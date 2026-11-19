@@ -15,6 +15,9 @@
     - W1-T13051
   files:
     - test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts
+  # refusal-amendment (W1-T13233, run W1-T13233-1795066899381, 2026-11-19T11:53:29.119Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T13233: a filed proof already passes at the merge base, so branch run-W1-T13233-1795066899381 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

@@ -1,7 +1,7 @@
 - id: W1-T12505
   title: "The author preflight reads main's read map, so a change to a deploy/ file or a json file selects the suites that read it, not every suite"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T13164]
   priority: 1.3
   type: implement
   verify: auto
@@ -15,19 +15,15 @@
     - W1-T6107
     - W1-T9953
   files:
-    - scripts/build-read-map.mjs
     - scripts/preflight-author.mjs
     - src/lib/affected-suites.ts
     - doctrine/before-you-push/preflight-before-first-push.md
     - test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts
     - test/read-map-descriptors-are-lifecycle-bound.test.ts
     - test/read-map-unobserved-descendants.test.ts
-    - src/lib/review.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "scripts/build-read-map.mjs merges the records in a directory with `readReadRecords` and `buildReadMap` into one `rmd-read-map-v2` file for the commit it is given, and when any record problem is found it exits non-zero and writes no map"
-      proof: "grep: W1-T12505 criterion 1 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
     - claim: "When a changed path is a read-mapped path, scripts/preflight-author.mjs reads the newest `read-map` artifact of a successful coverage-nightly run on main into a cache file, within a bounded time, and passes `readReadMapInput(root, mapPath, base)` to the selector as `readMap`. This is the first production caller of `readReadMapInput`"
       proof: "grep: W1-T12505 criterion 2 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
     - claim: "With a map in which suites have unknown descriptor coverage (the corpus today: a suite that starts a child process is unknown), a change to deploy/recycle-container.sh selects the suites the map records as its readers, the unknown-coverage suites that name the path, its file name or a directory above it, plus the changed tests and the modelled rest. The receipt selection is not `full-fallback` and names the map's sha"
@@ -36,8 +32,14 @@
       proof: "grep: W1-T12505 criterion 4 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
     - claim: "invariant:read-map-only-narrows-the-author — the read map changes only the author preflight's selection; ci.yml's selection and every required check run as before"
       proof: "grep: W1-T12505 criterion 5 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
-    - claim: "invariant:no-narrowing-past-unknown-reader — a suite with unknown descriptor coverage that names a changed read-mapped path, its file name or a directory above it, itself or through a test/ file it imports, is always selected"
+    - claim: "invariant:no-narrowing-past-unknown-reader — a suite with unknown descriptor coverage that names a changed read-mapped path, its file name or a directory above it, itself or through a test/ file it imports, is always selected, for each changed read-mapped path that forces a full run without a map"
       proof: "grep: W1-T12505 criterion 6 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
+    - claim: "invariant:read-map-never-widens-past-the-floor — the read map never selects more suites than today's floor for a path that does not force a full run: the map and its unknown-suite naming rule speak only for a changed path that forces a full run without a map, and every other path keeps today's selection"
+      proof: "grep: W1-T12505 criterion 7 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
+    - claim: "Replaying #19578 (cb13ffce5d, which changed only scripts/test-tier-manifest.json) with a map in which every suite has unknown descriptor coverage selects no more suites than the same change selects with no map (279 at that commit), where the record as first written selected 1,841"
+      proof: "grep: W1-T12505 criterion 8 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
+    - claim: "The author's default nightly-artifact fetch goes through src/lib/github-transport.ts (`ghExec`, the module that owns every `gh` spawn and routes a read through a live broker), never a raw `gh` spawn in scripts/preflight-author.mjs, and it is off under the test runner: no suite that runs the author `main` or `authorSelection` without injecting a fetch spawns `gh`"
+      proof: "grep: W1-T12505 criterion 9 in test/ci/the-author-preflight-selects-the-readers-of-a-deploy-or-json-change-from-mains-read-map.test.ts"
   rationale: |
     The author preflight runs every suite for a change to a deploy/ file or a json file, because no read map is ever passed to it.
     READ at origin/main 6cf453f7a:
@@ -73,13 +75,13 @@
     report on platform-aware shadows; W1-T11916 (queued) adds run-time tree walkers to the narrow arm. Neither produces or
     reads a read map. No open pull request files a task on this subject.
   design: |
-    1. Add scripts/build-read-map.mjs: read the record directory with `readReadRecords`, build with `buildReadMap(records, { sha })`,
+    1. MOVED to W1-T13164 on 2026-11-19 (see the note): add scripts/build-read-map.mjs: read the record directory with `readReadRecords`, build with `buildReadMap(records, { sha })`,
        write the map. It exits non-zero when any record problem is found, so no partial map is written.
     2. MOVED to W1-T13164 (see AMENDED below): the two coverage-nightly.yml jobs that record each suite's reads, run
        step 1's script and upload the `read-map` artifact.
     3. In scripts/preflight-author.mjs, only when a changed path is a read-mapped path (`isReadMappedPath`), fetch the
        newest `read-map` artifact of a successful coverage-nightly run on main (the `gh run list` and `gh run download`
-       calls ci.yml:1838-1844 makes) into a cache under the author's tmp dir, bounded to 60 s in all. Pass
+       calls ci.yml:1838-1844 makes, issued through the transport seam of step 10) into a cache under the author's tmp dir, bounded to 60 s in all. Pass
        `readReadMapInput(root, mapPath, base)` into `readAffectedSuitesInput`'s `extra` as `readMap`; a fetch failure
        is a `mapProblem`. Add `readMap` to that `extra` type in src/lib/affected-suites.ts. The receipt carries
        `readMapSha` when the map spoke, and `readMapFallback` when it did not.
@@ -96,11 +98,30 @@
     6. test/read-map-descriptors-are-lifecycle-bound.test.ts and test/read-map-unobserved-descendants.test.ts assert the
        whole-map refusal by `readMapProblem`; they assert the per-path refusal instead. Their record and hook assertions
        do not change.
-    7. scripts/build-read-map.mjs is a script a workflow runs, so test/instrument-surface-completeness.test.ts asks for
+    7. MOVED to W1-T13164 on 2026-11-19 with step 1: scripts/build-read-map.mjs is a script a workflow runs, so test/instrument-surface-completeness.test.ts asks for
        it in src/lib/review.ts. It goes in INSTRUMENT_SURFACE_EXCLUSIONS with its reason (no CI gate reads the read map),
        with no new comment lines (review.ts has a comment cap).
     8. The author preflight fetches the map only when a changed read-mapped path is nested and has no dot-directory
        segment: the nightly map always holds unknown suites, so it can never narrow a root-level or dot-directory path.
+    9. (AMENDED 2026-11-19) THE MAP SPEAKS ONLY WHERE TODAY RUNS EVERYTHING. The map, and step 4's naming rule, apply
+       only to a changed path that `fullRunTrigger(changed, false)` names, that is one that forces a full run without
+       a map (deploy/ files, and json outside the modelled trees). Any other changed path, a json file under src/,
+       scripts/ or test/ among them, keeps today's selection untouched. The weaker remedy, skipping the directory
+       forms `src/`, `scripts/` and `test/` in the naming rule, is not enough on its own unless the replay of
+       criterion 8 still selects no more than today's floor.
+    10. (AMENDED 2026-11-19) THE FETCH GOES THROUGH THE TRANSPORT. The default fetch of step 3 is a generic
+       `fetchNightlyArtifact({ root, artifact, file, spawn, cacheDir })` whose run listing and artifact download go
+       through `ghExec` in src/lib/github-transport.ts (the module that owns every `gh` spawn, and routes a read
+       through a live broker), never a `gh` spawn or `gh` argv literal of its own in scripts/preflight-author.mjs.
+       Find the seam with `git grep -n "ghJsonAsync\|rmd gh" -- src scripts` and `git grep -n "export function ghExec"`.
+    11. (AMENDED 2026-11-19) NO TEST SPAWNS gh. The default fetch is off under the test runner (`process.env.NODE_TEST_CONTEXT`
+       set) and reports a `mapProblem` naming that; a suite that wants a fetch injects one. So the existing suites
+       that run the author `main` or `authorSelection` on fixtures that change a nested json or deploy/ path
+       (test/author-low-footprint.test.ts, test/author-low-footprint-native.test.ts,
+       test/a-moved-test-keeps-its-tier-and-flake-history.test.ts,
+       test/infra/the-author-disk-reserve-is-sized-to-its-workload.test.ts) neither change nor reach GitHub.
+    INVARIANT read-map-never-widens-past-the-floor: the read map never selects more suites than today's floor for a
+    path that does not force a full run.
     INVARIANT read-map-only-narrows-the-author: the read map changes only the author preflight's selection; ci.yml's
     selection and every required check run as before.
     INVARIANT no-narrowing-past-unknown-reader: a suite whose reads are unknown and that names the changed path, its file
@@ -130,6 +151,40 @@
     Drop the `readMap` argument and criterion 3 must fail. Drop the unknown-coverage naming rule and criterion 6 must fail.
     Let a root-level json path narrow past an unknown suite and criterion 4 must fail. Let scripts/build-read-map.mjs
     write a map when a record is not a read record and criterion 1 must fail. Restore and require all six to pass.
+    (Criterion 1 and its falsifier sentence moved to W1-T13164 on 2026-11-19; criteria 2 to 9 stay here.)
+    AMENDED 2026-11-19: let the naming rule speak for a path that does not force a full run, and criteria 7 and 8
+    must fail (the replay of #19578, scripts/test-tier-manifest.json, selects 1,841 suites where today selects 279).
+    Turn the default fetch on under the test runner, or spawn `gh` from scripts/preflight-author.mjs in place of the
+    transport, and criterion 9 must fail. Restore and require criteria 2 to 9 to pass.
   note: |
+    AMENDED 2026-11-19 (operator: paused until a nightly read map exists). Operator ruling, 2026-11-19: "Pause the
+    chain, amend the records". The hand build of this task (kept local and unpushed, a4cddf305c) found four things:
+    1. NO MAP EXISTS YET. No nightly run uploads a `read-map` artifact; W1-T13164 (queued, an operator build because
+       it edits .github/workflows/coverage-nightly.yml) is the task that produces it. Until it has merged and one
+       nightly run has succeeded, everything this task builds can only fall back. Added `depends_on: W1-T13164`, so
+       this task (and W1-T12508, which depends on it) does not dispatch before a map exists. W1-T12507 and W1-T12536
+       also depend on this task, so they pause with it.
+       THE MAP BUILDER MOVES TO THE MAP PRODUCER (operator, 2026-11-19). W1-T13164 depended on this task because its
+       job runs scripts/build-read-map.mjs, so the new dependency made the two wait on each other. To break the cycle,
+       design step 1 (scripts/build-read-map.mjs), step 7 (its INSTRUMENT_SURFACE_EXCLUSIONS entry in
+       src/lib/review.ts), criterion 1 and its falsifier sentence moved to W1-T13164, whose proof now names its own
+       suite; both files left this task's `files:`, and W1-T13164 no longer depends on this task. The AMENDED
+       2026-11-16 paragraph of the design, which kept the script here, is superseded on that point.
+    2. THE NAMING RULE WIDENED A COMMON CASE. MEASURED with the half-built selector and a nightly-shaped map in which
+       every suite has unknown reads (the worst case): #19578, the daily scripts/test-tier-manifest.json pull request
+       (cb13ffce5d), went from 279 selected suites to 1,841, because a json path under scripts/ is read-mapped but
+       does not force a full run today, and the naming rule (the path, its file name, or a directory above it such
+       as `scripts/`) added 1,562 unknown-coverage suites (279 + 1,562 = 1,841). The same
+       map narrowed the two deploy/ diffs it was built for: #19506 (5fc91ae0e0) from the full 5,013 to 2,990, and
+       #19168 (e746d8ffa6) from 5,013 to 4,582. Added design step 9, criteria 7 and 8 and the falsifier lines;
+       criterion 6 now names the paths step 9 leaves to the map.
+    3. THE WIRED FETCH WOULD SPAWN THE REAL gh IN TESTS. Existing suites run the author `main` or `authorSelection`
+       without injecting a fetch on fixtures that change a nested json or deploy/ path (the four step 11 names).
+       Added design step 11 and criterion 9.
+    4. THE AUTHOR-SIDE FETCH WAS REFUSED BY THE DENY-FLOOR HOOK. The build's edit to scripts/preflight-author.mjs
+       held `gh` `run list` and `run download` strings, and the hook read the code as a GitHub call. So the fetch is
+       not written in the half-build (its suite names `fetchNightlyArtifact`; the script does not define it). The
+       builder routes the fetch through the existing transport (`ghExec` in src/lib/github-transport.ts, the broker
+       path) rather than a raw `gh` spawn, which also satisfies the hook: design step 10.
     Id W1-T12505 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
     Amended by the hand build on plan-amend-W1-T12505-1794589154000 (per-path narrowing, operator session decision).
