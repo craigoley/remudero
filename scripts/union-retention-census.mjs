@@ -196,7 +196,18 @@ export function resolvePatternText(source, arg) {
  *  source file. The slice reader uses the incremental ledger union under the hood, so its pattern
  *  belongs in this census even when its caller does not spell `resolveLedgerUnion` directly. */
 export function resolveTriageSliceSteps(source, sliceName, sourceFiles = []) {
-  const declarationFor = (text) => new RegExp(`const ${sliceName}\\s*(?::[^=]+)?=\\s*\\{([\\s\\S]{0,1800}?)\\}\\s*(?:as const\\s*)?;`).exec(text);
+  const declarationFor = (text) => {
+    const marker = `const ${sliceName}`;
+    const start = text.indexOf(marker);
+    if (start < 0) return null;
+    const afterName = start + marker.length;
+    if (/[A-Za-z0-9_$]/.test(text[afterName] ?? "")) return null;
+    const assignment = text.indexOf("=", afterName);
+    const open = assignment < 0 ? -1 : text.indexOf("{", assignment + 1);
+    const close = open < 0 ? -1 : text.indexOf("};", open + 1);
+    if (assignment < 0 || open < 0 || close < 0) return null;
+    return text.slice(open + 1, close);
+  };
   let declaration = declarationFor(source);
   if (!declaration) {
     for (const candidate of sourceFiles) {
@@ -205,10 +216,32 @@ export function resolveTriageSliceSteps(source, sliceName, sourceFiles = []) {
     }
   }
   if (!declaration) return null;
-  const rawPattern = /rawPattern:\s*(\/(?:\\.|[^/])*\/[dgimsuvy]*)/.exec(declaration[1]);
+  const rawPatternStart = declaration.indexOf("rawPattern:");
+  if (rawPatternStart < 0) return null;
+  let start = rawPatternStart + "rawPattern:".length;
+  while (/\s/.test(declaration[start] ?? "")) start++;
+  if (declaration[start] !== "/") return undefined;
+  let end = start + 1;
+  let escaped = false;
+  let inCharacterClass = false;
+  for (; end < declaration.length; end++) {
+    const char = declaration[end];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") inCharacterClass = true;
+    else if (char === "]") inCharacterClass = false;
+    else if (char === "/" && !inCharacterClass) break;
+  }
+  if (end >= declaration.length) return undefined;
+  const rawPattern = declaration.slice(start, end + 1);
   // Other typed slices have different retention contracts and are outside this census's question.
-  if (!declaration[1].includes("rawPattern:")) return null;
-  return rawPattern ? stepsInPatternText(rawPattern[1]) : undefined;
+  return stepsInPatternText(rawPattern);
 }
 
 /** Every union call site paired with the step names its pattern names, and whether each survives
