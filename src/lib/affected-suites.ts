@@ -658,6 +658,16 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(gardenAges) && files.some((f) => gardenAgesEdges.includes(f))) {
     pathReaders.push(gardenAges);
   }
+  // W1-T10330: coverage run 39573110596 (PR #13317) recorded a miss on the busy-primary recycle suite.
+  const busyPrimaryRecycle = suitePath("test/a-busy-primary-reaches-its-image-recycle.test.ts");
+  const busyPrimaryRecycleEdges = [
+    "src/lib/ledger.ts",
+    "src/lib/state-backup-engine-links.ts",
+    suitePath("test/state-backup.test.ts"),
+  ];
+  if (input.files.has(busyPrimaryRecycle) && files.some((f) => busyPrimaryRecycleEdges.includes(f))) {
+    pathReaders.push(busyPrimaryRecycle);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
