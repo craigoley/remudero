@@ -47,5 +47,5 @@
     is unreserved, a non-W1 id never reads core, and a core read that fails is unknown, never absent.
   falsifier: |
     Return the subject read without the core fallback: criterion 1 fails (unreserved). Drop the W1 prefix test:
-    criterion 2 fails because OPS-T900305 passes on core's anchor. Re-read ids the subject holds: criterion 2 fails
-    because W1-T900304 turns foreign.
+    criterion 2 fails because the fixture's non-W1 id passes on core's anchor. Re-read ids the subject holds:
+    criterion 2 fails because the fixture's subject-held id turns foreign.
