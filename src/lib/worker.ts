@@ -8002,8 +8002,12 @@ export function unmanagedWorktreeLanes(
   } catch {
     return []; // unreadable registration ⇒ report nothing, never guess a population
   }
-  const managed = [worktreesDir(config), adhocLaneRoot(config)];
-  const engines = join(config.root, "state", ENGINES_DIR);
+  const spellings = (path: string): string[] => [path, canonicalPath(path)];
+  const managed = [worktreesDir(config), adhocLaneRoot(config)].flatMap(spellings);
+  const engines = spellings(join(config.root, "state", ENGINES_DIR));
+  const main = spellings(repoDir);
+  const inside = (forms: string[], roots: string[]): boolean =>
+    forms.some((path) => roots.some((root) => path === root || path.startsWith(`${root}/`)));
   const lanes: string[] = [];
   for (const line of out.split("\n")) {
     const m = /^worktree (.+)$/.exec(line.trim());
@@ -8011,15 +8015,33 @@ export function unmanagedWorktreeLanes(
     const path = m[1];
     // The main checkout reports itself first and is not a lane; a path under either managed root is already covered by a
     // rung. Compared with a trailing separator so `…/lanes-old` can never read as being inside `…/lanes`.
-    if (path === repoDir) continue;
-    if (managed.some((root) => path === root || path.startsWith(`${root}/`))) continue;
-    if (path === engines || path.startsWith(`${engines}/`)) {
+    const forms = spellings(path);
+    if (forms.some((form) => main.includes(form))) continue;
+    if (inside(forms, managed)) continue;
+    if (inside(forms, engines)) {
       onEngineOwned(path);
       continue;
     }
     lanes.push(path);
   }
   return lanes;
+}
+
+/** W1-T10777: the real path of `path`, or of its nearest existing ancestor with the rest appended, so a gone tree still
+ * compares under a symlinked root. git registers real paths; config.root may not be one. */
+function canonicalPath(path: string): string {
+  let head = path;
+  let tail = "";
+  for (;;) {
+    try {
+      return join(realpathSync(head), tail);
+    } catch {
+      const up = dirname(head);
+      if (up === head) return path; // nothing resolves: the spelling git wrote is the only one to compare
+      tail = join(basename(head), tail);
+      head = up;
+    }
+  }
 }
 
 /** The real `git worktree list` reader {@link unmanagedWorktreeLanes} defaults to. Separated so the survey's own seam is
