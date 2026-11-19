@@ -599,3 +599,78 @@ test("W1-T13719: a refused plan does not block a fresh request once the target h
   assert.equal(fresh.observation.targetHead, MOVED);
   assert.equal(f.calls.length, 2);
 });
+
+// ── W1-T13875: "Resume saved plan" froze serve on 2026-11-19 ─────────────────────────────────────────────
+// The resume of a Nov 3 operation whose hand-off was refused read every ledger archive since Nov 3 synchronously on serve's
+// loop while it held the journal lock, and serve was killed as wedged.
+
+type EvidenceReader = NonNullable<ConstructorParameters<typeof ProductPlanOperationService>[0]["readLedgerLines"]>;
+
+/** An evidence reader that records each read and answers the given lines, or never answers. */
+function reader(lines: () => string[] | "never") {
+  const reads: string[] = [];
+  const read: EvidenceReader = async (stateDir) => {
+    reads.push(stateDir);
+    const answer = lines();
+    return answer === "never" ? new Promise<never>(() => {}) : { ok: true, rawLines: answer };
+  };
+  return { read, reads };
+}
+
+const proposalLines = (f: Fixture, operationId: string): string[] => {
+  const brief = f.calls.find((call) => call.operationId === operationId)?.brief;
+  return [
+    { ts: new Date(at(1_000)).toISOString(), run_id: "PANEL-1", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_started", verb: "plan", pid: 4242 },
+    { ts: new Date(at(2_000)).toISOString(), run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "plan.start", lane: "plan", mode: "clarify", brief },
+    { ts: new Date(at(3_000)).toISOString(), run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "pr.opened", lane: "plan", pr_url: PR_URL },
+  ].map((row) => JSON.stringify(row));
+};
+
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
+  const f = fixture(t, { gateway: false });
+  const evidence = reader(() => []);
+  const service = new ProductPlanOperationService({
+    root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout, runnerConfig,
+    text: async () => JSON.stringify([]), clock: fixedClock(Date.parse(REQUESTED)), readLedgerLines: evidence.read,
+    gateway: { productPlan: () => Promise.resolve({ outcome: "refused" as const }) },
+  });
+  const first = await ok(service.execute(actor, f.command()));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Rows on the real ledger that would read as a proposal: a refused hand-off started nothing, so they are never read.
+  for (const line of proposalLines(f, first.observation.operationId)) f.row(Date.parse(JSON.parse(line).ts), JSON.parse(line));
+  const reads = evidence.reads.length;
+  const again = await ok(service.execute(actor, f.command()));
+  assert.equal(again.observation.state, "refused");
+  assert.equal(evidence.reads.length, reads, "the resume read no ledger evidence");
+});
+
+test("W1-T13875: invariant:bounded-read — an evidence read past its bound answers unknown and releases the journal", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  for (const line of proposalLines(f, first.observation.operationId)) f.row(Date.parse(JSON.parse(line).ts), JSON.parse(line));
+  const make = (lines: () => string[] | "never") => new ProductPlanOperationService({
+    root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout, runnerConfig,
+    text: async () => JSON.stringify([{ name: "WRECK-T1-first.yaml" }]), clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => false,
+    ledgerReadBoundMs: 50, readLedgerLines: reader(lines).read,
+  });
+  const started = performance.now();
+  const stuck = await ok(make(() => "never").execute(actor, f.command()));
+  assert.equal(stuck.observation.state, "unknown", "no evidence within the bound reads as unknown, never as refused or proposed");
+  assert.ok(performance.now() - started < 5_000, "the resume answered at its bound");
+  // The journal lock was released: a second service resumes the same operation at once.
+  const next = await ok(make(() => proposalLines(f, first.observation.operationId)).execute(actor, f.command()));
+  assert.equal(next.observation.state, "proposed");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const evidence = reader(() => proposalLines(f, first.observation.operationId));
+  const service = new ProductPlanOperationService({
+    root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout, runnerConfig,
+    text: async () => JSON.stringify([{ name: "WRECK-T1-first.yaml" }]), clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => false, readLedgerLines: evidence.read,
+  });
+  assert.equal((await ok(service.execute(actor, f.command()))).observation.state, "proposed");
+  assert.equal((await ok(service.execute(actor, f.command()))).observation.state, "proposed");
+  assert.equal(evidence.reads.length, 1, "the kept proposal was not read again");
+});

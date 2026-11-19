@@ -10,7 +10,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -25,6 +25,9 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
+/** W1-T13875: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
+export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
+type LedgerEvidence = { pid?: number; exited: boolean; failed: boolean; opened?: string };
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
@@ -224,6 +227,11 @@ export interface ProductPlanOperationOptions {
   text?: GhText;
   clock?: Clock;
   isAlive?: (pid: number) => boolean;
+  /** W1-T13875: overrides PRODUCT_PLAN_LEDGER_READ_BOUND_MS; a test seam for the bounded evidence read. */
+  ledgerReadBoundMs?: number;
+  /** W1-T13875: the evidence reader; absent, readLedgerUnionRawLinesAsync over the ledger's state dir. */
+  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; refuseIncomplete: true; keep: (line: string) => boolean }) =>
+    Promise<{ ok: boolean; rawLines: readonly string[] }>;
   sync?: (fd: number) => void;
 }
 
@@ -297,6 +305,8 @@ export class ProductPlanOperationService {
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
+  /** W1-T13875: each operation's ledger evidence once it is final (a proposal, an exit or a failure): never read again. */
+  private readonly settledEvidence = new Map<string, LedgerEvidence>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -382,11 +392,15 @@ export class ProductPlanOperationService {
         entry.objectiveRevision === product.objectiveRevision && entry.briefDigest === briefDigest);
       // The same product, objective and brief never gets a second plan while one is in flight or its fate is unknown.
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
-      const reusable = journal.operations[operationId] ?? sameBrief.find((entry) => {
-        const state = this.state(entry, product, head);
-        if (state === "stale-target") return this.state(entry, product, undefined) !== "refused";
-        return state === "pending" || state === "unknown";
-      });
+      let reusable = journal.operations[operationId];
+      for (const entry of reusable ? [] : sameBrief) {
+        const seen = await this.ledger(entry);
+        const state = this.observeWith(entry, product, head, seen).state;
+        if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
+          reusable = entry;
+          break;
+        }
+      }
       if (reusable) {
         record = reusable;
         replayed = true;
@@ -425,9 +439,10 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const observation = this.observe(record, product, head);
+    const seen = await this.ledger(record);
+    const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
-    return { observation: this.observe(record, product, head), replayed };
+    return { observation: this.observeWith(record, product, head, seen), replayed };
   }
 
   private bind(paths: Paths, journal: Journal, requestKey: string, entry: { operationId: string; payloadDigest: string }): Journal {
@@ -483,12 +498,12 @@ export class ProductPlanOperationService {
   }
 
   /** The state this record is in NOW: the ledger's correlated rows first, the live brief and target head only on top. */
-  private state(record: Record_, product: StoredProduct, liveHead: string | undefined): ProductPlanState {
-    return this.observe(record, product, liveHead).state;
+  private async state(record: Record_, product: StoredProduct, liveHead: string | undefined): Promise<ProductPlanState> {
+    return this.observeWith(record, product, liveHead, await this.ledger(record)).state;
   }
 
-  private observe(record: Record_, product: StoredProduct, liveHead: string | undefined): ProductPlanObservation {
-    const seen = this.ledger(record);
+  /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
+  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerEvidence): ProductPlanObservation {
     let state: ProductPlanState;
     if (seen.opened !== undefined) state = "proposed";
     else if (seen.exited) state = "refused";
@@ -511,15 +526,29 @@ export class ProductPlanOperationService {
    * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
    * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
    */
-  private ledger(record: Record_): { pid?: number; exited: boolean; failed: boolean; opened?: string } {
+  private async ledger(record: Record_): Promise<LedgerEvidence> {
     const none = { exited: false, failed: false };
     if (this.options.ledgerPath === undefined) return none;
+    // W1-T13875: a refused hand-off started nothing, so the ledger holds no evidence for it; final evidence never changes.
+    if (record.handoff?.outcome === "refused" && !this.flying.has(record.operationId)) return none;
+    const settled = this.settledEvidence.get(record.operationId);
+    if (settled) return settled;
     const taskId = productPlanLedgerTaskId(record.operationId);
-    const read = readLedgerUnionRecordsSync(dirname(this.options.ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
-      keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") });
-    if (!read.ok) return none;
+    // W1-T13875: the read yields between slices, and an evidence read past its bound answers "no evidence" (state unknown),
+    // so a record from weeks ago never holds serve's loop, or the journal lock, while every archive since is read.
+    const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = await Promise.race([
+      (this.options.readLedgerLines ?? readLedgerUnionRawLinesAsync)(dirname(this.options.ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
+        keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") }),
+      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), bound); timer.unref?.(); }),
+    ]).finally(() => clearTimeout(timer));
+    if (read === undefined || !read.ok) return none;
+    const parsed = read.rawLines.flatMap((line): Array<Record<string, unknown>> => {
+      try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
+    });
     const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
-    const rows = read.rows.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
+    const rows = parsed.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
     const mine = rows.filter((row) => row.task_id === taskId);
     const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
     const pid = started?.pid as number | undefined;
@@ -533,12 +562,18 @@ export class ProductPlanOperationService {
     const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
       (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
         typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
-    if (conflictingStart) return { ...(pid !== undefined ? { pid } : {}), exited: false, failed: true };
+    if (conflictingStart) return this.settle_(record, { ...(pid !== undefined ? { pid } : {}), exited: false, failed: true });
     const run = runs.size === 1 ? [...runs.values()][0] : undefined;
     const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
     const url = pull?.pr_url as string | undefined;
     const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
-    return { ...(pid !== undefined ? { pid } : {}), exited: exited && runs.size < 2, failed: failed || runs.size > 1, ...(own ? { opened: url } : {}) };
+    return this.settle_(record, { ...(pid !== undefined ? { pid } : {}), exited: exited && runs.size < 2, failed: failed || runs.size > 1, ...(own ? { opened: url } : {}) });
+  }
+
+  /** W1-T13875: keeps evidence that can no longer change (a proposal, an exit or a failure), so it is read once. */
+  private settle_(record: Record_, seen: LedgerEvidence): LedgerEvidence {
+    if (seen.opened !== undefined || seen.exited || seen.failed) this.settledEvidence.set(record.operationId, seen);
+    return seen;
   }
 
   /** Terminal fates become the product's own supported stage evidence, once each. */
