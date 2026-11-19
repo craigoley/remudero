@@ -12,6 +12,7 @@
   files:
     - scripts/acceptance-author-gate.mjs
     - test/acceptance-author-gate.test.ts
+    - test/review/acceptance-author-gate-canonical-task-scope.test.ts
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=699268ade57c8ce6
@@ -60,23 +61,26 @@
     5. Exercise the real event/default path against temporary Git ranges as well as the pure
        predicate. Prove the exact #17090 shape refuses, an actually merged scope amendment admits
        the added path, a PR-local widening does not, and unreadable evidence cannot pass.
+    INVARIANT legacy-output: Plan-only amendments, non-task PRs, explicit dependency-bot exemptions and fully in-scope task PRs keep their supported gate outcomes.
   acceptance:
     - claim: A task implementation PR with any undeclared changed path is refused by the required gate and the diagnostic names every offending path.
-      proof: "unit test: a plan-only diff cannot credit a task that declares source files"
+      proof: "unit test: W1-T11571 criterion 1 names every undeclared task path"
     - claim: Only a separately merged task scope amendment admits an added implementation path; an unmerged PR-local widening does not.
-      proof: "unit test: acceptance gate: Rule 15 mixed diff refuses before review"
-    - claim: Plan-only amendments, non-task PRs and fully in-scope task PRs retain their supported gate outcomes.
-      proof: "unit test: a PR shipping its declared files still passes"
+      proof: "unit test: W1-T11571 criterion 2 trusts only scope merged before the PR"
+    - claim: Plan-only amendments, non-task PRs and fully in-scope task PRs retain their supported gate outcomes. invariant:legacy-output
+      proof: "unit test: W1-T11571 criterion 3 preserves the supported gate outcomes"
     - claim: An identified task with unreadable scope or an incomplete changed-path census fails closed, while absence of a task identity is not misclassified as a task PR.
-      proof: "unit test: W1-T3149 criterion 4"
+      proof: "unit test: W1-T11571 criterion 4 refuses unknown evidence for a canonical task"
   note: |
-    All four tests belong in the existing `test/acceptance-author-gate.test.ts`; no test file is
-    added. Extend the current test-title anchors used by the four proof selectors with criterion-
-    specific task-scope cases, preserving each anchor as a literal title substring. A real temporary
-    Git range must prove that task scope comes from the merge-base plan snapshot. The #17090
-    regression must be red with the new refusal absent and green only after every undeclared path is
-    covered by a separately merged scope amendment. Scope comparison does not ratify #17090's
-    historical seven-path deviation.
+    Place the four criterion-specific proofs in
+    `test/review/acceptance-author-gate-canonical-task-scope.test.ts` so the proof runner can execute
+    the same added tests against the merge-base source. Preserve all inherited tests in
+    `test/acceptance-author-gate.test.ts`. A real temporary Git range must prove that task scope
+    comes from the merge-base plan snapshot. The #17090 regression must be red with the new refusal
+    absent and green only after every undeclared path is covered by a separately merged scope
+    amendment. Also retain the #19457 regression, which has an undeclared path even though its
+    changed-path count equals its declared-path count. Scope comparison does not ratify either
+    historical deviation.
   falsifier: |
     Remove the task-scope refusal from the required gate: the exact #17090 25-path versus 22-path
     fixture must no longer refuse, so criterion 1 fails. Restore the refusal and the test must name

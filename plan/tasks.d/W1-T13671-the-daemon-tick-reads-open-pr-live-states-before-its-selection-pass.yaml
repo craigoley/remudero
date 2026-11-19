@@ -18,7 +18,7 @@
     - src/lib/daemon.ts
     - src/cli/commands/daemon.ts
     - test/daemon/the-tick-reads-open-pr-live-states-before-its-selection-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:read-off-the-loop — a daemon tick through the production wiring (the reader src/cli/commands/daemon.ts passes, over a gh shim from test/helpers/ that answers the pull request read after a delay) with an in-flight task whose pull request is open reads that live state with no synchronous child: a timer set just before the tick runs before the read answers, and the task is skipped with a dispatch.skipped row whose reason is open-pr, as before"

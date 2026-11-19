@@ -898,7 +898,7 @@ du_idle() {
   left=$((CONSUMER_WALK_DEADLINE - $(date +%s)))
   [ "$left" -gt 0 ] || return 124
   command -v timeout >/dev/null 2>&1 || left=""
-  if command -v ionice >/dev/null 2>&1; then ${left:+timeout "$left"} ionice -c3 -t nice -n 19 du -sk "$1"; else ${left:+timeout "$left"} nice -n 19 du -sk "$1"; fi
+  if command -v ionice >/dev/null 2>&1; then ${left:+timeout "$left"} ionice -c3 -t nice -n 19 du -sk "$@"; else ${left:+timeout "$left"} nice -n 19 du -sk "$@"; fi
 }
 consumer_kb() {
   local name="$1" total=0 seen=0 failed=0 cut=0 p kb device devices="" paths=""
@@ -925,6 +925,64 @@ ${p}"
     devices="${devices}
 ${device}"
   done
+  if [ "$seen" = 0 ] || [ "$failed" = 1 ]; then total="unknown"; fi
+  if [ "$cut" = 1 ]; then CONSUMER_WALK_CUT="${CONSUMER_WALK_CUT:+${CONSUMER_WALK_CUT},}${name}"; fi
+  if [ -z "$devices" ] || [[ "$devices" = *unknown* ]]; then
+    devices="unknown"
+  else
+    devices="$(printf '%s\n' "$devices" | sed '/^$/d' | sort -u | paste -sd, -)"
+  fi
+  CONSUMER_LINES="${CONSUMER_LINES}
+consumer_${name}_kb=${total}
+consumer_${name}_device=${devices}"
+  return 0
+}
+
+# The temp-leftover consumer's walk: one `du -sk` for ALL the entries of a temp root and one `df` per root,
+# not one of each per entry (W1-T13190: 1,190 entries cost a Mac beat 117 s in 1,127 du calls). The total,
+# the devices line, the unknown rule and the cut marker mean what consumer_kb's do. The root's device is its
+# first entry's: the entries are direct children of the root, so they live on the root's filesystem. A
+# `du -sk a b c` prints one `kb<TAB>path` line per argument on GNU and BSD alike; any failure, cut or
+# non-numeric line makes the total unknown, never a partial sum.
+consumer_kb_by_root() {
+  local name="$1" total=0 seen=0 failed=0 cut=0 p root out status sum device devices="" paths="" roots="" group=()
+  shift
+  for p in "$@"; do
+    case "$p" in *'*'*) continue ;; esac
+    case "
+$paths
+" in *"
+$p
+"*) continue ;; esac
+    paths="${paths}
+${p}"
+    seen=1
+    case "
+$roots
+" in *"
+${p%/*}
+"*) : ;; *) roots="${roots}
+${p%/*}" ;; esac
+  done
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    group=()
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      [ "${p%/*}" = "$root" ] && group+=("$p")
+    done <<<"$paths"
+    out="$(du_idle "${group[@]}" 2>/dev/null)"; status=$?
+    if [ "$status" != 0 ]; then
+      [ "$status" = 124 ] && cut=1
+      failed=1
+    else
+      sum="$(printf '%s\n' "$out" | awk '{ if ($1 !~ /^[0-9]+$/) bad = 1; else s += $1; n++ } END { if (n == 0 || bad) print "bad"; else printf "%.0f", s }')"
+      case "$sum" in ''|*[!0-9]*) failed=1 ;; *) total=$((total + sum)) ;; esac
+    fi
+    device="$(df_field "${group[0]}" 1)"; [ -n "$device" ] || device="unknown"
+    devices="${devices}
+${device}"
+  done <<<"$roots"
   if [ "$seen" = 0 ] || [ "$failed" = 1 ]; then total="unknown"; fi
   if [ "$cut" = 1 ]; then CONSUMER_WALK_CUT="${CONSUMER_WALK_CUT:+${CONSUMER_WALK_CUT},}${name}"; fi
   if [ -z "$devices" ] || [[ "$devices" = *unknown* ]]; then
@@ -2055,7 +2113,9 @@ if [ "$CONSUMER_PROBE" = "walked" ]; then
   consumer_kb npm_cache "${HOME}/.npm"
   TSX_CACHE_PATHS=()
   TMP_LEFTOVER_PATHS=()
-  for temp_root in "$CONSUMER_TMP" /tmp /mnt/scratch/tmp; do
+  # The host's own /tmp, beside $TMPDIR. RMD_HEARTBEAT_SYSTEM_TMP is the fixtures' seam: without it a
+  # fixture walks the real /tmp, and a busy CI runner's thousands of rmd-* dirs slow every beat.
+  for temp_root in "$CONSUMER_TMP" "${RMD_HEARTBEAT_SYSTEM_TMP:-/tmp}" /mnt/scratch/tmp; do
     for temp_path in "$temp_root"/tsx-[0-9]*; do
       [ -d "$temp_path" ] && TSX_CACHE_PATHS+=("$temp_path")
     done
@@ -2065,7 +2125,7 @@ if [ "$CONSUMER_PROBE" = "walked" ]; then
     done
   done
   consumer_kb tsx_cache ${TSX_CACHE_PATHS[@]+"${TSX_CACHE_PATHS[@]}"}
-  consumer_kb tmp_leftovers ${TMP_LEFTOVER_PATHS[@]+"${TMP_LEFTOVER_PATHS[@]}"}
+  consumer_kb_by_root tmp_leftovers ${TMP_LEFTOVER_PATHS[@]+"${TMP_LEFTOVER_PATHS[@]}"}
   consumer_kb hand_worktrees "${HOME}/rmd-work"
   WALK_USED_KB="$CONSUMER_USED_KB"; WALK_EPOCH="$CONSUMER_NOW_S"
   [ -z "$CONSUMER_WALK_CUT" ] || CONSUMER_PROBE="budget_exhausted"

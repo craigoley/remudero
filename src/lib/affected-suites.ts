@@ -648,6 +648,22 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(runTask) && files.some((f) => runTaskEdges.includes(f))) {
     pathReaders.push(runTask);
   }
+  // W1-T10286: coverage run 39484775706 (PR #13195) recorded a miss on the garden due-interval suite.
+  const gardenAges = suitePath("test/a-deferred-garden-ages-against-its-own-due-interval.test.ts");
+  const gardenAgesEdges = [
+    "src/lib/host-memory-admission.ts",
+    suitePath("test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts"),
+    suitePath("test/an-enforced-memory-budget-waits-in-priority-order.test.ts"),
+  ];
+  if (input.files.has(gardenAges) && files.some((f) => gardenAgesEdges.includes(f))) {
+    pathReaders.push(gardenAges);
+  }
+  // W1-T10323: coverage run 39532402813 recorded a floor miss on the scout writer suite.
+  const scoutWriter = suitePath("test/the-scout-declares-the-writer-of-its-symptom.test.ts");
+  const scoutWriterEdges = ["src/lib/scout-gardener.ts", suitePath("test/scout-inbox-draft-escalated.test.ts")];
+  if (input.files.has(scoutWriter) && files.some((f) => scoutWriterEdges.includes(f))) {
+    pathReaders.push(scoutWriter);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];

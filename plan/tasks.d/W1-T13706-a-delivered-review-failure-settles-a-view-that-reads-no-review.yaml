@@ -18,7 +18,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-delivered-review-failure-settles-a-view-that-reads-no-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the newest review.posted row for a head and input is a failure with unmet criteria, a view whose review state reads none is settled from that verdict: the disposition is the one a failed review takes (blocked-fixable, blocker review-failed), not post-review, and no review is started for that input"

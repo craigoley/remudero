@@ -318,7 +318,8 @@ test("the real intake publication writes an agent response on its original escal
     { when: "/statuses", stdout: "[]" }, { when: "/status", stdout: '{"statuses":[]}' },
     { when: "/actions/runs", stdout: '{"workflow_runs":[]}' },
     { when: "required_status_checks", stdout: '{"contexts":["ci-gate"],"checks":[]}' },
-  ], { kind: "escalation-real-intake" });
+  // W1-T12892: the child's TMPDIR is `root`, so the shim lives there for the in-process client to treat gh as a stub.
+  ], { kind: "escalation-real-intake", parent: root });
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const code = `
     import {triageCommand} from '#src/run-task.js';

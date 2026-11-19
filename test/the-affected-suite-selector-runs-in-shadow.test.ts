@@ -550,6 +550,60 @@ test("W1-T10183: the narrow selector includes the run-task suite for each record
   assert.ok(!absent.narrow?.includes(suite));
 });
 
+test("W1-T10286: the narrow selector includes the garden due-interval suite for each recorded miss edge", () => {
+  const suite = "test/a-deferred-garden-ages-against-its-own-due-interval.test.ts";
+  const edges = [
+    "src/lib/host-memory-admission.ts",
+    "test/a-deferred-garden-child-gains-priority-the-longer-it-waits.test.ts",
+    "test/an-enforced-memory-budget-waits-in-priority-order.test.ts",
+  ];
+  const files = new Map(Object.entries(TREE));
+  for (const edge of edges) files.set(edge, "");
+  files.set(suite, "");
+  const input = { files, pathReaders: [], symbolSuites: [] };
+
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], input);
+    assert.equal(selection.fullRun, false, changed);
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ], changed);
+  }
+
+  const unrelated = selectAffectedSuites(["src/a.ts"], input);
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+  files.delete(suite);
+  const absent = selectAffectedSuites([edges[0]!], input);
+  assert.ok(!absent.suites.includes(suite));
+  assert.ok(!absent.narrow?.includes(suite));
+});
+
+test("W1-T10323: the scout writer suite is selected for each recorded miss edge", () => {
+  const suite = "test/the-scout-declares-the-writer-of-its-symptom.test.ts";
+  const edges = ["src/lib/scout-gardener.ts", "test/scout-inbox-draft-escalated.test.ts"];
+  const files = new Map(Object.entries(TREE));
+  for (const edge of edges) files.set(edge, "");
+  files.set(suite, "");
+  const input = { files, pathReaders: [], symbolSuites: [] };
+
+  for (const changed of edges) {
+    const selection = selectAffectedSuites([changed], input);
+    assert.equal(selection.fullRun, false, changed);
+    assert.deepEqual(shadowRecord(selection, [suite]).failures, [
+      { file: suite, floor: "selected", narrow: "selected" },
+    ], changed);
+  }
+
+  const unrelated = selectAffectedSuites(["src/a.ts"], input);
+  assert.ok(!unrelated.suites.includes(suite));
+  assert.ok(!unrelated.narrow?.includes(suite));
+  files.delete(suite);
+  const absent = selectAffectedSuites([edges[0]!], input);
+  assert.ok(!absent.suites.includes(suite));
+  assert.ok(!absent.narrow?.includes(suite));
+});
+
 test("W1-T4404: a config or lockfile change selects the full suite", () => {
   for (const file of ["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml", "test/helpers/git-repo.ts", "test/fixtures/x.json", ".nvmrc"]) {
     const sel = select(["src/a.ts", file]);
