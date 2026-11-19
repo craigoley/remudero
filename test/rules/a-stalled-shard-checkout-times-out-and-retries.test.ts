@@ -1,4 +1,4 @@
-// @census-reads: .github/workflows/ci.yml test/helpers/repo-root.ts test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts — ci.yml's shard lanes, the root helper, itself.
+// @census-reads: .github/workflows/ci.yml test/helpers/checkout-retry-pair.ts test/helpers/repo-root.ts test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts — ci.yml's shard lanes, the root helper, itself.
 // W1-T13825 — a shard checkout that runs past 3 minutes is stopped and run once more.
 // MEASURED 2026-11-19 (Actions jobs API, every ci.yml run 2026-11-17 06:50Z..2026-11-19 13:00Z): after W1-T13321's
 // low-speed abort merged, 13 of 18,150 ci-shard and coverage-shard checkouts still took 314-1434 s. Job
@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
+import { withoutCheckoutRetryPair } from "#test/helpers/checkout-retry-pair.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Step = {
@@ -58,6 +59,27 @@ test("W1-T13825 criterion 3: invariant fetch-unchanged, every checkout keeps the
       assert.equal(step.uses, CHECKOUT, `${job} keeps the pinned actions/checkout sha`);
       assert.equal(step.with?.["fetch-depth"], 0, `${job} keeps fetch-depth 0`);
       assert.deepEqual(step.env, LOW_SPEED, `${job} keeps W1-T13321's env`);
+    }
+  }
+});
+
+test("W1-T13825 criterion 4: the guards admit exactly this pair, and a pair that drifts from it still answers to them", () => {
+  for (const job of LANES) {
+    const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as Workflow;
+    const steps = doc.jobs[job]?.steps ?? [];
+    const rest = withoutCheckoutRetryPair(steps);
+    assert.equal(rest.length, steps.length - 2, `${job}: the admitted pair is the two checkout steps`);
+    assert.ok(rest.every((s) => !(s.uses ?? "").startsWith("actions/checkout@")), `${job}: no checkout is left to the guards`);
+    const { first, retry } = checkouts(job);
+    const drifts: Array<[string, Step, Step]> = [
+      ["a retry that may fail quietly", first, { ...retry, "continue-on-error": true }],
+      ["a retry on any other condition", first, { ...retry, if: "always()" }],
+      ["an unbounded first checkout", { ...first, "timeout-minutes": 30 }, retry],
+      ["a first checkout behind an if:", { ...first, if: "github.event_name == 'pull_request'" }, retry],
+      ["a retry of other inputs", first, { ...retry, with: { "fetch-depth": 1 } }],
+    ];
+    for (const [why, a, b] of drifts) {
+      assert.equal(withoutCheckoutRetryPair([a, b]).length, 2, `${job}: ${why} is not admitted`);
     }
   }
 });
