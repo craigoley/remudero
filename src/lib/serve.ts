@@ -179,7 +179,7 @@ import {
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, setLedgerRotationRole } from "./ledger.js";
 import { createServeDemand, recordServeRequest, type ServeDemandOptions } from "./serve-demand.js";
 import { committedViewBody, createReadDeadline, readDeadlineConfig, withReadDeadline } from "./serve-read-deadline.js";
 import { startServeThreadLoad, type ServeThreadLoadOptions } from "./serve-thread-load.js";
@@ -3679,6 +3679,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   const startLedgerWriters = (): void => {
+    // W1-T13236: serve leaves rotation to the daemon below the backstop, so a rotation's read, filter and gzip of the
+    // live ledger never runs on its request loop. Set before any timer here appends; restored when this server closes.
+    const priorRotationRole = setLedgerRotationRole("backstop-only");
     server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances,
       selectedRegistryObserver: routeAssembly.selectedRegistryObserver }));
     const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
@@ -3718,6 +3721,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       // A supervised generation closing at a handoff is not serve stopping: its successor publishes its own, and a
       // supervisor that really stopped is read as stale (unknown), never as an explicit stop it did not make.
       if (!deps.generation) publishServe("serve-stopped");
+      setLedgerRotationRole(priorRotationRole);
     });
   };
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
