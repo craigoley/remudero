@@ -42,7 +42,7 @@ import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, type CashDraftFit } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
@@ -1990,6 +1990,8 @@ export interface DraftRungDeps {
   spawn: DraftSpawn;
   /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
   escalate?: (proposal: Proposal, prompt: string) => Promise<DraftWorkerResult | undefined>;
+  /** W1-T13863: the whole-run fit read before each cash spawn. Undefined on a subscription lane. */
+  cashFit?: (prompt: string, ctx: { avoidModels: readonly string[]; expectedRequests: number }) => CashDraftFit;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2484,9 +2486,26 @@ function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | 
 /** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
  *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
  *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
+const CASH_DRAFT_REQUEST_HISTORY: number[] = [];
+
+/** The median request count of this process's last 20 cash drafts; 2 before any is observed. */
+function expectedCashDraftRequests(): number {
+  if (CASH_DRAFT_REQUEST_HISTORY.length === 0) return 2;
+  const sorted = [...CASH_DRAFT_REQUEST_HISTORY].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)]!;
+}
+
+function observeCashDraftRequests(worker: DraftWorkerResult): void {
+  const requests = (worker.requestEfforts ?? []).reduce((total, row) => total + row.requests, 0);
+  if (requests <= 0) return;
+  CASH_DRAFT_REQUEST_HISTORY.push(requests);
+  if (CASH_DRAFT_REQUEST_HISTORY.length > 20) CASH_DRAFT_REQUEST_HISTORY.shift();
+}
+
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
   const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
+  const planIndexChars = planProjectionForDependsOn(currentPlanText).length;
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
     let lastWorker: DraftWorkerResult | undefined;
     let lastRequestedModel: string | null = null;
@@ -2501,6 +2520,16 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       let dirty: { from: string | null; violations: string[] } | undefined;
       let cashAttempts = 0;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
+        const fit = deps.cashFit?.(prompt, { avoidModels: [...avoidModels], expectedRequests: expectedCashDraftRequests() });
+        if (fit && !fit.fits) {
+          deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt, reason: fit.reason, deployment: fit.deployment,
+            estimated_tokens: fit.estimatedTokens, window_tokens: fit.windowTokens ?? null, estimated_usd: fit.estimatedUsd ?? null,
+            left_usd: fit.leftUsd ?? null, expected_requests: expectedCashDraftRequests(), prompt_chars: prompt.length, plan_index_chars: planIndexChars });
+          // Unpaid first attempt: refused, so no attempt key. A later one keeps the paid dirty fragment, as before.
+          if (attempt === 1) return { proposalId: proposal.id, ok: false, error: `cash draft skipped before any request: ${fit.reason}`,
+            refused: { matched: `inbox.draft_cash_skipped:${fit.reason}` } };
+          break;
+        }
         cashAttempts = attempt;
         lastWorker = undefined;
         lastRequestedModel = null;
@@ -2508,6 +2537,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
             onRequestedModel: model => { lastRequestedModel = model; } }));
         lastWorker = worker;
+        if (deps.cashFit) observeCashDraftRequests(worker);
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
           // here as from === to, which is the record a retried-same-model regression must leave.
@@ -2526,6 +2556,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           session_id: worker.sessionId,
           cost_usd: worker.costUsd,
           subtype: worker.subtype,
+          prompt_chars: prompt.length,
+          plan_index_chars: planIndexChars,
+          ...(fit?.fits && fit.unread ? { cash_fit_unread: fit.unread } : {}),
           ...workerLedgerFields(worker),
         });
         parsed = parseDraftedCandidate(workerTranscript(worker), proposal, currentPlanText);
@@ -2563,6 +2596,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               session_id: escalated.sessionId,
               cost_usd: escalated.costUsd,
               subtype: escalated.subtype,
+              prompt_chars: escalationPrompt.length,
+              plan_index_chars: planIndexChars,
               ...workerLedgerFields(escalated),
             });
             lastWorker = escalated;

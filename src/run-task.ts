@@ -1142,7 +1142,8 @@ import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } fr
 import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
-import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
+  cashDraftFit, openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./lib/worker-provider.js";
 import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
@@ -37704,6 +37705,13 @@ export async function draftProposalBatch(
             currentPlanText: planText,
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
+          cashFit: (prompt: string, fit: { avoidModels: readonly string[]; expectedRequests: number }) => {
+            const candidates = openWeightCandidatesForCapability(mountsTable.capabilities,
+              openWeightCapabilityForRequestedModel(mountsTable.capabilities, inboxDraftMount.model), inboxDraftMount.effort);
+            const routable = candidates.filter((deployment) => !fit.avoidModels.includes(deployment));
+            return cashDraftFit(config, { deployments: routable.length > 0 ? routable : candidates, promptChars: prompt.length,
+              expectedRequests: fit.expectedRequests, atIso: systemClock.iso() });
+          },
         } : {}),
         log,
       },
