@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # it makes the disk-pressure grace work again in production, which shortens the age gate; W1-T10777 must ship first so no engine tree is a candidate
+  risk: high  # Rule 19 (three files after the amendment); it makes the disk-pressure grace work again in production, which shortens the age gate; W1-T10777 must ship first so no engine tree is a candidate
   origin: "operator-session#fleet-small-issues-2026-11-19"
   plan_refs:
     - W1-T4065
@@ -16,6 +16,8 @@
   files:
     - src/lib/worker.ts
     - test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts
+    - test/the-lane-reaper-says-why-it-keeps.test.ts
+    - test/adhoc-lane-reap.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -58,6 +60,10 @@
     4. src/lib/worker.ts has a comment cap (test/worker/spawn/compress-src-lib-worker-ts.test.ts): add as few
        comment lines as possible. Re-run test/adhoc-lane-reap.test.ts and test/adhoc-lane-root.test.ts.
     5. The test uses a temp config root (RMD_TMP_PREFIX) with test/setup/tmp-hygiene.ts and the real reaper.
+    AMENDED (2026-11-19): two existing tests assert the behaviour this task removes on purpose and join files.
+    test/the-lane-reaper-says-why-it-keeps.test.ts (W1-T4065) keeps its unreadable-versus-empty distinction with a
+    root that is not ENOENT (ENOTDIR or EACCES), since a missing root is now an empty survey; and
+    test/adhoc-lane-reap.test.ts (W1-T2847) injects diskHeadroom so its made-up root is not measured on /.
   falsifier: |
     At origin/main criterion 1 fails (two error rows and a census error) and criterion 2 fails (free_fraction
     null). Treat every enumeration error as empty: criterion 3 fails. Skip the unmanaged sweep when the root

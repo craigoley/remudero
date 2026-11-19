@@ -9444,6 +9444,29 @@ export async function taskIdOwnershipFindingsAsync(
   return judgeTaskIdOwnership(diff, filed, await read([...filed.keys()]), headRef);
 }
 
+/** W1-T13817: the core prefix, whose ids a satellite's filings may hold in core's refs/rmd-id/ instead of their own. */
+const CORE_RESERVATION_PREFIX = "W1";
+
+/**
+ * W1-T13817: a satellite review's anchor read. A W1 id is minted in core, so one that `subjectDir`'s origin
+ * provably does not hold is read again from `homeDir`'s origin (core's checkout) and that read stands; the holder is
+ * still judged against the PR's head. Any other prefix, and an id the subject holds or cannot read, keeps its own read.
+ */
+export function satelliteReservationRead(
+  subjectDir: string,
+  homeDir: string,
+  runnerFor: (repoDir: string) => (args: string[]) => Promise<{ status: number; stdout: string; stderr: string }> = gitReservationRunnerAsync,
+): (ids: string[]) => Promise<Map<string, ReservationAnchorRead>> {
+  return async (ids) => {
+    const reads = await readReservationAnchorsAsync(ids, runnerFor(subjectDir));
+    const elsewhere = ids.filter((id) => reads.get(id)?.status === "absent" && parsePrefixedTaskId(id)?.prefix === CORE_RESERVATION_PREFIX);
+    if (elsewhere.length === 0) return reads;
+    const home = await readReservationAnchorsAsync(elsewhere, runnerFor(homeDir));
+    for (const id of elsewhere) reads.set(id, home.get(id) ?? { status: "unknown", reason: "no read" });
+    return reads;
+  };
+}
+
 type OwnershipEvidenceInputs =
   | { done: true; findings: TaskIdOwnershipFinding[] | undefined }
   | { done: false; added: TaskIdDeclaration[]; headRefName: string; headCheckoutDir: string };
