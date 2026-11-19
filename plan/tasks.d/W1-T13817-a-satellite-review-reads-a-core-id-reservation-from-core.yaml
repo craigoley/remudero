@@ -1,0 +1,51 @@
+- id: W1-T13817
+  title: "A satellite review reads a W1 id's reservation from core when its own repository does not hold it"
+  repo: remudero
+  depends_on: [W1-T13794]
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # Rule 19 sizing: one review helper, one review-command wiring line and one test; changes only where a satellite review looks up a W1 reservation, never how its holder is judged
+  origin: "human#2026-11-18-rethink-ops-tracking"
+  plan_refs:
+    - W1-T13794
+    - W1-T4414
+  files:
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
+    - test/review/a-satellite-review-reads-a-core-id-reservation-from-core.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A satellite review reads a W1 id its own origin lacks from core's origin, and passes a head that holds it"
+      proof: "grep: W1-T13817 criterion 1 in test/review/a-satellite-review-reads-a-core-id-reservation-from-core.test.ts"
+    - claim: "invariant:core-reservation-still-judged — a core id held by another branch is foreign, an id in neither origin is unreserved, a satellite's own prefix never reads core, and an unreadable core reads unknown"
+      proof: "grep: W1-T13817 criterion 2 in test/review/a-satellite-review-reads-a-core-id-reservation-from-core.test.ts"
+    - claim: "The review command passes core's checkout as the reservation home only for a satellite review"
+      proof: "grep: reservationHomeDir: repoRoot in src/cli/commands/review.ts"
+  rationale: |
+    WHY: the fleet reviewer failed remudero-ops#124 (W1-T13628) with "id W1-T13628 is not reserved". OBSERVED
+    2026-11-19: core's refs/rmd-id/W1-T13628 exists and names the PR's own head branch as holder; remudero-ops
+    holds no refs/rmd-id/ at all. taskIdOwnershipFindingsAsync reads refs/rmd-id/<id> from the review subject's
+    origin only, so every satellite filing of a W1 id minted in core reads unreserved. remudero-console holds some W1
+    anchors of its own, so the subject's read must still come first. ops#124 merged only because the plan-only
+    review-gate status was posted after the fleet's FAIL; with remudero-review now required on ops main, the next
+    such filing waits on whichever poster writes last.
+  design: |
+    review.ts: satelliteReservationRead(subjectDir, homeDir, runnerFor?) returns an anchor read for
+    taskIdOwnershipFindingsAsync. It reads every id from the subject's origin; each W1 id that read reports absent is
+    read again from homeDir's origin, and that read stands (present, absent or unknown). Other prefixes, and ids
+    the subject holds or cannot read, keep the subject's read. judgeTaskIdOwnership is unchanged, so the holder is
+    still compared with the PR's head and the hand-off line.
+    cli/commands/review.ts: runReview takes optional reservationHomeDir and, with a head checkout, passes
+    satelliteReservationRead(headCheckoutDir, reservationHomeDir) to reviewTaskIdEvidenceAsync. reviewCommand passes
+    reservationHomeDir: repoRoot exactly when keepsUnseenDependency is set (a satellite review, W1-T13794).
+    A core review passes none and reads as before.
+    INVARIANT core-reservation-still-judged: a W1 id held in core by another branch is foreign, one in neither origin
+    is unreserved, a non-W1 id never reads core, and a core read that fails is unknown, never absent.
+  falsifier: |
+    Return the subject read without the core fallback: criterion 1 fails (unreserved). Drop the W1 prefix test:
+    criterion 2 fails because the fixture's non-W1 id passes on core's anchor. Re-read ids the subject holds:
+    criterion 2 fails because the fixture's subject-held id turns foreign.
