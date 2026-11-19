@@ -323,6 +323,8 @@ const COVERED: ReadonlySet<string> = new Set([
   "POST /v1/products/research",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10613).
   "POST /v1/products/repository",
+  // Assembled HTTP proof: W1-T11197 in test/console-api/serve/product-routes.test.ts and the production-assembly test below.
+  "POST /v1/products/runner-config-proposal",
   // Assembled HTTP proof over the real default Vercel transport: test/console-api/serve/product-routes.test.ts (W1-T10616).
   "POST /v1/products/deployment",
   // Assembled HTTP proof: test/console-api/serve/product-routes.test.ts and the production-assembly test below (W1-T10615).
@@ -710,6 +712,32 @@ test("W1-T11196: GET /v1/products/runner-config-preview is registered with verif
     assert.deepEqual(readdirSync(h.fleetRoot, { recursive: true }).sort(), before);
     assert.equal(readFileSync(h.ledgerPath, "utf8"), "");
   }, true);
+});
+
+test("W1-T11197: POST /v1/products/runner-config-proposal is high tier, confirmed, and journals under the fleet root", async () => {
+  await withProductionServer(async h => {
+    const headers: Record<string, string> = { authorization: `Bearer ${WRITE_TOKEN}`, "content-type": "application/json",
+      [OPERATOR_SESSION_HEADER]: h.operatorSession! };
+    const saved = await fetch(`${h.base}/v1/products`, { method: "POST", headers, body: JSON.stringify({ version: "product-intent-v1",
+      requestId: "wiring-runner-proposal", expectedRevision: 0, brief: { idea: "runner proposal wiring" } }) });
+    const { receipt } = await saved.json() as { receipt: { productId: string } };
+    const payload = JSON.stringify({ version: "product-runner-config-proposal-v1", requestId: "wiring-runner-proposal-01", productId: receipt.productId,
+      expectedRevision: 1, expectedObjectiveRevision: 1, targetHead: "a".repeat(40), configDigest: "b".repeat(64) });
+    const refused = await fetch(`${h.base}/v1/products/runner-config-proposal`, { method: "POST", headers, body: payload });
+    assert.equal(refused.status, 403);
+    assert.equal((await refused.json()).error, "confirm_nonce_required");
+    const confirmed = await fetch(`${h.base}/v1/confirm`, { method: "POST", headers,
+      body: JSON.stringify({ method: "POST", path: "/v1/products/runner-config-proposal", payload }) });
+    assert.equal(confirmed.status, 200);
+    const { nonce } = await confirmed.json() as { nonce: string };
+    const proposed = await fetch(`${h.base}/v1/products/runner-config-proposal`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(proposed.status, 409);
+    assert.equal((await proposed.json()).error, "repository_missing");
+    assert.equal(proposed.headers.get("cache-control"), "private, no-store");
+    assert.ok(existsSync(join(h.fleetRoot, "state/products/v1/runner-config")));
+    assert.ok(!existsSync(join(h.questionsRoot, "state/products")));
+    assert.equal(readFileSync(h.ledgerPath, "utf8"), "", "a refused proposal preserves the ledger");
+  }, true, true);
 });
 
 test("W1-T10726: GET /v1/products/repository-preview is verified-operator read-only over the fleet root", async () => {
