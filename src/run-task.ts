@@ -13563,6 +13563,11 @@ interface TaskIdDestinationSnapshot {
   openPrTexts: readonly string[];
 }
 
+/** BACKSTOP: the destination plan is read in one `cat-file --batch`. Exceeding this buffer refuses the snapshot.
+ *  The ops plan outgrew Node's 1 MiB default; the bound is derived from the catalog byte bound in
+ *  ops-catalog-source.ts (the same population the catalog reader admits) and kept under this name for callers. */
+export const TASK_ID_DESTINATION_MAX_BUFFER = TASK_ID_DESTINATION_GIT_MAX_BUFFER;
+
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
 export async function taskIdDestinationSnapshot(
   checks: TaskIdDestinationChecks = {}, offline = false,
@@ -13574,7 +13579,7 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
     const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: TASK_ID_DESTINATION_GIT_MAX_BUFFER, ...(input === undefined ? {} : { input }) });
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: TASK_ID_DESTINATION_MAX_BUFFER, ...(input === undefined ? {} : { input }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";

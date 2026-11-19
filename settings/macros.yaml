@@ -100,6 +100,8 @@ macros:
       - Each round asks the whole frontier at once. Number the questions (Q1, Q2 …).
       - Give each question a short title, the choices you see, YOUR RECOMMENDED ANSWER, and the
         one piece of evidence that would change your recommendation.
+      - Word each question so that "yes" accepts your recommended answer. Agreeing must never
+        mean answering "no".
       - Never put a question in this round if its answer depends on another question in this
         round. It belongs in a later round.
       - After I answer, re-compute the frontier and ask the next round.
@@ -166,7 +168,8 @@ macros:
       4. HYPOTHESISE, RANKED. List the candidate causes. For each, name the one observation that
          would falsify it, and check that observation before you believe it.
       5. FIX THE NAMED CAUSE, then re-run the SAME loop and show it green. Prove the fix is
-         load-bearing: undo it, show red, restore it, show green.
+         load-bearing: undo it, show red, restore it, show green. Before you trust that red, show
+         `git diff` of the undo against the fixed tree: an undo that changed nothing proves nothing.
 
       If two patches have not moved the symptom, stop. No third patch and no wider change — get
       more data or return to the last known good state.
