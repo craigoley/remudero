@@ -48,7 +48,8 @@ export function createLightPassOpenPrList<V>(opts: {
   runId: string;
   deadlineMs: number;
   maxAgeMs: number;
-}): { read(served: ServedViews<V> | undefined, own: () => Promise<V[]>, rule?: { boot?: boolean }): Promise<LightPassViewsRead<V>> } {
+}): { read(served: ServedViews<V> | undefined, own: () => Promise<V[]>, rule?: { boot?: boolean },
+  onSource?: (source: LightPassViewsSource) => void): Promise<LightPassViewsRead<V>> } {
   let lastGood: LastGoodList<V> | undefined;
   let inFlight: { promise: Promise<V[]>; readStartedAtMs: number } | undefined;
   const keep = (read: Promise<V[]>, source: LightPassViewsSource, readStartedAtMs: number): Promise<V[]> => {
@@ -83,7 +84,7 @@ export function createLightPassOpenPrList<V>(opts: {
     return { fallback: true, source: list.source, views: structuredClone(list.views), reason, readStartedAtMs: list.readStartedAtMs };
   };
   return {
-    async read(served, own, rule) {
+    async read(served, own, rule, onSource) {
       const servedReadStartedAtMs = served?.servedReadStartedAtMs ?? opts.clock.now();
       // W1-T13709: a served list whose read started before the last good list's is older than it; the pass
       // reads its own views. The boot pass keeps the W1-T12236 rule and takes the served list as before.
@@ -91,6 +92,7 @@ export function createLightPassOpenPrList<V>(opts: {
         || lastGood === undefined || servedReadStartedAtMs >= lastGood.readStartedAtMs);
       const pending = useServed ? keep(served, "tick_read", servedReadStartedAtMs) : ownRead(own);
       const source: LightPassViewsSource = useServed ? "tick_read" : "own_read";
+      onSource?.(source);
       const readStartedAtMs = useServed ? servedReadStartedAtMs : inFlight?.readStartedAtMs ?? opts.clock.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const slow = new Promise<"slow">((resolve) => {

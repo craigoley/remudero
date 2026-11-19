@@ -226,7 +226,8 @@ test("W1-T13709 criterion 3: a served list in a scoped pass is acted on as a las
         assert.equal(moved[0]?.snapshot_head_sha, "head-tick");
         assert.equal(moved[0]?.live_head_sha, "head-pushed");
       }
-      assert.equal(f.posted.length, 0, "no review was posted on the moved head");
+      if (guarded) assert.equal(f.posted.length, 0, `${scope.scope}: no review was posted on the moved head`);
+      else assert.deepEqual(f.posted.map((post) => post.headSha), ["head-tick"], "boot retains its pre-task review rule");
     } finally { await f.cleanup(); }
   }
 });

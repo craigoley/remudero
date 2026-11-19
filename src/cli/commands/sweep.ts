@@ -1346,7 +1346,8 @@ export function buildSweepLightHook(
       // W1-T12755: a failed or slow read decides from the last good list (a refill read too).
       const readViews = async (passScope?: LightPassScope, initial = false) => {
         const served = io.openPrViews?.(passScope);
-        const read = await openPrList.read(served, ownViews, { boot: passScope?.scope === "boot" });
+        const read = await openPrList.read(served, ownViews, { boot: passScope?.scope === "boot" },
+          initial ? (source) => { viewsSource = source; } : undefined);
         // The row and the act-time guards follow the list the pass decided from, not the list it was offered.
         if (initial) {
           viewsSource = read.fallback ? "fallback" : read.source;
