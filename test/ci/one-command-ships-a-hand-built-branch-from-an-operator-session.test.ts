@@ -9,6 +9,7 @@ import { test, type TestContext } from "node:test";
 import { authorPushEligibility, pinnedNodeReexec } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { HANDLERS } from "#test/helpers/run-task-test.js";
@@ -285,7 +286,7 @@ test("different same-title failures at distinct source locations never become ba
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
-test("the production rerun reaches a nested failing leaf through its parent suite", async (t) => {
+test("the production rerun selects one nested leaf and retains passing TAP rows without locations", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   seedHandBranch(repo, true);
@@ -296,7 +297,7 @@ test("the production rerun reaches a nested failing leaf through its parent suit
     'import { test } from "node:test";',
     'test("parent", async (context) => {',
     '  await context.test("leaf", () => { throw new Error("selected leaf"); });',
-    '  await context.test("sibling", () => { throw new Error("sibling result is not the selected leaf"); });',
+    '  await context.test("sibling", () => {});',
     '});',
     "",
   ].join("\n"));
@@ -310,10 +311,79 @@ test("the production rerun reaches a nested failing leaf through its parent suit
     const rows = await workspace.rerun("head", file, source.head, "parent > leaf");
     assert.ok(rows.some((row) => row.title === "parent > leaf" && row.failed === true));
     assert.ok(rows.some((row) => row.title === "parent" && row.failed === true && row.suite === true));
-    assert.ok(rows.some((row) => row.title === "parent > sibling" && row.failed === true));
+    assert.ok(!rows.some((row) => row.title === "parent > sibling"), "the sibling must be skipped by the runner");
+    const passingSibling = await workspace.rerun("head", file, source.head, "parent > sibling");
+    assert.ok(passingSibling.some((row) => row.file === file && row.title === "parent > sibling" &&
+      row.failed === false && row.location === null), `a locationless passing TAP row keeps its known input file: ${JSON.stringify(passingSibling)}`);
   } finally {
     await workspace.close();
   }
+});
+
+test("stopping during Git bundle creation aborts the Git operation", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const defaults = handShipEffects(() => 0);
+  const controller = new AbortController();
+  const run: Parameters<HandShipEffects["readSource"]>[1] & { git: typeof hostWorktreeGitAsync } = {
+    dir: f.root, signal: controller.signal, log: f.options.write,
+    async git(cwd, args, options) {
+      if (args[0] === "bundle") {
+        assert.equal(options?.signal, controller.signal);
+        startBundle();
+        return await new Promise<string>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+        });
+      }
+      return hostWorktreeGitAsync(cwd, args, options);
+    },
+  };
+  let startBundle!: () => void;
+  const bundleStarted = new Promise<void>((resolve) => { startBundle = resolve; });
+  const source = await defaults.readSource(repo.dir, run);
+  const preparing = defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  await bundleStarted;
+  controller.abort(new Error("stop requested"));
+  await assert.rejects(preparing, /stop requested/);
+});
+
+test("workflow-contract failures use real isolated head and main reruns", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo, true);
+  writeFileSync(join(repo.dir, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), [
+    'import { test } from "node:test";',
+    'test("workflow suite", async (context) => {',
+    '  await context.test("contract failure", () => { throw new Error("contract changed"); });',
+    '  await context.test("passing sibling", () => {});',
+    '});',
+    "",
+  ].join("\n"));
+  repo.git("add", file, "package-lock.json", "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "nested workflow contract fixture");
+  f.options.cwd = repo.dir;
+  const defaults = handShipEffects(() => 0);
+  const effects: HandShipEffects = {
+    ...defaults,
+    readHost: async () => "1\n",
+    prepare: async (host, shipSource, shipRun) => {
+      const workspace = await defaults.prepare({ ...host, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, shipSource, shipRun);
+      workspace.preflight = async () => ({ headSha: shipSource.head, baseSha: base, verdict: "failed",
+        steps: [{ name: "census-precheck", ok: true }, { name: "workflow-contract-precheck", ok: false,
+          suites: [file], diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: 2, cancelled: 0 } }] });
+      return workspace;
+    },
+    push: async () => { f.calls.push("push"); },
+  };
+  const result = await runHandShip(f.args, f.options, effects);
+  assert.equal(result, 1);
+  assert.match(f.lines.join("\n"), /caused by the change: test\/ci\/example\.test\.ts :: workflow suite > contract failure/);
+  assert.doesNotMatch(f.lines.join("\n"), /passing sibling/);
+  assert.ok(!f.calls.includes("push"));
 });
 
 test("a stop requested during PR publication leaves the run stopped", async (t) => {
@@ -337,7 +407,7 @@ test("a stop requested during PR publication leaves the run stopped", async (t) 
 
 function seedHandBranch(repo: GitRepo, withTest = false): string {
   repo.addRemote("origin", "https://github.com/example/repo.git");
-  writeFileSync(join(repo.dir, "package-lock.json"), "{}\n");
+  writeFileSync(join(repo.dir, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8"));
   writeFileSync(join(repo.dir, ".nvmrc"), readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8"));
   writeFileSync(join(repo.dir, ".gitignore"), "node_modules\ncoverage/\n");
   mkdirSync(join(repo.dir, "node_modules"));
@@ -382,6 +452,9 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   const base = seedHandBranch(repo, true);
+  writeFileSync(join(repo.dir, file), 'import { test } from "node:test"; test("existing red", () => { throw new Error("red"); });\n');
+  repo.git("add", file);
+  repo.git("commit", "-m", "name the test fixture");
   const defaults = handShipEffects(() => 0);
   const spawned: string[][] = [];
   let receiptBound = true;

@@ -2,7 +2,7 @@
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
@@ -736,36 +736,26 @@ export function readAuthorProfile(root, path) {
  * its leaves are. A file that failed as a whole is one entry titled `(whole file)`. `file` is null when the location
  * is missing or outside `root`.
  */
-export function testResultsFromTap(output, root) {
-  try { root = realpathSync(root); } catch { /* An unreadable root leaves locations unresolved below. */ }
-  root = root.replace(/^\/private(?=\/)/, '');
+export function failingTestsFromTap(output, root) {
   const lines = String(output ?? '').split('\n'), tests = [], stack = [];
   for (let i = 0; i < lines.length; i += 1) {
     const header = /^( *)# Subtest: (.*)$/.exec(lines[i]);
     if (header) { stack.splice(header[1].length / 4); stack.push(header[2]); continue; }
-    const result = /^( *)(not ok|ok) [0-9]+ - (.*)$/.exec(lines[i]);
-    if (!result) continue;
+    const failed = /^( *)not ok [0-9]+ - (.*)$/.exec(lines[i]);
+    if (!failed) continue;
     const block = {};
-    for (let j = i + 1; j < lines.length && lines[j].startsWith(`${result[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]); j += 1) {
+    for (let j = i + 1; j < lines.length && lines[j].startsWith(`${failed[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]); j += 1) {
       const field = /^\s+(type|location|failureType): '?(.*?)'?$/.exec(lines[j]);
       if (field) block[field[1]] = field[2];
     }
-    if (block.type === 'suite') continue;
-    const locationMatch = /:([0-9]+):([0-9]+)$/.exec(String(block.location ?? ''));
-    const location = locationMatch ? `${locationMatch[1]}:${locationMatch[2]}` : null;
-    const located = String(block.location ?? '').replace(/^file:\/\//, '').replace(/:[0-9]+:[0-9]+$/, '').replace(/^\/private(?=\/)/, '');
+    if (block.type === 'suite' && block.failureType === 'subtestsFailed') continue;
+    const located = String(block.location ?? '').replace(/^file:\/\//, '').replace(/:[0-9]+:[0-9]+$/, '');
     const path = located && isAbsolute(located) ? relative(root, located).split(sep).join('/') : '';
     const file = path && path !== '..' && !path.startsWith('../') && !isAbsolute(path) ? path : null;
-    const fileLevel = file !== null && result[3].replace(/\\/g, '/').endsWith(file);
-    tests.push({ file, title: fileLevel ? '(whole file)' : [...stack.slice(0, result[1].length / 4), result[3]].join(' > '), location,
-      fileLevel, failed: result[2] === 'not ok' });
+    const fileLevel = file !== null && failed[2].replace(/\\/g, '/').endsWith(file);
+    tests.push({ file, title: fileLevel ? '(whole file)' : [...stack.slice(0, failed[1].length / 4), failed[2]].join(' > '), fileLevel });
   }
   return tests;
-}
-
-/** The failed leaf tests in a TAP report, each paired with its source location when available. */
-export function failingTestsFromTap(output, root) {
-  return testResultsFromTap(output, root).filter((test) => test.failed).map(({ file, title, location, fileLevel }) => ({ file, title, location, fileLevel }));
 }
 
 /** The time `files` took at the head: their own durations when all are recorded, else the whole stage's. */
@@ -808,7 +798,7 @@ function linkAttributionDependencies(dir, tmpRoot, nodeModules, mergeBase, probe
  */
 export function attributeFailures({ root, baseSha, headSha, failing, unnamed = 0, headMs, ceilingMs = AUTHOR_STEP_RUNTIME_MS,
   git, runBase, runnerArgs, tmp = tmpdir, nodeModules = join(root, 'node_modules') }) {
-  const tests = failing.map((test) => ({ file: test.file, title: test.title, location: test.location ?? null }));
+  const tests = failing.map((test) => ({ file: test.file, title: test.title }));
   const open = () => tests.filter((test) => test.state === undefined);
   const mark = (list, state, reason) => { for (const test of list) Object.assign(test, { state, reason }); };
   const settle = (cleanup = { removed: true }, base = {}) => {
@@ -859,9 +849,7 @@ export function attributeFailures({ root, baseSha, headSha, failing, unnamed = 0
         base = { ...base, summary };
         for (const test of open()) {
           const here = named.filter((other) => other.file === test.file);
-          if (test.location && here.some((other) => other.title === test.title && other.location === test.location)) {
-            mark([test], 'also-red', 'reported failing at the same source location in a completed base run of the same file');
-          }
+          if (here.some((other) => other.title === test.title)) mark([test], 'also-red', 'reported failing in a completed base run of the same file');
           else if (here.some((other) => other.fileLevel)) mark([test], 'unattributed', 'the file failed as a whole at the base');
           else if (named.length < summary.fail) mark([test], 'unattributed', 'the base run failed tests its output does not name');
           else mark([test], 'only-head', 'not failing in a completed base run of the same file');
@@ -1065,11 +1053,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       const located = pinnedNodeReexec({ spawn, ...pinnedNodeLocation, pin: pinnedNode, current: process.versions.node });
       if (located.refuse !== undefined) throw refusal('node-version', located.refuse);
       console.log(`author preflight: Node ${process.versions.node} is not the .nvmrc pin ${pinnedNode}; re-running under Node ${pinnedNode} at ${located.reexec}`);
-      // Keep nested `node` commands on the same pin as the gate itself. Several tests and
-      // coverage helpers launch `node` by name, so inheriting the caller's PATH can silently
-      // drop them back onto a different runtime after this re-exec.
-      const env = { ...process.env, PATH: `${dirname(located.reexec)}${delimiter}${process.env.PATH || ''}` };
-      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env });
+      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: process.env });
       if (child.error) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) could not start: ${child.error.message}`);
       if (child.signal) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) ended by signal ${child.signal}`);
       return child.status;
@@ -1479,7 +1463,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
                       ...files], files, manifest),
                     runBase: ({ file, args, cwd, boundMs }) => runStep('affected-tests-base', args, file, {}, boundMs, slot.heartbeat, cwd) });
                   receipt.failureAttribution = { counts: attribution.counts, base: attribution.base, cleanup: attribution.cleanup,
-                    tests: attribution.tests.map(({ file, title, location, state, reason }) => ({ file, title, location, state, reason })) };
+                    tests: attribution.tests.map(({ file, title, state, reason }) => ({ file, title, state, reason })) };
                   for (const line of attributionLines(attribution)) console.log(line);
                 } catch (error) {
                   receipt.failureAttribution = { error: `the attribution could not be made: ${error?.message ?? error}` };

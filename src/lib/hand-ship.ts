@@ -65,6 +65,7 @@ interface ShipRun {
   signal: AbortSignal;
   log: (line: string) => void;
   spawn?: (file: string, args: string[], options: SpawnOptions) => ChildProcess;
+  git?: typeof hostWorktreeGitAsync;
 }
 
 export interface HandShipEffects {
@@ -72,7 +73,7 @@ export interface HandShipEffects {
   readSource(cwd: string, run: ShipRun): Promise<ShipSource>;
   prepare(host: ShipHost, source: ShipSource, run: ShipRun): Promise<{
     preflight(priority: Priority): Promise<ShipReceipt>;
-    rerun(tree: "head" | "main", file: string, sha: string, title?: string): Promise<FailingTest[]>;
+    rerun(tree: "head" | "main", file: string, sha: string, title?: string, expectedCount?: number): Promise<FailingTest[]>;
     close(): Promise<void>;
   }>;
   push(source: ShipSource, run: ShipRun): Promise<void>;
@@ -128,7 +129,7 @@ function testFailureStage(step: ShipReceipt["steps"][number]): boolean {
 }
 
 /** Parse complete TAP rows locally so the hand-ship comparison does not change the author-preflight contract. */
-function tapResults(output: string, root: string): FailingTest[] {
+function tapResults(output: string, root: string, fallbackFile?: string): FailingTest[] {
   const clean = (path: string) => path.replace(/^\/private(?=\/)/, "");
   root = clean(root);
   const lines = String(output).split("\n"), rows: FailingTest[] = [], parents: string[] = [];
@@ -145,7 +146,8 @@ function tapResults(output: string, root: string): FailingTest[] {
     const locationMatch = /^(.*):([0-9]+):([0-9]+)$/.exec(clean(fields.location ?? ""));
     const absolute = locationMatch?.[1] ?? "";
     const relativePath = absolute && isAbsolute(absolute) ? relative(root, absolute).split(sep).join("/") : "";
-    const file = relativePath && relativePath !== ".." && !relativePath.startsWith("../") && !isAbsolute(relativePath) ? relativePath : null;
+    const file = relativePath && relativePath !== ".." && !relativePath.startsWith("../") && !isAbsolute(relativePath)
+      ? relativePath : fields.location === undefined ? fallbackFile ?? null : null;
     const fileLevel = file !== null && result[3]!.replace(/\\/g, "/").endsWith(file);
     rows.push({ file, title: fileLevel ? "(whole file)" : [...parents.slice(0, result[1]!.length / 4), result[3]!].join(" > "),
       location: locationMatch ? `${locationMatch[2]}:${locationMatch[3]}` : null,
@@ -156,6 +158,79 @@ function tapResults(output: string, root: string): FailingTest[] {
 
 function escapeTestName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
+/** Build a fail-closed Node test filter that admits the target's names and skips its siblings. */
+function isolatedTestPatterns(source: string, title: string, expectedCount = 1): string[] | null | undefined {
+  type Token = { kind: "identifier" | "punctuation" | "string"; value: string; literal?: boolean };
+  const tokens: Token[] = [];
+  let ambiguous = false;
+  for (let i = 0; i < source.length;) {
+    const char = source[i]!;
+    if (/\s/.test(char)) { i += 1; continue; }
+    if (source.startsWith("//", i)) { const end = source.indexOf("\n", i + 2); i = end < 0 ? source.length : end + 1; continue; }
+    if (source.startsWith("/*", i)) {
+      const end = source.indexOf("*/", i + 2);
+      if (end < 0) return undefined;
+      i = end + 2;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      const quote = char, start = ++i;
+      let dynamic = false, closed = false;
+      while (i < source.length) {
+        if (source[i] === "\\") { dynamic = true; i += 2; continue; }
+        if (quote === "`" && source.startsWith("${", i)) dynamic = true;
+        if (source[i] === quote) { closed = true; break; }
+        i += 1;
+      }
+      if (!closed) return undefined;
+      tokens.push({ kind: "string", value: source.slice(start, i), literal: !dynamic });
+      i += 1;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(char)) {
+      const start = i++;
+      while (i < source.length && /[\w$]/.test(source[i]!)) i += 1;
+      tokens.push({ kind: "identifier", value: source.slice(start, i) });
+      continue;
+    }
+    tokens.push({ kind: "punctuation", value: char });
+    i += 1;
+  }
+  const testNames = new Set(["test", "it", "spec", "specify", "describe", "suite"]);
+  const registrations: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (token.kind !== "identifier" || !testNames.has(token.value)) continue;
+    let open = i + 1;
+    if (tokens[open]?.value === ".") {
+      const modifier = tokens[open + 1]?.value;
+      if (["only", "skip", "todo", "fails"].includes(modifier ?? "") && tokens[open + 2]?.value === "(") open += 2;
+      else if (modifier === "each" || modifier === "for") { ambiguous = true; continue; }
+    }
+    if (tokens[open]?.value !== "(") continue;
+    const first = tokens[open + 1];
+    if (first?.kind !== "string" || first.literal !== true) { ambiguous = true; continue; }
+    registrations.push(first.value);
+  }
+  if (ambiguous) return undefined;
+  if (registrations.length === 0) return null;
+  const target = title.split(" > ");
+  if (!registrations.includes(target.at(-1)!)) return null;
+  const counts = new Map<string, number>();
+  for (const name of registrations) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const targetNames = new Set(target);
+  for (const name of targetNames) {
+    const expected = target.filter((part) => part === name).length + (name === target.at(-1) ? expectedCount - 1 : 0);
+    if (counts.get(name) !== expected) return undefined;
+  }
+  const skipped = [...new Set(registrations.filter((name) => !targetNames.has(name)))];
+  if (skipped.length === 0) return ["--test-name-pattern", `^(?:${target.map(escapeTestName).join("|")})$`];
+  const skipAlternatives = skipped.map(escapeTestName).join("|");
+  if (skipAlternatives.length > 24_000) return undefined;
+  return ["--test-name-pattern", `^(?:${target.map(escapeTestName).join("|")})$`,
+    "--test-skip-pattern", `^(?:${skipAlternatives})$`];
+}
+
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
   const failed = receipt.steps.find((step) => !step.ok);
   if (!failed || !testFailureStage(failed)) {
@@ -165,6 +240,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   let tests: FailingTest[] = (receipt.failureAttribution?.tests ?? []).map((test) => ({ ...test, suite: false }));
   const summary = failed.testSummary;
   const withEvidence = { ...receipt, failureAttribution: undefined };
+  let expectedFailureCount = 0;
   if (failed.signal || failed.error || failed.diagnostics?.mayBeIncomplete !== false || !summary || summary.fail === 0 ||
     tests.some(({ file, fileLevel }) => !file || fileLevel || !testPath.test(file) ||
       file.split("/").some((part) => part === "." || part === ".."))) {
@@ -175,10 +251,12 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     const counts = receipt.failureAttribution?.counts;
     const namedUnattributed = tests.filter((test) => test.state === "unattributed").length;
     const unnamed = (counts?.unattributed ?? -1) - namedUnattributed;
-    if (counts?.failingAtHead !== summary.fail || unnamed < 0 || tests.length + unnamed !== summary.fail) {
+    if (!Number.isSafeInteger(counts?.failingAtHead) || counts!.failingAtHead! > summary.fail || unnamed < 0 ||
+      tests.length + unnamed !== counts!.failingAtHead!) {
       run.log("test failure comparison unavailable: the preflight did not completely name its failures");
       return withEvidence;
     }
+    expectedFailureCount = counts!.failingAtHead!;
   }
   if (failed.name === "workflow-contract-precheck" && tests.length === 0) {
     const suites = failed.suites ?? [];
@@ -196,14 +274,15 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
       run.log("workflow contract failure comparison unavailable: isolated head reruns did not account for every failure");
       return withEvidence;
     }
+    expectedFailureCount = tests.length;
   }
-  if (tests.length === 0 || tests.length > summary.fail) {
+  if (tests.length === 0 || tests.length > expectedFailureCount) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }
   const groups = new Map<string, FailingTest[]>();
   for (const test of tests) {
-    const key = `${test.file}\0${test.title}\0${test.location ?? ""}`;
+    const key = `${test.file}\0${test.title}`;
     groups.set(key, [...(groups.get(key) ?? []), test]);
   }
   const unionRows = (runs: FailingTest[][]) => {
@@ -226,7 +305,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     const runs: FailingTest[][] = [];
     for (const group of groups.values()) {
       const test = group[0]!;
-      runs.push(await workspace.rerun(tree, test.file!, sha, test.title));
+      runs.push(await workspace.rerun(tree, test.file!, sha, test.title, group.length));
     }
     return unionRows(runs);
   };
@@ -235,19 +314,15 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const exactHeadFailures: FailingTest[] = [];
   for (const group of groups.values()) {
     const target = group[0]!;
-    // Node's name-pattern option selects an ancestor suite to reach a nested leaf.
-    // Ignore every non-target row (including passing or failing siblings) and use
-    // the receipt's physical location to identify the specific test.
-    const selected = headRows.filter((row) => row.file === target.file && row.title === target.title &&
-      row.location === target.location && !row.suite && !row.fileLevel);
+    const selected = headRows.filter((row) => row.file === target.file && row.title === target.title && !row.suite && !row.fileLevel);
     const targetFailures = selected.filter((row) => row.failed === true);
-    const targetPasses = headRows.filter((row) => row.file === target.file && row.title === target.title &&
-      !row.suite && !row.fileLevel && row.failed === false);
-    if (targetFailures.length === group.length) {
+    const targetPasses = selected.filter((row) => row.failed === false);
+    if (selected.length === group.length && targetFailures.length === group.length &&
+      targetFailures.every((row) => typeof row.location === "string" && /^\d+:\d+$/.test(row.location))) {
       exactHeadFailures.push(...targetFailures);
       continue;
     }
-    if (targetFailures.length === 0 && targetPasses.length >= group.length) {
+    if (selected.length === group.length && targetFailures.length === 0 && targetPasses.length === group.length) {
       hostCaused = true;
       for (const test of group) run.log(`caused by the host: ${test.file} :: ${test.title}`);
       continue;
@@ -259,7 +334,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const mainFailures = [...groups.values()].flatMap((group) => {
     const target = group[0]!;
     return mainRows.filter((row) => row.file === target.file && row.title === target.title &&
-      row.location === target.location && !row.suite && !row.fileLevel && row.failed === true);
+      !row.suite && !row.fileLevel && row.failed === true);
   });
   const remainingMain = [...mainFailures];
   const rows = [];
@@ -272,7 +347,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     rows.push({ file: test.file, title: test.title, location: test.location,
       state: classification === "also failing on main" ? "also-red" : "only-head" });
   }
-  if (hostCaused || rows.length !== summary.fail || exactHeadFailures.some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
+  if (hostCaused || rows.length !== expectedFailureCount || exactHeadFailures.some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }
@@ -523,7 +598,7 @@ async function hostCommand(host: ShipHost, run: ShipRun, args: string[], opts: C
 
 async function gitAt(run: ShipRun, cwd: string, args: string[]): Promise<string> {
   run.signal.throwIfAborted();
-  const output = await hostWorktreeGitAsync(cwd, args);
+  const output = await (run.git ?? hostWorktreeGitAsync)(cwd, args, { signal: run.signal });
   run.signal.throwIfAborted();
   return output.trim();
 }
@@ -606,7 +681,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         }
         return receipt;
       },
-      async rerun(tree, file, sha, title) {
+      async rerun(tree, file, sha, title, expectedCount) {
         run.log(`isolated rerun on ${tree} ${sha}: ${file}${title === undefined ? "" : ` :: ${title}`}`);
         if (tree === "main" && !baseCut) {
           await git(["diff", "--quiet", source.head, sha, "--", "package-lock.json"]);
@@ -623,13 +698,17 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        const namePattern = title === undefined ? [] : ["--test-name-pattern", `^(?:${[...new Set(title.split(" > "))].map(escapeTestName).join("|")})$`];
-        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...namePattern,
+        const namePattern = title === undefined ? [] : isolatedTestPatterns(readFileSync(join(cwd, file), "utf8"), title, expectedCount);
+        if (title !== undefined && namePattern === null && tree === "main") return [];
+        if (title !== undefined && (namePattern === undefined || namePattern === null)) {
+          throw new Error(`${tree} ${file}: could not isolate the named test and its ancestors`);
+        }
+        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...(namePattern ?? []),
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });
         const { testSummary } = await authorTools();
         const summary = testSummary(result.stdout);
-        const results = tapResults(result.stdout, cwd);
+        const results = tapResults(result.stdout, cwd, file);
         const targetSelected = title === undefined || results.some((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
         if (result.truncated || !summary || summary.cancelled !== 0 || results.length !== summary.tests ||
           results.filter((test) => test.failed).length !== summary.fail ||
@@ -670,7 +749,7 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       if (current.head !== source.head || current.branch !== source.branch || current.origin !== source.origin) {
         throw new Error("source branch, head or origin changed during verification");
       }
-      const execute = worktreePushExecAsync(source.root, { signal: run.signal, push: (worktree, args, opts) => {
+      const execute = worktreePushExecAsync(source.root, { prGates: true, signal: run.signal, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
       } });
