@@ -942,6 +942,7 @@ export function loadPlanQuarantiningDuplicates(
   path: string,
   io: FileIntegrityIO = defaultIntegrityIO,
   shardDir: string = join(dirname(path), "tasks.d"),
+  keepsUnseenDependency?: KeepsUnseenDependency,
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
   const duplicateFiles = new Map<string, string[]>();
   const invalid: QuarantinedTask[] = [];
@@ -952,7 +953,7 @@ export function loadPlanQuarantiningDuplicates(
     (id, earlierPath, laterPath) => recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath),
     (file, err, text) => invalid.push(...invalidShard(file, err, text)),
   );
-  return quarantineDuplicates(merged.tasks, duplicateFiles, path, invalid);
+  return quarantineDuplicates(merged.tasks, duplicateFiles, path, invalid, keepsUnseenDependency);
 }
 
 type CachedPlanBlob = {
@@ -1063,8 +1064,9 @@ function quarantineDuplicates(
   duplicateFiles: Map<string, string[]>,
   fallbackPath: string,
   invalid: QuarantinedTask[],
+  keepsUnseenDependency?: KeepsUnseenDependency,
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
-  if (duplicateFiles.size === 0 && invalid.length === 0) return { plan: validatedPlan(all), quarantined: [] };
+  if (duplicateFiles.size === 0 && invalid.length === 0) return { plan: validatedPlan(all, "strict", keepsUnseenDependency), quarantined: [] };
   const quarantined: QuarantinedTask[] = [
     ...[...duplicateFiles].map(([id, files]): QuarantinedTask => ({ id, files, reason: "duplicate_id" })),
     ...invalid,
@@ -1079,7 +1081,7 @@ function quarantineDuplicates(
       grew = true;
     }
   }
-  return { plan: validatedPlan(all.filter((t) => !held.has(t.id))), quarantined };
+  return { plan: validatedPlan(all.filter((t) => !held.has(t.id)), "strict", keepsUnseenDependency), quarantined };
 }
 
 function readMergedPlan(
@@ -1133,12 +1135,19 @@ function assertSupersededByResolves(t: Task, byId: ReadonlyMap<string, Task>): v
   }
 }
 
-function validatedPlan(tasks: Task[], dependencyMode: "strict" | "preserve-external" = "strict"): Plan {
+/** W1-T13585 — answers true for a task that may keep a depends_on id its plan does not hold: one of another
+ *  repository, in a plan read for a target that can never dispatch it. Every other task resolves strictly. */
+export type KeepsUnseenDependency = (task: Task) => boolean;
+
+function validatedPlan(tasks: Task[], dependencyMode: "strict" | "preserve-external" = "strict",
+  keepsUnseenDependency?: KeepsUnseenDependency): Plan {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   // Ordinary plans resolve locally; only the explicit ops mode defers to cross-catalog composition.
   for (const t of tasks) {
     for (const dep of t.depends_on) {
-      if (dependencyMode !== "preserve-external" && !byId.has(dep)) throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+      if (dependencyMode !== "preserve-external" && !byId.has(dep) && keepsUnseenDependency?.(t) !== true) {
+        throw new PlanError(`task ${t.id}: depends_on unknown task '${dep}'`);
+      }
     }    assertSupersededByResolves(t, byId);
   }
   return { tasks, byId };
