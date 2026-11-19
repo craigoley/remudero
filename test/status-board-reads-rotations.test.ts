@@ -15,9 +15,9 @@
  * measured 173 ms / 0.32 GiB against the same 669-rotation corpus.
  */
 import assert from "node:assert/strict";
-import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
+import { assertWallClockBound, deriveWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { test } from "node:test";
-import { gzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +41,7 @@ function corpus(opts: { live: string[]; rotations?: Record<string, string[]>; gz
 }
 
 const sawSummary = (s: ReadonlySet<string>): boolean => s.has("daemon.summary");
+const rotationName = (ms: number): string => `ledger.${new Date(ms).toISOString().replace(/[:.]/g, "-")}.ndjson`;
 
 // ── TRAP 1: a row that exists ONLY in a rotation must be found ────────────────────────────────
 
@@ -122,9 +123,8 @@ test("the status board reads a time window rather than a file count", () => {
   // week before the newest must stay shut, however few files that leaves.
   const rotations: Record<string, string[]> = {};
   const newestMs = Date.parse("2026-07-20T00:00:00.000Z");
-  const stampName = (ms: number): string => `ledger.${new Date(ms).toISOString().replace(/:/g, "-").replace(".", "-")}.ndjson`;
-  for (let h = 0; h < 30; h++) rotations[stampName(newestMs - h * 3_600_000)] = [row("run.start")];
-  const older = [1, 2, 3].map((d) => stampName(newestMs - STATUS_BOARD_WINDOW_MS - d * 86_400_000));
+  for (let h = 0; h < 30; h++) rotations[rotationName(newestMs - h * 3_600_000)] = [row("run.start")];
+  const older = [1, 2, 3].map((d) => rotationName(newestMs - STATUS_BOARD_WINDOW_MS - d * 86_400_000));
   for (const name of older) rotations[name] = [row("run.start")];
   const opened: string[] = [];
   readLedgerUnionBounded(join(corpus({ live: [row("run.start")], rotations }), "ledger.ndjson"), {
@@ -153,6 +153,35 @@ test("a host that rotates slowly still reads its newest rotations from before th
   assert.equal(union.filter((l) => l.step === "daemon.summary").length, 1, "a month-old summary is still found");
 });
 
+test("W1-T13214 criterion 3: opening rotations stays bounded as the older corpus grows", (t) => {
+  const newestMs = Date.parse("2026-08-11T00:00:00.000Z");
+  const recent = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [
+    rotationName(newestMs - i * 3_600_000), [row("run.start", { task_id: `recent-${i}` })],
+  ]));
+  const dir = corpus({ live: [row("run.start")], rotations: recent });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const countRotations = (): number => {
+    let opened = 0;
+    readLedgerUnionBounded(join(dir, "ledger.ndjson"), {
+      satisfied: () => false,
+      readFileBuffer: (path) => {
+        opened++;
+        return readFileSync(path);
+      },
+    });
+    return opened;
+  };
+
+  const before = countRotations();
+  assert.equal(before, Object.keys(recent).length, "the reader opens the rotations inside the window");
+  for (let day = 1; day <= 64; day++) {
+    const path = join(dir, rotationName(newestMs - STATUS_BOARD_WINDOW_MS - day * 86_400_000));
+    writeFileSync(path, row("run.start", { task_id: `older-${day}` }) + "\n");
+  }
+  assert.equal(countRotations(), before, "adding rotations outside the window must leave the open count unchanged");
+});
+
 // ── THE PREFIX CONSUMER: whole lines, not a filtered step list ────────────────────────────────
 
 test("every line is returned unfiltered, so the board's `deploy.` PREFIX match still works", () => {
@@ -171,19 +200,65 @@ test("every line is returned unfiltered, so the board's `deploy.` PREFIX match s
   rmSync(dir, { recursive: true, force: true });
 });
 
-// ── TRAP 2: the cost, on the REAL corpus, not a fixture ───────────────────────────────────────
+function assertCalibratedBoardRead(ledgerPath: string) {
+  const opened: string[] = [];
+  const readAndRecord = (path: string): Buffer => {
+    const content = readFileSync(path);
+    opened.push(path);
+    return content;
+  };
+  const started = performance.now();
+  const union = readLedgerUnionBounded(ledgerPath, {
+    satisfied: (s) => s.has("daemon.summary") && s.has("daemon.headroom.degraded") && s.has("dispatch.indeterminate"),
+    ledgerFs: { existsSync, readFileSync: (path, encoding) => readAndRecord(path).toString(encoding) },
+    readFileBuffer: readAndRecord,
+  });
+  const ms = performance.now() - started;
 
-test("the bounded read stays under a second on the REAL 669-rotation corpus", (t) => {
+  // A mixed gzip/plain fixture took 1.27–3.23 plain parses per bounded read. Allow four
+  // for scanning, deduping and collecting steps.
+  const bound = deriveWallClockBound(() => {
+    for (const path of opened) {
+      // ledger-read-intent: live
+      readLedgerLines(path, {
+        existsSync: () => true,
+        readFileSync: (file, encoding) => {
+          const content = readFileSync(file);
+          return (file.endsWith(".gz") ? gunzipSync(content) : content).toString(encoding);
+        },
+      });
+    }
+  }, 4, 1_000);
+  const calibration = bound.source === "calibrated"
+    ? `${bound.calibrationMs.toFixed(1)} ms`
+    : `unavailable (${String(bound.reason)})`;
+  assertWallClockBound(
+    ms,
+    bound.boundMs,
+    `bounded read took ${ms.toFixed(1)} ms, calibration ${calibration}, ${bound.source} bound ${bound.boundMs.toFixed(1)} ms`,
+  );
+  return union;
+}
+
+test("W1-T13214 criterion 2: the timing failure names the read, calibration and derived bound", (t) => {
+  const dir = corpus({
+    live: [row("run.start")],
+    gzip: { "ledger.2026-08-11T00-00-00-000Z.ndjson.gz": [row("daemon.summary")] },
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ticks = [0, 12, 12, 14];
+  t.mock.method(performance, "now", () => ticks.shift());
+  assert.throws(() => assertCalibratedBoardRead(join(dir, "ledger.ndjson")), {
+    actual: 12,
+    expected: "< 8",
+    message: /^bounded read took 12\.0 ms, calibration 2\.0 ms, calibrated bound 8\.0 ms/,
+  });
+});
+
+test("the bounded read of the host ledger stays within its calibrated cost", (t) => {
   const real = "/Users/craigoleyagent/Remudero/state/ledger.ndjson";
   if (!existsSync(real)) return t.skip("host ledger absent — this bound is only measurable on the daemon host");
-  const started = Date.now();
-  const union = readLedgerUnionBounded(real, {
-    satisfied: (s) => s.has("daemon.summary") && s.has("daemon.headroom.degraded") && s.has("dispatch.indeterminate"),
-  });
-  const ms = Date.now() - started;
-  // MEASURED at 173 ms; 1000 is the ceiling this must never quietly cross. The full union through
-  // `rmd emissions` costs 7.74s — the price the cap exists to refuse.
-  assertWallClockBound(ms, 1000, `bounded read took ${ms} ms — a board nobody runs is a board that does not work`);
+  const union = assertCalibratedBoardRead(real);
   assert.ok(
     union.filter((l) => l.step === "daemon.summary").length > 0,
     "and it must actually find the row the one-path reader could not",

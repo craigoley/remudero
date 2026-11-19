@@ -27,7 +27,7 @@ import { homedir, tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
 import { AUTHOR_WORKFLOW_CONTRACT_MAX_MS, AUTHOR_WORKFLOW_CONTRACT_SUITES, authorWorkflowContractInputs } from './lib/author-workflow-contract.mjs';
 import { evaluateHeadIdentityGate } from './head-identity-gate.mjs';
-import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorRefusalReport, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
+import { guardedAuthorEntry, MacAuthorCapacityRefusal, macAuthorMemorySeams, macAuthorRefusalReport, readMacAuthorAdmission } from './lib/mac-author-admission.mjs';
 import { readBoundedJsonFile } from './lib/coverage-disk-profile.mjs';
 import { scanRepo as scanCoverageBlanking } from './coverage-session-blanking-check.mjs';
 
@@ -387,7 +387,7 @@ export function authorHeadRef(root, declared, spawn = spawnSync) {
  * row and on a failed row whose tests never ran: the class its refusal site named (`refusalClass`), else the one the
  * receipt's own stages show. A dry run is read-only and has no row.
  */
-export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons } = {}) {
+export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons, entryCapacity } = {}) {
   if (receipt.dryRun) return undefined;
   const steps = receipt.steps ?? [];
   const outcome = receipt.verdict === 'passed' || (receipt.verdict === 'over-capacity' && receipt.pushEligible === true) ? 'passed'
@@ -405,6 +405,11 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
   const branch = typeof headRef === 'function' ? headRef() : headRef;
   const head = typeof branch === 'string' && branch ? branch : null;
   const waits = [receipt.staticAdmission?.waitedMs, Math.max(receipt.suiteQueue?.waitedMs ?? 0, receipt.testSlot?.waitedMs ?? 0)];
+  // W1-T10926: each stage that waited out memory pressure, so a later run can derive its wait limit from these.
+  const pressureWaits = [['entry', entryCapacity], ...(receipt.hostCapacity ?? []).map((row) => [row?.stage, row])]
+    .filter(([stage, row]) => typeof stage === 'string' && Number.isFinite(row?.pressureWait?.waitedMs))
+    .map(([stage, { pressureWait }]) => ({ stage, waited_ms: pressureWait.waitedMs, outcome: pressureWait.outcome,
+      limit_ms: pressureWait.limitMs, limit_basis: pressureWait.limitBasis }));
   return {
     run_id: `author-preflight-${Date.parse(receipt.startedAt) || 0}`,
     task_id: (head && runBranchTaskId(head)?.taskId) || 'CLI',
@@ -420,6 +425,7 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
       ...(Array.isArray(receipt.failureAttribution.tests) ? { preexisting_reds: preexistingReds(receipt) } : {}) } : {}),
     wall_ms: receipt.durationMs ?? null,
     admission_wait_ms: waits.reduce((sum, ms) => sum + (Number.isFinite(ms) && ms > 0 ? ms : 0), 0),
+    ...(pressureWaits.length > 0 ? { pressure_waits: pressureWaits } : {}),
     selection: receipt.selectedArm ?? receipt.selection ?? null,
   };
 }
@@ -507,19 +513,46 @@ export function concludeAuthorRun(receipt, { announce = true, ...context } = {})
   return exitCode;
 }
 
+/** W1-T10926 — this host's earlier memory-pressure waits for `stage` (ms), from the rows its author runs appended.
+ *  No configured ledger, or one that cannot be read, is no history: the wait limit then falls back to its sampling rule. */
+export function authorPressureWaitHistory(stage, { ledger = configuredAuthorLedger, read = (path) => readFileSync(path, 'utf8'),
+  log = (line) => console.error(line) } = {}) {
+  const target = (ledger ?? configuredAuthorLedger)();
+  if (typeof target?.root !== 'string') return [];
+  let text;
+  try { text = read(ledgerPathFor({ root: target.root })); }
+  catch (error) {
+    log(`author preflight: no pressure-wait history read (${error.code ?? error.message}); the ${stage} wait limit uses its sampling rule`);
+    return [];
+  }
+  const waits = [];
+  for (const line of text.split('\n')) {
+    if (!line.includes('"pressure_waits"')) continue;
+    let row;
+    try { row = JSON.parse(line); }
+    catch { continue; } // A torn line names no wait; only whole rows are history.
+    for (const wait of Array.isArray(row?.pressure_waits) ? row.pressure_waits : []) {
+      if (wait?.stage === stage && Number.isFinite(wait.waited_ms) && wait.waited_ms >= 0) waits.push(wait.waited_ms);
+    }
+  }
+  return waits;
+}
+
 /** The script's entry. A capacity refusal at entry never reaches `main`, so its row is appended here. */
 export function runGuardedAuthor(argv, { root = REPO_ROOT, runAuthor = main, readAdmission = readMacAuthorAdmission,
-  verdictLedger = {} } = {}) {
+  verdictLedger = {}, memory = readAdmission === readMacAuthorAdmission
+    ? macAuthorMemorySeams({ pastWaits: (stage) => authorPressureWaitHistory(stage, { ledger: verdictLedger.ledger }) }) : null } = {}) {
   const startedAt = Date.now();
-  let reached = false, admission;
-  const exitCode = guardedAuthorEntry(argv, { root, readAdmission: (...args) => (admission = readAdmission(...args)),
-    runAuthor: (args, deps) => { reached = true; return runAuthor(args, { ...deps, verdictLedger }); } });
+  let reached = false, admission, entryCapacity;
+  const exitCode = guardedAuthorEntry(argv, { root, readAdmission: (...args) => (admission = readAdmission(...args)), memory,
+    recordEntry: (settled) => { entryCapacity = settled; },
+    runAuthor: (args, deps) => { reached = true; return runAuthor(args, { ...deps, verdictLedger: { ...verdictLedger, entryCapacity } }); } });
   if (!reached) {
     const declared = argv.find((arg) => arg.startsWith('--head-ref='))?.slice('--head-ref='.length)
       ?? (argv.includes('--head-ref') ? argv[argv.indexOf('--head-ref') + 1] : undefined);
     recordAuthorVerdict({ verdict: 'over-capacity', pushEligible: false, dryRun: false, steps: [],
       startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt },
-    { ...verdictLedger, exitCode, refusalClass: 'other', refusalStage: 'entry', capacityReasons: admission?.reasons,
+    { ...verdictLedger, exitCode, refusalClass: 'other', refusalStage: 'entry', capacityReasons: (entryCapacity ?? admission)?.reasons, entryCapacity,
       headRef: () => authorHeadRef(root, declared) });
   }
   return exitCode;

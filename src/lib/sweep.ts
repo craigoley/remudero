@@ -17501,6 +17501,24 @@ function codeqlRunCompletedAgain(body: unknown, headSha: string, since: number, 
     Date.parse(run.updated_at) > since && Date.parse(run.updated_at) <= standing);
 }
 
+/** W1-T13663 — this head's CodeQL runs read whole, none open now and none whose attempt BEGAN (created_at, or a re-run's
+ *  run_started_at) after GitHub's standing check: nothing at this head will re-judge it, and no finished re-run is
+ *  waiting on a check not yet visible. The run that produced the warning began before it and finishes after uploading
+ *  it, so its later updated_at alone is no new judgement (#15133, #17217). An unread or truncated listing, or an
+ *  unparseable time, never matches. */
+function codeqlNeverRejudged(body: unknown, headSha: string, standing: number): number | undefined {
+  const listing = body as { total_count?: unknown; workflow_runs?: unknown } | null;
+  const runs = listing?.workflow_runs;
+  if (!Array.isArray(runs) || !Number.isFinite(standing)) return undefined;
+  if (typeof listing?.total_count === "number" && listing.total_count > runs.length) return undefined;
+  const atHead = runs.filter((run) => run?.head_sha === headSha);
+  // A re-run keeps its created_at but restarts run_started_at, so the later of the two is when this attempt began.
+  const began = (run: { created_at?: unknown; run_started_at?: unknown }) =>
+    Math.max(Date.parse(String(run.created_at)), run.run_started_at === undefined || run.run_started_at === null ? -Infinity
+      : Date.parse(String(run.run_started_at)));
+  return atHead.some((run) => run.status !== "completed" || !(began(run) <= standing)) ? undefined : atHead.length;
+}
+
 /** W1-T13470 — one full pass over a configuration-not-found wait; returns the wait's reason with what this pass did. */
 export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: ReadonlyArray<Record<string, unknown>>,
   pr: OpenPrView, waitReason: string): Promise<string> {
@@ -17523,6 +17541,7 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const captures = atHead(CODE_SCANNING_CONFIGURATION_WARNING_STEP);
   const notes: string[] = [];
   const warning = observed.observation?.configurationWarning;
+  const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
       decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
@@ -17541,27 +17560,49 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
       // Named in the disposed row; no escalation is judged without the runs, and the next pass reads them again.
       notes.push(`CodeQL workflow runs unread (${failed(error)})`);
     }
+    const standing = Date.parse(String(warning.completedAt));
     const run = codeqlRunCompletedAgain(runs, pr.headSha,
-      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), Date.parse(String(warning.completedAt)));
-    if (run !== undefined) {
-      const owner = pr.taskId ?? "security-policy";
-      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
-        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
-        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
-        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      Date.parse(String((first.receipt as { completedAt?: unknown } | undefined)?.completedAt)), standing);
+    const owner = pr.taskId ?? "security-policy";
+    // One escalation per head, whichever rule finds it; the row is written first so a failed send is not repeated.
+    const escalateOnce = async (reason: string, extra: Record<string, unknown>, resolutions: ClarificationQuestion["resolutions"],
+      done: string): Promise<void> => {
       appendLine(deps.ledgerPath, { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP, check_id: warning.checkId,
-        workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null, owner, receipt: warning });
+        ...extra, owner, receipt: warning });
       try {
         await deps.escalate(pr, reason, { taskId: owner, prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason, criterion: "",
-          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions: [
-            { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
-            { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
-          ] });
-        notes.push(`CodeQL run ${run.id} completed again with the warning standing — escalated once to ${owner}`);
+          reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [], resolutions });
+        notes.push(`${done} — escalated once to ${owner}`);
       } catch (error) {
         // Named in the disposed row; its pre-written escalation row keeps the escalation to once per head.
         notes.push(`its escalation to ${owner} failed (${failed(error)}) and is not repeated at this head`);
       }
+    };
+    const quietRuns = run === undefined && capturedEarlier ? codeqlNeverRejudged(runs, pr.headSha, standing) : undefined;
+    if (run !== undefined) {
+      const reason = `CodeQL configuration-not-found persists at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: CodeQL workflow ` +
+        `run ${run.id} (attempt ${run.run_attempt ?? "unknown"}) completed at ${run.updated_at}, and GitHub's trusted CodeQL check ` +
+        `${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}" — security-merge-policy stays unknown ` +
+        `and no fix round was spent. Receipt: ${JSON.stringify(warning)}`;
+      await escalateOnce(reason, { workflow_run_id: run.id, workflow_run_attempt: run.run_attempt ?? null }, [
+        { label: "re-run CodeQL", detail: "Re-run CodeQL at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+        { label: "file the recovery rule", detail: "Read the captured receipt and file the operator-reviewed recovery task it supports." },
+      ], `CodeQL run ${run.id} completed again with the warning standing`);
+    } else if (quietRuns !== undefined) {
+      // W1-T13663 — GitHub does not re-judge an unchanged head on its own (all 4 real heads read 2026-11-18), so a warning
+      // captured on an earlier pass with no CodeQL run here open or begun (created or re-run) after it waits on nothing. The remedy is the
+      // owner's: the sweep pushes nothing, re-runs nothing and writes no status.
+      const reason = `CodeQL configuration-not-found stands at head ${pr.headSha.slice(0, 7)} of #${pr.prNumber}: GitHub's trusted ` +
+        `CodeQL check ${warning.checkId} completed at ${warning.completedAt} still reads "${warning.title}", first captured on an ` +
+        `earlier pass from check ${String(first.check_id)}, and GitHub has not re-judged it at this head: of ${quietRuns} CodeQL ` +
+        "workflow run(s) listed at this head, none is open or began after it. Nothing at an unchanged head " +
+        "re-judges it; push a new commit or re-run CodeQL at this head. security-merge-policy stays unknown and no fix round " +
+        `was spent. Receipt: ${JSON.stringify(warning)}`;
+      await escalateOnce(reason, { first_check_id: first.check_id, workflow_run_id: null, workflow_runs_at_head: quietRuns,
+        trigger: "never-re-judged" }, [
+        { label: "push a new commit", detail: "A new head gets its own CodeQL run and check, which the sweep observes afresh." },
+        { label: "re-run CodeQL at this head", detail: "Re-run the CodeQL workflow at this head; its completion re-runs the trusted producer through that workflow's own trigger." },
+      ], `GitHub has not re-judged check ${warning.checkId} at this head`);
     }
   }
   return notes.length > 0 ? `${waitReason} — ${notes.join("; ")}` : waitReason;
