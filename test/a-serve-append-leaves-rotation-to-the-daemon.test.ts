@@ -4,12 +4,13 @@
  * rotateLedger (76 s of stall). Serve now rotates only past the backstop; the daemon keeps rotating at the ceiling.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { daemonBoot } from "#src/lib/daemon.js";
 import { appendLedger, LEDGER_ROTATION_BACKSTOP_MULTIPLIER, ledgerRotationRole, setLedgerRotationRole } from "#src/lib/ledger.js";
-import { buildServeServer, type ServeDeps } from "#src/lib/serve.js";
+import { buildReadyServeServer, buildServeServer, CONSOLE_SHA_UNKNOWN, type ServeDeps } from "#src/lib/serve.js";
 import { withTempDir } from "#src/lib/tmp.js";
 
 const CEILING = 8 * 1024;
@@ -60,12 +61,19 @@ test("W1-T13236 criterion 2: serve's boot takes backstop-only before its appendi
       githubAppRefresh: { start: () => ({ armed: false, stop() {} }) as never },
       assistantRepository: "craigoley/remudero",
       demand: { every: () => () => undefined },
+      hostServeEvidence: { root },
       incidentInvariants: {
         readLedger: () => [],
         setInterval: (() => { roleAtMonitorStart = ledgerRotationRole(); return { unref() {} }; }) as never,
         clearInterval: () => undefined,
       },
     } as ServeDeps;
+    const bootError = new Error("gateway assembly failed");
+    assert.throws(() => buildServeServer({
+      ...deps, board: { ...deps.board, github: { ...github, serveOffLoop: () => { throw bootError; } } },
+    }), bootError);
+    assert.equal(ledgerRotationRole(), "rotator", "failed assembly restores the prior role");
+
     const server = buildServeServer(deps);
     try {
       assert.equal(roleAtMonitorStart, "backstop-only", "the role is set before the incident monitor's timer starts");
@@ -75,5 +83,36 @@ test("W1-T13236 criterion 2: serve's boot takes backstop-only before its appendi
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     assert.equal(ledgerRotationRole(), "rotator", "closing serve restores the role it replaced");
+
+    roleAtMonitorStart = undefined;
+    let recheck: (() => void) | undefined;
+    const standby = await buildReadyServeServer({
+      ...deps,
+      consoleSha: CONSOLE_SHA_UNKNOWN,
+      generation: { requestHandoff() {} },
+      gatewayCheckout: async () => { throw new Error("checkout unavailable"); },
+      staleExitSeams: {
+        scheduleRecheck: (run) => { recheck = run; return () => { recheck = undefined; }; },
+      },
+      log: (step, extra) => appendLedger(ledgerPath, { run_id: "SERVE-test", task_id: "SERVE", step, lane: "serve", ...extra }, { ceilingBytes: CEILING }),
+    });
+    try {
+      assert.equal(standby.listening, false);
+      assert.equal(roleAtMonitorStart, undefined, "the incident monitor waits for the main listener");
+      assert.ok(recheck, "checkout recheck is scheduled in standby");
+      writeFileSync(ledgerPath, "{}".padEnd(CEILING - 1) + "\n");
+      recheck();
+      await setImmediate();
+      assert.deepEqual(archives(join(root, "state")), [], "the standby recheck leaves rotation to the daemon");
+      assert.match(readFileSync(ledgerPath, "utf8"), /"step":"serve\.gateway_checkout_unreadable"/);
+      assert.ok(statSync(ledgerPath).size > CEILING, "the checkout log crossed the ordinary ceiling");
+
+      const anotherServer = buildServeServer(deps);
+      await new Promise<void>((resolve) => anotherServer.close(() => resolve()));
+      assert.equal(ledgerRotationRole(), "backstop-only", "the open standby still owns the process role");
+    } finally {
+      await new Promise<void>((resolve) => standby.close(() => resolve()));
+    }
+    assert.equal(ledgerRotationRole(), "rotator", "closing before promotion also restores the prior role");
   });
 });
