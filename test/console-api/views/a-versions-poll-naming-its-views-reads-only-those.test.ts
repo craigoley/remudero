@@ -11,14 +11,15 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Clock } from "#src/lib/clock.js";
 import {
-  createReadModelWorker, READ_MODEL_READ_NOTE_MS, READ_MODEL_VERSIONS_VIEWS_PARAM, versionsReadViews, viewsReadBy,
+  canonicalVersionsViews, createReadModelWorker, READ_MODEL_READ_NOTE_MS, READ_MODEL_VERSIONS_VIEWS_PARAM, versionsReadViews, viewsReadBy,
 } from "#src/lib/read-model-worker.js";
 import { createViewEvents, VIEW_VERSIONS_PATH } from "#src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 import { readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-11-19T13:00:00.000Z");
-const NAMES = ["now", "needs-you", "nav-badge", "repositories", "read-model"];
+/** The worker's own views, as in production: `needs-you` is a served composite of `now`, not one of them. */
+const NAMES = ["now", "nav-badge", "repositories", "read-model"];
 
 function entry(view: string, key: string, data: unknown): ViewBodyEntry {
   const sources: ViewSource[] = [{ name: "ledger:core", asOf: new Date(T0).toISOString(), state: "fresh" }];
@@ -80,8 +81,10 @@ test("W1-T11979 criterion 1: a versions poll naming its views answers the same b
   assert.equal(plain.status, 200, "positive control: the route answered");
   assert.deepEqual(named, plain, "the parameter does not change the answer");
   assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=repositories`, NAMES), ["repositories"]);
-  assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=nav-badge,repositories`, NAMES).sort(), ["nav-badge", "needs-you", "now", "repositories"],
-    "a named view brings the views it is built from");
+  assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=nav-badge,repositories`, NAMES).sort(), ["nav-badge", "now", "repositories"],
+    "a named view brings the worker views it is built from");
+  assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=needs-you`, NAMES), ["now"],
+    "a served composite that is not a worker view still reads the worker view it is built from");
   const params = new URLSearchParams("views=nav-badge%2Crepositories&instance=core");
   assert.equal(versionsReadViews(VIEW_VERSIONS_PATH, params), "nav-badge,repositories", "serve forwards the poll's list");
   assert.equal(versionsReadViews("/v1/views/now", params), undefined, "only a versions poll forwards one");
@@ -89,11 +92,13 @@ test("W1-T11979 criterion 1: a versions poll naming its views answers the same b
     handle.noteViewRead?.(VIEW_VERSIONS_PATH, undefined, "repositories");
     handle.noteViewRead?.(VIEW_VERSIONS_PATH, undefined, "repositories");
     handle.noteViewRead?.(VIEW_VERSIONS_PATH, undefined, "now");
+    handle.noteViewRead?.(VIEW_VERSIONS_PATH, undefined, "repositories,no-such-view");
     advance(READ_MODEL_READ_NOTE_MS);
     handle.noteViewRead?.(VIEW_VERSIONS_PATH, "core", "now,repositories");
+    handle.noteViewRead?.(VIEW_VERSIONS_PATH, "core", " repositories,now,now");
   }, 3);
   assert.deepEqual(lines, [`${VIEW_VERSIONS_PATH}?views=repositories`, `${VIEW_VERSIONS_PATH}?views=now`,
-    `${VIEW_VERSIONS_PATH}?instance=core&views=now%2Crepositories`], "each named set is posted and spaced on its own");
+    `${VIEW_VERSIONS_PATH}?instance=core&views=now%2Crepositories`], "each named set is posted and spaced on its own, whatever its order, repeats or unknown names");
   assert.deepEqual(viewsReadBy(lines[2]!, NAMES).sort(), ["now", "repositories"], "the worker reads the posted list back");
 });
 
@@ -102,10 +107,15 @@ test("W1-T11979 criterion 2: a poll without the parameter reads every view, and 
   assert.equal(versionsReadViews(VIEW_VERSIONS_PATH, new URLSearchParams("instance=core")), undefined, "and serve forwards no list for it");
   assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=repositories,no-such-view`, NAMES), ["repositories"]);
   assert.deepEqual(viewsReadBy(`${VIEW_VERSIONS_PATH}?views=no-such-view`, NAMES), [], "a list of unknown names reads none");
+  const known = new Set(["now", "repositories"]);
+  assert.equal(canonicalVersionsViews("repositories, now,no-such-view,now", known), "now,repositories",
+    "an unknown name, a repeat and the order do not change the read-note key");
+  assert.equal(canonicalVersionsViews("no-such-view", known), "", "a list of only unknown names keys as the empty list");
 });
 
 test("W1-T11979 criterion 3: the per-instance copy of the versions path reads the same way", () => {
   assert.deepEqual(viewsReadBy("/v1/i/site/views/versions", NAMES), NAMES);
-  assert.deepEqual(viewsReadBy("/v1/i/site/views/versions?views=needs-you", NAMES).sort(), ["needs-you", "now"]);
+  assert.deepEqual(viewsReadBy("/v1/i/site/views/versions?views=needs-you", NAMES), ["now"]);
+  assert.deepEqual(viewsReadBy("/v1/i/site/views/versions?views=repositories,needs-you", NAMES).sort(), ["now", "repositories"]);
   assert.equal(versionsReadViews("/v1/i/site/views/versions", new URLSearchParams("views=needs-you")), "needs-you");
 });

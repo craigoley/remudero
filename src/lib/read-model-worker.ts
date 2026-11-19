@@ -557,8 +557,10 @@ export function viewsReadBy(path: string, names: readonly string[], readers: Rea
     // W1-T11979: a poll naming the views its page shows reads only those and what they are built from.
     const named = new URLSearchParams(query).get(READ_MODEL_VERSIONS_VIEWS_PARAM);
     if (named === null) return [...names];
+    // Expand before keeping the known names: a served composite such as `needs-you` is not a worker view, but the
+    // views it is built from (`now`) are.
     const known = new Set(names);
-    return withSourceViews(named.split(",").map((name) => name.trim()).filter((name) => known.has(name)), readers);
+    return withSourceViews(named.split(",").map((name) => name.trim()).filter(Boolean), readers).filter((name) => known.has(name));
   }
   const direct = base.startsWith("/v1/views/") ? base.slice("/v1/views/".length) : READ_MODEL_LEGACY_VIEW_READS[base];
   if (!direct) return [];
@@ -572,6 +574,24 @@ export function viewsReadBy(path: string, names: readonly string[], readers: Rea
 export function versionsReadViews(routePath: string, params: URLSearchParams): string | undefined {
   if (!READ_MODEL_EVERY_VIEW_PATHS.has(routePath.replace(/^\/v1\/i\/[^/]+\//, "/v1/"))) return undefined;
   return params.get(READ_MODEL_VERSIONS_VIEWS_PARAM) ?? undefined;
+}
+
+/**
+ * W1-T11979: a versions poll's `views` list as one read-note key: trimmed, deduplicated, sorted, and limited to the
+ * names in `known`, so a reordered list or an added unknown name does not post a second read inside the spacing.
+ */
+export function canonicalVersionsViews(views: string, known: ReadonlySet<string>): string {
+  return [...new Set(views.split(",").map((name) => name.trim()).filter((name) => known.has(name)))].sort().join(",");
+}
+
+/** The view names serve can tell apart without the worker: the built-in views and every view in the reader graph. */
+function readModelViewLexicon(readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): Set<string> {
+  const names = new Set(READ_MODEL_VIEWS.map((view) => view.name));
+  for (const [view, list] of Object.entries(readers)) {
+    names.add(view);
+    for (const { view: consumer } of list) if (consumer !== undefined) names.add(consumer);
+  }
+  return names;
 }
 
 /** `read` and every view a view in it is built from ({@link READ_MODEL_VIEW_READERS}). */
@@ -3367,7 +3387,12 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     noteViewRead: (route, instance, views) => {
       const now = clock.now();
       const scoped = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
-      const path = views === undefined ? scoped : `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(views)}`;
+      let path = scoped;
+      if (views !== undefined) {
+        const known = readModelViewLexicon();
+        for (const body of bodies.values()) known.add(body.view);
+        path = `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(canonicalVersionsViews(views, known))}`;
+      }
       if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
       readNotedAt.set(path, now);
       worker.postMessage({ type: "read", path });
