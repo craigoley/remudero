@@ -1004,6 +1004,12 @@
       "grepHint": "Research: the laws this system has learned, and where its plan disagrees with its own evidence — 2026-08-05"
     },
     {
+      "path": "docs/research/what-core-holds-for-one-operator.md",
+      "title": "What public core holds for one operator, who reads it, and where it moves",
+      "summary": "Recon for W1-T13729. Read at core `origin/main` eb79fd765. Nothing was changed, filed or pushed.",
+      "grepHint": "What public core holds for one operator, who reads it, and where it moves"
+    },
+    {
       "path": "docs/reservation-backed-skill-eval.md",
       "title": "Reservation-backed skill eval qualification",
       "summary": "The operator selected this policy on 2026-10-13: a separately approved, bounded",
