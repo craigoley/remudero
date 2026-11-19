@@ -115,7 +115,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -1617,6 +1617,7 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
+  readPlanRepairLogImpl?: typeof ghLinesAsync;
   /** W1-T13183: the awaited binary read (an artifact zip); defaults to a byte-keeping {@link ghTextAsync}. */
   readBufferImpl?: (args: string[]) => Promise<Buffer>;
   fleetDeployStateImpl?: DeployStateReader;
@@ -6058,12 +6059,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       },
       closePr: async (prUrl, comment) => { await ghTextAsync(["pr", "close", prUrl, "--comment", comment]); },
     }).then((r) => ({ withdrawn: r.withdrawn, ...(r.withdrawn ? { reason: r.stale.map((s) => s.id).join(", ") } : {}) })),
-    readPlanRepairFacts: (pr) => {
+    readPlanRepairFacts: async (pr, handoffJobId) => {
+      const facts: PlanRepairFacts = {};
+      if (handoffJobId !== undefined && pr.headRefName !== undefined) {
+        const parser = gateHandoffLogParser(pr.headRefName);
+        try {
+          await (deps.readPlanRepairLogImpl ?? ghLinesAsync)(["api", `repos/${owner}/${repo}/actions/jobs/${handoffJobId}/logs`], parser.push);
+          facts.handoffs = parser.finish() ?? null;
+        } catch (error) {
+          log(`${PLAN_REPAIR_STEP}.read_error`, { pr_number: pr.prNumber, job_id: handoffJobId, error: String(error) });
+          facts.handoffs = null;
+        }
+        if (!isMachineLanePlanHead(pr.headRefName) && !filedTaskPlanRepairCandidate(pr)) return facts;
+      }
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
       };
-      const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      facts.authorLogin = row?.user?.login;
+      facts.title = row?.title;
       // W1-T11170: the session-branch ownership facts. A head repo GitHub no longer shows (a deleted fork) is a fork.
       const headRepo = row?.head?.repo;
       if (headRepo !== undefined) facts.headRepoFork = headRepo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
@@ -6094,7 +6108,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       if (decision.action === "handoff") {
         return handOffHeldPlanPrIds(pr, decision.handoffs, repoDir, join(worktreesDir(config), `plan-handoff-${pr.prNumber}-${nowMsImpl()}`),
-          { owner, repo, log, readJson: (args) => readJsonImpl(args), nowMs: nowMsImpl });
+          { owner, repo, log, readJson: (args) => readJsonImpl(args, { fresh: true }), nowMs: nowMsImpl });
       }
       // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
       const worktreePath = join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`);
@@ -11328,6 +11342,7 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 }
 
 export interface PlanRepairFacts {
+  handoffs?: HeldIdHandoff[] | null;
   filedTaskRepairReady?: boolean;
   authorLogin?: string;
   title?: string;
@@ -11594,31 +11609,57 @@ export function heldTaskIdsFromCiFailures(failures: readonly CiFailure[]): strin
   return [...ids];
 }
 
-/** W1-T13829: the hand-off lines task-id-existence printed, only when every held id has one naming `filer` and no
- *  collision or open-PR section lists an id. */
+/** W1-T13829: keep each gate entry inside its own section and failing job. */
+function gateHandoffLogParser(filer: string) {
+  const entries: Array<Omit<HeldIdHandoff, "holder"> & { holder?: string }> = [];
+  let held = false;
+  let refused = false;
+  let entry: (typeof entries)[number] | undefined;
+  return {
+    push(raw: string) {
+      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "").trimEnd();
+      if (line.startsWith("task-id-existence:") && HELD_ID_HEADER_RE.test(line)) {
+        refused ||= held && !entry;
+        held = line.endsWith("HELD by a different reservation holder:");
+        refused ||= !held;
+        entry = undefined;
+      } else if (held) {
+        const id = /^\s+(W\d+-T\d+) -- /.exec(line)?.[1];
+        const file = /^\s+(plan\/tasks\.d\/[^/\s]+\.ya?ml):\d+$/.exec(line)?.[1];
+        const handoff = /^\s+reservation hand-off: (\S+) -> (\S+)$/.exec(line);
+        if (id) entries.push(entry = { id, filer, files: [] });
+        else if (entry && file) entry.files.push(file);
+        else if (entry && handoff) {
+          refused ||= entry.holder !== undefined || handoff[2] !== filer;
+          entry.holder = handoff[1];
+        } else if ((entry || line !== "") && !/^\s+(?:remedy: add this as a NEW line|note: \|$)/.test(line)) {
+          refused ||= !entry || /^\s/.test(line);
+          held = false;
+        }
+      }
+    },
+    finish(): HeldIdHandoff[] | undefined {
+      if (refused || (held && !entry) || entries.some((e) => !e.holder || e.files.length === 0)) return undefined;
+      return entries.map((e) => ({ ...e, holder: e.holder!, files: [...new Set(e.files)] }));
+    },
+  };
+}
+
 function gateHandoffsFromCiFailures(failures: readonly CiFailure[], filer: string | undefined): HeldIdHandoff[] | undefined {
-  const entries: Array<{ id: string; holder?: string; filer?: string; files: string[] }> = [];
-  let section: "held" | "other" | undefined;
-  for (const raw of failures.flatMap((f) => f.logTail.split("\n"))) {
-    const line = raw.replace(/^\d{4}-\d\d-\d\dT\S+ ?/, "").trimEnd();
-    if (line.includes("task-id-existence:")) {
-      section = line.includes("HELD by a different reservation holder") ? "held" : HELD_ID_HEADER_RE.test(line) ? "other" : undefined;
+  if (!filer) return undefined;
+  const handoffs = new Map<string, HeldIdHandoff>();
+  for (const failure of failures) {
+    const parser = gateHandoffLogParser(filer);
+    for (const line of failure.logTail.split("\n")) parser.push(line);
+    const entries = parser.finish();
+    if (!entries) return undefined;
+    for (const entry of entries) {
+      const prior = handoffs.get(entry.id);
+      if (prior && prior.holder !== entry.holder) return undefined;
+      handoffs.set(entry.id, { ...entry, files: [...new Set([...(prior?.files ?? []), ...entry.files])] });
     }
-    const id = /^\s+(W\d+-T\d+) -- /.exec(line)?.[1];
-    if (section === "other" && id) return undefined;
-    if (section !== "held") continue;
-    const file = /^\s+(plan\/tasks\.d\/[^/\s]+\.ya?ml):\d+$/.exec(line)?.[1];
-    const handoff = /^\s+reservation hand-off: ([\w./-]+) -> ([\w./-]+)$/.exec(line);
-    if (id) entries.push({ id, files: [] });
-    else if (file) entries.at(-1)?.files.push(file);
-    else if (handoff && entries.length > 0) Object.assign(entries.at(-1)!, { holder: handoff[1], filer: handoff[2] });
   }
-  const out = new Map<string, HeldIdHandoff>();
-  for (const e of entries) {
-    if (e.holder === undefined || filer === undefined || e.filer !== filer || e.files.length === 0) return undefined;
-    out.set(e.id, { id: e.id, holder: e.holder, filer, files: [...new Set(e.files)] });
-  }
-  return out.size > 0 ? [...out.values()] : undefined;
+  return [...handoffs.values()];
 }
 
 /** CHECK-NAME TRAP (W1-T4399): the `commitlint` check reports the title step AND rule-checks. Only
@@ -11661,7 +11702,7 @@ export function planRepairHistoryFromLedger(lines: readonly Record<string, unkno
     const head = `${line.pr_number}@${line.head_sha}`;
     if (line.outcome === "stood-down") {
       keys.add(`${head}@${String(line.signature)}@stood-down`).add(`${head}@${String(line.signature)}@stood-down@${String(line.reason)}`);
-      continue;
+      if (line.signature !== "held-task-id-handoff") continue;
     }
     keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
     if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
@@ -11680,8 +11721,10 @@ export function decidePlanRepair(
   const head = `${pr.prNumber}@${pr.headSha}`;
   // The renumber and retitle rungs push to the lane's OWN branch, so only a fleet machine-lane head gets them.
   const fleetLane = isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts.authorLogin);
-  const handoffs = pr.isPlanFiling === true ? gateHandoffsFromCiFailures(failures, pr.headRefName) : undefined;
-  if (handoffs && !history.has(`${head}@held-task-id-handoff`) && !(fleetLane && history.has(`${head}@held-task-id-handoff@stood-down`))) {
+  const handoffs = pr.isPlanFiling === true && !history.has(`${head}@held-task-id-handoff`)
+    ? facts.handoffs === undefined ? gateHandoffsFromCiFailures(failures, pr.headRefName) : facts.handoffs
+    : undefined;
+  if (handoffs?.length && handoffs.every((handoff) => handoff.filer === pr.headRefName)) {
     return { signature: "held-task-id-handoff", action: "handoff", check: "task-id-existence", handoffs };
   }
   if (fleetLane) {
@@ -11807,11 +11850,15 @@ export async function handOffHeldPlanPrIds(
   handoffs: readonly HeldIdHandoff[],
   repoDir: string,
   wt: string,
-  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo" | "log"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
+  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo" | "log"> & {
+    readJson: (args: string[]) => Promise<unknown>;
+    nowMs: () => number;
+    git?: (cwd: string, args: string[]) => Promise<string>;
+  },
 ): Promise<PlanRepairOutcome> {
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
-  const git = (cwd: string, args: string[]) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
+  const git = deps.git ?? ((cwd, args) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 }));
   const standDown = await handoffStandDown(handoffs, repoDir, git, deps);
   if (standDown !== undefined) return { outcome: "stood-down", reason: standDown };
   let cut = false;
@@ -11849,7 +11896,16 @@ async function handoffStandDown(
   deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
 ): Promise<string | undefined> {
   try {
-    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, deps.readJson, undefined, "open");
+    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
+      const rows = await deps.readJson(args);
+      if (!Array.isArray(rows)) throw new Error("the open pull request page is unreadable");
+      for (const row of rows) {
+        if (typeof row?.head?.ref !== "string" || !/^\S+$/.test(row.head.ref)) {
+          throw new Error(`open PR #${row?.number ?? "unknown"} has an unreadable head ref`);
+        }
+      }
+      return rows;
+    }, undefined, "open");
     if (open.truncated) return "the open pull request list is incomplete";
     for (const { id, holder } of handoffs) {
       if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
@@ -11858,15 +11914,18 @@ async function handoffStandDown(
       const openPr = open.rows.find((row) => row.headRefName === holder);
       if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
       const ref = taskIdReservationRef(id);
-      const sha = (await git(repoDir, ["ls-remote", "origin", ref])).split(/\s/)[0] ?? "";
+      const readSha = async () => (await git(repoDir, ["ls-remote", "--refs", "origin", ref]))
+        .split("\n").map((row) => row.split("\t")).find(([, name]) => name === ref)?.[0] ?? "";
+      const sha = await readSha();
       if (!/^[0-9a-f]{40,64}$/.test(sha)) return `the reservation of ${id} is not on origin`;
-      await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", ref]);
+      await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", ref]);
+      if (await readSha() !== sha) return `the reservation of ${id} changed while it was being read from origin`;
       const parsed = parseReservationHolderLine(await git(repoDir, ["log", "-1", "--format=%B", sha]));
       if (parsed.status !== "known" || parsed.holder.branch !== holder) return `the reservation of ${id} does not name ${holder} as its holder`;
       const started = Date.parse(parsed.holder.startedAt ?? "");
       if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
-      if (deps.nowMs() - started < RESERVATION_PUSH_GRACE_MS) {
-        return `the reservation of ${id} started at ${parsed.holder.startedAt}, less than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h ago`;
+      if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
+        return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
       }
     }
     return undefined;
@@ -11879,7 +11938,7 @@ async function handoffStandDown(
 function shardWithHandoffNote(text: string, id: string, line: string): string | { reason: string } {
   const doc = parseDocument(text);
   if (doc.errors.length > 0 || !isSeq(doc.contents)) return { reason: "the shard is not a YAML task list" };
-  const before = parseYaml(text) as Array<Record<string, unknown> | null>;
+  const before = doc.toJS() as Array<Record<string, unknown> | null>;
   const task = doc.contents.items[before.findIndex((row) => row?.id === id)];
   const first = isMap(task) ? task.items[0]?.key : undefined;
   const keyStart = isScalar(first) ? first.range?.[0] : undefined;
@@ -11891,21 +11950,37 @@ function shardWithHandoffNote(text: string, id: string, line: string): string | 
   if (note !== undefined && !(isScalar(note) && (typeof note.value === "string" || note.value === null) && note.range)) {
     return { reason: `the note of ${id} is not text` };
   }
-  const prior = isScalar(note) && typeof note.value === "string" ? note.value.replace(/\n+$/, "") : "";
-  const body = [...(prior ? prior.split("\n") : []), line].map((l) => (l ? `${pad}  ${l}` : "")).join("\n");
+  const prior = isScalar(note) && typeof note.value === "string" ? note.value : "";
+  const joined = prior + (prior && !prior.endsWith("\n") ? "\n" : "") + line;
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const body = joined.split("\n").map((l) => (l ? `${pad}  ${l}` : "")).join(eol);
+  let expected = `${joined}\n`;
   let next: string;
   if (isScalar(note) && note.range) {
     const [start, end] = note.range;
-    next = `${text.slice(0, start)}|\n${body}${text[end - 1] === "\n" ? "\n" : ""}${text.slice(end)}`;
+    if (note.type === "BLOCK_LITERAL") {
+      const literal = text.slice(start, end);
+      const indicators = /^\|([1-9+-]*)/.exec(literal)?.[1] ?? "";
+      const width = Number(/[1-9]/.exec(indicators)?.[0]);
+      const indent = width ? pad + " ".repeat(width) : /^ +(?=[^ \r\n])/m.exec(literal)?.[0] ?? `${pad}  `;
+      if (indicators.includes("-")) expected = joined;
+      next = `${text.slice(0, end)}${text[end - 1] === "\n" ? "" : eol}${indent}${line}${eol}${text.slice(end)}`;
+    } else {
+      const at = text.indexOf("\n", end);
+      const headerSuffix = note.type === "BLOCK_FOLDED"
+        ? /^>[1-9+-]*([^\r\n]*)/.exec(text.slice(start, end))?.[1] ?? ""
+        : text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "");
+      const rest = note.type === "BLOCK_FOLDED" ? end : at < 0 ? text.length : at + 1;
+      next = `${text.slice(0, start)}|${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
+    }
   } else {
     const end = task.range[1];
     const at = text[end - 1] === "\n" ? end : text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end);
-    const block = `${pad}note: |\n${body}`;
-    next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}\n${text.slice(at)}` : `${text.slice(0, at)}\n${block}${text.slice(at)}`;
+    const block = `${pad}note: |${eol}${body}`;
+    next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}${eol}${text.slice(at)}` : `${text.slice(0, at)}${eol}${block}${text.slice(at)}`;
   }
   const after = parseDocument(next);
   const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
-  const expected = `${prior ? `${prior}\n` : ""}${line}\n`;
   const same = Array.isArray(rows) && rows.length === before.length && rows.every((row, i) => row?.id === id
     ? row.note === expected && isDeepStrictEqual({ ...row, note: undefined }, { ...before[i], note: undefined })
     : isDeepStrictEqual(row, before[i]));
@@ -16375,7 +16450,7 @@ export interface SweepDeps {
     evidence: ProofDiscriminationEvidence,
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
-  readPlanRepairFacts?: (pr: OpenPrView) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  readPlanRepairFacts?: (pr: OpenPrView, handoffJobId?: string) => PlanRepairFacts | Promise<PlanRepairFacts>;
   /** W1-T11171: the queued plan tasks that wait, transitively, on this PR's task; a conflict's blocked cost reads it. */
   conflictDependents?: (pr: OpenPrView) => number;
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
@@ -22419,9 +22494,15 @@ export async function runSweep(
     if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
     let facts: PlanRepairFacts = {};
-    if (isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
+    const head = `${pr.prNumber}@${pr.headSha}`;
+    // The usual CI excerpt can drop part of the gate's HELD block.
+    const handoffJobId = pr.isPlanFiling && pr.headRefName && !planRepairHistory.has(`${head}@held-task-id-handoff`)
+      ? pr.ciFailures?.find((f) => f.name === "task-id-existence" && /^\d+$/.test(f.jobId ?? ""))?.jobId
+      : undefined;
+    if (handoffJobId || isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
       try {
-        facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
+        const cached = planRoundFacts.get(pr.prNumber);
+        facts = (handoffJobId && cached?.handoffs === undefined ? undefined : cached) ?? await deps.readPlanRepairFacts(pr, handoffJobId);
         planRoundFacts.set(pr.prNumber, facts);
       } catch (e) {
         appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
@@ -22461,7 +22542,9 @@ export async function runSweep(
       });
     }
     if (result.outcome === "stood-down") planRepairHistory.add(standDownKey).add(`${standDownKey}@${String(result.reason)}`);
-    else if (result.outcome !== "unwired") planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
+    if (result.outcome !== "unwired" && (result.outcome !== "stood-down" || decision.action === "handoff")) {
+      planRepairHistory.add(`${head}@${decision.signature}`);
+    }
     if (["renumbered", "retitled", "updated", "handed-off"].includes(result.outcome)) {
       return { repaired: true, reason: `plan repair (${decision.signature}): ${decision.action} on ${decision.check} — ${result.outcome}` };
     }
