@@ -38723,6 +38723,13 @@ async function lifetimeShardAge(
   return { ageDays: Math.max(0, Math.floor((nowMs - first) / 86400000)) };
 }
 
+/** W1-T13754: the part of a task's contract a lifetime-pressure verdict was judged against. Title, acceptance,
+ *  design and files only: status, attempts and priority change on every dispatch and must not re-ask the judge. */
+export function lifetimeContractDigest(task: Task): string {
+  const contract = JSON.stringify([task.title ?? null, task.acceptance ?? null, task.design ?? null, task.files ?? null]);
+  return createHash("sha256").update(contract).digest("hex").slice(0, 12);
+}
+
 function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
   if (!note) return undefined;
   let latest: { date: string; decision: "automate" | "needs_operator" } | undefined;
@@ -38759,7 +38766,9 @@ export async function routeAdaptiveLifetimePressure(
     const ruling = latestLifetimeOperatorRuling(task.note);
     const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
       `open=${openPrEvidence}:merged=${mergeEvidence}:last=verdict:${lastVerdict}:${terminalRows.length}` +
-      (ruling ? `:ruling=${ruling.date}:${ruling.decision}` : "");
+      (ruling ? `:ruling=${ruling.date}:${ruling.decision}` : "") +
+      // W1-T13754: an amended contract is a new observed state, so a verdict about the old one is not reused.
+      `:contract=${lifetimeContractDigest(task)}`;
     if (attributableDispatches === 0) {
       infraOnly.push(task.id);
       if (!rows.some((row) => row.step === "dispatch.lifetime_pressure.infra_only" && row.task_id === task.id && row.observed_state === key)) {
