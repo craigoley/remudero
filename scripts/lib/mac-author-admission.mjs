@@ -67,6 +67,32 @@ export function macAuthorReserveBytes(workload = {}) {
   return bytes >= full.bytes ? full : {bytes, basis: `measured-${workload.stage}`, row, measuredPeakBytes: measured};
 }
 
+// W1-T10926 MEASURE FIRST: what each author stage's OWN process tree held in memory (summed RSS) and how far host swap
+// grew while it ran, sampled every 5 s on the 16 GiB Mac mini on 2026-11-18 at origin/main 19628fb6dc:
+// - entry: the selection's own peak (maxRSS 711950336 for W1-T13672's affected-narrow range, 373178368 for a plan-only
+//   one) plus the census full pass it then runs (tree peak 1685078016 over 660 s; swap grew 268697600);
+// - static-preflight: `run-task preflight` (rule checks and tsc), tree peak 3677274112 over 217 s, no swap growth;
+// - affected-tests-per-worker: one worker over 60 suites of that narrow selection, tree peak 1817411584 over 307 s
+//   (p90 of its samples 665 MiB), no swap growth.
+// A stage or selection with no row here (a full fallback, an unknown selection) keeps the normal-only pressure rule.
+export const MAC_AUTHOR_MEASURED_MEMORY_BYTES = Object.freeze({
+  entry: Object.freeze({peakBytes: 711950336 + 1685078016, swapGrowthBytes: 268697600}),
+  'static-preflight': Object.freeze({peakBytes: 3677274112, swapGrowthBytes: 0}),
+  'affected-tests-per-worker': Object.freeze({peakBytes: 1817411584, swapGrowthBytes: 0}),
+});
+
+/** The measured memory `stage` needs for this workload (a test stage per worker it runs), or null when unmeasured. */
+export function macAuthorMemoryNeed({stage, selection, workers} = {}) {
+  let row, times = 1;
+  if (stage === 'entry') row = 'entry';
+  else if (SIZED_SELECTIONS.has(selection) && stage === 'static-preflight') row = 'static-preflight';
+  else if (SIZED_SELECTIONS.has(selection) && stage === 'affected-tests' && Number.isSafeInteger(workers) && workers >= 1)
+    [row, times] = ['affected-tests-per-worker', workers];
+  const measured = row === undefined ? undefined : MAC_AUTHOR_MEASURED_MEMORY_BYTES[row];
+  if (!measured) return null;
+  return {row, workers: times, peakBytes: measured.peakBytes * times, swapGrowthBytes: measured.swapGrowthBytes * times};
+}
+
 /** What a refusal says about the reserve it applied: the basis, the measured row and peak behind it. */
 function reserveRecord(reserve) {
   return {basis: reserve.basis, row: reserve.row, measuredPeakBytes: reserve.measuredPeakBytes};
@@ -218,22 +244,27 @@ export class MacAuthorCapacityRefusal extends Error {
 
 /** `workload` ({selection, workers}) sizes the reserve (W1-T10765); without one a phase keeps the full reserve.
  * A workload carrying `boundedProfile` (W1-T10947) is priced by that profile on each allocation filesystem
- * when it genuinely applies to `context` (and `bound`); otherwise it keeps that existing reserve and says why. */
-export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAuthorAdmission, workload = undefined) {
+ * when it genuinely applies to `context` (and `bound`); otherwise it keeps that existing reserve and says why.
+ * W1-T10926: `memory` ({sample, wait, now, pastWaits}) makes a measured stage wait out memory pressure
+ * (awaitMacAuthorMemory). It defaults on only with the native reader: a faked host reading is never paired with this
+ * host's real memory, and `null` keeps the single-read rule. */
+export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAuthorAdmission, workload = undefined,
+  memory = readAdmission === readMacAuthorAdmission ? macAuthorMemorySeams() : null) {
   const {boundedProfile, context, bound, ...sizing} = workload ?? {};
   const bounded = workload && Object.hasOwn(workload, 'boundedProfile')
     ? boundedAuthorRequirement(boundedProfile, {context, bound}) : undefined;
-  let admission, reserve;
+  let read, reserve;
   if (bounded?.state === 'bounded') {
     reserve = {basis: 'bounded-profile', row: null, measuredPeakBytes: null};
-    admission = readAdmission(root, {reserveBasis: 'bounded-profile',
+    read = () => readAdmission(root, {reserveBasis: 'bounded-profile',
       minimumFreeBytes: Math.max(...bounded.filesystems.map(row => row.minimumFreeBytes)),
       allocations: bounded.filesystems.map(({key, path, minimumFreeBytes}) => ({key, path, minimumFreeBytes}))});
   } else {
     reserve = macAuthorReserveBytes({stage, ...sizing});
-    admission = readAdmission(root, {minimumFreeBytes: reserve.bytes, reserveBasis: reserve.basis});
+    read = () => readAdmission(root, {minimumFreeBytes: reserve.bytes, reserveBasis: reserve.basis});
   }
-  if (bounded) admission = {...admission, boundedProfile: bounded};
+  const readOnce = () => bounded ? {...read(), boundedProfile: bounded} : read();
+  const admission = settleMacAuthorMemory(stage, readOnce(), readOnce, memory, macAuthorMemoryNeed({stage, ...sizing}));
   if (admission.state !== 'admitted' && admission.state !== 'not-applicable')
     throw new MacAuthorCapacityRefusal(stage, {...admission, reserve: reserveRecord(reserve)});
   return {stage, ...admission};
@@ -242,16 +273,32 @@ export function requireMacAuthorCapacity(root, stage, readAdmission = readMacAut
 /** The CLI boundary is guarded; direct main() fixtures remain explicit algorithm tests.
  * --help/--dry-run are read-only and never acquire a slot or start static/test work.
  * The entry check reserves only what selection and the census need; each heavy phase is
- * admitted again, against the reserve its own selection requires, once that selection is known. */
+ * admitted again, against the reserve its own selection requires, once that selection is known.
+ * `recordEntry` is handed the entry's own final admission, waited or not (W1-T10926). */
 export function guardedAuthorEntry(argv, {root, readAdmission = readMacAuthorAdmission,
-  runAuthor, reportRefusal = reportMacAuthorRefusal} = {}) {
+  runAuthor, reportRefusal = reportMacAuthorRefusal,
+  memory = readAdmission === readMacAuthorAdmission ? macAuthorMemorySeams() : null, recordEntry = () => {}} = {}) {
   if (argv.some(arg => ['--help', '-h', '--dry-run'].includes(arg))) return runAuthor(argv);
   const entry = macAuthorReserveBytes({stage: 'entry'});
-  const admission = readAdmission(root, {minimumFreeBytes: entry.bytes, reserveBasis: entry.basis});
+  const read = () => readAdmission(root, {minimumFreeBytes: entry.bytes, reserveBasis: entry.basis});
+  const admission = settleMacAuthorMemory('entry', read(), read, memory, macAuthorMemoryNeed({stage: 'entry'}));
+  recordEntry(admission);
   if (admission.state === 'admitted' || admission.state === 'not-applicable')
-    return runAuthor(argv, {admitHost: (stage, workload) => requireMacAuthorCapacity(root, stage, readAdmission, workload)});
+    return runAuthor(argv, {admitHost: (stage, workload) => requireMacAuthorCapacity(root, stage, readAdmission, workload, memory)});
   reportRefusal(root, {...admission, reserve: reserveRecord(entry)});
   return 3;
+}
+
+/** A refusal whose every reason is the pressure flag (or its failed read): the one refusal a stage may wait out. */
+const pressureOnly = admission => admission?.state === 'not-run' && Array.isArray(admission.reasons) &&
+  admission.reasons.length > 0 && admission.reasons.every(reason => reason.startsWith('pressure:'));
+
+/** W1-T10926: the admission a stage starts on. With no memory seams, no measured need, or a refusal that is not
+ * pressure alone (a disk shortfall), the single read stands exactly as before. Otherwise the stage waits. */
+function settleMacAuthorMemory(stage, admission, reread, memory, need) {
+  if (!memory || !need || admission.state === 'not-applicable') return admission;
+  if (admission.state !== 'admitted' && !pressureOnly(admission)) return admission;
+  return awaitMacAuthorMemory(stage, need, admission, reread, memory);
 }
 
 /** A refusal deliberately produces no author assurance. Never reuse an old PASS receipt. */
@@ -291,6 +338,9 @@ export function macAuthorRefusalReport(stage, admission) {
     ? 'no recorded measurement prices this stage'
     : `measured row ${reserve.row}, peak ${reserve.measuredPeakBytes} bytes`) +
     `; the run is admitted with ${bytes(reserve.admittingFreeBytes)} free on each filesystem checked.`);
+  const waited = admission?.pressureWait;
+  if (waited) lines.push(`Memory wait: ${waited.waitedMs} ms of a ${waited.limitMs} ms limit (${waited.limitBasis}, ` +
+    `${waited.pastWaits} past waits); ${waited.samples.length} samples; failed checks: ${waited.failedChecks.join(', ') || 'none'}.`);
   lines.push(REFUSAL_STAGE_WORK[stage] ?? `Author work started before ${stage}; no cleanup or process termination started.`);
   if (diskShort) lines.push(`Safe recovery: measure free space again, review ${MAC_AUTHOR_JANITOR_DRY_RUN}, ` +
     'and follow deploy/mac/JANITOR.md. Preflight deletes nothing.');
@@ -362,12 +412,21 @@ export function judgeFocusedMacSamples(workload, samples) {
   if (!Array.isArray(samples) || samples.length !== limit.sampleCount) reasons.push('samples:incomplete');
   if (reasons.length) return {state: 'not-run', reasons};
   const minimumHeadroomBytes = workload.memoryBudgetBytes + limit.reserveBytes;
+  const window = judgeMacSampleWindow(samples, minimumHeadroomBytes, 'memory:below-focused-budget-and-reserve');
+  if (window.invalid) return {state: 'not-run', reasons: window.reasons};
+  return {state: window.reasons.length ? 'not-run' : 'admitted', reasons: window.reasons, minimumHeadroomBytes, spanMs: window.spanMs};
+}
+
+/** The focused sampling rule over one window of samples (oldest first): every sample known pressure and at least
+ * `minimumHeadroomBytes` free+inactive, a steady clock and page size, no new swap-out and swap-in under the ceiling. */
+function judgeMacSampleWindow(samples, minimumHeadroomBytes, headroomReason) {
+  const reasons = [], limit = MAC_FOCUSED_LIMITS;
   if (samples.some(row => !row || ![row.at, row.freePlusInactiveBytesApprox, row.swapins, row.swapouts].every(n => Number.isFinite(n) && n >= 0) ||
     ![row.freePlusInactiveBytesApprox, row.swapins, row.swapouts].every(Number.isSafeInteger) ||
-    ![4096, 16384, 65536].includes(row.pageBytes))) return {state: 'not-run', reasons: ['samples:invalid']};
+    ![4096, 16384, 65536].includes(row.pageBytes))) return {invalid: true, reasons: ['samples:invalid']};
   for (const [i, row] of samples.entries()) {
     if (!['normal', 'warning'].includes(row?.pressure)) reasons.push('pressure:critical-or-unknown');
-    if (row.freePlusInactiveBytesApprox < minimumHeadroomBytes) reasons.push('memory:below-focused-budget-and-reserve');
+    if (row.freePlusInactiveBytesApprox < minimumHeadroomBytes) reasons.push(headroomReason);
     if (i) {
       const previous = samples[i - 1], ms = row.at - previous.at;
       if (ms < limit.sampleIntervalMs || ms > limit.maximumSampleSpanMs || row.pageBytes !== previous.pageBytes)
@@ -380,8 +439,109 @@ export function judgeFocusedMacSamples(workload, samples) {
   }
   const spanMs = samples.at(-1).at - samples[0].at;
   if (spanMs > limit.maximumSampleSpanMs) reasons.push('samples:observation-too-long');
-  return {state: reasons.length ? 'not-run' : 'admitted', reasons: [...new Set(reasons)],
-    minimumHeadroomBytes, spanMs};
+  return {reasons: [...new Set(reasons)], spanMs};
+}
+
+/** `sysctl -n vm.swapusage`, e.g. "total = 8192.00M  used = 6620.56M  free = 1571.44M  (encrypted)". */
+export function parseMacSwapUsage(text) {
+  const field = name => {
+    const match = String(text).match(new RegExp(`(?:^|\\s)${name} = ([0-9]+(?:\\.[0-9]+)?)([KMGT])(?:\\s|$)`));
+    if (!match) throw new Error(`missing or malformed swap field: ${name}`);
+    const bytes = Math.round(Number(match[1]) * 1024 ** ' KMGT'.indexOf(match[2]));
+    if (!Number.isSafeInteger(bytes)) throw new Error(`invalid swap field: ${name}`);
+    return bytes;
+  };
+  return {swapTotalBytes: field('total'), swapUsedBytes: field('used'), swapFreeBytes: field('free')};
+}
+
+/** One W1-T10926 memory sample: the focused vm_stat and pressure reading plus how much swap is still free. */
+export function readMacMemorySample({spawn = spawnSync, now = () => performance.now()} = {}) {
+  const sample = readMacFocusedSample({spawn, now});
+  const swap = parseMacSwapUsage(boundedMacRead(spawn, '/usr/sbin/sysctl', ['-n', 'vm.swapusage']));
+  return {...sample, swapFreeBytes: swap.swapFreeBytes, swapUsedBytes: swap.swapUsedBytes};
+}
+
+/**
+ * W1-T10926: may the stage `need` prices start on these samples (oldest first)? The latest sample decides the rule:
+ * - normal: its free+inactive covers the measured peak and free swap covers the measured swap growth;
+ * - warning: the focused runner's sampled window (its last sampleCount samples), priced at the measured peak plus the
+ *   focused reserve instead of the focused budget, with free swap covering the growth on every sample;
+ * - critical or unknown: never.
+ */
+export function judgeMacAuthorMemory(need, samples) {
+  const limit = MAC_FOCUSED_LIMITS, latest = Array.isArray(samples) ? samples.at(-1) : undefined;
+  if (!['normal', 'warning'].includes(latest?.pressure))
+    return {admit: false, under: latest?.pressure ?? 'unknown', reasons: [`pressure:${latest?.pressure ?? 'unknown'}`]};
+  const swapShort = row => !(Number.isSafeInteger(row?.swapFreeBytes) && row.swapFreeBytes >= need.swapGrowthBytes);
+  if (latest.pressure === 'normal') {
+    const reasons = [];
+    if (!(Number.isSafeInteger(latest.freePlusInactiveBytesApprox) && latest.freePlusInactiveBytesApprox >= need.peakBytes))
+      reasons.push('memory:below-measured-peak');
+    if (swapShort(latest)) reasons.push('swap:below-measured-growth');
+    return {admit: reasons.length === 0, under: 'normal', reasons, minimumHeadroomBytes: need.peakBytes};
+  }
+  const window = samples.slice(-limit.sampleCount), minimumHeadroomBytes = need.peakBytes + limit.reserveBytes;
+  const reasons = window.length < limit.sampleCount ? ['samples:incomplete']
+    : judgeMacSampleWindow(window, minimumHeadroomBytes, 'memory:below-measured-peak-and-reserve').reasons;
+  if (window.some(swapShort)) reasons.push('swap:below-measured-growth');
+  return {admit: reasons.length === 0, under: 'warning', reasons, minimumHeadroomBytes};
+}
+
+/** The fewest past waits whose nearest-rank p90 is not simply the longest of them (ceil(0.9 n) < n first at n = 10). */
+const P90_MIN_HISTORY = (() => { let n = 1; while (Math.ceil(0.9 * n) >= n) n++; return n; })();
+
+/**
+ * W1-T10926: how long a stage may wait for memory, from that stage's OWN earlier waits (`pastWaits`, ms): their p90,
+ * never shorter than one focused sampling window so a warning can ever be judged. With too few waits for a p90 it
+ * falls back to the focused sampling rule's own observation span. No fixed number of seconds is chosen here.
+ */
+export function macPressureWaitLimit(pastWaits) {
+  const focused = MAC_FOCUSED_LIMITS, windowMs = (focused.sampleCount - 1) * focused.sampleIntervalMs;
+  const waits = (Array.isArray(pastWaits) ? pastWaits : []).filter(ms => Number.isFinite(ms) && ms >= 0).sort((a, b) => a - b);
+  if (waits.length < P90_MIN_HISTORY)
+    return {limitMs: focused.maximumSampleSpanMs, basis: 'focused-sampling-span', pastWaits: waits.length, needed: P90_MIN_HISTORY};
+  const p90Ms = waits[Math.ceil(0.9 * waits.length) - 1];
+  return {limitMs: Math.max(windowMs, p90Ms), basis: 'p90-of-past-waits', pastWaits: waits.length, p90Ms};
+}
+
+/** The native seams of the W1-T10926 wait. `pastWaits(stage)` is the stage's own earlier waits (none by default). */
+export function macAuthorMemorySeams({spawn = spawnSync, now = () => Date.now(), pastWaits = () => [],
+  wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)} = {}) {
+  return {sample: () => readMacMemorySample({spawn, now}), now, wait, pastWaits};
+}
+
+/**
+ * W1-T10926: the stage starts on the first sample `judgeMacAuthorMemory` admits and a fresh disk and pressure read
+ * still agrees with; until then it samples at the focused interval. A disk shortfall on the fresh read, or a sample
+ * that cannot be read, refuses at once. Past the wait limit it refuses, naming every sample it took.
+ * `pressureWait` is recorded only when the stage did not start on its first sample: that is a wait.
+ */
+function awaitMacAuthorMemory(stage, need, first, reread, {sample, wait, now, pastWaits}) {
+  const startedAt = now(), samples = [];
+  let latest = first, verdict = {reasons: []}, limit;
+  const record = outcome => ({outcome, waitedMs: Math.max(0, now() - startedAt), limitMs: limit?.limitMs ?? null,
+    limitBasis: limit?.basis ?? null, pastWaits: limit?.pastWaits ?? null, failedChecks: verdict.reasons,
+    samples: samples.map(row => ({atMs: Math.max(0, row.at - startedAt), pressure: row.pressure,
+      freePlusInactiveBytes: row.freePlusInactiveBytesApprox, swapFreeBytes: row.swapFreeBytes ?? null, swapouts: row.swapouts}))});
+  const waited = outcome => samples.length > 1 ? {pressureWait: record(outcome)} : {};
+  const refuse = (admission, reasons) => ({...admission, state: 'not-run', reasons: [...new Set(reasons)],
+    memoryNeed: need, ...waited('refused')});
+  for (;;) {
+    try { samples.push(sample()); }
+    catch (error) { return refuse(latest, [...latest.reasons, `memory-sample:unavailable:${error.message}`]); }
+    verdict = judgeMacAuthorMemory(need, samples);
+    if (verdict.admit) {
+      latest = reread();
+      if (latest.reasons.some(reason => !reason.startsWith('pressure:'))) return refuse(latest, latest.reasons);
+      // A fresh warning only stands behind a sampled warning window; a fresh critical or unknown keeps the stage waiting.
+      if (latest.pressure === 'normal' || (latest.pressure === 'warning' && verdict.under === 'warning'))
+        return {...latest, state: 'admitted', reasons: [], memoryNeed: need, admittedUnder: verdict.under, ...waited('admitted')};
+    }
+    limit ??= macPressureWaitLimit(pastWaits(stage));
+    if (now() - startedAt >= limit.limitMs)
+      return {...refuse(latest, [...latest.reasons, ...verdict.reasons]), pressureWait: record('refused')};
+    wait(MAC_FOCUSED_LIMITS.sampleIntervalMs);
+  }
 }
 
 /** Opt-in seam used ONLY by the bounded low-footprint runner. The full-author
