@@ -30,6 +30,23 @@ function put(root: string, path: string, contents: string) {
   writeFileSync(target, contents);
 }
 
+test("the recorder preload traces reads when both trace environment variables are set", (t) => {
+  const { dir } = ownedFixtureDir(t, "rule-suite-preload");
+  const input = "fixtures/preload/input.txt";
+  const traceFile = join(dir, "trace.ndjson");
+  put(dir, input, "traced input");
+
+  // Inherit coverage here. The recorder blanks it for the nested test runners it launches.
+  execFileSync(process.execPath, ["--require", join(REPO_ROOT, RECORDER), "-e",
+    `require("node:fs").readFileSync(${JSON.stringify(input)})`], {
+    cwd: dir,
+    env: { ...process.env, RMD_RULE_SUITE_TRACE_ROOT: dir, RMD_RULE_SUITE_TRACE_FILE: traceFile },
+  });
+
+  const reports = readFileSync(traceFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(reports, [["fixtures/preload"]]);
+});
+
 test("W1-T11819 criterion 1: the recorder runs each suite once and writes sorted relative roots and source hashes", async (t) => {
   const { dir } = ownedFixtureDir(t, "rule-suite-reads");
   const suites = ["test/rules/z.test.mjs", "test/rules/a.test.mjs"];
