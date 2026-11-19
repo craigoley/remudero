@@ -3,10 +3,13 @@
 // read at the same head no longer shows the warning, it dispatches the producer once for that head. It never writes the
 // status itself: the producer re-derives the decision from trusted metadata.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
+import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import * as sweep from "#src/lib/sweep.js";
 import type { OpenPrView, SecurityMergeObservation, SweepDeps } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -20,7 +23,7 @@ const TASK = "W1-T13787";
 const PR_URL = `https://github.com/craigoley/remudero/pull/${PR}`;
 const T1 = "2026-11-18T20:20:41Z";
 const CLEARED: SecurityMergeObservation = { headSha: HEAD, decision: { state: "safe", mergeAllowed: true, reason: "no-new-high-or-critical-alert" },
-  observation: { latest: { id: 3 } } };
+  observation: { checksComplete: true, latest: { id: 3 } } };
 const WARNING = { checkId: 2, headSha: HEAD, completedAt: T1, conclusion: "neutral", title: "1 configuration not found",
   summary: null, summarySha256: null, truncated: false, alertsLink: null };
 const STILL_WARNS: SecurityMergeObservation = { headSha: HEAD, decision: { state: "unknown", mergeAllowed: false, reason: REASON },
@@ -28,6 +31,22 @@ const STILL_WARNS: SecurityMergeObservation = { headSha: HEAD, decision: { state
 
 const ROOT = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13787-`));
 after(() => rmSync(ROOT, { recursive: true, force: true }));
+
+const PR_ENDPOINT = `repos/craigoley/remudero/pulls/${PR}`;
+const PR_METADATA = { head: { sha: HEAD }, base: { sha: NEXT, ref: "main", repo: { full_name: "craigoley/remudero" } },
+  state: "open", changed_files: 1 };
+const CLEARED_CHECK = { id: 3, name: "CodeQL", head_sha: HEAD, status: "completed", conclusion: "success",
+  app: { id: 57789, slug: "github-advanced-security", owner: { login: "github" } },
+  output: { title: "No new alerts in code changed by this pull request",
+    summary: `[View all branch alerts](/craigoley/remudero/security/code-scanning?query=pr%3A${PR}+tool%3ACodeQL+is%3Aopen).` } };
+const CHECK_ENDPOINT = `repos/craigoley/remudero/commits/${HEAD}/check-runs?filter=all&per_page=100&page=1`;
+const FILE_ENDPOINT = `${PR_ENDPOINT}/files?per_page=100&page=1`;
+
+function productionEffects(readJsonImpl: NonNullable<Parameters<typeof sweep.buildSweepEffects>[0]["readJsonImpl"]>, writes: string[][]) {
+  return sweep.buildSweepEffects({ owner: "craigoley", repo: "remudero", config: { claudeBin: "/usr/bin/true", root: ROOT } as never,
+    ledgerPath: join(ROOT, "ledger.ndjson"), runId: "SWEEP-13787", plan: { tasks: [] } as never, log: () => {},
+    readJsonImpl, ghRunImpl: (file, args) => { writes.push([file, ...args]); } });
+}
 
 function view(over: Partial<OpenPrView> = {}): OpenPrView {
   return { prNumber: PR, prUrl: PR_URL, taskId: TASK, reviewState: "none", checksState: "red", unmetCriteria: [], priorStrikes: 0,
@@ -50,7 +69,7 @@ function harness(prior: Record<string, unknown>[], answer: () => Promise<Securit
     readSecurityMergeObservation: answer,
     readCodeqlWorkflowRuns: async () => ({ workflow_runs: [] }),
     dispatchSecurityMergeProducer: async (pr) => { dispatched.push(pr.prNumber); await dispatch(pr); },
-    ledgerPath: "/nonexistent/rmd-w1-t13787/rows.ndjson", runId: "SWEEP-13787", now: () => Date.parse(T1) + 3_600_000,
+    ledgerPath: join(ROOT, "fixture.ndjson"), runId: "SWEEP-13787", now: () => Date.parse(T1) + 3_600_000,
     readLedger: () => [...prior, ...rows], appendLine: (_path, row) => { rows.push(row); },
     log: (step, extra = {}) => { rows.push({ run_id: "SWEEP-13787", step, ...extra }); },
   };
@@ -84,6 +103,60 @@ test("W1-T13787 criterion 2: the producer is re-run at most once per head, and a
   assert.deepEqual(otherPr.dispatched, [PR + 1], "another PR at the same head is not covered by this PR's row");
 });
 
+test("W1-T13787 criterion 2: overlapping full passes share one redispatch receipt", { timeout: 10_000 }, async () => {
+  let releaseReads!: () => void;
+  const bothObserving = new Promise<void>((resolve) => { releaseReads = resolve; });
+  let reads = 0;
+  const read = async () => {
+    if (++reads === 2) releaseReads();
+    await bothObserving;
+    return CLEARED;
+  };
+  const first = harness([], read);
+  const second = harness([], read);
+  const ledgerPath = join(ROOT, "overlap.ndjson");
+  const results = await Promise.all([first, second].map(({ deps }, index) =>
+    sweep.runSweep([view()], { ...deps, runId: `OVERLAP-${index}`, ledgerPath, readLedger: undefined, appendLine: undefined })));
+  assert.equal(reads, 2);
+  assert.deepEqual([...first.dispatched, ...second.dispatched], [PR]);
+  assert.equal(readLedgerLines(ledgerPath).filter((row) => row.step === STEP).length, 1);
+  assert.equal(results.filter((result) => result.actions.some(({ reason }) => reason.includes("producer was already re-run at this head"))).length, 1);
+});
+
+test("W1-T13787 criterion 2: a competing ledger writer defers the dispatch until a later pass", async () => {
+  const h = harness([], async () => CLEARED);
+  h.deps.ledgerPath = join(ROOT, "locked.ndjson");
+  const lock = new DatabaseSync(`${h.deps.ledgerPath}.security-producer.lock.sqlite`);
+  try {
+    lock.exec("BEGIN IMMEDIATE");
+    const reason = await sweep.observeCodeqlConfigurationWarning(h.deps, [], view(), "wait");
+    assert.match(reason, /could not record a producer dispatch at this head \(database is locked\)/);
+    assert.deepEqual(h.dispatched, []);
+    assert.equal(h.rows.length, 0);
+  } finally {
+    lock.close();
+  }
+  await sweep.observeCodeqlConfigurationWarning(h.deps, [], view(), "wait");
+  assert.deepEqual(h.dispatched, [PR]);
+  assert.equal(h.rows.filter((row) => row.step === STEP).length, 1);
+});
+
+test("W1-T13787 criterion 2: an archived receipt still suppresses a dispatch at the same head", async () => {
+  const dir = join(ROOT, "rotation");
+  mkdirSync(dir);
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const receipts = Array.from({ length: MAX_RETAINED_LINES_PER_STEP + 1 }, (_, offset) =>
+    JSON.stringify({ ts: T1, step: STEP, pr_number: PR + offset, head_sha: HEAD }));
+  const content = `${receipts.join("\n")}\n`;
+  writeFileSync(ledgerPath, content);
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: Buffer.byteLength(content) - 1 }).rotated, true);
+  assert.ok(!readLedgerLines(ledgerPath).some((row) => row.step === STEP && row.pr_number === PR));
+  const h = harness([], async () => CLEARED);
+  const reason = await sweep.observeCodeqlConfigurationWarning({ ...h.deps, ledgerPath, readLedger: undefined }, [], view(), "wait");
+  assert.deepEqual(h.dispatched, []);
+  assert.match(reason, /producer was already re-run at this head/);
+});
+
 test("W1-T13787 criterion 3: no dispatch without a cleared read at this head; a failed dispatch is written once and keeps the wait", async () => {
   for (const [why, answer] of [
     ["the warning still stands", async () => STILL_WARNS],
@@ -97,10 +170,13 @@ test("W1-T13787 criterion 3: no dispatch without a cleared read at this head; a 
     assert.equal(h.rows.filter((r) => r.step === STEP).length, 0, why);
   }
 
-  const refused = harness([], async () => CLEARED, async () => { throw new Error("HTTP 422 workflow not dispatchable"); });
+  const refused = harness([], async () => CLEARED, async () => {
+    assert.equal(refused.rows.filter((r) => r.step === STEP).length, 1, "the receipt precedes the dispatch");
+    throw new Error("HTTP 422 workflow not dispatchable");
+  });
   await sweep.runSweep([view()], refused.deps);
   assert.deepEqual(refused.dispatched, [PR]);
-  assert.equal(refused.rows.filter((r) => r.step === STEP).length, 1, "the row is written before the dispatch");
+  assert.equal(refused.rows.filter((r) => r.step === STEP).length, 1, "the failed dispatch leaves one receipt");
   assert.equal(refused.rows.some((r) => String(r.step).startsWith("fix.") || r.step === "sweep.fix_dispatch"), false, "no fix round row");
   const disposed = refused.rows.filter((r) => r.step === "sweep.disposed");
   assert.equal(disposed.length, 1);
@@ -111,15 +187,57 @@ test("W1-T13787 criterion 3: no dispatch without a cleared read at this head; a 
   assert.equal(retry.dispatched.length, 0, "a failed dispatch is not retried at this head");
 });
 
+test("W1-T13787 criterion 3: the real adapter's failed read and changed final head both keep waiting", async (t) => {
+  for (const [name, problem] of [
+    ["502 after the first PR read", "security-api-unavailable"],
+    ["moved head on final recheck", "head-or-base-changed-during-observation"],
+    ["incomplete check corpus", "check-corpus-incomplete"],
+  ] as const) {
+    await t.test(name, async () => {
+      const reads: string[] = [];
+      const writes: string[][] = [];
+      const effects = productionEffects(async ([method, path]) => {
+        assert.equal(method, "api");
+        reads.push(path!);
+        switch (path) {
+          case PR_ENDPOINT: return reads.length === 1 || problem !== "head-or-base-changed-during-observation"
+            ? PR_METADATA : { ...PR_METADATA, head: { sha: NEXT } };
+          case FILE_ENDPOINT:
+            if (problem === "security-api-unavailable") throw new Error("HTTP 502");
+            return [{ filename: "src/example.ts" }];
+          case CHECK_ENDPOINT: return { total_count: problem === "check-corpus-incomplete" ? 2 : 1, check_runs: [CLEARED_CHECK] };
+          default: assert.fail(`unexpected metadata read ${path}`);
+        }
+      }, writes);
+      const h = harness([], async () => CLEARED);
+      const result = await sweep.runSweep([view()], { ...h.deps, readSecurityMergeObservation: effects.readSecurityMergeObservation,
+        dispatchSecurityMergeProducer: effects.dispatchSecurityMergeProducer });
+      assert.deepEqual(reads, problem === "security-api-unavailable" ? [PR_ENDPOINT, FILE_ENDPOINT]
+        : [PR_ENDPOINT, FILE_ENDPOINT, CHECK_ENDPOINT, PR_ENDPOINT]);
+      assert.deepEqual(writes, []);
+      assert.equal(h.rows.filter((r) => r.step === STEP).length, 0);
+      assert.deepEqual(result.actions.map(({ disposition, acted }) => [disposition, acted]), [["wait", false]]);
+      assert.ok(result.actions[0]?.reason?.includes(problem));
+    });
+  }
+});
+
 test("W1-T13787 criterion 4: the production effects dispatch security-merge-policy.yml on main with the pr_number input", async () => {
   const calls: string[][] = [];
-  const effects = sweep.buildSweepEffects({ owner: "craigoley", repo: "remudero", config: { claudeBin: "/usr/bin/true", root: ROOT } as never,
-    ledgerPath: join(ROOT, "ledger.ndjson"), runId: "SWEEP-13787", plan: { tasks: [] } as never, log: () => {},
-    ghRunImpl: (file, args) => { calls.push([file, ...args]); } });
+  const effects = productionEffects(async ([method, path]) => {
+    assert.equal(method, "api");
+    switch (path) {
+      case PR_ENDPOINT: return PR_METADATA;
+      case FILE_ENDPOINT: return [{ filename: "src/example.ts" }];
+      case CHECK_ENDPOINT: return { total_count: 1, check_runs: [CLEARED_CHECK] };
+      default: assert.fail(`unexpected metadata read ${path}`);
+    }
+  }, calls);
   const h = harness([], async () => CLEARED);
-  const deps = { ...h.deps, dispatchSecurityMergeProducer: effects.dispatchSecurityMergeProducer } as SweepDeps;
-  await sweep.observeCodeqlConfigurationWarning(deps, [], view(), "wait");
+  const result = await sweep.runSweep([view()], { ...h.deps, readSecurityMergeObservation: effects.readSecurityMergeObservation,
+    dispatchSecurityMergeProducer: effects.dispatchSecurityMergeProducer });
   assert.deepEqual(calls, [["gh", "api", "-X", "POST", "repos/craigoley/remudero/actions/workflows/security-merge-policy.yml/dispatches",
     "-f", "ref=main", "-f", `inputs[pr_number]=${PR}`]]);
   assert.equal(h.rows.filter((r) => r.step === STEP).length, 1);
+  assert.match(String(result.actions[0]?.reason), /fresh read answers safe: trusted-complete-exact-head-no-new-alerts/);
 });

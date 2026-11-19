@@ -34,6 +34,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { daemonInstanceRegistryPath, deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
@@ -136,7 +137,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ledgerRowsForSync, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -17506,7 +17507,7 @@ export interface CodeqlConfigurationWarningReceipt {
 export interface SecurityMergeObservation {
   headSha?: string;
   decision: { state: string; mergeAllowed: boolean; reason: string };
-  observation?: { latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
+  observation?: { checksComplete?: boolean; latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
 }
 
 /** W1-T13470 — the only red is the policy status at this reason (positively named), the review has not failed, and no
@@ -17572,17 +17573,49 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
   const fresh = `${observed.decision.state}: ${observed.decision.reason}`;
   if (warning === undefined && observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND && deps.dispatchSecurityMergeProducer) {
-    if (atHead(SECURITY_PRODUCER_REDISPATCHED_STEP).length > 0) {
+    if (!observed.observation || (observed.observation.checksComplete !== true && observed.decision.state !== "not-applicable")) {
+      return `${waitReason} — the fresh read did not verify warning clearance (${fresh})`;
+    }
+    const alreadyDispatched = (line: Record<string, unknown>) =>
+      line.step === SECURITY_PRODUCER_REDISPATCHED_STEP && line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
+    let claimed = false;
+    try {
+      if (!lines.some(alreadyDispatched)) {
+        mkdirSync(dirname(deps.ledgerPath), { recursive: true });
+        const lock = new DatabaseSync(`${deps.ledgerPath}.security-producer.lock.sqlite`, { timeout: 0 });
+        try {
+          // Serialize the live receipt check and append across processes. Closing releases the lock before GitHub I/O.
+          lock.exec("BEGIN IMMEDIATE");
+          let recorded = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath).some(alreadyDispatched);
+          if (!recorded && !deps.readLedger) {
+            const history = ledgerRowsForSync(dirname(deps.ledgerPath), {
+              steps: [SECURITY_PRODUCER_REDISPATCHED_STEP], prNumbers: [pr.prNumber],
+            }, { refuseIncomplete: true });
+            if (!history.ok) throw new Error("producer dispatch receipt history is unreadable");
+            recorded = history.rows.some(alreadyDispatched);
+          }
+          if (!recorded) {
+            appendLine(deps.ledgerPath, { ...row, step: SECURITY_PRODUCER_REDISPATCHED_STEP, decision: fresh,
+              posted_status: `${pr.securityMergePolicy?.state}: ${pr.securityMergePolicy?.reason}` });
+            claimed = true;
+          }
+        } finally {
+          lock.close();
+        }
+      }
+    } catch (error) {
+      const reason = `could not record a producer dispatch at this head (${failed(error)})`;
+      return `${waitReason} — the fresh read answers ${fresh}; ${reason}`;
+    }
+    if (!claimed) {
       notes.push(`the fresh read answers ${fresh}; the security-merge-policy producer was already re-run at this head`);
     } else {
-      appendLine(deps.ledgerPath, { ...row, step: SECURITY_PRODUCER_REDISPATCHED_STEP, decision: fresh,
-        posted_status: `${pr.securityMergePolicy?.state}: ${pr.securityMergePolicy?.reason}` });
       try {
         await deps.dispatchSecurityMergeProducer(pr);
         notes.push(`the fresh read answers ${fresh}, so the security-merge-policy producer was dispatched once for this head`);
       } catch (error) {
-        // Named in the disposed row; its pre-written row keeps the dispatch to once per head.
-        notes.push(`the fresh read answers ${fresh}; the producer dispatch failed (${failed(error)}) and is not repeated at this head`);
+        const reason = `the producer dispatch failed (${failed(error)}) and is not repeated at this head`;
+        notes.push(`the fresh read answers ${fresh}; ${reason}`);
       }
     }
   }
