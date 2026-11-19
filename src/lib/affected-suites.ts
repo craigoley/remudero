@@ -680,6 +680,17 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(bakedInputs) && files.some((f) => bakedInputsEdges.includes(f))) {
     pathReaders.push(bakedInputs);
   }
+  // W1-T10505: coverage run 39968804318 (PR #13736) failed on this suite and the selector missed it.
+  const preflightPhase = suitePath("test/github/preflight-phase-integration.test.ts");
+  const preflightPhaseEdges = [
+    "scripts/comment-load-baseline.json",
+    "src/lib/commit-message.ts",
+    suitePath("test/a-harness-checkpoint-commit-never-fails-the-preopen-gate.test.ts"),
+    suitePath("test/preflight.test.ts"),
+  ];
+  if (input.files.has(preflightPhase) && files.some((f) => preflightPhaseEdges.includes(f))) {
+    pathReaders.push(preflightPhase);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
