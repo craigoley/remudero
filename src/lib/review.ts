@@ -3056,8 +3056,7 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
   const files = entries
     .filter((entry) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry) && !/(?:^|\/)e2e\//.test(entry))
     .map((entry) => `${root.replace(/\/$/, "")}/${entry}`);
-  const diffHits = files.filter((file) => w.diffTestFiles?.includes(file));
-  if (diffHits.length === 1) return diffHits;
+  const inDiff = (file: string) => w.diffTestFiles?.includes(file) === true;
   const titleHits = files.filter((file) => {
     try { return readFileSync(join(cwd, file), "utf8").includes(w.label); }
     catch (error) {
@@ -3065,7 +3064,14 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
       return true;
     }
   });
-  return titleHits.length > 0 ? titleHits : files;
+  // The diff's own file wins only among files that hold the title: a guard naming an earlier task's test in
+  // another file must still run that file, not the diff's file, where it matches nothing.
+  if (titleHits.length > 0) {
+    const diffTitleHits = titleHits.filter(inDiff);
+    return diffTitleHits.length === 1 ? diffTitleHits : titleHits;
+  }
+  const diffHits = files.filter(inDiff);
+  return diffHits.length === 1 ? diffHits : files;
 }
 
 /** A missing checkout runner is a host gap, not a failed proof (W1-T3312).
