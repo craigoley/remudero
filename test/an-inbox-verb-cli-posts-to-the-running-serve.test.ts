@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
 import type { Config } from "#src/lib/config.js";
-import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions } from "#src/lib/inbox-cli-serve.js";
+import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/run-task.js";
 
 type Ctx = { after: (fn: () => void | Promise<void>) => void; mock: { method: typeof import("node:test").mock.method } };
 const TOKEN = "ab".repeat(32);
@@ -173,7 +173,6 @@ test("W1-T13238 criterion 3: invariant:same-answer-either-path — archive, snoo
 
 test("W1-T13238: the CLI's restated serve port and token path match serve's own", async () => {
   const serve = await import("#src/lib/serve.js");
-  const { INBOX_CLI_DEFAULT_SERVE_PORT } = await import("#src/lib/inbox-cli-serve.js");
   assert.equal(INBOX_CLI_DEFAULT_SERVE_PORT, serve.DEFAULT_SERVE_PORT);
   assert.equal(serve.serviceTokensPath("/r"), join("/r", "state", "service-tokens.json"));
 });
