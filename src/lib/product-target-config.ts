@@ -257,9 +257,13 @@ export interface RunnerConfigProposalOptions extends RunnerConfigPreviewOptions 
   clock?: Pick<Clock, "iso">;
   sync?: (fd: number) => void;
 }
-class ProposalFault extends Error {
-  constructor(readonly code: RunnerConfigProposalCode) { super(`runner config proposal: ${code}`); }
-}
+// A refusal raised inside a proposal run and always caught by proposeRunnerConfigBootstrap, which answers its code.
+const PROPOSAL_CODE = Symbol("runner-config-proposal-code");
+type ProposalFault = Error & { [PROPOSAL_CODE]: RunnerConfigProposalCode };
+const proposalFault = (code: RunnerConfigProposalCode): ProposalFault =>
+  Object.assign(new Error(`runner config proposal: ${code}`), { [PROPOSAL_CODE]: code });
+const proposalCodeOf = (error: unknown): RunnerConfigProposalCode | undefined =>
+  error instanceof Error ? (error as Partial<ProposalFault>)[PROPOSAL_CODE] : undefined;
 const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const notFound = (error: unknown) => /\(HTTP 404\)|\bHTTP 404\b/.test(`${String((error as { stderr?: unknown })?.stderr ?? "")}\n${String((error as Error)?.message ?? error)}`);
 const proposalChains = new Map<string, Promise<unknown>>();
@@ -284,10 +288,10 @@ const previewRefusal: Partial<Record<RunnerConfigPreview["state"], RunnerConfigP
  */
 export async function proposeRunnerConfigBootstrap(options: RunnerConfigProposalOptions, actor: string, command: unknown): Promise<RunnerConfigProposalResult> {
   try {
-    if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw new ProposalFault("invalid_identity");
+    if (typeof actor !== "string" || !actor.trim() || actor.length > 512) throw proposalFault("invalid_identity");
     const parsed = runnerConfigProposalCommandSchema.safeParse(command);
-    if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > RUNNER_CONFIG_PROPOSAL_LIMITS.requestBytes) throw new ProposalFault("invalid_input");
-    if (!options.root || !isAbsolute(options.root)) throw new ProposalFault("unavailable");
+    if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data)) > RUNNER_CONFIG_PROPOSAL_LIMITS.requestBytes) throw proposalFault("invalid_input");
+    if (!options.root || !isAbsolute(options.root)) throw proposalFault("unavailable");
     const root = realpathSync(options.root);
     const ownerKey = sha256(actor);
     const directory = join(root, "state", "products", "v1", "runner-config");
@@ -296,12 +300,12 @@ export async function proposeRunnerConfigBootstrap(options: RunnerConfigProposal
       ensureProposalDirectory(paths.root, options.sync ?? fsyncSync);
       let lock;
       try { lock = acquireInflightLock(paths.locks, ownerKey, { run_id: `runner-config-proposal-${randomUUID()}` }); }
-      catch (error) { throw error instanceof InflightLockError ? new ProposalFault("busy") : new ProposalFault("unavailable"); }
+      catch (error) { throw error instanceof InflightLockError ? proposalFault("busy") : proposalFault("unavailable"); }
       try { return { ok: true as const, value: await new RunnerConfigProposalRun(options, actor, parsed.data, paths).run() }; }
       finally { lock.release(); }
     });
   } catch (error) {
-    return { ok: false, code: error instanceof ProposalFault ? error.code : "unavailable" };
+    return { ok: false, code: proposalCodeOf(error) ?? "unavailable" };
   }
 }
 
@@ -312,13 +316,13 @@ function ensureProposalDirectory(root: string, sync: (fd: number) => void): void
     let created = false;
     if (owned) {
       try { mkdirSync(directory, { mode: 0o700 }); created = true; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new ProposalFault("unavailable"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw proposalFault("unavailable"); }
     } else mkdirSync(directory, { recursive: true });
     const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
       if (created) fchmodSync(fd, 0o700);
       const info = fstatSync(fd);
-      if (!info.isDirectory() || (owned && (info.mode & 0o077) !== 0)) throw new ProposalFault("unavailable");
+      if (!info.isDirectory() || (owned && (info.mode & 0o077) !== 0)) throw proposalFault("unavailable");
     } finally { closeSync(fd); }
     const parent = openSync(dirname(directory), constants.O_RDONLY);
     try { sync(parent); } finally { closeSync(parent); }
@@ -345,16 +349,16 @@ class RunnerConfigProposalRun {
     const payloadDigest = sha256(JSON.stringify(input));
     const key = sha256(`${input.productId}\n${input.targetHead}\n${input.configDigest}`);
     const bound = journal.requests[requestKey];
-    if (bound && bound.payloadDigest !== payloadDigest) throw new ProposalFault("idempotency_conflict");
+    if (bound && bound.payloadDigest !== payloadDigest) throw proposalFault("idempotency_conflict");
     let record = journal.records[key];
     let bytes: string | undefined;
     if (bound) {
-      if (!record) throw new ProposalFault("corrupt");
+      if (!record) throw proposalFault("corrupt");
       if (record.phase === "proposed") return this.reply(this.ensureEvidence(journal, key, record), await this.pullState(record), true);
     } else {
       const product = this.store.read(this.actor, input.productId);
-      if (!product.ok) throw new ProposalFault(product.code);
-      if (product.value.revision !== input.expectedRevision || product.value.objectiveRevision !== input.expectedObjectiveRevision) throw new ProposalFault("stale_revision");
+      if (!product.ok) throw proposalFault(product.code);
+      if (product.value.revision !== input.expectedRevision || product.value.objectiveRevision !== input.expectedObjectiveRevision) throw proposalFault("stale_revision");
       if (record?.phase === "proposed") {
         // The same accepted proposal returns the same pull request until a human closes it unmerged.
         const state = await this.pullState(record);
@@ -367,14 +371,14 @@ class RunnerConfigProposalRun {
         // Immediately before acting, recompute the preview: every refusal is decided on live state, never on the request.
         const preview = await previewRunnerConfigBootstrap(this.options, this.actor,
           { productId: input.productId, expectedRevision: input.expectedRevision, expectedObjectiveRevision: input.expectedObjectiveRevision });
-        if (!preview.ok) throw new ProposalFault(preview.code);
+        if (!preview.ok) throw proposalFault(preview.code);
         const refusal = previewRefusal[preview.value.state];
-        if (refusal) throw new ProposalFault(refusal);
+        if (refusal) throw proposalFault(refusal);
         const accepted = preview.value.proposal;
-        if (!accepted || accepted.digest !== input.configDigest || accepted.targetHead !== input.targetHead) throw new ProposalFault("stale_preview");
-        if (Buffer.byteLength(accepted.bytes) > RUNNER_CONFIG_PROPOSAL_LIMITS.contentBytes) throw new ProposalFault("source_unavailable");
+        if (!accepted || accepted.digest !== input.configDigest || accepted.targetHead !== input.targetHead) throw proposalFault("stale_preview");
+        if (Buffer.byteLength(accepted.bytes) > RUNNER_CONFIG_PROPOSAL_LIMITS.contentBytes) throw proposalFault("source_unavailable");
         const repository = product.value.repository!;
-        if (!record && Object.keys(journal.records).length >= RUNNER_CONFIG_PROPOSAL_LIMITS.records) throw new ProposalFault("capacity");
+        if (!record && Object.keys(journal.records).length >= RUNNER_CONFIG_PROPOSAL_LIMITS.records) throw proposalFault("capacity");
         bytes = accepted.bytes;
         record = { productId: input.productId, objectiveRevision: input.expectedObjectiveRevision,
           repository: { id: repository.id, owner: repository.owner, name: repository.name, defaultBranch: repository.defaultBranch },
@@ -414,9 +418,9 @@ class RunnerConfigProposalRun {
   private async read<T>(path: string, schema: z.ZodType<T>): Promise<T | undefined> {
     let raw: string;
     try { raw = await this.api([path]); }
-    catch (error) { if (notFound(error)) return undefined; throw new ProposalFault("outcome_unknown"); }
+    catch (error) { if (notFound(error)) return undefined; throw proposalFault("outcome_unknown"); }
     const parsed = schema.safeParse(JSON.parse(raw));
-    if (!parsed.success) throw new ProposalFault("outcome_unknown");
+    if (!parsed.success) throw proposalFault("outcome_unknown");
     return parsed.data;
   }
 
@@ -429,7 +433,7 @@ class RunnerConfigProposalRun {
     const file = await this.read(`${this.slug(record)}/contents/${TARGET_RUNNER_CONFIG_PATH}?ref=${encodeURIComponent(ref)}`,
       z.object({ type: z.string(), encoding: z.literal("base64"), content: z.string() }).passthrough());
     if (file === undefined) return undefined;
-    if (file.type !== "file") throw new ProposalFault("branch_conflict");
+    if (file.type !== "file") throw proposalFault("branch_conflict");
     return sha256(Buffer.from(file.content.replace(/\s/g, ""), "base64"));
   }
 
@@ -445,8 +449,8 @@ class RunnerConfigProposalRun {
     }).passthrough());
     const files = compare?.files ?? [];
     if (!compare || compare.behind_by !== 0 || compare.ahead_by !== 1 || files.length !== 1 ||
-      files[0]!.filename !== TARGET_RUNNER_CONFIG_PATH || files[0]!.status !== "added") throw new ProposalFault("branch_conflict");
-    if (await this.branchFile(record, ref.object.sha) !== record.configDigest) throw new ProposalFault("branch_conflict");
+      files[0]!.filename !== TARGET_RUNNER_CONFIG_PATH || files[0]!.status !== "added") throw proposalFault("branch_conflict");
+    if (await this.branchFile(record, ref.object.sha) !== record.configDigest) throw proposalFault("branch_conflict");
     return "added";
   }
 
@@ -455,7 +459,7 @@ class RunnerConfigProposalRun {
     const preview = await previewRunnerConfigBootstrap(this.options, this.actor,
       { productId: record.productId, expectedRevision: this.input.expectedRevision, expectedObjectiveRevision: record.objectiveRevision });
     const accepted = preview.ok ? preview.value.proposal : undefined;
-    if (!accepted || accepted.digest !== record.configDigest || accepted.targetHead !== record.targetHead) throw new ProposalFault("outcome_unknown");
+    if (!accepted || accepted.digest !== record.configDigest || accepted.targetHead !== record.targetHead) throw proposalFault("outcome_unknown");
     return accepted.bytes;
   }
 
@@ -465,7 +469,7 @@ class RunnerConfigProposalRun {
     if (state === "absent") {
       await this.attempt(["-X", "POST", `${slug}/git/refs`, "-f", `ref=refs/heads/${record.branch}`, "-f", `sha=${record.targetHead}`]);
       state = await this.branchState(record);
-      if (state === "absent") throw new ProposalFault("outcome_unknown");
+      if (state === "absent") throw proposalFault("outcome_unknown");
     }
     if (state === "base") {
       const bytes = await this.bytesFor(record, known);
@@ -473,7 +477,7 @@ class RunnerConfigProposalRun {
       await this.attempt(["-X", "PUT", `${slug}/contents/${TARGET_RUNNER_CONFIG_PATH}`,
         "-f", `message=chore(remudero): add runner configuration (${record.configDigest.slice(0, 12)})`,
         "-f", `content=${Buffer.from(bytes, "utf8").toString("base64")}`, "-f", `branch=${record.branch}`]);
-      if (await this.branchState(record) !== "added") throw new ProposalFault("outcome_unknown");
+      if (await this.branchState(record) !== "added") throw proposalFault("outcome_unknown");
     }
     const owner = record.repository.owner;
     const pulls = z.array(z.object({ number: z.number().int().positive(), html_url: z.string().url(), state: z.string(),
@@ -481,13 +485,13 @@ class RunnerConfigProposalRun {
     const listed = async () => (await this.read(`${slug}/pulls?head=${encodeURIComponent(`${owner}:${record.branch}`)}&state=open&per_page=100`, pulls) ?? [])
       .filter((pull) => pull.head.ref === record.branch && pull.state === "open");
     let open = await listed();
-    if (open.some((pull) => pull.base.ref !== record.repository.defaultBranch)) throw new ProposalFault("branch_conflict");
+    if (open.some((pull) => pull.base.ref !== record.repository.defaultBranch)) throw proposalFault("branch_conflict");
     if (open.length === 0) {
       await this.attempt(["-X", "POST", `${slug}/pulls`, "-f", `title=chore(remudero): add runner configuration`,
         "-f", `head=${record.branch}`, "-f", `base=${record.repository.defaultBranch}`, "-f", `body=${proposalBody(record)}`]);
       open = await listed();
     }
-    if (open.length !== 1 || open[0]!.base.ref !== record.repository.defaultBranch) throw new ProposalFault("outcome_unknown");
+    if (open.length !== 1 || open[0]!.base.ref !== record.repository.defaultBranch) throw proposalFault("outcome_unknown");
     return { number: open[0]!.number, url: open[0]!.html_url };
   }
 
@@ -505,7 +509,7 @@ class RunnerConfigProposalRun {
       if (review.state !== "found" || review.starter.number !== record.pullRequest!.number || !review.starter.reviewed) return "merged_unreviewed";
       return await this.branchFile(record, pull.merge_commit_sha) === record.configDigest ? "merged" : "merged_drifted";
     } catch (error) {
-      if (error instanceof ProposalFault) return "unknown";
+      if (proposalCodeOf(error)) return "unknown";
       throw error;
     }
   }
@@ -530,20 +534,20 @@ class RunnerConfigProposalRun {
     try {
       fd = openSync(this.paths.state, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const info = fstatSync(fd);
-      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw new ProposalFault("unavailable");
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw proposalFault("unavailable");
       const parsed = proposalJournalSchema.safeParse((() => { try { return JSON.parse(readFileSync(fd!, "utf8")); } catch { return undefined; } })());
-      if (!parsed.success || parsed.data.ownerKey !== this.paths.ownerKey) throw new ProposalFault("corrupt");
+      if (!parsed.success || parsed.data.ownerKey !== this.paths.ownerKey) throw proposalFault("corrupt");
       return parsed.data;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: RUNNER_CONFIG_PROPOSAL_VERSION, ownerKey: this.paths.ownerKey, records: {}, requests: {} };
-      throw error instanceof ProposalFault ? error : new ProposalFault("unavailable");
+      throw proposalCodeOf(error) ? error : proposalFault("unavailable");
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
   /** Atomic, fsynced replace. A failure before the rename is `unavailable`; after it, the outcome is unknown. */
   private persist(journal: ProposalJournal): ProposalJournal {
     const body = JSON.stringify(journal);
-    if (Buffer.byteLength(body) > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw new ProposalFault("capacity");
+    if (Buffer.byteLength(body) > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw proposalFault("capacity");
     const stage = join(this.paths.directory, `.${this.paths.ownerKey}.${randomUUID()}.pending`);
     let renamed = false;
     try {
@@ -557,7 +561,7 @@ class RunnerConfigProposalRun {
     } catch (error) {
       void error;
       if (!renamed) try { unlinkSync(stage); } catch { /* a stage already gone is the outcome wanted */ }
-      throw new ProposalFault(renamed ? "outcome_unknown" : "unavailable");
+      throw proposalFault(renamed ? "outcome_unknown" : "unavailable");
     }
   }
 }
