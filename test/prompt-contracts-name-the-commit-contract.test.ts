@@ -90,8 +90,9 @@ test("the reviewer prompt asks for a one-line explanation, not its reasoning", (
 test("the machine-readable reviewer verdict contract is byte-identical to its pre-change text", () => {
   // Hashes measured at origin/main 231b7673b, before the wording change in `buildReviewPrompt`; re-measured once
   // for W1-T11209, which deliberately names the clause budget in the contract (its criterion 3), and once for
-  // W1-T11428, which deliberately adds the UNABLE verdict form for a reviewer that could not inspect.
+  // W1-T11428, which deliberately adds the UNABLE verdict form for a reviewer that could not inspect, and once for
+  // W1-T13849, which deliberately names the (a)/(c) FAIL classes and the REVIEW_FOLLOW_UP line.
   const sha = (n: number) => createHash("sha256").update(reviewerVerdictContract(n), "utf8").digest("hex");
-  assert.equal(sha(1), "37a4ee6b081f583289f41a282975c113c87b1d013e5973b895a1f1c14cb0f84d");
-  assert.equal(sha(3), "51e02bf981cb1df4cfc610c778467002e95bf7418f212076c72d60a78909d372");
+  assert.equal(sha(1), "8e55dfcb11b1617c8155abc68600a7951d0048c0e4302291eabef1d08ee9921b");
+  assert.equal(sha(3), "dd6d158dbe3dab440017e0b0bba9ed2194c3c8deb0d5ea1d1a539e67a13907e1");
 });

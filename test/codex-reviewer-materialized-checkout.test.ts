@@ -399,7 +399,7 @@ test("trusted proof receipts never override a semantic failure or missing requir
           const receipt = JSON.parse(readFileSync(JSON.parse(match[1]), "utf8"));
           assert.equal(receipt.criteria[0].proof_exec, "executed_pass");
           if (mode === "reviewer-refusal") throw Object.assign(new Error("controlled sandbox EPERM"), {code:"EPERM"});
-          return reviewerResult("claude", "REVIEW_VERDICT 1: FAIL — concrete source-level counterexample control");
+          return reviewerResult("claude", "REVIEW_VERDICT 1: FAIL (a) — concrete source-level counterexample control");
         }});
       assert.equal(verdict.state, "failure", "an execution receipt is never a replacement for required semantics");
       if (mode === "semantic-failure") {
