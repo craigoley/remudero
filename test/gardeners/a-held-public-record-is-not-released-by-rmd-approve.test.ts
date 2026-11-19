@@ -15,11 +15,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
+import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
 import {
   APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
 } from "#src/lib/stuck-state-gardener.js";
-import { composeSecondaryPlan, findApproveReleasePlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
+import { composeSecondaryPlan, findApproveReleasePlan, readReleasePublicPlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = Record<string, unknown>;
@@ -114,23 +115,31 @@ function publicMain(t: TestContext, text: string) {
   };
   const boot = publish(text);
   return { dir: checkout.dir, planPath, boot, publish: (next: string) => { const sha = publish(next); checkout.git("checkout", "--quiet", "--detach", boot); return sha; },
-    head: () => checkout.git("rev-parse", "refs/remotes/origin/main") };
+    head: () => checkout.git("rev-parse", "refs/remotes/origin/main"), unpublish: () => checkout.git("update-ref", "-d", "refs/remotes/origin/main") };
 }
 
-/** The operator's refused approve of PUB-2 (the public copy of a duplicate), then the gardener over its row with a counted approve. */
+/** The refused public release and the gardener replay over an older detached checkout. */
 async function refusalFixture(t: TestContext) {
   const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
-  const main = publicMain(t, PUBLIC_TEXT);
+  const main = publicMain(t, PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record"));
+  main.publish(PUBLIC_TEXT);
   const rows: Row[] = [];
   let now = NOW;
-  const held = await readApproveRelease("PUB-2", loadPlan(main.planPath), main.dir, fx.lookup, row => rows.push({ ts: iso(now), ...row }));
+  const append = (row: Row) => rows.push({ ts: iso(now), ...row });
+  const bootPlan = loadPlan(main.planPath);
+  const held = await readApproveRelease("PUB-2", bootPlan, main.dir, fx.lookup, append);
   assert.deepEqual(held, { outcome: "held", hold: DUP_HOLD });
-  const approved: string[] = [];
+  const approved: { id: string; pin: string }[] = [];
   const ports = {
     ...productionStuckStatePorts({
       stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
       log: (step, extra = {}) => void rows.push({ ts: iso(now), step, ...extra }), escalate: () => null,
-      destinationRead: async () => undefined, approve: async id => { approved.push(id); return 0; },
+      destinationRead: async () => undefined, approve: async (id, digest) => {
+        const release = await readApproveRelease(id, digest === undefined ? bootPlan : undefined, main.dir, fx.lookup, append, digest);
+        const task = (release?.outcome === "found" ? release.plan : bootPlan).byId.get(id)!;
+        approved.push({ id, pin: operatorReleasePin(task) });
+        return release?.outcome === "found" || release === undefined ? 0 : 1;
+      },
     }),
     readRows: () => rows, nowMs: () => now,
   };
@@ -143,7 +152,9 @@ test("W1-T13785 criterion 4: the release probe reads a held public record's caus
   const { fx, main, rows, ports, pass, approved } = await refusalFixture(t);
   const refusal = steps(rows, APPROVE_RELEASE_REFUSED_STEP);
   assert.equal(refusal.length, 1, "the operator's refusal wrote one row");
-  const digest = publicRecordDigest(loadPlan(main.planPath).byId.get("PUB-2")!);
+  const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
+  const digest = publicRecordDigest(current);
+  assert.notEqual(digest, publicRecordDigest(loadPlan(main.planPath).byId.get("PUB-2")!), "the detached record predates the refused record");
   assert.equal(refusal[0]!.public_record_digest, digest, "the row names the public record's digest");
   const [item] = scanStuckState(rows).open;
   assert.equal(item?.digest, digest, "the held item carries it");
@@ -158,9 +169,24 @@ test("W1-T13785 criterion 4: the release probe reads a held public record's caus
   assert.deepEqual(await ports.probe(item!), { present: false, digest }, "gone once the edge clears, with the same public digest");
   await pass();
   await pass();
-  assert.deepEqual(approved, ["PUB-2"], "the gardener re-ran that release exactly once");
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }], "one replay pins the verified public record");
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
   assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
+});
+
+test("W1-T13785 criterion 4: the working-tree public refusal is recorded without opening a replay item", async t => {
+  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
+  mkdirSync(join(fx.stateDir, "plan"));
+  writeFileSync(join(fx.stateDir, "plan", "tasks.yaml"), PUBLIC_TEXT);
+  const rows: Row[] = [];
+  const publicPlan = loadPlan(join(fx.stateDir, "plan", "tasks.yaml"));
+  assert.deepEqual(await readApproveRelease("PUB-2", publicPlan, fx.stateDir, fx.lookup, row => rows.push({ ts: iso(NOW), ...row })),
+    { outcome: "held", hold: DUP_HOLD });
+  const [row] = rows;
+  assert.equal(rows.length, 1);
+  assert.equal(row?.public_commit, null);
+  assert.equal(row?.public_record_digest, publicRecordDigest(publicPlan.byId.get("PUB-2")!));
+  assert.deepEqual(scanStuckState(rows).open, []);
 });
 
 test("W1-T13785 criterion 4: a held public record that changed, or moved to the ops catalog, is never re-run and writes stuck_state.record_changed", async t => {
@@ -182,6 +208,28 @@ test("W1-T13785 criterion 4: a held public record that changed, or moved to the 
     assert.equal(changed[0]!.recorded_digest, steps(rows, APPROVE_RELEASE_REFUSED_STEP)[0]!.public_record_digest, shape);
     assert.notEqual(changed[0]!.current_digest, changed[0]!.recorded_digest, shape);
   }
+});
+
+test("W1-T13785 criterion 4: a public retry checks the digest and catalog again before it can release", async t => {
+  const { fx, main, ports, rows } = await refusalFixture(t);
+  const [item] = scanStuckState(rows).open;
+  const expected = item?.digest;
+  assert.ok(expected);
+  const append = (row: Row) => rows.push(row);
+  const retry = () => readApproveRelease("PUB-2", undefined, main.dir, fx.lookup, append, expected);
+  assert.equal((await retry())?.outcome, "held", "a hold still present refuses automatic release");
+  fx.set(record("OPS-GOOD"));
+  const offline = { ...fx.lookup, api: async () => { throw new Error("ops offline"); } };
+  assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, offline, append, expected),
+    { outcome: "unreadable", reason: "public-replay-ops-unreadable" });
+  main.publish(PUBLIC_TEXT.replace("held public fixture PUB-2", "edited after the probe"));
+  assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
+  main.publish(record("PUB-1"));
+  fx.set(record("PUB-2"));
+  assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
+  main.unpublish();
+  assert.deepEqual(await ports.probe(item!), { present: true, reason: "origin-main-unreadable" });
+  assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
 });
 
 test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-catalog — no record the composition holds is answered found by the approve release plan, and every other record is answered as on origin/main", async t => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { loadPlan, loadPlanAtRefAsync, MOVED_FROM_VALUE, parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, loadPlanKeepingUnseenDependencies, MOVED_FROM_VALUE, parseTasksFromYaml, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
@@ -233,19 +233,28 @@ export type ReleasePublicPlan =
   | { plan: Plan; read: "origin/main" }
   | { plan: Plan; read: "working_tree"; reason: string };
 
+/** A public-to-ops dependency must reach approve's composition so it can hold the task and its dependants. */
+export function loadLocalReleasePlan(path: string, stateDir: string): Plan {
+  return planDestinationRepository(stateDir).outcome === "named" ? loadPlanKeepingUnseenDependencies(path, () => true) : loadPlan(path);
+}
+
 /**
- * W1-T13749: the public plan an ops release composes against. It is the checkout's origin/main, the ref the
- * daemon's plan reloader reads (`planReloader` in src/run-task.ts), not the working tree: on the host that is the
- * boot's detached HEAD, older than every public id filed or moved since the boot. With that ref unreadable, the
- * working tree is the only plan the checkout holds, and the answer says it was read.
+ * The public view for release composition. Pin origin/main before reading its blobs so the refusal row can name
+ * that commit. A working-tree fallback can still show a hold to the operator. Its row has no commit for replay.
  */
-export async function readReleasePublicPlan(checkoutRoot: string): Promise<ReleasePublicPlan> {
+export async function readReleasePublicPlan(
+  checkoutRoot: string, { keepUnseenDependencies = false } = {},
+): Promise<ReleasePublicPlan & { commit?: string }> {
+  const keepsUnseenDependency = keepUnseenDependencies ? () => true : undefined;
   try {
-    return { plan: await loadPlanAtRefAsync(checkoutRoot, "plan/tasks.yaml", "origin/main"), read: "origin/main" };
+    const runGit = defaultGitRunnerAsync(checkoutRoot);
+    const commit = (await runGit(["rev-parse", "--verify", "origin/main"])).trim();
+    return { read: "origin/main", commit, plan: await loadPlanAtRefAsync(checkoutRoot, "plan/tasks.yaml", commit, runGit, keepsUnseenDependency) };
   } catch (error) {
-    // The ref read failed, not the plan: the working tree answers, labelled, and its own load errors propagate.
     const reason = error instanceof Error ? "origin-main-unreadable" : "origin-main-thrown";
-    return { plan: loadPlan(join(checkoutRoot, "plan", "tasks.yaml")), read: "working_tree", reason };
+    const path = join(checkoutRoot, "plan", "tasks.yaml");
+    const plan = keepsUnseenDependency ? loadPlanKeepingUnseenDependencies(path, keepsUnseenDependency) : loadPlan(path);
+    return { plan, read: "working_tree", reason };
   }
 }
 

@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, loadLocalReleasePlan, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -180,7 +180,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
-import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
+import { APPROVE_PUBLIC_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -29129,12 +29129,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T13750: held work is re-probed on the events its refusal class names; the operator's own refused release
-    // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
-    // record it refused is unchanged.
+    // re-runs as `rmd approve <id>` (approveCommand, in a child) while the refused record is unchanged.
     case "stuck-state": {
       const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
       const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
-        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
+        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild({ publicRoot }),
         gardenNames: REGISTERED_GARDEN_NAMES });
       return () => runStuckStateGardener(ports);
     }
@@ -39889,16 +39888,17 @@ export async function approveCommand(
   const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
+    const stateDir = join(config.root, "state");
+    const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
+    const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
+    const readLocal = (path: string) => loadLocalReleasePlan(path, stateDir);
     // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
-    const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
-    // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
-    // is released against the plan the daemon's tick composes, so both read the same pin.
-    // W1-T13749: that composition reads the checkout's origin/main, the ref the daemon's plan reloader reads, never
-    // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
-    const localPlan = located?.ok ? located.plan : loadPlan(planPath);
+    const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir, readLocal) : undefined;
+    // A public replay uses the pinned record verified by the gardener. An operator's ordinary release starts locally.
+    const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : readLocal(planPath) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
-    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir: join(config.root, "state") },
-      row => appendLedger(ledgerPathFor(config), row));
+    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
+      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest);
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
       return 1;
@@ -39908,12 +39908,13 @@ export async function approveCommand(
       console.error(`rmd approve: cannot release '${proposalId}': it is held by ${whose} (${held.hold.reason}: ${compositionHoldEdge(held.hold)}) — nothing released`);
       return 1;
     }
-    if (located && !located.ok && held?.outcome !== "found") {
-      console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
+    const releasePlan = held?.outcome === "found" ? held.plan : localPlan;
+    if (releasePlan === undefined || (located && !located.ok && held?.outcome !== "found")) {
+      console.error(`rmd approve: unknown task '${proposalId}'${located?.ok === false ? ` (${located.error})` : ""}`);
       return 2;
     }
     const outcome = approveParkedTask(proposalId, {
-      plan: held?.outcome === "found" ? held.plan : localPlan,
+      plan: releasePlan,
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -43418,13 +43419,13 @@ function instanceStateDirIfConfigured(): string | undefined {
 
 /** W1-T10925: the plan root (and its loaded plan) a per-task verb acts on — cwd's, or the instance's
  *  target checkout's when cwd's plan lacks the id. A miss names every plan searched. */
-function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured):
+function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured, readPlan = loadPlan):
   (Extract<VerbPlanRoot, { ok: true }> & { plan: Plan; planPath: string }) | Extract<VerbPlanRoot, { ok: false }> {
   let loaded: Plan | undefined;
   const located = resolveVerbPlanRoot(taskId, {
     cwdRoot: repoRoot,
     stateDir,
-    holds: (root, id) => (loaded = loadPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
+    holds: (root, id) => (loaded = readPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
   });
   return located.ok ? { ...located, plan: loaded!, planPath: join(located.root, "plan", "tasks.yaml") } : located;
 }

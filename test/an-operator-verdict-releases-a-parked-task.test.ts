@@ -7,7 +7,7 @@ import { RELEASE_LEDGER_STEP, assertRunnable, loadPlan, parseTasksFromYaml, rele
 import { nextRunnable, resolveReleasedIds, resolveReleases, runDrain } from "#src/lib/drain.js";
 import { OPERATOR_RELEASES_FILE, readOperatorReleaseRecords } from "#src/lib/machine-filing-judge.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import { composeSecondaryPlan } from "#src/lib/task-lookup.js";
+import { composeSecondaryPlan, readReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,8 +16,8 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
-import { productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
-import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
+import { approveInChild, productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
+import { approveCommand, approveParkedTask, namesATask, stripRepoRootFlag } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 /**
@@ -636,12 +636,6 @@ const DEPENDANT_ID = "W1-T1042";
 const dependingOn = (id: string, dependency: string): string => shardText(id).replace("depends_on: []", `depends_on: [${dependency}]`);
 /** The ops catalog repeats the public id without moved_from: both copies are held (duplicate_task_id). */
 const REPEATS_PUBLIC_ID = shardText(OPS_ID) + shardText(PUBLIC_ID);
-const HELD_PUBLIC = [
-  { name: "the public copy of an id the ops catalog repeats", publicText: shardText(PUBLIC_ID), subject: PUBLIC_ID,
-    held: `it is held by its own edge \\(duplicate_task_id: ${PUBLIC_ID} in both catalogs\\)` },
-  { name: "a public task depending on that copy", publicText: shardText(PUBLIC_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID), subject: DEPENDANT_ID,
-    held: `it is held by the edge of ${PUBLIC_ID}, which it depends on \\(duplicate_task_id: ${PUBLIC_ID} in both catalogs\\)` },
-];
 
 /** A public plan published at origin/main in a git checkout detached at the boot commit, as the host runs. */
 function publicMainAt(t: TestContext, bootText: string, mainText = bootText) {
@@ -663,11 +657,11 @@ function publicMainAt(t: TestContext, bootText: string, mainText = bootText) {
 }
 
 /** `rmd --repo-root <root> approve <rest>` with the host's state directory: the verb finds the plan in that root. */
-async function approveAtRoot(root: string, host: ReturnType<typeof hostWithSecondCatalog>, rest: string[]): Promise<number> {
+async function approveAtRoot(root: string, host: ReturnType<typeof hostWithSecondCatalog>, rest: string[], api = host.api): Promise<number> {
   const argv = [...process.argv];
   process.argv.push("--repo-root", root);
   try {
-    return await approveCommand(rest, { config: host.config, taskLookup: { api: host.api } });
+    return await approveCommand(rest, { config: host.config, taskLookup: { api } });
   } finally {
     process.argv.splice(0, process.argv.length, ...argv);
   }
@@ -692,41 +686,71 @@ async function approveIn(mode: (typeof MODES)[number], t: TestContext, host: Ret
 
 test("W1-T13785 criterion 1: approve refuses a public record the composition holds, handed a plan and as the host runs it, releases nothing, and writes one refusal row with the public record's digest", async t => {
   const everything = everythingSaid(t);
-  for (const world of HELD_PUBLIC) {
-    for (const mode of MODES) {
-      const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID }), from = everything.length;
-      const ops = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, host.api);
-      const { code, main, planPath } = await approveIn(mode, t, host, world.publicText, world.subject);
-      const said = everything.slice(from).join("\n"), label = `${world.name}, ${mode}: ${said}`;
-      assert.equal(code, 1, label);
-      assert.match(said, new RegExp(`cannot release '${world.subject}': ${world.held} — nothing released`), label);
-      assert.doesNotMatch(said, /RELEASED|unknown task|cannot be read/, label);
-      assert.deepEqual(host.releaseRows(world.subject), [], `no release row — ${label}`);
-      assert.equal(existsSync(host.durablePath), false, `no durable record — ${label}`);
-      const rows = host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
-      if (main === undefined) {
-        // #19593's design, kept: a hold read through the working-tree fallback has no public commit to replay against.
-        assert.deepEqual(rows, [], `the working-tree fallback writes no row — ${label}`);
-        continue;
-      }
-      assert.deepEqual(rows.map(row => row.step), ["approve.release_refused"], `exactly one refusal row — ${label}`);
-      const record = loadPlan(planPath).byId.get(world.subject)!;
-      assert.deepEqual(
-        [rows[0]!.task_id, rows[0]!.class, rows[0]!.reason, rows[0]!.edge, rows[0]!.public_commit, rows[0]!.ops_commit, rows[0]!.ops_record_digest, rows[0]!.public_record_digest],
-        [world.subject, "release-compose", "held-duplicate_task_id", `${PUBLIC_ID} in both catalogs`, main, ops.binding?.commit, null, publicRecordDigest(record)], label);
+  const worlds = [
+    { reason: "duplicate_task_id", edge: `${PUBLIC_ID} in both catalogs`, opsText: REPEATS_PUBLIC_ID, publicRecord: shardText(PUBLIC_ID) },
+    { reason: "invalid_cross_catalog_dependency", edge: `${PUBLIC_ID} -> ${OPS_ID}`, opsText: shardText(OPS_ID), publicRecord: dependingOn(PUBLIC_ID, OPS_ID) },
+  ];
+  for (const world of worlds) {
+    const publicText = world.publicRecord + dependingOn(DEPENDANT_ID, PUBLIC_ID);
+    for (const subject of [PUBLIC_ID, DEPENDANT_ID]) {
+      for (const mode of MODES) await t.test(`${world.reason}, ${subject}, ${mode}`, async sub => {
+        const host = hostWithSecondCatalog(sub, { opsText: world.opsText }), from = everything.length;
+        const { code, main, planPath } = await approveIn(mode, sub, host, publicText, subject);
+        const said = everything.slice(from).join("\n");
+        const whose = subject === PUBLIC_ID ? "its own edge" : `the edge of ${PUBLIC_ID}, which it depends on`;
+        assert.equal(code, 1, said);
+        assert.ok(said.includes(`cannot release '${subject}': it is held by ${whose} (${world.reason}: ${world.edge}) — nothing released`), said);
+        assert.doesNotMatch(said, /RELEASED|unknown task|cannot be read/);
+        assert.deepEqual(host.releaseRows(subject), []);
+        assert.equal(existsSync(host.durablePath), false);
+        const rows = host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+        assert.deepEqual(rows.map(row => row.step), ["approve.release_refused"]);
+        const record = parseTasksFromYaml(publicText, "public.yaml").find(task => task.id === subject)!;
+        if (world.reason === "invalid_cross_catalog_dependency") assert.throws(() => loadPlan(planPath), /depends_on unknown task/);
+        const opsCommit = createHash("sha1").update(world.opsText).digest("hex");
+        assert.deepEqual(
+          [rows[0]!.task_id, rows[0]!.class, rows[0]!.reason, rows[0]!.edge, rows[0]!.public_commit, rows[0]!.ops_commit, rows[0]!.ops_record_digest, rows[0]!.public_record_digest],
+          [subject, "release-compose", `held-${world.reason}`, world.edge, main ?? null, opsCommit, null, publicRecordDigest(record)]);
+      });
     }
   }
-  // A public task naming an ops id, and its dependant: the public plan's own strict loader refuses that plan before
-  // any release is read, on origin/main and here, so nothing is released and nothing is written. The lookup-level
-  // held answer for both is criterion 3's.
-  for (const subject of [PUBLIC_ID, DEPENDANT_ID]) {
-    const host = hostWithSecondCatalog(t);
-    const publicText = dependingOn(PUBLIC_ID, OPS_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID);
-    for (const mode of MODES) {
-      await assert.rejects(approveIn(mode, t, host, publicText, subject), new RegExp(`depends_on unknown task '${OPS_ID}'`), `${subject}, ${mode}`);
-      assert.equal(host.wroteAnything(), false, `${subject}, ${mode}: no row and no record`);
-    }
-  }
+});
+
+test("W1-T13785 criterion 4: the real approve retry releases the verified origin/main record from a stale detached checkout", async t => {
+  const currentText = shardText(PUBLIC_ID);
+  const bootText = currentText.replace(`Fixture ${PUBLIC_ID}`, "Older boot record");
+  const world = publicMainAt(t, bootText, currentText);
+  const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+  const cleared = hostWithSecondCatalog(t);
+  let api = host.api;
+  const approve = () => approveCommand([PUBLIC_ID], { config: host.config, planPath: world.planPath, taskLookup: { api } });
+  const said = everythingSaid(t);
+  assert.equal(await approve(), 1, said.join("\n"));
+  const currentPlan = await readReleasePublicPlan(world.dir);
+  const currentRecord = currentPlan.plan.byId.get(PUBLIC_ID)!;
+  assert.notEqual(operatorReleasePin(loadPlan(world.planPath).byId.get(PUBLIC_ID)!), operatorReleasePin(currentRecord));
+  const retries: string[][] = [];
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: path => api(path), gardenNames: [], publicRoot: world.dir,
+    publicMainCommit: () => readOriginMainSha(world.dir), destinationRead: async () => undefined, escalate: () => null,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: PUBLIC_ID, ...fields, step }),
+    approve: approveInChild({ publicRoot: world.dir, execArgv: [], entry: "src/run-task.ts", env: {},
+      run: async (_file, args) => {
+        retries.push([...args]);
+        assert.equal(await approveAtRoot(args[5]!, host, stripRepoRootFlag(args.slice(2)), api), 0, said.join("\n"));
+      },
+    }),
+  });
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, []);
+  api = cleared.api;
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, [["src/run-task.ts", "approve", PUBLIC_ID, `--replay-public-digest=${publicRecordDigest(currentRecord)}`, "--repo-root", world.dir]]);
+  assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [operatorReleasePin(currentRecord)]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, operatorReleasePin(currentRecord));
+  assert.deepEqual([...readReleasedTaskIds(host.rawLines(), currentPlan.plan)], [PUBLIC_ID]);
+  assert.ok(host.rawLines().some(line => JSON.parse(line).step === "stuck_state.cleared" && JSON.parse(line).retry === "approve"));
 });
 
 test("W1-T13785 criterion 2: a held public record is released as on origin/main when the ops catalog cannot be read or the destination is off, and a sound public task beside a held one keeps the local pin", async t => {
