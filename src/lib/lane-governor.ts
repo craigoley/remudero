@@ -92,6 +92,9 @@ export interface LaneTargetInputs {
   cpuCount: number;
   /** What the CPU arm has learned (W1-T11129); absent or unlearned keeps the cap at {@link cpuCount}. */
   cpu?: LaneCpuReading;
+  /** The lane pool's size (the fixed `sweep.dispatchLanes`). Present: the target never grows past it, so a later
+   *  shed (pressure is the previous target less one) bites at once instead of first walking down from above the pool. */
+  maxLanes?: number;
 }
 
 /** W1-T11129 — the CPU arm's learned figures, in CPUs (CPU-seconds per second). Null is "not learned yet". */
@@ -113,7 +116,7 @@ export function cpuLaneBound(cpuCount: number, cpu: LaneCpuReading | undefined):
   return Math.floor(Math.max(0, cpuCount - Math.max(0, cpu.baselineCpus)) / cpu.perLaneCpus);
 }
 
-export type LaneBinding = "pressure" | "container" | "host" | "growth" | "unread" | "wip" | "cpu";
+export type LaneBinding = "pressure" | "container" | "host" | "growth" | "unread" | "wip" | "cpu" | "fixed";
 
 export interface LaneTarget {
   target: number;
@@ -184,6 +187,7 @@ export function laneTarget(inputs: LaneTargetInputs): LaneTarget {
   }
   if (inputs.wipBound !== undefined && Number.isFinite(inputs.wipBound)) bounds.push([Math.floor(inputs.wipBound), "wip"]);
   bounds.push([cpuLaneBound(inputs.cpuCount, inputs.cpu) ?? Math.floor(inputs.cpuCount), "cpu"]);
+  if (inputs.maxLanes !== undefined && Number.isFinite(inputs.maxLanes)) bounds.push([Math.max(1, Math.floor(inputs.maxLanes)), "fixed"]);
   let [target, binding] = bounds[0]!;
   for (const [n, name] of bounds) if (n < target) [target, binding] = [n, name];
   target = Math.max(1, target);

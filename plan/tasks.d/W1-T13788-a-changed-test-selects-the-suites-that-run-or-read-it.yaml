@@ -1,0 +1,95 @@
+- id: W1-T13788
+  title: "A changed test file selects every suite that runs it as a child or reads its text, in the test-only PR lane and in the affected-suite selector"
+  repo: remudero
+  depends_on: []
+  priority: 0.9
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one rule across three selectors (test-only PR lane, affected-suite graph, shared scanner); a miss turns main red, an over-wide rule costs runner time
+  origin: "operator-session#main-red-19469-2026-11-18"
+  plan_refs:
+    - W1-T4395
+    - W1-T4404
+    - W1-T6089
+  files:
+    - src/lib/test-impact-map.ts
+    - src/lib/affected-suites.ts
+    - scripts/diff-class.mjs
+    - test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "On the real tree, the test-only run for a change to test/a-gate-run-leaves-the-tracked-tree-clean.test.ts (diff-class testOnlyRun, the list the PR lane ran for #19469) includes test/infra/gate-probe-native-evidence.test.ts, which runs that file as a child with spawnSync"
+      proof: "grep: W1-T13788 criterion 1 in test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts"
+    - claim: "selectAffectedSuites, for a change to test file C, selects suite B when B passes C's path to spawn, spawnSync, execFile, execFileSync, fork or runBoundedSuite (directly, as join or resolve segments, or through a const that holds the path), and the reason names C"
+      proof: "grep: W1-T13788 criterion 2 in test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts"
+    - claim: "selectAffectedSuites, for a change to test file C, selects suite B when B passes C's path to readFileSync or readFile (directly or through a const)"
+      proof: "grep: W1-T13788 criterion 3 in test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts"
+    - claim: "The selection is transitive over these edges: C changed, B runs C, A runs B, so both selectors select A and B"
+      proof: "grep: W1-T13788 criterion 4 in test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts"
+    - claim: "invariant:named-is-not-run — a suite that names C only as data (in an object or array literal never passed to a run or read call, in an assertion message, or in a comment) is not selected by either selector"
+      kind: guard
+      proof: "grep: W1-T13788 criterion 5 in test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts"
+    - claim: "The PR lane's census selection calls the shared scanner"
+      proof: "grep: testFilesASuiteRunsOrReads( in scripts/diff-class.mjs"
+    - claim: "The affected-suite graph calls the shared scanner"
+      proof: "grep: testFilesASuiteRunsOrReads( in src/lib/affected-suites.ts"
+  rationale: |
+    WHY: main was red from 18:47Z to 21:22Z on 2026-11-18, and the PR that broke it ran green.
+    #19469 (W1-T13243) changed only test/a-gate-run-leaves-the-tracked-tree-clean.test.ts: it changed a
+    probe's step label. test/infra/gate-probe-native-evidence.test.ts runs that file as a child
+    (spawnSync(process.execPath, [..., "test/a-gate-run-leaves-the-tracked-tree-clean.test.ts"]), line 36)
+    and matches the old label with a regex. Its 2 tests failed on main CI run 44373577634 (ci-shard 1/8, the
+    first red after #19469), on every PR that ran that shard, and until #19474 changed the regex.
+    MEASURED, #19469's own CI (run 44369058649): the PR lane classified it TEST_ONLY and ran "55 of 400
+    plan-reading candidates" per shard (diff-class --test-only-run: the changed test plus censusSuiteFiles).
+    No shard log of that run names gate-probe-native-evidence.test.ts.
+    READ at origin/main 079539063:
+    - scripts/diff-class.mjs testOnlyRun runs the changed tests plus censusSuiteFiles. censusSuiteFiles
+      selects a suite that reads a changed file only through sourceTextPathsRead, which looks inside
+      readFileSync calls only. A suite that spawns the changed test is never selected.
+    - src/lib/affected-suites.ts namedPaths drops every *.test.ts path ("a test path in a string is
+      prose"), so the import graph has no suite-to-suite edge. A changed suite selects only itself. This is
+      the selector behind rmd preflight, the merge-group selection and the live coverage selection.
+    - The same file holds 26 hand-written edge lists (69 suitePath("test/...") entries), several naming test
+      files, added after earlier misses ("recorded miss on coverage run ..."). This task replaces the need to
+      add one per miss.
+    HOW COMMON (a scan of the 4,994 tracked suites at 079539063, comments stripped, a test path counted only
+    when it sits in the arguments of a run or read call or in a const passed to one): 13 direct spawn edges,
+    14 direct read edges, and about 42 more through a const (10 spawn, 32 read), across about 45 consumer
+    suites. Examples that spawn: browser-test-corpus -> serve-browser-teardown, mac-generated-cache-proofs-
+    must-run -> mac-generated-cache-safety, no-test-worktree-outlives-its-fixture ->
+    worktree-base-currency-healthy, merge-lcov -> worker-provider, the check-test-test-* flake checks -> the
+    suite they check. Today the PR lane catches only the direct readFileSync cases; the affected-suite
+    selector catches none.
+  design: |
+    INVARIANT named-is-not-run: a suite is selected for a changed test file only when it runs that file as a
+    child or reads its text, never because its text names the path.
+    1. In src/lib/test-impact-map.ts (it already holds stripComments and maskLiterals and imports no repo
+       module, so both selectors can load it) add and export testFilesASuiteRunsOrReads(content): the
+       test/**/*.test.ts paths a comment-free file text passes to a run or read call. A path counts when it
+       is a string literal, or quoted segments ("test", "infra", "x.test.ts") under join or resolve, that
+       sits in the argument list of spawn, spawnSync, execFile, execFileSync, fork, runBoundedSuite,
+       readFileSync or readFile, through any argv array; or when it is held by a const whose name appears in
+       such an argument list. A path in an object or array literal that is not such an argument, in an
+       assertion message, or in a comment does not count. Reuse the enclosing-call walk that
+       affected-suites.ts usedAtRuntime does today (move the walk and PATH_SINKS into test-impact-map.ts and
+       call it from both places, so there is one copy).
+    2. src/lib/affected-suites.ts buildAffectedSuitesGraph: for each file under test/, add the paths
+       testFilesASuiteRunsOrReads returns (when known) to namedDependencies. namedPaths keeps dropping test
+       paths for every other use. selectAffectedSuites then picks the consumer through the existing
+       pathNamers loop; make that loop follow these suite-to-suite edges to a fixed point, so a suite that
+       runs a selected consumer is selected too (criterion 4). The reason reads "runs or reads <path>".
+    3. scripts/diff-class.mjs censusSuiteFiles: a suite also joins when testFilesASuiteRunsOrReads(content)
+       holds a changed path, then repeat over the suites added until no suite is added (transitive).
+       testOnlyRun therefore runs the consumers.
+    4. No change to the hand-written edge lists; they keep working.
+  falsifier: |
+    Remove the new arm from censusSuiteFiles: criterion 1 fails (the measured #19469 miss). Keep namedPaths'
+    test-path drop for test files: criteria 2 and 3 fail. Stop after one hop: criterion 4 fails. Count any
+    quoted test path in a suite's text: criterion 5 fails.
+  note: |
+    Filed from an operator analysis session of the 2026-11-18 red main, with W1-T13790 and W1-T13792. The scan counts come from a
+    throwaway script over the tree at 079539063; the builder may measure again.
