@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
@@ -554,6 +554,12 @@ function readLaunchdPath(path: string): { state: "present"; resolved: string } |
   }
 }
 
+function readLaunchdWorkingDirectory(path: string | undefined): string | null {
+  if (!path || !isAbsolute(path)) return null;
+  const reading = readLaunchdPath(path);
+  return reading.state === "present" ? reading.resolved : null;
+}
+
 function readLaunchdCheckoutBranch(checkout: string): string | null {
   try {
     return hostWorktreeGit(checkout, ["symbolic-ref", "--short", "-q", "HEAD"], { timeout: 1_000 }).trim() || null;
@@ -734,17 +740,7 @@ function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdSer
       && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
     const checkout = label === SUPERVISOR_LABEL
       ? readSupervisorCheckout(output, service.indent)
-      : usesCheckout && workingDirectory && isAbsolute(workingDirectory)
-        ? (() => {
-          try {
-            const directory = realpathSync(workingDirectory);
-            return statSync(directory).isDirectory() ? directory : null;
-          } catch (error) {
-            void error;
-            return null;
-          }
-        })()
-        : usesCheckout ? null : undefined;
+      : usesCheckout ? readLaunchdWorkingDirectory(workingDirectory) : undefined;
     const selfSync = checkout === null ? "unreadable" as const
       : checkout === undefined ? undefined : { checkout, branch: readLaunchdCheckoutBranch(checkout) };
     readings.push({
