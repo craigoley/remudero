@@ -9,11 +9,8 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { systemClock, type Clock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
-import { CONSOLE_CACHED_READ_PATHS } from "./route-read-rollup.js";
 import { SERVE_DEMAND_WINDOW_MS } from "./serve-demand.js";
 import type { Route } from "./service.js";
-import { VIEW_EVENTS_PATH } from "./view-events.js";
-import { viewKey, type ViewBodySource } from "./views.js";
 
 export const SERVE_READ_DEADLINE_MS_ENV = "RMD_SERVE_READ_DEADLINE_MS";
 export const SERVE_READ_DEADLINE_MODE_ENV = "RMD_SERVE_READ_DEADLINE";
@@ -40,14 +37,21 @@ export function readDeadlineConfig(env: NodeJS.ProcessEnv): { mode: ReadDeadline
 }
 
 /** Only GET reads of a view or of a legacy cached route. Writes, the batch POST and the view event stream are never cut. */
-export function readDeadlineCovers(route: Pick<Route, "method" | "scope" | "path">): boolean {
-  if (route.method !== "GET" || route.scope !== "read" || route.path === VIEW_EVENTS_PATH) return false;
+export function readDeadlineCovers(
+  route: Pick<Route, "method" | "scope" | "path">,
+  { cachedReadPaths, viewEventsPath }: Pick<ReadDeadlineOptions, "cachedReadPaths" | "viewEventsPath">,
+): boolean {
+  if (route.method !== "GET" || route.scope !== "read" || route.path === viewEventsPath) return false;
   const base = route.path.replace(INSTANCE_PREFIX, "/v1/");
-  return base.startsWith("/v1/views/") || CONSOLE_CACHED_READ_PATHS.has(base);
+  return base.startsWith("/v1/views/") || cachedReadPaths.has(base);
 }
 
 /** A view route's committed body is the read model's held body for its key. */
-export function committedViewBody(source: Pick<ViewBodySource, "body"> | undefined, route: Pick<Route, "path">): ((req: IncomingMessage) => CommittedRead | undefined) | undefined {
+export function committedViewBody(
+  source: { body(view: string, key: string): { body: { generatedAt: string } } | undefined } | undefined,
+  route: Pick<Route, "path">,
+  viewKey: (params: URLSearchParams) => string,
+): ((req: IncomingMessage) => CommittedRead | undefined) | undefined {
   if (!source || !route.path.startsWith("/v1/views/")) return undefined;
   const view = route.path.slice("/v1/views/".length);
   return (req) => {
@@ -58,6 +62,8 @@ export function committedViewBody(source: Pick<ViewBodySource, "body"> | undefin
 
 export interface ReadDeadlineOptions {
   ledgerPath: string;
+  cachedReadPaths: ReadonlySet<string>;
+  viewEventsPath: string;
   mode?: ReadDeadlineMode;
   deadlineMs?: number;
   /** The route family the serve.demand window counts this request under. */
@@ -128,7 +134,7 @@ export function createReadDeadline(options: ReadDeadlineOptions) {
   }
 
   function wrap(route: Route, committed?: (req: IncomingMessage) => CommittedRead | undefined): Route {
-    if (!readDeadlineCovers(route)) return route;
+    if (!readDeadlineCovers(route, options)) return route;
     return { ...route, handler: (req, res, ctx) => {
       const family = options.family(req) ?? route.path;
       const remember = mode === "enforce" && !committed ? `${route.path}${new URL(req.url ?? "/", "http://localhost").search}` : undefined;

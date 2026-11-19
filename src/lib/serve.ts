@@ -74,7 +74,7 @@ import {
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
-import { buildReadModelViewRoutes, oldestAsOf, viewMode, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -3601,14 +3601,17 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     memory,
   );
   // W1-T11817: the deadline counts under the demand window's own families, read only at request time.
-  const readDeadline = createReadDeadline({ ...readDeadlineConfig(process.env), ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath, family: (req) => demand.familyFor(req) });
+  const readDeadline = createReadDeadline({
+    ...readDeadlineConfig(process.env), ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath,
+    cachedReadPaths: CONSOLE_CACHED_READ_PATHS, viewEventsPath: VIEW_EVENTS_PATH, family: (req) => demand.familyFor(req),
+  });
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
     // five paths (`/v1/manual/approve`, `/v1/drain/kick`, `/v1/drain/run`, `/v1/inbox/approve`,
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(withReadDeadline(route, readDeadline, committedViewBody(readModel, route)))),
+    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(withReadDeadline(route, readDeadline, committedViewBody(readModel, route, viewKey)))),
   );
   const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({

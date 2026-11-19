@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { CONSOLE_CACHED_READ_PATHS } from "#src/lib/route-read-rollup.js";
 import { createServeDemand, SERVE_DEMAND_WINDOW_MS } from "#src/lib/serve-demand.js";
 import {
   committedViewBody, CONSOLE_REQUEST_TIMEOUT_MS, createReadDeadline, DEFAULT_SERVE_READ_DEADLINE_MS, readDeadlineConfig,
@@ -22,6 +23,7 @@ import { buildReadModelViewRoutes, viewEtag, viewKey, type ViewBody, type ViewBo
 
 const DEADLINE_MS = 40;
 const SLOW_MS = 250;
+const readRoutes = { cachedReadPaths: CONSOLE_CACHED_READ_PATHS, viewEventsPath: VIEW_EVENTS_PATH };
 type Counts = { late: number; stale: number; deferred: number };
 type Row = { step: string; mode: string; deadlineMs: number; families: Record<string, Counts> };
 
@@ -39,7 +41,7 @@ async function world(t: { after: (fn: () => void) => void }, root: string, mode:
   writeFileSync(ledgerPath, "");
   let clock = 0;
   const demand = createServeDemand({ ledgerPath, routes, clock: clockFromMillisFn(() => clock) });
-  const deadline = createReadDeadline({ ledgerPath, mode, deadlineMs: DEADLINE_MS, clock: clockFromMillisFn(() => clock), family: (req) => demand.familyFor(req) });
+  const deadline = createReadDeadline({ ...readRoutes, ledgerPath, mode, deadlineMs: DEADLINE_MS, clock: clockFromMillisFn(() => clock), family: (req) => demand.familyFor(req) });
   const wrapped = routes.map((route) => withReadDeadline(route, deadline, committed(route)));
   const server = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
@@ -105,7 +107,7 @@ test("W1-T11817 criterion 2: in enforce a late read with a committed body is ans
   await withTempDir("read-deadline-stale", async (root) => {
     const view = heldView("1970-01-01T00:00:00.000Z");
     const finished: number[] = [];
-    const w = await world(t, root, "enforce", [view.route, legacyStatus((call) => call === 2, finished)], (route) => committedViewBody(view.source, route));
+    const w = await world(t, root, "enforce", [view.route, legacyStatus((call) => call === 2, finished)], (route) => committedViewBody(view.source, route, viewKey));
     w.setClock(90_000);
     const viewed = await w.read("/v1/views/held?instance=core");
     assert.equal(viewed.status, 200);
@@ -132,7 +134,7 @@ test("W1-T11817 criterion 2: in enforce a late read with a committed body is ans
 test("W1-T11817 criterion 3: in enforce a late read with no committed body is answered at once with 503 and retry-after, and counted deferred", async (t) => {
   await withTempDir("read-deadline-deferred", async (root) => {
     const view = heldView("1970-01-01T00:00:00.000Z");
-    const w = await world(t, root, "enforce", [view.route, legacyStatus(() => true)], (route) => committedViewBody(view.source, route));
+    const w = await world(t, root, "enforce", [view.route, legacyStatus(() => true)], (route) => committedViewBody(view.source, route, viewKey));
     for (const path of ["/v1/views/held?instance=cold", "/v1/status"]) {
       const read = await w.read(path);
       assert.equal(read.status, 503);
@@ -153,8 +155,8 @@ test("W1-T11817 criterion 4: 4000 ms under the console's 5000 ms, shadow by defa
   assert.equal(DEFAULT_SERVE_READ_DEADLINE_MS < CONSOLE_REQUEST_TIMEOUT_MS, true);
   assert.deepEqual(readDeadlineConfig({ RMD_SERVE_READ_DEADLINE: "enforce", RMD_SERVE_READ_DEADLINE_MS: "2500" }), { mode: "enforce", deadlineMs: 2500 });
   assert.deepEqual(readDeadlineConfig({ RMD_SERVE_READ_DEADLINE: "on", RMD_SERVE_READ_DEADLINE_MS: "soon" }), { mode: "shadow", deadlineMs: 4000 });
-  assert.deepEqual(createReadDeadline({ ledgerPath: "unused", family: () => undefined }).deadlineMs, 4000);
-  const covered = (method: string, path: string, scope = "read") => readDeadlineCovers({ method: method as Route["method"], path, scope: scope as Route["scope"] });
+  assert.deepEqual(createReadDeadline({ ...readRoutes, ledgerPath: "unused", family: () => undefined }).deadlineMs, 4000);
+  const covered = (method: string, path: string, scope = "read") => readDeadlineCovers({ method: method as Route["method"], path, scope: scope as Route["scope"] }, readRoutes);
   assert.deepEqual([covered("GET", "/v1/views/now"), covered("GET", "/v1/status"), covered("GET", "/v1/i/games/status"), covered("GET", "/v1/operator-activity")], [true, true, true, true]);
   assert.deepEqual([covered("POST", "/v1/views/batch"), covered("GET", VIEW_EVENTS_PATH), covered("POST", "/v1/inbox/approve", "write"), covered("GET", "/v1/task")], [false, false, false, false]);
   await withTempDir("read-deadline-scope", async (root) => {
@@ -164,7 +166,7 @@ test("W1-T11817 criterion 4: 4000 ms under the console's 5000 ms, shadow by defa
     const stream: Route = { method: "GET", path: VIEW_EVENTS_PATH, scope: "read", handler: async (_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" }); res.write("event: ping\n\n"); await sleep(SLOW_MS); res.end();
     } };
-    const deadline = createReadDeadline({ ledgerPath: join(root, "ledger.ndjson"), mode: "enforce", deadlineMs: DEADLINE_MS, family: () => undefined });
+    const deadline = createReadDeadline({ ...readRoutes, ledgerPath: join(root, "ledger.ndjson"), mode: "enforce", deadlineMs: DEADLINE_MS, family: () => undefined });
     assert.equal(withReadDeadline(write, deadline), write);
     assert.equal(withReadDeadline(stream, deadline), stream);
     const w = await world(t, root, "enforce", [write, stream]);
@@ -189,7 +191,7 @@ test("the deadline window starts its own timer and reports a ledger it cannot wr
     mkdirSync(join(root, "dir"));
     const logged: string[] = [];
     let clock = 0;
-    const deadline = createReadDeadline({ ledgerPath: join(root, "dir"), mode: "enforce", deadlineMs: 1, clock: clockFromMillisFn(() => clock),
+    const deadline = createReadDeadline({ ...readRoutes, ledgerPath: join(root, "dir"), mode: "enforce", deadlineMs: 1, clock: clockFromMillisFn(() => clock),
       family: () => undefined, log: (step) => logged.push(step) });
     const stop = deadline.start();
     stop(); stop();
@@ -200,7 +202,7 @@ test("the deadline window starts its own timer and reports a ledger it cannot wr
     clock = SERVE_DEMAND_WINDOW_MS; deadline.flush();
     assert.deepEqual(logged, ["serve.read_deadline_write_failed"]);
     let ticks = 0;
-    const every = createReadDeadline({ ledgerPath: join(root, "dir"), family: () => undefined, every: () => { ticks++; return () => {}; } });
+    const every = createReadDeadline({ ...readRoutes, ledgerPath: join(root, "dir"), family: () => undefined, every: () => { ticks++; return () => {}; } });
     every.start()();
     assert.equal(ticks, 1);
   });
