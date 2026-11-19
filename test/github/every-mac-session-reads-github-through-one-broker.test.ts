@@ -727,7 +727,8 @@ test("a refused broker socket bind leaves no heartbeat timer keeping its process
     'import assert from "node:assert/strict";',
     `import { GhReadBroker, serveGhReadBroker } from ${JSON.stringify(source)};`,
     `const dir = ${JSON.stringify(dir)};`,
-    'const broker = new GhReadBroker(dir, async () => { throw new Error("no upstream request belongs to a failed bind"); });',
+    // W1-T11789: the login lookup runs before the bind; every other upstream request would be a defect.
+    'const broker = new GhReadBroker(dir, async (args) => { if (args[1] === "user") return { stdout: "octo\\n", stderr: "", exitCode: 0 }; throw new Error("no upstream request belongs to a failed bind"); });',
     'await assert.rejects(serveGhReadBroker({ dir, broker }), /listen|ENAMETOOLONG|EINVAL/);',
     'console.log("broker-bind-refused");',
   ].join("\n");
@@ -802,4 +803,64 @@ test("W1-T11787 criterion 4: a boot that evicted writes one bounded log row nami
   assert.equal(evictRows[0]!.entries, 8 - kept);
   assert.ok((evictRows[0]!.bytes as number) >= (8 - kept) * 5 * 1024 * 1024);
   assert.ok(JSON.stringify(evictRows[0]).length < 300);
+});
+
+/** W1-T11789: a served broker directory whose `api user` lookup answers `user`; it records which files existed
+ *  at the moment the login was asked for, so a test can tell a pre-bind lookup from a post-bind one. */
+function identityFixture(t: TestContext, tag: string, user: () => Promise<GhUpstreamResult>) {
+  const cache = tmp(t, tag);
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  const lookups: Array<{ socket: boolean; heartbeat: boolean }> = [];
+  const exec: GhUpstreamExec = async (args) => {
+    if (args[1] !== "user") return http("200 OK", ["Cache-Control: private, max-age=60"], '{"n":11789}');
+    lookups.push({ socket: existsSync(join(dir, "broker.sock")), heartbeat: existsSync(join(dir, "heartbeat")) });
+    return user();
+  };
+  const broker = new GhReadBroker(dir, exec, clockFromMillisFn(() => 1_800_000_000_000), async () => {}, () => 1e12,
+    { sharedPaceRoot: null, account: "t" });
+  return { cache, dir, broker, lookups };
+}
+
+test("W1-T11789 criterion 1: serve resolves the login once before it binds and refuses, naming the missing identity, when it reads unknown", { timeout: 60_000 }, async (t) => {
+  for (const [tag, user] of [
+    ["empty", async () => ({ stdout: "", stderr: "", exitCode: 0 })],
+    ["unauthenticated", async () => ({ stdout: "", stderr: "HTTP 401: Requires authentication\n", exitCode: 4 })],
+    ["thrown", async () => { throw new Error("gh vanished"); }],
+  ] as const) {
+    const { dir, broker, lookups } = identityFixture(t, `id-${tag}`, user);
+    let served: Awaited<ReturnType<typeof serveGhReadBroker>> | undefined;
+    await assert.rejects(
+      (async () => { served = await serveGhReadBroker({ dir, broker }); })(),
+      /refusing to serve .*broker\.sock: no GitHub identity \(login reads unknown.*\); set GH_TOKEN for the broker process/,
+      `${tag}: an identity-less broker refuses to serve`,
+    );
+    if (served) await served.close(); // only reached when the falsifier lets it bind
+    assert.deepEqual(lookups, [{ socket: false, heartbeat: false }], `${tag}: one login lookup, before any socket or heartbeat`);
+    if (tag === "thrown") assert.equal((broker.status() as { login: unknown }).login, null, "a thrown lookup cached no login");
+  }
+});
+
+test("W1-T11789 criterion 2: a refused start leaves no socket and no heartbeat, so the hook keeps its 180 s floor", { timeout: 60_000 }, async (t) => {
+  const { cache, dir, broker } = identityFixture(t, "id-floor", async () => ({ stdout: "", stderr: "HTTP 401: Bad credentials\n", exitCode: 1 }));
+  let served: Awaited<ReturnType<typeof serveGhReadBroker>> | undefined;
+  await assert.rejects((async () => { served = await serveGhReadBroker({ dir, broker }); })(), /no GitHub identity/);
+  if (served) await served.close();
+  assert.equal(existsSync(join(dir, "broker.sock")), false, "a refused start binds no socket");
+  assert.equal(existsSync(join(dir, "heartbeat")), false, "a refused start beats no heartbeat");
+  assert.equal(ghReadBrokerLive({ RMD_GH_CACHE_HOME: cache }), undefined, "clients see no live broker to route to");
+  assert.equal(fireHook("rmd gh -- pr view 5", cache).status, 0, "the first read is allowed");
+  const floored = fireHook("gh pr view 6", cache);
+  assert.equal(floored.status, 2, "the hook keeps its floor instead of routing to the refused broker");
+  assert.match(floored.stderr, /floor 180s, W1-T3275/);
+});
+
+test("W1-T11789 criterion 3: a broker whose login resolves serves exactly as today", { timeout: 60_000 }, async (t) => {
+  const { cache, dir, broker, lookups } = identityFixture(t, "id-octo", async () => ok("octo\n"));
+  const server = await serveGhReadBroker({ dir, broker });
+  t.after(() => server.close());
+  assert.equal(ghReadBrokerLive({ RMD_GH_CACHE_HOME: cache }), server.socketPath, "a resolved broker's heartbeat reads live");
+  assert.equal((await ghBrokerStatus(cache)).login, "octo", "the login is known at serve start, before any read asks for it");
+  const read = await brokerGhRead(server.socketPath, ["api", "repos/o/r/pulls/11789"], { class: "interactive", caller: "s" });
+  assert.deepEqual([read.exitCode, read.stdout, read.outcome], [0, '{"n":11789}', "upstream-200"], "reads are served as before");
+  assert.equal(lookups.length, 1, "the login resolved at serve start is the one every read keys on");
 });

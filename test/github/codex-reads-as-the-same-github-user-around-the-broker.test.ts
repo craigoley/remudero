@@ -12,6 +12,7 @@ import {
   type GhUpstreamExec, type GhUpstreamResult,
 } from "#src/lib/gh-read-broker.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T10302 — Codex sessions read GitHub as the same user as the Claude sessions, around the broker. These
@@ -454,14 +455,21 @@ test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the logi
   assert.ok(handler, "gh-broker is a registered command");
   const cache = tmp(t, "cli-cache");
   const pace = tmp(t, "cli-pace");
-  const saved = { cache: process.env.RMD_GH_CACHE_HOME, pace: process.env.RMD_GH_PACE_ROOT };
+  const shim = ghShim([{ when: "api user --jq .login", stdout: LOGIN }]);
+  const saved = {
+    RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME,
+    RMD_GH_PACE_ROOT: process.env.RMD_GH_PACE_ROOT,
+    PATH: process.env.PATH,
+  };
   process.env.RMD_GH_CACHE_HOME = cache;
   process.env.RMD_GH_PACE_ROOT = pace;
+  process.env.PATH = `${shim.dir}:${saved.PATH ?? ""}`;
   t.after(() => {
-    for (const [key, value] of [["RMD_GH_CACHE_HOME", saved.cache], ["RMD_GH_PACE_ROOT", saved.pace]] as const) {
+    for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    rmSync(shim.dir, { recursive: true, force: true });
   });
   // Only the handler's own string output is captured. Everything else the process writes (the test runner's
   // reports reach stdout through this same function, as binary chunks) goes on to the real stream untouched.
@@ -485,6 +493,8 @@ test("W1-T10302: the registered `rmd gh-broker` handler serves, reports the logi
     assert.equal(await handler(["status", "--since", "1d"]), 0);
     const printed = writes.join("");
     const shown = JSON.parse(printed.slice(printed.indexOf("{"))) as { login_status: { login: unknown; accounts: string[]; by_account: Record<string, unknown> } };
+    assert.equal(shown.login_status.login, LOGIN, "status reports the identity resolved at startup");
+    assert.deepEqual(shim.calls(), ["api user --jq .login"], "the handler resolves the login once");
     assert.ok(Array.isArray(shown.login_status.accounts), "status carries the per-login view from ghBrokerLoginStatus");
     assert.equal(Object.keys(shown.login_status.by_account).length, 1, "this account's request log is summarised");
     assert.equal(await handler(["stop"]), 0);
