@@ -44,9 +44,13 @@ import {
 import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-state-commit-store.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
-import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
+import {
+  gatedRemoteRefReserver, parseReservationHolderLine, RESERVATION_PUSH_GRACE_MS, reservationHandoffNoteLine, reserveTaskIdRemote,
+  taskIdReservationRef, type RemoteReserveDeps,
+} from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import { checkSharedPause, isRecyclePauseDetail, realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
 import {
@@ -60,7 +64,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { parse as parseYaml } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -282,6 +286,7 @@ import {
   excludeNodeModulesFromGit,
   provisionWorktreeNodeModules,
   worktreeAdd,
+  worktreeAddAsync,
   worktreeRemove,
   worktreeRemoveAsync,
   releaseReviewWorktree,
@@ -348,6 +353,7 @@ import {
   needsWorkflowIdentity,
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
+  fetchBoardPrsRestAsync,
   GhPaceFloorStandDownError,
   isHumanHoldCandidate,
   isScannerBlockerCandidate,
@@ -6086,6 +6092,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (decision.jobId) ghJsonForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
         return { outcome: "retitled" };
       }
+      if (decision.action === "handoff") {
+        return handOffHeldPlanPrIds(pr, decision.handoffs, repoDir, join(worktreesDir(config), `plan-handoff-${pr.prNumber}-${nowMsImpl()}`),
+          { owner, repo, log, readJson: (args) => readJsonImpl(args), nowMs: nowMsImpl });
+      }
       // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
       const worktreePath = join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`);
       return renumberPlanPrIds(pr, decision.heldIds, decision.title, repoDir, worktreePath, deps);
@@ -11544,8 +11554,11 @@ export function planLintViolationsFromCiFailures(failures: readonly CiFailure[],
   return [...named].slice(0, max);
 }
 
+type HeldIdHandoff = { id: string; holder: string; filer: string; files: string[] };
+
 export type PlanRepairDecision =
   | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
+  | { signature: "held-task-id-handoff"; action: "handoff"; check: "task-id-existence"; handoffs: HeldIdHandoff[] }
   | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
   | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" | "inherited" };
 
@@ -11579,6 +11592,33 @@ export function heldTaskIdsFromCiFailures(failures: readonly CiFailure[]): strin
     }
   }
   return [...ids];
+}
+
+/** W1-T13829: the hand-off lines task-id-existence printed, only when every held id has one naming `filer` and no
+ *  collision or open-PR section lists an id. */
+function gateHandoffsFromCiFailures(failures: readonly CiFailure[], filer: string | undefined): HeldIdHandoff[] | undefined {
+  const entries: Array<{ id: string; holder?: string; filer?: string; files: string[] }> = [];
+  let section: "held" | "other" | undefined;
+  for (const raw of failures.flatMap((f) => f.logTail.split("\n"))) {
+    const line = raw.replace(/^\d{4}-\d\d-\d\dT\S+ ?/, "").trimEnd();
+    if (line.includes("task-id-existence:")) {
+      section = line.includes("HELD by a different reservation holder") ? "held" : HELD_ID_HEADER_RE.test(line) ? "other" : undefined;
+    }
+    const id = /^\s+(W\d+-T\d+) -- /.exec(line)?.[1];
+    if (section === "other" && id) return undefined;
+    if (section !== "held") continue;
+    const file = /^\s+(plan\/tasks\.d\/[^/\s]+\.ya?ml):\d+$/.exec(line)?.[1];
+    const handoff = /^\s+reservation hand-off: ([\w./-]+) -> ([\w./-]+)$/.exec(line);
+    if (id) entries.push({ id, files: [] });
+    else if (file) entries.at(-1)?.files.push(file);
+    else if (handoff && entries.length > 0) Object.assign(entries.at(-1)!, { holder: handoff[1], filer: handoff[2] });
+  }
+  const out = new Map<string, HeldIdHandoff>();
+  for (const e of entries) {
+    if (e.holder === undefined || filer === undefined || e.filer !== filer || e.files.length === 0) return undefined;
+    out.set(e.id, { id: e.id, holder: e.holder, filer, files: [...new Set(e.files)] });
+  }
+  return out.size > 0 ? [...out.values()] : undefined;
 }
 
 /** CHECK-NAME TRAP (W1-T4399): the `commitlint` check reports the title step AND rule-checks. Only
@@ -11619,6 +11659,10 @@ export function planRepairHistoryFromLedger(lines: readonly Record<string, unkno
     if (line.step !== PLAN_REPAIR_STEP || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
     if (line.outcome === "unwired") continue; // PR-13008: a light pass's no-op never spends the full pass's attempt.
     const head = `${line.pr_number}@${line.head_sha}`;
+    if (line.outcome === "stood-down") {
+      keys.add(`${head}@${String(line.signature)}@stood-down`).add(`${head}@${String(line.signature)}@stood-down@${String(line.reason)}`);
+      continue;
+    }
     keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
     if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
   }
@@ -11636,6 +11680,10 @@ export function decidePlanRepair(
   const head = `${pr.prNumber}@${pr.headSha}`;
   // The renumber and retitle rungs push to the lane's OWN branch, so only a fleet machine-lane head gets them.
   const fleetLane = isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts.authorLogin);
+  const handoffs = pr.isPlanFiling === true ? gateHandoffsFromCiFailures(failures, pr.headRefName) : undefined;
+  if (handoffs && !history.has(`${head}@held-task-id-handoff`) && !(fleetLane && history.has(`${head}@held-task-id-handoff@stood-down`))) {
+    return { signature: "held-task-id-handoff", action: "handoff", check: "task-id-existence", handoffs };
+  }
   if (fleetLane) {
     const heldIds = heldTaskIdsFromCiFailures(failures);
     if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
@@ -11750,6 +11798,118 @@ export async function renumberPlanPrIds(
       }
     }
   }
+}
+
+/** W1-T13829: the gate's printed hand-off line, added to each named shard's note of a PR whose holders are abandoned
+ *  (W1-T6026's proof: no holder head on origin, no open PR on it, a reservation past RESERVATION_PUSH_GRACE_MS). */
+export async function handOffHeldPlanPrIds(
+  pr: OpenPrView,
+  handoffs: readonly HeldIdHandoff[],
+  repoDir: string,
+  wt: string,
+  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo" | "log"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
+): Promise<PlanRepairOutcome> {
+  const branch = pr.headRefName;
+  if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
+  const git = (cwd: string, args: string[]) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 });
+  const standDown = await handoffStandDown(handoffs, repoDir, git, deps);
+  if (standDown !== undefined) return { outcome: "stood-down", reason: standDown };
+  let cut = false;
+  try {
+    await worktreeAddAsync(repoDir, wt, basename(wt), `origin/${branch}`, { log: deps.log });
+    cut = true;
+    const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
+    if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
+    const files: string[] = [];
+    for (const h of handoffs) {
+      for (const rel of h.files) {
+        const next = shardWithHandoffNote(readFileSync(join(wt, rel), "utf8"), h.id, reservationHandoffNoteLine(h.holder, h.filer));
+        if (typeof next !== "string") return { outcome: "stood-down", reason: `${rel}: ${next.reason}` };
+        writeFileSync(join(wt, rel), next);
+        files.push(rel);
+      }
+    }
+    const ids = [...new Set(handoffs.map((h) => h.id))].join(", ");
+    await git(wt, ["add", "--", ...new Set(files)]);
+    await git(wt, ["commit", "-m", `chore(plan): record the reservation hand-off for ${ids}\n\nW1-T13829 sweep plan repair.`]);
+    const newHeadSha = (await git(wt, ["rev-parse", "HEAD"])).trim();
+    assertLiveWriteAllowed("git-push", `recording the reservation hand-off for ${ids} on ${branch} for PR #${pr.prNumber}`);
+    await git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
+    return { outcome: "handed-off", newHeadSha };
+  } catch (error) {
+    return { outcome: "error", reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+  } finally {
+    if (cut) await worktreeRemoveAsync(repoDir, wt).catch((error) => deps.log("sweep.plan_repair.cleanup_failed", { reason: String(error) }));
+  }
+}
+
+/** The first abandonment test a holder fails, named; an unreadable fact stands down too. */
+async function handoffStandDown(
+  handoffs: readonly HeldIdHandoff[], repoDir: string, git: (cwd: string, args: string[]) => Promise<string>,
+  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
+): Promise<string | undefined> {
+  try {
+    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, deps.readJson, undefined, "open");
+    if (open.truncated) return "the open pull request list is incomplete";
+    for (const { id, holder } of handoffs) {
+      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
+        return `holder branch ${holder} of ${id} is on origin`;
+      }
+      const openPr = open.rows.find((row) => row.headRefName === holder);
+      if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
+      const ref = taskIdReservationRef(id);
+      const sha = (await git(repoDir, ["ls-remote", "origin", ref])).split(/\s/)[0] ?? "";
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) return `the reservation of ${id} is not on origin`;
+      await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "origin", ref]);
+      const parsed = parseReservationHolderLine(await git(repoDir, ["log", "-1", "--format=%B", sha]));
+      if (parsed.status !== "known" || parsed.holder.branch !== holder) return `the reservation of ${id} does not name ${holder} as its holder`;
+      const started = Date.parse(parsed.holder.startedAt ?? "");
+      if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
+      if (deps.nowMs() - started < RESERVATION_PUSH_GRACE_MS) {
+        return `the reservation of ${id} started at ${parsed.holder.startedAt}, less than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h ago`;
+      }
+    }
+    return undefined;
+  } catch (error) {
+    return `a holder fact is unreadable: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}`;
+  }
+}
+
+/** `text` with `line` as a new last line of task `id`'s note (a block scalar), or why it cannot be added alone. */
+function shardWithHandoffNote(text: string, id: string, line: string): string | { reason: string } {
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0 || !isSeq(doc.contents)) return { reason: "the shard is not a YAML task list" };
+  const before = parseYaml(text) as Array<Record<string, unknown> | null>;
+  const task = doc.contents.items[before.findIndex((row) => row?.id === id)];
+  const first = isMap(task) ? task.items[0]?.key : undefined;
+  const keyStart = isScalar(first) ? first.range?.[0] : undefined;
+  if (before.filter((row) => row?.id === id).length !== 1 || !isMap(task) || task.range === undefined || keyStart === undefined) {
+    return { reason: `the shard does not declare ${id} once` };
+  }
+  const pad = " ".repeat(keyStart - (text.lastIndexOf("\n", keyStart - 1) + 1));
+  const note = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "note")?.value;
+  if (note !== undefined && !(isScalar(note) && (typeof note.value === "string" || note.value === null) && note.range)) {
+    return { reason: `the note of ${id} is not text` };
+  }
+  const prior = isScalar(note) && typeof note.value === "string" ? note.value.replace(/\n+$/, "") : "";
+  const body = [...(prior ? prior.split("\n") : []), line].map((l) => (l ? `${pad}  ${l}` : "")).join("\n");
+  let next: string;
+  if (isScalar(note) && note.range) {
+    const [start, end] = note.range;
+    next = `${text.slice(0, start)}|\n${body}${text[end - 1] === "\n" ? "\n" : ""}${text.slice(end)}`;
+  } else {
+    const end = task.range[1];
+    const at = text[end - 1] === "\n" ? end : text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end);
+    const block = `${pad}note: |\n${body}`;
+    next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}\n${text.slice(at)}` : `${text.slice(0, at)}\n${block}${text.slice(at)}`;
+  }
+  const after = parseDocument(next);
+  const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
+  const expected = `${prior ? `${prior}\n` : ""}${line}\n`;
+  const same = Array.isArray(rows) && rows.length === before.length && rows.every((row, i) => row?.id === id
+    ? row.note === expected && isDeepStrictEqual({ ...row, note: undefined }, { ...before[i], note: undefined })
+    : isDeepStrictEqual(row, before[i]));
+  return same ? next : { reason: `adding the hand-off to the note of ${id} would change other text` };
 }
 
 /** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gatedRemoteRefReserver} takes.
@@ -16221,7 +16381,7 @@ export interface SweepDeps {
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
   repairPlanPr?: (
     pr: OpenPrView,
-    decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
+    decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" | "handoff" }>,
   ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
   /** W1-T11388: a conflicted machine-judge PR whose ruled record moved on main is withdrawn for a re-judge
    *  (closed, the judge's pending state cleared), never sent to a plan-scoped round machine-author-verify must refuse. */
@@ -22289,15 +22449,20 @@ export async function runSweep(
       result = { outcome: "error", reason: String((e as Error)?.message ?? e) };
     }
     if (decision.signature === "base-red" && result.reason !== undefined) result = { outcome: `error: ${result.reason}` };
-    appendLine(deps.ledgerPath, {
-      ...ledgered,
-      ...(decision.signature === "base-red" ? { cause: decision.cause } : {}),
-      ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
-      ...(decision.action === "retitle" ? { title: decision.title } : {}),
-      ...result,
-    });
-    if (result.outcome !== "unwired") planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
-    if (["renumbered", "retitled", "updated"].includes(result.outcome)) {
+    const standDownKey = `${pr.prNumber}@${pr.headSha}@${decision.signature}@stood-down`;
+    if (result.outcome !== "stood-down" || !planRepairHistory.has(`${standDownKey}@${String(result.reason)}`)) {
+      appendLine(deps.ledgerPath, {
+        ...ledgered,
+        ...(decision.signature === "base-red" ? { cause: decision.cause } : {}),
+        ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
+        ...(decision.action === "retitle" ? { title: decision.title } : {}),
+        ...(decision.action === "handoff" ? { handoffs: decision.handoffs } : {}),
+        ...result,
+      });
+    }
+    if (result.outcome === "stood-down") planRepairHistory.add(standDownKey).add(`${standDownKey}@${String(result.reason)}`);
+    else if (result.outcome !== "unwired") planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
+    if (["renumbered", "retitled", "updated", "handed-off"].includes(result.outcome)) {
       return { repaired: true, reason: `plan repair (${decision.signature}): ${decision.action} on ${decision.check} — ${result.outcome}` };
     }
     return { repaired: false, reason: `; plan repair (${decision.signature}) did not take: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}` };
