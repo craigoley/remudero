@@ -1,0 +1,111 @@
+- id: W1-T13830
+  title: "A split or rebuild remedy that the plan preflight refused is not tried again on the same input, and it reserves its task id off the daemon loop"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the remedy ladder decides what an open pull request does next; a guard that held a transient failure would stall it
+  origin: "operator-session#fleet-measure-2026-11-19"
+  plan_refs:
+    - W1-T12709
+    - W1-T13046
+    - W1-T13361
+    - W1-T13183
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - src/lib/sweep.ts
+    - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
+    - test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts
+    - test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts
+    - test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With a parked_pr.remedy row for the same pull request, cause and remedy (split-follow-up or close-and-rebuild) whose outcome is refused, whose refusal_checks name the plan preflight checks that refused the draft, and whose input_digest equals the digest of this pass's input (the head sha, the task file text read from the repository that holds it or the plan rebuild's sorted plan files, and the moved criteria), takeParkedPrRemedy calls neither reserveTaskId nor landTaskFiles, writes no row, and returns the remedy as unchanged with a reason that names the earlier refusal"
+      proof: "grep: W1-T13830 criterion 1 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "invariant:never-parked — actOnParkedPr treats an unchanged remedy as spent: it takes the remedy parkedPrRemedy(facts, spent) names next, and with none left it opens W1-T13361's one needs-human issue. For a design hold like pull request 19605 (some, not all, of the task's criteria need input) and a landing that always refuses with the same preflight checks, ten passes at one head reserve two task ids (one split-follow-up, one close-and-rebuild), not ten"
+      kind: guard
+      proof: "grep: W1-T13830 criterion 2 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "invariant:retry-on-transient — a refusal that is not a plan preflight verdict on the draft (a git or file error, a timed-out preflight, or a red that main alone has, mainRed true), and a refused row written before this task (no input_digest), keep today's answer: the next pass reserves and tries the remedy again"
+      kind: guard
+      proof: "grep: W1-T13830 criterion 3 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "invariant:a-changed-input-releases — a new head, a changed task file text in the holding repository, or a changed set of moved criteria gives a new input_digest, and the next pass reserves and tries the remedy again"
+      kind: guard
+      proof: "grep: W1-T13830 criterion 4 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "The refused parked_pr.remedy row records input_digest, and refusal_checks as the sorted check names of the preflight failures (for example lint-plan and shard-census), read from the landing's refused or set-aside entry"
+      proof: "grep: W1-T13830 criterion 5 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "The sweep's production parked-PR host reserves the held task id through an awaited reservation (gatedRemoteRefReserverAsync over hostWorktreeGitAsync, the W1-T13183 shape): a test drives the host's reserveTaskId with a git runner that resolves only after a timer, and an interval timer fires while the reservation is pending"
+      proof: "grep: W1-T13830 criterion 6 in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "The parked-PR host in buildSweepEffects calls the awaited reservation"
+      proof: "grep: reservePlanRepairTaskIdAsync( in src/lib/sweep.ts"
+  falsifier: |
+    Remove the unchanged-input check in takeParkedPrRemedy. Criterion 2's ten passes then reserve ten task ids and
+    write ten refused rows, and criterion 1 sees reserveTaskId called. Make reserveTaskId synchronous again and
+    criterion 6's interval timer does not fire while the reservation runs.
+  rationale: |
+    WHY: since the 2026-11-19 10:35Z boot, the split-follow-up remedy for pull request 19605 (task W1-T10331) was
+    refused 15 times (ledger to 12:19Z), about every 6 minutes (gap p50 365 s). It started at 06:26Z. All 47 tries in
+    48 hours were at the same head (7000d48) and cause (needs-design). 46 of the 47 failed the same way: "the task
+    files did not land: the plan preflight refused it: [lint-plan] ... [design-invariant-proof,
+    machine-author-verify, machine-filing-admission]; [shard-census] W1-T3086 ...". The other one was an ENOENT on
+    the pending task file. No try was taken.
+    EACH TRY COSTS A TASK ID: takeParkedPrRemedy reserves an id (host.reserveTaskId), builds the held task under
+    it, and the landing refuses it and releases the id. The task-files-landing lane released 48 ids between 06:22Z
+    and 11:55Z, every one with that preflight reason; 14 of the 20 releases in hour 10 were this lane. The landing's
+    refused-tree cache (refusedPlanPrTrees) never hits, because each try names a new id, so each try runs the full
+    plan preflight again.
+    THE SAME LOOP ON CLOSE-AND-REBUILD: in the same 48 hours close-and-rebuild was refused 50 times on 3 pull
+    requests: 19199 (36, until it merged), 19166 (13, until it merged) and 19352 (1). Their refusals named 35 and 13
+    distinct task ids. In all, 97 refused split or rebuild tries on 4 pull requests in 48 hours, and none was
+    taken. The catch in takeParkedPrRemedy says "the next pass tries it again" with nothing that compares the input.
+    W1-T13361 added that comparison for fix-on-pr only (parkedPrUnchanged).
+    THE DRAFT CANNOT BE REPAIRED BY THE REMEDY: design-invariant-proof needs a design statement (INVARIANT or
+    NO-INVARIANTS) that W1-T10331 never had; a machine cannot write it. machine-author-verify fires because the split
+    edits W1-T10331, a machine record with a pinned risk_ruling; reparkStaleRuling (src/lib/machine-filing.ts) could
+    drop the stale pin, but doing that to the task under review removes its risk approval. machine-filing-admission
+    fails because the held follow-up depends on the unmerged W1-T10331. So the same input gives the same refusal,
+    and a retry can only pass after the head, the task file or a plan rule changes.
+    THE RESERVATION BLOCKS THE LOOP: since boot, 14 daemon.loop_stall_profile rows have takeParkedPrRemedy in a
+    frame, with 82.6 s of lag and 39.7 s of synchronous spawn. 10 of them have reservePlanRepairTaskId (65.9 s of
+    lag, 28.2 s of synchronous spawn). Each of those rows shows 8 synchronous hostWorktreeGit calls under driveSync
+    (2.2 to 3.8 s) and mintNextTaskId plan reads. reservePlanRepairTaskId calls reserveTaskIdRemote, which is
+    driveSync over gatedRemoteRefReserver and execFileSync git (src/lib/sweep.ts reservePlanRepairTaskId,
+    src/lib/task-id-reservation.ts). W1-T13183 moved triage's reservation off the loop; this host was not moved.
+  design: |
+    INVARIANT retry-on-transient: only a plan preflight verdict on the draft's own files holds a remedy. A git or file
+    error, a timed-out preflight, a red main alone has (mainRed true), or a row written before this task is tried
+    again on the next pass, as today.
+    INVARIANT a-changed-input-releases: the guard holds only while the head, the task file text in the holding
+    repository (or the plan rebuild's plan files) and the moved criteria are the same. A plan rule change alone does
+    not release it; the ladder moves on instead, so the guard never holds the pull request.
+    INVARIANT never-parked: a remedy held by the guard is spent for this pass; the ladder's next remedy runs, or
+    W1-T13361's one needs-human issue opens. The pull request always has a next action.
+    The one-question rule is unchanged: a held task already filed for the pull request and cause is reused.
+    1. takeParkedPrRemedy (src/lib/parked-pr-remedy.ts): after the task file read and before host.reserveTaskId,
+       compute input_digest (sha256 of the remedy, the head sha, the task file relPath and text, or the sorted plan
+       files for a plan rebuild, and the sorted moved claims). Find the last parked_pr.remedy row for the pull
+       request, cause and remedy. When it is refused, has a non-empty refusal_checks, and has the same input_digest,
+       return { remedy, unchanged: true, reason } with no row, no reservation and no landing.
+    2. ParkedPrHost.landTaskFiles also returns refusalChecks: the sorted check names of the preflight failures of the
+       first refused or set-aside entry, only when failures exist, timedOut is not set and mainRed is not true
+       (TaskFileRefusal in src/lib/feedback-landing.ts). The refused row writes input_digest, and refusal_checks
+       when the landing gave them.
+    3. actOnParkedPr: on an unchanged outcome, take parkedPrRemedy(facts, spent) with the remedy added to spent, as
+       it does for an unchanged fix-on-pr; with none left, askPerson. Carry one spent list through the recursion,
+       so the W1-T13361 fix-on-pr step does not name a spent split again. The other callers of takeParkedPrRemedy
+       (remedyStalledCriterion, planRoundExhaustedRemedy, the review-setup hold in sweep.ts) keep their disposition
+       and report the unchanged reason.
+    4. Off the loop: ParkedPrHost.reserveTaskId returns string or Promise<string>, and takeParkedPrRemedy awaits it.
+       Add reservePlanRepairTaskIdAsync in src/lib/sweep.ts beside reservePlanRepairTaskId: the same mintNextTaskId,
+       then reserveTaskIdBlockRemoteAsync(mint.n, 1, gatedRemoteRefReserverAsync({ run over hostWorktreeGitAsync,
+       filingBranch, lane: "plan-repair", log })). The parkedPr host in buildSweepEffects calls it when no
+       planRepairReserveIdImpl is injected. The plan-repair renumber keeps the synchronous reservation.
+    5. Add no counter, bound, time window or config key. Grep test/ for tests that assert a refused split or rebuild
+       is tried again at the same head, or assert the whole parked_pr.remedy row; one outside `files` needs an
+       amendment. W1-T13656 (a held rebuild lands as a new file) is merged; build on it.
+    AMENDED (2026-11-19): the awaited reserver reservePlanRepairTaskIdAsync is a new reservation lane, so
+    test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts names it in its expected census map beside
+    reservePlanRepairTaskId (plan-repair).
