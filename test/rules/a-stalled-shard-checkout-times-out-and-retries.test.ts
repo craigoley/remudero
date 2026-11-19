@@ -77,6 +77,11 @@ test("W1-T13825 criterion 4: the guards admit exactly this pair, and a pair that
       ["an unbounded first checkout", { ...first, "timeout-minutes": 30 }, retry],
       ["a first checkout behind an if:", { ...first, if: "github.event_name == 'pull_request'" }, retry],
       ["a retry of other inputs", first, { ...retry, with: { "fetch-depth": 1 } }],
+      ["a retry with a longer bound", first, { ...retry, "timeout-minutes": 360 }],
+      ["a retry without the low-speed env", first, { ...retry, env: undefined }],
+      ["a pair on an unpinned tag", { ...first, uses: "actions/checkout@v7" }, { ...retry, uses: "actions/checkout@v7" }],
+      ["a pair on a shallow fetch", { ...first, with: { "fetch-depth": 1 } }, { ...retry, with: { "fetch-depth": 1 } }],
+      ["a pair without the low-speed env", { ...first, env: undefined }, { ...retry, env: undefined }],
     ];
     for (const [why, a, b] of drifts) {
       assert.equal(withoutCheckoutRetryPair([a, b]).length, 2, `${job}: ${why} is not admitted`);

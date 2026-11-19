@@ -19,22 +19,31 @@ export interface WorkflowStep {
 /** The retry step's exact condition. */
 export const CHECKOUT_RETRY_IF = "steps.checkout.outcome == 'failure'";
 
-function isCheckout(step: WorkflowStep | undefined): boolean {
-  return typeof step?.uses === "string" && step.uses.startsWith("actions/checkout@");
+/** The pinned checkout both steps must use. */
+export const CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+/** W1-T13321's low-speed env, which both steps keep. */
+export const CHECKOUT_LOW_SPEED_ENV = { GIT_HTTP_LOW_SPEED_LIMIT: "1000", GIT_HTTP_LOW_SPEED_TIME: "120" };
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** True when a checkout step uses the pinned action, the full history and the low-speed env. */
+function isFullPinnedCheckout(step: WorkflowStep | undefined): boolean {
+  return step?.uses === CHECKOUT_ACTION && step.with?.["fetch-depth"] === 0 && same(step.env, CHECKOUT_LOW_SPEED_ENV);
 }
 
-/** The index of the first step of an admitted pair, or -1. Admitted only when the first step is `id: checkout`
- *  with timeout-minutes 3, continue-on-error true and no if:, and the next step checks out the same action with
- *  the same inputs, only on `steps.checkout.outcome == 'failure'`, with a timeout and no continue-on-error. */
+/** The index of the first step of an admitted pair, or -1. Admitted only when the first step is `id: checkout` with
+ *  timeout-minutes 3, continue-on-error true and no if:, and the next step checks out with the same inputs, only on
+ *  `steps.checkout.outcome == 'failure'`, with timeout-minutes 5 and no continue-on-error. Both must use the pinned
+ *  action, fetch-depth 0 and the W1-T13321 env. */
 export function checkoutRetryPairIndex(steps: readonly WorkflowStep[]): number {
   const i = steps.findIndex((s) => s?.id === "checkout");
   if (i < 0) return -1;
   const first = steps[i]!;
   const retry = steps[i + 1];
-  const admitted = isCheckout(first) && first["timeout-minutes"] === 3 && first["continue-on-error"] === true &&
-    first.if === undefined && retry !== undefined && retry.uses === first.uses && retry.if === CHECKOUT_RETRY_IF &&
-    retry["continue-on-error"] === undefined && typeof retry["timeout-minutes"] === "number" &&
-    JSON.stringify(retry.with ?? {}) === JSON.stringify(first.with ?? {});
+  const admitted = isFullPinnedCheckout(first) && isFullPinnedCheckout(retry) &&
+    first["timeout-minutes"] === 3 && first["continue-on-error"] === true && first.if === undefined &&
+    retry!.if === CHECKOUT_RETRY_IF && retry!["continue-on-error"] === undefined && retry!["timeout-minutes"] === 5 &&
+    retry!.id === undefined && retry!.run === undefined && same(retry!.with, first.with);
   return admitted ? i : -1;
 }
 
