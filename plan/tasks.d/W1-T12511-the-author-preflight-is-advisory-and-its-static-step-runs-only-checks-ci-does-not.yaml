@@ -5,8 +5,7 @@
     - W1-T12509
   priority: 0
   type: implement
-  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
-  verify: human
+  verify: human  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
   principles:
     tdd: strict
   risk: high # changes what the hand route treats as the gate; a check that leaves the author path must have a required CI job
@@ -23,7 +22,7 @@
     - doctrine/before-you-push/preflight-before-first-push.md
     - docs/operator-guide.md
     - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each FAST_GATE_STEPS entry carries a `ciJob` field naming the ci.yml job that runs the same check on every pull request (for example jscpd runs in `jscpd-gate`), or no field when no such job exists. The author static step passes `runPreflightFast` only the entries with no `ciJob`, and the receipt lists each skipped entry as left to CI with its job name"
@@ -107,11 +106,3 @@
     from), W1-T12165 (blocked), W1-T13551 (ops, Linux-only census readers).
     Id W1-T12511 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
     Depends on W1-T12509: the doctrine names the merge-time verdict as part of the gate only once it counts every gate it can.
-  risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 1
-    reasons:
-      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required checks\") — irreversible or privileged work goes to a person"
-    judged_at: "2026-11-19T01:10:21.748Z"
-    pin: "c3fda3cd526a1fc4e184bb938ebc4b44d8951bf009f38d6357416dd953764064"

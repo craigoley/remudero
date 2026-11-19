@@ -19,6 +19,22 @@ An explicit npm cache environment override is preserved. An empty
 `RMD_DEPENDENCY_SEED_ROOT` disables account preferences; test setup uses this
 unless a fixture supplies its own root, avoiding writes to the operator store.
 
+When the lockfile moves under a checkout (a fast-forward, a rebase, a dependency bump such as
+playwright 1.65.0 to 1.65.1 on 2026-11-18), `prime` replaces that checkout's OWN materialization:
+its `.rmd-dependency-seed.json` marker names the checkout and its generation still verifies. The
+replacement comes from a generation matching the new lockfile (reused, `--source` from a fresh donor,
+or the tool's `npm ci --ignore-scripts` stage). It is built beside the old one and renamed into place.
+Nothing else is replaced: a whole-directory symlink, a real install with no marker naming the
+checkout, other checkouts and every generation stay as they are.
+On Linux hosts `hooks/post-merge` re-primes a seed-linked or absent node_modules after a merge that
+changed package-lock.json. On the Mac the author preflight's dependency precheck re-primes its own
+materialization with the checkout's `scripts/dependency-seeds.mjs prime --proof`, then checks again.
+For a borrowed layout the hook and the precheck print the same remedy instead:
+- whole-directory symlink: `rm <checkout>/node_modules` (the link only), then `remudero-dependencies prime <checkout>`.
+  Never `rm -rf <checkout>/node_modules/`: the trailing slash follows the link and deletes the donor's install.
+- real install: `mv <checkout>/node_modules <checkout>/node_modules.before-prime` (other checkouts may borrow it),
+  then `remudero-dependencies prime <checkout>`.
+
 Enabled asynchronous worker creation, hand-worktree and proof priming use the provisioner.
 Existing checkouts are retained. Worker and asynchronous reviewer provisioning invoke the
 standalone tool in a bounded child process, leaving the daemon's event loop available.

@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { findReleasePlanInCatalogs, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -180,6 +180,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
+import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -225,7 +226,7 @@ import {
 } from "./lib/doctor.js";
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { boundChildByLoopTime, LoopBoundedChildTimeout, type LoopBound } from "./lib/loop-bounded-child.js";
-import { execFileRouted } from "./lib/spawn-helper.js";
+import { bootSpawnHelper, execFileRouted, stopBootedSpawnHelper } from "./lib/spawn-helper.js";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
@@ -29127,6 +29128,16 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d = deps("backlog", raiseDuplicate);
       return gardenPass(backlogGardenSpec(d), d);
     }
+    // W1-T13750: held work is re-probed on the events its refusal class names; the operator's own refused release
+    // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
+    // record it refused is unchanged.
+    case "stuck-state": {
+      const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
+        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
+        gardenNames: REGISTERED_GARDEN_NAMES });
+      return () => runStuckStateGardener(ports);
+    }
     // W1-T9925: the queue judge re-ranks queued tasks by measured cost of delay through its own reviewed plan PR.
     case "redesign": {
       const d = deps("redesign", raiseDuplicate);
@@ -30783,6 +30794,8 @@ export async function serveCommand(
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
+  // W1-T13664: serve's own helper, started while this process is small, so its child spawns fork the helper's heap.
+  const spawnHelper = bootSpawnHelper(log, process.env, "serve.spawn_helper");
   if (boardPlanReadFailure) log("serve.board_plan_unreadable", { reason: boardPlanReadFailure });
 
   // W1-T2568 + W1-T152: SEAMED AND NON-FATAL, and it sits below `log` so a degraded read is
@@ -31045,7 +31058,7 @@ export async function serveCommand(
       for (const listener of realRequestListeners) listener(req, res);
     }));
   }
-  server.on("close", () => boardProjection?.stop());
+  server.on("close", () => { boardProjection?.stop(); stopBootedSpawnHelper(spawnHelper); });
   const precomputeBoard = async (): Promise<void> => {
     if (!buildInitialBoardSnapshot) return;
     log("serve.board_precompute_started", {});
@@ -31120,6 +31133,7 @@ export async function serveCommand(
     console.error(`### rmd serve — failed to listen on ${hosts.join(", ")}:${port}: ${(e as Error).message}`);
     log("serve.bind_failed", { hosts, port, error: (e as Error).message });
     for (const m of mirrors) m.close();
+    stopBootedSpawnHelper(spawnHelper);
     return 1;
   }
 
@@ -39870,11 +39884,19 @@ export async function approveCommand(
     const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
     // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
     // is released against the plan the daemon's tick composes, so both read the same pin.
+    // W1-T13749: that composition reads the checkout's origin/main, the ref the daemon's plan reloader reads, never
+    // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
     const localPlan = located?.ok ? located.plan : loadPlan(planPath);
-    const held = located?.ok ? undefined
-      : await findReleasePlanInCatalogs(proposalId, localPlan, { ...deps.taskLookup, stateDir: join(config.root, "state") });
+    const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
+    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir: join(config.root, "state") },
+      row => appendLedger(ledgerPathFor(config), row));
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
+      return 1;
+    }
+    if (held?.outcome === "held") {
+      const whose = held.hold.task === proposalId ? "its own edge" : `the edge of ${held.hold.task}, which it depends on`;
+      console.error(`rmd approve: cannot release '${proposalId}': it is held by ${whose} (${held.hold.reason}: ${compositionHoldEdge(held.hold)}) — nothing released`);
       return 1;
     }
     if (located && !located.ok && held?.outcome !== "found") {

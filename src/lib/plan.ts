@@ -923,6 +923,23 @@ export function loadPlan(
   return readMergedPlan(path, io, shardDir);
 }
 
+/**
+ * W1-T13752 — {@link loadPlan} for a plan whose tasks may belong to another repository: a task for which
+ * `keepsUnseenDependency` answers true keeps a depends_on id this plan does not hold, as the ops catalog's other
+ * readers do ("preserve-external"). Every other task stays strict, with loadPlan's own PlanError text.
+ */
+export function loadPlanKeepingUnseenDependencies(
+  path: string,
+  keepsUnseenDependency: KeepsUnseenDependency,
+  io: FileIntegrityIO = defaultIntegrityIO,
+  shardDir: string = join(dirname(path), "tasks.d"),
+): Plan {
+  const parse = (text: string, label: string, onDuplicate?: (id: string) => void) =>
+    parseTasksFromYaml(text, label, onDuplicate, {}, "preserve-external");
+  return readMergedPlan(path, io, shardDir, undefined, undefined, parse,
+    (tasks) => validatedPlan(tasks, "strict", keepsUnseenDependency));
+}
+
 /** W1-T13669 — {@link loadPlan} that reuses `cache`'s parse of each file whose content is unchanged. */
 export function loadPlanReusingParses(path: string, cache: PlanBlobCache): Plan {
   const next = new Map<string, CachedPlanBlob>();
@@ -1096,6 +1113,7 @@ function readMergedPlan(
   onDuplicate?: (id: string, earlierPath: string | undefined, laterPath: string) => void,
   onInvalidShard?: OnInvalidShard,
   parse: typeof parseTasksFromYaml = parseTasksFromYaml,
+  validate: (tasks: Task[]) => Plan = validatedPlan,
 ): Plan {
   let text: string;
   try {
@@ -1131,7 +1149,7 @@ function readMergedPlan(
       tasks.push(t);
     }
   }
-  return onDuplicate ? { tasks, byId } : validatedPlan(tasks);
+  return onDuplicate ? { tasks, byId } : validate(tasks);
 }
 
 function assertSupersededByResolves(t: Task, byId: ReadonlyMap<string, Task>): void {

@@ -12,7 +12,7 @@
   files:
     - docs/research/claude-md-headlines-by-stage.md
     - docs/docs-index.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report lists every CLAUDE.md headline with its stage: CHECK (name the check that refuses it), REVIEW, or IMPLEMENT"

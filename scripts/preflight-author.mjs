@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
-import { callerReachableSuites } from '../src/lib/ci-parity.ts';
+import { authorCiSplit, callerReachableSuites, readAuthorCiContract } from '../src/lib/ci-parity.ts';
 import { authorTestRunnerArgs } from '../src/lib/test-run-timeout.ts';
 import { admitStaticWork, enqueueTestSlot, lowPriorityCommand, memoryTestConcurrency, readHostLoad, readMemoryHeadroom,
   readVmStat, TEST_FILE_PEAK_BYTES, testRunArgv, testRunConcurrency, testSlotExecutionAllowed } from '../src/lib/test-slot.ts';
@@ -21,7 +21,7 @@ import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 import { captureStepSync, AUTHOR_OUTPUT_LIMIT_BYTES, AUTHOR_STEP_RUNTIME_MS } from './lib/author-step-capture.mjs';
 import { AUTHOR_RUNTIME_SAFETY_FACTOR, AUTHOR_SHUTDOWN_RESERVE_MS, runtimeBindings, readRuntimeProfile, runtimeDeadlineFit, closedDurationEvidence } from './lib/native-author-runtime.mjs';
-import { authorDependencyProvenance, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
+import { authorDependencyProvenance, reprimeOwnSeedMaterialization, sameAuthorDependencyProvenance } from './lib/author-dependency-provenance.mjs';
 import { AUTHOR_CONTEXT_FORMAT, observeAuthorContext, requireAuthorContext } from './lib/author-context-compatibility.mjs';
 import { homedir, tmpdir } from 'node:os';
 import { accountAuthorPhases } from './lib/author-phase-accounting.mjs';
@@ -223,9 +223,16 @@ export const CENSUS_TIME_BOUND_LINE = 'census-precheck: census suites NOT MEASUR
  *  (CENSUS_FULL_PASS_SKIPPED_LABEL in scripts/census-precheck.mjs). */
 export const CENSUS_FULL_PASS_SKIPPED_LINE = 'census-precheck: full pass SKIPPED (no census-read file changed) - ';
 
-/** The author's census step: counts first, and the full suite pass only when the diff touches a census read. */
-export function authorCensusPrecheckArgs(root, baseSha) {
-  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, '--skip-when-unread'];
+/** W1-T12511 — the author's census step runs the census COUNTS only: the census suites and the instrument-surface
+ *  child are left to the required ci.yml jobs authorCiSplit names. When a job it names cannot be confirmed in
+ *  ci.yml (`countsOnly` false), the step keeps the W1-T11940 full pass, skipped only when no census read changed. */
+export function authorCensusPrecheckArgs(root, baseSha, countsOnly = true) {
+  return [join(root, 'scripts/census-precheck.mjs'), '--base', baseSha, countsOnly ? '--counts-only' : '--skip-when-unread'];
+}
+
+/** The receipt line naming each check the author path left to CI, and the job and required check that run it. */
+export function leftToCiLine(rows) {
+  return `left to CI: ${rows.length === 0 ? 'nothing (no ci.yml job confirmed)' : rows.map((r) => `${r.job} (${r.ciJob} as ${r.ciCheck})`).join(', ')}`;
 }
 
 /** Whether the census step skipped its full pass, and the counts it relied on, read from its own stdout line. */
@@ -357,12 +364,35 @@ export const AUTHOR_VERDICT_STEPS = Object.freeze({ passed: 'author_preflight.pa
   refused: 'author_preflight.refused' });
 /** The closed list a refused or NOT_RUN row's `refusal_class` comes from, so equal causes cluster. */
 export const AUTHOR_REFUSAL_CLASSES = Object.freeze(['node-version', 'dependency-precheck', 'static-wait-bound',
-  'test-slot-wait-bound', 'census-time-bound', 'lint-plan', 'affected-tests', 'other']);
+  'test-slot-wait-bound', 'census-time-bound', 'lint-plan', 'affected-tests', 'disk-reserve', 'memory-pressure',
+  'census-precheck', 'static-preflight', 'other']);
 /** BACKSTOP: how long the row's child may take before it is killed. The verdict is printed before it starts. */
 export const AUTHOR_VERDICT_WRITE_BOUND_MS = 30_000;
 const AUTHOR_VERDICT_ROW_FLAG = '--append-author-verdict-row';
 /** A refusal that names its class where it is raised; the message is the one the run always printed. */
 const refusal = (refusalClass, message) => Object.assign(new Error(message), { refusalClass });
+
+function capacityRefusalClass(reasons) {
+  // A disk shortfall prevents admission even when pressure is also high.
+  if (reasons.some((reason) => /^(?:workspaceFreeBytes|scratchFreeBytes|allocation:[^:]+):below-[^:]+-reserve$/.test(reason))) {
+    return 'disk-reserve';
+  }
+  if (reasons.some((reason) => /^(?:pressure:(?:warning|critical|critical-or-unknown)|memory:below-measured-peak(?:-and-reserve)?|swap:below-measured-growth)$/.test(reason))) {
+    return 'memory-pressure';
+  }
+  return 'other';
+}
+
+function staticFailureMetadata(path) {
+  try {
+    const summary = JSON.parse(readFileSync(path, 'utf8'));
+    const failedCheck = Array.isArray(summary?.steps)
+      ? summary.steps.find((step) => step?.ok === false && typeof step.name === 'string' && step.name)?.name : undefined;
+    return failedCheck ? { failedCheck } : {};
+  } catch (error) {
+    return { failureNameUnavailable: error.message };
+  }
+}
 
 /** The branch a run's row names: the declared publication target, else the checked-out branch; null when unreadable. */
 export function authorHeadRef(root, declared, spawn = spawnSync) {
@@ -376,9 +406,9 @@ export function authorHeadRef(root, declared, spawn = spawnSync) {
 /**
  * W1-T12842 — the one ledger row an author run appends, built from the receipt the run already computed.
  * A run that may push is `passed`, one that reached its end with a failed step is `failed`, every other is `refused`.
- * `first_step` is the first failed step, else the stage the run stopped before. `refusal_class` is on every refused
- * row and on a failed row whose tests never ran: the class its refusal site named (`refusalClass`), else the one the
- * receipt's own stages show. A dry run is read-only and has no row.
+ * `first_step` is the first failed step, else the stage the run stopped before. Every refused row and every failed
+ * row whose tests never ran carries a `refusal_class` from the failed gate, capacity reasons, or the refusal site.
+ * `failed_check` names the failed gate's suite or check when the child recorded it. A dry run has no row.
  */
 export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalClass, refusalStage, capacityReasons, entryCapacity } = {}) {
   if (receipt.dryRun) return undefined;
@@ -391,9 +421,12 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
   const atSite = refusalClass !== undefined;
   const firstStep = outcome === 'passed' ? null : failed?.name ?? refusalStage ?? PUSH_STAGES.find((name) => !ran(name))
     ?? (atSite ? 'receipt' : censusTimeBound ? 'census-precheck' : 'affected-tests');
-  const derivedClass = outcome === 'failed' ? (failed?.name === 'lint-plan-fast' ? 'lint-plan' : 'other')
-    : atSite ? (AUTHOR_REFUSAL_CLASSES.includes(refusalClass) ? refusalClass : 'other')
-      : ran('affected-tests') && censusTimeBound ? 'census-time-bound' : receipt.verdict === 'over-capacity' ? 'affected-tests' : 'other';
+  const gateClass = ['census-precheck', 'static-preflight'].includes(failed?.name) ? failed.name : undefined;
+  const reasons = Array.isArray(capacityReasons) ? capacityReasons.map(String) : [];
+  const derivedClass = gateClass ?? (outcome === 'failed' ? (failed?.name === 'lint-plan-fast' ? 'lint-plan' : 'other')
+    : reasons.length > 0 ? capacityRefusalClass(reasons)
+      : atSite ? (AUTHOR_REFUSAL_CLASSES.includes(refusalClass) ? refusalClass : 'other')
+        : ran('affected-tests') && censusTimeBound ? 'census-time-bound' : receipt.verdict === 'over-capacity' ? 'affected-tests' : 'other');
   const classed = outcome === 'refused' || (outcome === 'failed' && !ran('affected-tests'));
   const branch = typeof headRef === 'function' ? headRef() : headRef;
   const head = typeof branch === 'string' && branch ? branch : null;
@@ -410,7 +443,8 @@ export function authorVerdictRow(receipt, { exitCode = null, headRef, refusalCla
     verdict: receipt.verdict ?? null, exit_code: exitCode, push_eligible: receipt.pushEligible === true,
     head_ref: head, head_sha: receipt.headSha ?? null, first_step: firstStep,
     ...(classed ? { refusal_class: derivedClass } : {}),
-    ...(Array.isArray(capacityReasons) && capacityReasons.length > 0 ? { capacity_reasons: capacityReasons.map(String) } : {}),
+    ...(classed && gateClass && failed.failedCheck ? { failed_check: failed.failedCheck } : {}),
+    ...(reasons.length > 0 ? { capacity_reasons: reasons } : {}),
     ...(receipt.failureAttribution?.counts ? { failing_at_head: receipt.failureAttribution.counts.failingAtHead,
       failing_also_at_base: receipt.failureAttribution.counts.alsoFailingAtBase,
       failing_only_at_head: receipt.failureAttribution.counts.failingOnlyAtHead,
@@ -851,9 +885,49 @@ export function attributionLines(result) {
       counts.failingOnlyAtHead}; unattributed ${counts.unattributed}`];
 }
 
+/**
+ * W1-T13736 — whether a run on a Node other than the .nvmrc pin re-runs itself under an installed pin. Candidates, in
+ * order: ~/.local/opt/node-v<pin>, its nodejs.org archive form node-v<pin>-<platform>-<arch>, then nvm's
+ * versions/node/v<pin>; the first that exists and whose own --version reads v<pin> is chosen. INVARIANT
+ * never-another-node: nothing here downloads or installs a Node, a candidate reading another version is never chosen,
+ * and when this process already is the chosen install (the re-run child) it refuses, so the re-run happens at most once.
+ */
+export function pinnedNodeReexec({ pin, current, env = process.env, home = homedir(), platform = process.platform,
+  arch = process.arch, execPath = process.execPath, exists = existsSync, spawn = spawnSync,
+  versionOf = (path) => spawn(path, ['--version'], { encoding: 'utf8' }).stdout?.trim(), realpath = realpathSync }) {
+  const nvmDir = env.NVM_DIR || join(home, '.nvm');
+  const candidates = [join(home, '.local/opt', `node-v${pin}`, 'bin/node'),
+    join(home, '.local/opt', `node-v${pin}-${platform}-${arch}`, 'bin/node'), join(nvmDir, 'versions/node', `v${pin}`, 'bin/node')];
+  const file = `node-v${pin}-${platform}-${arch}.tar.gz`, dist = `https://nodejs.org/dist/v${pin}`;
+  const sum = { darwin: 'shasum -a 256 -c -', linux: 'sha256sum -c -' }[platform];
+  const install = env.NVM_DIR || exists(join(home, '.nvm', 'nvm.sh'))
+    ? `nvm install ${pin} (nvm checks the download against the release's SHASUMS256.txt)`
+    : sum ? `cd "$(mktemp -d)" && curl -fsSLO ${dist}/${file} && curl -fsSLO ${dist}/SHASUMS256.txt && ` +
+      `grep ' ${file}$' SHASUMS256.txt | ${sum} && mkdir -p "$HOME/.local/opt" && tar -xzf ${file} -C "$HOME/.local/opt"`
+      : `the nodejs.org release for ${platform}-${arch} from ${dist}/ checked against its SHASUMS256.txt`;
+  // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
+  // host-node-behind while it cannot; a bare version pair sent every lane to guess.
+  const remedy = `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
+    `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pin}: ${install}; ` +
+    `the author preflight then re-runs itself under it`;
+  const prefix = `Node ${pin} required; got ${current}. `;
+  const misread = [];
+  for (const path of candidates) {
+    if (!exists(path)) continue;
+    const read = versionOf(path);
+    if (read !== `v${pin}`) { misread.push(`${path} reads ${read || 'no version'}`); continue; }
+    if (realpath(path) === realpath(execPath)) {
+      return { candidates, refuse: `${prefix}This Node (${execPath}) is the install at ${path}, whose --version reads v${pin}; ` +
+        `it is not re-run again. ${remedy}` };
+    }
+    return { candidates, reexec: path };
+  }
+  return { candidates, refuse: prefix + (misread.length ? `Not run: ${misread.join('; ')}. ` : '') + remedy };
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {} } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {}, pinnedNode: pinnedNodeLocation = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -974,11 +1048,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       throw new Error('runtime admission requires a future ISO deadline and a native runtime profile together');
     }
     const pinnedNode = readFileSync(join(root, '.nvmrc'), 'utf8').trim().replace(/^v/, '');
-    // W1-T13720: name the remedy. On the fleet host the units converge installs the pin and raises
-    // host-node-behind while it cannot; a bare version pair sent every lane to guess.
-    if (process.versions.node !== pinnedNode) throw refusal('node-version', `Node ${pinnedNode} required; got ${process.versions.node}. ` +
-      `On the fleet host the units converge (deploy/install-host-units.sh --install) installs the .nvmrc pin and raises the ` +
-      `host-node-behind alert while it cannot; read its host-node: journal lines. Elsewhere, install Node ${pinnedNode}`);
+    // W1-T13736: off the pin, re-run this script under an installed pin with the same flags, arguments and environment.
+    if (process.versions.node !== pinnedNode) {
+      const located = pinnedNodeReexec({ spawn, ...pinnedNodeLocation, pin: pinnedNode, current: process.versions.node });
+      if (located.refuse !== undefined) throw refusal('node-version', located.refuse);
+      console.log(`author preflight: Node ${process.versions.node} is not the .nvmrc pin ${pinnedNode}; re-running under Node ${pinnedNode} at ${located.reexec}`);
+      const child = spawn(located.reexec, [...process.execArgv, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: process.env });
+      if (child.error) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) could not start: ${child.error.message}`);
+      if (child.signal) throw new Error(`the re-run under Node ${pinnedNode} (${located.reexec}) ended by signal ${child.signal}`);
+      return child.status;
+    }
     // Turning worktreeConfig on removes Git's main-worktree-only exception for these keys.
     // A suite can enable it midway through validation and poison every sibling checkout.
     // Admit the topology, never migrate an operator's shared Git configuration here.
@@ -1078,8 +1157,11 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (partial.unavailable) for (const why of partial.unavailable) console.log(`full-fallback partial set: ${why}`);
     }
     if (!values['dry-run']) {
-      const dependencyBefore=authorDependencyProvenance(root);
-      receipt.dependencyProvenance={before:dependencyBefore,assurance:'metadata/tool precheck, not cached-test permission'};
+      let dependencyBefore=authorDependencyProvenance(root);
+      // W1-T11468: a checkout's own seed materialization behind its lockfile is re-primed once, then re-checked.
+      const reprime=reprimeOwnSeedMaterialization(root,dependencyBefore,{run});
+      if(reprime){dependencyBefore=reprime.after;console.log(`dependency re-prime: exit ${reprime.record.status}; ${reprime.record.firstLine}`);}
+      receipt.dependencyProvenance={before:dependencyBefore,...(reprime?{reprime:reprime.record}:{}),assurance:'metadata/tool precheck, not cached-test permission'};
       if(dependencyBefore.state!=='present')throw refusal('dependency-precheck',`installed dependency precheck unavailable: ${dependencyBefore.reason}; expensive validation not started`);
       // Production phases only: an injected spawn is a diagnostic seam with no native slot to bind.
       const nativeBoundary = spawn === spawnSync;
@@ -1112,13 +1194,21 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       reusable = stages;
       console.log(`stage reuse: ${stageReuse.state}; ${stageReuse.reason}`);
       // A reused census passed measured: it was never time-bound and its full-pass note is the one it printed.
+      // W1-T12511: what this run leaves to CI, confirmed against this tree's ci.yml; the static child derives the same split.
+      const ciSplit = authorCiSplit(readAuthorCiContract(root));
+      receipt.leftToCi = ciSplit.leftToCi;
+      receipt.authorPathKept = ciSplit.kept;
+      console.log(leftToCiLine(ciSplit.leftToCi));
+      for (const { job, reason } of ciSplit.kept) console.log(`kept on the author path: ${job} — ${reason}`);
       const censusReused = Boolean(reuseStage('census-precheck'));
-      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha));
+      const census = censusReused ? { status: 0 } : runStep('census-precheck', authorCensusPrecheckArgs(root, receipt.baseSha, ciSplit.censusCountsOnly));
       receipt.censusFullPass = censusReused ? previous.censusFullPass ?? { skipped: false } : censusFullPassNote(census);
       if (receipt.censusFullPass.skipped) console.log(`census full pass SKIPPED - ${receipt.censusFullPass.reliedOn}`);
       const censusTimeBound = censusTimeBoundOnly(census);
       const censusOk = (census.status === 0 || censusTimeBound) && !census.signal && !census.error;
-      if (!censusReused) report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' } : {});
+      const failedSuite = !censusOk && /^  census-suite: (test\/.+?) fails — /m.exec(census.stderr ?? '')?.[1];
+      if (!censusReused) report('census-precheck', census, censusOk, censusTimeBound ? { notMeasured: 'time-bound' }
+        : failedSuite ? { failedCheck: failedSuite } : {});
       if (censusTimeBound) {
         receipt.censusNotMeasured = { reason: 'time-bound', checkedBy: 'CI' };
         console.log('census suites NOT MEASURED (time bound) — CI runs them');
@@ -1230,13 +1320,16 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           try {
             if (!staticAdmission.executionAllowed) throw refusal('static-wait-bound', `author static stage NOT_RUN (${staticAdmission.note})`);
             if (!staticReused) {
+              // A per-run summary cannot name a check from an earlier run if the child exits before writing it.
+              const staticSummaryPath = join(diagnosticsRoot, 'preflight-author-static.json');
               const staticCommand = lowPriorityCommand(process.execPath, ['--import', 'tsx',
                 join(root, 'src/run-task.ts'), 'preflight', '--from', receipt.baseSha,
-                '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+                '--summary-file', staticSummaryPath]);
               const censusAnswer = { RMD_AUTHOR_CENSUS_ANSWERED: `${receipt.headSha}:${censusTimeBound ? 'time-bound' : 'ok'}` };
               const staticResult = runStep('static-preflight', staticCommand.args, staticCommand.file, { ...(staticAdmission.childEnvironment ?? {}), ...censusAnswer }, AUTHOR_STEP_RUNTIME_MS);
               staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
-              report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority });
+              report('static-preflight', staticResult, staticOk, { priority: staticCommand.priority,
+                ...(staticResult.status === 1 && !staticResult.signal && !staticResult.error ? staticFailureMetadata(staticSummaryPath) : {}) });
             }
             // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
             // receipt and selected floor, but don't spend another full run on known-doomed tests.

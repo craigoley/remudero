@@ -260,6 +260,48 @@ export function installedSpawnHelper(): SpawnHelper | undefined {
   return installed;
 }
 
+/** W1-T9754: the environment switch for the spawn helper. W1-T13437: on unless set to exactly "off" (operator ruling). */
+export const SPAWN_HELPER_SWITCH = "RMD_SPAWN_HELPER";
+
+/**
+ * W1-T13664 — the one boot routine the daemon and serve share: starts a helper while this process is still small and
+ * installs it, unless the switch is exactly "off". One `<step>` row either way (`started`, and the reason when not); a
+ * start that throws leaves the direct path with that named row. Returns the helper it installed, if any.
+ */
+export function bootSpawnHelper(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  env: NodeJS.ProcessEnv,
+  step: string,
+  start: (options: SpawnHelperOptions) => SpawnHelper = startSpawnHelper,
+): SpawnHelper | undefined {
+  const switchValue = env[SPAWN_HELPER_SWITCH] ?? "unset";
+  const helperRow = { switch: SPAWN_HELPER_SWITCH, value: switchValue };
+  if (switchValue === "off") {
+    log(step, { started: false, reason: "switch_off", ...helperRow });
+    return undefined;
+  }
+  try {
+    installedSpawnHelper()?.stop();
+    const helper = start({ log });
+    installSpawnHelper(helper);
+    log(step, { started: true, pid: helper.pid, ...helperRow });
+    return helper;
+  } catch (error) {
+    // Reason: a helper that cannot start costs no spawn; the boot continues on the direct path, named here.
+    installSpawnHelper(undefined);
+    log(step, { started: false,
+      reason: `start_failed: ${String((error as Error)?.message ?? error).slice(0, 120)}`, ...helperRow });
+    return undefined;
+  }
+}
+
+/** Stops the helper {@link bootSpawnHelper} returned, and uninstalls it only if it is still the installed one. */
+export function stopBootedSpawnHelper(helper: SpawnHelper | undefined): void {
+  if (helper === undefined) return;
+  if (installed === helper) installed = undefined;
+  helper.stop();
+}
+
 /** Through the installed helper while it is healthy; otherwise a direct spawn whose result names why. */
 export function runRouted(request: SpawnRequest): Promise<SpawnResult> {
   return installed ? installed.run(request) : runDirect(request, undefined, "helper_not_installed");

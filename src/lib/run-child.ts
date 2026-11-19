@@ -1273,7 +1273,7 @@ export function adoptRunChildren(input: {
  * counts type-only edges). The sweep's own `DetachedActionKind` is checked against `DETACHED_WORK_KINDS` by the inventory test.
  */
 type DetachedActionKind = "fix-dispatch" | "retro" | "auto-triage" | "ci-learning" | "measurement-cadence" | "benchmark-cohort"
-  | "light-pass-action";
+  | "light-pass-action" | "plan-task-move";
 
 /** Every in-process unit a restart drains today: the detached-action kinds, and the review registry. */
 export type DetachedWorkKind = DetachedActionKind | "review";
@@ -1461,6 +1461,8 @@ export const DETACHED_WORK_INVENTORY: Readonly<Record<DetachedWorkKind, Detached
   "benchmark-cohort": { kind: "benchmark-cohort", holds: "one cohort's await", resumableFromFiles: false },
   "measurement-cadence": { kind: "measurement-cadence", holds: "the settle poll of a cadence that already runs out of process", resumableFromFiles: false },
   "light-pass-action": { kind: "light-pass-action", holds: "an action bound to the pass that started it", resumableFromFiles: false },
+  // W1-T13681: the mover runs in its own process; a released tick loses nothing, since the next step converges.
+  "plan-task-move": { kind: "plan-task-move", holds: "the await of one move-task step's child process", resumableFromFiles: false },
 };
 
 export const DETACHED_WORK_KINDS = Object.keys(DETACHED_WORK_INVENTORY) as DetachedWorkKind[];

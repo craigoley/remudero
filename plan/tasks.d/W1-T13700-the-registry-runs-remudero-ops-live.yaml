@@ -20,7 +20,7 @@
   # refusal-amendment (W1-T13700, run W1-T13700-1795024352310, 2026-11-19T00:45:41.687Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T13700: a filed proof already passes at the merge base, so branch run-W1-T13700-1795024352310 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The committed registry declares the ops row for craigoley/remudero-ops with an explicit mode live"
