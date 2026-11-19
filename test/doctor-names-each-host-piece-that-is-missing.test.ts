@@ -3,12 +3,13 @@
 // These tests pin the host-piece list (src/lib/host-pieces.ts) and the doctor check that reads it.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
 
-import { buildDoctorReport, judgeHostPieces, readHostPieces } from "#src/lib/doctor.js";
+import { judgeHostPieces, readHostPieces } from "#src/lib/doctor.js";
 import { allHostPieces, hostPieces, type HostPieceContext } from "#src/lib/host-pieces.js";
+import { doctorCommand } from "#src/lib/report-commands.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const CTX: HostPieceContext = { home: "/home/fleet", stateRoot: "/home/fleet/rmd-state" };
@@ -30,25 +31,43 @@ const REQUIRED_LINUX_IDS = [
   "github-login",
 ];
 
-function baseInputs(over: Partial<Parameters<typeof buildDoctorReport>[0]> = {}): Parameters<typeof buildDoctorReport>[0] {
-  return {
+async function runDoctor(hostPieceExists: (path: string) => boolean) {
+  const lines: string[] = [];
+  const exitCode = await doctorCommand([], {
+    out: (line) => lines.push(line),
+    loadConfig: () => ({ root: CTX.stateRoot, claudeBin: "/bin/true" }),
     nowMs: Date.parse("2026-08-20T12:00:00Z"),
-    ledgerLines: [
+    readLedgerLines: () => [
       { step: "daemon.alive", phase: "dispatch", ts: "2026-08-20T11:59:00Z", poll_interval_ms: 300_000 },
       { step: "sweep.pass", ts: "2026-08-20T11:50:00Z" },
       { step: "sweep.summary", ts: "2026-08-20T11:50:05Z" },
     ],
-    candidateCount: 0,
-    mem: { availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 },
-    diskFreeBytes: 40 * 1024 ** 3,
-    totalLocks: 0,
-    deadLocks: [],
-    gitLocks: [],
-    workerCount: 0,
-    checkoutDepth: { shallow: false, commitCount: 980 },
-    runningNodeVersion: "22.22.3",
-    nvmrcVersion: "22.22.3",
-    ...over,
+    readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+    readDiskFreeBytes: () => 40 * 1024 ** 3,
+    readDiskTotalBytes: () => 100 * 1024 ** 3,
+    readPauseAgeMs: () => undefined,
+    liveInflightRuns: () => [],
+    readLockFiles: () => ({ locks: [] }),
+    readGitLocks: () => [],
+    readWorkerProcesses: () => ({ count: 0, processes: [] }),
+    readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
+    readNvmrcVersion: () => process.versions.node,
+    readCaptureSurfaceFireHistory: () => [],
+    readProviderRoutingStatus: () => ({ version: 1, state: "not-probed", freshness: "unknown" }),
+    hostPieceExists,
+  });
+  return { exitCode, text: lines.join("\n") };
+}
+
+function commandContext(): HostPieceContext {
+  return {
+    ...CTX,
+    home: homedir(),
+    configHome: process.env.XDG_CONFIG_HOME || undefined,
+    binDir: process.env.RMD_BIN_DIR || undefined,
+    fleetInstallDir: process.env.RMD_FLEET_INSTALL_DIR || undefined,
+    cleanupPath: process.env.RMD_CLEANUP_PATH || undefined,
+    tmpSweepPath: process.env.RMD_TMP_SWEEP_PATH || undefined,
   };
 }
 
@@ -77,7 +96,28 @@ test("W1-T12074 criterion 1: one list names each host piece with its path, what 
   assert.equal(byId.get("host-cleanup-script")!.path, "/home/fleet/rmd-host-cleanup.sh");
   assert.equal(byId.get("tmp-sweep-script")!.path, "/home/fleet/rmd-tmp-sweep.sh");
   assert.equal(byId.get("heartbeat-script")!.path, "/home/fleet/rmd-state/daemon-install/scripts/fleet-heartbeat.sh");
+  assert.equal(byId.get("host-cleanup-script")!.path, "/home/fleet/rmd-host-cleanup.sh");
+  assert.equal(byId.get("tmp-sweep-script")!.path, "/home/fleet/rmd-tmp-sweep.sh");
+  for (const id of ["host-cleanup-script", "tmp-sweep-script"]) {
+    assert.equal(byId.get(id)!.installer, "sudo deploy/install-host-units.sh --install");
+  }
   assert.equal(byId.get("github-login")!.path, "/home/fleet/.gh-token");
+  assert.equal(byId.get("dependency-tool")!.installer, "bash deploy/install-dependency-seeds.sh");
+  assert.equal(
+    byId.get("heartbeat-script")!.installer,
+    "git -C '/home/fleet/rmd-state/daemon-install' restore -- scripts/fleet-heartbeat.sh",
+  );
+  assert.equal(
+    byId.get("reclaim-script")!.installer,
+    "git -C '/home/fleet/rmd-state/daemon-install' restore -- deploy/host-update.sh",
+  );
+  const overridden = hostPieces("linux", { ...CTX, binDir: "/custom/bin", fleetInstallDir: "/custom/daemon-install" });
+  assert.equal(overridden.find((p) => p.id === "reap-stray-script")!.path, "/custom/bin/rmd-reap-stray-containers");
+  assert.equal(overridden.find((p) => p.id === "heartbeat-script")!.path, "/custom/daemon-install/scripts/fleet-heartbeat.sh");
+  assert.equal(
+    hostPieces("linux", { ...CTX, cleanupPath: "/custom/cleanup/host.sh" }).find((p) => p.id === "tmp-sweep-script")!.path,
+    "/custom/cleanup/rmd-tmp-sweep.sh",
+  );
   assert.equal(
     hostPieces("linux", { ...CTX, configHome: "/xdg" }).find((p) => p.id === "gh-broker-unit")!.path,
     "/xdg/systemd/user/remudero-gh-read-broker.service",
@@ -85,38 +125,38 @@ test("W1-T12074 criterion 1: one list names each host piece with its path, what 
   );
 });
 
-test("W1-T12074 criterion 2: the doctor check reports FAIL and names every missing piece with the command that restores it, and reports OK, its pass verdict, when all are present", () => {
-  const gone = new Set(["dependency-tool", "gh-broker-unit", "github-login"]);
-  const missingPaths = new Set(hostPieces("linux", CTX).filter((p) => gone.has(p.id)).map((p) => p.path));
-  const seen: string[] = [];
-  const reading = readHostPieces(CTX, "linux", (path) => {
-    seen.push(path);
-    return !missingPaths.has(path);
+test("W1-T12074 criterion 2: the doctor command reports FAIL with every missing piece and restore command, then OK when all are present", async (t) => {
+  t.mock.property(process, "platform", "linux");
+  t.mock.env("RMD_BIN_DIR", "/custom/bin");
+  t.mock.env("RMD_FLEET_INSTALL_DIR", "/custom/daemon-install");
+  t.mock.env("RMD_CLEANUP_PATH", "/custom/cleanup/host.sh");
+  t.mock.env("RMD_TMP_SWEEP_PATH", "/custom/cleanup/hourly-sweep.sh");
+  const pieces = hostPieces("linux", commandContext());
+  const missingIds = ["dependency-tool", "heartbeat-script", "reclaim-script", "host-cleanup-script", "tmp-sweep-script", "github-login"];
+  const missingPaths = new Set(pieces.filter((p) => missingIds.includes(p.id)).map((p) => p.path));
+  const seen: [string][] = [];
+  const failed = await runDoctor((...args) => {
+    seen.push(args);
+    return !missingPaths.has(args[0]);
   });
-  assert.deepEqual(seen, hostPieces("linux", CTX).map((p) => p.path), "the check is given each piece's path and nothing else");
+  assert.deepEqual(seen, pieces.map((p) => [p.path]), "the command checks each applicable path with no other arguments");
+  assert.equal(failed.exitCode, 2, failed.text);
+  assert.match(failed.text, /\[FAIL\]\s+host-pieces\s+measured:/);
+  assert.match(failed.text, /reap-stray-script missing at \/custom\/bin\/rmd-reap-stray-containers/);
+  assert.match(failed.text, /heartbeat-script missing at \/custom\/daemon-install\/scripts\/fleet-heartbeat\.sh/);
+  assert.match(failed.text, /host-cleanup-script missing at \/custom\/cleanup\/host\.sh/);
+  assert.match(failed.text, /tmp-sweep-script missing at \/custom\/cleanup\/hourly-sweep\.sh/);
+  assert.ok(failed.text.includes(`${missingIds.length} of ${pieces.length} missing: ${missingIds.join(", ")}`), failed.text);
+  assert.deepEqual(
+    failed.text.split("\n").map((line) => line.trim()).filter((line) => line.includes(" — restore: ")),
+    pieces.filter((p) => missingPaths.has(p.path))
+      .map((p) => `${p.id} missing at ${p.path} — restore: ${p.installer} — without it: ${p.withoutIt}`),
+  );
 
-  const report = buildDoctorReport(baseInputs({ hostPieces: reading }));
-  const check = report.checks.find((c) => c.name === "host-pieces");
-  assert.ok(check, "the host-pieces check is in the composed report");
-  assert.equal(check!.verdict, "FAIL");
-  assert.equal(report.exitCode, 2, "a missing piece makes rmd doctor exit 2");
-  assert.match(check!.measured, /^3 of \d+ missing: dependency-tool, gh-broker-unit, github-login$/);
-  for (const p of hostPieces("linux", CTX).filter((x) => gone.has(x.id))) {
-    assert.ok(report.text.includes(`${p.id} missing at ${p.path} — restore: ${p.installer}`), `the report names ${p.id} with its restore command:\n${report.text}`);
-  }
-  for (const p of hostPieces("linux", CTX).filter((x) => !gone.has(x.id))) {
-    assert.ok(!report.text.includes(`${p.id} missing`), `a present piece (${p.id}) is not reported missing`);
-  }
-
-  // All present: the check passes with doctor's passing verdict, OK.
-  const healthy = buildDoctorReport(baseInputs({ hostPieces: readHostPieces(CTX, "linux", () => true) }));
-  const ok = healthy.checks.find((c) => c.name === "host-pieces")!;
-  assert.equal(ok.verdict, "OK");
-  assert.equal(ok.detail, undefined);
-  assert.equal(healthy.exitCode, 0);
-
-  // A caller that measured no host adds no check.
-  assert.equal(buildDoctorReport(baseInputs()).checks.some((c) => c.name === "host-pieces"), false);
+  const healthy = await runDoctor(() => true);
+  assert.equal(healthy.exitCode, 0, healthy.text);
+  assert.match(healthy.text, /\[OK\s*\]\s+host-pieces\s+measured: \d+ of \d+ present/);
+  assert.doesNotMatch(healthy.text, / — restore: /);
 });
 
 test("W1-T12074 criterion 2: the default reader tests real paths on disk", () => {
@@ -140,75 +180,24 @@ test("W1-T12074 criterion 2: the default reader tests real paths on disk", () =>
   }
 });
 
-test("W1-T12074 criterion 3: a piece that does not apply to this host, such as a Mac-only one on Linux, is not reported", () => {
+test("W1-T12074 criterion 3: the doctor command only checks and reports pieces for the running platform", async (t) => {
   const nothing = () => false;
-  const onLinux = judgeHostPieces(readHostPieces(CTX, "linux", nothing));
-  assert.equal(onLinux.verdict, "FAIL");
-  assert.ok(!onLinux.detail!.includes("gh-broker-agent"), "the Mac launchd agent is not reported on Linux");
-  assert.ok(!onLinux.detail!.includes("LaunchAgents"), onLinux.detail);
-  assert.ok(!onLinux.detail!.includes("hosts.yml"), "the Mac GitHub login path is not reported on Linux");
-  assert.ok(onLinux.detail!.includes("gh-broker-unit"), "control: a Linux piece is reported on Linux");
+  const platform = t.mock.property(process, "platform", "linux");
+  const onLinux = await runDoctor(nothing);
+  assert.equal(onLinux.exitCode, 2, onLinux.text);
+  assert.match(onLinux.text, /gh-broker-unit missing at /);
+  assert.match(onLinux.text, /github-login missing at .*\/\.gh-token /);
+  assert.doesNotMatch(onLinux.text, /gh-broker-agent|LaunchAgents|hosts\.yml/);
 
-  const onMac = judgeHostPieces(readHostPieces(CTX, "darwin", nothing));
-  assert.ok(onMac.detail!.includes("gh-broker-agent"), "control: the Mac agent is reported on a Mac");
-  assert.ok(!onMac.detail!.includes("gh-broker-unit"), "the Linux systemd unit is not reported on a Mac");
-  assert.ok(!onMac.detail!.includes(".gh-token"), "the Linux token file is not reported on a Mac");
+  platform.mock.restore();
+  t.mock.property(process, "platform", "darwin");
+  const onMac = await runDoctor(nothing);
+  assert.equal(onMac.exitCode, 2, onMac.text);
+  assert.match(onMac.text, /gh-broker-agent missing at /);
+  assert.match(onMac.text, /github-login missing at .*\/hosts\.yml /);
+  assert.doesNotMatch(onMac.text, /gh-broker-unit|\.gh-token|host-cleanup-script|tmp-sweep-script/);
 
   const elsewhere = readHostPieces(CTX, "win32", nothing);
   assert.equal(elsewhere.checked, 0);
   assert.equal(judgeHostPieces(elsewhere).verdict, "OK", "a platform with no pieces reports none missing");
-});
-
-test("W1-T12074: doctorCommand reads and reports every host piece for its current platform", async (t) => {
-  const platform = process.platform;
-  if (platform !== "linux" && platform !== "darwin") {
-    t.skip(`host-piece inventory does not target ${platform}`);
-    return;
-  }
-  const dir = mkdtempSync(join(tmpdir(), "rmd-doctor-host-pieces-"));
-  const previousHome = process.env.HOME;
-  const previousXdg = process.env.XDG_CONFIG_HOME;
-  const home = join(dir, "home");
-  const configHome = join(dir, "xdg");
-  const stateRoot = join(dir, "state");
-  mkdirSync(home, { recursive: true });
-  mkdirSync(configHome, { recursive: true });
-  process.env.HOME = home;
-  process.env.XDG_CONFIG_HOME = configHome;
-  try {
-    const { doctorCommand } = await import("#src/run-task.js");
-    const lines: string[] = [];
-    const code = await doctorCommand([], {
-      out: (line) => lines.push(line),
-      err: (line) => lines.push(line),
-      loadConfig: () => ({ root: stateRoot }) as never,
-      nowMs: Date.parse("2026-08-20T12:00:00Z"),
-      readLedgerLines: () => [],
-      liveInflightRuns: () => [],
-      readLockFiles: () => ({ locks: [] }),
-      readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
-      readWorkerProcesses: () => ({ count: 0, processes: [] }),
-      readDiskFreeBytes: () => 40 * 1024 ** 3,
-      readPauseAgeMs: () => undefined,
-      readGitLocks: () => [],
-      readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
-      readNvmrcVersion: () => process.versions.node,
-    });
-    assert.equal(code, 2, `missing installed host pieces make doctor fail:
-${lines.join("\n")}`);
-    const report = lines.join("\n");
-    assert.match(report, /\[FAIL\] host-pieces/);
-    const expected = hostPieces(platform, { home, configHome, stateRoot });
-    for (const piece of expected) {
-      assert.ok(report.includes(`${piece.id} missing at ${piece.path} — restore: ${piece.installer}`),
-        `doctorCommand reports ${piece.id} with its exact restore command:\n${report}`);
-    }
-    assert.match(report, /^rmd doctor: FAIL/m);
-  } finally {
-    if (previousHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousHome;
-    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = previousXdg;
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

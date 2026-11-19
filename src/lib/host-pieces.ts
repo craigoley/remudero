@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Why: on 2026-11-10 at about 12:32Z an accidental deletion on the Azure host removed the dependency
 // tool, the field-trials script, ~/.gh-token and the read broker's unit and launcher. Nothing named
@@ -37,21 +37,30 @@ export interface HostPieceContext {
   stateRoot: string;
   /** Where deploy/install-host-units.sh writes its scripts; `/usr/local/bin` by default. */
   binDir?: string;
+  /** The converged fleet checkout that owns the heartbeat and reclaim cron scripts. */
+  fleetInstallDir?: string;
+  /** The installed six-hour cleanup script; defaults to `<home>/rmd-host-cleanup.sh`. */
+  cleanupPath?: string;
+  /** The installed temporary sweep script; defaults beside the cleanup script. */
+  tmpSweepPath?: string;
 }
 
 const HOST_UNITS_INSTALLER = "sudo deploy/install-host-units.sh --install";
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Every piece on every platform, before the platform filter. */
 export function allHostPieces(ctx: HostPieceContext): HostPiece[] {
   const config = ctx.configHome ?? join(ctx.home, ".config");
   const bin = ctx.binDir ?? "/usr/local/bin";
-  const fleetInstall = join(ctx.stateRoot, "daemon-install");
+  const fleetInstall = ctx.fleetInstallDir ?? join(ctx.stateRoot, "daemon-install");
+  const cleanupPath = ctx.cleanupPath ?? join(ctx.home, "rmd-host-cleanup.sh");
+  const tmpSweepPath = ctx.tmpSweepPath ?? join(dirname(cleanupPath), "rmd-tmp-sweep.sh");
   return [
     {
       id: "dependency-tool",
       platforms: ["linux", "darwin"],
       path: join(ctx.home, ".local", "bin", "remudero-dependencies"),
-      installer: "deploy/install-dependency-seeds.sh",
+      installer: "bash deploy/install-dependency-seeds.sh",
       withoutIt: "a new worktree gets no linked dependencies and the janitor's seed sweep reports command not found",
     },
     {
@@ -93,29 +102,29 @@ export function allHostPieces(ctx: HostPieceContext): HostPiece[] {
       id: "heartbeat-script",
       platforms: ["linux"],
       path: join(fleetInstall, "scripts", "fleet-heartbeat.sh"),
-      installer: HOST_UNITS_INSTALLER,
+      installer: `git -C ${shellQuote(fleetInstall)} restore -- scripts/fleet-heartbeat.sh`,
       withoutIt: "the five-minute heartbeat cron pushes no beat, so the host looks dead to fleet-heartbeat-watch",
     },
     {
       id: "reclaim-script",
       platforms: ["linux"],
       path: join(fleetInstall, "deploy", "host-update.sh"),
-      installer: HOST_UNITS_INSTALLER,
+      installer: `git -C ${shellQuote(fleetInstall)} restore -- deploy/host-update.sh`,
       withoutIt: "the daily reclaim cron takes no off-host state snapshot",
     },
     {
       id: "host-cleanup-script",
       platforms: ["linux"],
-      path: join(ctx.home, "rmd-host-cleanup.sh"),
+      path: cleanupPath,
       installer: HOST_UNITS_INSTALLER,
-      withoutIt: "the six-hour host cleanup cron cannot reclaim disk space or preserve retired work",
+      withoutIt: "the six-hour janitor cron cannot reclaim disk space",
     },
     {
       id: "tmp-sweep-script",
       platforms: ["linux"],
-      path: join(ctx.home, "rmd-tmp-sweep.sh"),
+      path: tmpSweepPath,
       installer: HOST_UNITS_INSTALLER,
-      withoutIt: "the hourly guarded temporary-file sweep cannot run",
+      withoutIt: "the hourly temp sweep cannot reclaim stale temporary files",
     },
     {
       id: "reap-stray-script",

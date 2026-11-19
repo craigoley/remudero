@@ -69,13 +69,13 @@ import {
   readDiskFreeBytes,
   readDiskTotalBytes,
   readGitLocks,
+  readHostPieces,
   readMemInfo,
   readWorkerProcesses,
   type WorkerProcessReading,
   readNvmrcVersion,
   readPauseAgeMs,
   refuseUnsupportedArgs,
-  readHostPieces,
   type MemInfo,
   type ProviderCapacityReading,
   type WorktreeBaseRow,
@@ -583,6 +583,7 @@ export interface DoctorDeps extends ReportRepoContext {
   readProviderRoutingStatus?: typeof readProviderRoutingStatus;
   /** W1-T3728: presence only. Doctor never prints or persists the Azure Foundry key. */
   readCashKey?: () => string | undefined;
+  hostPieceExists?: (path: string) => boolean;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -709,8 +710,17 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
       keyPresent: Boolean((deps.readCashKey ?? (() => process.env[OPENWEIGHT_API_KEY_ENV]))()),
     },
     hostPieces: readHostPieces(
-      { home: homedir(), configHome: process.env.XDG_CONFIG_HOME, stateRoot: config.root },
+      {
+        home: homedir(),
+        configHome: process.env.XDG_CONFIG_HOME || undefined,
+        stateRoot: root,
+        binDir: process.env.RMD_BIN_DIR || undefined,
+        fleetInstallDir: process.env.RMD_FLEET_INSTALL_DIR || config.installRoot,
+        cleanupPath: process.env.RMD_CLEANUP_PATH || undefined,
+        tmpSweepPath: process.env.RMD_TMP_SWEEP_PATH || undefined,
+      },
       process.platform,
+      deps.hostPieceExists,
     ),
   });
 
