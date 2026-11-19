@@ -74,3 +74,17 @@ test("readLaneMemory carries the class typical and both reserved tails from the 
   });
   assert.equal(noTypical.perLaneTypicalMib, undefined, "an unreadable median charges the whole estimate");
 });
+
+// OBSERVED 2026-11-19 04:07Z-04:24Z, Azure core daemon after this file's fix: the target grew one lane a reading to 6
+// over a fixed pool of 3, so a pressure shed (the previous target less one) would have read 5, 4, 3 before it held a
+// single admission back.
+test("the lane target never grows past the lane pool, so a pressure shed bites on its first reading", () => {
+  const roomy = { ...LIVE, containerBaseMib: 2000, hostBaseAvailableMib: 50_000, perLaneTypicalMib: 816, containerTailMib: 4275, hostTailMib: 4275 };
+  let previous = laneTarget({ inFlight: 2, cpuCount: 8, maxLanes: 3, memory: roomy }).next;
+  for (let tick = 0; tick < 5; tick++) previous = laneTarget({ previous, inFlight: 2, cpuCount: 8, maxLanes: 3, memory: roomy }).next;
+  const capped = laneTarget({ previous, inFlight: 2, cpuCount: 8, maxLanes: 3, memory: roomy });
+  assert.deepEqual([capped.target, capped.binding], [3, "fixed"]);
+
+  const shed = laneTarget({ previous: capped.next, inFlight: 2, cpuCount: 8, maxLanes: 3, memory: { ...roomy, containerPressed: true } });
+  assert.deepEqual([shed.target, shed.binding], [2, "pressure"], "the first pressed reading admits no new lane over the two running");
+});

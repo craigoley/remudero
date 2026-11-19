@@ -200,7 +200,7 @@ test("W1-T13695 criterion 3: a grow is held to the reading's target and to laneC
   ]);
   h.state.fits = 6;
   await h.poll();
-  assert.deepEqual(targets(h.steps).at(-1), [4, 3], "the reading rises past laneCount");
+  assert.deepEqual(targets(h.steps).at(-1), [3, 3], "the reading is held to laneCount, so a later shed bites at once");
   assert.deepEqual(h.started, ["A", "B", "C"], "no lane past laneCount starts");
   await h.end();
 });
