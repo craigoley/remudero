@@ -18,7 +18,7 @@
     - src/lib/plan.ts
     - src/cli/commands/daemon.ts
     - test/plan/a-foreign-target-daemon-boots-on-a-catalog-plan.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A daemon whose target is remudero-ops loads a plan where a repo: remudero task depends on an id absent from that plan, and the loaded plan still holds that task"
