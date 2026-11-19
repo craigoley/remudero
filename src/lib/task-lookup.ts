@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, loadPlanKeepingUnseenDependencies, MOVED_FROM_VALUE, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, loadPlanQuarantiningDuplicates, MOVED_FROM_VALUE, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
@@ -199,15 +199,15 @@ export type TaskReleasePlan =
  * while the tick holds it, and a sound ops task beside it is `found` as if the bad edge were absent.
  * W1-T13785: a public hit while a destination is named reads the ops catalog too, because the tick holds public
  * records as well (a duplicate's public copy, a public task naming an ops id, and their dependants). A public task
- * the composition holds is `held`; with the destination off, the catalog unreadable or the composition malformed,
- * the public-only release requires the same resolved dependencies as the strict public loader.
+ * the composition holds is `held`. A sound public hit, an off destination, an unreadable ops catalog or a
+ * malformed composition keeps the public plan. Approve checks the original public loader's dependency rules
+ * before it releases from a plan read with deferred resolution.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
   const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });
   if (lookup.outcome !== "found") return lookup;
   if (lookup.catalog === "public") {
     const composition = await readReleaseComposition(publicPlan, sources);
-    if (composition?.outcome !== "ok") assertPublicReleaseDependencies(publicPlan);
     const hold = composition?.outcome === "ok" ? composition.held.get(taskId) : undefined;
     return hold === undefined ? { outcome: "found", catalog: "public", plan: publicPlan } : { outcome: "held", hold };
   }
@@ -248,7 +248,19 @@ export type ReleasePublicPlan =
 
 /** A public-to-ops dependency must reach approve's composition so it can hold the task and its dependants. */
 export function loadLocalReleasePlan(path: string, stateDir: string): Plan {
-  return planDestinationRepository(stateDir).outcome === "named" ? loadPlanKeepingUnseenDependencies(path, () => true) : loadPlan(path);
+  return planDestinationRepository(stateDir).outcome === "named" ? loadPublicPlanWithDeferredDependencies(path) : loadPlan(path);
+}
+
+function loadPublicPlanWithDeferredDependencies(path: string): Plan {
+  try {
+    return loadPlan(path);
+  } catch (error) {
+    if (!(error instanceof PlanError) || !/^task .*: depends_on unknown task /.test(error.message)) throw error;
+    // The quarantine reader and loadPlan share the public parser. Keep unseen edges only if it read every record.
+    const { plan, quarantined } = loadPlanQuarantiningDuplicates(path, undefined, undefined, () => true);
+    if (quarantined.length !== 0) throw error;
+    return plan;
+  }
 }
 
 /**
@@ -266,7 +278,7 @@ export async function readReleasePublicPlan(
   } catch (error) {
     const reason = error instanceof Error ? "origin-main-unreadable" : "origin-main-thrown";
     const path = join(checkoutRoot, "plan", "tasks.yaml");
-    const plan = keepsUnseenDependency ? loadPlanKeepingUnseenDependencies(path, keepsUnseenDependency) : loadPlan(path);
+    const plan = keepsUnseenDependency ? loadPublicPlanWithDeferredDependencies(path) : loadPlan(path);
     return { plan, read: "working_tree", reason };
   }
 }
@@ -277,31 +289,30 @@ export async function readReleasePublicPlan(
  * no longer holds (an id moved to the ops catalog after the boot) is resolved through the catalogs, and released
  * from the ops catalog when that is where it lives now; any other local hit is released as before.
  * W1-T13785: a local hit the public view still holds is `held` when the composition over that view holds it, and
- * `undefined` otherwise, so a sound public record is released from the local plan with the pin it always had.
+ * `undefined` for a sound public record from a valid local plan, retaining its local pin.
  */
-export async function findApproveReleasePlan(taskId: string, localPlan: Plan, readPublic: () => Promise<ReleasePublicPlan>,
+export async function findApproveReleasePlan(taskId: string, localPlan: Plan, readPublic: (keepUnseenDependencies?: boolean) => Promise<ReleasePublicPlan>,
   sources: TaskLookupOptions = {}): Promise<TaskReleasePlan | undefined> {
-  if (!localPlan.byId.has(taskId)) {
-    const release = await findReleasePlanInCatalogs(taskId, (await readPublic()).plan, sources);
-    if (release.outcome === "unreadable" || release.outcome === "absent") assertPublicReleaseDependencies(localPlan);
-    return release;
-  }
-  if (planDestinationRepository(sources.stateDir).outcome !== "named") {
+  const localHit = localPlan.byId.has(taskId);
+  const named = planDestinationRepository(sources.stateDir).outcome === "named";
+  if (!named) {
     assertPublicReleaseDependencies(localPlan);
-    return undefined;
+    return localHit ? undefined : findReleasePlanInCatalogs(taskId, (await readPublic(false)).plan, sources);
   }
-  const publicPlan = await readPublic();
-  if (publicPlan.plan.byId.has(taskId)) {
-    const composition = await readReleaseComposition(publicPlan.plan, sources);
-    if (composition?.outcome === "ok") {
-      const hold = composition.held.get(taskId);
-      return hold === undefined ? undefined : { outcome: "held", hold };
-    }
-  } else if (publicPlan.read === "origin/main") {
-    const moved = await findReleasePlanInCatalogs(taskId, publicPlan.plan, sources);
-    if (moved.outcome === "held" || (moved.outcome === "found" && moved.catalog === "ops")) return moved;
-  }
+  const publicView = await readPublic(true);
+  const resolve = ({ plan, read }: ReleasePublicPlan) => !localHit || plan.byId.has(taskId) || read === "origin/main"
+    ? findReleasePlanInCatalogs(taskId, plan, sources) : undefined;
+  let release = await resolve(publicView);
+  if (release?.outcome === "held") return release;
   assertPublicReleaseDependencies(localPlan);
+  if (publicReleaseDependencyError(publicView.plan)) {
+    // The original ref loader falls back to the strict working-tree plan when main has unresolved edges.
+    // An explicit hold above still comes from the view used for composition.
+    const strictView = await readPublic(false);
+    assertPublicReleaseDependencies(strictView.plan);
+    release = await resolve(strictView);
+  }
+  if (!localHit || release?.outcome === "held" || (release?.outcome === "found" && release.catalog === "ops")) return release;
   return undefined;
 }
 

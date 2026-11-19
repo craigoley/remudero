@@ -21,7 +21,7 @@ import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
 import {
   APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
 } from "#src/lib/stuck-state-gardener.js";
-import { composeSecondaryPlan, findApproveReleasePlan, readReleasePublicPlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
+import { composeSecondaryPlan, findApproveReleasePlan, loadLocalReleasePlan, readReleasePublicPlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 type Row = Record<string, unknown>;
@@ -84,7 +84,7 @@ const viewOf = (plan: Plan, read: "origin/main" | "working_tree"): (() => Promis
 test("W1-T13785 criterion 3: findApproveReleasePlan answers held with the reason and the edge for each held public record, and undefined for a sound one", async t => {
   const cases = [
     { world: WORLDS[1]!, held: { "PUB-2": DUP_HOLD, "PUB-2-CHILD": DUP_HOLD }, sound: ["PUB-1"] },
-    { world: WORLDS[2]!, held: { "PUB-REV": REV_HOLD, "PUB-REV-CHILD": REV_HOLD }, sound: ["PUB-1", "PUB-2"] },
+    { world: WORLDS[2]!, held: { "PUB-REV": REV_HOLD, "PUB-REV-CHILD": REV_HOLD }, sound: [] },
   ];
   for (const { world, held, sound } of cases) {
     const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
@@ -204,13 +204,66 @@ test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only
   }
 });
 
+test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged public dependant even when branch refs do not move", async t => {
+  const fx = opsCatalog(t, SOUND_OPS);
+  const main = publicMain(t, WORLDS[2]!.publicText);
+  main.unpublish();
+  const id = "PUB-REV-CHILD", rows: Row[] = [], replays: string[][] = [];
+  const localPlan = loadLocalReleasePlan(main.planPath, fx.stateDir);
+  const digest = publicRecordDigest(localPlan.byId.get(id)!);
+  let now = NOW, catalogUnavailable = false, failedReads = 0;
+  const append = (row: Row) => rows.push({ ts: iso(now), ...row });
+  assert.deepEqual(await readApproveRelease(id, localPlan, main.dir, fx.lookup, append), { outcome: "held", hold: REV_HOLD });
+  const ports = {
+    ...productionStuckStatePorts({
+      stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
+      api: path => {
+        if (catalogUnavailable && path === `repos/${REPOSITORY}`) {
+          failedReads++;
+          throw new Error("ops repository unavailable");
+        }
+        return fx.api(path);
+      },
+      log: (step, extra = {}) => void append({ step, ...extra }), escalate: () => null, destinationRead: async () => undefined,
+      approve: async (task, ...replay) => {
+        replays.push([task, ...replay]);
+        const result = await readApproveRelease(task, undefined, main.dir, fx.lookup, append, replay[0], replay[1] === "working_tree");
+        assert.equal(result?.outcome, "found");
+        return 0;
+      },
+    }),
+    readRows: () => rows, nowMs: () => now,
+  };
+  const [item] = scanStuckState(rows).open;
+  assert.equal((await ports.probe(item!)).present, true);
+  const pass = async () => { now += MIN; await runStuckStateGardener(ports); };
+  await pass();
+  assert.deepEqual(replays, []);
+  writeFileSync(main.planPath, PUBLIC_TEXT + record("PUB-REV") + record(id, ["PUB-REV"]));
+  assert.equal(main.head(), undefined);
+  catalogUnavailable = true;
+  await pass();
+  assert.equal(failedReads, 1, "the ops ref responds while its catalog read fails");
+  assert.deepEqual(replays, []);
+  catalogUnavailable = false;
+  assert.deepEqual(await ports.probe(item!), { present: false, digest });
+  await pass();
+  await pass();
+  assert.deepEqual(replays, [[id, digest, "working_tree"]]);
+  assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
+});
+
 test("W1-T13785 criterion 4: a held public record that changed, or moved to the ops catalog, is never re-run and writes stuck_state.record_changed", async t => {
   for (const shape of ["changed", "moved"] as const) {
-    const { fx, main, rows, pass, approved } = await refusalFixture(t);
+    const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
     await pass();
+    const [item] = scanStuckState(rows).open;
     if (shape === "changed") {
       main.publish(PUBLIC_TEXT.replace("held public fixture PUB-2", "retitled PUB-2"));
-      fx.set(record("OPS-GOOD"));
+      const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
+      const probed = await ports.probe(item!);
+      assert.equal(probed.present, true, "a title edit leaves the duplicate hold present");
+      assert.equal(probed.digest, publicRecordDigest(current), "the held probe also reports the edited record");
     } else {
       // The public copy leaves main; the ops catalog keeps a record of the same text, now the only copy.
       main.publish(record("PUB-1"));
@@ -222,6 +275,12 @@ test("W1-T13785 criterion 4: a held public record that changed, or moved to the 
     assert.equal(changed.length, 1, `${shape}: one record_changed row`);
     assert.equal(changed[0]!.recorded_digest, steps(rows, APPROVE_RELEASE_REFUSED_STEP)[0]!.public_record_digest, shape);
     assert.notEqual(changed[0]!.current_digest, changed[0]!.recorded_digest, shape);
+    if (shape === "changed") {
+      fx.set(record("OPS-GOOD"));
+      await pass();
+      assert.deepEqual(approved, [], "clearing the edge later still cannot replay the edited record");
+      assert.equal(steps(rows, "stuck_state.record_changed").length, 1);
+    }
   }
 });
 
@@ -252,14 +311,26 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
   assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
   main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
   rmSync(join(fx.stateDir, "plan-destination.json"));
-  assert.deepEqual(await ports.probe(item!), { present: true, reason: "public-replay-plan-invalid" });
+  assert.deepEqual(await ports.probe(item!), { present: true, digest: expected, reason: "public-replay-plan-invalid" });
   assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-plan-invalid" });
 });
 
 test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-catalog — no record the composition holds is answered found by the approve release plan, and every other record is answered as on origin/main", async t => {
   let heldSeen = 0, soundSeen = 0;
   for (const world of WORLDS) {
-    const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
+    const fx = opsCatalog(t, world.opsText), main = publicMain(t, world.publicText);
+    const publicPlan = loadLocalReleasePlan(main.planPath, fx.stateDir);
+    const readPublic = (keepUnseenDependencies = true) => readReleasePublicPlan(main.dir, { keepUnseenDependencies });
+    let legacyPlan: Plan | undefined;
+    let legacyError: unknown;
+    try {
+      legacyPlan = loadPlan(main.planPath);
+    } catch (error) {
+      legacyError = error;
+      assert.equal(world.name, "a public task naming an ops id");
+      assert.match(String(error), /task PUB-REV: depends_on unknown task 'OPS-GOOD'/);
+    }
+    if (world.name === "a public task naming an ops id") assert.ok(legacyError, "the original public loader rejects the whole plan");
     // The tick composes over the snapshot its reader returns, so the reference does too.
     const opsPlan = (await fx.read()).plan!;
     const composition = composeSecondaryPlan(publicPlan, opsPlan);
@@ -267,16 +338,21 @@ test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-ca
     if (composition.outcome !== "ok") continue;
     const ids = new Set([...publicPlan.tasks, ...opsPlan.tasks].map(task => task.id));
     for (const id of ids) {
-      const answer = await findApproveReleasePlan(id, publicPlan, viewOf(publicPlan, "origin/main"), fx.lookup);
+      const resolve = () => findApproveReleasePlan(id, publicPlan, readPublic, fx.lookup);
       const hold = composition.held.get(id), label = `${world.name}: ${id}`;
       if (hold !== undefined) {
         heldSeen += 1;
-        assert.deepEqual(answer, { outcome: "held", hold }, `${label} is held, never found`);
+        assert.deepEqual(await resolve(), { outcome: "held", hold }, `${label} is held, never found`);
+      } else if (legacyError instanceof Error) {
+        soundSeen += 1;
+        await assert.rejects(resolve, { name: legacyError.name, message: legacyError.message }, `${label}: the original public loader refused the release`);
       } else if (publicPlan.byId.has(id)) {
         soundSeen += 1;
-        assert.equal(answer, undefined, `${label}: a sound public record keeps its local plan, as on origin/main`);
+        assert.equal(await resolve(), undefined, `${label}: a sound public record keeps its local plan, as on origin/main`);
+        assert.equal(operatorReleasePin(publicPlan.byId.get(id)!), operatorReleasePin(legacyPlan!.byId.get(id)!), label);
       } else {
         soundSeen += 1;
+        const answer = await resolve();
         assert.equal(answer?.outcome, "found", label);
         assert.equal(answer?.outcome === "found" ? answer.catalog : undefined, "ops", label);
         assert.deepEqual(answer?.outcome === "found" ? answer.plan.byId.get(id) : undefined, composition.plan.byId.get(id),

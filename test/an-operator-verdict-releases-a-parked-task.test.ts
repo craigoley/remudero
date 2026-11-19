@@ -848,3 +848,22 @@ test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved depe
     }
   }
 });
+
+test("W1-T13785 criterion 2: the public loader still normalizes scalar dependencies before an ops outage or destination shutdown", async t => {
+  everythingSaid(t);
+  const text = shardText(PUBLIC_ID).replace("depends_on: []", `depends_on: ${OPS_ID}`);
+  for (const mode of MODES) {
+    for (const destination of ["offline", "off"] as const) {
+      const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" });
+      if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+      const { code, planPath } = await approveIn(mode, t, host, text, PUBLIC_ID);
+      const label = `${mode}, ${destination}`;
+      const record = loadPlan(planPath).byId.get(PUBLIC_ID)!;
+      assert.deepEqual(record.depends_on, [], label);
+      assert.equal(code, 0, label);
+      assert.equal(host.calls.length > 0, destination === "offline", label);
+      assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)], label);
+      assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pinBeforeThisTask(record), label);
+    }
+  }
+});
