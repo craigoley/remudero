@@ -9,7 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname as osHostname } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
@@ -75,6 +75,7 @@ import {
   readNvmrcVersion,
   readPauseAgeMs,
   refuseUnsupportedArgs,
+  readHostPieces,
   type MemInfo,
   type ProviderCapacityReading,
   type WorktreeBaseRow,
@@ -707,6 +708,10 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
       configured: config.workerProviders?.cashFallbackWhenBlocked === true && enabledWorkerProviders(config).includes("cash"),
       keyPresent: Boolean((deps.readCashKey ?? (() => process.env[OPENWEIGHT_API_KEY_ENV]))()),
     },
+    hostPieces: readHostPieces(
+      { home: homedir(), configHome: process.env.XDG_CONFIG_HOME, stateRoot: config.root },
+      process.platform,
+    ),
   });
 
   const unverifiableLines = judged.unverifiable.map((u) => `${u.taskId}: unverifiable here (host ${u.host})`);

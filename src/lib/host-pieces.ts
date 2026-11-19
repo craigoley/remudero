@@ -104,6 +104,20 @@ export function allHostPieces(ctx: HostPieceContext): HostPiece[] {
       withoutIt: "the daily reclaim cron takes no off-host state snapshot",
     },
     {
+      id: "host-cleanup-script",
+      platforms: ["linux"],
+      path: join(ctx.home, "rmd-host-cleanup.sh"),
+      installer: HOST_UNITS_INSTALLER,
+      withoutIt: "the six-hour host cleanup cron cannot reclaim disk space or preserve retired work",
+    },
+    {
+      id: "tmp-sweep-script",
+      platforms: ["linux"],
+      path: join(ctx.home, "rmd-tmp-sweep.sh"),
+      installer: HOST_UNITS_INSTALLER,
+      withoutIt: "the hourly guarded temporary-file sweep cannot run",
+    },
+    {
       id: "reap-stray-script",
       platforms: ["linux"],
       path: join(bin, "rmd-reap-stray-containers"),

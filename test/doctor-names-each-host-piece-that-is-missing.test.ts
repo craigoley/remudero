@@ -22,6 +22,8 @@ const REQUIRED_LINUX_IDS = [
   "daemon-launcher",
   "heartbeat-script",
   "reclaim-script",
+  "host-cleanup-script",
+  "tmp-sweep-script",
   "reap-stray-script",
   "session-reaper-script",
   "acr-login-script",
@@ -72,6 +74,8 @@ test("W1-T12074 criterion 1: one list names each host piece with its path, what 
   assert.equal(byId.get("gh-broker-unit")!.path, "/home/fleet/.config/systemd/user/remudero-gh-read-broker.service");
   assert.equal(byId.get("gh-broker-launcher")!.path, "/home/fleet/.config/remudero/gh-broker-start.sh");
   assert.equal(byId.get("field-trials-script")!.path, "/home/fleet/.local/bin/rmd-field-trials-refresh");
+  assert.equal(byId.get("host-cleanup-script")!.path, "/home/fleet/rmd-host-cleanup.sh");
+  assert.equal(byId.get("tmp-sweep-script")!.path, "/home/fleet/rmd-tmp-sweep.sh");
   assert.equal(byId.get("heartbeat-script")!.path, "/home/fleet/rmd-state/daemon-install/scripts/fleet-heartbeat.sh");
   assert.equal(byId.get("github-login")!.path, "/home/fleet/.gh-token");
   assert.equal(
@@ -153,4 +157,58 @@ test("W1-T12074 criterion 3: a piece that does not apply to this host, such as a
   const elsewhere = readHostPieces(CTX, "win32", nothing);
   assert.equal(elsewhere.checked, 0);
   assert.equal(judgeHostPieces(elsewhere).verdict, "OK", "a platform with no pieces reports none missing");
+});
+
+test("W1-T12074: doctorCommand reads and reports every host piece for its current platform", async (t) => {
+  const platform = process.platform;
+  if (platform !== "linux" && platform !== "darwin") {
+    t.skip(`host-piece inventory does not target ${platform}`);
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "rmd-doctor-host-pieces-"));
+  const previousHome = process.env.HOME;
+  const previousXdg = process.env.XDG_CONFIG_HOME;
+  const home = join(dir, "home");
+  const configHome = join(dir, "xdg");
+  const stateRoot = join(dir, "state");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(configHome, { recursive: true });
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = configHome;
+  try {
+    const { doctorCommand } = await import("#src/run-task.js");
+    const lines: string[] = [];
+    const code = await doctorCommand([], {
+      out: (line) => lines.push(line),
+      err: (line) => lines.push(line),
+      loadConfig: () => ({ root: stateRoot }) as never,
+      nowMs: Date.parse("2026-08-20T12:00:00Z"),
+      readLedgerLines: () => [],
+      liveInflightRuns: () => [],
+      readLockFiles: () => ({ locks: [] }),
+      readMemInfo: () => ({ availableBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3, swapTotalBytes: 2 * 1024 ** 3 }),
+      readWorkerProcesses: () => ({ count: 0, processes: [] }),
+      readDiskFreeBytes: () => 40 * 1024 ** 3,
+      readPauseAgeMs: () => undefined,
+      readGitLocks: () => [],
+      readCheckoutDepth: () => ({ shallow: false, commitCount: 980 }),
+      readNvmrcVersion: () => process.versions.node,
+    });
+    assert.equal(code, 2, `missing installed host pieces make doctor fail:
+${lines.join("\n")}`);
+    const report = lines.join("\n");
+    assert.match(report, /\[FAIL\] host-pieces/);
+    const expected = hostPieces(platform, { home, configHome, stateRoot });
+    for (const piece of expected) {
+      assert.ok(report.includes(`${piece.id} missing at ${piece.path} — restore: ${piece.installer}`),
+        `doctorCommand reports ${piece.id} with its exact restore command:\n${report}`);
+    }
+    assert.match(report, /^rmd doctor: FAIL/m);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
