@@ -495,6 +495,31 @@ interface MainProbeEvidence {
   outcomes?: BaseProbeResult;
 }
 
+/** W1-T13792 — a completed CI probe judged on the red it bisects. Red: it fails the red's own checks with
+ *  matching detail. Green: every one of the red's checks passed, whatever other checks did. Else inconclusive. */
+async function probeVerdictForRed(
+  sha: string,
+  jobs: readonly RollupCheckEntry[],
+  red: MainRedSignature,
+  readFailures: (failing: RollupCheckEntry[]) => Promise<readonly CiFailure[] | undefined>,
+): Promise<{ verdict: MainProbeVerdict; countedChecks: string[]; reason?: string }> {
+  const nameOf = (job: RollupCheckEntry) => job.name ?? job.context ?? "";
+  const checkOf = (name: string) => mainRedSignature([name], undefined).checks[0];
+  const names = [...new Set(jobs.map(nameOf).filter((name) => red.checks.includes(checkOf(name))))];
+  const onRed = mainHealthFromRollup(sha, jobs.filter((job) => names.includes(nameOf(job))), names, undefined, { cancelledIsPending: true });
+  const countedChecks = [...onRed.failingChecks];
+  if (countedChecks.length > 0) {
+    const probed = mainRedSignature(countedChecks, await readFailures(jobs.filter((job) => countedChecks.includes(nameOf(job)))));
+    return mainRedSignaturesMatch(probed, red) ? { verdict: "red", countedChecks } : { verdict: "inconclusive", countedChecks,
+      reason: `the probe is red on ${describeMainRed(probed)}, not on this red's ${describeMainRed(red)}` };
+  }
+  const unread = red.checks.filter((check) => !names.some((name) => checkOf(name) === check));
+  if (unread.length === 0 && onRed.state === "green" && onRed.nonEvidenceChecks.length === 0) return { verdict: "green", countedChecks };
+  return { verdict: "inconclusive", countedChecks, reason: unread.length > 0
+    ? `the probe ran none of this red's ${unread.join(", ")} checks`
+    : `this red's checks did not all pass on the probe: ${onRed.reason}` };
+}
+
 function localProbeVerdict(files: readonly string[], outcomes: BaseProbeResult): MainProbeVerdict {
   const byFile = new Map(outcomes.map((outcome) => [outcome.file, outcome.outcome]));
   if (files.some((file) => byFile.get(file) === "fails")) return "red";
@@ -681,7 +706,7 @@ export function mainBisectionFromLedger(lines: readonly Record<string, unknown>[
           verdict,
           ...(typeof line.run_url === "string" ? { runUrl: line.run_url } : {}),
           ...(typeof line.run_id === "number" ? { runId: line.run_id } : {}),
-          failingChecks: Array.isArray(line.failing_checks) ? line.failing_checks.map(String) : [],
+          failingChecks: (Array.isArray(line.counted_checks) ? line.counted_checks : Array.isArray(line.failing_checks) ? line.failing_checks : []).map(String),
           ...(line.method === "local-test" ? { method: "local-test" as const,
             files: Array.isArray(line.files) ? line.files.map(String) : [],
             outcomes: Array.isArray(line.outcomes) ? line.outcomes as BaseProbeResult : [] } : {}),
@@ -2173,7 +2198,15 @@ export function buildMainHealthRung(
       }
       if (reading.status !== "completed") continue;
       const judged = mainHealthFromRollup(probe.sha, [...(reading.jobs ?? [])], required.size > 0 ? required : undefined, undefined, { cancelledIsPending: true });
-      const verdict: MainProbeVerdict = judged.state === "green" ? "green" : judged.state === "red" ? "red" : "inconclusive";
+      let forRed: Awaited<ReturnType<typeof probeVerdictForRed>>;
+      try {
+        forRed = await probeVerdictForRed(probe.sha, reading.jobs ?? [], ctx.red,
+          async (failing) => deps.readCiFailures ? await deps.readCiFailures(failing) : undefined);
+      } catch (error) {
+        deps.log("main.repair.probe_unreadable", { ...at, probe_sha: probe.sha, error: String((error as Error)?.message ?? error) });
+        continue;
+      }
+      const verdict = forRed.verdict;
       const runUrl = reading.runUrl ?? probe.runUrl;
       repairRow("main.repair.probe_concluded", {
         ...at,
@@ -2181,7 +2214,8 @@ export function buildMainHealthRung(
         ref: probe.ref,
         verdict,
         failing_checks: [...judged.failingChecks],
-        reason: judged.reason,
+        counted_checks: forRed.countedChecks,
+        reason: forRed.reason ?? judged.reason,
         ...((reading.runId ?? probe.runId) !== undefined ? { run_id: reading.runId ?? probe.runId } : {}),
         ...(runUrl ? { run_url: runUrl } : {}),
       });
@@ -2189,7 +2223,7 @@ export function buildMainHealthRung(
       if (verdict === "inconclusive") state.verdicts.delete(probe.sha);
       else {
         state.verdicts.set(probe.sha, verdict);
-        state.evidence.set(probe.sha, { verdict, ...(runUrl ? { runUrl } : {}), failingChecks: [...judged.failingChecks] });
+        state.evidence.set(probe.sha, { verdict, ...(runUrl ? { runUrl } : {}), failingChecks: forRed.countedChecks });
       }
       try {
         await probes.release(probe);
