@@ -175,14 +175,14 @@ test("W1-T12176 criterion 4 warns about the actual checkout and branch used for 
   } }, dirname(dirname(main)));
   const warnings = result.checks.filter(check => check.name.startsWith("launchd-self-sync:"));
   assert.deepEqual(warnings.map(check => [check.name, check.verdict]),
-    [SERVE_LABEL, SUPERVISOR_LABEL].map(label => [`launchd-self-sync:${label}`, "WARN"]));
+    [[`launchd-self-sync:${SUPERVISOR_LABEL}`, "WARN"]]);
   for (const warning of warnings) {
     assert.ok(warning.measured.includes(offMain));
     assert.ok(warning.measured.includes("plan-amendment"));
   }
 });
 
-test("digest self-sync checks its WorkingDirectory instead of the launcher checkout", async t => {
+test("digest self-sync checks the Git checkout at its WorkingDirectory", async t => {
   const { root } = fixture(t);
   const main = gitRepo({ scope: t }).dir;
   const offMain = gitRepo({ scope: t, branch: "digest-plan-amendment" }).dir;
@@ -200,6 +200,27 @@ test("digest self-sync checks its WorkingDirectory instead of the launcher check
   const warning = result.checks.find(check => check.name === `launchd-self-sync:${DIGEST_LABEL}`);
   assert.equal(warning?.verdict, "WARN");
   assert.equal(warning.measured, `${realpathSync(offMain)} (digest-plan-amendment)`);
+});
+
+test("digest self-sync falls back to the launcher checkout when WorkingDirectory is outside Git", async t => {
+  const { root } = fixture(t);
+  const launcher = gitRepo({ scope: t, branch: "digest-launcher-branch" }).dir;
+  const program = join(launcher, "bin", "rmd");
+  mkdirSync(dirname(program), { recursive: true });
+  writeFileSync(program, "", { mode: 0o755 });
+  const stateRoot = join(root, "state outside git");
+  mkdirSync(stateRoot);
+  const result = await report(root, { platform: "darwin", home: root, exec: (_cmd, args) => {
+    const label = args[1]!.split("/").at(-1)!;
+    if (label === DIGEST_LABEL) return service(label, program, [
+      "state = not running", "runs = 4", "last exit code = 0", `working directory = ${stateRoot}`,
+    ]);
+    return missingService(label);
+  } });
+  const warning = result.checks.find(check => check.name === `launchd-self-sync:${DIGEST_LABEL}`);
+  assert.equal(warning?.verdict, "WARN");
+  assert.equal(warning.measured, `${realpathSync(launcher)} (digest-launcher-branch)`);
+  assert.equal(result.checks.some(check => check.name === `launchd-self-sync:${SERVE_LABEL}`), false);
 });
 
 test("supervisor --state-root overrides its job HOME's explicit install checkout", async t => {

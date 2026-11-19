@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
   consoleAppUrl,
@@ -554,10 +554,32 @@ function readLaunchdPath(path: string): { state: "present"; resolved: string } |
   }
 }
 
-function readLaunchdWorkingDirectory(path: string | undefined): string | null {
-  if (!path || !isAbsolute(path)) return null;
-  const reading = readLaunchdPath(path);
-  return reading.state === "present" ? reading.resolved : null;
+function launchdDigestCheckout(
+  output: string,
+  indent: string,
+  workingDirectory: string | undefined,
+  launcherCheckout: string,
+): string | null {
+  const args = launchdPrintBlock(output.split(/\r?\n/), indent, "arguments") ?? [];
+  const repoRootIndex = args.indexOf("--repo-root");
+  if (repoRootIndex >= 0) {
+    const override = args[repoRootIndex + 1];
+    if (!override) return null;
+    const path = readLaunchdPath(resolve(workingDirectory ?? "/", override));
+    return path.state === "present" ? path.resolved : null;
+  }
+
+  if (!workingDirectory || !isAbsolute(workingDirectory)) return null;
+  const cwd = readLaunchdPath(workingDirectory);
+  if (cwd.state !== "present") return null;
+  try {
+    const root = hostWorktreeGit(cwd.resolved, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
+    return isAbsolute(root) ? realpathSync(root) : null;
+  } catch (error) {
+    // The CLI falls back to its install checkout when its working directory is not inside Git.
+    void error;
+    return launcherCheckout;
+  }
 }
 
 function readLaunchdCheckoutBranch(checkout: string): string | null {
@@ -735,12 +757,12 @@ function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdSer
     const { program, pid, starts, lastExit, stderrPath, workingDirectory } = service;
     const programPath = readLaunchdPath(program);
     const resolved = programPath.state === "present" ? programPath.resolved : undefined;
-    const usesCheckout = (label === DIGEST_LABEL || label === SERVE_LABEL) && resolved
+    const usesCheckout = label === DIGEST_LABEL && resolved
       && basename(resolved) === "rmd" && basename(dirname(resolved)) === "bin"
       && !/^[\t ]+RMD_SELF_SYNC_DONE => 1\s*$/m.test(output);
     const checkout = label === SUPERVISOR_LABEL
       ? readSupervisorCheckout(output, service.indent)
-      : usesCheckout ? readLaunchdWorkingDirectory(workingDirectory) : undefined;
+      : usesCheckout ? launchdDigestCheckout(output, service.indent, workingDirectory, dirname(dirname(resolved))) : undefined;
     const selfSync = checkout === null ? "unreadable" as const
       : checkout === undefined ? undefined : { checkout, branch: readLaunchdCheckoutBranch(checkout) };
     readings.push({
