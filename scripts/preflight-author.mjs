@@ -2,7 +2,7 @@
 // Author-time feedback, not a substitute for the required hosted full-suite/coverage verdict.
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { affectedSelectionOrFull, buildAffectedSuitesGraph, changedSymbols, fullRunTrigger, isPlanOnlyDiff,
   planOnlySelectionOrFull, readAffectedSuitesInput, readPlanOnlyListing, symbollessSourceFiles } from '../src/lib/affected-suites.ts';
@@ -925,9 +925,28 @@ export function pinnedNodeReexec({ pin, current, env = process.env, home = homed
   return { candidates, refuse: prefix + (misread.length ? `Not run: ${misread.join('; ')}. ` : '') + remedy };
 }
 
+/**
+ * W1-T13774 — the npm CLI of the Node running this script, so a step's `npm run` and the package script's own
+ * `node` both run on it. MEASURED 2026-11-18 on the operator Mac: with PATH unchanged, the pinned Node running the
+ * pinned npm-cli.js still ran the script's `node` from PATH (another version), so the step also puts `binDir` first
+ * on its child's PATH. The install is the directory above the bin directory, as nodejs.org archives, nvm and
+ * Homebrew lay it out. An install without the CLI is refused, naming the path looked for; npm from PATH is never
+ * the fallback, since it may belong to another Node.
+ */
+export function npmUnderRunningNode({ execPath = process.execPath, exists = existsSync } = {}) {
+  const binDir = dirname(execPath), install = dirname(binDir);
+  const cli = join(install, 'lib/node_modules/npm/bin/npm-cli.js');
+  if (!exists(cli)) {
+    return { refuse: `the running Node (${execPath}) has no npm CLI at ${cli}; reinstall the Node at ${install} from a release ` +
+      `that carries lib/node_modules/npm (the nodejs.org archive and an nvm install both do), then re-run the author preflight. ` +
+      `npm from PATH is not run: it may belong to another Node` };
+  }
+  return { file: execPath, args: [cli], binDir };
+}
+
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
   select = (changed, range) => authorSelection(root, changed, range), host, admitHost = () => undefined,
-  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {}, pinnedNode: pinnedNodeLocation = {} } = {}) {
+  testSlot = {}, enqueueTestSlot: enqueueSuiteSlot = enqueueTestSlot, verdictLedger = {}, pinnedNode: pinnedNodeLocation = {}, npmCli: npmCliLocation = {} } = {}) {
   const { values, helpRequested } = parseArgv(argv, {
     'dry-run': { type: 'boolean' },
     deadline: { type: 'string' },
@@ -1247,7 +1266,17 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
           // before claiming a heavyweight slot. Never fix generated output inside a gate.
           for (const script of ['docs-index:check', 'docs-index:check-paths']) {
             if (reuseStage(`docs-index-precheck:${script}`)) continue;
-            const name = `docs-index-precheck:${script}`, result = runStep(name, ['run', '--silent', script], 'npm', {}, AUTHOR_DOCS_PRECHECK_MAX_MS);
+            const name = `docs-index-precheck:${script}`;
+            // W1-T13774: npm and the package script's own `node` run on this Node, never on PATH's first one.
+            const npm = npmUnderRunningNode(npmCliLocation);
+            if (npm.refuse !== undefined) {
+              report(name, { status: null, error: new Error(npm.refuse) }, false, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
+              receipt.affectedTestsNotRunReason = `${name} did not succeed; no heavy slot/static/test phase was started`;
+              throw new Error(npm.refuse);
+            }
+            const parentPath = authorEnvironment(process.env).PATH;
+            const result = runStep(name, [...npm.args, 'run', '--silent', script], npm.file,
+              { PATH: parentPath ? npm.binDir + delimiter + parentPath : npm.binDir }, AUTHOR_DOCS_PRECHECK_MAX_MS);
             const ok = result.status === 0 && !result.signal && !result.error && result.outputComplete !== false;
             report(name, result, ok, { inputs: docsInputs, runtimeBoundMs: AUTHOR_DOCS_PRECHECK_MAX_MS });
             if (!ok) {
