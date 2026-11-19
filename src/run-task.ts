@@ -13574,9 +13574,10 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "off") return undefined;
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
-    // The plan batch gets the bound readBlobsAtRefAsync derives from the listing; the other reads keep the plan readers' 64 MiB.
     const run = async (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input, opts) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: opts?.maxBuffer ?? 1 << 26, ...(input === undefined ? {} : { input }) });
+      checks.destinationGit
+        ? checks.destinationGit(cwd, args, input, opts)
+        : hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...opts, input });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";

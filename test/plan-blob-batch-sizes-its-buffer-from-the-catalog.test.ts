@@ -38,6 +38,7 @@ function planRepo(t: TestContext, rationales: string[]): { dir: string; paths: s
   const ids = rationales.map((_, i) => `W9-T${i + 1}`);
   const paths = ids.map((id) => `plan/tasks.d/${id}-fixture.yaml`);
   rationales.forEach((rationale, i) => writeFileSync(join(repo.dir, paths[i]!), shard(ids[i]!, rationale)));
+  writeFileSync(join(repo.dir, "plan", "tasks.d", "café.txt"), "café — fallback\n".repeat(600));
   repo.git("add", "plan");
   repo.git("commit", "--quiet", "-m", "fixture plan");
   return { dir: repo.dir, paths, ids };
@@ -62,31 +63,53 @@ test("W1-T13824 criterion 1: shards over 64 MiB load through loadPlanAtRef and l
   assert.equal(awaited.tasks.find((task) => task.id === "W9-T1")?.rationale?.length, piece.length + 1);
 });
 
-test("W1-T13824 criterion 2: for non-ASCII shards the derived bound covers git's bytes and is less than twice them", async (t) => {
+test("W1-T13824 criterion 2: canonical and ./-prefixed UTF-8 shards have the same exact batch bound", async (t) => {
   const { dir, paths } = planRepo(t, ["über — ünïcödé ✓ ".repeat(5000), "日本語のテキスト ".repeat(4000), "plain ascii"]);
   const exact = batchBytes(dir, paths);
-  const bounds: Array<number | undefined> = [];
+  const batches: Array<{ input: string | undefined; bound: number | undefined }> = [];
   const asyncRun = defaultGitRunnerAsync(dir);
-  const texts = await readBlobsAtRefAsync(async (args, stdin, opts) => {
-    if (args[0] === "cat-file") bounds.push(opts?.maxBuffer);
+  const awaited: typeof asyncRun = (args, stdin, opts) => {
+    if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer });
     return asyncRun(args, stdin, opts);
-  }, "HEAD", paths);
+  };
   const syncRun: GitBlobRunner = (args, stdin, opts) => {
-    if (args[0] === "cat-file") bounds.push(opts?.maxBuffer);
+    if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer });
     return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
   };
-  assert.deepEqual(readBlobsAtRef(syncRun, "HEAD", paths), texts);
-  assert.equal(texts[1]!.includes("日本語"), true, "the non-ASCII text survives the framing");
-  assert.equal(bounds.length, 2, "one bounded batch per read");
-  for (const bound of bounds) {
-    assert.ok(bound !== undefined && bound >= exact, `bound ${bound} covers the ${exact} bytes git wrote`);
-    assert.ok(bound < 2 * exact, `bound ${bound} is no hidden ceiling over ${exact} bytes`);
+  const expected = readBlobsAtRef(syncRun, "HEAD", paths);
+  assert.equal(expected[1]!.includes("日本語"), true, "the non-ASCII text survives the framing");
+  const prefixed = paths.map(path => `./${path}`);
+  assert.equal(batchBytes(dir, prefixed), exact, "Git resolves both spellings to the same blobs");
+  for (const request of [paths, prefixed]) {
+    assert.deepEqual(await readBlobsAtRefAsync(awaited, "HEAD", request), expected);
   }
-  // A path the tree lacks adds git's own `<input> missing` line, and still refuses as before.
-  await assert.rejects(
-    () => readBlobsAtRefAsync(async (args, stdin, opts) => asyncRun(args, stdin, opts), "HEAD", [paths[0]!, "plan/tasks.d/absent.yaml"]),
-    /could not read HEAD:plan\/tasks\.d\/absent\.yaml \(HEAD:plan\/tasks\.d\/absent\.yaml missing\)/,
-  );
+  assert.deepEqual(readBlobsAtRef(syncRun, "HEAD", prefixed), expected);
+  assert.equal(batches.length, 4, "one bounded batch per read");
+  for (const { input, bound } of batches) {
+    assert.match(input ?? "", /^(?:[0-9a-f]{40,64}\n){3}$/, "both spellings ask for the listed ids");
+    assert.equal(bound, exact, "bound includes every byte of Git's UTF-8 output and framing");
+  }
+});
+
+test("a quoted listing path can resolve to a blob and a missing UTF-8 path retains Git's error", async (t) => {
+  const { dir, paths } = planRepo(t, ["first shard"]);
+  const quoted = "plan/tasks.d/café.txt";
+  const missing = "plan/tasks.d/absent-é.yaml";
+  const request = [quoted, paths[0]!, quoted, missing];
+  const exact = batchBytes(dir, request);
+  const asyncRun = defaultGitRunnerAsync(dir);
+  const bounds: Array<number | undefined> = [];
+  const quotePaths = ["-c", "core.quotePath=true"];
+  const missingError = /could not read HEAD:plan\/tasks\.d\/absent-é\.yaml \(HEAD:plan\/tasks\.d\/absent-é\.yaml missing\)/;
+  assert.throws(() => readBlobsAtRef((args, stdin, opts) => {
+    if (args[1] === "--batch") bounds.push(opts?.maxBuffer);
+    return execFileSync("git", ["-C", dir, ...quotePaths, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
+  }, "HEAD", request), missingError);
+  await assert.rejects(() => readBlobsAtRefAsync((args, stdin, opts) => {
+    if (args[1] === "--batch") bounds.push(opts?.maxBuffer);
+    return asyncRun([...quotePaths, ...args], stdin, opts);
+  }, "HEAD", request), missingError);
+  assert.deepEqual(bounds, [exact, exact], "resolved and missing fallback output is counted in request order");
 });
 
 test("W1-T13824 criterion 3: a two-argument runner still reads the plan, and the defaults keep 64 MiB without a bound", async (t) => {
