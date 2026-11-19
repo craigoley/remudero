@@ -34,6 +34,8 @@
       proof: "grep: W1-T13832 criterion 3 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
     - claim: "serve.ts binds the generation's swapProbe hook to runSwapProbe, so the new module has a production caller"
       proof: "grep: runSwapProbe( in src/lib/serve.ts"
+    - claim: "A crash restart's replacement generation runs the swap probe and its serve.swap_probe row says trigger crash_restart"
+      proof: "grep: W1-T13832 criterion 5 in test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts"
   rationale: |
     WHY: W1-T13602 (#19315, 8202941cd) made each serve.demand row count view answers by code and staleness, but only
     for reads a client made. OBSERVED on the host 2026-11-19 (state/ledger.*.ndjson.gz, 199 files, plus
@@ -50,6 +52,9 @@
     - src/lib/serve-supervisor.ts: handoff logs serve.handoff_done after drainOld, and supervisor.start logs
       serve.supervisor_ready after bringUpAlone. Both run in the supervisor process, which holds no read model.
       serve.recycle_swapped is written by deploy/serve-container.sh (serve_ledger_row), outside TypeScript.
+      replaceCrashed (a promoted generation that exits on its own) logs serve.generation_crashed or
+      serve.handoff_rolled_back, waits its back-off, then bringUpAlone; on success it calls reportAlone and logs no
+      row of its own, so a crash restart is a third swap with no client-independent evidence either.
     - src/lib/serve-generation.ts GENERATION_MESSAGES is the supervisor-to-generation IPC; src/run-task.ts registers
       onDrainRequest, onShedRequest and the others on the generation's channel through serveGeneration(server).
     - src/lib/serve-demand.ts createServeDemand recordView feeds the one views map that flush writes as `views`.
@@ -59,8 +64,11 @@
     reason in the row, never an exit, a retry or a held handoff.
     1. serve-generation.ts: GENERATION_MESSAGES gains swapProbe ("rmd.swap_probe") and onSwapProbeRequest(channel, fn).
        serve-supervisor.ts: right after the serve.handoff_done log in handoff, and after the serve.supervisor_ready log
-       in supervisor.start, send { type: swapProbe, trigger: "handoff" | "cold_start", generation, sha, fromSha? } to
-       the active generation. A recycle is covered by its new container's cold_start trigger.
+       in supervisor.start, send { type: swapProbe, trigger: "handoff" | "cold_start" | "crash_restart", generation, sha, fromSha? } to
+       the active generation. In replaceCrashed, once bringUpAlone returns the promoted replacement and before
+       reportAlone, send the same message with trigger "crash_restart" and the dead generation's sha as fromSha.
+       A recycle is covered by its new container's cold_start trigger: supervisor.start cannot tell a recycle from a
+       first boot, so the row says cold_start, never recycle.
     2. views.ts: ReadModelViewRoutesOptions gains onProbeReader(reader). buildReadModelViewRoutes hands it one function
        that reads a view through answerRead with a probe flag: its answer reaches onAnswer with source "swap-probe",
        and a probe read never calls touchViewDemand or awaitViewDemand, so the probe keeps no demand key alive.
@@ -78,7 +86,8 @@
        read model and deps.ledgerPath; onViewAnswer forwards source to demand.recordView. run-task.ts registers
        onSwapProbeRequest beside onDrainRequest.
   falsifier: |
-    Never send swapProbe after handoff_done or supervisor_ready: criterion 1 fails (no row). Count probe answers in
+    Never send swapProbe after handoff_done or supervisor_ready: criterion 1 fails (no row). Drop the send from
+    replaceCrashed, or send trigger cold_start there: criterion 5 fails. Count probe answers in
     `views`: criterion 2 fails. Await the probe before handoff_done, or let a throw escape: criterion 3 fails.
   note: |
     Id reserved for run-unfiled-1795090868671 with ~/rmd-work/bin/reserve-id.sh.
