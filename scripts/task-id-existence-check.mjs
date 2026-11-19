@@ -447,6 +447,39 @@ export function evaluateReservationHolderConflicts(addedIds, occurrencesById, re
   return conflicts;
 }
 
+// The ops gate's strip rule (scripts/ops-gate.rb MOVED_FROM_LINE_RE, src/lib/plan.ts withoutOneMovedFromLine).
+const MOVED_FROM_LINE_RE = /^[ \t]+moved_from:[^\n]*\n?/gm;
+const MOVED_FROM_VALUE_RE = /^[ \t]+moved_from: remudero@([0-9a-f]{40})\n?$/;
+
+/**
+ * Added ids that are a VERIFIED MOVE from the public catalog (`rmd move-task`'s copy step): every file
+ * declaring the id carries exactly one `moved_from: remudero@<sha>` line, and with that line removed equals,
+ * byte for byte, the file at the same path in the public code root at `<sha>`. Such a copy adds no new claim
+ * on the reservation: the public record already passed the holder check under its own filer, so the copy's
+ * mover branch is not a rival holder. Anything short of that proof (no code root, no line, two lines, a
+ * commit or path the code root cannot read, one changed byte) is not a move and keeps the holder check.
+ * Read-only: `git cat-file` in the code root, never a fetch.
+ */
+export function verifiedMoveIds(addedIds, occurrencesById, cwd, codeRoot, runGit = git) {
+  const moved = new Map();
+  if (codeRoot === undefined) return moved;
+  for (const id of addedIds) {
+    const files = occurrenceFiles(occurrencesById.get(id) ?? []);
+    let source;
+    const verified = files.length > 0 && files.every((file) => {
+      const text = readFileSync(join(cwd, file), "utf8");
+      const lines = text.match(MOVED_FROM_LINE_RE) ?? [];
+      const sha = lines.length === 1 ? MOVED_FROM_VALUE_RE.exec(lines[0])?.[1] : undefined;
+      if (sha === undefined) return false;
+      const original = runGit(["cat-file", "blob", `${sha}:${file}`], { cwd: codeRoot });
+      source = sha;
+      return !original.error && original.status === 0 && original.stdout === text.replace(MOVED_FROM_LINE_RE, "");
+    });
+    if (verified) moved.set(id, source);
+  }
+  return moved;
+}
+
 /** W1-T6025: the four facts that tell one holder from another -- an unrecorded one says so. */
 function describeHolderFields(fields) {
   const v = (x) => (x === undefined || x === "" ? "<unrecorded>" : x);
@@ -989,9 +1022,15 @@ export function main(argv) {
     process.exitCode = 1;
   }
 
+  // A verified move copies a record the public catalog already holds under its own filer: announced, never silent.
+  const movedIds = verifiedMoveIds(addedAtHead.ids, occurrencesById, cwd, codeRoot);
+  for (const [id, sha] of movedIds) {
+    console.log(`task-id-existence: ${id} is a verified move of the public record at remudero@${sha} -- its reservation holder is the public filer, not this branch.`);
+  }
+  const holderIds = addedAtHead.ids.filter((id) => !movedIds.has(id));
   const holderReservation =
-    addedAtHead.ids.length === 0 ? reservation : resolveReservedIds(reservationRemote, cwd, { readHoldersFor: new Set(addedAtHead.ids) });
-  const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, holderReservation, ownHeadRef, cwd);
+    holderIds.length === 0 ? reservation : resolveReservedIds(reservationRemote, cwd, { readHoldersFor: new Set(holderIds) });
+  const holderConflicts = evaluateReservationHolderConflicts(holderIds, occurrencesById, holderReservation, ownHeadRef, cwd);
   if (holderConflicts.length > 0) {
     console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
     for (const c of holderConflicts) {
