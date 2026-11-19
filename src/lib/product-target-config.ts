@@ -528,7 +528,7 @@ class RunnerConfigProposalRun {
   private readJournal(): ProposalJournal {
     let fd: number | undefined;
     try {
-      fd = openSync(this.paths.state, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(this.paths.state, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const info = fstatSync(fd);
       if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > RUNNER_CONFIG_PROPOSAL_LIMITS.stateBytes) throw new ProposalFault("unavailable");
       const parsed = proposalJournalSchema.safeParse((() => { try { return JSON.parse(readFileSync(fd!, "utf8")); } catch { return undefined; } })());
