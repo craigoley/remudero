@@ -390,19 +390,36 @@ function removeOwnLinkOnlyMaterialization(checkout: string, dest: string): boole
   return true;
 }
 
+/** Reads and parses one regular file through a single open handle (no test-then-use). Undefined when the
+ * path is absent, is not a regular file (a link is never followed), or does not hold JSON. */
+function readRegularJson<T>(path: string): T | undefined {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) {
+    if (["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    throw error;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return undefined;
+    return JSON.parse(readFileSync(fd, "utf8")) as T;
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  } finally { closeSync(fd); }
+}
+
 /** W1-T11468: the inputs of the verified generation `modules` was materialized from for `owner`, or
  * undefined when its marker does not name `owner` or its generation is not ready. A generation that
  * fails verifyImmutableGeneration throws: a node_modules its seed cannot verify is never replaced. */
 function ownMaterializationInputs(owner: string, modules: string): Record<string, string> | undefined {
-  const markerFile = join(modules, CONSUMER_MARKER);
-  if (!lstatSync(modules).isDirectory() || !lstatExists(markerFile) || !lstatSync(markerFile).isFile()) return undefined;
-  let marker: { version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown; method?: unknown };
-  // An unparseable marker names no checkout: the destination is not provably this checkout's, so it is left to the old refusal.
-  try { marker = JSON.parse(readFileSync(markerFile, "utf8")); } catch (error) { if (error instanceof SyntaxError) return undefined; throw error; }
+  if (!lstatSync(modules).isDirectory()) return undefined;
+  // An absent, non-regular or unparseable marker names no checkout: the destination is not provably this checkout's, so it is left to the old refusal.
+  const marker = readRegularJson<{ version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown; method?: unknown }>(join(modules, CONSUMER_MARKER));
+  if (!marker) return undefined;
   if (marker.version !== VERSION || marker.checkout !== owner || !["apfs-clone", "readonly-links", "private-copy"].includes(marker.method as string) ||
-      typeof marker.key !== "string" || typeof marker.seed !== "string" || !isAbsolute(marker.seed) || !existsSync(join(marker.seed, "ready.json"))) return undefined;
-  const ready = JSON.parse(readFileSync(join(marker.seed, "ready.json"), "utf8")) as SeedMetadata;
-  if (ready.version !== VERSION || ready.key !== marker.key) return undefined;
+      typeof marker.key !== "string" || typeof marker.seed !== "string" || !isAbsolute(marker.seed)) return undefined;
+  const ready = readRegularJson<SeedMetadata>(join(marker.seed, "ready.json"));
+  if (!ready || ready.version !== VERSION || ready.key !== marker.key) return undefined;
   verifyImmutableGeneration(marker.seed, ready.files);
   return ready.files;
 }
