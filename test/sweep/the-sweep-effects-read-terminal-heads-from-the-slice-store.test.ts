@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { resolveLedgerUnion } from "#src/lib/ledger-union.js";
 import { parseLedger } from "#src/lib/retro.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -17,6 +17,7 @@ const terminalStep = "sweep.fix.uncreditable_head";
 const escalatedStep = "sweep.fix.uncreditable_head_escalated";
 const legacyPattern = /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/;
 const standDownReason = `terminal uncreditable head already escalated for this PR@head (${escalatedStep})`;
+const unreadHistoryReason = "terminal uncreditable-head history unread; dispatch held";
 const childFlag = "--terminal-heads-child";
 const candidates = [1, 2, 3, 4, 5].map((prNumber) => ({ prNumber, headSha: `sha-${prNumber}` }));
 candidates.push({ prNumber: 1, headSha: "sha-new-push" });
@@ -43,6 +44,8 @@ function fixture(t: TestContext) {
       ] },
     ],
   });
+  const spacedEscalation = JSON.stringify(escalated(4)).replace('"step":"', '"step": "');
+  writeFileSync(ledger.path, `${spacedEscalation}\n`, { flag: "a" });
   return { root, ...ledger };
 }
 
@@ -70,7 +73,7 @@ function observeBuild(root: string, ledgerPath: string): BuildObservation {
     const stoodDown = candidates.filter((candidate) => {
       const answer = standDown(candidate as OpenPrView);
       if (answer === undefined) return false;
-      assert.equal(answer, standDownReason);
+      assert.ok(answer === standDownReason || answer === unreadHistoryReason, `unexpected stand-down reason: ${answer}`);
       return true;
     });
     return { gunzips, stoodDown };
@@ -136,7 +139,7 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(unread.unread, [archive]);
     assert.deepEqual(unread.matches, []);
     const rejected = buildInNewProcess(root, path);
-    assert.deepEqual(rejected, { gunzips: 1, stoodDown: [] }, "retry only the changed rotation and discard the partial index");
+    assert.deepEqual(rejected, { gunzips: 1, stoodDown: candidates }, "an unread rotation holds dispatch instead of making prior heads look free");
 
     writeFileSync(archive, original);
     assert.deepEqual(buildInNewProcess(root, path).stoodDown, candidates.slice(0, 3));
@@ -150,6 +153,32 @@ if (process.argv[2] === childFlag) {
     const union = resolveLedgerUnion(dir, legacyPattern);
     assert.equal(union.ok, true);
     assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 1) });
+  });
+
+  test("W1-T12271: an unreadable rotation cannot make a cached terminal head look free", async (t) => {
+    const { root, dir, path } = fixture(t);
+    const slice = {
+      holder: "sweep.terminal-uncreditable-heads",
+      steps: [terminalStep, escalatedStep],
+      rawPattern: legacyPattern,
+      sharedSnapshot: true,
+      project: (row: Record<string, unknown>) => ({
+        ts: row.ts, step: row.step, pr_number: row.pr_number, head_sha: row.head_sha,
+        head: row.head, repair_task_id: row.repair_task_id, cause: row.cause, reason: row.reason, terminal: row.terminal,
+      }),
+    };
+    await createEscalationTriageHistoryReader({ slice })(dir);
+    const archive = join(dir, "ledger.2026-11-02T00-00-00-000Z.ndjson.gz");
+    const access = fs.accessSync;
+    try {
+      fs.accessSync = ((candidate: Parameters<typeof fs.accessSync>[0], mode?: Parameters<typeof fs.accessSync>[1]) => {
+        if (String(candidate) === archive) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        return access(candidate, mode);
+      }) as typeof fs.accessSync;
+      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates }, "a cache hit cannot override the unreadable source rotation");
+    } finally {
+      fs.accessSync = access;
+    }
   });
 
   test("without rotations the sweep uses the caller's live ledger path", (t) => {
