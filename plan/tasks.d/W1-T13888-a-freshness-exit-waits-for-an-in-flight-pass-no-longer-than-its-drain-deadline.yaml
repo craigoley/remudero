@@ -1,0 +1,50 @@
+- id: W1-T13888
+  title: "A freshness exit waits for an in-flight pass no longer than its drain deadline"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: the freshness exit path (daemon restart and deploy)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T9812
+    - W1-T12231
+    - W1-T12237
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/a-freshness-exit-waits-for-a-pass-no-longer-than-its-drain-deadline.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A latched freshness exit stops waiting for an in-flight pass at latch plus the drain limit and logs the abandonment"
+      proof: "grep: W1-T13888 criterion 1 in test/daemon/a-freshness-exit-waits-for-a-pass-no-longer-than-its-drain-deadline.test.ts"
+    - claim: "An unlatched freshness exit stops waiting for an in-flight pass at exit plus the drain limit"
+      proof: "grep: W1-T13888 criterion 2 in test/daemon/a-freshness-exit-waits-for-a-pass-no-longer-than-its-drain-deadline.test.ts"
+    - claim: "invariant:pass-inside-limit-is-waited-for — a pass that settles inside the limit is still waited for and nothing is abandoned"
+      proof: "grep: W1-T13888 invariant in test/daemon/a-freshness-exit-waits-for-a-pass-no-longer-than-its-drain-deadline.test.ts"
+  rationale: |
+    WHY: on 2026-11-20 a requested restart was consumed at 23:33:40Z, but the daemon recycled only at 00:16:46Z
+    (OBSERVED, host core ledger): the exit waited 2,350,250 ms for an in-flight full pass that started 22:56Z and
+    settled 00:12:54Z. prepareFreshnessExit in src/lib/daemon.ts awaits backgroundSweep with no limit (W1-T12237),
+    and drainBeforeRestart awaits the overlapped pass beside the drain with no limit (W1-T9812). The full-pass bound
+    is learned as p90 x 3 of settled passes (learnedSweepBound), so it sits far above 30 min on a slow day and does
+    not end the wait. Population (OBSERVED, 7 days, 53 freshness exits): 4 had pre_exit_pass over 30 min, all
+    pathological (max 2,683,898 ms); the slowest healthy one was about 28.6 min. A bound at
+    freshnessRestart.maxDrainWaitMs (FRESHNESS_MAX_DRAIN_WAIT_MS, 30 min) cuts only those 4.
+  design: |
+    daemon.ts: an ExitPass with a pending pass carries limitAtMs = (dispatch latch, else exit start) +
+    freshnessMaxDrainWaitMs. passWithinLimit races the pass against a timer for the time left; on the timer it logs
+    daemon.freshness_pre_exit_pass_abandoned (pre_exit_pass, max_drain_wait_ms, limit_at) and the exit proceeds. Both
+    waits use it: the unlatched await before the drain and the overlapped entry in the drain's Promise.all. The pass
+    itself is not cancelled; its outcome stays handled as before. pre_exit_pass is recorded once, at settle or at
+    the limit. A pass that settles inside the limit behaves exactly as today.
+    INVARIANT pass-inside-limit-is-waited-for: a pass that settles before its limit is awaited and nothing is abandoned.
+  falsifier: |
+    Revert passWithinLimit to awaiting pass.settled: criteria 1 and 2 fail (the exit waits for the pass forever);
+    the invariant test still passes.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795136213861
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

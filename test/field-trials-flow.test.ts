@@ -896,3 +896,48 @@ test("the sole private flow joins named preventive component execution without c
   assert.equal(release.state, "candidate");
   assert.doesNotMatch(JSON.stringify(release), /preventionExecution|private-component|ci-remedy-execution|component-assignment|processInstanceId/);
 });
+
+/** Synthetic rows for `count` assignments: each one is its own task, an observed implement-lane assignment and a terminal
+ * attempt, alternating a served success with an unnamed served model. Same day and host, so every unit shares a partition. */
+function scaleRows(count: number): FieldTrialsLedgerRead {
+  const raw: Record<string, unknown>[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = `scale-${i}`;
+    const served = i % 2 === 0;
+    raw.push(row("worker.assignment", `task-${id}`, `run-${id}`, T(10), {
+      worker_assignment: { id, requested: { model: "model-a" }, selected: { provider: "p", model: "model-a" } },
+      benchmark_run: { work: { taskClass: { state: "observed", value: "implement" }, shape: { lane: { state: "observed", value: "implement" } } } } }));
+    raw.push(row("worker.attempt", `task-${id}`, `run-${id}`, T(10, 1), {
+      selection_assignment_id: id, provider: "p", success: true, ...(served ? { served_model: "model-a" } : {}) }));
+  }
+  return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, futureRows: 0,
+    unreadSources: 0, newestTs: null, rows: raw.map((value, index) => projectFlowRow(value, `scale-fp-${index}`)) };
+}
+
+/** Multiply every count in a cell tree, so a small input's cells predict a large input's cells. */
+function scaled(value: unknown, factor: number): unknown {
+  if (typeof value === "number") return value * factor;
+  if (Array.isArray(value)) return value.map((item) => scaled(item, factor));
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scaled(item, factor)]));
+  return value;
+}
+
+test("W1-T13866 criterion 1: a flow snapshot from over 100k synthetic assignments completes and matches a small input's units per assignment", () => {
+  const snapshotOf = (count: number) => buildFieldTrialsFlowSnapshot({ asOf: T(11),
+    sources: [{ label: "core", repo: "acme/core", ledger: scaleRows(count) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  // 2^17 assignments: past V8's ~125k argument ceiling, so any `push(...units)` of a per-assignment family throws RangeError.
+  const large = 131_072;
+  const small = snapshotOf(2);
+  const big = snapshotOf(large);
+  const cells = (snapshot: FieldTrialsFlowSnapshot, family: "adoption" | "guardrails" | "funnel") =>
+    Object.fromEntries(Object.entries(snapshot.families[family]).map(([key, partition]) => [key, partition.cells]));
+  for (const family of ["adoption", "guardrails", "funnel"] as const) {
+    assert.ok(Object.keys(cells(small, family)).length > 0, `${family}: the small input must produce cells to compare`);
+    assert.deepEqual(cells(big, family), scaled(cells(small, family), large / 2), `${family}: each assignment adds the same units at any size`);
+  }
+  const guardrailUnits = Object.values(big.families.guardrails).reduce((sum, partition) => sum + partition.cells.opportunities, 0);
+  assert.ok(guardrailUnits > large, "each assignment yields more than one guardrail unit, so that family is past the ceiling too");
+  assert.deepEqual(big.assignmentTelemetry, scaled(small.assignmentTelemetry, large / 2));
+  assert.deepEqual(big.rebuild.rebuiltPartitions, small.rebuild.rebuiltPartitions);
+});

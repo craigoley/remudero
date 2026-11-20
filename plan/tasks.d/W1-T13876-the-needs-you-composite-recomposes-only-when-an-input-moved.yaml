@@ -1,0 +1,45 @@
+- id: W1-T13876
+  title: "The needs-you composite recomposes only when an input entry moved, and the gate sort parses each time once"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans the serve needs-you composite and the human-gate sort (serve main thread)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13873
+  files:
+    - src/lib/needs-you-view.ts
+    - src/lib/human-gate.ts
+    - test/the-needs-you-view-is-a-view-of-views.test.ts
+    - test/inbox/the-human-gate-sort-parses-each-time-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Reading the needs-you view or walking its bodies composes again only when an input entry or the instances moved"
+      proof: "grep: W1-T13876 criterion 1 in test/the-needs-you-view-is-a-view-of-views.test.ts"
+    - claim: "invariant:gate-order-kept — the human-gate sort parses each gate's opened time once and keeps oldest-first, key-tied order"
+      proof: "grep: W1-T13876 criterion 2 in test/inbox/the-human-gate-sort-parses-each-time-once.test.ts"
+  rationale: |
+    WHY: a 61 s CPU profile of serve's main thread on the host with the Console open (OBSERVED 2026-11-19
+    21:31:57-21:32:58Z, operator-approved) put the main thread at 0.22 cores against a 0.3 goal for serve's whole
+    process. composeNeedsYou with compareGates was the largest self-time block (1.17 s). withNeedsYouView in
+    src/lib/needs-you-view.ts calls composeNeedsYou on every read of the view and on every walk of the bodies,
+    though its inputs (the input view entries and the known instances) are replaced, never mutated, when they
+    move. compareGates in src/lib/human-gate.ts calls Date.parse on both sides of every comparison, so a sort of n
+    gates parses about 2 n log n times.
+  design: |
+    needs-you-view.ts: compose() keeps the composed entry with the input entries and the instance keys it was
+    built from, and returns it when both are reference-identical (sameItems). The body listener uses one
+    isNeedsYouInput predicate. human-gate.ts: compareGates takes optional precomputed times, and the sort maps each
+    gate to its sourceTime once, sorts the pairs and maps back. The view's body and order are unchanged.
+    INVARIANT gate-order-kept: gates still sort oldest opened time first, ties broken by key, as before.
+  falsifier: |
+    Compose on every read again: criterion 1 fails (the input body's data is read on each read). Call compareGates
+    without the precomputed times: criterion 2 fails (more than one parse per gate).
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795125325737
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

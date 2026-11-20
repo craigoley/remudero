@@ -1,0 +1,41 @@
+- id: W1-T13877
+  title: "A stored plain Inbox message is checked once per content, not on every thread list"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: the plain-message check path every Inbox thread list runs (serve main thread)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13876
+  files:
+    - src/lib/inbox-plain.ts
+    - test/inbox/a-stored-plain-message-is-checked-once-per-content.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A stored plain message is checked once per content, and a changed content is checked again"
+      proof: "grep: W1-T13877 criterion 1 in test/inbox/a-stored-plain-message-is-checked-once-per-content.test.ts"
+    - claim: "invariant:memo-bounded — the memo is bounded and answers correctly after it starts over"
+      proof: "grep: W1-T13877 criterion 2 in test/inbox/a-stored-plain-message-is-checked-once-per-content.test.ts"
+  rationale: |
+    WHY: the same 61 s serve main-thread profile (OBSERVED 2026-11-19 21:31:57-21:32:58Z, Console open, main thread
+    0.22 cores) put checkPlainMessage with machineTokens at about 1.1 s, plus Buffer encoding from sha256. Every
+    thread list (operatorThreadItems in panel-graph.ts) calls plainInboxMessage for each item, and
+    currentStoredMessage in src/lib/inbox-plain.ts re-runs plainSourceFingerprint, validateDecisionSummary and
+    checkPlainMessage each time. Those checks read only the stored message and the proposal id and summary that its
+    matched sourceFingerprint already names, and no clock, so the answer for one content never changes.
+  design: |
+    inbox-plain.ts: storedMessageChecksOut memoizes the shape and plain-language verdict in a Map keyed on the
+    JSON of the fingerprint, source and every field the checks read. plainSourceFingerprint memoizes its hash by
+    its JSON key. Both maps clear when they reach PLAIN_CHECK_MEMO_MAX (4096). What is served and refused is
+    unchanged.
+    INVARIANT memo-bounded: neither memo grows past PLAIN_CHECK_MEMO_MAX, and answers stay correct after a clear.
+  falsifier: |
+    Skip the memo lookup: criterion 1 fails (each repeat reads the message fields to check them again).
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795125349655
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

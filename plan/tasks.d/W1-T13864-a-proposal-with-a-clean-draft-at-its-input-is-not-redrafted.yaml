@@ -16,7 +16,9 @@
   files:
     - src/lib/inbox.ts
     - src/lib/ledger-steps.ts
+    - src/run-task.ts # the daemon draft hook passes its ledger rows to draftsDueOnDaemon
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
+    - "src/lib/ledger.ts"
   status: queued
   attempts: 0
   acceptance:
@@ -63,3 +65,7 @@
     the proposal again and the test fails.
   note: |
     Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.
+    AMENDED (2026-11-19): cleanDraftInputKeys needs the daemon's ledger rows, and only the daemon draft hook,
+    buildInboxDraftHook in src/run-task.ts, holds them (it calls readLedgerLines(ledgerPath) and then
+    draftsDueOnDaemon). src/run-task.ts joins files; the build adds one field, draftLedgerRows: ledgerLines,
+    to the draftSelection object there.

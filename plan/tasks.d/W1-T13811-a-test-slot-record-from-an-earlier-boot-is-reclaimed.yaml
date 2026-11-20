@@ -13,7 +13,7 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Observed 2026-11-19 in a cloud session. In src/lib/test-slot.ts, the reclaim path after
