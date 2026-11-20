@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { closeSync, constants, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
-import { watch } from "node:fs/promises";
+import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fsPromises, { watch } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
@@ -1031,39 +1031,44 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
   const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
   assert.ok(existsSync(kept));
 
-  // The kept file becomes a FIFO: opening it blocks in the kernel until a writer arrives. From 400 ms on, a writer
-  // releases every waiting open for 2 s, so a reader that blocks serve's loop returns (late) instead of hanging the suite.
-  renameSync(kept, `${kept}.saved`);
-  execFileSync("mkfifo", ["-m", "600", kept]);
-  const unblock = () => {
-    // A reader still waiting in open() is released by any writer; with none waiting this throws ENXIO, which is fine.
-    try { closeSync(openSync(kept, constants.O_WRONLY | constants.O_NONBLOCK)); } catch (error) { void error; }
-  };
-  t.after(unblock);
-  const release = `const fs = require("node:fs"); const end = Date.now() + 2400;
-    setTimeout(function tick() {
-      try { fs.closeSync(fs.openSync(${JSON.stringify(kept)}, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch {}
-      if (Date.now() < end) setTimeout(tick, 20);
-    }, 400);`;
-  const writer = spawn(process.execPath, ["-e", release], { stdio: "ignore" });
-  let writerDone = false;
-  const writerExited = new Promise<void>((resolve) => writer.once("exit", () => { writerDone = true; resolve(); }));
-  t.after(() => { writer.kill("SIGKILL"); });
+  let signalOpen!: () => void;
+  const openStarted = new Promise<void>((resolve) => { signalOpen = resolve; });
+  let releaseOpen!: () => void;
+  const openReleased = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const realOpen = fsPromises.open;
+  const stalledOpen = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
+    if (args[0] === kept) {
+      signalOpen();
+      await openReleased;
+    }
+    return realOpen(...args);
+  });
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const bound = 25;
+    let pending = true;
+    const resume = ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()))
+      .finally(() => { pending = false; });
+    await Promise.race([openStarted, resume.then(() => assert.fail("resume answered without opening the kept file"))]);
+    t.mock.timers.tick(bound - 1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pending, true, "the open is still pending one tick before the bound");
+    t.mock.timers.tick(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pending, false, "resume answers at the bound while the open is still stalled");
+    const resumed = await resume;
+    assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["unknown", undefined]);
+    const key = createHash("sha256").update(actor).digest("hex");
+    acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "while-kept-open-stalled" }).release();
+    assert.equal(evidence.reads.length, 1, "a stalled kept file is not a reason to read the ledger again");
+  } finally {
+    t.mock.timers.reset();
+    stalledOpen.mock.restore();
+    syncBuiltinESMExports();
+    releaseOpen();
+  }
 
-  const bound = 25;
-  const started = performance.now();
-  const resumed = await ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()));
-  const elapsed = performance.now() - started;
-  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["unknown", undefined], "a lookup past its bound is never an answer");
-  assert.ok(elapsed < 350, `answered within the bound, not after the open (${Math.round(elapsed)} ms)`);
-  assert.equal(writerDone, false, "the open was still blocked when the answer came");
-  const key = createHash("sha256").update(actor).digest("hex");
-  acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "while-kept-open-stalled" }).release();
-  assert.equal(evidence.reads.length, 1, "a stalled kept file is not a reason to read the ledger again");
-
-  await writerExited;
-  unlinkSync(kept);
-  renameSync(`${kept}.saved`, kept);
   const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.deepEqual([again.observation.state, again.observation.proposal], ["proposed", PR_URL]);
   assert.equal(evidence.reads.length, 1, "the kept proposal answered once the file was readable");
