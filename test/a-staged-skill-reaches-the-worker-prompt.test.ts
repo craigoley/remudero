@@ -355,16 +355,24 @@ test("W1-T3379 criterion 2: the report joins terminal outcomes by run id and ren
     terminal_runs: 1,
     pending_merge_runs: 0,
     merged_runs: 1,
+    not_merged_runs: 0,
     harmful_terminal_runs: 0,
     outcomes: { merged: 1 },
+    costed_runs: 0,
+    cost_usd: 0,
+    cost_per_merged_pr: null,
   });
   assert.deepEqual(report.control, {
     observed_eligible_runs: 1,
     terminal_runs: 1,
     pending_merge_runs: 1,
     merged_runs: 0,
+    not_merged_runs: 0,
     harmful_terminal_runs: 0,
     outcomes: { blocked_ci: 1 },
+    costed_runs: 0,
+    cost_usd: 0,
+    cost_per_merged_pr: null,
   });
   const rendered = renderSkillEffectivenessReport(report);
   assert.match(rendered, /^selected: observed_eligible_runs=1; terminal_runs=1/m);
@@ -442,7 +450,7 @@ test("W1-T3379: the report command reads one complete union and refuses malforme
   const readLedger = ((stateDir: string, opts: { step?: string | readonly string[]; refuseIncomplete?: boolean } = {}) => {
     readCalls++;
     assert.equal(stateDir, "/state");
-    assert.deepEqual(opts.step, ["skills.selection", "verdict", "verdict.merged", "pr.terminal"]);
+    assert.deepEqual(opts.step, ["skills.selection", "verdict", "verdict.merged", "pr.terminal", "fix.done"]);
     assert.equal(opts.refuseIncomplete, true);
     return {
       stateDir,
