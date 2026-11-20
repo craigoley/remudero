@@ -37923,16 +37923,7 @@ export function buildInboxDraftHook(
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  draftBatch: (
-    toDraft: Proposal[],
-    config: Config,
-    owner: string,
-    repo: string,
-    runId: string,
-    log: (step: string, extra?: Record<string, unknown>) => void,
-    cashResumes?: DraftCashResumes,
-  ) => Promise<DraftRungOutcome[]> = (proposals, config, owner, repo, runId, log, cashResumes) =>
-    draftProposalBatch(proposals, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes),
+  draftBatch: typeof draftProposalBatch = draftProposalBatch,
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
@@ -38138,7 +38129,8 @@ export function buildInboxDraftHook(
       let outcomes: DraftRungOutcome[];
       const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
-        outcomes = await draftBatch(due, config, owner, repo, runId, log, readDraftCashResumes(join(inboxRoot, "state")));
+        const cashResumes = readDraftCashResumes(join(inboxRoot, "state"));
+        outcomes = await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes);
       } finally {
         // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
         // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial

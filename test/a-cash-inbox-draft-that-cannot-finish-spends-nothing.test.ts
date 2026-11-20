@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, inboxDraftExampleFragmentYaml,
   MAX_DRAFT_LINT_ATTEMPTS, planProjectionForDependsOn, readDraftCashResumes, resolvedInboxDraftLane, runDraftRung,
-  type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
+  type DraftCashResumes, type DraftRungOutcome, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
 import { cashRequestEffort } from "#src/lib/cash-request-effort.js";
 import { draftStatsFromRows } from "#src/lib/draft-routing.js";
@@ -14,7 +14,7 @@ import { cashDraftFit, openWeightAllowancePath, openWeightReservationUsd, readOp
   reserveOpenWeightBudget, settleOpenWeightBudget } from "#src/lib/worker-provider.js";
 import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { withWorkspaceCleanup } from "#src/lib/workspace-cleanup-contract.js";
-import { draftProposalBatch } from "#test/helpers/run-task-test.js";
+import { buildInboxDraftHook, draftProposalBatch } from "#test/helpers/run-task-test.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -110,19 +110,33 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
     },
   };
   const draftedProposal = opts.proposal ?? proposal;
-  const outcomes = await draftProposalBatch([draftedProposal], config, "acme", "remudero", "cash-fit",
-    (step, extra) => { rows.push({ step, ...extra }); }, args => {
-      if (!args.draftRouting) return spawnWorker(args);
-      prompts.push(withWorkspaceCleanup(args.prompt));
-      const deployment = opts.deployments[draft++];
-      const stats = draftStatsFromRows([{ step: "draft.routing.outcome", lane: "inbox-draft", deployment,
-        outcome: "clean", clean: true, draft_cost_usd: 0.000001 }], "inbox-draft");
-      return spawnWorker({ ...args,
-        ...((draft > 1 || opts.resume) && opts.relintDeployment ? {
-          routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: "fixture relint deployment", models: [opts.relintDeployment] },
-        } : {}),
-        draftRouting: { ...args.draftRouting, random: () => 0.5, readStats: () => stats } });
-    }, providerRouting, mount, opts.resume ? readDraftCashResumes(join(root, "state")) : undefined);
+  const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
+  const rawSpawn: typeof spawnWorker = args => {
+    if (!args.draftRouting) return spawnWorker(args);
+    prompts.push(withWorkspaceCleanup(args.prompt));
+    const deployment = opts.deployments[draft++];
+    const stats = draftStatsFromRows([{ step: "draft.routing.outcome", lane: "inbox-draft", deployment,
+      outcome: "clean", clean: true, draft_cost_usd: 0.000001 }], "inbox-draft");
+    return spawnWorker({ ...args,
+      ...((draft > 1 || opts.resume) && opts.relintDeployment ? {
+        routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: "fixture relint deployment", models: [opts.relintDeployment] },
+      } : {}),
+      draftRouting: { ...args.draftRouting, random: () => 0.5, readStats: () => stats } });
+  };
+  const runBatch = (due: Proposal[], cashResumes?: DraftCashResumes) =>
+    draftProposalBatch(due, config, "acme", "remudero", "cash-fit", log, rawSpawn, providerRouting, mount, cashResumes);
+  let outcomes: DraftRungOutcome[] | undefined;
+  if (opts.resume) {
+    const hook = buildInboxDraftHook("acme", "remudero", config, "cash-fit", log,
+      async (due, _config, _owner, _repo, _runId, _log, _spawn, _routing, _mount, cashResumes) => {
+        outcomes = await runBatch(due, cashResumes);
+        return outcomes;
+      }, undefined, () => undefined);
+    await hook();
+  } else {
+    outcomes = await runBatch([draftedProposal]);
+  }
+  assert.ok(outcomes, JSON.stringify(rows));
   return { config, rows, transports, prompts, outcomes, auctionReads, cashPostures, proposal: draftedProposal };
 }
 
@@ -140,9 +154,14 @@ function commitBatch(run: Awaited<ReturnType<typeof productionBatch>>) {
   const lane = resolvedInboxDraftLane(REPO_ROOT);
   commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(run.proposal, scope)],
     outcomes: run.outcomes, lane, log: () => {} });
+  return readBatchState(run);
+}
+
+function readBatchState(run: Awaited<ReturnType<typeof productionBatch>>) {
+  const stateDir = join(run.config.root, "state");
   const attempts = JSON.parse(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8")) as Record<string, string>;
   const drafts = JSON.parse(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8"));
-  return { attempts, drafts, due: draftsDueOnDaemon([run.proposal], drafts, attempts, 3, undefined, lane) };
+  return { attempts, drafts, due: draftsDueOnDaemon([run.proposal], drafts, attempts, 3, undefined, resolvedInboxDraftLane(REPO_ROOT)) };
 }
 
 test("W1-T13863 criterion 1: the cash draft is held to the deployment selected by the real router", async t => {
@@ -275,7 +294,7 @@ test("W1-T13863 criterion 3: a refused relint resumes after the paid synthesis w
   const allowance = readOpenWeightAllowance(retry.config, { deployments: ["gpt-5-nano"], atIso: AT });
   assert.equal(allowance.attemptsToday, 1);
   assert.equal(allowance.settledToday["gpt-5-nano"]?.settledUsd, 0.001);
-  assert.deepEqual(commitBatch(retry).due, []);
+  assert.deepEqual(readBatchState(retry).due, []);
   assert.deepEqual(readDraftCashResumes(stateDir), {});
 });
 
