@@ -434,8 +434,8 @@ export function joinableRead<I, T>(read: (input: I) => Promise<ReadGeneration<T>
  * a tick, and a dispatch phase can hold the loop for an hour while the full sweep is retriggered;
  * reusing it there disposed merged PRs and dead heads (DAEMON-1791151532775, 2026-10-04). A later
  * pass reads its own generation, unpublished, and so does the first pass once the published one is
- * past {@link TICK_READ_MAX_AGE_MS}. Unpublished, or no plane to read: undefined, which leaves the
- * consumer on its own live read. W1-T12754: a pass that misses a consumed or stale generation while
+ * past {@link TICK_READ_MAX_AGE_MS}. No plane to read: undefined, which leaves the consumer on its own
+ * live read. W1-T12754: a pass that misses a consumed, stale or unpublished generation while
  * a {@link joinableRead} has a read in flight that no full pass has taken waits for that read and is
  * served it, unless it was requested more than the age bound before it settled. `lastServe` names how
  * the last pass got its facts. */
@@ -465,8 +465,11 @@ export function onePassPerGeneration<I, T>(
       }
       miss = "stale";
     }
-    if (!published || !read) {
-      last = { source: "none", miss: read ? miss : "no_plane" };
+    // W1-T13880: unpublished (before the first publish, or while an invalidated generation's next read is in flight) is
+    // served by the plane like consumed and stale: undefined here rebuilt every tick fact on the daemon loop
+    // (sweep.full_prelude 2026-11-19T22:13Z, source none, 48.7 min, then minutes-long loop stalls).
+    if (!read) {
+      last = { source: "none", miss: "no_plane" };
       return undefined;
     }
     const startedAtMs = clock.now();
@@ -486,7 +489,8 @@ export function onePassPerGeneration<I, T>(
           last = { source: "joined", miss, waitMs, publishedAtMs: joined.publishedAtMs };
           return joined.facts;
         }
-        miss = "stale";
+        // An over-age joined read is refused; with nothing published the pass's miss stays "unpublished" (#19778 review).
+        if (miss !== "unpublished") miss = "stale";
       }
     }
     const requestedAtMs = clock.now();

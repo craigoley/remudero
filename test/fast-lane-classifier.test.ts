@@ -28,6 +28,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { PUSH_UNSAFE_TOKENS } from "./helpers/push-safety.js";
+import { CHECKOUT_RETRY_IF, checkoutRetryPairIndex, withoutCheckoutRetryPair, type WorkflowStep } from "#test/helpers/checkout-retry-pair.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -310,7 +311,11 @@ test("acceptance 6: coverage collection carries no `if:` and the stable-name agg
   assert.notEqual(jobStart, -1, "ci.yml must declare a coverage-ratchet job");
   const aggregatorStart = ciYml.indexOf("\n  coverage-ratchet-required:", jobStart);
   assert.notEqual(aggregatorStart, -1, "coverage-ratchet aggregator must be findable in ci.yml");
-  const collectorBody = ciYml.slice(jobStart, aggregatorStart);
+  const doc0 = parseYaml(ciYml) as { jobs: Record<string, { steps?: WorkflowStep[] }> };
+  // W1-T13825: the admitted checkout retry pair's one `if:` line is the only one this text scan lets through.
+  const admitted = checkoutRetryPairIndex("ci.yml:coverage-ratchet", doc0.jobs["coverage-ratchet"]?.steps ?? []) >= 0;
+  const collectorBody = ciYml.slice(jobStart, aggregatorStart)
+    .replace(admitted ? `\n        if: ${CHECKOUT_RETRY_IF}\n` : "\0", "\n");
   assert.doesNotMatch(collectorBody, /\n\s*if:/, "coverage shards must never be conditionally absent");
   // The class check must still be present, just expressed as bash rather than YAML.
   assert.match(collectorBody, /diff-class\.mjs/, "the job must call the classifier");
@@ -581,7 +586,8 @@ test("W1-T2428 ci half: the ci job body stays push-safe — no request-scoped to
 
 test("W1-T2428 ci half: coverage-ratchet step bodies still carry no literal if: (the #729 discipline)", () => {
   const doc = parseYaml(CI_YML) as { jobs: Record<string, { steps?: Array<{ if?: string }> }> };
-  for (const step of doc.jobs["coverage-ratchet"].steps ?? []) {
+  // W1-T13825: the checkout retry pair is the one admitted step if:; skipping it never skips the job.
+  for (const step of withoutCheckoutRetryPair("ci.yml:coverage-ratchet", doc.jobs["coverage-ratchet"].steps ?? [])) {
     assert.equal(step.if, undefined, "a conditionally-skipped required check deadlocks merge forever");
   }
 });

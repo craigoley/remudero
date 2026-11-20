@@ -7,7 +7,7 @@ import { test } from "node:test";
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { compositeCatalogRevisionKey, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
-import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { mergePlanBlobs, type Plan, type Task } from "#src/lib/plan.js";
 import { OPS_CATALOG_OUTCOMES, type OpsCatalogOutcome, type OpsCatalogShadowInput } from "#src/lib/ops-catalog-source.js";
 import { inspect } from "node:util";
@@ -37,18 +37,6 @@ const okSource = (plan: Plan, opsCommit = OPS_1): OpsCatalogShadowInput => ({ ou
 const digestOf = (publicCommit: string, opsCommit: string): string =>
   createHash("sha256").update(compositeCatalogRevisionKey(publicCommit, opsCommit)).digest("hex");
 
-/**
- * Every host reading `runDaemon` takes on this path, fixed: the memory governor (process RSS, swap and the
- * cgroup budget), V8 heap statistics, the wall clock and RMD_BOOT_CHECKOUT_BLOCKED. A case and its baseline
- * get the same values, so a busy or memory-limited host cannot change either ledger.
- */
-const hostPins = (): Partial<DaemonDeps> => ({
-  memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
-  heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
-  now: () => new Date(Date.UTC(2026, 0, 1)),
-  bootCheckoutBlocked: "",
-});
-
 type Row = Record<string, unknown>;
 interface Run { ran: string[]; merged: string[]; rows: Row[]; ledger: string }
 
@@ -72,7 +60,7 @@ async function drive(deps: Partial<DaemonDeps>, opts: { max?: number; plan?: Pla
       if (step === "dispatch.secondary_catalog_shadow") rows.push(extra);
       else other.push([step, extra]);
     },
-    ...hostPins(),
+    ...hostIndependentDaemonDeps(),
     ...deps,
   }, { max: opts.max ?? 3 });
   return { ran, merged: summary.merged, rows, ledger: JSON.stringify(other) };
@@ -196,7 +184,7 @@ test("W1-T11769 criterion 3: a ledger that refuses the shadow row cannot change 
     primaryPlanCommit: () => PUBLIC_1,
     runOne: async (id) => { ran.push(id); merged.add(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
     sleep: async () => {},
-    ...hostPins(),
+    ...hostIndependentDaemonDeps(),
     log: (step) => { if (step === "dispatch.secondary_catalog_shadow") { refusedRows++; throw new Error("ledger unavailable"); } },
   }, { max: 3 });
   assert.equal(refusedRows, 1, "the refused row is not retried every tick");

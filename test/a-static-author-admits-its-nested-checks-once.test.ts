@@ -32,9 +32,12 @@ function owner(t: { after: (fn: () => void) => void }) {
   return { dir, lease, claim, bytes };
 }
 
-test("author static admission: real child and grandchild borrow one live owner without releasing it", (t) => {
+test("W1-T13916 criterion 1: author static admission: real child and grandchild borrow one live owner without releasing it", (t) => {
   const { dir, lease, bytes, claim } = owner(t);
-  const result = child(lease.childEnvironment!);
+  // This fixture specifically verifies the ordinary compile-cache path. The coverage runner disables
+  // it for every suite child to preserve V8 precision, so make these two ordinary Node probes explicit.
+  const ordinaryChildEnvironment = { ...lease.childEnvironment!, NODE_DISABLE_COMPILE_CACHE: undefined, NODE_V8_COVERAGE: "" };
+  const result = child(ordinaryChildEnvironment);
   assert.equal(result.outcome, "acquired");
   assert.match(result.note, /inherited live parent test slot/);
   assert.equal(result.concurrency, lease.concurrency);
@@ -44,9 +47,12 @@ test("author static admission: real child and grandchild borrow one live owner w
     import { execFileSync } from 'node:child_process';
     process.stdout.write(execFileSync(process.execPath, ${JSON.stringify(["--import", "tsx", "--input-type=module", "-e", probe])}, {encoding:'utf8'}));
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...lease.childEnvironment, NODE_TEST_CONTEXT: undefined } });
+    env: { ...process.env, ...ordinaryChildEnvironment, NODE_TEST_CONTEXT: undefined } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
-  assert.deepEqual(readdirSync(dir), ["node-compile-cache", "slot-1.json"]);
+  // Both probes run with ordinaryChildEnvironment, which unsets NODE_DISABLE_COMPILE_CACHE even in a coverage
+  // run, so the slot's NODE_COMPILE_CACHE directory is always written. readdir order is not defined: sort it.
+  assert.deepEqual(readdirSync(dir).sort(), ["node-compile-cache", "slot-1.json"],
+    "W1-T13916 compile cache (after W1-T13853): the probes unset NODE_DISABLE_COMPILE_CACHE, so their compile cache is always on");
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
 });
 

@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSy
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { fixStrikeCap, globalArtifactPath, enabledWorkerProviders, loadConfig, softBudgetThreshold, userOverallLearningsHome, workerHomeDir, type Config } from "../../lib/config.js";
 import { ledgerPathFor, nextLaneEpochMs } from "../../lib/ledger-path.js";
 import { realArmDepsAsync, isPrMergedNow, armAutoMerge, armAutoMergeAtOpen, armAutoMergeAtOpenAsync, disarmOutcomeWithdrawn, disarmAutoMerge, disarmAutoMergeAsync, armIfVerdictPermits, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
@@ -85,8 +85,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "../../lib/errors.js";
 import { assertLintClean, lintTask, TaskLintError } from "../../lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "../../lib/dispatch-repair.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount } from "../../lib/mounts.js";
-import { resolveMountExplorationDispatch as exploreMount } from "../../lib/mount-exploration.js";
-import { type MountHeadroomCell } from "../../lib/mount-recommender.js";
+import { loadMountHeadroomCells, resolveMountExplorationDispatch as exploreMount } from "../../lib/mount-exploration.js";
 import { loadDefaultPolicy, loadPolicy, policyPath } from "../../lib/policy.js";
 import { loadRatifications, ratificationPinCheck, ratificationsPath, type Ratifications } from "../../lib/ratification.js";
 import { defaultOpenFileCountAsync, reapStaleClones, reapStaleClonesAsync, type CloneReapSummary } from "../../lib/clone-reaper.js";
@@ -95,7 +94,7 @@ import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
 import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { buildSkillEffectivenessReport, loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldForRun } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
@@ -5283,6 +5282,19 @@ export function claimRunTaskFixBranch(input: {
   });
 }
 
+/** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
+ *  with a staged retirement offered only on that share. */
+export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "type" | "files">, runId: string): ObservedSkillSelection {
+  const staged = stagedSkillRetirements(join(stateRoot, "state", "inbox-proposals.json"));
+  return observeSkillSelection(
+    loadInjectableSkills(join(repoRoot, ".claude", "skills")),
+    task.type,
+    DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+    task.files,
+    (skillName) => skillWithheldUnderRetirement(runId, skillName, staged),
+  );
+}
+
 export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost): Promise<RunResult> {
   if (ctx.task.catalog === "ops" && ctx.opsCriteriaAtOpen === undefined) {
     throw new Error("ops run has no canonical publication binding");
@@ -5645,13 +5657,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       enabledProviders: enabledWorkerProviders(config),
     },
     {
-      loadCells: async () => {
-        const scriptUrl = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
-        const sweep = (await import(scriptUrl)) as {
-          buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-        };
-        return sweep.buildMountHeadroomSweep(join(config.root, "state")).cells;
-      },
+      loadCells: () => loadMountHeadroomCells(repoRoot, join(config.root, "state")),
       loadMountsTable: () => loadMounts(mountsPath(repoRoot)),
       log,
     },
@@ -6743,13 +6749,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
     // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
     // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = observeSkillSelection(
-      loadInjectableSkills(join(repoRoot, ".claude", "skills")),
-      task.type,
-      DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      task.files,
-      (skillName) => skillWithheldForRun(runId, skillName),
-    );
+    const skillSelection = selectImplementSkills(config.root, repoRoot, task, runId);
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
     // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the

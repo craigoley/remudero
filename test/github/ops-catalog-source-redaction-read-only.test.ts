@@ -12,6 +12,7 @@ import { parse as parseYaml } from "yaml";
 // so the cache loads first and the daemon (the module under test) finishes before the cache evaluates.
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { runDaemon } from "#src/lib/daemon.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js";
 import { mergePlanBlobs, type Plan } from "#src/lib/plan.js";
@@ -258,6 +259,7 @@ async function daemonWith(deps: Record<string, unknown>): Promise<Array<{ step: 
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const merged = new Set<string>();
   await runDaemon(planOf("A"), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     targetRepo: "remudero",
     runOne: async (id: string) => { merged.add(id); return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }; },
