@@ -5551,7 +5551,9 @@ function openWeightEndpoint(config: Config, model: string): string {
 
 /** W1-T4650: the named reasons a cash attempt reports no served model. */
 export const CASH_SERVED_MODEL_REASONS = {
-  noResponse: "no cash response was received, so none named the model that served it",
+  // W1-T13868: a body that lands after the deadline aborted the attempt reaches only the late usage handler. The row is
+  // already written by then, so the reason says when, not that no reply ever came.
+  noResponse: "no cash response arrived before the attempt ended, so none named the model that served it",
   unnamed: "a cash response named no model id",
   mixed: "cash responses in this attempt named different models",
 } as const;

@@ -67,6 +67,13 @@ function lateReply(expire: () => void, body: Record<string, unknown>): typeof fe
   return async () => { expire(); return new Response(JSON.stringify(body), { status: 200 }); };
 }
 
+/** A reply whose headers arrive in time but whose body is held until `holdMs` after the request deadline aborted it. */
+function heldBodyReply(body: Record<string, unknown>, holdMs: number): typeof fetch {
+  return async () => new Response(new ReadableStream({ start(controller) {
+    setTimeout(() => { controller.enqueue(new TextEncoder().encode(JSON.stringify(body))); controller.close(); }, holdMs);
+  } }), { status: 200 });
+}
+
 test("a cash response naming a DIFFERENT model than requested records the response's model, never the request", async () => {
   const result = await runCash(cashReply({ model: "gpt-5-nano-2025-08-07" }));
   assert.equal(result.isError, false, result.stderr);
@@ -350,6 +357,21 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
     decisionDigest: "d", provenance: { ...reviewProvenance, servedModel: "gpt-5.2" }, log: (step, row) => findingRows.push({ step, ...row }) });
   assert.equal(findingRows[2]?.served_model, "gpt-5.2");
   assert.equal("served_model_reason" in findingRows[2]!, false, "a named model carries no reason");
+
+  // A body held past the request deadline lands only after the attempt ended and its row was built. The row says so:
+  // the reason names the deadline, never that no reply ever came.
+  const heldFixture = cashFixture();
+  try {
+    const held = await spawnOpenWeightWorker({ cwd: heldFixture.root, workerHome: join(heldFixture.root, "home"), prompt: "classify",
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-key" }, requestTimeoutMs: 20,
+      fetchImpl: heldBodyReply({ id: "chat-1", model: "gpt-5-nano-2025-08-07", choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 5 } }, 80) }, heldFixture.config, { model: "gpt-5-nano", effort: "low" });
+    assert.equal(held.isError, true, "the deadline fails the attempt");
+    assert.equal(held.servedModel, null);
+    assert.equal(held.servedModelReason, CASH_SERVED_MODEL_REASONS.noResponse);
+    assert.match(String(held.servedModelReason), /before the attempt ended/);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  } finally { heldFixture.cleanup(); }
 
   // Through production spawnWorker: the watchdog replaces a cash rung that named its model with WorkerAbandonedError, and
   // the failed-attempt row still records that model (or the rung's named reason) through the error's cause.
