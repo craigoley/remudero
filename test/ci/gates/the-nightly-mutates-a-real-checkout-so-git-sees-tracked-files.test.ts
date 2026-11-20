@@ -7,9 +7,9 @@ import { parse as parseYaml } from "yaml";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-// W1-T13903: Mutation Nightly failed 7 of 10 nights (runs 42750186208, 42953579466, 43149001216,
-// 43359737571, 43552241378, 44011034405, 44452272063). Stryker's default sandbox is a gitignored
+// W1-T13903: Mutation Nightly failed 7 of 10 nights. Stryker's default sandbox is a gitignored
 // subfolder with no .git, so every test that runs git against REPO_ROOT saw untracked paths there.
+const SANDBOX_RED_RUNS = "42750186208 42953579466 43149001216 43359737571 43552241378 44011034405 44452272063";
 
 const scriptModule = "#scripts/mutation-ratchet.mjs";
 const { buildNightlyStrykerConfig } = await import(scriptModule);
@@ -25,7 +25,7 @@ test("the nightly config mutates in place and rewrites no file for type checks",
     reportPath: "reports/mutation/nightly/alpha.json",
     tempDirName: ".stryker-tmp-alpha",
   }) as Record<string, unknown>;
-  assert.equal(cfg.inPlace, true, "a sandbox subfolder is not a git checkout: tests must run in the checkout itself");
+  assert.equal(cfg.inPlace, true, `a sandbox subfolder is not a git checkout (runs ${SANDBOX_RED_RUNS})`);
   assert.equal(cfg.disableTypeChecks, false, "a ts-nocheck rewrite of every src file dirties the tree in place");
 });
 
