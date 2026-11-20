@@ -2271,7 +2271,7 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     let hasUnresetWindow = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
-      credits: CodexCredits | undefined, excludedModel: boolean): CodexRateLimitWindow | string | null => {
+      credits: CodexCredits | undefined, perModel: boolean): CodexRateLimitWindow | string | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
@@ -2286,7 +2286,7 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) return "unreadable quota window";
       if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) {
-        if (excludedModel) return "projected burn reaches the reserve";
+        if (perModel) return "projected burn reaches the reserve";
         throw new Error("projected burn reaches the reserve");
       }
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
@@ -2294,10 +2294,8 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined, perModel = false) => {
       if (b == null) return b;
       const { credits } = codexCreditsFor(b, carriedRates);
-      // A model's explicit spend block already disqualifies that bucket on a fresh read.
-      const excludedModel = perModel && codexCreditsBlock(b) !== undefined;
-      const primary = project(b.primary, old?.primary, credits, excludedModel);
-      const secondary = project(b.secondary, old?.secondary, credits, excludedModel);
+      const primary = project(b.primary, old?.primary, credits, perModel);
+      const secondary = project(b.secondary, old?.secondary, credits, perModel);
       if (typeof primary !== "string" && typeof secondary !== "string") {
         hasUnresetWindow ||= primary !== null || secondary !== null;
         return { ...b, primary, secondary };

@@ -184,21 +184,22 @@ test("W1-T13855 criterion 1: a timed-out probe carries a credits-lane last-good 
   assert.equal(providerEligibility(day, 5).lane, "codex-credits");
   assert.equal(selectWorkerProvider([claudeAt(99), day], 5, 0.5).lane, "codex-credits");
 
-  const split = codexAccount(t);
-  const primary = { usedPercent: 99, windowDurationMins: 10080, resetsAt: split.state.reset };
-  split.state.buckets = {
-    sol: { limitName: SOL.id, primary },
-    other: { limitName: SOL61.id, primary, spendControlReached: true },
-  };
-  split.state.models.push(SOL61);
-  await split.read();
-  split.fail();
-  const carriedSol = await split.read();
-  assert.equal(carriedSol.readable, true, carriedSol.detail);
-  assert.equal(carriedSol.model, SOL.id);
-  assert.deepEqual(carriedSol.windows.map((window) => window.usedPercent), [99 + 99 / (4 * 86_400_000) * 61_000]);
-  assert.equal(carriedSol.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "quota-unreadable");
-  assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
+  for (const other of [{ spendControlReached: true }, { credits: { hasCredits: true, unlimited: false, balance: "0" } }]) {
+    const split = codexAccount(t);
+    const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: split.state.reset };
+    split.state.buckets = { sol: { limitName: SOL.id, primary }, other: { limitName: SOL61.id, primary, ...other } };
+    split.state.models.push(SOL61);
+    const fresh = await split.read();
+    assert.equal(fresh.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "below-reserve");
+    split.fail();
+    const carriedSol = await split.read();
+    assert.equal(carriedSol.readable, true, carriedSol.detail);
+    assert.equal(carriedSol.model, SOL.id);
+    assert.equal(carriedSol.credits?.balance, Number(BALANCE));
+    assert.deepEqual(carriedSol.windows.map((window) => window.usedPercent), [97 + 97 / (4 * 86_400_000) * 61_000]);
+    assert.equal(carriedSol.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "quota-unreadable");
+    assert.equal(selectWorkerProvider([claudeAt(99), carriedSol], 5, 0.999).lane, "codex-credits");
+  }
 });
 
 test("borrowed credits project from the generic bucket's own history", async (t) => {
@@ -533,9 +534,28 @@ test("W1-T13855 criterion 6: a rescued assignment names its rescue and an unread
 
 test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash only when credits cannot carry", async (t) => {
   const account = codexAccount(t);
+  const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
+  const otherCredits = { hasCredits: true, unlimited: false, balance: "20" };
+  const other = { limitName: SOL61.id, primary, credits: otherCredits };
+  account.state.buckets = { sol: { limitName: SOL.id, primary: { ...primary, usedPercent: 99 } }, other };
+  account.state.models.push(SOL61);
   await account.read();
-  account.fail();
+  account.state.now += 3_600_000;
+  account.state.buckets.other = { ...other, credits: { ...otherCredits, balance: "10" } };
+  const fresh = await account.read();
+  assert.equal(fresh.model, SOL61.id, "the tighter SOL window loses while SOL61's credits are spendable");
+  assert.equal(fresh.credits?.balance, 10);
+  account.fail(6 * 3_600_000);
   const carried = await account.read();
+  assert.equal(carried.readable, true, carried.detail);
+  assert.equal(carried.model, SOL.id);
+  assert.equal(carried.credits?.balance, Number(BALANCE));
+  assert.equal(carried.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "quota-unreadable");
+  const spawn = await routeSpawn(account);
+  assert.equal(spawn.decision?.rule, "codex-credits");
+  assert.equal(spawn.assignments.at(-1)?.selected.model, SOL.id);
+  assert.equal(spawn.codexSpawns, 1);
+  assert.equal(spawn.cashSpawns, 0);
   // Claude with headroom is chosen over a carried credits lane at every draw.
   for (const draw of [0, 0.5, 0.999, 0.99999]) {
     const pick = selectWorkerProvider([claudeAt(60), carried], 5, draw);
