@@ -309,7 +309,20 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
       ? { lastGood: parsed.lastGood } : {}) };
 }
 
-function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number {
+/** The published index's file identity, or null when none exists. A publish renames a new file into place, so any
+ * publish between two reads changes the inode. */
+function indexIdentity(stateDir: string): string | null {
+  const stat = statSync(checkpointPath(stateDir), { bigint: true, throwIfNoEntry: false });
+  return stat ? `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : null;
+}
+
+function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number;
+function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO,
+  expected: { identity: string | null }): number | undefined;
+/** With `expected`, this is a rewrite of the index this pass read, not a rebuild: it publishes only while that index
+ * is still the one on disk, and retires no segment, since another pass may have published the index that names it. */
+function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO,
+  expected?: { identity: string | null }): number | undefined {
   const sealedSegments = new Map<string, SegmentState>();
   const save = (source: SourceRecord): SegmentReference => {
     // V1 JSON gives the baseline and current copies of immutable evidence different identities.
@@ -354,10 +367,16 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: Checkpoin
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, encoded);
+    // A newer index from another pass wins: this pass's rewrite of an older one is dropped, never published over it.
+    if (expected && indexIdentity(stateDir) !== expected.identity) return undefined;
     io.checkpointWrittenBytes += Buffer.byteLength(encoded);
     renameSync(temporary, destination);
   } finally { if (existsSync(temporary)) unlinkSync(temporary); }
   const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
+  // A rewrite names exactly the segments it read and retires none. If another pass retired one between the identity
+  // check and the rename, readCheckpoint omits that source and rescans it; the size counts only the bytes on disk.
+  if (expected) return [...retained].reduce((sum, segment) =>
+    sum + (statSync(join(stateDir, segment), { throwIfNoEntry: false })?.size ?? 0), Buffer.byteLength(encoded));
   for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
     if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
       unlinkSync(join(stateDir, entry.name));
@@ -567,8 +586,25 @@ function finiteCost(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+/** W1-T13867: a snapshot carried past a pass that made no join of its own names the unavailable reason, rows and
+ * total alike; an earlier pass's join was made at that pass's cutoff and is never reported as a later one's. */
+function withoutJoin(snapshot: BenchmarkCohortSnapshot): BenchmarkCohortSnapshot {
+  return { ...snapshot, cohorts: snapshot.cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: NO_VERIFICATION_JOIN })),
+    verifiedTaskOutcome: NO_VERIFICATION_JOIN };
+}
+
+/** A pass that stops before joining persists its carried snapshot without the earlier join it held. */
+function dropJoin(checkpoint: Checkpoint): void {
+  if (checkpoint.lastGood) checkpoint.lastGood = withoutJoin(checkpoint.lastGood);
+}
+
+function hasJoin(snapshot: BenchmarkCohortSnapshot | undefined): boolean {
+  return snapshot !== undefined && (typeof snapshot.verifiedTaskOutcome !== "string"
+    || snapshot.cohorts.some((cohort) => typeof cohort.verifiedOutcome !== "string"));
+}
+
 function emptySnapshot(reason: string, lastGood?: BenchmarkCohortSnapshot): BenchmarkCohortSnapshot {
-  return lastGood ? { ...lastGood, state: "unavailable", reason, lastGoodAt: lastGood.asOf ?? undefined } : {
+  return lastGood ? { ...withoutJoin(lastGood), state: "unavailable", reason, lastGoodAt: lastGood.asOf ?? undefined } : {
     version: BENCHMARK_COHORT_VERSION, state: "unavailable", reason, asOf: null,
     sourceLineage: [], sourceRows: { assignments: 0, attempts: 0, terminals: 0,
       unmatchedAttempts: 0, unmatchedTerminals: 0, invalidAssignmentRows: 0,
@@ -1034,14 +1070,21 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   io: CheckpointIO): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
+  // Taken before the read, so any publish after it, including readCheckpoint's own migration, voids a rewrite.
+  const readIdentity = { identity: indexIdentity(stateDir) };
   const checkpoint = readCheckpoint(stateDir, io);
+  // A pass that stops before joining leaves no earlier join on disk; the rewrite yields to a newer index.
+  const unjoinOnDisk = (): number | undefined => hasJoin(checkpoint.lastGood)
+    ? writeCheckpoint(stateDir, { ...checkpoint, lastGood: withoutJoin(checkpoint.lastGood!) }, io, readIdentity) : undefined;
+  const bytesOf = (checkpointBytes: number | undefined) => checkpointBytes === undefined ? {} : { checkpointBytes };
   let current: ManifestEntry[];
   try { current = manifest(stateDir); }
   catch {
     // An unreadable ledger directory is not an observed empty cohort; preserve the last good snapshot.
     return { state: "unavailable", snapshot: emptySnapshot("ledger-source-unreadable", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
   }
-  if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
+  if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood),
+    scannedSources: 0, pendingSources: 0, ...bytesOf(unjoinOnDisk()) };
   const known = new Map(checkpoint.sources.map((source) => [source.name, source]));
   const faults = new Map((checkpoint.sourceFaults ?? []).map((fault) => [fault.name, fault]));
   const changed = current.filter((entry) => {
@@ -1070,7 +1113,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
         : error instanceof Error && error.message === "ledger-live-not-a-file" ? "ledger-live-invalid-before-scan"
         : "ledger-live-unreadable-before-scan";
       return { state: "unavailable", snapshot: emptySnapshot(reason, checkpoint.lastGood),
-        scannedSources: 0, pendingSources: 1 };
+        scannedSources: 0, pendingSources: 1, ...bytesOf(unjoinOnDisk()) };
     }
   }
   if (changed.length === 0 && checkpoint.lastGood && !checkpoint.baselineSources
@@ -1086,9 +1129,9 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     // Only a change in the rows or the totals is written, so a repeated pass at a later cutoff stays a read.
     const checkpointBytes = JSON.stringify([overlay.cohorts, overlay.verifiedTaskOutcome])
       === JSON.stringify([lastGood.cohorts, lastGood.verifiedTaskOutcome]) ? undefined
-      : writeCheckpoint(stateDir, { ...checkpoint, lastGood: { ...lastGood, ...overlay } }, io);
+      : writeCheckpoint(stateDir, { ...checkpoint, lastGood: { ...lastGood, ...overlay } }, io, readIdentity);
     return { state: faults.size === 0 ? "complete" : lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
-      snapshot, scannedSources: 0, pendingSources: 0, ...(checkpointBytes === undefined ? {} : { checkpointBytes }) };
+      snapshot, scannedSources: 0, pendingSources: 0, ...bytesOf(checkpointBytes) };
   }
   if (!checkpoint.baselineSources && checkpoint.sources.length > 0
     && (checkpoint.lastGood || checkpoint.sources.some((source) => !current.some((entry) => entry.name === source.name)))) {
@@ -1125,6 +1168,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
   if (pendingSources > 0) {
+    dropJoin(checkpoint);
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "partial", snapshot: emptySnapshot("scan-incomplete", checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
   }
@@ -1141,6 +1185,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     } catch (error) {
       const reason = error instanceof Error && error.message === "ledger-live-changed-after-scan"
         ? "ledger-live-changed-after-scan" : "ledger-live-unreadable-after-scan";
+      dropJoin(checkpoint);
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "partial", snapshot: emptySnapshot(reason, checkpoint.lastGood),
         scannedSources, pendingSources: 1, checkpointBytes };
@@ -1150,6 +1195,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     const successorFingerprints = new Set(checkpoint.sources.flatMap((source) => source.rows.map((row) => row.fingerprint)));
     if (checkpoint.sourceFaults.length === 0
       && checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
+      dropJoin(checkpoint);
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "unavailable", snapshot: emptySnapshot("retired-source-evidence-not-reconciled", checkpoint.lastGood),
         scannedSources, pendingSources: 0, checkpointBytes };
@@ -1171,6 +1217,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
   }
   if (snapshot.sourceRows.conflictingAssignments > 0) {
+    dropJoin(checkpoint);
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),
       scannedSources, pendingSources: 0, checkpointBytes };

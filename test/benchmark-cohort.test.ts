@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -806,5 +806,34 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
     agrees(rejoined.snapshot, "cached with case files");
     const again = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
     assert.equal(again.checkpointBytes, undefined, "an unchanged cache hit writes nothing");
+    // A cache hit's rewrite yields to a newer index another pass published after this one read: it neither
+    // replaces that index nor retires the segment it names.
+    const joinedOnDisk = onDisk();
+    const concurrentSegment = join(stateDir, "benchmark-cohort-segment-concurrent-0.ndjson");
+    const yielded = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, onBeforeLiveCacheVerify: () => {
+      writeFileSync(concurrentSegment, "");
+      const newer = { ...(JSON.parse(readFileSync(indexPath, "utf8")) as object), concurrentRebuild: true };
+      writeFileSync(`${indexPath}.concurrent.tmp`, JSON.stringify(newer));
+      renameSync(`${indexPath}.concurrent.tmp`, indexPath);
+    } });
+    assert.equal(yielded.scannedSources, 0, "positive control: this pass is a cache hit");
+    for (const cohort of yielded.snapshot.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal((JSON.parse(readFileSync(indexPath, "utf8")) as { concurrentRebuild?: boolean }).concurrentRebuild, true,
+      "the newer index stays published");
+    assert.equal(existsSync(concurrentSegment), true, "the newer index's segment is not retired");
+    assert.equal(yielded.checkpointBytes, undefined, "no write is claimed for a rewrite that yielded");
+    // A pass that stops before joining, here because the live ledger vanished, names the unavailable reason in its
+    // rows and total, and leaves no earlier join on disk.
+    assert.deepEqual(onDisk(), joinedOnDisk, "positive control: the index on disk still holds the earlier join");
+    const stopped = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff,
+      onBeforeLiveCacheVerify: () => rmSync(join(stateDir, "ledger.ndjson")) });
+    assert.equal(stopped.state, "unavailable");
+    assert.equal(stopped.snapshot.reason, "ledger-live-missing-before-scan");
+    assert.equal(stopped.snapshot.cohorts.length, 2, "the carried rows are still reported");
+    for (const cohort of stopped.snapshot.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal(stopped.snapshot.verifiedTaskOutcome, "unavailable-no-github-verification-join");
+    agrees(stopped.snapshot, "stopped before joining");
+    assert.deepEqual(onDisk(), stopped.snapshot.cohorts.map(() => "unavailable-no-github-verification-join"),
+      "the index on disk no longer holds the earlier join");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
