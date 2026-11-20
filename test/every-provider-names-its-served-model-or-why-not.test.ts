@@ -116,16 +116,19 @@ test("a multi-response cash attempt reports a model only when every response nam
   }
 });
 
-function codexProcess(turnItems: Record<string, unknown>[] = []) {
+/** `turnItems` land in the first turn only; later turns carry just a message, as a turn codex did not reroute does. */
+function codexProcess(turnItems: Record<string, unknown>[] = [], turns = 1) {
   const stdout = new PassThrough();
   const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
   setImmediate(() => {
     for (const event of [
       { type: "thread.started", thread_id: "codex-thread" },
-      { type: "turn.started" },
-      ...turnItems.map((item) => ({ type: "item.completed", item })),
-      { type: "item.completed", item: { type: "agent_message", text: "done" } },
-      { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } },
+      ...Array.from({ length: turns }, (_, turn) => [
+        { type: "turn.started" },
+        ...(turn === 0 ? turnItems : []).map((item) => ({ type: "item.completed", item })),
+        { type: "item.completed", item: { type: "agent_message", text: "done" } },
+        { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } },
+      ]).flat(),
     ]) stdout.write(`${JSON.stringify(event)}\n`);
     stdout.end();
     setImmediate(() => process.emit("exit", 0));
@@ -133,13 +136,13 @@ function codexProcess(turnItems: Record<string, unknown>[] = []) {
   return process;
 }
 
-async function runCodex(turnItems: Record<string, unknown>[] = []): Promise<WorkerResult> {
+async function runCodex(turnItems: Record<string, unknown>[] = [], turns = 1): Promise<WorkerResult> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-"));
   try {
     return await spawnCodexWorker({
       workerHome: join(root, "home"), cwd: process.cwd(), prompt: "review",
       settingsFile: join(process.cwd(), "settings", "worker.json"), tools: ["Read", "Grep", "Glob", "Bash"],
-      containment: { spawn: () => ({ process: codexProcess(turnItems) as never, pid: 31_337 }), teardown: () => {} },
+      containment: { spawn: () => ({ process: codexProcess(turnItems, turns) as never, pid: 31_337 }), teardown: () => {} },
     }, {
       claudeBin: "/unused/claude", root,
       workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
@@ -199,11 +202,12 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(CODEX_REROUTE_RE.test("some unrelated warning"), false);
   assert.equal(CODEX_REROUTE_RE.test("the model rerouted: a -> b (x)"), false);
 
-  // A reroute that covers only some turns, or names two models, names no single served model and says why.
-  assert.deepEqual(codexServedModel(["gpt-5.2"], 2), { servedModel: null,
-    servedModelReason: "codex rerouted 1 of 2 turn(s), so no one served model: gpt-5.2" });
-  assert.equal(codexServedModel(["gpt-5.2", "gpt-5.1"], 2).servedModel, null);
-  assert.deepEqual(codexServedModel(["gpt-5.2", "gpt-5.2"], 2), { servedModel: "gpt-5.2" });
+  // A call that received any model name records it, even when only one of its turns was rerouted.
+  const twoTurns = await runCodex([reroute], 2);
+  assert.equal(twoTurns.servedModel, "gpt-5.2");
+  assert.equal(twoTurns.servedModelReason, undefined);
+  assert.deepEqual(codexServedModel(["gpt-5.1", "gpt-5.2"]), { servedModel: "gpt-5.2" }, "the latest reported name wins");
+  assert.deepEqual(codexServedModel([]), { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON });
 
   // A GPT call over the OpenAI-compatible cash path names what its response named, or why not.
   const gpt = await runCash(cashReply({ model: "gpt-6.2-sol-2026-10-01" }), "gpt-6.2-sol");

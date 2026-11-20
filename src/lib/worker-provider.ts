@@ -2291,14 +2291,12 @@ export const CODEX_REROUTE_RE = /^model rerouted: (\S+) -> (\S+) \(/;
 /** Bounded like every retained codex field: a turn reroutes at most once, so more than this is not a real stream. */
 const CODEX_REROUTES_KEPT = 64;
 
-/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Named only when every turn
- * was rerouted to the same model; otherwise `null` with the reason, never the requested model. */
-export function codexServedModel(reroutes: readonly string[], turns: number): { servedModel: string | null; servedModelReason?: string } {
-  if (reroutes.length === 0) return { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON };
-  const distinct = [...new Set(reroutes)].sort();
-  if (distinct.length === 1 && reroutes.length >= turns) return { servedModel: distinct[0]! };
-  return { servedModel: null,
-    servedModelReason: `codex rerouted ${reroutes.length} of ${turns} turn(s), so no one served model: ${distinct.join(", ")}` };
+/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Any model name the stream
+ * reported is recorded: the latest one, which served the turn that produced the attempt's final answer. With none,
+ * `null` with {@link CODEX_SERVED_MODEL_REASON}, never the requested model. */
+export function codexServedModel(reroutes: readonly string[]): { servedModel: string | null; servedModelReason?: string } {
+  const latest = reroutes.at(-1);
+  return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
 interface CodexJsonEvent {
@@ -6523,7 +6521,7 @@ async function spawnCodexWorkerInPrivateTemp(
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      ...codexServedModel(parsed.reroutes ?? [], parsed.numTurns),
+      ...codexServedModel(parsed.reroutes ?? []),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
