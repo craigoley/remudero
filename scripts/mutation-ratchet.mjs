@@ -524,6 +524,14 @@ export function planNightlyRun(sample, importers, opts) {
  * mutant count grew across two nights of a rotating sample (MEASURED), so the score was neither a
  * sample nor a tree score. The PR gate's own stryker.conf.json is unaffected -- one required
  * check, one fixed scope, so accumulation cannot distort it there.
+ *
+ * `inPlace: true` (W1-T13903): Stryker's default sandbox is `<tempDirName>/sandbox-*`, a gitignored
+ * SUBFOLDER of the checkout with no `.git` of its own, so every test that runs git against
+ * REPO_ROOT saw only untracked paths there and failed the dry run (7 of 10 nights, 2026-11-10..19).
+ * In place, the tests run in the checkout itself; Stryker keeps the originals in `tempDirName` and
+ * restores them when done. Two in-place runs would share one tree, so the workflow runs these
+ * configs one at a time. `disableTypeChecks: false` because no checker runs (tsx strips types) and
+ * the old pattern rewrote every src file with `// @ts-nocheck`, which in place dirties `src`.
  * @param {string} file
  * @param {readonly string[]} testFiles
  * @param {{reportPath: string, tempDirName: string}} opts
@@ -537,7 +545,8 @@ export function buildNightlyStrykerConfig(file, testFiles, opts) {
     },
     mutate: [file],
     tsconfigFile: 'tsconfig.stryker-unused.json',
-    disableTypeChecks: '{src,test}/**/*.ts',
+    disableTypeChecks: false,
+    inPlace: true,
     reporters: ['clear-text', 'json'],
     jsonReporter: { fileName: opts.reportPath },
     tempDirName: opts.tempDirName,

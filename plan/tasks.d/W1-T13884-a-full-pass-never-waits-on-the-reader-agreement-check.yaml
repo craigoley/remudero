@@ -17,6 +17,7 @@
     - src/lib/sweep.ts
     - test/review/a-full-pass-never-waits-on-the-reader-agreement-check.test.ts
     - test/two-readers-of-one-fact-must-agree.test.ts
+    - "src/cli/commands/sweep.ts"
   status: queued
   attempts: 0
   acceptance:

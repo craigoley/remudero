@@ -552,7 +552,10 @@ test("deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant co
   const run = spawnSync(
     process.execPath,
     ["--max-old-space-size=192", "--import", "tsx", "--input-type=module", "--eval", script],
-    { cwd: process.cwd(), encoding: "utf8", timeout: 30_000 },
+    // This child measures the stream's heap use. Coverage instrumentation inherited from the
+    // parent writes a large raw report for the generated corpus and can consume the 192 MiB
+    // budget itself, so keep the measurement process uninstrumented.
+    { cwd: process.cwd(), encoding: "utf8", timeout: 30_000, env: { ...process.env, NODE_V8_COVERAGE: "" } },
   );
   assert.equal(
     run.status,
