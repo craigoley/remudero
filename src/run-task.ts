@@ -965,6 +965,7 @@ import {
   onShedRequest,
   onRestoreRequest,
   onShedWorkersRequest,
+  onSwapProbeRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -2407,20 +2408,8 @@ export function buildReviewerHealthRoute(
   const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
   const healthLog = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
-  // A tree left at a healed path by an earlier process (its memo gone) is removed, then cut again.
-  const cut = (prefix: string, sha: string): string => {
-    try {
-      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
-    } catch (error) {
-      try {
-        worktreeRemove(repoDir, `${tree.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`);
-      } catch {
-        throw error; // deliberate: nothing was there to remove, so the cut's own refusal stands
-      }
-      return prepareFreshOriginMainTree(repoDir, tree, prefix, sha);
-    }
-  };
-  const remove = (dir: string): void => worktreeRemove(repoDir, dir);
+  const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
+    (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
   const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
@@ -2935,6 +2924,7 @@ import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
 import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswer } from "./lib/worker.js";
+import { healedReviewerTreeTools } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -31105,6 +31095,7 @@ export async function serveCommand(
     onRestoreRequest(channel, (reason) => generation?.restore(reason));
     // W1-T9508: tier 2, which no generation answered (0 of 122 rows answered on 10-13/14), so every ask timed out.
     onShedWorkersRequest(channel, { shed: () => generation?.shedWorkers(), restore: (reason) => generation?.restoreWorkers(reason) });
+    onSwapProbeRequest(channel, (request) => generation?.swapProbe(request));
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection ?? boardGate)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
