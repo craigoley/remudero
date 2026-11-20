@@ -1,16 +1,16 @@
 - id: W1-T13859
   title: "An unanswered skill draft expires once it has waited longer than any answered proposal waited"
   repo: remudero
-  depends_on: [W1-T13858]
+  depends_on: [ W1-T13858 ]
   priority: 2
   type: implement
   verify: auto
-  principles: {tdd: strict}
+  principles: { tdd: strict }
   budget_usd: 12.00
   risk: high # Rule 19 sizing: one concern (expiry of unanswered skill drafts) in skill-workshop.ts, its retro call in run-task.ts and the first-seen reader in panel-graph.ts; the close is a reversible ledger decline
   band_meaning: span
   origin: "operator-session#skill-drafts-never-wait-2026-11-19"
-  plan_refs: [W1-T13858, W1-T8825, W1-T2766]
+  plan_refs: [ W1-T13858, W1-T8825, W1-T2766 ]
   files:
     - src/lib/skill-workshop.ts
     - src/run-task.ts
@@ -19,8 +19,6 @@
   status: queued
   attempts: 0
   acceptance:
-    - claim: "skillDraftExpiryBound returns the longest wait between a proposal's first-seen time (inbox-first-seen.json) and its first ratify.approved or panel.proposal_declined row after that time, over a complete ledger union read. It leaves out ids whose first-seen time equals the store's earliest stamp, and answers with origin skill-workshop. It also returns the sample size."
-      proof: "grep: W1-T13859 criterion 1: in test/an-unanswered-skill-draft-expires.test.ts"
     - claim: "expireUnansweredSkillDrafts closes, once, a staged skill draft with no ratify or decline row whose first-seen age is greater than the bound. It writes one panel.proposal_declined row with origin skill-workshop and a reason that starts with 'expired:' and states the age, the bound and the sample size. A second pass writes no row."
       proof: "grep: W1-T13859 criterion 2: in test/an-unanswered-skill-draft-expires.test.ts"
     - claim: "A draft younger than the bound, a draft already approved or declined, and a draft the workshop already closed are not changed and get no row."
@@ -47,6 +45,8 @@
     wait was 32.62 days (a follow-up approved by the fleet on 2026-11-16). The longest wait for an
     operator answer was 0.8 days (5 proposals, 4 of them console tests). On that data, a draft first seen
     more than 32.62 days ago has waited longer than any proposal that was answered.
+
+    MOVED to W1-T14047 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19830 merges on the rest.
   design: |
     1. Add skillDraftExpiryBound(stateDir) in skill-workshop.ts. Read the first-seen store
        (inboxFirstSeenPath in panel-graph.ts; export its reader if a second reader is needed and check the
