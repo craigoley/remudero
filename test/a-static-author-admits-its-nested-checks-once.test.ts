@@ -49,13 +49,8 @@ test("author static admission: real child and grandchild borrow one live owner w
   `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
     env: { ...process.env, ...ordinaryChildEnvironment, NODE_TEST_CONTEXT: undefined } });
   assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
-  // W1-T13853: the coverage first pass sets NODE_DISABLE_COMPILE_CACHE for every test process
-  // (coverageChildEnvironment in scripts/test-with-retry.mjs), and these children inherit it, so Node
-  // writes no compile cache into the slot dir there. The slot's NODE_COMPILE_CACHE wiring is asserted
-  // wherever the cache is enabled; slot-1.json is asserted in both.
-  const cacheDisabled = { ...process.env, ...lease.childEnvironment }.NODE_DISABLE_COMPILE_CACHE !== undefined;
-  assert.deepEqual(readdirSync(dir), cacheDisabled ? ["slot-1.json"] : ["node-compile-cache", "slot-1.json"],
-    "W1-T13853 compile cache: only slot-1.json, plus node-compile-cache when the child's compile cache is enabled");
+  assert.deepEqual(readdirSync(dir).sort(), ["node-compile-cache", "slot-1.json"],
+    "W1-T13853 compile cache: the cache-enabled children leave only the compile cache and the owner's slot");
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
 });
 

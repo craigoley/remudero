@@ -47,6 +47,8 @@ describe("test/paid-spend-per-merged-pr-is-recorded-daily.test.ts", () => {
   test("W1-T13862 criterion 2: the paid sum is split by lane and the lanes add up to the total", () => {
     const rows = [...bill(),
       { ts: at(7), step: "implement.done", billing_mode: "api", total_cost_usd: 0.125, model: "opus" },
+      { ts: at(7), step: "worker.attempt", billing_mode: "api", total_cost_usd: 0.125, lane: "reviewer" },
+      { ts: at(7), step: "worker.attempt", billing_mode: "api", total_cost_usd: 0.25, lane: "non-reviewer" },
       { ts: at(7), step: "risk_judge.decision", billing_mode: "api", cost_usd: 0.0625 },
       { ts: at(7), step: "config-gardener.drafted", billing_mode: "api", total_cost_usd: 0.03125, model: "sonnet" },
       { ts: at(7), step: "retro.synthesized", billing_mode: "api", total_cost_usd: 0.5 },
@@ -56,13 +58,13 @@ describe("test/paid-spend-per-merged-pr-is-recorded-daily.test.ts", () => {
     assert.deepEqual(Object.keys(day.lanes), [...SPEND_LANES]);
     assert.equal(day.lanes.fix, 0.5);
     assert.equal(day.lanes.inbox_triage, 1);
-    assert.equal(day.lanes.review, 0.25);
+    assert.equal(day.lanes.review, 0.375);
     assert.equal(day.lanes.implement, 0.125);
     assert.equal(day.lanes.judge_shadow, 0.0625);
     assert.equal(day.lanes.gardener, 0.03125);
     assert.equal(day.lanes.retro, 0.5);
     assert.equal(day.lanes.scout, 0.25);
-    assert.equal(day.lanes.other, 0.015625);
+    assert.equal(day.lanes.other, 0.265625);
     const sum = Object.values(day.lanes).reduce((a, b) => a + b, 0);
     assert.equal(Math.round(sum * 1e6) / 1e6, day.paid_usd);
   });

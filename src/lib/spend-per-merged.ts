@@ -46,7 +46,7 @@ const LANE_RULES: readonly [RegExp, SpendLane][] = [
   [/inbox|triage|issue_revalidation/, "inbox_triage"],
   [/^retro/, "retro"],
   [/scout/, "scout"],
-  [/^review|reviewer/, "review"],
+  [/^review/, "review"],
   [/^(fix|alert-fix|main-repair|census_push|sweep\.plan_round)/, "fix"],
   [/^(implement|recon|diagnose)/, "implement"],
 ];
