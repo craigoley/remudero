@@ -5,7 +5,8 @@
 // fix samples had an RSS p90 of 835 MiB. The learner also read only the last 256 KiB of each store file, which in
 // state2.ndjson is mostly test-file rows (W1-T13842, docs/forensics/fix-peak-estimate-drivers.md).
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,11 +15,12 @@ import { fixedClock } from "#src/lib/clock.js";
 import { DEFAULT_ESTIMATE_MIB, DEFAULT_WALK_LIMITS, defaultListProcesses, type HostMemoryLedgerOptions } from "#src/lib/host-memory-ledger.js";
 import {
   PEAK_COMPACT_BYTES, PEAK_TAIL_BYTES, classEstimate, classTypical, createTreePeakSampler, openLearnedReservation,
-  readPeakSamples, recordTestFilePeak,
+  readPeakSamples, recordPeak, recordTestFilePeak,
   resetLearnedEstimateCacheForTests, type PeakStoreOptions,
 } from "#src/lib/host-memory-learning.js";
 import { createSweepFixAdmissionController, type OpenPrView } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const NOW = Date.parse("2026-11-19T20:18:37.040Z");
 const MIN = 60_000;
@@ -127,6 +129,38 @@ test("W1-T13878 criterion 2: compaction preserves the former input tail for othe
   }
 });
 
+test("W1-T13878 criterion 2: compaction keeps a garden sample at the exact read-tail boundary", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}aligned-peak-tail-`));
+  resetLearnedEstimateCacheForTests();
+  t.after(() => {
+    resetLearnedEstimateCacheForTests();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const fileRow = (name: string) => row({ c: "test", p: 400, basis: "process-hwm", f: `test/${name}.test.ts` }, 0);
+  const latest = fileRow("latest");
+  const padding = fileRow("padding");
+  let suffix = row({ c: "garden", p: 6_400, basis: "legacy-hwm" }, 0);
+  for (let i = 0; ; i++) {
+    const filler = fileRow(`file-${i}`);
+    if (suffix.length + filler.length + padding.length + latest.length > PEAK_TAIL_BYTES) break;
+    suffix += filler;
+  }
+  suffix += fileRow(`padding${"a".repeat(PEAK_TAIL_BYTES - suffix.length - padding.length - latest.length)}`);
+  const oldFix = fixRows({ legacy: 0, concurrent: 1 });
+  mkdirSync(join(dir, "estimates"));
+  const path = join(dir, "estimates", "state2.ndjson");
+  writeFileSync(path, oldFix + fileRow("x".repeat(PEAK_COMPACT_BYTES)) + suffix);
+  const store = { location: () => ({ dir }), instance: () => ({ name: "state2" }), clock: fixedClock(NOW) };
+  const garden = { estimateMib: 6_400, samples: 1 };
+  assert.deepEqual(classEstimate("garden", store), garden);
+
+  assert.equal(recordTestFilePeak("test/latest.test.ts", 400, store), true);
+  assert.equal(statSync(path).size, Buffer.byteLength(oldFix) + PEAK_TAIL_BYTES);
+  assert.equal(readPeakSamples("fix", store).length, 1);
+  resetLearnedEstimateCacheForTests();
+  assert.deepEqual(classEstimate("garden", store), garden);
+});
+
 test("W1-T13878 criterion 3: a legacy-hwm row recorded at release names why the tree went unmeasured", async (t) => {
   const faults = ["member-rss-missing", "member-status-unreadable", "listing-incomplete", "listing-failed"] as const;
   for (const fault of faults) {
@@ -200,16 +234,55 @@ test("W1-T13878 criterion 4: fix samples behind 256 KiB of test-file rows still 
 
     const newestFile = `test/${"a".repeat(200)}.test.ts`;
     assert.ok(statSync(path).size + Buffer.byteLength(row({ c: "test", p: 400, basis: "process-hwm", f: newestFile }, 0)) > PEAK_COMPACT_BYTES);
-    assert.equal(recordTestFilePeak(newestFile, 400, store), true);
+    assert.equal(recordTestFilePeak(newestFile, 400, { ...store, size: target => {
+      const size = statSync(target).size;
+      appendFileSync(target, row({ c: "test", p: 400, basis: "process-hwm", f: "test/intervening-append.test.ts" }, 0));
+      return size;
+    } }), true);
     resetLearnedEstimateCacheForTests();
     assert.deepEqual(classEstimate("fix", store), estimate, "compaction retains every concurrent fix sample");
     assert.equal(readPeakSamples("fix", store).find(s => s.measurementBasis === "legacy-hwm")?.unmeasuredReason, "listing-incomplete");
     assert.ok(statSync(path).size <= PEAK_COMPACT_BYTES, "distinct test-file histories fit in the retained store");
-    assert.ok(readPeakSamples("test", store, true).some(s => s.testFile === newestFile), "the new test-file sample is retained");
+    const retainedFiles = readPeakSamples("test", store, true).map(s => s.testFile);
+    assert.ok(retainedFiles.includes(newestFile), "the new test-file sample is retained");
+    assert.ok(retainedFiles.includes("test/intervening-append.test.ts"));
   } finally {
     resetLearnedEstimateCacheForTests();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T13878 criterion 4: another process cannot append to an instance during its rewrite", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}peak-writers-`));
+  resetLearnedEstimateCacheForTests();
+  t.after(() => {
+    resetLearnedEstimateCacheForTests();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const store = { location: () => ({ dir }), instance: () => ({ name: "state2" }), clock: fixedClock(NOW) };
+  const concurrent = { ...store, measurementBasis: "concurrent-rss" as const };
+  assert.equal(recordPeak("fix", 800, concurrent), true);
+
+  let writerResults: string | undefined;
+  assert.equal(recordTestFilePeak("test/compact.test.ts", 400, {
+    ...store, size: () => PEAK_COMPACT_BYTES + 1,
+    rewrite: (path, content) => {
+      const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+        import { recordPeak } from "#src/lib/host-memory-learning.js";
+        const write = name => recordPeak("fix", 900, {
+          location: () => ({ dir: process.argv[1] }), instance: () => ({ name }), measurementBasis: "concurrent-rss",
+          log: () => {},
+        });
+        console.log(JSON.stringify([write("state2"), write("state3")]));
+      `, dir], { cwd: REPO_ROOT, encoding: "utf8", timeout: 10_000 });
+      assert.equal(child.status, 0, child.stderr || String(child.error));
+      writerResults = child.stdout.trim();
+      writeFileSync(path, content);
+    },
+  }), true);
+  assert.equal(writerResults, "[false,true]", "contention applies only to the instance being compacted");
+  assert.equal(recordPeak("fix", 900, concurrent), true, "a retry can write once the rewrite finishes");
+  assert.deepEqual(readPeakSamples("fix", store).map(sample => sample.peakMib).sort(), [800, 900, 900]);
 });
 
 test("W1-T13878 criterion 5: the fix capacity row names the basis of the fix estimate it charges", () => {

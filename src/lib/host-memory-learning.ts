@@ -27,9 +27,10 @@
  * learnedHandle's descendant-memory-bound.ts stops a descendant over its bound).
  */
 
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { basename, join, normalize } from "node:path";
+import { basename, dirname, join, normalize } from "node:path";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readBoundedFileTail } from "./bounded-file-tail.js";
@@ -211,6 +212,7 @@ export interface PeakStoreOptions {
 }
 
 const diagnosticsSeen = new Set<string>();
+const require = createRequire(import.meta.url);
 
 function recordError(opts: PeakStoreOptions, op: string, error: unknown): void {
   const reason = (error as NodeJS.ErrnoException | undefined)?.code ?? String((error as Error)?.message ?? error).slice(0, 120);
@@ -244,9 +246,11 @@ function instanceFile(opts: PeakStoreOptions): string {
 
 /** Retain whole NDJSON lines only; failures reach the store's existing diagnostic path. */
 export function readFileTail(path: string, maxBytes: number): string {
-  const tail = readBoundedFileTail(path, maxBytes);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new RangeError("invalid byte bound");
+  // Read the byte before the window on the same descriptor. A newline there keeps the next row whole.
+  const tail = readBoundedFileTail(path, Math.min(maxBytes + 1, Number.MAX_SAFE_INTEGER));
   if (tail.state !== "complete" && tail.state !== "truncated") throw new Error(`${tail.state}: ${tail.reason}`);
-  if (tail.state === "complete") return tail.text;
+  if (tail.state === "complete" && tail.bytesRead <= maxBytes) return tail.text;
   const newline = tail.text.indexOf("\n");
   return newline < 0 ? "" : tail.text.slice(newline + 1);
 }
@@ -300,7 +304,7 @@ const lineOf = (s: PeakSample): string =>
     ...(s.unmeasuredReason ? { why: s.unmeasuredReason } : {}) })}\n`;
 
 function compactStore(text: string): string {
-  // Only fix can recover rows outside the former compaction tail. Match readFileTail's byte and whole-line boundary.
+  // Only fix can recover rows outside the former compaction tail, which dropped the first row of a truncated read.
   const input = Buffer.from(text);
   let tailStart = 0;
   if (input.length > PEAK_COMPACT_BYTES) {
@@ -324,29 +328,67 @@ function compactStore(text: string): string {
   return rows.map((row) => row.line).join("");
 }
 
+function readCompactionSnapshot(path: string, opts: PeakStoreOptions): string | undefined {
+  const suppliedSize = opts.size?.(path);
+  if (suppliedSize !== undefined && suppliedSize <= PEAK_COMPACT_BYTES) return;
+  if (opts.readTail) {
+    const size = suppliedSize ?? statSync(path).size;
+    return size > PEAK_COMPACT_BYTES ? opts.readTail(path, size) : undefined;
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const file = fstatSync(fd);
+    if (!file.isFile()) throw new Error("peak store is not a regular file");
+    if ((suppliedSize ?? file.size) > PEAK_COMPACT_BYTES) {
+      return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(fd));
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The sidecar lock survives atomic replacement of the data file and releases on process exit. */
+function withPeakStoreLock(path: string, write: () => void): void {
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const lockDir = join(dirname(path), "..", "estimate-locks");
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(join(lockDir, `${basename(path)}.sqlite`), { timeout: 250 });
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    write();
+    db.exec("COMMIT");
+  } finally {
+    db.close();
+  }
+}
+
 /** Record one measured tree peak for this instance. NEVER throws. */
 export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}, testFile?: string): boolean {
   try {
     if (!Number.isFinite(peakMib) || peakMib <= 0) return false;
     const path = instanceFile(opts);
     const at = (opts.clock ?? systemClock).now();
-    const append = opts.append ?? ((target: string, line: string) => {
-      mkdirSync(storeDir(opts), { recursive: true, mode: 0o700 });
-      appendFileSync(target, line, { mode: 0o600 });
-    });
-    append(path, lineOf({ workerClass, peakMib, at,
+    const line = lineOf({ workerClass, peakMib, at,
       ...(opts.cliPeakMib !== undefined ? { cliPeakMib: opts.cliPeakMib } : {}),
       measurementBasis: opts.measurementBasis ?? "legacy-hwm",
       ...(opts.legacyPeakMib !== undefined ? { legacyPeakMib: opts.legacyPeakMib } : {}),
       ...(testFile ? { testFile: testFileKey(testFile) } : {}),
       ...(opts.peakAgeMs !== undefined ? { peakAgeMs: opts.peakAgeMs } : {}),
       ...(opts.unmeasuredReason ? { unmeasuredReason: opts.unmeasuredReason } : {}),
-      ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) }));
-    cachedEstimates.delete(workerClass);
-    const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
-    if (size > PEAK_COMPACT_BYTES) {
-      const text = (opts.readTail ?? readFileTail)(path, size);
-      (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content, { mode: 0o600 })))(path, compactStore(text));
+      ...(opts.entryKind ? { entryKind: opts.entryKind } : {}) });
+    const write = () => {
+      if (opts.append) opts.append(path, line);
+      else appendFileSync(path, line, { mode: 0o600 });
+      cachedEstimates.delete(workerClass);
+      const text = readCompactionSnapshot(path, opts);
+      if (text !== undefined) {
+        (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content, { mode: 0o600 })))(path, compactStore(text));
+      }
+    };
+    if (opts.append) write();
+    else {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      withPeakStoreLock(path, write);
     }
     return true;
   } catch (error) {
