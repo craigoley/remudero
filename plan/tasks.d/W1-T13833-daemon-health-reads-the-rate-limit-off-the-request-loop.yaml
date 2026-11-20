@@ -17,7 +17,7 @@
     - src/lib/host-view.ts
     - test/daemon/daemon-health-reads-the-rate-limit-off-the-request-loop.test.ts
     - test/the-console-backend-keeps-its-share-of-the-host.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The route's default rate-limit read runs gh without blocking serve's loop, and the first request answers with the first reading"

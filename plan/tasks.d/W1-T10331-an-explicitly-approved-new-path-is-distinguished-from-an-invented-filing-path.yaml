@@ -16,7 +16,7 @@
   # refusal-amendment (W1-T10331, run work-fix-dispatch-W1-T10331-1795068656894-e5b2@7000d48e0bcb5abf6f5832ced9d83b4374f8e5eb, 2026-11-19T06:37:59.732Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
   #   worker evidence: No production producer or issuer supplies verified approval facts, and building one (`service.ts`, `serve.ts`, `config-schema.ts`, openapi) needs a far larger budget and the human release that design point 17 requires for the baked `config-schema.ts`.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED, not a permission to bypass the guard: separate unpublished W10313

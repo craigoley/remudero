@@ -1,0 +1,59 @@
+- id: W1-T13916
+  title: The static author admission test expects the compile cache its probes always enable, in coverage runs too
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: low # one test assertion; no source or gate changes
+  origin: "operator-session#unblock-w1-t13862-2026-11-20"
+  plan_refs:
+    - W1-T13853
+    - W1-T13791
+    - W1-T13904
+  files:
+    - test/a-static-author-admits-its-nested-checks-once.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:static-admission-cache-on — the admission test requires exactly node-compile-cache and slot-1.json in the slot directory, in coverage runs and in ordinary runs, because its probes always unset NODE_DISABLE_COMPILE_CACHE"
+      kind: guard
+      proof: "grep: W1-T13916 criterion 1: in test/a-static-author-admits-its-nested-checks-once.test.ts"
+    - claim: "The assertion message names why the cache entry is always expected"
+      proof: "grep: W1-T13916 compile cache in test/a-static-author-admits-its-nested-checks-once.test.ts"
+  rationale: |
+    Two fixes for one coverage failure merged four minutes apart on 2026-11-19, and together they break
+    the test "author static admission: real child and grandchild borrow one live owner without releasing
+    it" in test/a-static-author-admits-its-nested-checks-once.test.ts on every coverage shard that selects it.
+    OBSERVED: #19652 (W1-T13791, merged 18:42Z) made the probes run with the compile cache on: they spawn with
+    ordinaryChildEnvironment, which sets NODE_DISABLE_COMPILE_CACHE to undefined, and lease.childEnvironment
+    sets NODE_COMPILE_CACHE to <slot dir>/node-compile-cache (src/lib/test-slot.ts). So Node always writes
+    node-compile-cache into the slot directory.
+    OBSERVED: #19725 (W1-T13853, merged 18:46Z) was built before that change. It reads the disable flag from
+    { ...process.env, ...lease.childEnvironment }, not from the environment the probes get. The coverage first
+    pass sets NODE_DISABLE_COMPILE_CACHE=1 in process.env (scripts/test-with-retry.mjs), so the test expects
+    only ["slot-1.json"] there, while the probes still write the cache.
+    OBSERVED: CI run 44631962397, coverage-shard 12/12 on #19769 (W1-T13862, head 40d7e1634): "W1-T13853 compile
+    cache: only slot-1.json, plus node-compile-cache when the child's compile cache is enabled", actual
+    ['node-compile-cache', 'slot-1.json'], expected ['slot-1.json'].
+    A fleet fix round corrected the assertion on #19769 itself (32adc5ad9). Coverage then passed, but the
+    acceptance author gate refused the PR (canonical-task-scope-exceeded): the test is outside W1-T13862's files.
+    The sweep closed #19769 and filed the held rebuild W1-T13904. Its question asks for this correction to land
+    on its own first. Any other PR whose coverage shard selects this test fails the same way.
+  design: |
+    INVARIANT static-admission-cache-on: the slot directory holds exactly node-compile-cache and slot-1.json
+    after the probes run, whatever NODE_DISABLE_COMPILE_CACHE the parent test process has.
+    1. Replace the cacheDisabled branch with one assertion: readdirSync(dir), sorted, deep-equals
+       ["node-compile-cache", "slot-1.json"]. Sort the list: readdir order is not defined.
+    2. The assertion message carries the marker "W1-T13916 compile cache" and says the probes unset
+       NODE_DISABLE_COMPILE_CACHE, so the cache is always on for them. Keep the W1-T13853 marker in the message
+       as well.
+    3. Prefix the test title with "W1-T13916 criterion 1: ". No other test changes; no source change.
+  falsifier: |
+    Run the file with NODE_DISABLE_COMPILE_CACHE=1 in the parent environment (as the coverage first pass does):
+    the test on origin/main fails with expected ['slot-1.json']; the changed test passes. Remove
+    NODE_DISABLE_COMPILE_CACHE: undefined from ordinaryChildEnvironment: the changed test then fails under
+    NODE_DISABLE_COMPILE_CACHE=1, because the probes write no cache.

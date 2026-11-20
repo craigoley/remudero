@@ -18,6 +18,7 @@ import {
   renderSkillsPart,
   selectSkillsForTask,
   skillsInjectedEvent,
+  PROCEDURAL_STEP_TEXT,
   stageSkillDraft,
   stageSkillDrafts,
   workerAllowlistFromSettings,
@@ -354,16 +355,24 @@ test("W1-T3379 criterion 2: the report joins terminal outcomes by run id and ren
     terminal_runs: 1,
     pending_merge_runs: 0,
     merged_runs: 1,
+    not_merged_runs: 0,
     harmful_terminal_runs: 0,
     outcomes: { merged: 1 },
+    costed_runs: 0,
+    cost_usd: 0,
+    cost_per_merged_pr: null,
   });
   assert.deepEqual(report.control, {
     observed_eligible_runs: 1,
     terminal_runs: 1,
     pending_merge_runs: 1,
     merged_runs: 0,
+    not_merged_runs: 0,
     harmful_terminal_runs: 0,
     outcomes: { blocked_ci: 1 },
+    costed_runs: 0,
+    cost_usd: 0,
+    cost_per_merged_pr: null,
   });
   const rendered = renderSkillEffectivenessReport(report);
   assert.match(rendered, /^selected: observed_eligible_runs=1; terminal_runs=1/m);
@@ -441,7 +450,7 @@ test("W1-T3379: the report command reads one complete union and refuses malforme
   const readLedger = ((stateDir: string, opts: { step?: string | readonly string[]; refuseIncomplete?: boolean } = {}) => {
     readCalls++;
     assert.equal(stateDir, "/state");
-    assert.deepEqual(opts.step, ["skills.selection", "verdict", "verdict.merged", "pr.terminal"]);
+    assert.deepEqual(opts.step, ["skills.selection", "verdict", "verdict.merged", "pr.terminal", "fix.done"]);
     assert.equal(opts.refuseIncomplete, true);
     return {
       stateDir,
@@ -664,17 +673,17 @@ test("two drafts in one batch with different applies-to get different reachabili
   assert.equal(negative.skillFile?.markdown, missing.markdown);
 });
 
-test("W1-T3101: stageSkillDrafts logs one skill.staged per draft, carrying the stager's own verdict", () => {
+test("W1-T3101: stageSkillDrafts logs a skill.staged row for a draft it staged, carrying the stager's own verdict", () => {
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const stub = (_p: string, d: SkillDraft): StageSkillDraftResult =>
     d.name === "one"
       ? { staged: true, alreadyStaged: false, refused: false }
       : { staged: false, alreadyStaged: false, refused: true, reason: "not allowlisted" };
   stageSkillDrafts("/registry.json", [draft("one"), draft("two")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
-  assert.deepEqual(rows.map(([step]) => step), ["skill.staged", "skill.staged"]);
+  // W1-T13858: a refusal with no staged proposal to close writes no row.
+  assert.deepEqual(rows.map(([step]) => step), ["skill.staged"]);
   assert.equal(rows[0][1]?.staged, true);
-  assert.equal(rows[1][1]?.refused, true);
-  assert.equal(rows[1][1]?.reason, "not allowlisted");
+  assert.equal(rows[0][1]?.name, "one");
 });
 
 test("W1-T3101: a THROW on one draft is logged and the loop continues — a bad draft never fails the retro", () => {
@@ -766,8 +775,9 @@ test("real skill staging retains scanner and operator approval boundaries", () =
   assert.deepEqual(loadInjectableSkills(join(dir, ".claude", "skills")), [], "staging cannot inject or ratify a skill");
   const before = readFileSync(registry, "utf8");
   const unknown = { ...contextDraft("Read the source.", "future-lane"), procedureKey: "unknown-context" };
+  const rowsBefore = rows.length;
   stageSkillDrafts(registry, [unknown], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
-  assert.equal(rows.at(-1)?.refused, true);
+  assert.equal(rows.length, rowsBefore, "W1-T13858: a refusal with no staged proposal to close writes no row");
   assert.equal(readFileSync(registry, "utf8"), before);
   renameSync(settingsPath, settingsPath + ".held");
   stageSkillDrafts(registry, [valid], d => skillDraftWorkerAllowlist(config, d), describeSkillInjectionReachability, (_step, extra) => rows.push(extra ?? {}));
@@ -790,6 +800,18 @@ test("skill conformance names the real eligible execution context", () => {
   assert.ok(allow.capabilityContext?.consumers.every(c => c.source.startsWith("src/lib/")));
   const onlyCash = { root: dir, workerProviders: { enabled: ["cash"], harnessCommitsFix: false } } as Config;
   assert.ok(skillDraftWorkerAllowlist(onlyCash, both, settingsPath).contextRefusal, "one known lane cannot stand in for a missing fix consumer");
+});
+
+test("signal-only staging keeps its outcome-only reason with a missing production capability context", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}signal-context-`));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const config: Config = { root: dir, claudeBin: join(dir, "unused-claude"), workerProviders: { enabled: [] } };
+  const signalOnly = contextDraft(PROCEDURAL_STEP_TEXT.fully_executed_proof);
+  const missing = skillDraftWorkerAllowlist(config, signalOnly, join(dir, "worker.json"));
+  assert.equal(missing.contextRefusal, "worker-capability-context:missing");
+  const outcome = stageSkillDraft(join(dir, "registry.json"), signalOnly, missing, describeSkillInjectionReachability(signalOnly));
+  assert.equal(outcome.refused, true);
+  assert.match(outcome.reason ?? "", /^outcome-only:.*worker-capability-context:missing/);
 });
 
 test("skill context conformance regressions fail without the boundary repair", () => {

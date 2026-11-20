@@ -20,7 +20,7 @@
     - src/lib/view-events.ts
     - src/lib/serve.ts
     - test/console-api/views/a-versions-poll-naming-its-views-reads-only-those.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "GET /v1/views/versions with a views parameter answers the same body as without it and is counted by viewsReadBy as a read of only the named views and the views they are built from"

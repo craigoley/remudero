@@ -18,7 +18,7 @@
     - src/lib/live-ledger-tail.ts
     - src/lib/serve.ts
     - test/incident-checks-read-only-their-inputs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A rule reads only its declared inputs (rows no rule reads change no finding), and a row's time is parsed once across evaluations"

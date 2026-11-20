@@ -21,7 +21,7 @@
     - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
     - test/measurement-cadence-production-wiring.test.ts
     - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Today's case: the cadence reads W1-T13790's shard from a checkout that holds its filing version (status queued, no amendment), while origin/main holds the amended version (the extra files entry test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts and the AMENDED (2026-11-19) note, still queued). The task is credited merged. buildPlanReconcileCadenceInput, planReconcileCadence and landPlanReconcileShards run on a real git fixture. The landed tree's shard reads status merged and still holds the files entry and the note"
