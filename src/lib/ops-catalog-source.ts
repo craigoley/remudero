@@ -1,7 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { inspect } from "node:util";
 import { RmdError } from "./errors.js";
+import { ghBrokerRouteFor } from "./gh-read-broker-client.js";
 import { ghJsonAsync, createGhCallPacer, type GhCallPacer } from "./github-transport.js";
+import { isTestRunner } from "./live-write-guard.js";
 import { PlanError, type Plan } from "./plan.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision-store.js";
@@ -10,8 +15,8 @@ import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision
  * W1-T11768: a private ops task catalog read read-only at one pinned commit, or refused with a stable code.
  * The shape of `readSelectedRegistry` (W1-T9493) applied to the plan monolith plus its shard directory: bind the
  * numeric repository id, branch ref, commit, exact-path trees and blob SHAs, verify git's blob SHA-1 over the
- * decoded bytes, re-read the ref afterwards. Private bytes stay in memory: no clone, worktree, mirror or file
- * write, and the injected api is GET-only. Nothing here is a selector; the caller feeds an `ok` Plan to the
+ * decoded bytes, re-read the ref afterwards. No clone, worktree or mirror, and the injected api is GET-only. The one
+ * file write is W1-T13970's blob cache: verified blob bytes, one owner-only file per sha, under a state dir. Nothing here is a selector; the caller feeds an `ok` Plan to the
  * shadow composer only. A branch that moved during the read is read again at its new commit, reusing every tree and
  * blob already verified: git names each by its content, so a reused object is the same bytes.
  */
@@ -144,6 +149,9 @@ function privateHandles<T extends object>(summary: T, handles: object): T {
   return Object.freeze(summary);
 }
 
+/** W1-T13970: a blob GET. A blob is named by its content, so no answer for one can go stale. */
+const BLOB_PATH = /^repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/git\/blobs\/[a-f0-9]{40}$/;
+
 /** The default GET-only api: `ghJsonAsync` behind the existing pacer. Errors are reduced to a code-bearing class. */
 export function defaultOpsCatalogApi(
   opts: { pacer?: GhCallPacer; exec?: Parameters<typeof ghJsonAsync>[1] } = {},
@@ -158,6 +166,10 @@ export function defaultOpsCatalogApi(
     try {
       if (pacer.waitAsync) await pacer.waitAsync();
       else pacer.wait();
+      // W1-T13970: a blob takes ghJsonAsync's own transport, the in-process client, not a gh child per blob. Ref,
+      // commit and tree reads keep the forced-fresh child. With a live broker a blob keeps the child too, so private
+      // bytes never enter the broker's shared response cache (W1-T11768). A caller's own executor runs every read.
+      if (opts.exec === undefined && BLOB_PATH.test(path) && ghBrokerRouteFor() === undefined) return await ghJsonAsync(["api", path]);
       return await ghJsonAsync(["api", path], exec, undefined, { fresh: true });
     } catch (error) {
       // Match CLI diagnostics, not auth words in echoed request paths or response bodies.
@@ -205,6 +217,8 @@ interface ShadowTreeCache { current?: { repositoryId: number; trees: ObjectCache
  */
 interface Pass {
   repositoryId: number;
+  /** W1-T13970: this read's blob file cache, when it has a state dir. */
+  blobFiles: BlobFiles | undefined;
   kept: ObjectCache;
   used: ObjectCache;
   counts: OpsCatalogCounts;
@@ -266,11 +280,100 @@ function keepBlob(api: OpsCatalogApi, repositoryId: number, blobSha: string, blo
   bySha.set(blobSha, blob);
 }
 
+/**
+ * W1-T13970: verified blob bytes kept across processes, one file per sha under `<stateDir>/cache/ops-blobs/<repository
+ * id>/`. A file answers only after the checks a fetched blob passes ({@link verifiedBlob}); one that fails them is
+ * removed and the blob is fetched. Only blobs live here: a ref, commit or tree read always reaches GitHub.
+ */
+interface BlobFiles { dir: string }
+
+export function opsCatalogBlobCacheDir(stateDir: string, repositoryId: number): string {
+  return join(stateDir, "cache", "ops-blobs", String(repositoryId));
+}
+
+/** The verified blob a file holds, or undefined: no file, an unreadable one, or one failing a check (removed). */
+function readBlobFile(files: BlobFiles, blobSha: string): KeptBlob | undefined {
+  const path = join(files.dir, blobSha);
+  let bytes: Buffer;
+  try {
+    const stat = fs.statSync(path, { throwIfNoEntry: false });
+    if (!stat) return undefined;
+    // The per-blob bound applies before the read, so an oversized file is never loaded.
+    if (!stat.isFile() || stat.size > OPS_CATALOG_MAX_BLOB_BYTES) return removeBlobFile(path);
+    bytes = fs.readFileSync(path);
+  } catch (error) {
+    void error; // An unreadable file is a miss: the blob is fetched from GitHub, as with no cache.
+    return undefined;
+  }
+  try { return verifiedBlob(blobSha, bytes); }
+  catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    return removeBlobFile(path); // Bytes that do not hash to the sha never answer; the read fetches the blob.
+  }
+}
+
+/** Remove one cache entry; answers undefined, the miss its caller returns. */
+function removeBlobFile(path: string): undefined {
+  try { fs.rmSync(path, { force: true, recursive: true }); }
+  catch (error) {
+    void error; // A file that cannot be removed is refused again on the next read; the answer still comes from GitHub.
+  }
+  return undefined;
+}
+
+/** Keep verified bytes as `<sha>`, written whole under a private temporary name and renamed, so a reader sees all or none. */
+function writeBlobFile(files: BlobFiles, blobSha: string, bytes: Uint8Array): void {
+  const temp = join(files.dir, `.${blobSha}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    fs.mkdirSync(files.dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temp, bytes, { mode: 0o600, flag: "wx" });
+    fs.renameSync(temp, join(files.dir, blobSha));
+  } catch (error) {
+    void error; // A cache that cannot be written changes only the next read, which fetches the blob again.
+    removeBlobFile(temp);
+  }
+}
+
+/** After an ok read, keep only the files of the shas its binding names: the point the in-memory blobs are pruned. */
+function pruneBlobFiles(files: BlobFiles, keep: ReadonlySet<string>): void {
+  let names: string[];
+  try { names = fs.readdirSync(files.dir); }
+  catch (error) {
+    void error; // No directory (nothing was ever written) or an unreadable one: nothing to prune.
+    return;
+  }
+  for (const name of names) if (!keep.has(name)) removeBlobFile(join(files.dir, name));
+}
+
+/**
+ * The instance state dir as loadConfig resolves it (the config file's `root`, else `~/Remudero`, then `state`), read
+ * only. Undefined with no such directory, and, under the test runner, for one outside the temp directory, so a test
+ * never reads or writes a real instance's cache.
+ */
+function instanceStateDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const home = env.HOME || homedir();
+  try {
+    const configFile = join(home, ".config", "remudero", "config.json");
+    const parsed = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, "utf8")) as { root?: unknown } | null : null;
+    const state = join(typeof parsed?.root === "string" && parsed.root !== "" ? parsed.root : join(home, "Remudero"), "state");
+    const stat = fs.statSync(state, { throwIfNoEntry: false });
+    if (stat === undefined || !stat.isDirectory()) return undefined;
+    if (isTestRunner(env) && !fs.realpathSync(state).startsWith(fs.realpathSync(tmpdir()) + sep)) return undefined;
+    return state;
+  } catch (error) {
+    void error; // An unreadable config is no instance: the read keeps its blobs in memory only, as before.
+    return undefined;
+  }
+}
+
 async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass: Pass): Promise<string> {
   const { counts, repositoryId } = pass;
   const known = knownBlobText(api, repositoryId, blobSha);
   const previous = pass.kept.blobs.get(blobSha);
-  const kept = known ?? previous;
+  // W1-T13970: memory first, then the state-dir file, then GitHub. A file's blob joins the api's kept blobs.
+  const filed = known === undefined && previous === undefined && pass.blobFiles ? readBlobFile(pass.blobFiles, blobSha) : undefined;
+  if (filed) keepBlob(api, repositoryId, blobSha, filed);
+  const kept = known ?? previous ?? filed;
   if (kept) {
     pass.hits++;
     if (previous) pass.reusedPreviousPass = true;
@@ -290,6 +393,7 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   if (counts.bytes > OPS_CATALOG_MAX_TOTAL_BYTES || blob.size !== bytes.length) throw new Refusal("malformed");
   const verified = verifiedBlob(blobSha, bytes);
   keepBlob(api, repositoryId, blobSha, verified);
+  if (pass.blobFiles) writeBlobFile(pass.blobFiles, blobSha, bytes);
   pass.used.blobs.set(blobSha, verified);
   return verified.text;
 }
@@ -367,7 +471,7 @@ const CONTENT_REFUSALS: ReadonlySet<OpsCatalogOutcome> = new Set(["malformed", "
 
 async function read(
   target: OpsCatalogTarget, api: OpsCatalogApi, counts: OpsCatalogCounts, store: PlanRevisionStore,
-  atStage: (stage: OpsCatalogRefusalStage) => void, treeCache?: ShadowTreeCache,
+  atStage: (stage: OpsCatalogRefusalStage) => void, treeCache?: ShadowTreeCache, stateDir?: string,
 ): Promise<OpsCatalogSnapshot> {
   atStage("repository_identity");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repository)) throw new Refusal("unreadable");
@@ -380,6 +484,7 @@ async function read(
   const branch = meta.default_branch;
   atStage("branch_ref");
   let commit = await readBranchSha(api, repo, branch);
+  const blobFiles: BlobFiles | undefined = stateDir === undefined ? undefined : { dir: opsCatalogBlobCacheDir(stateDir, repositoryId) };
   let kept = emptyCache();
   if (treeCache?.current?.repositoryId === repositoryId) kept.trees = treeCache.current.trees;
   // Each pass reads one commit whole. A pass whose closing ref read still names its commit is the answer; a moved ref
@@ -387,7 +492,7 @@ async function read(
   // predecessor, the read refuses ref_moved.
   for (;;) {
     const pass: Pass = {
-      repositoryId, kept, used: emptyCache(), counts, fetched: 0, hits: 0, reusedPreviousPass: false, bound: false,
+      repositoryId, blobFiles, kept, used: emptyCache(), counts, fetched: 0, hits: 0, reusedPreviousPass: false, bound: false,
     };
     counts.passes++;
     counts.treeEntries = 0;
@@ -445,6 +550,7 @@ function adopt(
     boundBlobs.set(blobSha, pass.used.blobs.get(blobSha)!);
   }
   blobsByRepository(api).set(repositoryId, boundBlobs);
+  if (pass.blobFiles) pruneBlobFiles(pass.blobFiles, new Set(boundBlobs.keys()));
   newestOkBinding.set(api, { repositoryId, blobShas: [...boundBlobs.keys()], taskIds: new Set(plan.byId.keys()) });
   Object.freeze(counts.fetchedObjects);
   return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
@@ -534,16 +640,26 @@ export function acceptOfferedOpsCatalogBlobs(
 export async function readOpsCatalogSnapshotAsync(
   target: OpsCatalogTarget,
   api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
+  opts: OpsCatalogReadOptions = {},
 ): Promise<OpsCatalogSnapshot> {
-  return readSnapshot(target, api, snapshotStore);
+  return readSnapshot(target, api, snapshotStore, undefined, blobStateDir(api, opts));
+}
+
+/**
+ * W1-T13970: where a read keeps its verified blobs across processes. `stateDir` names it; without one the process's
+ * shared default api uses the instance's state dir, and any other api keeps its blobs in memory only.
+ */
+export interface OpsCatalogReadOptions { stateDir?: string }
+function blobStateDir(api: OpsCatalogApi, opts: OpsCatalogReadOptions): string | undefined {
+  return opts.stateDir ?? (api === processDefaultApi ? instanceStateDir() : undefined);
 }
 
 async function readSnapshot(
-  target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore, treeCache?: ShadowTreeCache,
+  target: OpsCatalogTarget, api: OpsCatalogApi, store: PlanRevisionStore, treeCache?: ShadowTreeCache, stateDir?: string,
 ): Promise<OpsCatalogSnapshot> {
   const counts: OpsCatalogCounts = { treeEntries: 0, shards: 0, bytes: 0, passes: 0, fetchedObjects: [], cachedObjects: 0 };
   let refusalStage: OpsCatalogRefusalStage = "repository_identity";
-  try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache); }
+  try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache, stateDir); }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
     const httpStatusClass = error instanceof Refusal ? error.httpStatusClass : undefined;
@@ -561,6 +677,7 @@ async function readSnapshot(
 export function createOpsCatalogShadowSource(
   target: OpsCatalogTarget,
   api: OpsCatalogApi = sharedDefaultOpsCatalogApi(),
+  opts: OpsCatalogReadOptions = {},
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
@@ -588,7 +705,7 @@ export function createOpsCatalogShadowSource(
       if (check === "failed") {
         return withDiagnostics({ outcome: "stale", refusalStage: "branch_ref" }, "revalidate", revalidateClass);
       }
-      const snap = await readSnapshot(target, api, store, treeCache);
+      const snap = await readSnapshot(target, api, store, treeCache, blobStateDir(api, opts));
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
