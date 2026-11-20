@@ -206,3 +206,17 @@ test("W1-T13876 criterion 1: reading the needs you view or walking its bodies co
   const known = view.body(NEEDS_YOU_VIEW_NAME)!;
   assert.deepEqual((known.body.data as NeedsYouData).instances.map((i) => i.instance), ["core", "wild"], "a newly reported instance composes");
 });
+
+test("W1-T13876 compose: an input that fails to compose is composed again on the next read, never answered by the held body", () => {
+  const { handle, post } = fakeHandle(["core"]);
+  const view = withNeedsYouView(handle, clock);
+  post(now("core", [decision("core", "question:W1-T1:a", at(30))]));
+  const first = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.throws(() => post(entry("now", "instance=core", 3, { decisions: "malformed" }, [])),
+    "positive control: the malformed body fails to compose when it is posted");
+  assert.throws(() => view.body(NEEDS_YOU_VIEW_NAME), "the failed inputs are not recorded as composed");
+  post(now("core", [decision("core", "question:W1-T3:c", at(1))]));
+  const recovered = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.notEqual(recovered, first);
+  assert.deepEqual((recovered.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T3:c"]);
+});

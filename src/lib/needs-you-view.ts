@@ -196,8 +196,9 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
     const inputs: ReadModelBodyEntry[] = [];
     for (const entry of inner.bodies.values()) if (isNeedsYouInput(entry)) inputs.push(entry);
     if (current && composedFrom && sameItems(composedFrom.inputs, inputs) && sameItems(composedFrom.known, known)) return current;
-    composedFrom = { inputs, known };
     const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, known);
+    // Recorded only once composition succeeded: a throw leaves the next lookup to compose again (#19774 review).
+    composedFrom = { inputs, known };
     const stale = sources.some((s) => s.state !== "fresh");
     const etag = viewEtag(NEEDS_YOU_VIEW_NAME, NEEDS_YOU_VIEW_VERSION, stale, data);
     if (current?.etag === etag) return current;
