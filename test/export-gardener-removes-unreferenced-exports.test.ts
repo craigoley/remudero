@@ -77,11 +77,11 @@ test("QUEUE_JUDGE_AVAILABILITY_STEPS is not exported from queue-judge-gardener",
 });
 
 test("STUCK_STATE_GARDEN is not exported from stuck-state-gardener", async () => {
-  const module = await import("../src/lib/stuck-state-gardener.js");
+  const module = await import("#src/lib/stuck-state-gardener.js");
   assert.equal(Object.hasOwn(module, "STUCK_STATE_GARDEN"), false);
 });
 
 test("WORKSTREAMS_BUILT_ROW_WINDOW_MS is not exported from workstreams-view", async () => {
-  const module = await import("../src/lib/workstreams-view.js");
+  const module = await import("#src/lib/workstreams-view.js");
   assert.equal(Object.hasOwn(module, "WORKSTREAMS_BUILT_ROW_WINDOW_MS"), false);
 });
