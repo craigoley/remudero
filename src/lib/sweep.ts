@@ -101,10 +101,12 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetReadsAnyPath, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
-import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
+import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
 import {
-  ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
+  loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
+  type HostMemoryBudgetPolicy,
 } from "./host-memory-shadow.js";
+import { readHostPressure, type HostPressure } from "./daemon-health.js";
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
@@ -20091,8 +20093,13 @@ export type FixAdmissionClass = "fix" | "review";
 export interface FixAdmissionWaiter { prNumber: number; sinceMs: number } // W1-T9582: a PR and when it began waiting.
 
 /** W1-T9498: the rss+swap (MiB) of each live, started worker tree of a class in this container; undefined when the
- *  residency cannot be read, and then every reservation is charged its whole estimate. */
-export type FixAdmissionResidents = { readonly [K in FixAdmissionClass]: readonly number[] } | undefined;
+ *  residency cannot be read, and then every reservation is charged its whole estimate.
+ *  W1-T13879: `pendingFix` counts the live fix trees with no residency reading yet (absent reads 0), and
+ *  `readFixMemoryCalm` is the lazy host memory calm reader the typical-beside-live rung asks (absent: not calm). */
+export type FixAdmissionResidents = ({ readonly [K in FixAdmissionClass]: readonly number[] } & {
+  readonly pendingFix?: number;
+  readonly readFixMemoryCalm?: () => boolean;
+}) | undefined;
 
 /** W1-T9498: what one refresh charged against the headroom, as the capacity row and a refusal show it. */
 export interface FixAdmissionCharge {
@@ -20104,9 +20111,11 @@ export interface FixAdmissionCharge {
   reviewEstimateMib: number;
   fixTypicalMib: number;
   admissionRung: FixAdmissionRung;
+  /** W1-T13879: the live fix trees' summed resident, set only on the typical-beside-live rung. */
+  liveFixResidentMib?: number;
 }
 
-export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
+export type FixAdmissionRung = "fits" | "typical" | "typical-beside-live" | "nothing-live" | "none";
 
 /**
  * W1-T9498 — THE CHARGE OF `count` RESERVATIONS OF ONE CLASS, ONCE. The pressure reading (MemAvailable, the container's
@@ -20124,15 +20133,40 @@ export function fixAdmissionChargeMib(count: number, estimateMib: number, reside
 }
 
 /**
+ * W1-T13879: the host memory calm test the typical-beside-live rung asks: the host's memory PSI is readable and within
+ * the host memory budget's own psi bounds (host-memory-shadow.ts: some avg10 over psiSomeAvg10Max, or full avg10 over
+ * the bound, names psi) at the prior full bound psiFullAvg10Max, the stricter side of psiBoundFor. No new number.
+ * Unreadable PSI is not calm.
+ */
+export function productionFixMemoryCalm(
+  readPressure: () => HostPressure = () => readHostPressure(),
+  loadPolicy: () => Pick<HostMemoryBudgetPolicy, "psiSomeAvg10Max" | "psiFullAvg10Max"> = () => loadHostMemoryBudgetPolicy(),
+): boolean {
+  const memory = readPressure().memory;
+  if (memory === "unknown") return false;
+  const policy = loadPolicy();
+  return memory.someAvg10 <= policy.psiSomeAvg10Max && (memory.fullAvg10 ?? 0) <= policy.psiFullAvg10Max;
+}
+
+/**
  * W1-T9498: this container's live fix and review worker trees, measured as the shadow budget measures them (each tree's
  * rss+swap, a process counted once). Only this container's own, unreleased reservations count, as
  * {@link ownContainerWorkLive} reads them; a tree whose record cannot be read is left out, so its reservation is charged
  * whole. An unreadable reservation store: undefined, every reservation whole.
+ *
+ * W1-T13879 — NO RESIDENCY READING YET. `pendingFix` counts the owned, unreleased fix entries whose tree cannot be read,
+ * and the readable fix trees below the class typical at an age before most of the class reach their peak (the class
+ * survival above 1 - typicalQuantile, or unmeasured): such a tree's resident says nothing yet about its peak. The
+ * reading also carries the host memory calm reader. Both ride as non-enumerable fields, so the trees' own view (a
+ * deep-equal or JSON of fix and review) is unchanged.
  */
 export function productionFixAdmissionResidents(
   root: string,
   readLedger: (root: string) => HostMemoryReading | undefined = (r) => readMemoryLedger({ root: r }),
   readFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  readTypical: (workerClass: "fix") => LearnedEstimate = (workerClass) => classTypical(workerClass),
+  readSurvival: (workerClass: "fix", ageMs: number) => Survival = (workerClass, ageMs) => classSurvival(workerClass, ageMs),
+  readFixMemoryCalm: () => boolean = () => productionFixMemoryCalm(),
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
@@ -20140,10 +20174,22 @@ export function productionFixAdmissionResidents(
     (entry.workerClass === "fix" || entry.workerClass === "review"));
   const residents = residentsOf(readFile, live.map((entry) => entry.path));
   const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
+  let pendingFix = 0;
+  let typicalMib: number | undefined;
   live.forEach((entry, i) => {
     const resident = residents[i]!;
     if (!("unread" in resident)) out[entry.workerClass as FixAdmissionClass].push(resident.mib);
+    if (entry.workerClass !== "fix") return;
+    if ("unread" in resident) {
+      pendingFix++;
+      return;
+    }
+    typicalMib ??= readTypical("fix").estimateMib;
+    if (resident.mib >= typicalMib) return;
+    const survival = readSurvival("fix", entry.ageMs);
+    if ("unmeasured" in survival || survival.factor > 1 - ESTIMATE_LEARNING.typicalQuantile) pendingFix++;
   });
+  Object.defineProperties(out, { pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm } });
   return out;
 }
 
@@ -20244,6 +20290,15 @@ export function createSweepFixAdmissionController(input: {
   };
   let residents: FixAdmissionResidents;
   let residentsRead = false;
+  // W1-T13879: absent, false or a throw is not calm, so a reading without the calm reader reads as before this rung.
+  const fixMemoryCalm = (live: NonNullable<FixAdmissionResidents>): boolean => {
+    try {
+      return live.readFixMemoryCalm?.() === true;
+    } catch (error) {
+      void error; // An unreadable calm reading is not calm: the rung stays closed.
+      return false;
+    }
+  };
   const liveTrees = (): FixAdmissionResidents => {
     if (!residentsRead) {
       residents = readResidents();
@@ -20291,6 +20346,18 @@ export function createSweepFixAdmissionController(input: {
     if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
       charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
+    else if (live && live.fix.length > 0 && (live.pendingFix ?? 0) === 0) {
+      // W1-T13879 — TYPICAL BESIDE LIVE. One fix at its typical peak beside live fix trees, only while nothing is reserved
+      // here (a second claim sees reservations 1, so live is undefined: at most one per pass on this rung). The headroom
+      // already nets each live tree's resident (the NO DOUBLE COUNT rule above); charging the residents AGAIN is
+      // deliberate: it keeps for each live fix room to grow by as much again as it holds now, a growth allowance from its
+      // own measurement instead of its class p90. Host memory must also read calm; the calm reader is asked last.
+      const liveFixMib = live.fix.reduce((sum, mib) => sum + mib, 0);
+      if (charge.headroomMib - charge.reviewChargeMib - liveFixMib - charge.fixTypicalMib >= 0 && fixMemoryCalm(live)) {
+        charge.admissionRung = "typical-beside-live";
+        charge.liveFixResidentMib = liveFixMib;
+      }
+    }
     if (charge.admissionRung !== "none") available = 1;
   };
   const reviewsFit = (count: number): boolean => !pressure
@@ -20355,6 +20422,7 @@ export function createSweepFixAdmissionController(input: {
       review_estimate_mib: state.charge?.reviewEstimateMib,
       fix_typical_mib: state.charge?.fixTypicalMib,
       admission_rung: state.charge?.admissionRung,
+      ...(state.charge?.admissionRung === "typical-beside-live" ? { live_fix_resident_mib: state.charge.liveFixResidentMib } : {}),
       ...order,
     });
   };
