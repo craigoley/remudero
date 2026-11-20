@@ -14,14 +14,14 @@
  * cycle. TypeScript's structural typing means a real `ProceduralCandidate` satisfies this shape
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ledgerProposalVerdicts, loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { mergeVerdictReceipts, verdictReceiptOf, type VerdictReceipt } from "./inbox-verdict-receipts.js";
-import { withInflightLock } from "./inflight-lock.js";
+import { inflightLockPath } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -1582,6 +1582,7 @@ export function stageSkillDrafts(
 
 /** The rows that answer a proposal, so a wait ends at the first of them. */
 const SKILL_DRAFT_ANSWER_STEPS: readonly string[] = ["ratify.approved", "panel.proposal_declined"];
+const SKILL_DRAFT_VERDICT_STEPS = [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"];
 const DAY_MS = 86_400_000;
 
 /** W1-T8825: the inbox's durable first-seen store, shared by the panel and the workshop. */
@@ -1604,7 +1605,14 @@ export function readInboxFirstSeen(stateDir: string): Record<string, string> {
 export function withSkillDraftVerdictLock<T>(stateDir: string, proposalId: string | undefined, action: () => T): T {
   if (proposalId === undefined || !proposalId.startsWith(SKILL_DRAFT_ID_PREFIX)) return action();
   const lockId = `skill-draft-verdict-${createHash("sha256").update(proposalId).digest("hex")}`;
-  return withInflightLock(stateDir, lockId, action, { run_id: proposalId });
+  mkdirSync(stateDir, { recursive: true });
+  const release = tryAcquireRotationLock(inflightLockPath(stateDir, lockId), proposalId);
+  if (release === null) throw new Error(`a verdict is in progress for ${proposalId}`);
+  try {
+    return action();
+  } finally {
+    release();
+  }
 }
 
 /** `bound` is in ms; `sample` counts the answered proposals it was measured over. */
@@ -1724,6 +1732,12 @@ function skillDraftVerdicts(rows: SkillDraftLedgerRows): ReturnType<typeof ledge
   return ledgerProposalVerdicts([...mergeVerdictReceipts(receipts), ...unordered]);
 }
 
+/** Restore can need an archived expiry receipt before the slow lane has retained it. */
+export function readSkillDraftVerdicts(stateDir: string): ReturnType<typeof skillDraftVerdicts> | { unmeasured: string } {
+  const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS);
+  return "unmeasured" in union ? union : skillDraftVerdicts(union.rows);
+}
+
 /** Called after checking the current verdict. A restore can outlive a failed close-record write. */
 function hasSkillDraftExpiryReceipt(proposal: Proposal, rows: SkillDraftLedgerRows): boolean {
   const skillSha256 = storedSkillSha256(proposal);
@@ -1769,7 +1783,7 @@ export function expireUnansweredSkillDrafts(
 ): SkillDraftExpiryPass {
   const firstSeen = readInboxFirstSeen(stateDir);
   const readMeasuredLedger = () => {
-    const union = readSkillDraftLedger(stateDir, [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"]);
+    const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS);
     if ("unmeasured" in union) return union;
     const measured = measureSkillDraftWaits(firstSeen, union.rows);
     return "unmeasured" in measured ? measured : { ...measured, rows: union.rows };

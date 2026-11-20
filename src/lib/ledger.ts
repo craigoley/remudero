@@ -1471,14 +1471,19 @@ export function isRotationLockHolderStale(
  * Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-ledger-row-once.test.ts.
  * See docs/forensics/ledger.md#tryacquirerotationlock (R-1).
  * W1-T13859: `rmd ledger-compact` holds it while it replaces archives, and the skill-draft expiry reader
- * holds it while it reads the union, so no archive moves under a read that must be complete. */
-export function tryAcquireRotationLock(lockPath: string): (() => void) | null {
-  const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
+ * holds it while it reads the union, so no archive moves under a read that must be complete.
+ * Per-draft verdict locks use the same foreign-holder expiry policy and retain their legacy run id. */
+export function tryAcquireRotationLock(lockPath: string, runId?: string): (() => void) | null {
+  const info: LedgerRotationLockInfo & { run_id?: string; owner?: string } = {
+    pid: process.pid, host: hostname(), startedAt: new Date().toISOString(),
+    ...(runId === undefined ? {} : { run_id: runId, owner: randomUUID() }),
+  };
+  const raw = JSON.stringify(info);
   for (;;) {
     try {
       const fd = openSync(lockPath, "wx");
       try {
-        writeSync(fd, JSON.stringify(info));
+        writeSync(fd, raw);
       } finally {
         closeSync(fd);
       }
@@ -1493,10 +1498,10 @@ export function tryAcquireRotationLock(lockPath: string): (() => void) | null {
       // "missing" | "reclaimed" | "lost" → retry the atomic create from the top.
     }
   }
-  // `force`: a lock some other actor already cleared (a reclaimer that mis-judged this holder
-  // stale) must not turn release into a throw — the rotation's own outcome was decided by the
-  // identity guard, not by whether the lock file survived.
-  return () => rmSync(lockPath, { force: true });
+  return () => {
+    // A reclaimed holder may still unwind later. Release only the lock acquired above.
+    reclaimStaleLock(lockPath, { parseHolder: (bytes) => bytes, isStale: (bytes) => bytes === raw, onReclaim: () => {} });
+  };
 }
 
 function datedArchivePath(path: string, now: Date): string {
@@ -1733,7 +1738,7 @@ export function compactRotations(
   io: {
     readRows: (path: string) => string[];
     write: (name: string, body: string) => void;
-    remove: (path: string) => void;
+    remove?: (path: string) => void;
     clock?: Clock;
   },
 ): LedgerCompactionResult {
@@ -1799,7 +1804,7 @@ export function compactRotations(
   const written = new Set(archiveNames);
   for (const path of sources) {
     if (written.has(basename(path))) continue;
-    io.remove(path);
+    io.remove?.(path);
   }
   return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName, archiveNames };
 }

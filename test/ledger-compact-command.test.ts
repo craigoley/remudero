@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -106,7 +106,8 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
   assert.equal(result.code, 0);
   assert.deepEqual(corpusRows(memory.files), before, "apply must preserve every distinct row");
   assert.equal(memory.writes.length, 2, "one atomic replacement per day of rows is written");
-  assert.equal(memory.removals.length, 2, "the non-colliding sources are removed after replacement");
+  assert.equal(memory.removals.length, 3, "all three sources are removed after publication");
+  const secondOutput = compactedArchiveName("2026-08-02T00:00:00.001Z");
   assert.deepEqual(JSON.parse(result.out[0]!), {
     mode: "apply",
     olderThanDays: 7,
@@ -116,8 +117,8 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
     sourceCount: 3,
     rowsWritten: 2,
     duplicatesCollapsed: 2,
-    archiveName: compactedArchiveName("2026-08-02T00:00:00.000Z"),
-    archiveNames: [compactedArchiveName("2026-08-01T00:00:00.000Z"), compactedArchiveName("2026-08-02T00:00:00.000Z")],
+    archiveName: secondOutput,
+    archiveNames: [compactedArchiveName("2026-08-01T00:00:00.000Z"), secondOutput],
   });
 });
 
@@ -195,7 +196,9 @@ test("ledger-compact previews and applies a copied fixture through real gzip and
   assert.deepEqual(dryCounts, applyCounts);
   assert.equal(applyCounts.sourceCount, 3);
   assert.equal(applyCounts.archiveNames.length, 2);
-  const replacement = [compactedArchiveName("2026-08-01T00:00:00.000Z"), second].flatMap((name) =>
+  assert.equal(existsSync(join(stateDir, second)), false, "the colliding source left the active ledger");
+  assert.deepEqual(gunzipSync(readFileSync(join(stateDir, LEDGER_COLD_STORE_DIRNAME, second))), Buffer.from(`${a}\n${b}\n`));
+  const replacement = (applyCounts.archiveNames as string[]).flatMap((name) =>
     gunzipSync(readFileSync(join(stateDir, name))).toString("utf8").trim().split("\n"));
   assert.deepEqual(new Set(replacement), new Set([a, b]));
   assert.equal(readFileSync(join(stateDir, "ledger.ndjson"), "utf8"), `${row("2026-09-10T00:00:00.000Z", "LIVE")}\n`);
@@ -473,6 +476,24 @@ test("ledger-compact moves a merged source into cold storage instead of deleting
   assert.ok(memory.files.has(join(COLD, compactedArchiveName("2026-08-01T06:00:00.000Z"))), "the merged source is in cold storage");
   assert.ok(!memory.files.has(older), "and gone from the scanned directory");
   assert.deepEqual(topLevelRows(memory.files), before, "the scanned corpus keeps every distinct row");
+});
+
+test("ledger-compact keeps both cold copies when a source name is reused", () => {
+  const stamp = compactedArchiveName("2026-08-01T00:00:00.000Z");
+  const original = join(COLD, stamp);
+  const earlier = gzipRows([row("2026-08-01T00:00:00.000Z", "EARLIER")]);
+  const source = gzipRows([row("2026-08-01T00:00:00.000Z", "SOURCE")]);
+  const memory = coldMemoryFs({
+    [original]: earlier,
+    [join(STATE_DIR, stamp)]: source,
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: source,
+  }, { [original]: NOW.getTime() - 24 * 60 * 60 * 1000 });
+  const before = topLevelRows(memory.files);
+
+  assert.equal(command([], memory).code, 0);
+  assert.deepEqual(memory.files.get(original), earlier);
+  assert.deepEqual(memory.files.get(`${original}.1`), source);
+  assert.deepEqual(topLevelRows(memory.files), before);
 });
 
 test("ledger-compact deletes a cold-stored source only after its retention lapses", () => {

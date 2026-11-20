@@ -5,11 +5,20 @@
  * ledger row.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 
+import { fixedClock, systemClock } from "#src/lib/clock.js";
+import { inflightLockPath } from "#src/lib/inflight-lock.js";
+import { appendLedger, compactedArchiveName, ledgerRotationLockPath, tryAcquireRotationLock } from "#src/lib/ledger.js";
+import { ledgerLivePath } from "#src/lib/ledger-union.js";
+import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
+import { expireUnansweredSkillDrafts, inboxFirstSeenPath, readSkillDraftVerdicts, withSkillDraftVerdictLock } from "#src/lib/skill-workshop.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import type { InboxClassification, Proposal } from "../src/lib/inbox.js";
 import { proposalVerdictCommand } from "../src/lib/inbox-verdict-command.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -122,4 +131,82 @@ test("rmd decline and rmd restore, end to end: a real registry, the live classif
     console.log = savedLog;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("W1-T13859 criterion 6: rmd restore reclaims a stale foreign verdict lock and reverses an archived expiry", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-expiry-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const ledgerPath = ledgerLivePath(stateDir);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  const skills = join(root, ".claude", "skills");
+  const skillPath = join(skills, "existing.md");
+  mkdirSync(stateDir);
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(skillPath, "existing skill\n");
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  assert.deepEqual(writeDaemonTargetRecord(stateDir, {
+    owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: root,
+  }), { written: true });
+
+  const id = "skill-draft:old";
+  const clock = fixedClock(Date.parse("2026-11-19T12:00:00Z"));
+  const markdown = "---\nname: proc\n---\n";
+  writeFileSync(registryPath, JSON.stringify({ proposals: [
+    { id, summary: markdown, evidenceAnchors: [], skillFile: { name: "proc", markdown }, skillFileStagedAt: "2026-11-01T00:00:00Z" },
+  ] }));
+  writeFileSync(inboxFirstSeenPath(stateDir), JSON.stringify({
+    backfill: "2026-10-13T00:00:00Z", answered: "2026-11-01T00:00:00Z", [id]: "2026-11-01T00:00:00Z",
+  }));
+  const answer = { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" };
+  const log = (step: string, extra?: Record<string, unknown>) =>
+    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra });
+  appendLedger(ledgerPath, answer);
+  const expire = () => expireUnansweredSkillDrafts(registryPath, stateDir, log, clock);
+  assert.deepEqual(expire().expired, [id]);
+  assert.deepEqual(readdirSync(skills), ["existing.md"]);
+  assert.equal(readFileSync(skillPath, "utf8"), "existing skill\n");
+
+  const lock = inflightLockPath(stateDir, `skill-draft-verdict-${createHash("sha256").update(id).digest("hex")}`);
+  const restoreClock = fixedClock(Date.parse("2026-11-19T13:00:00Z"));
+  t.mock.method(systemClock, "now", restoreClock.now);
+  const holder = { pid: process.pid, run_id: id, host: "decommissioned-verdict-host", startedAt: restoreClock.iso() };
+  const recent = JSON.stringify(holder);
+  withSkillDraftVerdictLock(stateDir, id, () => {
+    writeFileSync(lock, recent);
+  });
+  assert.equal(readFileSync(lock, "utf8"), recent, "release preserves a successor's lock");
+  const restore = () => proposalVerdictCliCommand("restore", [id, "--reason", "keep considering this draft"], { root } as never);
+  const restores = () => readLedgerLines(ledgerPath).filter((row) => row.step === "panel.proposal_restored" && row.task_id === id);
+  assert.throws(restore, /verdict is in progress/);
+  assert.equal(readFileSync(lock, "utf8"), recent);
+  assert.deepEqual(restores(), []);
+  rmSync(lock);
+
+  const expiry = readLedgerLines(ledgerPath).find((row) => row.step === "panel.proposal_declined" && row.task_id === id);
+  assert.ok(expiry);
+  writeFileSync(join(stateDir, compactedArchiveName(clock.iso())), gzipSync(JSON.stringify(expiry) + "\n"));
+  writeFileSync(ledgerPath, JSON.stringify(answer) + "\n");
+  const releaseRotation = tryAcquireRotationLock(ledgerRotationLockPath(ledgerPath));
+  assert.ok(releaseRotation);
+  try {
+    assert.throws(restore, /rmd restore: incomplete ledger union/);
+    assert.deepEqual(restores(), []);
+  } finally { releaseRotation(); }
+
+  writeFileSync(lock, JSON.stringify({ ...holder, startedAt: clock.iso() }));
+  assert.equal(restore(), 0);
+  assert.equal(existsSync(lock), false);
+  assert.deepEqual(restores().map(({ origin, reason }) => ({ origin, reason })), [
+    { origin: "rmd-cli", reason: "keep considering this draft" },
+  ]);
+  assert.equal(restore(), 1);
+  assert.equal(restores().length, 1);
+  assert.deepEqual(expire().expired, []);
+  const verdicts = readSkillDraftVerdicts(stateDir);
+  assert.ok(!("unmeasured" in verdicts));
+  assert.equal(verdicts.isDeclined(id), undefined);
+  assert.deepEqual(readdirSync(skills), ["existing.md"]);
+  assert.equal(readFileSync(skillPath, "utf8"), "existing skill\n");
 });

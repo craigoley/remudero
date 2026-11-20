@@ -132,13 +132,17 @@ function compactionAnswers(s: Site) {
   const long = { step: "panel.proposal_declined", task_id: "long", ts: "2026-11-05T00:00:00Z" };
   const marker = { step: "skill.staged", task_id: "RETRO", ts: "2026-11-06T00:00:00Z" };
   const earlier = writeArchive(s, short.ts, [short]);
-  const superseded = writeArchive(s, "2026-11-05T00:30:00Z", []);
   const later = writeArchive(s, marker.ts, [marker]);
   const publishAnswer = () => writeArchive(s, marker.ts, [long, marker]);
-  return { earlier, later, superseded, publishAnswer };
+  // Simulate an older writer that moves the answer between two unchanged filenames.
+  const replaceArchives = () => {
+    assert.equal(writeAtomic(earlier, gzipSync([long, short].map((r) => JSON.stringify(r) + "\n").join(""))), true);
+    assert.equal(writeAtomic(later, gzipSync(JSON.stringify(marker) + "\n")), true);
+  };
+  return { earlier, later, publishAnswer, replaceArchives };
 }
 
-function compactAfterReadingEarlier(
+function replaceArchivesAfterReadingEarlier(
   t: TestContext,
   s: Site,
   archives: ReturnType<typeof compactionAnswers>,
@@ -151,7 +155,7 @@ function compactAfterReadingEarlier(
   t.mock.method(realLedgerFs, "readFileSync", (path: string) => {
     const bytes = read(path);
     if (path === archives.earlier && !replaced) {
-      assert.deepEqual(publishCompactedArchives(s, 3), [archives.superseded]);
+      archives.replaceArchives();
       assert.deepEqual(archiveNames(), names);
       assert.notEqual(statSync(archives.earlier).ino, before[0]);
       assert.notEqual(statSync(archives.later).ino, before[1]);
@@ -172,10 +176,9 @@ test("W1-T13859 criterion 1: same-name archive compaction cannot shrink the samp
     archives.publishAnswer();
     const complete = { bound: 15.5 * DAY, sample: 2 };
     assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
-    const verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+    const verifyCompaction = replaceArchivesAfterReadingEarlier(t, s, archives);
     const raced = skillDraftExpiryBound(s.stateDir);
     verifyCompaction();
-    rmSync(archives.superseded);
     assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
     assert.deepEqual(raced, { unmeasured: "incomplete ledger union: ledger archives changed during read" });
   } finally { s.done(); }
@@ -187,13 +190,12 @@ test("W1-T13859 criterion 2: expiry waits for a complete compaction read and clo
     const archives = compactionAnswers(s);
     archives.publishAnswer();
     const registry = readFileSync(s.registryPath);
-    const verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+    const verifyCompaction = replaceArchivesAfterReadingEarlier(t, s, archives);
     const raced = pass(s);
     verifyCompaction();
     assert.deepEqual(raced, { expired: [], reason: "no skill draft expires: incomplete ledger union: ledger archives changed during read" });
     assert.deepEqual(rows(s), []);
     assert.deepEqual(readFileSync(s.registryPath), registry);
-    rmSync(archives.superseded);
 
     assert.deepEqual(pass(s).expired, ["skill-draft:old"]);
     assert.deepEqual(pass(s).expired, []);
@@ -218,7 +220,7 @@ test("W1-T13859 criterion 4: same-name compaction during the locked reread stops
     const racingClock = { ...clock, now: () => {
       archives.publishAnswer();
       assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 15.5 * DAY, sample: 2 });
-      verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+      verifyCompaction = replaceArchivesAfterReadingEarlier(t, s, archives);
       return NOW;
     } };
     reportSkillDraftExpiry(
@@ -456,8 +458,7 @@ test("W1-T13859 criterion 4: a held rotation lock leaves the bound unmeasured, a
 });
 
 /**
- * A corpus where the production compactor overwrites archive X (named for 11-05) with its 11-05 rows first,
- * and only then writes the 11-06 rows to a new archive. Between those two writes the union lacks them.
+ * This source's stamp collides with the first output. Its rows span both replacement archives.
  */
 function rowsInTransit(s: Site, inTransit: Record<string, unknown>[]) {
   const short = { step: "ratify.approved", task_id: "short", ts: "2026-11-05T01:00:00Z" };
@@ -484,17 +485,24 @@ function transitDrafts(s: Site): string {
   ]);
 }
 
-/** Run the production `rmd ledger-compact`, with its own filesystem, and call `between` right after it replaces `x`. */
+/** Run the production compactor and inspect the ledger immediately after its first publication. */
 function compactWithReadBetweenReplacements(t: TestContext, s: Site, x: string, between: () => void) {
-  const rename = realWriteAtomicIo.renameSync;
+  const originalNames = new Set(readdirSync(s.stateDir));
+  const write = realWriteAtomicIo.writeFileSync;
+  const source = readFileSync(x);
   let calls = 0;
-  const hook = t.mock.method(realWriteAtomicIo, "renameSync", (from: string, to: string) => {
-    rename(from, to);
-    if (to !== x || calls++ > 0) return;
-    const text = gunzipSync(readFileSync(x)).toString();
-    assert.doesNotMatch(text, /2026-11-06/, "the rows in transit are in no archive at this instant");
-    assert.equal(readdirSync(s.stateDir).some((name) => name.startsWith("ledger.2026-11-06")), false);
-    between();
+  const hook = t.mock.method(realWriteAtomicIo, "writeFileSync", (...args: Parameters<typeof write>) => {
+    if (++calls === 2) {
+      const names = readdirSync(s.stateDir);
+      const outputs = names.filter((name) => name.endsWith(".ndjson.gz") && !originalNames.has(name));
+      assert.equal(outputs.length, 1, "the first output is already readable");
+      assert.deepEqual(readFileSync(x), source, "the source stays readable during publication");
+      assert.match(gunzipSync(source).toString(), /2026-11-06/);
+      assert.doesNotMatch(gunzipSync(readFileSync(join(s.stateDir, outputs[0]!))).toString(), /2026-11-06/);
+      assert.equal(names.some((name) => name.startsWith("ledger.2026-11-06")), false);
+      between();
+    }
+    write(...args);
   });
   const errors: string[] = [];
   const code = ledgerCompactCommand(["--older-than", "0", "--max-sources", "3"], {
@@ -502,7 +510,7 @@ function compactWithReadBetweenReplacements(t: TestContext, s: Site, x: string, 
   });
   hook.mock.restore();
   assert.equal(code, 0, errors.join("\n"));
-  assert.equal(calls, 1, "the compactor replaced x");
+  assert.equal(calls, 2, "the compactor published both outputs");
 }
 
 const allDeclinesOf = (s: Site, id: string) => readLedgerUnionRecordsSync(s.stateDir, { step: "panel.proposal_declined", refuseIncomplete: true })
@@ -586,6 +594,61 @@ test("W1-T13859 criterion 6: a restored expiry stays open while the compactor mo
     assert.deepEqual(pass(s).expired, []);
     assert.equal(allDeclinesOf(s, id).length, 1, "the restored draft is not closed again");
     assert.equal(readFileSync(s.registryPath, "utf8"), registry);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 2: a failed second publication preserves approvals and the established bound", (t) => {
+  const s = site();
+  try {
+    const source = transitDrafts(s);
+    const measured = { bound: 16.5 * DAY, sample: 3 };
+    const sourceBytes = readFileSync(source);
+    const before = union(s);
+    assert.equal(before.ok, true);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
+
+    const originalNames = new Set(readdirSync(s.stateDir));
+    const write = realWriteAtomicIo.writeFileSync;
+    const errors: string[] = [];
+    let attempted = 0;
+    const hook = t.mock.method(realWriteAtomicIo, "writeFileSync", (...args: Parameters<typeof write>) => {
+      if (++attempted === 2) throw new Error("fixture: second archive publication failed");
+      write(...args);
+    });
+    let code: number;
+    try {
+      code = ledgerCompactCommand(["--older-than", "0", "--max-sources", "3"], {
+        stateDir: s.stateDir, clock, out: () => {}, error: (message) => errors.push(message),
+      });
+    } finally { hook.mock.restore(); }
+
+    assert.equal(code, 1);
+    assert.match(errors.join("\n"), /second archive publication failed/);
+    assert.equal(attempted, 2);
+    assert.equal(existsSync(ledgerRotationLockPath(s.ledgerPath)), false);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
+    assert.deepEqual(readFileSync(source), sourceBytes);
+    assert.equal(readdirSync(s.stateDir).filter((name) => name.endsWith(".ndjson.gz") && !originalNames.has(name)).length, 1);
+    const after = union(s);
+    assert.equal(after.ok, true);
+    assert.deepEqual(new Set(after.rows), new Set(before.rows));
+
+    const reason = "expired: unanswered for 18.00 days; the longest wait of any answered proposal is 16.50 days (3 answered)";
+    assert.deepEqual(pass(s).expired, ["skill-draft:old"]);
+    assert.deepEqual(pass(s).expired, []);
+    assert.deepEqual(rows(s).map(({ step, task_id, origin, reason }) => ({ step, task_id, origin, reason })), [
+      { step: "panel.proposal_declined", task_id: "skill-draft:old", origin: "skill-workshop", reason },
+    ]);
+    assert.deepEqual(loadProposalRegistry(s.registryPath).map(({ id, skillDraftClose }) => [id, skillDraftClose?.reason]), [
+      ["skill-draft:middle", undefined], ["skill-draft:old", reason], ["skill-draft:approved", undefined],
+    ]);
+
+    assert.equal(ledgerCompactCommand(["--older-than", "0", "--max-sources", "4"], {
+      stateDir: s.stateDir, clock, out: () => {}, error: assert.fail,
+    }), 0);
+    assert.equal(existsSync(source), false, "a complete retry retires the source");
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
+    assert.deepEqual(pass(s).expired, []);
   } finally { s.done(); }
 });
 
@@ -897,6 +960,7 @@ test("W1-T13859 criterion 6: invariant:approve-only-writes-skills an expiry writ
   } finally { s.done(); }
 });
 
+// W1-T13859 criterion 6: the terminal verdict suite exercises rmd restore with a stale lock and an archived expiry.
 test("W1-T13859 criterion 6: restoring after a failed registry write keeps that text open", (t) => {
   const s = site();
   try {

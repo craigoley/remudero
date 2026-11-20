@@ -1060,6 +1060,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   decideDraftDeferral,
@@ -1648,6 +1649,7 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   expireUnansweredSkillDrafts,
+  readSkillDraftVerdicts,
   reportSkillDraftExpiry,
   withSkillDraftVerdictLock,
   stageSkillLifecycleProposal,
@@ -39797,8 +39799,16 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
     kind,
     rest,
     (id) => {
-      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
+      let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
+      if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
+        const verdicts = readSkillDraftVerdicts(dirname(ledgerPath));
+        if ("unmeasured" in verdicts) throw new Error(`rmd restore: ${verdicts.unmeasured}`);
+        const declinedReason = verdicts.isDeclined(id);
+        if (verdicts.isRatified(id)) classification = { proposalId: id, state: "ratified", reasons: [] };
+        else if (declinedReason !== undefined) classification = { proposalId: id, state: "declined", reasons: [], declinedReason };
+        else if (classification?.state === "declined") classification = undefined;
+      }
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
