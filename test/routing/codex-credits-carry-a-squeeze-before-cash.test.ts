@@ -118,8 +118,8 @@ function codexResult(): WorkerResult {
     compactionFailures: [], qualitySuspect: false, servedModel: null, servedModelReason: "Codex JSONL reports no served model" } as WorkerResult;
 }
 
-/** The real spawnWorker with Claude below its reserve, Codex read through the real carry, and cash counted. */
-async function routeSpawn(account: ReturnType<typeof codexAccount>) {
+/** The real spawnWorker with measured Claude capacity, real Codex carry, and counted cash spawns. */
+async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed = 99) {
   const root = scratchRoot();
   const assignments: WorkerSelectionAssignment[] = [];
   let cashSpawns = 0, codexSpawns = 0;
@@ -131,7 +131,7 @@ async function routeSpawn(account: ReturnType<typeof codexAccount>) {
         codexBin: "/unused/codex", reservePercent: 5, capacityCacheMs: 60_000, cashFallbackWhenBlocked: true } } as never,
       providerRouting: {
         readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: account.state.now }),
-        readClaude: async () => claudeAt(99),
+        readClaude: async () => claudeAt(claudeUsed),
         readCodex: async (_config, request) => account.read({ ...request }),
         spawnCodex: async () => { codexSpawns += 1; return codexResult(); },
         spawnOpenWeight: async () => { cashSpawns += 1; return { provider: "cash", text: "done", isError: false, subtype: "success" } as never; },
@@ -237,6 +237,38 @@ test("a generic window crossing the reserve without credits refuses the carry ev
   assert.equal(routed.decision?.rule, "cash-fallback");
   assert.equal(routed.cashSpawns, 1);
   assert.equal(routed.codexSpawns, 0);
+});
+
+test("an unfunded model with headroom cannot veto another model's funded carry", async (t) => {
+  const account = codexAccount(t);
+  const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
+  const credits = { hasCredits: true, unlimited: false, balance: "10" };
+  const other = { limitName: SOL61.id, primary: { ...primary, usedPercent: 40 } };
+  account.state.balance = "0";
+  account.state.models.push(SOL61);
+  account.state.buckets = {
+    sol: { limitName: SOL.id, primary, credits },
+    other,
+  };
+  assert.equal((await account.read()).model, SOL61.id, "the fresh read prefers the model with subscription headroom");
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.model, SOL.id);
+  assert.equal(carried.credits?.balance, 10);
+  assert.equal(providerEligibility(carried, 5).lane, "codex-credits");
+  const attribution = await account.read({ selectedModel: SOL61.id });
+  assert.equal(attribution.readable, false);
+  assert.match(attribution.detail ?? "", /projected burn reaches the reserve/);
+
+  account.state.mode = "ok";
+  account.state.now += 61_000;
+  account.state.buckets.other = { ...other, credits };
+  await account.read();
+  account.fail();
+  const withHeadroom = await account.read();
+  assert.equal(withHeadroom.model, SOL61.id);
+  assert.equal(withHeadroom.readable, true, withHeadroom.detail);
+  assert.equal(providerEligibility(withHeadroom, 5).lane, undefined);
 });
 
 test("a model balance projects from the prior generic balance when its bucket lacked credits", async (t) => {
@@ -569,15 +601,45 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
   assert.equal(preferred.model, SOL61.id);
   assert.equal(providerEligibility(preferred, 5).lane, undefined);
 
+  const ownPool = codexAccount(t);
+  ownPool.state.balance = "20";
+  ownPool.state.buckets.sol = { limitName: SOL.id,
+    primary: { ...primary, usedPercent: 99, resetsAt: ownPool.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  assert.equal((await ownPool.read()).credits?.balance, 10);
+  ownPool.state.now += 3_600_000;
+  ownPool.state.balance = "10";
+  assert.equal((await ownPool.read()).credits?.balance, 10);
+  ownPool.fail(6 * 3_600_000);
+  const ownPoolSpawn = await routeSpawn(ownPool);
+  assert.equal(ownPoolSpawn.decision?.rule, "codex-credits", "the model keeps its steady 10 while generic credits project to -50");
+  assert.equal(ownPoolSpawn.assignments.at(-1)?.selected.model, SOL.id);
+  assert.deepEqual(ownPoolSpawn.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue,
+    { path: "carried", tier: "codex-credits", projectedBalance: 10, ageMs: 6 * 3_600_000, failureKind: "timeout" });
+  assert.equal(ownPoolSpawn.codexSpawns, 1);
+  assert.equal(ownPoolSpawn.cashSpawns, 0);
+  const withClaudeHeadroom = await routeSpawn(ownPool, 60);
+  assert.equal(withClaudeHeadroom.assignments.at(-1)?.selected.provider, "claude");
+  assert.equal(withClaudeHeadroom.codexSpawns, 0);
+  assert.equal(withClaudeHeadroom.cashSpawns, 0);
+
   const refused = async (label: string, prepare: (a: ReturnType<typeof codexAccount>) => Promise<void>) => {
     const a = codexAccount(t);
     await prepare(a);
     const read = await a.read();
     assert.equal(read.readable, false, `${label}: ${read.detail}`);
-    assert.throws(() => selectWorkerProvider([claudeAt(99), read], 5), /./, `${label}: the auction blocks, so cash may serve`);
+    const fallback = await routeSpawn(a);
+    assert.equal(fallback.decision?.rule, "cash-fallback", label);
+    assert.equal(fallback.cashSpawns, 1, label);
+    assert.equal(fallback.codexSpawns, 0, label);
   };
   // Blocked credits on the carried reading.
-  await refused("blocked", async (a) => { a.state.extras = { spendControlReached: true }; await a.read(); a.fail(); });
+  await refused("blocked", async (a) => {
+    a.state.buckets.sol = { limitName: SOL.id, primary: { ...primary, resetsAt: a.state.reset }, spendControlReached: true,
+      credits: { hasCredits: true, unlimited: false, balance: "10" } };
+    await a.read();
+    a.fail();
+  });
   // A burn-projected balance at or below zero: 20 then 10 an hour apart, projected six hours on.
   await refused("burned out", async (a) => {
     a.state.balance = "20"; await a.read();
