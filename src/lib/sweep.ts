@@ -13364,18 +13364,25 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     // Start one exact-input review after CI has registered, while its long checks still run.
+    // W1-T14035: a pending claim whose owner the view producer PROVED dead is no review in flight,
+    // so it takes this row too; an alive or merely old owner still waits (invariant live-claim-waits).
+    // OBSERVED 2026-11-20 on #19791: a reviewer died 5m in and its claim held the head until CI ended.
     disposition: "post-review",
     blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) => {
       const age = pendingAgeMinutes(pr, now);
-      return pr.checksState === "pending" && pr.reviewState === "none" &&
+      return pr.checksState === "pending" &&
+        (pr.reviewState === "none" || (pr.reviewState === "pending" && pr.reviewPendingOwnerDead === true)) &&
         pr.requiredContextsUnreadable !== true && pr.reviewPostRefused !== true &&
         (pr.priorReviewAttemptsForInput ?? 0) === 0 &&
         age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
     },
     reason: (pr, _policy, _ageDays, now) =>
-      `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, review never posted — ` +
-      `running one exact-input review alongside CI through the bounded post-review lane`,
+      pr.reviewState === "pending"
+        ? `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, remudero-review owner proven dead — ` +
+          `re-running one exact-input review alongside CI through the bounded post-review lane`
+        : `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, review never posted — ` +
+          `running one exact-input review alongside CI through the bounded post-review lane`,
   },
   {
     // WAIT (W1-T114). Never reached with a FAILING review or red checks — rows 4-7 claimed those,
