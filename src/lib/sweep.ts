@@ -66,7 +66,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -11632,15 +11632,37 @@ export function heldTaskIdsFromCiFailures(failures: readonly CiFailure[]): strin
   return [...ids];
 }
 
-/** W1-T13829: keep each gate entry inside its own section and failing job. */
+/** The bundled job can log HELD fixtures in other steps. Use the runner's gate step boundaries. */
 function gateHandoffLogParser(filer: string) {
   const entries: Array<Omit<HeldIdHandoff, "holder"> & { holder?: string }> = [];
+  let step: "outside" | "preamble" | "output" = "outside";
+  let gateSeen = false;
+  let gateFailed = false;
   let held = false;
   let refused = false;
   let entry: (typeof entries)[number] | undefined;
   return {
     push(raw: string) {
       const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "").trimEnd();
+      if (line.startsWith("##[group]Run ")) {
+        step = line === '##[group]Run if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then # W1-T5522: a queued PR is open and would match itself'
+          ? "preamble" : "outside";
+        if (step === "preamble") {
+          refused ||= gateSeen;
+          gateSeen = true;
+        }
+        return;
+      }
+      if (step === "preamble" && line === "##[endgroup]") {
+        step = "output";
+        return;
+      }
+      if (step !== "output") return;
+      if (line.startsWith("##[error]")) {
+        gateFailed = line === "##[error]Process completed with exit code 1.";
+        step = "outside";
+        return;
+      }
       if (line.startsWith("task-id-existence:") && HELD_ID_HEADER_RE.test(line)) {
         refused ||= held && !entry;
         held = line.endsWith("HELD by a different reservation holder:");
@@ -11662,7 +11684,8 @@ function gateHandoffLogParser(filer: string) {
       }
     },
     finish(): HeldIdHandoff[] | undefined {
-      if (refused || (held && !entry) || entries.some((e) => !e.holder || e.files.length === 0)) return undefined;
+      if (!gateFailed || refused || (held && !entry) || entries.length === 0 ||
+          entries.some((e) => !e.holder || e.files.length === 0)) return undefined;
       return entries.map((e) => ({ ...e, holder: e.holder!, files: [...new Set(e.files)] }));
     },
   };
@@ -11672,10 +11695,11 @@ function gateHandoffsFromCiFailures(failures: readonly CiFailure[], filer: strin
   if (!filer) return undefined;
   const handoffs = new Map<string, HeldIdHandoff>();
   for (const failure of failures) {
+    if (failure.name !== "task-id-existence") continue;
     const parser = gateHandoffLogParser(filer);
     for (const line of failure.logTail.split("\n")) parser.push(line);
     const entries = parser.finish();
-    if (!entries) return undefined;
+    if (entries === undefined) return undefined;
     for (const entry of entries) {
       const prior = handoffs.get(entry.id);
       if (prior && prior.holder !== entry.holder) return undefined;
@@ -11969,6 +11993,17 @@ async function handoffStandDown(
       }
       validated.set(ref, sha);
     }
+    for (const { id, holder } of handoffs) {
+      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
+        return `holder branch ${holder} of ${id} is on origin`;
+      }
+    }
+    // Check the refs together before asking GitHub about open PRs, including forks.
+    const final = await readShas([...validated.keys(), ...handoffs.map(({ holder }) => `refs/heads/${holder}`)]);
+    const published = handoffs.find(({ holder }) => final.has(`refs/heads/${holder}`));
+    if (published) return `holder branch ${published.holder} of ${published.id} is on origin`;
+    const moved = handoffs.find(({ id }) => final.get(taskIdReservationRef(id)) !== validated.get(taskIdReservationRef(id)));
+    if (moved !== undefined) return `the reservation of ${moved.id} changed while the hand-off was being checked`;
     const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
       const rows = await deps.readJson(args);
       if (!Array.isArray(rows)) throw new Error("the open pull request page is unreadable");
@@ -11983,16 +12018,7 @@ async function handoffStandDown(
     for (const { id, holder } of handoffs) {
       const openPr = open.rows.find((row) => row.headRefName === holder);
       if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
-      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
-        return `holder branch ${holder} of ${id} is on origin`;
-      }
     }
-    // One advertisement rechecks every branch and reservation after the individual reads.
-    const final = await readShas([...validated.keys(), ...handoffs.map(({ holder }) => `refs/heads/${holder}`)]);
-    const published = handoffs.find(({ holder }) => final.has(`refs/heads/${holder}`));
-    if (published) return `holder branch ${published.holder} of ${published.id} is on origin`;
-    const moved = handoffs.find(({ id }) => final.get(taskIdReservationRef(id)) !== validated.get(taskIdReservationRef(id)));
-    if (moved !== undefined) return `the reservation of ${moved.id} changed while the hand-off was being checked`;
     return undefined;
   } catch (error) {
     return `a holder fact is unreadable: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}`;
@@ -12060,17 +12086,6 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
     const at = text[end - 1] === "\n" ? end : text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end);
     const block = `${pad}note: |${eol}${body}`;
     next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}${eol}${text.slice(at)}` : `${text.slice(0, at)}${eol}${block}${text.slice(at)}`;
-  }
-  if (isScalar(noteNode) && noteNode.anchor) {
-    // Preserve the old value for aliases that resolve to this note, even when another anchor reuses its name.
-    const references: Array<[number, number]> = [];
-    visit(doc, { Alias(_key, alias) {
-      if (alias.range && alias.resolve(doc) === noteNode) references.push([alias.range[0], alias.range[1]]);
-    } });
-    const shift = next.length - text.length;
-    for (const [start, end] of references.reverse()) {
-      next = `${next.slice(0, start + shift)}${JSON.stringify(noteNode.value)}${next.slice(end + shift)}`;
-    }
   }
   const after = parseDocument(next);
   const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;

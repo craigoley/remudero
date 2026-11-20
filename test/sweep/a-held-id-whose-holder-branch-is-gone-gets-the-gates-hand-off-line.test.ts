@@ -55,7 +55,17 @@ function heldLog(entries: Array<{ id: string; file: string; handoff?: string; ho
 const handoffLine = `reservation hand-off: ${HOLDER} -> ${FILER}`;
 const fullLog = heldLog(IDS.map((id, i) => ({ id, file: SHARDS[i]!, handoff: handoffLine })));
 
-function failure(logTail: string): CiFailure {
+function gateStepLog(output: string): string {
+  return [
+    '##[group]Run if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then # W1-T5522: a queued PR is open and would match itself',
+    "##[endgroup]",
+    output,
+    "##[error]Process completed with exit code 1.",
+  ].join("\n");
+}
+
+function failure(logTail: string, wrap = true): CiFailure {
+  if (wrap) logTail = gateStepLog(logTail);
   return { name: "task-id-existence", logTail, conclusion: "FAILURE" };
 }
 
@@ -106,6 +116,21 @@ test("W1-T13829 criterion 1: only the gate's printed hand-off line for this head
   // Not a plan filing, or the attempt at this head is spent.
   none(fullLog, { isPlanFiling: false });
   assert.equal(sweep.decidePlanRepair(planPr(), {}, undefined, new Set([`19604@${HEAD}@held-task-id-handoff`])), undefined);
+});
+
+test("W1-T13829 criterion 1: only output inside the failed task-id-existence step supplies remedies", () => {
+  const unrelated = [
+    "##[group]Run node --import tsx scripts/list-rule-suites.mjs --run",
+    "##[endgroup]",
+    fullLog,
+  ].join("\n");
+  const noRemedy = heldLog([{ id: IDS[0]!, file: SHARDS[0]! }]);
+  const decide = (log: string) => sweep.decidePlanRepair(planPr({ ciFailures: [failure(log, false)] }), {}, undefined, new Set());
+  assert.equal(decide(`${unrelated}\n${gateStepLog("Could not read the base plan.")}`), undefined);
+  assert.equal(decide(fullLog), undefined, "an excerpt without a step boundary has no provenance");
+  assert.equal(decide(`${gateStepLog(noRemedy)}\n${unrelated}`), undefined);
+  assert.equal(decide(gateStepLog("Could not read the base plan.").replace("##[endgroup]", `${fullLog}\n##[endgroup]`)), undefined);
+  assert.deepEqual(decide(`${unrelated}\n${gateStepLog(fullLog)}`)?.action, "handoff");
 });
 
 interface Fixture {
@@ -306,6 +331,29 @@ test("W1-T13829 criterion 2: a holder published during another holder's last bra
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+test("W1-T13829 criterion 2: a fork PR opened during the final ref lookup stops the push", async (t) => {
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
+  let committed = false;
+  let opened = false;
+  const writes: string[] = [];
+  f.readJson = async () => opened ? [{
+    number: 19600, html_url: "https://github.com/acme/remudero/pull/19600", state: "open", title: "holder filing", body: "",
+    updated_at: "2026-11-19T05:00:00Z", head: { ref: HOLDER, sha: f.headSha, repo: { full_name: "fork/remudero" } },
+  }] : [];
+  const out = await handOff(f, planPr({ headSha: f.headSha }), async (cwd, args) => {
+    const result = await hostWorktreeGitAsync(cwd, args);
+    if (args[0] === "commit") committed = true;
+    if (args[0] === "commit" || args[0] === "push") writes.push(args[0]);
+    if (committed && args[0] === "ls-remote" && args[1] === "--refs" && args.includes(`refs/heads/${HOLDER}`)) opened = true;
+    return result;
+  });
+  assert.equal(opened, true);
+  assert.deepEqual(out, { outcome: "stood-down", reason: `open PR #19600 has holder branch ${HOLDER} of ${IDS[0]} as its head` });
+  assert.deepEqual(writes, ["commit"]);
+  assert.equal(f.host.git("ls-remote", "--heads", "origin", `refs/heads/${HOLDER}`), "");
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
 test("W1-T13829 criterion 3: the line is added as its own note line per named shard, in one commit pushed with a lease", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
   const out = await handOff(f, planPr({ headSha: f.headSha }));
@@ -443,7 +491,7 @@ test("W1-T13829 criterion 3: a remedy already in the shard is left in place", as
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
-test("W1-T13829 criterion 3: a note anchor used elsewhere leaves those values unchanged", async (t) => {
+test("W1-T13829 criterion 3: a note anchor used elsewhere stands down without rewriting aliases", async (t) => {
   const original = `- id: ${IDS[0]}\n  note: &shared | # keep the note comment\n    filed by hand\n  title: *shared # keep the title comment\n`;
   const second = `- id: ${IDS[1]}\n  title: *shared\n  note: &shared for the second task\n  status: queued\n`;
   const third = `- id: ${IDS[2]}\n  title: *shared\n  status: queued\n`;
@@ -451,11 +499,20 @@ test("W1-T13829 criterion 3: a note anchor used elsewhere leaves those values un
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [prior] });
   const logTail = heldLog([{ id: IDS[0]!, file: SHARDS[0]!, handoff: handoffLine }]);
   const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+  assert.deepEqual(out, { outcome: "stood-down", reason: `${SHARDS[0]}: adding the hand-off to the note of ${IDS[0]} would change other text` });
+  const head = f.remote.git("rev-parse", `refs/heads/${FILER}`);
+  assert.equal(head, f.headSha);
+  assert.equal(f.remote.git("show", `${head}:${SHARDS[0]}`) + "\n", prior);
+});
+
+test("W1-T13829 criterion 3: an unshared note anchor is preserved", async (t) => {
+  const prior = `- id: ${IDS[0]}\n  note: &kept | # keep the note comment\n    filed by hand\n  title: a fixture shard\n`;
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [prior] });
+  const logTail = heldLog([{ id: IDS[0]!, file: SHARDS[0]!, handoff: handoffLine }]);
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
   assert.equal(out.outcome, "handed-off", JSON.stringify(out));
   const after = f.remote.git("show", `${out.newHeadSha}:${SHARDS[0]}`) + "\n";
-  assert.equal(after, (original + second)
-    .replace("    filed by hand\n", `    filed by hand\n    ${handoffLine}\n`)
-    .replaceAll("title: *shared", 'title: "filed by hand\\n"') + third);
+  assert.equal(after, prior.replace("    filed by hand\n", `    filed by hand\n    ${handoffLine}\n`));
   const expected = parseYaml(prior) as Array<Record<string, unknown>>;
   expected[0]!.note = `filed by hand\n${handoffLine}\n`;
   assert.deepEqual(parseYaml(after), expected);
@@ -497,17 +554,18 @@ test("W1-T13829 criterion 5: the real sweep clears the gate when the CI excerpt 
   assert.equal(refused.status, 1, refused.stderr);
   assert.match(refused.stderr, /HELD by a different reservation holder/);
   const stamp = "2026-11-19T05:33:01.1234567Z ";
-  const lines = (refused.stderr + "##[error]Process completed with exit code 1.\n").trimEnd().split("\n").map((line) => stamp + line);
+  const lines = gateStepLog(refused.stderr.trimEnd()).split("\n").map((line) => stamp + line);
   const reducer = ciFailureRegionReducer(60);
   for (const line of lines) reducer.push(line);
   const logTail = reducer.finish();
   assert.doesNotMatch(logTail, /HELD by a different reservation holder/);
   assert.doesNotMatch(logTail, /W1-T13787/);
   assert.match(logTail, /W1-T13789/);
-  const pr = planPr({ headSha: f.headSha, ciFailures: [{ ...failure(logTail), jobId: "12345" }] });
+  const pr = planPr({ headSha: f.headSha, ciFailures: [{ ...failure(logTail, false), jobId: "12345" }] });
   const ledger: Record<string, unknown>[] = [];
   const readErrors: unknown[] = [];
   let logUnavailable = true;
+  let jobLines = lines;
   const effects = sweep.buildSweepEffects({
     owner: "acme", repo: "remudero", repoRoot: f.host.dir, config: { root, claudeBin: "/bin/true" },
     ledgerPath: join(root, "ledger.ndjson"), runId: "W1-T13829-test", plan: { tasks: [], byId: new Map() },
@@ -515,7 +573,7 @@ test("W1-T13829 criterion 5: the real sweep clears the gate when the CI excerpt 
     nowMsImpl: () => NOW, ciGateRequired: [],
     readPlanRepairLogImpl: async (args, onLine) => {
       assert.deepEqual(args, ["api", "repos/acme/remudero/actions/jobs/12345/logs"]);
-      lines.forEach(onLine);
+      jobLines.forEach(onLine);
       if (logUnavailable) throw new Error("connection closed before the job log completed");
     },
     readJsonImpl: async (args, opts) => {
@@ -535,6 +593,15 @@ test("W1-T13829 criterion 5: the real sweep clears the gate when the CI excerpt 
   assert.deepEqual(readErrors, ["Error: connection closed before the job log completed"]);
   assert.equal(sweep.decidePlanRepair(pr, incomplete, undefined, new Set()), undefined);
   logUnavailable = false;
+  jobLines = [
+    "##[group]Run node --import tsx scripts/list-rule-suites.mjs --run",
+    "##[endgroup]",
+    ...refused.stderr.trimEnd().split("\n"),
+    ...gateStepLog("Could not read the base plan.").split("\n"),
+  ].map((line) => stamp + line);
+  const unrelated = await effects.readPlanRepairFacts!(pr, "12345");
+  assert.equal(sweep.decidePlanRepair(pr, unrelated, undefined, new Set()), undefined);
+  jobLines = lines;
   await withFixtureHooks(f, () => runSweep([pr], deps, DEFAULT_SWEEP_POLICY));
   const head = f.remote.git("rev-parse", `refs/heads/${FILER}`);
   assert.equal(f.remote.git("rev-parse", `${head}^`), f.headSha);
