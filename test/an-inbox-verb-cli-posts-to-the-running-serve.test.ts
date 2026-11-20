@@ -220,3 +220,20 @@ test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same
   assert.equal(await proposalVerdictViaServe("decline", ["P1"], config, () => { ran++; return 2; }), 2);
   assert.equal(ran, 1);
 });
+
+test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no serve token or no serve answers", async (t) => {
+  const args = ["P1", "--reason", "duplicate"];
+  let ran = 0;
+  const inProcess = () => { ran++; return 0; };
+
+  const bare = await captured(t, () => proposalVerdictViaServe("decline", args, { root: root(t, null) } as unknown as Config, inProcess));
+  assert.deepEqual(bare, { code: 0, out: [], err: ["rmd decline: no serve write token (ENOENT); running in-process"] });
+  assert.equal(ran, 1);
+
+  const port = await closedPort();
+  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const refused = await captured(t, () => proposalVerdictViaServe("restore", args, config, inProcess));
+  assert.deepEqual(refused, { code: 0, out: [],
+    err: [`rmd restore: no serve answered at http://127.0.0.1:${port} (ECONNREFUSED); running in-process`] });
+  assert.equal(ran, 2);
+});
