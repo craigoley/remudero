@@ -574,7 +574,18 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
     .replace(/(?:~|\.{1,2})?(?:\/[^\s/:'"`]+){2,}\/?/g, "<path>")
     .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
     .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
-  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message };
+  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message,
+    ...thrownServedModel(error) };
+}
+
+/** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
+ *  response named one (`withObservedServedModel` in worker-provider.ts). Absent when the error carries neither. */
+function thrownServedModel(error: unknown): Record<string, string | null> {
+  if (error === null || typeof error !== "object" || !("servedModel" in error)) return {};
+  const { servedModel, servedModelReason } = error as { servedModel?: unknown; servedModelReason?: unknown };
+  if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
+  return typeof servedModelReason === "string" && servedModelReason.length > 0
+    ? { served_model: null, served_model_reason: servedModelReason.slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS) } : {};
 }
 
 /** W1-T4639: the join half of a `worker.attempt` receipt — the assignment id it answers, or a named

@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
-import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
+import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
 import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
   CASH_SERVED_MODEL_REASONS,
@@ -163,6 +163,29 @@ async function runCodex(turnItems: Record<string, unknown>[] = [], turns = 1): P
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/** A codex that streams `items` in one turn, then hangs until the clock bound tears it down. */
+async function runHungCodex(items: Record<string, unknown>[]): Promise<unknown> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-hung-"));
+  const stdout = new PassThrough();
+  const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
+  setImmediate(() => {
+    for (const event of [{ type: "thread.started", thread_id: "codex-thread" }, { type: "turn.started" },
+      ...items.map((item) => ({ type: "item.completed", item }))]) stdout.write(`${JSON.stringify(event)}\n`);
+  });
+  try {
+    await spawnCodexWorker({
+      workerHome: join(root, "home"), cwd: globalThis.process.cwd(), prompt: "review", clockBound: { boundMs: 200 },
+      settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"), tools: ["Read", "Grep", "Glob", "Bash"],
+      containment: { spawn: () => ({ process: process as never, pid: 31_338 }),
+        teardown: () => { stdout.end(); setImmediate(() => process.emit("exit", null, "SIGTERM")); } },
+    }, {
+      claudeBin: "/unused/claude", root,
+      workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
+    } as Config, { model: "gpt-6-luna", effort: "low" });
+    return undefined;
+  } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 test("a codex result records a fixed named reason, since its exec --json stream carries no model id", async () => {
   const result = await runCodex();
   assert.equal(result.isError, false, result.stderr);
@@ -221,6 +244,19 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(twoTurns.servedModelReason, undefined);
   assert.deepEqual(codexServedModel(["gpt-5.1", "gpt-5.2"]), { servedModel: "gpt-5.2" }, "the latest reported name wins");
   assert.deepEqual(codexServedModel([]), { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON });
+
+  // A codex call that received a reroute and then hit its clock bound throws, but its failed-attempt row still
+  // records the model it was served; one that received none records the named reason.
+  const hung = await runHungCodex([reroute]);
+  assert.ok(hung instanceof Error && /clock bound/.test(hung.message), String(hung));
+  const hungRow = spawnFailureDetail(hung, true);
+  assert.equal(hungRow.served_model, "gpt-5.2");
+  assert.deepEqual(benchmarkRunAttemptReceipt({ step: "worker.attempt", ...hungRow })?.servedModel,
+    { state: "observed", value: "gpt-5.2" });
+  const hungUnnamed = spawnFailureDetail(await runHungCodex([]), true);
+  assert.equal(hungUnnamed.served_model, null);
+  assert.equal(hungUnnamed.served_model_reason, CODEX_SERVED_MODEL_REASON);
+  assert.equal("served_model" in spawnFailureDetail(new Error("plain"), true), false, "an error with no observation adds nothing");
 
   // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
   // so the recorded name comes from a real answer, not from an error result.

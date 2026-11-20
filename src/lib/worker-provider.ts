@@ -2299,6 +2299,14 @@ export function codexServedModel(reroutes: readonly string[]): { servedModel: st
   return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
+/** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
+ * on the error, so the failed attempt's row records it like a returned result's row does. */
+export function withObservedServedModel<E extends Error>(error: E,
+  observed: { servedModel: string | null; servedModelReason?: string }): E & { servedModel: string | null; servedModelReason?: string } {
+  return Object.assign(error, { servedModel: observed.servedModel,
+    ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) });
+}
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
@@ -2503,6 +2511,8 @@ class CodexJsonlAccumulator {
   private readonly blocks: string[] = [];
   private readonly errors: string[] = [];
   private readonly reroutes: string[] = [];
+  /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
+  observedServedModel(): { servedModel: string | null; servedModelReason?: string } { return codexServedModel(this.reroutes); }
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -6445,8 +6455,9 @@ async function spawnCodexWorkerInPrivateTemp(
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     await contained.outputClosed;
-    if (outputLimit) throw outputLimit;
-    if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (outputLimit) throw withObservedServedModel(outputLimit, stdout.observedServedModel());
+    if (timedOut) throw withObservedServedModel(new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`),
+      stdout.observedServedModel());
     if (!stdoutFailure) {
       try { stdoutValidator.decode(); }
       catch (error) {
