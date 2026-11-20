@@ -17,19 +17,22 @@ export interface ReviewReplayInput {
   verdict_lines: readonly string[] | "unrecorded";
   setup_unavailable?: boolean;
   publication_refusal?: string;
-  /** W1-T13849: criteria (1-based) whose FAIL named no class on a proof that executed and passed. */
+  /** W1-T13849: criteria (1-based) with an explained, untagged FAIL on a proof that executed and passed. */
   downgrade_unclassified?: readonly number[];
   /** W1-T13849: an earlier attempt at this head and input already withheld for that reason. */
   downgrade_unclassified_withheld?: boolean;
 }
 export const DOWNGRADE_UNCLASSIFIED = "downgrade-unclassified";
 
-/** W1-T13849: the criteria an untagged FAIL would downgrade although their proof executed and passed. */
+/** W1-T13849: the criteria an explained, untagged FAIL would downgrade although their proof executed and passed. */
 export function unclassifiedDowngrades(semantic: readonly (boolean | undefined)[] | undefined,
   clauses: readonly (string | undefined)[] | undefined,
   proofs: ReadonlyArray<Pick<CriterionVerdict, "proof_exec" | "floorMet">> | undefined): number[] {
-  return (proofs ?? []).flatMap((proof, i) => semantic?.[i] === false && proof.floorMet === true &&
-    proof.proof_exec === "executed_pass" && classifyDowngrade(clauses?.[i]).class === "unclassified" ? [i + 1] : []);
+  return (proofs ?? []).flatMap((proof, i) => {
+    const clause = clauses?.[i];
+    return semantic?.[i] === false && clause !== undefined && proof.floorMet === true &&
+      proof.proof_exec === "executed_pass" && classifyDowngrade(clause).class === "unclassified" ? [i + 1] : [];
+  });
 }
 export interface ReviewOutcomeDecision { class: ReviewOutcomeClass; reason: string }
 

@@ -4831,16 +4831,19 @@ export function judgeCriterion(
   let followUp: string | undefined;
   if (semantic === false && met) {
     const downgradeNote = "reviewer judged the proof non-responsive (semantic downgrade)";
-    // W1-T13849: (a) and (c) fold as before on the untagged text; (b) keeps the floor and becomes a follow-up.
-    const downgrade = classifyDowngrade(semanticClause);
-    semanticClause = downgrade.text;
-    downgradeClass = downgrade.class;
-    // The review command handles the once-per-input hold; any unclassified FAIL reaching this fold is binding.
-    if (downgradeClass === "b") {
-      followUp = semanticClause;
+    // W1-T2811: a bare FAIL cannot outweigh an observed passing proof. It still binds on the keyword floor.
+    if (semanticClause === undefined && proofExec === "executed_pass") {
+      reason = `${reason} — NOTE: ${downgradeNote} REFUSED: the FAIL line named no reason, and an unexplained non-responsive cannot outweigh an observed executed_pass`;
     } else {
-      met = false;
-      reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+      const downgrade = classifyDowngrade(semanticClause);
+      semanticClause = downgrade.text;
+      downgradeClass = downgrade.class;
+      if (downgradeClass === "b") {
+        followUp = semanticClause;
+      } else {
+        met = false;
+        reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+      }
     }
   }
   const clauseChars = !met && semantic === false ? clauseCutLength(semanticClause) : undefined;

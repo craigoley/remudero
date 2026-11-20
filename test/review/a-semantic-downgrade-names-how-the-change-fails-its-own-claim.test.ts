@@ -1,7 +1,7 @@
 // W1-T13849: a reviewer FAIL names its class. (a) the change does not do what the claim says on the claim's own
 // input, (c) it breaks behaviour outside the claim: both fail the criterion exactly as before. (b) a counterexample
-// beyond the claim's stated inputs is a follow-up finding, not a FAIL. An untagged FAIL is held once, then folds as
-// before. The fixtures replay recorded clauses of 2026-11-19 (core ledger union, review.posted rows).
+// beyond the claim's stated inputs is a follow-up finding, not a FAIL. An explained, untagged FAIL is held once,
+// then folds as before. The fixtures replay recorded clauses of 2026-11-19 (core ledger union, review.posted rows).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -220,7 +220,7 @@ test("W1-T13849 criterion 3: an untagged FAIL on an executed_pass criterion is w
   const second = await drive(transcript);
   assert.equal(second.verdict.verdictWithheld, undefined, "the verdict is withheld once, never forever");
   assert.equal(second.verdict.state, "failure");
-  assert.equal(second.verdict.criteria[0]!.met, false, "an untagged FAIL never yields a met criterion");
+  assert.equal(second.verdict.criteria[0]!.met, false, "an explained, untagged FAIL still downgrades on retry");
   assert.equal(second.verdict.criteria[0]!.downgrade_class, "unclassified");
   assert.ok(second.verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}: ${W1_T12176_CLAUSE}`));
   assert.equal(second.rows.filter(row => row.step === "review.semantic_incomplete").length, 1);
@@ -230,9 +230,9 @@ test("W1-T13849 criterion 3: an untagged FAIL on an executed_pass criterion is w
   assert.equal(criteria[0]!.downgrade_class, "unclassified", "the posted row names the unclassified fold");
 });
 
-test("W1-T13849 criterion 3: a bare FAIL holds once for each input digest, then posts an unmet criterion", async (t) => {
+test("W1-T13849 criterion 3: an explained, untagged FAIL holds once for each input digest", async (t) => {
   const { drive, head } = reviewFixture(t, W1_T12176);
-  const transcript = "REVIEW_VERDICT 1: FAIL";
+  const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
   const inputBody = "first PR body";
   const first = await drive(transcript, { inputBody });
   assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
@@ -242,7 +242,7 @@ test("W1-T13849 criterion 3: a bare FAIL holds once for each input digest, then 
   assert.equal(second.verdict.state, "failure");
   assert.equal(second.verdict.criteria[0]!.proof_exec, "executed_pass");
   assert.equal(second.verdict.criteria[0]!.met, false);
-  assert.ok(second.verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}`));
+  assert.ok(second.verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}: ${W1_T12176_CLAUSE}`));
   const posted = second.rows.find(row => row.step === "review.posted");
   const decision = posted?.decision_verdict as review.ReviewVerdict | undefined;
   assert.equal(decision?.criteria[0]?.downgrade_class, "unclassified");
@@ -271,7 +271,7 @@ test("W1-T13849 criterion 3: each shadow input holds once independently of produ
     "a shadow hold never consumes the production retry");
 });
 
-test("W1-T13849 criterion 3: the withhold decision reads the prior hold, and an untagged FAIL is never met", (t) => {
+test("W1-T13849 criterion 3: the decision reads the prior hold, and an explained, untagged FAIL still downgrades", (t) => {
   const input = {
     stage: "semantic", plan_only: false, required_semantic: false, criteria_count: 1, risk_present: true,
     budget_present: true, untasked: false, head_task_resolved: true, own_task_record_missing: false,
@@ -351,12 +351,13 @@ test("W1-T13849 criterion 5: duplicate FAIL lines retain a binding failure and s
       }
     }
   }
-  for (const unclassified of [bare, explained]) {
+  for (const [unclassified, met] of [[bare, true], [explained, false]] as const) {
     for (const lines of [[unclassified, edge], [edge, unclassified]]) {
       const transcript = lines.join("\n");
       const verdict = judged(t, W1_T12176, transcript, { exec: "pass" });
-      assert.equal(verdict.state, "failure");
-      assert.equal(verdict.criteria[0]!.downgrade_class, "unclassified");
+      assert.equal(verdict.state, met ? "success" : "failure");
+      assert.equal(verdict.criteria[0]!.preProofVerdict, "unmet");
+      assert.equal(verdict.criteria[0]!.downgrade_class, met ? undefined : "unclassified");
     }
   }
 });

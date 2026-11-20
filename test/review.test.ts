@@ -1600,8 +1600,11 @@ test("a semantic FAIL that NAMES A REASON still downgrades an executed_pass crit
   assert.equal(v.criteria[0].proof_exec, "executed_pass"); // observability is unaffected by the downgrade
 });
 
-test("W1-T13849: a bare semantic FAIL reaching the binding fold downgrades an executed_pass criterion", () => {
-  // runReview owns the first-attempt hold. The binding fold records the unclassified failure.
+test("W1-T2811: an UNEXPLAINED semantic FAIL does NOT downgrade an executed_pass criterion, and the row says the downgrade was refused", () => {
+  // The #4174/#4175 shape: the proof EXECUTED and PASSED, the reviewer emitted a bare
+  // `REVIEW_VERDICT n: FAIL` with no trailing clause, and the author was told the proof is
+  // non-responsive with nothing about what would answer it. Two rebuild attempts could not move
+  // a verdict that named no reason, which is the deadlock reviewerVerdictContract forbids.
   const alwaysPass: ProofExecutor = () => "pass";
   const v = judgeReview(T100_CRITERIA, {
     diff: "",
@@ -1610,10 +1613,9 @@ test("W1-T13849: a bare semantic FAIL reaching the binding fold downgrades an ex
     execProof: alwaysPass,
     semantic: [false], // no semanticClauses ⇒ a bare FAIL
   });
-  assert.equal(v.criteria[0].met, false);
+  assert.equal(v.criteria[0].met, true, "an unexplained downgrade cannot outweigh an observed executed_pass");
   assert.equal(v.criteria[0].proof_exec, "executed_pass");
-  assert.equal(v.criteria[0].downgrade_class, "unclassified");
-  assert.match(v.criteria[0].reason, /reviewer judged the proof non-responsive \(semantic downgrade\)$/);
+  assert.match(v.criteria[0].reason, /REFUSED: the FAIL line named no reason/);
 });
 
 // ── W1-T72 (W1-T65 follow-up): parse the HOUSE PROOF DIALECT — the shapes
