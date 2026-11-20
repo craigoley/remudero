@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
 import type { Config } from "#src/lib/config.js";
-import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/run-task.js";
+import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
 
 type Ctx = { after: (fn: () => void | Promise<void>) => void; mock: { method: typeof import("node:test").mock.method } };
 const TOKEN = "ab".repeat(32);
