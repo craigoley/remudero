@@ -681,6 +681,18 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     const unreadableCommitRange = suitePath("test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts");
     if (input.files.has(unreadableCommitRange)) pathReaders.push(unreadableCommitRange);
   }
+  // W1-T10535: coverage run 40034558634 (PR #13845) recorded a floor miss on the lifetime-history backstop.
+  const lifetimeHistoryBackstop = suitePath("test/triage/lifetime-history-keeps-the-approved-identity-backstop.test.ts");
+  const lifetimeHistoryEdges = [
+    "src/lib/issue-revalidation-garden.ts",
+    "src/lib/ledger-steps.ts",
+    "src/lib/spend-rows.ts",
+    suitePath("test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts"),
+    suitePath("test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts"),
+  ];
+  if (input.files.has(lifetimeHistoryBackstop) && files.some((f) => lifetimeHistoryEdges.includes(f))) {
+    pathReaders.push(lifetimeHistoryBackstop);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
