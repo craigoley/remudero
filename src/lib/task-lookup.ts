@@ -200,7 +200,7 @@ export type TaskReleasePlan =
  * W1-T13785: a public hit while a destination is named reads the ops catalog too, because the tick holds public
  * records as well (a duplicate's public copy, a public task naming an ops id, and their dependants). A public task
  * the composition holds is `held`. A sound public hit, an off destination, an unreadable ops catalog or a
- * malformed composition keeps the public plan. Approve's file-loading path validates deferred dependencies
+ * malformed composition keeps the public plan. An ordinary approve uses the strict public dependency rules
  * before writing a release.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
@@ -227,7 +227,7 @@ async function readReleaseComposition(publicPlan: Plan, sources: TaskLookupOptio
   return composeSecondaryPlan(publicPlan, snapshot.plan);
 }
 
-/** Check deferred public dependencies. A verified composition handles edges to ops IDs as per-record holds. */
+/** Check deferred dependencies strictly, or accept per-record ops-edge holds for a verified gardener replay. */
 export function publicReleaseDependencyError(plan: Plan, opsPlan?: Plan): PlanError | undefined {
   let composition: SecondaryComposition | undefined;
   for (const task of plan.tasks) {

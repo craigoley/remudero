@@ -11,7 +11,7 @@
  *
  * Here REFUSAL_CLASSES names each class once. A pass reads the ledger union for the items those classes open, records
  * `stuck_state.held` once per item, and probes an item only on an event its class names (a new public origin/main
- * commit, a public working-tree edit for a refusal read there, a new ops main commit, a daemon boot, memory pressure
+ * commit, a public working-tree edit for a refusal read there, a new ops default-branch commit, a daemon boot, memory pressure
  * back to normal). A passing probe re-runs the refused
  * action through its own path (`rmd approve` with the refused id, nothing else) or, for an action that retries itself,
  * records the clearance. It escalates once, only when its probe reads the cause still present after the event its
@@ -27,7 +27,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
-import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
+import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, loadLocalReleasePlan, publicReleaseDependencyError, readReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
@@ -483,11 +483,9 @@ export async function readApproveRelease(
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
   if (release?.outcome !== "held") {
-    const opsPlan = lookup.opsSnapshot?.outcome === "ok" &&
-      planDestinationRepository(lookup.stateDir).outcome === "named" ? lookup.opsSnapshot.plan : undefined;
-    const localError = publicReleaseDependencyError(localPlan, opsPlan);
+    const localError = publicReleaseDependencyError(localPlan);
     if (localError) throw localError;
-    if (publicPlan && publicReleaseDependencyError(publicPlan, opsPlan)) {
+    if (publicPlan && publicReleaseDependencyError(publicPlan)) {
       // Match the strict ref loader's working-tree fallback for an unresolved public dependency.
       release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
     }
@@ -548,13 +546,15 @@ function resolvePublicReplay(taskId: string, plan: Plan, read: OpsRead): TaskRel
   return { outcome: "found", catalog: "public", plan };
 }
 
-/** The ops main commit, for the `ops-main` clearing event; undefined when there is no ops catalog or it cannot be read. */
+/** The ops catalog's default-branch commit, for the persisted `ops-main` event. */
 export async function opsMainCommit(stateDir: string, api: OpsCatalogApi): Promise<string | undefined> {
   const destination = planDestinationRepository(stateDir);
   if (destination.outcome !== "named") return undefined;
+  const repo = `repos/${destination.owner}/${destination.repo}`;
   try {
-    const ref = await api(`repos/${destination.owner}/${destination.repo}/git/ref/heads/main`) as { object?: { sha?: unknown } };
-    return str(ref?.object?.sha);
+    const meta = await api(repo) as { default_branch?: unknown } | null | undefined;
+    const branch = str(meta?.default_branch);
+    return branch === undefined ? undefined : await readBranchSha(api, repo, branch);
   } catch (error) {
     // An unread ref is no event: the item keeps its last stamp and is probed when the ref next answers.
     void error;

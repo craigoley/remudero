@@ -849,20 +849,52 @@ test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved depe
   }
 });
 
-test("W1-T13785 criterion 2: a readable reverse edge holds its own record while a sound public neighbour keeps the local pin", async t => {
-  const everything = everythingSaid(t);
-  const sound = shardText(DEPENDANT_ID);
-  const boot = dependingOn(PUBLIC_ID, OPS_ID) + sound;
+test("W1-T13785 criterion 2: readable ops cannot make a sound public neighbour release from a locally invalid plan", async t => {
+  everythingSaid(t);
+  const boot = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID);
   const main = boot.replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
-  const localRecord = parseTasksFromYaml(sound, "local.yaml")[0]!;
-  for (const mode of MODES) {
-    const host = hostWithSecondCatalog(t), from = everything.length;
-    const { code } = await approveIn(mode, t, host, boot, DEPENDANT_ID, main);
-    assert.equal(code, 0, `${mode}: ${everything.slice(from).join("\n")}`);
-    assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(localRecord)], mode);
-    assert.equal(host.durableRecords()[DEPENDANT_ID]?.pin, pinBeforeThisTask(localRecord), mode);
-    assert.equal(host.releaseRows(PUBLIC_ID).length, 0, mode);
-  }
+  for (const mode of MODES) await t.test(mode, async sub => {
+    const host = hostWithSecondCatalog(sub);
+    const error = { name: "PlanError", message: `task ${PUBLIC_ID}: depends_on unknown task '${OPS_ID}'` };
+    writeFileSync(host.planPath, boot);
+    assert.throws(() => loadPlan(host.planPath), error);
+    await assert.rejects(approveIn(mode, sub, host, boot, DEPENDANT_ID, main), error);
+    assert.ok(host.calls.some(path => path.startsWith(`repos/${OPS_REPOSITORY}/git/blobs/`)));
+    assert.equal(host.wroteAnything(), false);
+  });
+});
+
+test("W1-T13785 criterion 2: an invalid public ref falls back to the strict local plan before a normal release", async t => {
+  const said = everythingSaid(t);
+  const boot = shardText(PUBLIC_ID);
+  const main = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID);
+  const host = hostWithSecondCatalog(t);
+  const { code } = await approveIn("checkout, as the host runs it", t, host, boot, DEPENDANT_ID, main);
+  assert.equal(code, 2, said.join("\n"));
+  assert.match(said.join("\n"), new RegExp(`unknown task '${DEPENDANT_ID}'`));
+  assert.equal(host.calls.filter(path => path === `repos/${OPS_REPOSITORY}`).length, 1, "the strict fallback reuses the ops snapshot");
+  assert.equal(host.wroteAnything(), false);
+});
+
+test("W1-T13785 criterion 2: a public release keeps its local pin when an ops snapshot cannot compose", async t => {
+  const said = everythingSaid(t);
+  const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+  const snapshot = await readOpsCatalogSnapshotAsync({ repository: OPS_REPOSITORY }, host.api);
+  assert.equal(snapshot.outcome, "ok");
+  const publicPlan = loadPlan(host.planPath);
+  const composed = composeSecondaryPlan(publicPlan, snapshot.plan!);
+  assert.ok(composed.outcome === "ok" && composed.held.has(PUBLIC_ID));
+  const malformed = { ...snapshot.plan!, tasks: [] };
+  assert.equal(composeSecondaryPlan(publicPlan, malformed).outcome, "malformed");
+  const reads = host.calls.length;
+  const code = await approveCommand([PUBLIC_ID], {
+    config: host.config, planPath: host.planPath, taskLookup: { api: host.api, opsSnapshot: { ...snapshot, plan: malformed } },
+  });
+  assert.equal(code, 0, said.join("\n"));
+  assert.equal(host.calls.length, reads, "the handed snapshot is the only ops read");
+  const pin = pinBeforeThisTask(publicPlan.byId.get(PUBLIC_ID)!);
+  assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pin]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pin);
 });
 
 test("W1-T13785 criterion 2: an unreadable ops catalog leaves a deferred origin/main edge to the strict loader's fallback", async t => {

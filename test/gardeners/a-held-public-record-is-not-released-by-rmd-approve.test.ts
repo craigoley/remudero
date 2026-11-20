@@ -41,7 +41,7 @@ const planOf = (text: string, label: string): Plan => {
 };
 
 /** A state directory naming the ops repository, and that repository's read-only routes over a text a test may change. */
-function opsCatalog(t: TestContext, initial: string) {
+function opsCatalog(t: TestContext, initial: string, defaultBranch = "main") {
   let text = initial;
   let blobUnreadable = false;
   const root = mkdtempSync(join(tmpdir(), "rmd-held-public-"));
@@ -52,8 +52,9 @@ function opsCatalog(t: TestContext, initial: string) {
     const commit = sha1(text), tree = sha1(commit + "root"), plan = sha1(commit + "plan");
     const blob = sha1(`blob ${Buffer.byteLength(text)}\0${text}`);
     const base = `repos/${REPOSITORY}`;
-    if (path === base) return { id: 42, full_name: REPOSITORY, default_branch: "main" };
-    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: commit } };
+    if (path === base) return { id: 42, full_name: REPOSITORY, default_branch: defaultBranch };
+    if (path === `${base}/git/ref/heads/${encodeURIComponent(defaultBranch)}`) return { object: { type: "commit", sha: commit } };
+    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: sha1(initial) } };
     if (path === `${base}/git/commits/${commit}`) return { sha: commit, tree: { sha: tree } };
     if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
     if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
@@ -123,8 +124,8 @@ function publicMain(t: TestContext, text: string) {
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
-async function refusalFixture(t: TestContext) {
-  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
+async function refusalFixture(t: TestContext, defaultBranch = "main") {
+  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"), defaultBranch);
   const main = publicMain(t, PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record"));
   main.publish(PUBLIC_TEXT);
   const rows: Row[] = [];
@@ -152,10 +153,16 @@ async function refusalFixture(t: TestContext) {
 }
 const steps = (rows: readonly Row[], step: string) => rows.filter(row => row.step === step);
 
-test("W1-T13785 criterion 4: the release probe reads a held public record's cause while the composition holds it and gone once the edge clears, with the public record's digest, and the gardener re-runs that release once", async t => {
-  const { fx, main, rows, ports, pass, approved } = await refusalFixture(t);
+test("W1-T13785 criterion 4: advancing only the ops default branch trunk clears the hold and replays the same public record once", async t => {
+  const { fx, main, rows, ports, pass, approved } = await refusalFixture(t, "trunk");
   const refusal = steps(rows, APPROVE_RELEASE_REFUSED_STEP);
   assert.equal(refusal.length, 1, "the operator's refusal wrote one row");
+  const publicHead = main.head();
+  const opsMainRef = `repos/${REPOSITORY}/git/ref/heads/main`;
+  const fixedMain = await fx.api(opsMainRef);
+  const initialOps = await fx.read();
+  assert.equal(initialOps.binding?.ref, "refs/heads/trunk");
+  assert.equal(initialOps.binding?.commit, refusal[0]!.ops_commit);
   const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
   const digest = publicRecordDigest(current);
   assert.notEqual(digest, publicRecordDigest(loadPlan(main.planPath).byId.get("PUB-2")!), "the detached record predates the refused record");
@@ -171,10 +178,16 @@ test("W1-T13785 criterion 4: the release probe reads a held public record's caus
 
   fx.set(record("OPS-GOOD"));
   assert.deepEqual(await ports.probe(item!), { present: false, digest }, "gone once the edge clears, with the same public digest");
+  assert.equal(main.head(), publicHead);
+  assert.deepEqual(await fx.api(opsMainRef), fixedMain, "refs/heads/main did not move");
+  const clearedOps = await fx.read();
+  assert.equal(clearedOps.binding?.ref, "refs/heads/trunk");
+  assert.notEqual(clearedOps.binding?.commit, initialOps.binding?.commit);
   await pass();
   await pass();
   assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }], "one replay pins the verified public record");
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => row.events), [["ops-main"]]);
   assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
 });
 
@@ -290,7 +303,7 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
     ...productionStuckStatePorts({
       stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
       api: path => {
-        if (catalogUnavailable && path === `repos/${REPOSITORY}`) {
+        if (catalogUnavailable && path.startsWith(`repos/${REPOSITORY}/git/commits/`)) {
           failedReads++;
           throw new Error("ops repository unavailable");
         }
