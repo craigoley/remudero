@@ -1,0 +1,78 @@
+- id: W1-T13831
+  title: "A light pass that names no scope decides from the fresh open pull request views of the tick read, and only a refill read always reads its own"
+  repo: remudero
+  priority: 1.2
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the light pass reviews and merges from this list; a served list must keep the act-time head guards
+  origin: "operator-session#fleet-measure-2026-11-19"
+  plan_refs:
+    - W1-T13709
+    - W1-T12236
+    - W1-T12755
+  files:
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/sweep.ts
+    - test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts
+    - test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts
+    - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A light pass called with no scope (the in-flight ticker's pass and the interphase ordinary pass in src/lib/daemon.ts), given a tick-read generation that freshReadGeneration serves, that holds no openPrError, and whose read started after the read of the last good list, decides from those views: the hook makes no GitHub read for its open pull request list and writes views_source tick_read on sweep_light.pre_review_timing"
+      proof: "grep: W1-T13831 criterion 1 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:refill-reads-its-own — the refill read (readOpenPrsForRefill) is never served the tick read, whatever the pass's scope, and reads its own views as origin/main does"
+      kind: guard
+      proof: "grep: W1-T13831 criterion 2 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:own-read-without-a-fresh-tick-read — with no generation, a generation older than TICK_READ_MAX_AGE_MS, a generation holding openPrError, or a generation whose read started before the read of the last good list, a pass with no scope reads its own views exactly as origin/main does; the boot pass keeps the W1-T12236 rule"
+      kind: guard
+      proof: "grep: W1-T13831 criterion 3 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "invariant:a-served-list-is-guarded-at-act — a pass with no scope that decides from a served list reads each acting head at act time, stands a moved head down as sweep.head_moved, and names the list's head on a direct merge"
+      kind: guard
+      proof: "grep: W1-T13831 criterion 4 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "sweep_light.pre_review_timing writes pass_scope: the scope name of the pass, or ordinary for a pass with no scope"
+      proof: "grep: W1-T13831 criterion 5 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "Through the servedOpenPrViews function that daemonCommand passes to buildSweepLightHook, with the real createLightPassOpenPrList and a gh shim (test/helpers/gh-shim.ts) that counts calls, a pass with no scope after a fresh published generation sends no pulls list, check-runs or status read, and its refill read sends them"
+      proof: "grep: W1-T13831 criterion 6 in test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts"
+    - claim: "The light pass hook writes the pass scope on its timing row"
+      proof: "grep: pass_scope in src/cli/commands/sweep.ts"
+  falsifier: |
+    Make servedOpenPrViews return nothing for a call with no scope again (origin/main). Criterion 1 and criterion 6
+    then see the pulls list, check-runs and status reads, and views_source own_read.
+  rationale: |
+    WHY: W1-T13709 serves the tick read's views to a light pass with a scope. servedOpenPrViews
+    (src/cli/commands/daemon.ts) returns nothing when scope is undefined, to keep the refill read on its own read.
+    But the common light passes also pass no scope: the in-flight ticker's pass (src/lib/daemon.ts, sweepLight with
+    `admit ? { reviewOnly: false, admit } : undefined`) and the interphase ordinary pass (`ordinary` is undefined
+    unless a repair hand-off is due). W1-T13709 was measured on idle passes (1,156 of 1,262), which carry scope idle.
+    MEASURED since the 2026-11-19 10:35Z boot: 10 light passes. 1 took the tick read (10:41:24Z, the first pass);
+    9 read their own views (views_age_ms 17.8 s to 73.6 s). The row does not name the scope (criterion 5 adds it).
+    The daemon wrote 6 daemon.iteration rows in this time, so most passes likely ran from the in-flight ticker. In the 24 hours before 08:15Z: 15 tick_read, 71 own_read and 169
+    fallback passes.
+    WHAT A FIX GAINS: tick-read generations settled at about 10:42:09Z, 11:08:18Z, 11:29:21Z and 11:43:24Z (each
+    tick_read.stale_refused row's time minus its age_ms; read_ms 22.1 s, 44.5 s, 67.5 s and 45.3 s). Each own-read
+    pass's start is its row time minus views_age_ms. 3 of the 9 own-read passes (about 10:46:35Z, 11:32:25Z and
+    11:47:45Z) found a generation 266 s, 185 s and 262 s old, under TICK_READ_MAX_AGE_MS (300 s), with a read start
+    after the last good list's. With this task they decide from it and skip their open_pr_views read.
+    WHAT IT DOES NOT FIX: the other 6 passes found a generation 363 s to 972 s old, or none while a tick read ran.
+    Ticks are 14 to 26 minutes apart on this host, so a generation is fresh for only its first 5 minutes. The full
+    sweep's prelude tick_read stage (p50 63.4 s) misses for the same reason: since boot 4 of 6 preludes read their
+    own (miss stale 3, consumed 1). This task changes neither the bound nor the tick cadence.
+  design: |
+    INVARIANT refill-reads-its-own: the refill read is never served the tick read.
+    INVARIANT own-read-without-a-fresh-tick-read: a pass reads its own views as today unless a fresh, error-free
+    generation newer than its last good list exists. The boot pass keeps the W1-T12236 rule.
+    INVARIANT a-served-list-is-guarded-at-act: a pass of any scope but boot on a served list uses the act-time
+    guards of the last good list (mergeAtListHead, headReadOrStandDown, guardEveryHeadAtAct); onLastGoodList in
+    src/cli/commands/sweep.ts already treats a pass with no scope as not boot.
+    1. servedOpenPrViews (src/cli/commands/daemon.ts): take a second parameter that names the read, "pass" or
+       "refill". Serve nothing for "refill". For "pass", keep the boot rule for scope boot and serve a fresh,
+       error-free generation for any other scope, including none.
+    2. buildSweepLightHook (src/cli/commands/sweep.ts): readViews passes "pass" for the first read and "refill" for
+       readOpenPrsForRefill. Write pass_scope on sweep_light.pre_review_timing: scope.scope, or "ordinary".
+    3. Add no counter, bound or config key; TICK_READ_MAX_AGE_MS and LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS are not
+       changed. Grep test/ for tests that assert a pass with no scope reads its own views when a fresh generation
+       exists, or assert the whole pre_review_timing row; one outside `files` needs an amendment.

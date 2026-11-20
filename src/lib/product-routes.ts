@@ -3,6 +3,10 @@ import { RawBodyTooLargeError, readBoundedRawBody, verifiedActor, type Route } f
 import { sendJson } from "./panel-actions.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import {
+  previewRunnerConfigBootstrap, proposeRunnerConfigBootstrap, RUNNER_CONFIG_PREVIEW_VERSION, RUNNER_CONFIG_PROPOSAL_LIMITS, RUNNER_CONFIG_PROPOSAL_VERSION,
+  type ReviewedMergeRead, type RunnerConfigProposalCode,
+} from "./product-target-config.js";
+import {
   PRODUCT_REPOSITORY_LIMITS, PRODUCT_REPOSITORY_VERSION, ProductRepositoryService, ghProductRepositoryProvider, inspectProductRepository,
   type ProductRepositoryCode, type ProductRepositoryProvider,
 } from "./product-repository.js";
@@ -11,7 +15,7 @@ import {
   type ProductDeploymentCode, type ProductDeploymentProvider,
 } from "./product-deployment.js";
 import {
-  PRODUCT_BUILD_LIMITS, PRODUCT_BUILD_VERSION, ProductBuildService,
+  PRODUCT_BUILD_LIMITS, PRODUCT_BUILD_VERSION, ProductBuildService, ghProductBuildTarget,
   type ProductBuildCode, type ProductBuildOptions,
 } from "./product-build.js";
 import {
@@ -103,12 +107,54 @@ const repositoryStatus: Record<ProductRepositoryCode, number> = {
   stale_revision: 409, recovery_required: 503,
 };
 
-/** Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository. */
-export function buildProductRepositoryRoutes(options: { root?: string; provider?: ProductRepositoryProvider }): Route[] {
+const proposalStatus: Record<RunnerConfigProposalCode, number> = {
+  ...status, repository_missing: 409, repository_conflict: 409, provider_unreadable: 503, stale_preview: 409,
+  runner_config_present: 409, runner_config_invalid: 409, source_unavailable: 503, branch_conflict: 409,
+};
+
+/**
+ * Exact create-or-adopt of the product repository. HIGH tier: it may create a real GitHub repository.
+ * The runner-config proposal is HIGH tier too: it writes a branch and opens a pull request on the product repository.
+ */
+export function buildProductRepositoryRoutes(options: {
+  root?: string; installRoot?: string; provider?: ProductRepositoryProvider;
+  text?: (args: string[], opts?: { maxBuffer?: number; timeout?: number }) => Promise<string>; reviewedMerge?: ReviewedMergeRead;
+}): Route[] {
   const provider = options.provider ?? ghProductRepositoryProvider();
   const service = new ProductRepositoryService({ ...options, provider });
   const intents = new ProductIntentStore(options);
+  // The merge rule is product-build's own reviewed-starter read, injected here so the config module never imports the build.
+  const reviewedMerge = options.reviewedMerge ?? ((repository, head) => ghProductBuildTarget({ text: options.text }).bootstrap(repository, head));
   return [
+    { method: "POST", path: "/v1/products/runner-config-proposal", scope: "write", tier: "high", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: RUNNER_CONFIG_PROPOSAL_VERSION, ...body });
+      const actor = verifiedActor(req);
+      if (!actor) { reply(403, { error: "invalid_identity" }); return; }
+      let command: unknown;
+      try { command = JSON.parse(await readBoundedRawBody(req, RUNNER_CONFIG_PROPOSAL_LIMITS.requestBytes)); }
+      catch (error) {
+        const tooLarge = error instanceof RawBodyTooLargeError;
+        reply(tooLarge ? 413 : 400, { error: tooLarge ? "request_too_large" : "invalid_input" });
+        return;
+      }
+      const result = await proposeRunnerConfigBootstrap({ root: options.root, store: intents, provider, installRoot: options.installRoot ?? "",
+        text: options.text, reviewedMerge }, actor, command);
+      if (!result.ok) { reply(proposalStatus[result.code], { error: result.code }); return; }
+      sendJson(res, 200, result.value);
+    } },
+    { method: "GET", path: "/v1/products/runner-config-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
+      res.setHeader("Cache-Control", "private, no-store");
+      const fail = (code: ProductStoreCode) => sendJson(res, status[code], { version: RUNNER_CONFIG_PREVIEW_VERSION, error: code });
+      const actor = verifiedActor(req);
+      if (!actor) { fail("invalid_identity"); return; }
+      const params = new URL(req.url ?? "/", "http://rmd.local").searchParams;
+      const keys = [...params.keys()];
+      if (keys.length !== 3 || new Set(keys).size !== keys.length) { fail("invalid_input"); return; }
+      const result = await previewRunnerConfigBootstrap({ store: intents, provider, installRoot: options.installRoot ?? "" }, actor, Object.fromEntries(params));
+      if (!result.ok) { fail(result.code); return; }
+      sendJson(res, 200, result.value);
+    } },
     { method: "GET", path: "/v1/products/repository-preview", scope: "read", sensitivity: "sensitive", async handler(req, res) {
       res.setHeader("Cache-Control", "private, no-store");
       const reply = (code: number, body: Record<string, unknown>) => sendJson(res, code, { version: PRODUCT_REPOSITORY_VERSION, ...body });

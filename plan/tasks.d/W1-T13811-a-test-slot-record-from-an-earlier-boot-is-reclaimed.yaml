@@ -9,10 +9,11 @@
   budget_usd: 20.00
   risk: medium
   origin: operator-request#onboarding-thread-2026-11-19
+  # placement-amendment 2026-11-19: `rmd test-place` puts this test in test/ci/suites/ (ci-parity via test-slot), beside the other slot-reclaim suites.
   files:
     - src/lib/test-slot.ts
-    - test/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts
-  status: queued
+    - test/ci/suites/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts
+  status: merged
   attempts: 0
   rationale: |
     Observed 2026-11-19 in a cloud session. In src/lib/test-slot.ts, the reclaim path after
@@ -28,14 +29,19 @@
     set and differs from the current readable boot id, treat the owner as ended: the earlier boot ended
     every process it held, so no tree probe is needed. Record this as reclaim evidence with a reason
     that names the boot change (old and new boot id), so the existing test-slot reclaim ledger row says
-    why the slot was freed. Keep every other rule: an equal boot id still needs exact-tree terminal
-    evidence, a foreign host or foreign pid namespace keeps today's handling, an unreadable current
-    boot id keeps the slot withheld, and darwin marker records keep their lease rule.
+    why the slot was freed. Keep every other rule exactly as origin/main has it: a marked record (a
+    heartbeat cadence or work identity) with an equal boot id still needs exact-tree terminal evidence,
+    and with an unreadable current boot id stays withheld; a pid-only record (no cadence, no work
+    identity) keeps today's pid and start-time rule whatever its boot id; a foreign host or foreign pid
+    namespace keeps today's handling; and darwin marker records keep their lease rule.
+    Amended 2026-11-19 with the operator's go-ahead: the earlier text said an
+    equal or unreadable boot id never frees any record, but origin/main frees a pid-only record on pid
+    and start-time evidence, and five other test-slot suites rely on that. Changing it is a separate task.
 
     INVARIANT slot-earlier-boot: a same-host, same-namespace slot record whose boot id differs from the current boot is reclaimed at once with a boot-change reason; an equal or unreadable boot id never frees a slot by this rule.
   acceptance:
     - claim: invariant:slot-earlier-boot — a same-host, same-namespace record from an earlier boot is reclaimed at once with a reason naming the boot change; an equal or unreadable boot id is never freed by this rule
-      proof: 'unit test: test/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts'
+      proof: 'unit test: test/ci/suites/a-test-slot-record-from-an-earlier-boot-is-reclaimed.test.ts'
   falsifier: |
     Write a slot record with this host, this pid namespace, a foreign bootId and a dead pid, then
     acquire: the acquire must take the slot without waiting and the reclaim row must name the boot

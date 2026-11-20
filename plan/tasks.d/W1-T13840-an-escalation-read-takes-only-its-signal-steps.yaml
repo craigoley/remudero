@@ -1,0 +1,60 @@
+- id: W1-T13840
+  title: "The board's escalation read takes only a task's run and escalation rows, so the now view stops re-reading core's 707,000 DAEMON rows on every build"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which rows latestEscalationLine reads from a store index; its answer is unchanged
+  band_meaning: span
+  origin: "operator-session#now-view-serve-2026-11-17"
+  plan_refs:
+    - W1-T9604
+    - W1-T9716
+  files:
+    - src/lib/status.ts
+    - src/lib/board-projection.ts
+    - test/an-escalation-read-takes-only-its-signal-steps.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A store index's byTaskSteps answers a task's own rows of the named steps in ledger order, equal to its byTask rows filtered the same way, as the store grows with late rows"
+      proof: "grep: W1-T13840 criterion 1 in test/an-escalation-read-takes-only-its-signal-steps.test.ts"
+    - claim: "invariant:same-escalation — latestEscalationLine over the store index equals it over an in-memory index of the same rows, for open, cleared and absent escalations"
+      kind: guard
+      proof: "grep: W1-T13840 criterion 2 in test/an-escalation-read-takes-only-its-signal-steps.test.ts"
+    - claim: "A board build reads no fact row of a long-history task's other steps for its escalation"
+      proof: "grep: W1-T13840 criterion 3 in test/an-escalation-read-takes-only-its-signal-steps.test.ts"
+    - claim: "latestEscalationLine asks the index for its signal steps"
+      proof: "grep: byTaskSteps.get(taskId, ESCALATION_SIGNAL_STEPS) in src/lib/status.ts"
+    - claim: "The store index and its cross-read wrapper both carry byTaskSteps"
+      proof: "grep: byTaskSteps: { get: taskStepRows } in src/lib/board-projection.ts"
+  rationale: |
+    WHY: the now view cannot serve because core's builds are slow. MEASURED on the Azure host with now in shadow mode
+    on 2026-11-19: core's snapshot stage was 27 s every build, and its board stage 625 s and 668 s when the 10-minute
+    oracle ran. PROFILED on the Mac over a VACUUM INTO copy of core.v1.sqlite (4.5 GB): with no new rows, a build
+    took 4 to 14 s, and about 90% of it was projectPlan -> resolveEscalation -> latestEscalationLine -> the board's
+    byTask bucket -> readTaskRows. The fact store holds 706,926 rows (358 MB) for task id DAEMON, which has 4
+    escalation lines. DAEMON names no plan task, so the task-less escalation pass reads its whole bucket in both the
+    board and snapshot stages, and the bucket is larger than the 64 MiB task cache (W1-T9716), so it is never kept.
+    latestEscalationLine reads only run.start, escalation.issue_opened and primary_shadow.issue_published rows whose
+    task_id is the task. Those three steps hold about 7,500 rows store-wide, all in the board's cached step buckets.
+    With the change, on the same copy: a steady build is 0.36 to 0.44 s (board 40 to 53 ms, snapshot 233 to 307 ms),
+    and an oracle build 11.4 s instead of 49.8 s.
+  design: |
+    INVARIANT same-escalation: latestEscalationLine gives the same answer over a store index as over an in-memory
+    index of the same rows.
+    1. status.ts: LedgerIndex gets an optional byTaskSteps.get(taskId, steps): the task's rows of those steps with
+       task_id equal to it, in ledger order. New export ESCALATION_SIGNAL_STEPS. latestEscalationLine reads
+       byTaskSteps when the index has it and covers the same rows, and its own bucket otherwise.
+    2. board-projection.ts: storeIndex answers byTaskSteps once per index and step set, by grouping the cached step
+       buckets (cachedStep, or readStep when uncached) by task_id and ordering by (ts_ms, seq), the order taskBucket
+       uses. recordingCrossReads passes it through: none of the steps is a cross-task step.
+    3. The in-memory buildLedgerIndex is unchanged, so every other reader keeps today's path.
+  falsifier: |
+    Read indexedTaskRows in latestEscalationLine again: criterion 3 fails (a build reads 6,544 fact bodies against a
+    bound of 1,454).
+  note: |
+    Id reserved for run-unfiled-1795094731199 with ~/rmd-work/bin/reserve-id.sh.

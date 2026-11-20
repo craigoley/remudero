@@ -1,0 +1,52 @@
+- id: W1-T13833
+  title: "GET /v1/daemon-health reads the GitHub rate limit off serve's request loop and holds the reading"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans daemon-health, host-view and one existing test helper; one route becomes async with a held read
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T13692
+    - W1-T5053
+  files:
+    - src/lib/daemon-health.ts
+    - src/lib/host-view.ts
+    - test/daemon/daemon-health-reads-the-rate-limit-off-the-request-loop.test.ts
+    - test/the-console-backend-keeps-its-share-of-the-host.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The route's default rate-limit read runs gh without blocking serve's loop, and the first request answers with the first reading"
+      proof: "grep: W1-T13833 criterion 1 in test/daemon/daemon-health-reads-the-rate-limit-off-the-request-loop.test.ts"
+    - claim: "invariant:one-read-in-flight — a reading is held for DAEMON_HEALTH_RATE_LIMIT_HOLD_MS, an expired one still answers at once and starts exactly one background read, and a failed read holds no number"
+      proof: "grep: W1-T13833 criterion 2 in test/daemon/daemon-health-reads-the-rate-limit-off-the-request-loop.test.ts"
+  rationale: |
+    WHY: serve's main thread was at 0.296 cores with the Console open (OBSERVED 2026-11-19 12:18-12:28Z, pidstat on
+    serve pid 3096477, booted 11:31Z on 19b11d5e2). The 136 runtime.loop_stall_profile rows in that window rank
+    defaultGhExec (src/lib/daemon-health.ts) first among callers, with 2452 ms. Its spawn self frame via
+    execFileSync is 2449 ms. buildDaemonHealthRoute calls readGhRateLimitRemaining(deps.exec) on every GET, and
+    with no exec injected that is ghExec, a synchronous gh api rate_limit network call that holds the request
+    loop for its whole round trip. The Console reads /v1/daemon-health from its legacy now path, the incidents page
+    and the repository page. The host view (W1-T5053) already reads the same number with
+    readGhRateLimitRemainingAsync in the read-model worker, so only this route still blocks.
+  design: |
+    daemon-health.ts: readGhRateLimitRemainingAsync moves here from host-view.ts, which imports and re-exports it,
+    so test/host-view.test.ts is unchanged. createRateLimitHold(read, now, holdMs) keeps one reading and at most
+    one read in flight. Before the first reading lands, a request awaits it, so the loop is free while gh runs.
+    After that, a request answers with the held reading and starts one background read when the reading is older
+    than DAEMON_HEALTH_RATE_LIMIT_HOLD_MS (60 s). A read that rejects holds undefined, so the field is absent, as
+    before. DaemonHealthDeps gains rateLimit?: () => Promise<number | undefined>. The default is
+    readGhRateLimitRemainingAsync, or the injected exec through readGhRateLimitRemaining when a test gives one.
+    The handler becomes async and awaits the hold before it writes. spliceJsonField (serve.ts) already awaits its
+    inner handler. test/the-console-backend-keeps-its-share-of-the-host.test.ts's healthBody helper awaits the
+    handler instead of reading its body in the same turn.
+    INVARIANT one-read-in-flight: concurrent requests never start a second read, and an expired reading never
+    makes a request wait.
+  falsifier: |
+    Make the default read the blocking readGhRateLimitRemaining(): criterion 1 fails, because the loop ticks
+    about 0 times during a 0.5 s gh shim. Drop the hold, so every request reads: criterion 2 fails on its read
+    counts (or times out at 10 s).

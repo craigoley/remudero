@@ -1,0 +1,59 @@
+- id: W1-T13836
+  title: "The read-model status view holds a moved projector generation for 10 seconds, so a run of projected rows no longer rebuilds it on every pass"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans the status view and three existing suites whose build counts it moves
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T11127
+    - W1-T11974
+    - W1-T13835
+  files:
+    - src/lib/read-model-worker.ts
+    - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
+    - test/console-api/read-model/a-view-build-row-names-why-a-due-build-was-not-skipped.test.ts
+    - test/a-promoted-standby-serves-fresh-committed-bodies.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A generation-only move inside the hold is skipped and keeps the shown generation; past the hold one build shows the moved generation"
+      proof: "grep: W1-T13836 criterion 1 in test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts"
+    - claim: "invariant:status-fields-rebuild-at-once — a lease holder change, its clearing and a quarantined row rebuild the status body inside the hold"
+      proof: "grep: W1-T13836 criterion 2 in test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts"
+  rationale: |
+    WHY: on the host the read-model status view (READ_MODEL_STATUS_VIEW, "read-model") built 368 times on 446
+    calls in one 10-minute read_model.view_builds window, with not_skipped "generation 359, state 9" (OBSERVED
+    2026-11-19, Mac RC lane report, pid 60693, about 10:30Z onward). The view has no inputsFingerprint, so its
+    generic digest (inputDigest in src/lib/read-model-worker.ts) includes each store's meta generation, which
+    ledger-projector.ts commit() advances on every batch with a non-diagnostic row, about once a second. The
+    body publishes that generation, so every pass is a rebuild and a new ETag, and every Console conditional
+    read of /v1/views/read-model misses its 304. The cost per window is small (cpuMs 1263), but each rebuild
+    also posts a body to the serve main thread and a view event to every SSE client. W1-T13835 removes the same
+    churn from the instances view. The status schema (openapi/daemon.yaml) marks instances[].generation as
+    required, and the Console rejects a version other than 1, so the field cannot simply be dropped.
+  design: |
+    src/lib/read-model-worker.ts: readModelStatusView becomes createReadModelStatusView(holdMs), exported with
+    READ_MODEL_STATUS_GENERATION_HOLD_MS = 10_000, and readModelStatusView = createReadModelStatusView().
+    The view declares inputsFingerprint as the JSON of the same data materialize returns. Each store's shown
+    generation is kept in a WeakMap keyed by its ReadModelDb, so two tickers in one process never share a
+    showing. A moved generation is shown when the hold since the last showing has passed; until then the last
+    shown value stays. Lease, heldBy, quarantine count, failure reason and shadow readiness are in the
+    fingerprint unheld and rebuild at once. The old digestReads is removed: a declared view digests through
+    its fingerprint plus the plan, state, switches and shadow parts, so plan and switches moves still rebuild.
+    Each projector's progress stays current in its ledger source's asOf, which a skip restamps. View version
+    stays 1 and the schema is unchanged. Because the view now declares its inputs, its first skip candidate
+    is audited (READ_MODEL_SKIP_AUDIT_EVERY), which adds one build to the existing count assertions; the
+    existing suites are updated to the explained counts.
+    INVARIANT status-fields-rebuild-at-once: only the generation is held.
+  falsifier: |
+    Make shownGeneration return state.generation unconditionally: criterion 1 fails (each move rebuilds), and
+    the two existing production status tests fail at their in-hold counts. Measured in the build worktree:
+    # fail 3 with the hold removed, # fail 0 restored, over 12 tests in the criterion file.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795095057216
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

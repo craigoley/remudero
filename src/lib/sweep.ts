@@ -34,6 +34,7 @@ import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { daemonInstanceRegistryPath, deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, IMAGE_BUILD_SHA_PATH, readDeployFactsAsync, realDeploySensorsAsync, type AsyncDeploySensors, type DeployFacts } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
@@ -44,7 +45,8 @@ import {
 import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-state-commit-store.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
-import { gatedRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
+import { gatedRemoteRefReserver, gatedRemoteRefReserverAsync, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, type RemoteReserveAsyncInput,
+  type RemoteReserveDeps } from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { recyclePauseDetail } from "./recycle-yield.js";
@@ -112,6 +114,7 @@ import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { readReviewEvidenceRecord } from "./review-evidence-record.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
 import { observeContributorAdmission } from "./arm-auto-merge.js";
@@ -136,7 +139,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ndjsonLines,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines,
   readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
@@ -398,7 +401,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -2427,6 +2430,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "depReview",
   "retireDepReviewRefusedAsk", // W1-T12955
   "postReview",
+  "readReviewEvidenceRecord",
   "repushAbsent",
   "updateBranch",
   "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
@@ -2447,6 +2451,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "reaggregateCiGate",
   "readSecurityMergeObservation", // W1-T13470
   "readCodeqlWorkflowRuns", // W1-T13470
+  "dispatchSecurityMergeProducer", // W1-T13787
   "readMainTip",
   "readMainRepair",
   "mainInheritance", // W1-T8042
@@ -2718,6 +2723,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "depReview"
   | "retireDepReviewRefusedAsk"
   | "postReview"
+  | "readReviewEvidenceRecord"
   | "repushAbsent"
   | "updateBranch"
   | "mergeQueue"
@@ -2747,6 +2753,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "reaggregateCiGate"
   | "readSecurityMergeObservation"
   | "readCodeqlWorkflowRuns"
+  | "dispatchSecurityMergeProducer"
   | "readMainTip"
   | "readMainRepair"
   | "mainInheritance"
@@ -3305,6 +3312,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   });
   return {
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
+    readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     fixDispatchCauseProbe: (cause) => fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
@@ -4034,6 +4042,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       (path: string) => readJsonImpl(securityMetadataGhArgs(path))),
     readCodeqlWorkflowRuns: (pr) =>
       readJsonImpl(["api", `repos/${owner}/${repo}/actions/workflows/codeql.yml/runs?head_sha=${pr.headSha}&per_page=100`]),
+    // W1-T13787: the one write, a dispatch of the trusted producer's own backfill input; the producer decides the status.
+    dispatchSecurityMergeProducer: async (pr) => ghRunImpl("gh", ["api", "-X", "POST",
+      `repos/${owner}/${repo}/actions/workflows/security-merge-policy.yml/dispatches`, "-f", "ref=main", "-f", `inputs[pr_number]=${pr.prNumber}`]),
 
     // W1-T78 — the CLARIFICATION-QUESTION rung's real wiring: `question` is
     // ALREADY rendered (deterministically, from ledger ground truth) by the
@@ -5506,13 +5517,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           (checkoutDir) => readTaskShard(checkoutDir, taskId));
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
-      reserveTaskId: (target) => (deps.planRepairReserveIdImpl ?? ((cwd, branch) => reservePlanRepairTaskId(cwd, branch, undefined, log)))(
-        repoDir, landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
-          sourceRepository: { owner, repo } }).branch),
+      // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
+      reserveTaskId: (target) => {
+        const branch = landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
+          sourceRepository: { owner, repo } }).branch;
+        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch)
+          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log);
+      },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
-        return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }) };
+        const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
+          ...(refusalChecks === undefined ? {} : { refusalChecks }) };
       },
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
@@ -11779,6 +11796,32 @@ export function reservePlanRepairTaskId(
   return reserveTaskIdRemote(mint.n, gatedRemoteRefReserver({ run, filingBranch, lane: "plan-repair", log })).taskId;
 }
 
+/** W1-T13830: {@link planRepairGitRun} awaited, over hostWorktreeGitAsync. A non-zero exit is an answer, not a throw. */
+function planRepairGitRunAsync(cwd: string): RemoteReserveAsyncInput["run"] {
+  return async (args) => {
+    try {
+      return { status: 0, stdout: await hostWorktreeGitAsync(cwd, args), stderr: "" };
+    } catch (error) {
+      if (error instanceof WorktreePointerRefusedError) throw error;
+      const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+      return { status: typeof failed.code === "number" ? failed.code : 1, stdout: String(failed.stdout ?? ""),
+        stderr: String(failed.stderr || failed.message || "") };
+    }
+  };
+}
+
+/** W1-T13830: {@link reservePlanRepairTaskId} for the daemon loop: the same mint, and the reservation's git awaited. */
+export async function reservePlanRepairTaskIdAsync(
+  worktreePath: string,
+  filingBranch: string,
+  run: RemoteReserveAsyncInput["run"] = planRepairGitRunAsync(worktreePath),
+  log?: (step: string, fields: Record<string, unknown>) => void,
+): Promise<string> {
+  const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
+  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log }));
+  return block.taskIds[0]!;
+}
+
 export interface StaleBaseReleaseTarget {
   pr: OpenPrView;
   decision: RedBaseRefreshDecision;
@@ -16052,6 +16095,7 @@ export function reviewOnlyStandDownReason(scope: LightPassScopeName): string {
 }
 
 export interface SweepDeps {
+  readReviewEvidenceRecord?: typeof readReviewEvidenceRecord;
   /** Awaited once per effects instance; unknown selection never closes a shadow notice. */
   reconcilePrimaryShadowAlert?: () => Promise<void>;
   /** One shared open needs-human snapshot per pass; missing or unreadable fails toward fixing. */
@@ -16329,6 +16373,7 @@ export interface SweepDeps {
   /** W1-T13470 — the read-only security decision for this PR at its head (readSecurityMergeDecision). Omitted, a
    *  configuration-not-found wait captures and escalates nothing. */
   readSecurityMergeObservation?: (pr: OpenPrView) => Promise<SecurityMergeObservation>;
+  dispatchSecurityMergeProducer?: (pr: OpenPrView) => Promise<void>;
   /** W1-T13470 — this head's runs of the CodeQL workflow (`actions/workflows/codeql.yml/runs`), raw. */
   readCodeqlWorkflowRuns?: (pr: OpenPrView) => Promise<unknown>;
   /** W1-T177 — an OPTIONAL fresh re-read of ONE PR's live state, consulted immediately before a
@@ -17482,10 +17527,13 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
 /* W1-T13470 — GITHUB'S "N CONFIGURATION(S) NOT FOUND" CODEQL STATE IS OBSERVED, NEVER REPAIRED. The policy keeps it
  * UNKNOWN under its own reason; a head whose only red is that status waits instead of entering a fix round. A full
  * pass reads the decision through the read-only adapter and writes its receipt once per head and check generation, and
- * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. Nothing here
- * grants, merges, dispatches or writes a status: GitHub's refresh reaches the producer through its own triggers. */
+ * a CodeQL workflow completion GitHub re-judged with the warning still standing is escalated once. If the fresh,
+ * exact-head observation is merge-allowed and no longer contains the warning, the sweep re-dispatches the trusted
+ * producer once;
+ * it never grants, merges or writes a status itself. */
 export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
 export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
+const SECURITY_PRODUCER_REDISPATCHED_STEP = "security.producer_redispatched";
 const CODEQL_CONFIGURATION_WAIT_REASON = `security-merge-policy unknown at this head: ${CODEQL_CONFIGURATION_NOT_FOUND} — ` +
   "GitHub's CodeQL check reports a missing configuration, a GitHub-side state no source edit clears — " +
   "waiting for GitHub's refresh, no fix round and no strike";
@@ -17499,7 +17547,7 @@ export interface CodeqlConfigurationWarningReceipt {
 export interface SecurityMergeObservation {
   headSha?: string;
   decision: { state: string; mergeAllowed: boolean; reason: string };
-  observation?: { latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
+  observation?: { checksComplete?: boolean; latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
 }
 
 /** W1-T13470 — the only red is the policy status at this reason (positively named), the review has not failed, and no
@@ -17563,6 +17611,56 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
   const notes: string[] = [];
   const warning = observed.observation?.configurationWarning;
   const capturedEarlier = captures.length > 0; // W1-T13663: a capture an earlier pass wrote, not this one
+  const fresh = `${observed.decision.state}: ${observed.decision.reason}`;
+  const clearedDecision = observed.decision.mergeAllowed === true &&
+    (observed.decision.state === "safe" || observed.decision.state === "not-applicable") &&
+    observed.decision.reason !== CODEQL_CONFIGURATION_NOT_FOUND;
+  if (warning === undefined && clearedDecision && deps.dispatchSecurityMergeProducer) {
+    const alreadyDispatched = (line: Record<string, unknown>) =>
+      line.step === SECURITY_PRODUCER_REDISPATCHED_STEP && line.pr_number === pr.prNumber && line.head_sha === pr.headSha;
+    let claimed = false;
+    try {
+      if (!lines.some(alreadyDispatched)) {
+        mkdirSync(dirname(deps.ledgerPath), { recursive: true });
+        const lock = new DatabaseSync(`${deps.ledgerPath}.security-producer.lock.sqlite`, { timeout: 0 });
+        try {
+          // Serialize receipt lookup and append across processes. Closing releases the lock before GitHub I/O.
+          lock.exec("BEGIN IMMEDIATE");
+          let recorded = (deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath).some(alreadyDispatched);
+          if (!recorded && !deps.readLedger) {
+            const history = await ledgerRowsFor(dirname(deps.ledgerPath), {
+              steps: [SECURITY_PRODUCER_REDISPATCHED_STEP], prNumbers: [pr.prNumber],
+            }, { refuseIncomplete: true });
+            if (!history.ok) throw new Error("producer dispatch receipt history is unreadable");
+            recorded = history.rows.some(alreadyDispatched);
+          }
+          if (!recorded) {
+            appendLine(deps.ledgerPath, { ...row, step: SECURITY_PRODUCER_REDISPATCHED_STEP, decision: fresh,
+              posted_status: `${pr.securityMergePolicy?.state}: ${pr.securityMergePolicy?.reason}` });
+            claimed = true;
+          }
+        } finally {
+          lock.close();
+        }
+      }
+    } catch (error) {
+      const reason = `could not record a producer dispatch at this head (${failed(error)})`;
+      return `${waitReason} — the fresh read answers ${fresh}; ${reason}`;
+    }
+    if (!claimed) {
+      notes.push(`the fresh read answers ${fresh}; the security-merge-policy producer was already re-run at this head`);
+    } else {
+      try {
+        await deps.dispatchSecurityMergeProducer(pr);
+        notes.push(`the fresh read answers ${fresh}, so the security-merge-policy producer was dispatched once for this head`);
+      } catch (error) {
+        const reason = `the producer dispatch failed (${failed(error)}) and is not repeated at this head`;
+        notes.push(`the fresh read answers ${fresh}; ${reason}`);
+      }
+    }
+  } else if (warning === undefined && !clearedDecision) {
+    notes.push(`the fresh read did not verify warning clearance (${fresh})`);
+  }
   if (warning !== undefined && !captures.some((line) => line.check_id === warning.checkId)) {
     const capture = { ...row, step: CODE_SCANNING_CONFIGURATION_WARNING_STEP, check_id: warning.checkId,
       decision: `${observed.decision.state}: ${observed.decision.reason}`, receipt: warning };
@@ -20790,6 +20888,15 @@ let lastReportedAnomalyGap: string | undefined;
 
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+/** W1-T13884: the reader agreement check in flight per ledger. A full pass starts it and goes on: it scans about
+ *  2M ledger lines twice, and awaited inline it held host passes for up to 40 min (reader.agreement duration_ms,
+ *  2026-11-19). One runs at a time, so a slow check is never doubled by the next interval. */
+const readerAgreementInFlight = new Map<string, Promise<void>>();
+
+/** W1-T13884: settles once the reader agreement check started for `ledgerPath` has finished, if one is in flight. */
+export function settleReaderAgreement(ledgerPath: string): Promise<void> {
+  return readerAgreementInFlight.get(ledgerPath) ?? Promise.resolve();
+}
 const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
@@ -21299,15 +21406,20 @@ export async function runSweep(
   }
   const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
   if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+      !readerAgreementInFlight.has(deps.ledgerPath) &&
       (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
     lastReaderAgreementAt.set(deps.ledgerPath, now);
-    try {
-      const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath: deps.ledgerPath,
-        runId: deps.runId, appendLine });
-      for (const finding of findings) log("reader.disagreement", { ...finding });
-    } catch (error) {
-      log("reader.agreement.unavailable", { reason: String(error) });
-    }
+    const ledgerPath = deps.ledgerPath;
+    // W1-T13884: started, not awaited. Its findings and failures are still logged when it settles.
+    const check = (async () => {
+      try {
+        const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath, runId: deps.runId, appendLine });
+        for (const finding of findings) log("reader.disagreement", { ...finding });
+      } catch (error) {
+        log("reader.agreement.unavailable", { reason: String(error) });
+      }
+    })().finally(() => { if (readerAgreementInFlight.get(ledgerPath) === check) readerAgreementInFlight.delete(ledgerPath); });
+    readerAgreementInFlight.set(ledgerPath, check);
   }
   deps.markPrelude?.("reader_agreement");
   if (endsForRestart("reader_agreement")) return endedEarly();
@@ -27254,6 +27366,35 @@ export async function runSweep(
         undefined,
       );
       return;
+    }
+    if (jobDisposition === "post-review" && reviewMode.kind === "full-review" && job.pr.priorReviewAttemptsForInput === 0 &&
+        job.pr.checksState === "green" && job.pr.requiredContextsUnreadable !== true && job.pr.reviewPostRefused !== true &&
+        !hostGapReviews.has(job.reviewKey) &&
+        job.pr.reviewInputDigest !== undefined && (job.pr.reviewState === "success" || job.pr.reviewState === "failure") &&
+        !(job.pr.reviewState === "failure" && reviewVerdictOvertakenByActivity(job.pr)) &&
+        deps.readReviewEvidenceRecord && postedRowsForInput(job.pr, ledgerLines).length === 0) {
+      // Keep the claim across the GitHub read, and check for a local verdict before appending.
+      let recovered: string | undefined;
+      try {
+        const record = await deps.readReviewEvidenceRecord(job.pr);
+        if (postedRowsForInput(job.pr, readLedger(deps.ledgerPath)).length > 0) {
+          recovered = "a review row for the exact input arrived during the evidence read";
+        } else if (record !== undefined) {
+          appendLine(deps.ledgerPath, {
+            ...record.row, step: "review.posted", run_id: deps.runId, task_id: reviewOutcomeTaskIdFor(job.pr),
+            review_source: "github-comment", review_evidence_comment_id: record.commentId,
+          });
+          recovered = `recovered the exact-input verdict from GitHub comment ${record.commentId}`;
+        }
+      } catch (error) {
+        log("sweep.review_evidence_recovery_failed", { pr_number: job.pr.prNumber, head_sha: job.pr.headSha, reason: String(error) });
+      }
+      if (recovered !== undefined) {
+        claim.release();
+        await finalizeDisposition(job.index, job.pr, jobDisposition, recovered, job.question,
+          false, false, undefined, recovered, undefined, undefined, undefined);
+        return;
+      }
     }
     const reviewAttemptId = `review-PR${job.pr.prNumber}-${randomUUID()}`;
     const hostGapSkips = hostGapReviews.get(job.reviewKey);

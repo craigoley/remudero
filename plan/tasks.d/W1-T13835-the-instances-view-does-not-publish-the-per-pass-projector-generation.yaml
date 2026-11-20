@@ -1,0 +1,60 @@
+- id: W1-T13835
+  title: "The instances view stops publishing the per-pass projector generation, so a row it does not read no longer rebuilds it"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: spans the instances view, its openapi contract, the generated client and two existing suites
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10430
+    - W1-T11975
+  files:
+    - src/lib/instances-view.ts
+    - openapi/daemon.yaml
+    - packages/api-client/src/schema.d.ts
+    - test/instances-view.test.ts
+    - test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A row that moves only the projector generation leaves the instances body skipped, publishing no generation, and equal to a full build"
+      proof: "grep: W1-T13835 criterion 1 in test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts"
+    - claim: "invariant:evidence-bound-to-held-lease — capability evidence still refuses on a lost lease and on a generation move during observation, and the lease state stays a fingerprint input"
+      proof: "grep: W1-T13835 criterion 2 in test/instances-view.test.ts"
+  rationale: |
+    WHY: on the host, the read-model child's instances view built 550 to 680 times per 10 minutes, at about 40 s of
+    CPU per window, with not_skipped "inputs" (OBSERVED 2026-11-19 12:20-12:51Z, read_model.view_builds rows).
+    The serve container averaged 1.165 cores with the Console open, and the read-model child used 0.9 to 1.7 of
+    them. The view's inputsFingerprint (src/lib/instances-view.ts createInstancesView) includes each instance's
+    state.generation. Its body publishes the same value as inboxCapabilityEvidence.generation. That counter is
+    the projector's meta generation, and ledger-projector.ts commit() advances it on every batch with a
+    non-diagnostic row, about once a second. So the body rebuilds, and its ETag moves, on every pass, and the
+    Console's conditional /v1/views/instances reads (about 170 per 5 minutes) never get a 304. W1-T11975 kept
+    this rebuild on purpose, because the field was published. Nothing reads it: a git grep of core src and of
+    remudero-console lib/app finds no reader of inboxCapabilityEvidence.generation outside this view and its
+    tests.
+  design: |
+    instances-view.ts: the evidence object no longer carries generation. The ownership check keeps reading
+    slot.state.generation: qualify() still refuses when the generation moves between the first observation and
+    revalidation, so W1-T10430's binding inside one materialize is unchanged. inputsFingerprint replaces
+    state.generation with state.lease, the ownership input the body really reads, which the generation stood
+    in for. Heartbeat, liveness, registry, mount, marker and stamp-budget inputs are unchanged.
+    openapi/daemon.yaml drops the optional evidence.generation property and says the evidence is bound to the
+    held projector lease. packages/api-client/src/schema.d.ts is regenerated (npm run api-client:generate).
+    INSTANCES_VIEW_VERSION and INSTANCES_QUALIFICATION_GENERATION are unchanged. Removing an optional, unread
+    field keeps v1 consumers whole, and re-qualifying would drop a served view back to shadow for no reason.
+    The W1-T11975 criterion 2 test now expects instances to skip the generation-moving row, like the other three
+    declared views. The W1-T10430 test asserts the field is absent.
+    INVARIANT evidence-bound-to-held-lease: a lost lease, a stale held label without its live lease, or a
+    generation move during observation still publishes unavailable evidence.
+  falsifier: |
+    Put state.generation back in the fingerprint in place of state.lease: criterion 1 fails (the view rebuilds)
+    and criterion 2 fails (the lease is no longer an input). Publish generation in the evidence again: both
+    criteria fail.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795093265214
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

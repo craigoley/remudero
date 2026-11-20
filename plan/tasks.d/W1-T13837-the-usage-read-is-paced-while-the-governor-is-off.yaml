@@ -1,0 +1,49 @@
+- id: W1-T13837
+  title: "While the headroom governor is off, the daemon's tick reads account usage at most once every five minutes, so each daemon stops spawning `claude -p /usage` (about 12 CPU seconds and 340 MB) on every tick for a reading that only feeds telemetry"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # how often the daemon reads account usage while the governor is off; the armed governor keeps its every-tick read
+  band_meaning: span
+  origin: "operator-session#console-daemon-load-2026-11-19"
+  plan_refs:
+    - W1-T2565
+    - W1-T5719
+  files:
+    - src/lib/daemon.ts
+    - test/daemon/the-usage-read-is-paced-while-the-governor-is-off.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "With the governor off, ticks inside five minutes of the last usage read do not read usage again; the first tick and a tick five minutes later do"
+      proof: "grep: W1-T13837 criterion 1 in test/daemon/the-usage-read-is-paced-while-the-governor-is-off.test.ts"
+    - claim: "invariant:armed-reads-every-tick — with the governor armed, every tick still reads usage"
+      kind: guard
+      proof: "grep: W1-T13837 criterion 2 in test/daemon/the-usage-read-is-paced-while-the-governor-is-off.test.ts"
+    - claim: "The main loop's usage read is skipped only when the governor is off and the last read is younger than HEADROOM_SAMPLE_MAX_AGE_MS"
+      proof: "grep: headroomEnabled || daemonClock\\.now() - headroomSampler\\.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS in src/lib/daemon.ts"
+  rationale: |
+    WHY: Craig asked why the Azure host runs at load 40 to 70 on 8 cores, which stretches serve stalls and holds builds.
+    MEASURED on 2026-11-19 (Azure host, /proc sampling of the console daemon's cgroup): on every tick (about every
+    85 s) the daemon calls readUsageSnapshotPreferSdk. The SDK control request answers with no usable rate-limit
+    windows, so the daemon falls back to `claude -p /usage`, which ran 24 to 27 s and used 11.7 to 12 CPU seconds and
+    337 MB each time. That is about 0.14 cores per daemon, and the fleet, console and ops daemons all do it (ops logged
+    52 usage.probe_failed rows in one hour). The headroom governor is off (ruling a4153e): the reading only writes a
+    daemon.headroom telemetry row and gates nothing.
+  design: |
+    INVARIANT armed-reads-every-tick: with the governor armed, the main loop reads usage on every tick, exactly as before.
+    In runDaemon's main-loop headroom block (src/lib/daemon.ts), read usage only when
+    `headroomEnabled || daemonClock.now() - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS`.
+    The in-flight sampler already uses the same bound and the same lastSampleMs stamp, so the two readers share one
+    five-minute cadence. lastSampleMs starts at 0, so the first tick reads. When the governor is armed nothing changes:
+    every tick reads, and the unreadable and park logic is untouched. A skipped tick writes no daemon.headroom row;
+    the readers of that row (status board, account usage, usage telemetry) take the newest row and already accept a
+    reading 30 minutes old (USAGE_CACHE_MAX_AGE_MS).
+  falsifier: |
+    Disabled governor still reads every tick: criterion 1 fails. Armed governor skips a tick: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795093401000 with ~/rmd-work/bin/reserve-id.sh.

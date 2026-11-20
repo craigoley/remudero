@@ -910,15 +910,42 @@ const PROSE_BODY = (trailer?: string, invalidProof = true) => [
   ...(trailer === undefined ? [] : [`Remudero-Task: ${trailer}`]),
 ].join("\n");
 
-test("acceptance gate ignores body proof shape when head plan criteria resolve", () => {
-  const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+test("acceptance gate ignores body proof shape when head plan criteria resolve", async t => {
+  // A known implementation now needs a real complete range as well as its
+  // head criteria. Keep the prose body while supplying an in-scope change.
+  const { dir: root, git } = gitRepo({ scope: t, kind: "author-proof-shape" });
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  const testPath = "test/cross-repo-proof-suite-registry.test.ts";
+  writeFileSync(join(root, "plan", "tasks.d", "W1-T3525.yaml"), [
+    "- id: W1-T3525",
+    "  title: Proof suite fixture",
+    "  repo: remudero",
+    "  type: implement",
+    "  status: queued",
+    "  verify: auto",
+    "  risk: low",
+    "  depends_on: []",
+    `  files: [${testPath}]`,
+    "  acceptance:",
+    "    - claim: the plan proof is listed for readers",
+    `      proof: "unit test: ${testPath}"`,
+  ].join("\n") + "\n");
+  git("add", "plan");
+  git("commit", "-qm", "file scoped task");
+  const base = git("rev-parse", "HEAD");
+  mkdirSync(join(root, "test"));
+  writeFileSync(join(root, testPath), "// scoped proof file\n");
+  git("add", testPath);
+  git("commit", "-qm", "implement scoped task");
+  const head = git("rev-parse", "HEAD");
   const event = tmpEventFile({ pull_request: {
-    body: PROSE_BODY("W1-T3525", false), user: { login: "a-human" }, head: { sha: headSha },
+    body: PROSE_BODY("W1-T3525", false), user: { login: "a-human" }, base: { sha: base }, head: { sha: head },
   } });
   try {
-    const run = runGate(event.path);
-    assert.equal(run.status, 0, run.stdout + run.stderr);
-    assert.match(run.stdout, /acceptance-author-gate: OK/);
+    const run = await withExitCode(() => main(["--event-path", event.path], { root }));
+    assert.equal(run.exitCode, 0, run.out.join("\n") + run.err.join("\n"));
+    assert.match(run.out.join("\n"), /acceptance-author-gate: OK/);
   } finally {
     event.cleanup();
   }

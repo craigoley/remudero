@@ -1,0 +1,48 @@
+- id: W1-T13838
+  title: "The hold on a review whose setup was refused twice at the same input also counts refusals written by a healed reviewer tree, so an open reviewer-regression incident no longer re-admits the same refused review on every sweep pass"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # which refusal rows the W1-T13193 admission hold counts; a refusal at a different PR, head or input digest still never counts
+  band_meaning: span
+  origin: "operator-session#console-daemon-load-2026-11-19"
+  plan_refs:
+    - W1-T13193
+    - W1-T10269
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/review/a-setup-refusal-from-a-healed-tree-holds-the-review.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Two refusals at the same PR, head and input digest whose reviewer_code_sha is a healed_sha from a review.ran_from_healed_tree row hold the review, while the running reviewer code sha differs"
+      proof: "grep: W1-T13838 criterion 1 in test/review/a-setup-refusal-from-a-healed-tree-holds-the-review.test.ts"
+    - claim: "invariant:known-code-only — a refusal whose reviewer_code_sha is neither the running sha nor a healed sha still does not count"
+      kind: guard
+      proof: "grep: W1-T13838 criterion 2 in test/review/a-setup-refusal-from-a-healed-tree-holds-the-review.test.ts"
+    - claim: "reviewSetupRefusalsFor reads healed shas from review.ran_from_healed_tree rows"
+      proof: "grep: row\\.step === \"review\\.ran_from_healed_tree\" in src/lib/tick-read-worker.ts"
+  rationale: |
+    WHY: Craig asked why the Azure host is loaded. In the console daemon a reviewer-regression incident
+    (reviewer-regression-ef8b74910f25, opened 2026-11-16 13:44Z, revert does not apply) is still open, so every
+    console review runs from a healed tree. MEASURED on 2026-11-19: console PR #2715 was admitted and refused
+    (head-task-metadata-unavailable) 9 times between 12:47 and 12:56Z at one head and one input digest, and each
+    attempt cost a `git reset --hard` (115 to 130 MB), a tsx run of src/run-task.ts (6 to 12 CPU s, 440 MB) and an
+    esbuild child. #2592 was refused 51 times at one digest. The console ledger holds 533 review.ran_from_healed_tree rows.
+    CAUSE: W1-T13193's hold (reviewSetupRefusalsFor, src/lib/tick-read-worker.ts) counts a refusal only when its
+    reviewer_code_sha equals loadedReviewerCodeSha() (762d3a05 here). A healed run writes the healed tree's sha
+    (efa46f6b, e9890cfa), so no refusal ever counts while the incident is open.
+  design: |
+    INVARIANT known-code-only: a refusal counts only when its reviewer_code_sha is the running sha or a healed sha, and only at the same PR url, head sha, input digest and reason, as before.
+    In reviewSetupRefusalsFor, collect every healed_sha from review.ran_from_healed_tree rows in the ledger it is
+    given. A refusal row counts when its reviewer_code_sha is the running sha or one of those healed shas. All other
+    filters (PR url, head, input digest, reason, reset on review.pending_posted / review.posted) are unchanged, and so
+    is REVIEW_INPUT_ADMISSION_BACKSTOP. A new head or a new input digest still re-admits at once.
+  falsifier: |
+    Healed refusals still ignored: criterion 1 fails. Any code sha counted: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795093401000 with ~/rmd-work/bin/reserve-id.sh.
