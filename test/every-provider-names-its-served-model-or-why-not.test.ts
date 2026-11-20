@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
-import { fixedClock } from "#src/lib/clock.js";
+import { fixedClock, type Clock } from "#src/lib/clock.js";
 import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "#src/lib/benchmark-run.js";
 import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
@@ -42,14 +42,26 @@ function cashReply(extra: Record<string, unknown>) {
   }), { status: 200 });
 }
 
-async function runCash(fetchImpl: typeof fetch, model = "gpt-5-nano") {
+async function runCash(fetchImpl: typeof fetch, model = "gpt-5-nano", clock: Clock = fixedClock(NOW)) {
   const f = cashFixture();
   try {
     return await spawnOpenWeightWorker({
       cwd: f.root, workerHome: join(f.root, "home"), prompt: "classify",
-      env: { RMD_OPENWEIGHT_API_KEY: "test-only-key" }, clock: fixedClock(NOW), fetchImpl,
+      env: { RMD_OPENWEIGHT_API_KEY: "test-only-key" }, clock, fetchImpl,
     }, f.config, { model, effort: "low" });
   } finally { f.cleanup(); }
+}
+
+/** A clock that passes every request deadline the moment `expire()` runs: the reply then lands too late. */
+function lateClock() {
+  let ms = NOW;
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  return { clock, expire: () => { ms = NOW + 24 * 60 * 60_000; } };
+}
+
+/** A valid, settled reply that arrives after the attempt's deadline has passed. */
+function lateReply(expire: () => void, body: Record<string, unknown>): typeof fetch {
+  return async () => { expire(); return new Response(JSON.stringify(body), { status: 200 }); };
 }
 
 test("a cash response naming a DIFFERENT model than requested records the response's model, never the request", async () => {
@@ -220,4 +232,37 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(gptUnnamed.isError, false, gptUnnamed.stderr);
   assert.equal(gptUnnamed.servedModel, null);
   assert.equal(gptUnnamed.servedModelReason, CASH_SERVED_MODEL_REASONS.unnamed);
+
+  // A reply that named its model and settled its usage, then missed the deadline, still names that model:
+  // the attempt fails, but it did receive a response. Chat Completions, Responses and Foundry Messages alike.
+  const chatLate = lateClock();
+  const chatTimedOut = await runCash(lateReply(chatLate.expire, {
+    id: "chat-1", model: "gpt-5-nano-2025-08-07", choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 20, completion_tokens: 5 },
+  }), "gpt-5-nano", chatLate.clock);
+  assert.equal(chatTimedOut.isError, true, "the deadline still fails the attempt");
+  assert.equal(chatTimedOut.servedModel, "gpt-5-nano-2025-08-07");
+  assert.equal(chatTimedOut.servedModelReason, undefined);
+  const responsesLate = lateClock();
+  const responsesTimedOut = await runCash(lateReply(responsesLate.expire, {
+    id: "resp-1", model: "gpt-6.2-sol-2026-10-01", status: "completed",
+    output: [{ type: "message", content: [{ type: "output_text", text: "done" }] }],
+    usage: { input_tokens: 20, output_tokens: 5 },
+  }), "gpt-6.2-sol", responsesLate.clock);
+  assert.equal(responsesTimedOut.isError, true, "the deadline still fails the attempt");
+  assert.equal(responsesTimedOut.servedModel, "gpt-6.2-sol-2026-10-01");
+  assert.equal(workerLedgerFields(responsesTimedOut as WorkerResult).served_model, "gpt-6.2-sol-2026-10-01");
+  const foundryLate = lateClock();
+  const f = cashFixture();
+  try {
+    const foundryTimedOut = await spawnOpenWeightWorker({
+      cwd: f.root, workerHome: join(f.root, "home"), prompt: "classify", cashSqueezed: true,
+      env: { RMD_FOUNDRY_CLAUDE_API_KEY: "test-only-key", RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" },
+      clock: foundryLate.clock,
+      fetchImpl: lateReply(foundryLate.expire, { id: "msg-1", model: "claude-opus-5-5-20260920", stop_reason: "end_turn",
+        content: [{ type: "text", text: "done" }], usage: { input_tokens: 10, output_tokens: 4 } }),
+    }, f.config, { model: "claude-opus-5-5", effort: "medium" });
+    assert.equal(foundryTimedOut.isError, true, "the deadline still fails the attempt");
+    assert.equal(foundryTimedOut.servedModel, "claude-opus-5-5-20260920");
+  } finally { f.cleanup(); }
 });

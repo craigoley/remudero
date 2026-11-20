@@ -5781,6 +5781,8 @@ export async function spawnFoundryClaudeWorker(
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = foundryClaudeReceiptUsage(envelope);
           if (!usage) return;
           attempt.tokens = { input: usage.input_tokens, output: usage.output_tokens,
@@ -5823,7 +5825,6 @@ export async function spawnFoundryClaudeWorker(
         content?: Array<Record<string, unknown>>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const measured = foundryClaudeReceiptUsage(envelope);
       if (!measured) {
         settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: pending!.atIso, reason: "usage unavailable" });
@@ -6039,6 +6040,8 @@ export async function spawnOpenWeightWorker(
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = openWeightEnvelopeUsage(envelope, usesResponses);
           attempt.tokens = { input: validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0,
             output: validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0,
@@ -6110,7 +6113,6 @@ export async function spawnOpenWeightWorker(
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
