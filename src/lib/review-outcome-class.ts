@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parseReviewerUnable, parseReviewerVerdicts } from "./review.js";
+import { classifyDowngrade, parseReviewerUnable, parseReviewerVerdicts, withoutReviewerFollowUpRecords, type CriterionVerdict } from "./review.js";
 import { requiredSemanticRefusal } from "./required-semantic-review.js";
 
 export type ReviewOutcomeClass = "posted" | "withheld" | "refused";
@@ -17,6 +17,22 @@ export interface ReviewReplayInput {
   verdict_lines: readonly string[] | "unrecorded";
   setup_unavailable?: boolean;
   publication_refusal?: string;
+  /** W1-T13849: criteria (1-based) with an explained, untagged FAIL on a proof that executed and passed. */
+  downgrade_unclassified?: readonly number[];
+  /** W1-T13849: an earlier attempt at this head and input already withheld for that reason. */
+  downgrade_unclassified_withheld?: boolean;
+}
+export const DOWNGRADE_UNCLASSIFIED = "downgrade-unclassified";
+
+/** W1-T13849: the criteria an explained, untagged FAIL would downgrade although their proof executed and passed. */
+export function unclassifiedDowngrades(semantic: readonly (boolean | undefined)[] | undefined,
+  clauses: readonly (string | undefined)[] | undefined,
+  proofs: ReadonlyArray<Pick<CriterionVerdict, "proof_exec" | "floorMet">> | undefined): number[] {
+  return (proofs ?? []).flatMap((proof, i) => {
+    const clause = clauses?.[i];
+    return semantic?.[i] === false && clause !== undefined && proof.floorMet === true &&
+      proof.proof_exec === "executed_pass" && classifyDowngrade(clause).class === "unclassified" ? [i + 1] : [];
+  });
 }
 export interface ReviewOutcomeDecision { class: ReviewOutcomeClass; reason: string }
 
@@ -35,6 +51,9 @@ export function classifyReviewOutcome(input: ReviewReplayInput): ReviewOutcomeDe
       verdicts: parseReviewerVerdicts(input.verdict_lines.join("\n"), input.criteria_count),
       unable: parseReviewerUnable(input.verdict_lines.join("\n"), input.criteria_count) });
     if (reason !== undefined) return { class: "withheld", reason };
+    if (!input.plan_only && (input.downgrade_unclassified?.length ?? 0) > 0 && input.downgrade_unclassified_withheld !== true) {
+      return { class: "withheld", reason: DOWNGRADE_UNCLASSIFIED };
+    }
   }
   if (input.publication_refusal) return { class: "withheld", reason: input.publication_refusal };
   return { class: "posted", reason: input.verdict_lines === "unrecorded" ? "setup-gate-only" : "review-gates-complete" };
@@ -43,7 +62,7 @@ export function classifyReviewOutcome(input: ReviewReplayInput): ReviewOutcomeDe
 /** Scan independently of the verdict parser; keep tokens, never the reviewer's prose. */
 export function recordedReviewVerdictLines(transcript: string, count: number): string[] {
   const byCriterion = new Map<number, Map<string, string>>();
-  for (const line of transcript.split(/\r?\n/)) {
+  for (const line of withoutReviewerFollowUpRecords(transcript).split(/\r?\n/)) {
     // W1-T11428: UNABLE is recorded as its own token, so a replay sees an answered-but-unable criterion.
     for (const match of line.matchAll(/REVIEW_VERDICT[ \t]+(\d+)[ \t]*:[ \t]*(PASS|FAIL|UNABLE)\b/gi)) {
       if (match[0].length > 128) continue;
@@ -64,6 +83,7 @@ export function reviewReplayInputDigest(input: ReviewReplayInput): string {
     input.budget_present, input.untasked, input.head_task_resolved, input.own_task_record_missing,
     input.reviewer_outcome, input.verdict_lines, input.setup_unavailable === true,
     input.publication_refusal ?? null,
+    ...(input.downgrade_unclassified === undefined ? [] : [input.downgrade_unclassified, input.downgrade_unclassified_withheld === true]),
   ])).digest("hex");
 }
 
