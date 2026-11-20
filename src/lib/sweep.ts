@@ -6668,14 +6668,20 @@ function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<str
 }
 
 /** W1-T13949 — the newest `review.posted` row of an input that is a full success or failure verdict. A pending
- *  (cannot-evaluate) row after it is a hold that judged nothing, never a newer outcome. OBSERVED 2026-11-20 on #19691 and
+ *  cannot-evaluate row after it is a hold that judged nothing, never a newer outcome; a plain pending row is a review in flight. OBSERVED 2026-11-20 on #19691 and
  *  #19721: a lane FAIL was delivered, a fix worker's in-round review then posted a cannot-evaluate pending for the same head
  *  and input two minutes later, and every release path read that hold as the newest row, so no review or fix ran again. */
 function newestFullVerdictRow(posted: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
-  return posted.findLast(row => {
+  for (let i = posted.length - 1; i >= 0; i--) {
+    const row = posted[i]!;
     const verdict = row.decision_verdict as ReviewVerdict | undefined;
-    return (row.state === "success" || row.state === "failure") && verdict?.state === row.state && verdict.cannotEvaluate !== true;
-  });
+    // Only a cannot-evaluate hold is looked past. A plain pending row is an admitted review still judging: it is the newest
+    // outcome of the input, so nothing older is restored over it (W1-T11847).
+    if (row.state === "pending" && verdict?.cannotEvaluate === true) continue;
+    return (row.state === "success" || row.state === "failure") && verdict?.state === row.state && verdict.cannotEvaluate !== true
+      ? row : undefined;
+  }
+  return undefined;
 }
 
 /** W1-T12994 — a `review.posted` row of state pending is a cannot-evaluate HOLD: it folds as delivered, yet nothing was judged.
