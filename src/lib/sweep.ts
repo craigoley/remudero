@@ -1027,6 +1027,7 @@ const TERMINAL_UNCREDITABLE_HEAD_STEP = "sweep.fix.uncreditable_head";
  *  the suppression is legible — "we saw this and chose not to page you" must be greppable. */
 const TERMINAL_UNCREDITABLE_HEAD_HEALTHY_STEP = "sweep.terminal_head.not_stuck";
 const TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP = "sweep.fix.uncreditable_head_escalated";
+const TERMINAL_UNCREDITABLE_HISTORY_HOLD = "terminal uncreditable head history is unreadable";
 const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   holder: "sweep.terminal-uncreditable-heads",
   steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
@@ -3001,7 +3002,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Keep an unread-history hold through this build to avoid retrying a failed archive for each PR.
     if (terminalState.refreshPending || (recheckReadableHistory && terminalState.historyHold === undefined)) {
       const history = readTerminalUncreditableHistory(ledgerPath);
-      terminalState.historyHold = history === undefined ? "terminal uncreditable head history is unreadable" : undefined;
+      terminalState.historyHold = history === undefined ? TERMINAL_UNCREDITABLE_HISTORY_HOLD : undefined;
       if (history !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, history);
       terminalState.refreshPending = false;
     }
@@ -26374,20 +26375,11 @@ export async function runSweep(
                     instrumentEntanglementPaths: pr.instrumentEntanglementPaths,
                     proofDiscrimination,
                   };
-              // W1-T2752 — a delivered terminal decision for this EXACT PR@head is FINAL:
-              // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
-              // check), but only after being invoked, so an unmoved head still recorded a phantom
-              // `acted:true` on every poll after the one that delivered the escalation. This outer
-              // check stands the whole disposition down synchronously before the claim below.
-              // A cached entry whose delivery failed falls through, as
-              // {@link SweepDeps.terminalFixStandDown}'s own doc requires.
+              // W1-T2752 keeps a delivered escalation final for the exact PR@head.
+              // Unread history holds fix work. An empty diff can still establish supersession.
               const terminalStandDown = deps.terminalFixStandDown?.(pr);
-              if (terminalStandDown) {
-                acted = false;
-                standDownReason = terminalStandDown;
-                break;
-              }
-              if (staleProofs && pr.changedFiles?.length === 0) {
+              const canCloseSuperseded = !terminalStandDown || terminalStandDown === TERMINAL_UNCREDITABLE_HISTORY_HOLD;
+              if (canCloseSuperseded && staleProofs && pr.changedFiles?.length === 0) {
                 if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
                   // W1-T5030: the break keeps a deferred PR off `dispatchFix` — a ci-log worker cannot edit a stale proof.
                   acted = false;
@@ -26409,7 +26401,7 @@ export async function runSweep(
                 await deps.close(pr, reason);
                 break;
               }
-              if (emptyDiffReviewFailure(pr)) {
+              if (canCloseSuperseded && emptyDiffReviewFailure(pr)) {
                 if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
                   acted = false;
                   standDownReason = `empty-diff supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
@@ -26420,6 +26412,11 @@ export async function runSweep(
                 reason = `superseded — this PR's diff against main is empty, so nothing is left to merge; its failed review cannot be repaired in it (#10265)`;
                 extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
                 await deps.close(pr, reason);
+                break;
+              }
+              if (terminalStandDown) {
+                acted = false;
+                standDownReason = terminalStandDown;
                 break;
               }
               // W1-T4004 — THE DETERMINISTIC REPAIR IS TRIED FIRST, AND ONLY UNDER THREE CONDITIONS

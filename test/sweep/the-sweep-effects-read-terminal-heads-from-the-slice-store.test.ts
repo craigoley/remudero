@@ -10,7 +10,7 @@ import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createIncrementalLedgerUnion, resolveLedgerUnion } from "#src/lib/ledger-union.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { parseLedger } from "#src/lib/retro.js";
-import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, runSweep, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -326,6 +326,62 @@ if (process.argv[2] === childFlag) {
     writeFileSync(archive, original);
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
   });
+
+  for (const unreadRotation of [false, true]) {
+    test(`W1-T12271 criterion 3: stale-proof supersession with ${unreadRotation ? "unread" : "complete"} history`, async (t) => {
+      const { root, path, archive } = fixture(t);
+      if (unreadRotation) writeFileSync(archive, "unreadable gzip");
+      const now = Date.now();
+      const stale: OpenPrView = {
+        ...candidates[0]!, prUrl: "https://github.com/acme/scratch/pull/1",
+        taskId: "W1-T1", body: "Remudero-Task: W1-T1\n", headRefName: "run-W1-T1-1795088624327",
+        reviewState: "pending", checksState: "red", unmetCriteria: [], priorStrikes: 0,
+        lastActivityAt: new Date(now).toISOString(), autoMergeArmed: false,
+        redRequiredChecks: ["proof-discrimination"], changedFiles: [],
+        ciFailures: [{ name: "proof-discrimination", conclusion: "FAILURE", logTail: [
+          "proof-discrimination: FAIL — 1 proof(s) pass at both PR head and merge base (abc123):",
+          "  proof: unit test: a stale fixture proof",
+        ].join("\n") }],
+      };
+      const reviewFailed: OpenPrView = {
+        ...stale, ...candidates[3]!, prUrl: "https://github.com/acme/scratch/pull/4",
+        taskId: "W1-T4", body: "Remudero-Task: W1-T4\n", headRefName: "run-W1-T4-1795088624327",
+        reviewState: "failure", checksState: "green", redRequiredChecks: [], ciFailures: undefined,
+        unmetCriteria: [{ claim: "still needs work", proof: "unit test: missing fixture", met: false,
+          reason: "no match", proof_exec: "executed_fail" }],
+      };
+      const actionable: OpenPrView = {
+        ...reviewFailed, ...candidates[4]!, prUrl: "https://github.com/acme/scratch/pull/5",
+        taskId: "W1-T5", body: "Remudero-Task: W1-T5\n", headRefName: "run-W1-T5-1795088624327",
+        changedFiles: ["src/lib/sweep.ts"],
+      };
+      const { terminalFixStandDown } = buildEffects(root, path);
+      assert.ok(terminalFixStandDown);
+      assert.equal(terminalFixStandDown(stale), unreadRotation ? unreadHistoryReason : standDownReason);
+      const closed: number[] = [];
+      const dispatched: number[] = [];
+      await runSweep([stale, reviewFailed, actionable], {
+        ledgerPath: path, runId: "SWEEP-terminal-heads", now: () => now, terminalFixStandDown,
+        arm: () => assert.fail("unexpected arm"), escalate: () => assert.fail("unexpected escalation"),
+        repairMetadata: () => ({ repaired: false, notMetadata: true, reason: "no deterministic metadata repair" }),
+        close: (pr) => { closed.push(pr.prNumber); },
+        dispatchFix: (pr) => { dispatched.push(pr.prNumber); },
+      });
+      const disposed = (pr: OpenPrView) => parseLedger(readFileSync(path, "utf8"))
+        .find((row) => row.step === "sweep.disposed" && row.pr_number === pr.prNumber);
+      assert.deepEqual(closed, unreadRotation ? [stale.prNumber, reviewFailed.prNumber] : [reviewFailed.prNumber]);
+      assert.deepEqual(dispatched, unreadRotation ? [] : [actionable.prNumber]);
+      assert.equal(disposed(reviewFailed)?.empty_diff_superseded, true);
+      if (unreadRotation) {
+        assert.equal(disposed(stale)?.stale_proof_superseded, true);
+        assert.equal(disposed(actionable)?.stand_down_reason, unreadHistoryReason);
+        assert.equal(disposed(actionable)?.acted, false);
+      } else {
+        assert.equal(disposed(stale)?.stand_down_reason, standDownReason);
+        assert.equal(disposed(stale)?.acted, false);
+      }
+    });
+  }
 
   test("W1-T12271 criterion 3: same-size, same-mtime corruption holds warm and restarted dispatch", async (t) => {
     const { root, dir, path, archive } = fixture(t);
