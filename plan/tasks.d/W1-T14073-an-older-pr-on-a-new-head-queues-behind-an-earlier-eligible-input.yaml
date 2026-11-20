@@ -1,0 +1,43 @@
+- id: W1-T14073
+  title: A review input is admitted in the order it became eligible, not by its PR's age
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  origin: operator-session#review-stall-2026-11-20
+  plan_refs: [W1-T12534, W1-T2426, W1-T11153, W1-T12994]
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/an-older-pr-on-a-new-head-queues-behind-an-earlier-eligible-input.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    PROVEN in a fixture at origin/main 47c987a06: reviewAdmissionKey ranks on the PR's createdAt, so an older PR that
+    a fix re-pushes keeps winning the review slot over inputs that became eligible earlier, 10 of 10 rounds at width 1.
+    OBSERVED 2026-11-20: the 20:58Z census found 11 green PRs with no review status. #19888 (W1-T13957, head
+    475b1fe1c) read "not admitted this pass: semantic post-review admission bound 0" at 19:44, 20:49 and 20:58Z while
+    older PRs on fresh heads were admitted (#19515 three times, #19728 twice).
+    NOT W1-T12534: that task ranks only a head minted by absent-repush by its CI-green time (repushedHeadQueuedAt).
+    This one ranks every review input by when it became eligible. NOT W1-T2426: that task stopped the activity key
+    from being bumped by the review itself and moved the key to createdAt, which is the key this task replaces.
+  design: |
+    Rank each review input by the ts of the first sweep.review_eligible row for its review_key, falling back to the
+    PR's createdAt when no such row exists. Apply the same key in selectReviewAdmissions and in
+    orderPendingReviewsNeedsPersonLast, by generalizing repushedHeadQueuedAt (W1-T12534) from absent-repush heads to
+    every review key, so the full pass and the light pass agree.
+
+    INVARIANT eligible-input-is-admitted: at width 1, an input is admitted within K slot releases, where K is the number of inputs that became eligible before it.
+  acceptance:
+    - claim: "An older PR that re-enters review on a fix head is admitted after an input that became eligible earlier"
+      proof: "grep: W1-T14073 criterion 1: in test/sweep/an-older-pr-on-a-new-head-queues-behind-an-earlier-eligible-input.test.ts"
+    - claim: "The full pass and the light pass pick the same first PR for one ledger"
+      proof: "grep: W1-T14073 criterion 2: in test/sweep/an-older-pr-on-a-new-head-queues-behind-an-earlier-eligible-input.test.ts"
+    - claim: "invariant:eligible-input-is-admitted — at width 1, an input is admitted within K slot releases, where K is the number of inputs that became eligible before it"
+      kind: guard
+      proof: "grep: W1-T14073 criterion 3: in test/sweep/an-older-pr-on-a-new-head-queues-behind-an-earlier-eligible-input.test.ts"
+  falsifier: |
+    Restore the createdAt key: the older PR on its fix head is admitted first in criterion 1, and in the invariant
+    case the later input is never admitted within K releases.
