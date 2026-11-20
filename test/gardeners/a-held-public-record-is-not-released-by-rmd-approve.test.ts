@@ -204,6 +204,29 @@ test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only
   }
 });
 
+test("W1-T13785: the working-tree event returns no stamp while the public plan is missing", t => {
+  const fx = opsCatalog(t, SOUND_OPS);
+  const publicRoot = join(fx.stateDir, "public");
+  const planPath = join(publicRoot, "plan", "tasks.yaml");
+  mkdirSync(join(publicRoot, "plan"), { recursive: true });
+  writeFileSync(planPath, PUBLIC_TEXT);
+  const ports = productionStuckStatePorts({
+    stateDir: fx.stateDir, api: fx.api, publicRoot, publicMainCommit: () => undefined, gardenNames: [],
+    log: () => undefined, escalate: () => null, destinationRead: async () => undefined, approve: async () => 0,
+  });
+  const readStamp = ports.eventStamps["public-working-tree"]!;
+  const before = readStamp();
+  assert.equal(typeof before, "string");
+
+  rmSync(planPath);
+  assert.equal(readStamp(), undefined);
+
+  writeFileSync(planPath, PUBLIC_TEXT + record("PUB-3"));
+  const after = readStamp();
+  assert.equal(typeof after, "string");
+  assert.notEqual(after, before);
+});
+
 test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged public dependant even when branch refs do not move", async t => {
   const fx = opsCatalog(t, SOUND_OPS);
   const main = publicMain(t, WORLDS[2]!.publicText);
