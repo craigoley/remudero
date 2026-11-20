@@ -145,16 +145,21 @@ test("W1-T13951 criterion 2: an evicted message that was cut once counts only it
     const spillKept = 64 * 1024 + 256 * 1024;
     const outputs = ["a".repeat(1536 * 1024), "b".repeat(1536 * 1024)];
     const evicted = "E".repeat(2 * 1024 * 1024);
+    // While the 2 MiB message streams in, "first" is reclaimed for it before it spills; the cut message then
+    // heads the retained blocks, and a final message that fits the limit alone reclaims it and "B" in turn.
+    const final = "C".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 200);
     child.message("first");
     child.command(outputs[0]!);
     child.message(evicted);
     child.command(outputs[1]!);
     child.message("B".repeat(400 * 1024));
-    child.message("C".repeat(400 * 1024));
+    child.message(final);
     child.end();
     const result = await child.run;
     assert.ok(!result.blocks.some(block => block.startsWith("EEEE")), "the cut message was evicted");
-    const expected = outputs.reduce((sum, output) => sum + commandLine(output) - spillKept, 0) + Buffer.byteLength(evicted);
+    assert.equal(result.text, final);
+    const expected = outputs.reduce((sum, output) => sum + commandLine(output) - spillKept, 0) + Buffer.byteLength(evicted)
+      + Buffer.byteLength("first") + 400 * 1024;
     assert.equal(result.outputTruncation!.droppedBytes, expected);
     const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
     assert.equal(receipt.output_truncation.droppedBytes, expected);
@@ -188,5 +193,54 @@ test("W1-T13951 criterion 3: a final message whose spilled line cannot be recons
     assert.equal(result.text, "");
     assert.equal(result.outputRetention?.text.state, "truncated");
     assert.equal(result.isError, true);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 1: a final message that fits the limit only with every earlier message reclaimed is kept whole", async () => {
+  const child = reviewer();
+  try {
+    // The reviewer's counterexample: 2 MiB of command output, a 400 KiB earlier message, and a final message of
+    // 1,048,476 bytes whose JSONL line still fits the 1 MiB limit with its envelope.
+    const final = "FINAL\n" + "f".repeat(1_048_476 - 6);
+    const line = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: final } });
+    assert.ok(Buffer.byteLength(line) <= CODEX_WORKER_STDOUT_MAX_BYTES, "the final line fits the limit alone");
+    child.message("EARLIER\n" + "e".repeat(400 * 1024));
+    child.command("c".repeat(2 * 1024 * 1024));
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.equal(Buffer.byteLength(result.text), Buffer.byteLength(final));
+    assert.ok(result.text === final, "the final message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
+    const bytes = result.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.ok(bytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.equal(result.outputTruncation!.retainedBytes, bytes);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: a message whose source opens with the marker text counts only source bytes when cut again", async () => {
+  const child = reviewer();
+  try {
+    // The spilled line keeps its first 64 KiB and last 256 KiB; the marker it gets names the bytes between.
+    // Build the source so it opens with that exact marker text, then cut the retained block a second time.
+    const omitted = 1_500_000;
+    const marker = (bytes: number) => `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
+    const envelope = (text: string) => JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } });
+    const base = Buffer.byteLength(envelope(marker(omitted)));
+    const source = marker(omitted) + "x".repeat(omitted + 64 * 1024 + 256 * 1024 - base);
+    assert.equal(Buffer.byteLength(envelope(source)) - 64 * 1024 - 256 * 1024, omitted);
+    child.message(source);
+    child.message("C".repeat(1_000_000));
+    child.end();
+    const result = await child.run;
+    const first = result.blocks[0]!;
+    assert.ok(first.startsWith(marker(omitted)), "the source copy of the marker text is retained");
+    const markers = [...first.matchAll(/\n\[Codex output truncated: (\d+) bytes omitted\]\n/g)];
+    assert.equal(markers.length, 2, "the source copy and the one marker of the second cut");
+    const synthetic = markers[1]![0];
+    // Every source byte is either retained in the block or counted as dropped; no marker byte is counted.
+    const retainedSource = Buffer.byteLength(first) - Buffer.byteLength(synthetic);
+    assert.equal(result.outputTruncation!.droppedBytes, Buffer.byteLength(source) - retainedSource);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
