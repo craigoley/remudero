@@ -13,6 +13,7 @@ import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_REROUTE_RE,
   CODEX_SERVED_MODEL_REASON,
+  CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES,
   cashResponseModel,
   codexServedModel,
   cashServedModel,
@@ -164,13 +165,17 @@ async function runCodex(turnItems: Record<string, unknown>[] = [], turns = 1): P
 }
 
 /** A codex that streams `items` in one turn, then hangs until the clock bound tears it down. */
-async function runHungCodex(items: Record<string, unknown>[]): Promise<unknown> {
+async function runHungCodex(items: Record<string, unknown>[], end: "hang" | "overflow" | "crash" = "hang"): Promise<unknown> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-hung-"));
   const stdout = new PassThrough();
   const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
   setImmediate(() => {
-    for (const event of [{ type: "thread.started", thread_id: "codex-thread" }, { type: "turn.started" },
-      ...items.map((item) => ({ type: "item.completed", item }))]) stdout.write(`${JSON.stringify(event)}\n`);
+    const lines = [{ type: "thread.started", thread_id: "codex-thread" }, { type: "turn.started" },
+      ...items.map((item) => ({ type: "item.completed", item }))].map((event) => `${JSON.stringify(event)}\n`).join("");
+    // `overflow`: the same complete lines arrive in ONE read chunk with the byte that crosses the stdout backstop.
+    stdout.write(end === "overflow" ? Buffer.concat([Buffer.from(lines), Buffer.alloc(CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, "x")]) : lines);
+    // `crash`: the child process itself fails after the stream named the model.
+    if (end === "crash") setImmediate(() => process.emit("error", new Error("codex child crashed")));
   });
   try {
     await spawnCodexWorker({
@@ -275,6 +280,13 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(hungUnnamed.served_model, null);
   assert.equal(hungUnnamed.served_model_reason, CODEX_SERVED_MODEL_REASON);
   assert.equal("served_model" in spawnFailureDetail(new Error("plain"), true), false, "an error with no observation adds nothing");
+  // A complete reroute that shares one read chunk with the first byte past the stdout backstop still names the model.
+  const overflowed = await runHungCodex([reroute], "overflow");
+  assert.ok(overflowed instanceof Error && !/clock bound/.test(overflowed.message), String(overflowed));
+  assert.equal(spawnFailureDetail(overflowed, true).served_model, "gpt-5.2");
+  const crashed = await runHungCodex([reroute], "crash");
+  assert.ok(crashed instanceof Error && /crashed/.test(crashed.message), String(crashed));
+  assert.equal(spawnFailureDetail(crashed, true).served_model, "gpt-5.2");
 
   // Through production spawnWorker: the watchdog replaces a cash rung that named its model with WorkerAbandonedError, and
   // the failed-attempt row still records that model (or the rung's named reason) through the error's cause.

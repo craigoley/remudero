@@ -6430,12 +6430,16 @@ async function spawnCodexWorkerInPrivateTemp(
           reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
       }
     }
-    const text = stdoutDecoder.write(chunk);
+    const room = CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES - stdoutBytes;
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
+      // W1-T13868: the bytes still inside the budget are read after the limit's evidence is taken, so a complete
+      // reroute line among them names the served model however the chunks happened to split.
+      if (room > 0) stdout.push(stdoutDecoder.write(chunk.subarray(0, room)), Date.now());
       return;
     }
+    const text = stdoutDecoder.write(chunk);
     const observedAt = Date.now();
     stdout.push(text, observedAt);
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
@@ -6539,6 +6543,10 @@ async function spawnCodexWorkerInPrivateTemp(
       qualitySuspect: false,
       workerDurationMs: Date.now() - startedAt,
     };
+  } catch (error) {
+    // W1-T13868: ANY failure after the stream named a model carries it (or the named reason) to the failed-attempt row.
+    if (error instanceof Error && !("servedModel" in error)) withObservedServedModel(error, stdout.observedServedModel());
+    throw error;
   } finally {
     // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
     const droppedStderr = stderrRetainer.truncation();
