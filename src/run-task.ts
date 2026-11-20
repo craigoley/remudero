@@ -2065,7 +2065,15 @@ export function buildFreshTreeReviewRunner(
     // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
     // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
     let ownTree = false;
-    const reviewInOwnTree = () => { ownTree = true; return inPerAttemptTree(repoDir, deps, "reviewer", sha, review); };
+    const reviewInOwnTree = async (shared: unknown) => {
+      ownTree = true;
+      try {
+        return await inPerAttemptTree(repoDir, deps, "reviewer", sha, review);
+      } catch (err) {
+        // The skip names both causes: why the shared tree was not used, and why the own tree failed.
+        throw new Error(`${(shared as Error)?.message ?? String(shared)}; the review's own tree failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    };
     try {
       let worktree = prepared.get(sha);
       if (worktree === undefined) {
@@ -2077,7 +2085,7 @@ export function buildFreshTreeReviewRunner(
         } catch (err) {
           // Often another child's cut that is still checking out (the cut race); nothing is cached.
           if (!(err instanceof UnprovenFreshTreeError)) throw err;
-          return await reviewInOwnTree();
+          return await reviewInOwnTree(err);
         }
         prepared.set(sha, worktree);
       }
@@ -2098,7 +2106,7 @@ export function buildFreshTreeReviewRunner(
       } catch (err) {
         // A live review in another process holds the shared tree and this action never ran.
         if (started || !(err instanceof ReviewerWorktreeLeasedError)) throw err;
-        return await reviewInOwnTree();
+        return await reviewInOwnTree(err);
       }
     } catch (err) {
       if (!ownTree) prepared.delete(sha);
