@@ -1367,7 +1367,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -2929,7 +2929,7 @@ import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
-import { codexHarnessCommits, isCodexWorkerOutputLimitError, observeServedModelsPerCall, type CodexHarnessCommit } from "./lib/worker-provider.js";
+import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
 import { aliasRewriteFields, mergeHeadPresent, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter } from "./lib/added-test-alias-rewrite.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
@@ -10785,57 +10785,9 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
   };
 }
 
-/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
- * The call/result/error is authoritative; evidence collection cannot change any of them. */
-export function recordBenchmarkWorkerAttempt(
-  call: () => Promise<WorkerResult>,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  selected: () => { id: string } | undefined,
-  stopPolling: () => void,
-): Promise<WorkerResult> {
-  // W1-T13868: this call's own served-model observations. Two calls cancelled by one signal throw ONE error, so
-  // an error-keyed record shared by every call would let the second overwrite the first's model.
-  const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
-  const failed = (error: unknown): void => {
-    try {
-      const assignment = selected();
-      log("worker.attempt", {
-        ...attemptAssignmentJoin(assignment?.id, true),
-        success: false,
-        worker_failure: "spawn-threw-before-result",
-        ...spawnFailureDetail(error, assignment !== undefined, servedModelObservations),
-      });
-    } catch { /* preserve the original worker error */ }
-  };
-  let workerCall: Promise<WorkerResult>;
-  try {
-    workerCall = observeServedModelsPerCall(servedModelObservations, call);
-  } catch (error) {
-    failed(error);
-    stopPolling();
-    throw error;
-  }
-  return workerCall.then((result) => {
-    try {
-      const resultId = result.selectionAssignmentId;
-      const selection = selected();
-      const assignmentId = resultId ?? selection?.id;
-      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
-      log("worker.attempt", {
-        ...attemptAssignmentJoin(assignmentId, false),
-        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
-        ...(result.isError || result.apiError || result.usageRefusal
-          ? { success: false }
-          : resultEnvelopeObserved ? { success: true } : {}),
-        ...benchmarkWorkerAttemptResources(result),
-      });
-    } catch { /* telemetry cannot alter the returned worker result */ }
-    return result;
-  }, (error: unknown) => {
-    failed(error);
-    throw error;
-  }).finally(stopPolling);
-}
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper (W1-T13868: it lives
+ * beside the non-dispatch receipt writer it shares the per-call served-model table with). */
+export { recordBenchmarkWorkerAttempt };
 
 /** Ledger non-dispatch assignments before execution; the worker catches sink failures. */
 function ledgerNonDispatchAssignment(

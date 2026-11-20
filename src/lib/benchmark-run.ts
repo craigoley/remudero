@@ -857,3 +857,55 @@ function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLo
     return { written, reason };
   }
 }
+
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  // W1-T13868: this call's own served-model observations. Two calls cancelled by one signal throw ONE error, so
+  // an error-keyed record shared by every call would let the second overwrite the first's model.
+  const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
+  const failed = (error: unknown): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...attemptAssignmentJoin(assignment?.id, true),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, assignment !== undefined, servedModelObservations),
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = observeServedModelsPerCall(servedModelObservations, call);
+  } catch (error) {
+    failed(error);
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...attemptAssignmentJoin(assignmentId, false),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        ...benchmarkWorkerAttemptResources(result),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed(error);
+    throw error;
+  }).finally(stopPolling);
+}

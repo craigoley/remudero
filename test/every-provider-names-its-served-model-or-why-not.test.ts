@@ -7,11 +7,11 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, recordBenchmarkWorkerAttempt, spawnFailureDetail } from "#src/lib/benchmark-run.js";
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { recordReviewFindings } from "#src/lib/review-findings.js";
-import { recordBenchmarkWorkerAttempt } from "#src/run-task.js";
+
 import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_REROUTE_RE,
