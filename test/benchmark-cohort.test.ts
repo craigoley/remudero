@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import type { BenchmarkCohort } from "#src/lib/benchmark-cohort.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const row = (value: Record<string, unknown>) => JSON.stringify(value) + "\n";
 
@@ -713,5 +715,61 @@ test("benchmark cohort repairs a quarantined source without raw deletion", async
       "repair releases a formerly excluded clean assignment in the affected partition");
     assert.equal(readFileSync(bad).equals(gzipSync(corrected)), true);
     assert.equal(repaired.snapshot.quarantine, undefined);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("W1-T13867 criterion 1: every cohort row carries its calls' verified task outcomes, or the named reason no join exists", async () => {
+  const cutoff = "2026-09-27T23:00:00.000Z";
+  const sha = "a".repeat(40);
+  const observed = <T>(value: T) => ({ state: "observed" as const, value, source: "fixture", asOf: cutoff });
+  const notCollected = { state: "unavailable" as const, reason: "not-collected", source: "fixture", asOf: cutoff };
+  const at = (i: number, seconds = 0) => `2026-09-27T10:${String(i).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.000Z`;
+  // Model and PR state per assignment; no `pr` = no case file for that task.
+  const cases: { model: string; pr?: "MERGED" | "CLOSED" | "OPEN" }[] = [
+    { model: "gpt-luna", pr: "MERGED" }, { model: "gpt-luna", pr: "CLOSED" }, { model: "gpt-luna", pr: "OPEN" },
+    { model: "gpt-luna" }, { model: "claude-opus", pr: "MERGED" }, { model: "claude-opus", pr: "MERGED" },
+  ];
+  const caseFiles: TaskCaseFile[] = cases.flatMap(({ model, pr }, i) => pr === undefined ? [] : [{
+    version: "task-case-file-v1", taskId: `W1-T${9000 + i}`, asOf: cutoff,
+    plan: observed({ title: "example", dependsOn: [], verify: "auto", risk: "low" }),
+    ledger: observed({ windowStart: "2026-08-28T12:10:00.000Z", forms: { gzip: 0, plain: 0, live: 1 }, matchingRows: 2 }),
+    runs: [{ runId: `run-${i}`, startedAt: at(i), assignmentId: `assign-${i}`, selectedProvider: "codex", selectedModel: model,
+      servedModel: null, billingMode: "api", costUsd: 0.02, verdict: "passed", prNumber: 2000 + i }],
+    pr: observed({ number: 2000 + i, url: `https://github.com/craigoley/remudero/pull/${2000 + i}`, headSha: sha, state: pr, taskCredit: pr === "MERGED" }),
+    review: observed({ headSha: sha, status: "success" }), acceptance: observed({ headSha: sha, status: "success" }),
+    ci: observed({ headSha: sha, status: "success" }),
+    mergedSource: pr === "MERGED" ? observed({ prNumber: 2000 + i, mergedAt: "2026-09-27T22:00:00Z" }) : notCollected,
+    deployment: notCollected, runtime: notCollected, next: null,
+  } as TaskCaseFile]);
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-call-outcome-"));
+  try {
+    writeFileSync(join(stateDir, "ledger.ndjson"), cases.map(({ model }, i) => row({ ts: at(i), host: "core-host",
+      task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.assignment",
+      worker_assignment: { id: `assign-${i}`, requested: { model }, selected: { provider: "codex", model } },
+      benchmark_run: { work: { taskClass: { state: "observed", value: "fix" } } } })
+      + row({ ts: at(i, 30), host: "core-host", task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.attempt",
+        selection_assignment_id: `assign-${i}`, success: true, billing_mode: "api", total_cost_usd: 0.02 })).join(""));
+    const joined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles })).snapshot;
+    const byModel = Object.fromEntries(joined.cohorts.map((cohort) => [cohort.dimensions.model, cohort]));
+    assert.deepEqual(Object.keys(byModel).sort(), ["claude-opus", "gpt-luna"]);
+    for (const cohort of joined.cohorts) {
+      assert.notEqual(typeof cohort.verifiedOutcome, "string", "case files were joined, so no row may name the no-join reason");
+      const outcome = cohort.verifiedOutcome as Exclude<typeof cohort.verifiedOutcome, string>;
+      assert.equal(outcome.assignments, cohort.assignments, "every call in the row is accounted for");
+      assert.equal(outcome.completed + outcome.endedWithoutCompletion + outcome.censored + outcome.unavailable, cohort.assignments);
+    }
+    const luna = byModel["gpt-luna"]!.verifiedOutcome as Exclude<BenchmarkCohort["verifiedOutcome"], string>;
+    assert.equal(luna.completed, 1); assert.equal(luna.censored, 1); assert.equal(luna.unavailable, 2);
+    assert.equal(Object.values(luna.reasons).reduce((sum, count) => sum + count, 0), luna.endedWithoutCompletion + luna.unavailable,
+      "each call neither completed nor censored names why");
+    assert.ok(luna.reasons["closed-unmerged-unadjudicated"] === 1, "a closed PR names its reason");
+    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 2, completed: 2, endedWithoutCompletion: 0,
+      censored: 0, unavailable: 0, reasons: {} });
+    const totals = joined.verifiedTaskOutcome as Exclude<typeof joined.verifiedTaskOutcome, string>;
+    assert.equal(totals.coverage.completed, 3, "the cohort-level join is unchanged");
+    rmSync(join(stateDir, "benchmark-cohort-checkpoint.json"), { force: true });
+    const unjoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
+    assert.equal(unjoined.cohorts.length, 2);
+    for (const cohort of unjoined.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

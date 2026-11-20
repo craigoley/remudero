@@ -57,7 +57,23 @@ export interface BenchmarkCohort {
   servedModelObserved: number;
   apiCostUsd: number;
   subscriptionNotionalUsd: number;
+  /** W1-T13867: the verified outcome of the task behind each call in this cohort, from the same case-file join and
+   * cutoff as `verifiedTaskOutcome`, or that join's named unavailable reason. Recomputed on every snapshot. */
+  verifiedOutcome: CohortVerifiedOutcome | typeof NO_VERIFICATION_JOIN;
 }
+
+/** W1-T13867: one cohort's share of the W1-T4608 join. assignments = completed + endedWithoutCompletion + censored +
+ * unavailable, and `reasons` names every assignment neither completed nor censored, as in BenchmarkVerifiedOutcome. */
+export interface CohortVerifiedOutcome {
+  assignments: number;
+  completed: number;
+  endedWithoutCompletion: number;
+  censored: number;
+  unavailable: number;
+  reasons: Record<string, number>;
+}
+
+const NO_VERIFICATION_JOIN = "unavailable-no-github-verification-join" as const;
 
 export interface CohortFieldCoverage {
   denominator: number;
@@ -687,7 +703,7 @@ function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
   return eligible;
 }
 
-type CohortAssignment = VerifiedAssignment & { exposure: Omit<ModelExposure, "verified" | "cost"> };
+type CohortAssignment = VerifiedAssignment & { cohortKey: string; exposure: Omit<ModelExposure, "verified" | "cost"> };
 
 function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): CohortAssignment[] {
   const index = indexEvidence(sources);
@@ -703,7 +719,7 @@ function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): Coho
     const billingMode = sameRunCall?.billing_mode;
     const servedModel = typeof sameRunCall?.served_model === "string" && sameRunCall.served_model ? sameRunCall.served_model : null;
     const requested = object(object(row.worker_assignment)?.requested)?.model;
-    assignments.push({ assignmentId: id,
+    assignments.push({ assignmentId: id, cohortKey: JSON.stringify(dimensions),
       taskId: typeof row.task_id === "string" ? row.task_id : null,
       runId: typeof row.run_id === "string" ? row.run_id : null,
       assignedAt: typeof row.ts === "string" ? row.ts : null,
@@ -798,11 +814,34 @@ function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAss
     coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
 }
 
+/** W1-T13867: give every cohort row its calls' verified outcomes, joined one assignment at a time against its task's
+ * case files at `cutoff`. Without case files every row names the join's unavailable reason, never a guessed outcome. */
+function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOutcome">[], assignments: CohortAssignment[],
+  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohort[] {
+  if (!caseFiles) return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: NO_VERIFICATION_JOIN }));
+  const byTask = caseFilesByTask(caseFiles);
+  const tallies = new Map<string, CohortVerifiedOutcome>();
+  for (const assignment of assignments) {
+    const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
+    const tally = tallies.get(assignment.cohortKey)
+      ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} };
+    tally.assignments += coverage.assignments;
+    tally.completed += coverage.completed;
+    tally.endedWithoutCompletion += coverage.endedWithoutCompletion;
+    tally.censored += coverage.censored;
+    tally.unavailable += coverage.unavailable;
+    for (const [reason, count] of Object.entries(coverage.reasons)) tally.reasons[reason] = (tally.reasons[reason] ?? 0) + count;
+    tallies.set(assignment.cohortKey, tally);
+  }
+  return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: tallies.get(JSON.stringify(cohort.dimensions))
+    ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} } }));
+}
+
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  if (!caseFiles) return snapshot;
+  if (!caseFiles) return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, [], undefined, cutoff) };
   const assignments = cohortAssignments(sources, faults);
-  return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
+  return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff), verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
     modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
     selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
@@ -853,7 +892,7 @@ function deriveSnapshot(
     const runId = evidence.row.run_id;
     if (typeof runId === "string" && runId.length > 0) runs.set(runId, (runs.get(runId) ?? 0) + 1);
   }
-  const groups = new Map<string, BenchmarkCohort>();
+  const groups = new Map<string, Omit<BenchmarkCohort, "verifiedOutcome">>();
   if (prior && dirtyKeys) for (const cohort of prior.cohorts) {
     const key = JSON.stringify(cohort.dimensions);
     if (!dirtyKeys.has(key)) groups.set(key, cohort);
@@ -948,7 +987,7 @@ function deriveSnapshot(
       unmatchedTerminals: [...terminals.keys()].filter((id) => !assignments.has(id)).length,
       invalidAssignmentRows, attemptRowsWithoutAssignmentId, terminalRowsWithoutAssignmentId,
       conflictingAssignments, duplicateRows },
-    cohorts,
+    cohorts: withCohortOutcomes(cohorts, joined, caseFiles, asOf),
     coverage,
     verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
     modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
