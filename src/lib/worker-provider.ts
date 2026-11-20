@@ -2307,6 +2307,10 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  /** W1-T13951: which retained text lost bytes. A command-output body dropped under the cap is counted on
+   *  `outputTruncation` and leaves both false: the final message is `text`, and it reads truncated only when
+   *  its own bytes were cut. */
+  retention: { textTruncated: boolean; blocksTruncated: boolean };
   completion: CodexCompletionEvidence;
 }
 
@@ -2494,6 +2498,9 @@ class CodexJsonlAccumulator {
   private spillHead = "";
   private spillHeadFull = false;
   private spillEvidence?: Omit<FileTail, "text">;
+  /** W1-T13951: the newest agent_message lost bytes; any retained message or error did. */
+  private lastBlockTruncated = false;
+  private retainedTruncated = false;
   private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
@@ -2547,6 +2554,7 @@ class CodexJsonlAccumulator {
   private consumePending(): void {
     let line = this.pending;
     let sourceBytes: number | undefined;
+    let lineEvidence: Omit<FileTail, "text"> | undefined;
     if (this.spilling) {
       const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
       const { text, ...evidence } = tail;
@@ -2560,7 +2568,8 @@ class CodexJsonlAccumulator {
       } else {
         line = text;
       }
-      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state !== "complete" && tail.state !== "truncated") this.spillEvidence = evidence;
+      if (tail.state === "truncated") lineEvidence = evidence;
       if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
         this.failed = true;
         this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
@@ -2576,7 +2585,10 @@ class CodexJsonlAccumulator {
     this.spilling = false;
     this.spillHead = "";
     this.spillHeadFull = false;
-    this.consumeLine(line, sourceBytes);
+    const kind = this.consumeLine(line, sourceBytes, lineEvidence !== undefined);
+    // W1-T13951: a command's output body is not protocol — a parsed command item whose middle was dropped is
+    // counted, never a stdout loss. Any other cut line (a message, an unparseable item) still reads truncated.
+    if (lineEvidence && kind !== "item.completed:command_execution") this.spillEvidence = lineEvidence;
     if (this.pendingFile) this.boundRetained();
   }
 
@@ -2602,6 +2614,7 @@ class CodexJsonlAccumulator {
         : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
           ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
           : { state: "complete" },
+      retention: { textTruncated: this.lastBlockTruncated, blocksTruncated: this.lastBlockTruncated || this.retainedTruncated },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
@@ -2649,22 +2662,27 @@ class CodexJsonlAccumulator {
   private boundRetained(): void {
     const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    const droppedBefore = this.droppedBytes;
     while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
     if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
     const blockBudget = budget - bytes(this.errors);
     while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
     if (bytes(this.blocks) > blockBudget) {
+      const last = this.blocks.at(-1);
       if (this.blocks.length === 1) this.blocks[0] = this.boundText(this.blocks[0]!, blockBudget);
       else {
         const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
         this.blocks[0] = this.boundText(this.blocks[0]!, headBudget);
         this.blocks[1] = this.boundText(this.blocks[1]!, blockBudget - Buffer.byteLength(this.blocks[0]!));
       }
+      if (this.blocks.at(-1) !== last) this.lastBlockTruncated = true;
     }
+    if (this.droppedBytes > droppedBefore) this.retainedTruncated = true;
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
+  /** Returns the event's byte kind, so a spilled line's loss is judged by what it was (W1-T13951). */
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, truncated = false): CodexEventByteKind | undefined {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
@@ -2675,7 +2693,7 @@ class CodexJsonlAccumulator {
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
-      return;
+      return "malformed";
     }
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
@@ -2692,6 +2710,8 @@ class CodexJsonlAccumulator {
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
+      this.lastBlockTruncated = truncated;
+      if (truncated) this.retainedTruncated = true;
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -2726,6 +2746,7 @@ class CodexJsonlAccumulator {
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
+    return kind;
   }
 
   /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
@@ -6434,12 +6455,13 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
-    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
     const textBytes = Buffer.byteLength(parsed.text);
     const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    // W1-T13951: judged by what lost bytes, not by any drop — a command-output body dropped under the cap is
+    // counted on worker.output_truncated and leaves the final message complete.
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
-      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
-      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      text: { state: parsed.retention.textTruncated ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: parsed.retention.blocksTruncated ? "truncated" : "complete", bytesRead: blockBytes },
       stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
