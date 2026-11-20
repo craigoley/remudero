@@ -1075,6 +1075,13 @@ interface TerminalUncreditableHead {
   escalated: boolean;
 }
 
+// W1-T2723: effects built for the same ledger share fix decisions, including deliveries made
+// after those effects were built. A new build refreshes the index from the slice reader.
+const terminalUncreditableHeadsByLedger = new Map<string, {
+  heads: Map<string, TerminalUncreditableHead>;
+  historyHold?: string;
+}>();
+
 function terminalUncreditableHeadKey(prNumber: number, headSha: string): string {
   return `${prNumber}:${headSha}`;
 }
@@ -1094,9 +1101,8 @@ function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordR
   return history;
 }
 
-function terminalUncreditableHeads(ledgerPath: string, history: LedgerUnionRecordRead | undefined): Map<string, TerminalUncreditableHead> {
+function terminalUncreditableHeads(ledgerPath: string, history: LedgerUnionRecordRead): Map<string, TerminalUncreditableHead> {
   const terminals = new Map<string, TerminalUncreditableHead>();
-  if (history === undefined) return terminals;
   // Without rotations, the legacy live-only read uses the caller's path and parsed-step checks.
   const rows = history.archiveCount === 0 ? readLedgerLines(ledgerPath) : history.rows; // ledger-read-intent: live
   for (const row of rows) {
@@ -2987,10 +2993,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
   const terminalHistory = readTerminalUncreditableHistory(ledgerPath);
-  const terminalHeads = terminalUncreditableHeads(ledgerPath, terminalHistory);
-  const terminalHistoryHold = terminalHistory === undefined ? "terminal uncreditable head history is unreadable" : undefined;
+  const terminalState = terminalUncreditableHeadsByLedger.get(ledgerPath)
+    ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined };
+  terminalUncreditableHeadsByLedger.set(ledgerPath, terminalState);
+  terminalState.historyHold = terminalHistory === undefined ? "terminal uncreditable head history is unreadable" : undefined;
+  if (terminalHistory !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, terminalHistory);
   const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
-    if (terminal.escalated) return;
+    const key = terminalUncreditableHeadKey(terminal.prNumber, terminal.headSha);
+    if ((terminalState.heads.get(key) ?? terminal).escalated) return;
     // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
     // needs no decision from anyone today, so it is LEDGERED and not escalated — never silently
     // dropped, because a suppressed ask nobody can see is the defect this repo keeps re-finding.
@@ -3034,7 +3044,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       { issues, ledgerPath, runId },
     );
     if (!issueUrl) return;
-    terminal.escalated = true;
+    // An effects build during issue delivery can replace the index entry before delivery returns.
+    const delivered = terminalState.heads.get(key) ?? terminal;
+    delivered.escalated = true;
     log(TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP, {
       pr_number: terminal.prNumber,
       head_sha: terminal.headSha,
@@ -4422,7 +4434,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
-      if (terminalHistoryHold) return { roundNotRun: true, reason: terminalHistoryHold };
+      if (terminalState.historyHold) return { roundNotRun: true, reason: terminalState.historyHold };
       await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
@@ -4453,7 +4465,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       };
       try {
         const terminalKey = terminalUncreditableHeadKey(pr.prNumber, pr.headSha);
-        const priorTerminal = terminalHeads.get(terminalKey);
+        const priorTerminal = terminalState.heads.get(terminalKey);
         // A delivered terminal decision is final for THIS SHA and requires no fresh network read.
         // If delivery failed, retain the ordinary live-state preflight below before retrying only
         // the escalation; the expensive/unchangeable head lookup is never repeated either way.
@@ -4603,7 +4615,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               cause,
               escalated: false,
             };
-            terminalHeads.set(terminalKey, terminal);
+            terminalState.heads.set(terminalKey, terminal);
             await escalateTerminalHead(terminal, pr);
           }
           return;
@@ -5401,8 +5413,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
     // dispatch surface invokes `dispatchFix`. Both share the history hold and the same head index.
     terminalFixStandDown: (pr) => {
-      if (terminalHistoryHold) return terminalHistoryHold;
-      const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
+      if (terminalState.historyHold) return terminalState.historyHold;
+      const terminal = terminalState.heads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
       // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
       // hold at zero (it folds "no cached entry at all" and "cached but not yet delivered" into

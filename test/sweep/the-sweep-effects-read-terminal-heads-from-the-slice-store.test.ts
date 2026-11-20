@@ -7,6 +7,7 @@ import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { createIncrementalLedgerUnion, resolveLedgerUnion } from "#src/lib/ledger-union.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { parseLedger } from "#src/lib/retro.js";
 import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -188,6 +189,51 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(issueBodies.map((body) => /^\*\*Cause:\*\* (.+)$/m.exec(body)?.[1]), expectedCauses);
   });
 
+  test("W1-T12271 criterion 2: an escalation recorded by one build holds sibling and fresh builds", async (t) => {
+    const { root, dir, path } = fixture(t);
+    const pr = { ...candidates[3]!, checksState: "red" } as OpenPrView;
+    const issueUrl = "https://github.com/acme/scratch/issues/4";
+    let siblingPreflights = 0;
+    const buildSibling = () => buildEffects(root, path, {
+      dispatchFixPreflightStandDownImpl: async () => {
+        siblingPreflights++;
+        return true;
+      },
+    });
+    const sibling = buildSibling();
+    assert.equal(sibling.terminalFixStandDown!(pr), undefined);
+
+    let duringDelivery: ReturnType<typeof buildEffects> | undefined;
+    const writer = buildEffects(root, path, {
+      dispatchFixPreflightStandDownImpl: async () => false,
+      issuesImpl: { create: () => {
+        duringDelivery = buildSibling();
+        return issueUrl;
+      } },
+      log: (step, fields) => appendLedger(path, { ...fields, step, run_id: "SWEEP-terminal-heads", task_id: "SWEEP" }),
+    });
+    await writer.dispatchFix!(pr, { unmetCriteria: [] });
+    assert.ok(duringDelivery, "the fix dispatch delivered the escalation");
+
+    const union = resolveLedgerUnion(dir, legacyPattern);
+    assert.equal(union.ok, true);
+    assert.equal(union.archiveCount, 2);
+    const rows = parseLedger(union.matches.join("\n"));
+    assert.ok(rows.some((row) => row.step === escalatedStep && row.pr_number === pr.prNumber
+      && row.head_sha === pr.headSha && row.issue_url === issueUrl));
+    const expected = unionStandDowns(rows);
+    assert.deepEqual(expected, candidates.slice(0, 4));
+    assert.deepEqual(buildInNewProcess(root, path).stoodDown, expected);
+
+    for (const effects of [sibling, duringDelivery]) {
+      await effects.dispatchFix!(pr, { unmetCriteria: [] });
+    }
+    assert.deepEqual({
+      standDowns: [sibling, duringDelivery].map((effects) => effects.terminalFixStandDown!(pr)),
+      preflights: siblingPreflights,
+    }, { standDowns: [standDownReason, standDownReason], preflights: 0 });
+  });
+
   for (const [change, suffix] of [["same-size edit", ""], ["edit followed by growth", '{"step":"unrelated"}\n']] as const) {
     test(`W1-T12271 criterion 2: a live ${change} before the cached tail matches the ledger union`, (t) => {
       const { root, dir, path } = fixture(t);
@@ -257,6 +303,9 @@ if (process.argv[2] === childFlag) {
     const { root, dir, path, archive } = fixture(t);
     utimesSync(archive, 1, 1);
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
+    const sibling = buildEffects(root, path);
+    const previouslyFree = candidates[3] as OpenPrView;
+    assert.equal(sibling.terminalFixStandDown!(previouslyFree), undefined);
     const original = corruptWithoutChangingMtime(archive);
     const unread = resolveLedgerUnion(dir, legacyPattern);
     assert.equal(unread.ok, false);
@@ -264,14 +313,14 @@ if (process.argv[2] === childFlag) {
 
     assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 1, stoodDown: candidates });
     assert.deepEqual(buildInNewProcess(root, path, unreadHistoryReason), { gunzips: 1, stoodDown: candidates });
-    const { dispatchFix } = buildEffects(root, path);
-    assert.ok(dispatchFix);
-    assert.deepEqual(await dispatchFix(candidates[0] as OpenPrView, { unmetCriteria: [] }), {
+    assert.equal(sibling.terminalFixStandDown!(previouslyFree), unreadHistoryReason);
+    assert.deepEqual(await sibling.dispatchFix!(previouslyFree, { unmetCriteria: [] }), {
       roundNotRun: true, reason: unreadHistoryReason,
     });
 
     writeFileSync(archive, original);
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
+    assert.equal(sibling.terminalFixStandDown!(previouslyFree), undefined);
   });
 
   test("a raw-pattern slice preserves replay identity and rejects a stale shared snapshot", async (t) => {
