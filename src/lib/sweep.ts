@@ -5204,6 +5204,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             reason: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
           });
         }
+        // A rotation can become unreadable during checkout and setup; recheck right before the rung.
+        const checkoutHistoryHold = terminalHistoryHold(true);
+        if (checkoutHistoryHold) return { roundNotRun: true, reason: checkoutHistoryHold };
         const rung = await runFixRung({
           guardRoundHead: true,
           ...(ownedConflictPushGuard === undefined ? {} : { ownedConflictPushGuard }),

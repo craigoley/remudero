@@ -615,6 +615,52 @@ if (process.argv[2] === childFlag) {
     });
   }
 
+  for (const siblingReads of [true, false]) {
+    test(`W1-T12271 criterion 3: rotation EIO during worktree checkout holds before the fix rung (sibling reads: ${siblingReads})`, async (t) => {
+      const { root, path, archive } = fixture(t);
+      const pr = { ...candidates[4], prUrl: "https://github.com/acme/scratch/pull/5", priorStrikes: 0 } as OpenPrView;
+      const head = { headRefName: "run-unfiled-1", headRefOid: pr.headSha, body: "", files: [] };
+      for (const dir of ["state/inflight", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
+      let restore: (() => void) | undefined;
+      const rungs: string[] = [];
+      const build = (failAtCheckout: boolean) => buildEffects(root, path, {
+        repoRoot: REPO_ROOT,
+        dispatchFixPreflightStandDownImpl: async () => false,
+        readJsonImpl: async () => head,
+        registeredWorktreeOwnerImpl: () => undefined,
+        fixBranchClaimKeyImpl: () => `terminal-checkout-${failAtCheckout}-${siblingReads}`,
+        createFixRungWorktreeImpl: async () => {
+          if (!failAtCheckout) return undefined;
+          restore = failRotationRead(archive, "EIO");
+          if (siblingReads) assert.equal(buildEffects(root, path).terminalFixStandDown!(pr), unreadHistoryReason);
+          return undefined;
+        },
+        captureWorktreeSnapshotImpl: () => ({ headSha: pr.headSha }),
+        readPreservedOwnerPatchImpl: () => undefined,
+        buildFixRungDispatchArgsImpl: () => ({}),
+        openTaskIdsFromPlanImpl: () => new Set<string>(),
+        readPackageScriptsImpl: () => ({}),
+        worktreeRemoveImpl: () => {},
+        runFixRungImpl: async () => {
+          rungs.push(failAtCheckout ? "unread" : "readable");
+          return { outcome: "stood_down", strikes: 0, retriggers: 0 };
+        },
+      } as unknown as Partial<BuildSweepEffectsDeps>);
+      const effects = build(true);
+      assert.equal(effects.terminalFixStandDown!(pr), undefined);
+      try {
+        const result = await effects.dispatchFix!(pr, { unmetCriteria: [] });
+        assert.ok(restore, "the checkout ran and made the rotation unreadable");
+        assert.deepEqual({ result, rungs }, { result: { roundNotRun: true, reason: unreadHistoryReason }, rungs: [] });
+      } finally {
+        restore?.();
+      }
+
+      await Promise.resolve(build(false).dispatchFix!(pr, { unmetCriteria: [] })).catch(() => undefined);
+      assert.deepEqual(rungs, ["readable"], "readable history reaches the fix rung through the same fixture");
+    });
+  }
+
   test("W1-T12271 criterion 3: stand-down checks cached rotation readability without rebuilding effects", (t) => {
     const { root, path, archive } = fixture(t);
     const effects = buildEffects(root, path);
