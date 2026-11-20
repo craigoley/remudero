@@ -447,6 +447,9 @@ const ROWS_AS_BEFORE: Record<string, string> = {
   "sre-rerun-failed-ci-job": "f1d4616a6a0b35f4",
   "head-identity-trailer-commit": "085ad46113c08b28",
   "issue-close-panel-action": "677537872479a8a6",
+  "hand-ship-push": "84be1733216f5bb6",
+  "hand-ship-open-pr": "b26e26586bf6eb60",
+  "hand-ship-amend-pr": "d287f3cafdff6c4b",
 };
 
 function rowDigest(row: AuthorityReportRow, line: string): string {
