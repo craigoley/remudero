@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PLAIN_CHECK_MEMO_MAX, plainInboxMessage, plainSourceFingerprint, type PlainInboxMessage } from "#src/lib/inbox-plain.js";
+import { PLAIN_CHECK_MEMO_MAX, plainCheckMemoSizes, plainInboxMessage, plainSourceFingerprint, type PlainInboxMessage } from "#src/lib/inbox-plain.js";
 
 const proposal = { id: "verify-human:W1-T13877", summary: "Sandbox drill awaits a defined scope" };
 const base: PlainInboxMessage = {
@@ -40,9 +40,30 @@ test("W1-T13877 criterion 2: the memo is bounded and answers correctly after it 
     const item = { ...proposal, id: `verify-human:W1-T${i}` };
     const stored = { ...base, sourceFingerprint: plainSourceFingerprint(item) };
     assert.equal(plainInboxMessage(item, { [item.id]: stored }), stored);
+    const sizes = plainCheckMemoSizes();
+    assert.ok(sizes.fingerprints <= PLAIN_CHECK_MEMO_MAX && sizes.storedChecks <= PLAIN_CHECK_MEMO_MAX, `W1-T13877 bound: ${JSON.stringify(sizes)}`);
   }
+  const after = plainCheckMemoSizes();
+  assert.ok(after.fingerprints < PLAIN_CHECK_MEMO_MAX && after.storedChecks < PLAIN_CHECK_MEMO_MAX,
+    `filling past the bound started both memos over: ${JSON.stringify(after)}`);
   const stored = { ...base };
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: stored }), stored, "after the memo starts over a current record is still served");
   const empty = { ...base, options: null } as unknown as PlainInboxMessage;
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: empty }).source, "template", "and a malformed one is still refused");
+});
+
+/** An object nested `depth` levels deep: too deep for JSON.stringify, which throws RangeError. */
+function deep(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = {};
+  for (let i = 0; i < depth; i += 1) value = { next: value };
+  return value;
+}
+
+test("W1-T13877 memo: content too deep to name is checked without the memo, as before", () => {
+  assert.throws(() => JSON.stringify(deep(20_000)), RangeError, "positive control: this depth cannot be serialized");
+  const malformed = { ...base, options: deep(20_000) } as unknown as PlainInboxMessage;
+  assert.equal(plainInboxMessage(proposal, { [proposal.id]: malformed }).source, "template", "a malformed deep record falls back to the template");
+  const options = base.options.map((option, index) => index === 0 ? { ...option, metadata: deep(20_000) } : option);
+  const valid = { ...base, options } as PlainInboxMessage;
+  assert.equal(plainInboxMessage(proposal, { [proposal.id]: valid }), valid, "a valid card with deep unused option metadata is still served");
 });

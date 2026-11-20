@@ -482,8 +482,8 @@ export function readPlainStore(path: string): PlainStore {
 const storedChecks = new Map<string, boolean>();
 
 function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: string; summary: string }): boolean {
-  const key = JSON.stringify([stored.sourceFingerprint, stored.source, stored.headline, stored.whatHappened, stored.whatWeNeed, stored.ifNothingHappens, stored.options]);
-  const known = storedChecks.get(key);
+  const key = contentKey(stored);
+  const known = key === undefined ? undefined : storedChecks.get(key);
   if (known !== undefined) return known;
   const shape = validateDecisionSummary({
     headline: stored.headline,
@@ -492,9 +492,25 @@ function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: strin
     options: stored.options,
   });
   const ok = shape !== null && shape !== undefined && typeof stored.ifNothingHappens === "string" && checkPlainMessage(stored, proposal).ok;
+  if (key === undefined) return ok;
   if (storedChecks.size >= PLAIN_CHECK_MEMO_MAX) storedChecks.clear();
   storedChecks.set(key, ok);
   return ok;
+}
+
+/** The memo key for a stored message's content, or undefined when the content cannot be serialized (too deep, a
+ *  cycle, a BigInt): that content is checked without the memo, exactly as before W1-T13877 (#19775 review). */
+function contentKey(stored: PlainInboxMessage): string | undefined {
+  try {
+    return JSON.stringify([stored.sourceFingerprint, stored.source, stored.headline, stored.whatHappened, stored.whatWeNeed, stored.ifNothingHappens, stored.options]);
+  } catch {
+    return undefined; // deliberate: unnameable content is not an error, only unmemoized; the caller checks it in full
+  }
+}
+
+/** W1-T13877: how many entries each memo holds, so a test can see the bound hold. */
+export function plainCheckMemoSizes(): { fingerprints: number; storedChecks: number } {
+  return { fingerprints: fingerprints.size, storedChecks: storedChecks.size };
 }
 
 function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
