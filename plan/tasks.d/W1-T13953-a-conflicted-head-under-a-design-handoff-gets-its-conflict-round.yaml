@@ -1,0 +1,43 @@
+- id: W1-T13953
+  title: A conflicted head under an amended design handoff gets a conflict round instead of an update-branch that cannot succeed
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # routes one held disposition to the existing conflict worker
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T9999
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-conflicted-head-under-a-design-handoff-gets-its-conflict-round.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When a task contract was amended under a terminal design handoff and the head is conflicted, the sweep dispatches the conflict worker instead of adopting main through update-branch"
+      proof: "grep: W1-T13953 criterion 1: in test/sweep/a-conflicted-head-under-a-design-handoff-gets-its-conflict-round.test.ts"
+    - claim: "An update-branch refused with HTTP 422 merge conflict is read as conflicted on the next pass, not as amendment refresh failed"
+      proof: "grep: W1-T13953 criterion 2: in test/sweep/a-conflicted-head-under-a-design-handoff-gets-its-conflict-round.test.ts"
+    - claim: "invariant:clean-head-adopts-main — a clean head under the same handoff still adopts main through update-branch as today"
+      kind: guard
+      proof: "grep: W1-T13953 criterion 3: in test/sweep/a-conflicted-head-under-a-design-handoff-gets-its-conflict-round.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger and GitHub): #19655 (W1-T12270) went mergeable_state dirty. Its conflict round
+    ended fix.needs_design_routed kind=design at 2026-11-19 21:19:59Z. Every branch update since returned 422
+    conflict (22:13Z, 11:02Z), and the latest disposition (12:19:31Z) read "task contract amended under this
+    terminal design handoff — adopting main before any fix admission — NOT DISPATCHED: amendment refresh failed;
+    awaiting new evidence/operator answer" (sweep.ts). update-branch cannot merge a conflicted head, so the PR sat
+    16 h with a stale pending review status. Hand-merged 2026-11-20 (c5c3c168f; one hunk in read-model-worker.ts).
+  design: |
+    INVARIANT clean-head-adopts-main: only a conflicted head changes route.
+    1. In the amended-design-handoff arm of the sweep, read the PR's conflicted state first; conflicted routes to
+       the existing conflict dispatch (the conflicted disposition), not to update-branch.
+    2. A 422 "merge conflict" from update-branch marks the head conflicted for the next pass.
+  falsifier: |
+    Without the route criterion 1's conflicted fixture disposes "amendment refresh failed" and dispatches nothing.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.

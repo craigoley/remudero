@@ -24,6 +24,9 @@
     - test/view-etags-are-deterministic.test.ts
     - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
     - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
+  # refusal-amendment (W1-T12270, run work-fix-dispatch-W1-T12270-1795122281770-3ca7@7fd08018a84725ba60cb1eb9dd13ab85d72768b6, 2026-11-19T22:06:52.830Z): the worker refused criterion 5 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Stopping unread production `now` units prevents the shadow gate from collecting the fresh comparisons it requires without console traffic.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
