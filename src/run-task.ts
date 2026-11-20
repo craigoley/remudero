@@ -1143,7 +1143,7 @@ import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shado
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
-  cashDraftFit, openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./lib/worker-provider.js";
+  CashDraftSkippedError, cashDraftFit, spawnOpenWeightWorker } from "./lib/worker-provider.js";
 import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
@@ -2965,7 +2965,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 }
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
-import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { assertLiveSpawnAllowed, LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
@@ -37633,6 +37633,7 @@ export async function draftProposalBatch(
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   rawSpawn: typeof spawnWorker = spawnWorker,
+  providerRouting?: SpawnWorkerArgs["providerRouting"],
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
   const causalScope = { repository: `${owner}/${repo}` };
@@ -37690,28 +37691,41 @@ export async function draftProposalBatch(
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined };
+          const checkCashFit = ctx?.cashFit;
           const requestedModel = spawnArgs.model ?? null;
           ctx?.onRequestedModel?.(requestedModel);
-          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
+          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
+            ...spawnArgs,
+            providerRouting: checkCashFit ? {
+              ...providerRouting,
+              // The worker calls this after model selection, including every adapter rung it walks.
+              spawnOpenWeight: (args, routedConfig, selection) => {
+                const fit = checkCashFit({ deployment: selection.model, promptChars: prompt.length,
+                  promptBytes: Buffer.byteLength(args.prompt, "utf8"), squeezed: args.cashSqueezed,
+                  atIso: fixedClock((providerRouting?.now ?? systemClock.now)()).iso() });
+                if (!fit.fits) throw new CashDraftSkippedError(fit);
+                if (providerRouting?.spawnOpenWeight) return providerRouting.spawnOpenWeight(args, routedConfig, selection);
+                assertLiveSpawnAllowed("spawnOpenWeightWorker for inbox draft");
+                return spawnOpenWeightWorker(args, routedConfig, selection);
+              },
+            } : providerRouting,
+          }), requestedModel };
         },
         ...(inboxDraftMount.provider === "cash" ? {
-          escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
-            cwd: worktreePath,
-            settingsFile,
-            mount: inboxDraftMount,
-            config,
-            prompt,
-            proposal,
-            currentPlanText: planText,
-            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
-          cashFit: (prompt: string, fit: { avoidModels: readonly string[]; expectedRequests: number }) => {
-            const candidates = openWeightCandidatesForCapability(mountsTable.capabilities,
-              openWeightCapabilityForRequestedModel(mountsTable.capabilities, inboxDraftMount.model), inboxDraftMount.effort);
-            const routable = candidates.filter((deployment) => !fit.avoidModels.includes(deployment));
-            return cashDraftFit(config, { deployments: routable.length > 0 ? routable : candidates, promptChars: prompt.length,
-              expectedRequests: fit.expectedRequests, atIso: systemClock.iso() });
+          escalate: async (proposal, prompt, reason) => {
+            const args = { cwd: worktreePath, settingsFile, mount: inboxDraftMount, config, prompt, proposal,
+              currentPlanText: planText, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS };
+            const spawn = benchmarkNonDispatchSpawn("inbox-draft", rawSpawn);
+            if (reason !== "cash-fit") return spawnEscalatedInboxDraft(args, spawn);
+            const policy = resolveProviderRoutingPolicy(config.root, config, { now: providerRouting?.now });
+            if (!policy.routableProviders.some(provider => provider !== "cash")) return undefined;
+            const subscription = buildInboxDraftSpawnArgs(args);
+            const result = await spawn({ ...subscription, mountProvider: undefined, providerRouting,
+              config: { ...config, overflow: "none", workerProviders: { ...config.workerProviders, cashFallbackWhenBlocked: false } },
+              onSelectionAssignment: undefined });
+            return { ...result, requestedModel: subscription.model ?? null };
           },
+          cashFit: input => cashDraftFit(config, input),
         } : {}),
         log,
       },

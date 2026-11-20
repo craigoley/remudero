@@ -640,8 +640,8 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "inbox.draft_cash_skipped",
     meaning:
       "A cash inbox draft was not started, because its estimated whole run was larger than the model's window " +
-      "(reason window) or the cash allowance left today (reason allowance). No request was sent. On a first " +
-      "attempt no attempt key is written, so the proposal stays due.",
+      "(reason window) or the cash allowance left today (reason allowance). The refused cash run sent no request. " +
+      "Without a lint-clean subscription draft, the proposal stays due without an attempt key.",
     writer: ["runDraftRung"],
     outcomes: ["window", "allowance"],
   },

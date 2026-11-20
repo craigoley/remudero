@@ -42,7 +42,8 @@ import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, type CashDraftFit } from "./worker-provider.js";
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, CashDraftSkippedError,
+  OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
 
@@ -1629,7 +1630,8 @@ export function inboxDraftExampleFragmentYaml(): string {
   ].join("\n");
 }
 
-export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string): string {
+export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, runId: string,
+  planIndex = planProjectionForDependsOn(currentPlanText)): string {
   const parked = parkedProposalTask(proposal.id, currentPlanText);
   // W1-T194: retraction is STRUCTURAL — a retracted round is omitted entirely, never summarised. Numbering stays
   // POSITIONAL against the FULL history, so "round N" always means the same round.
@@ -1677,7 +1679,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "you have Read/Grep/Glob and the file is in this worktree. Do not assume a field you cannot see.",
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
-    planProjectionForDependsOn(currentPlanText),
+    planIndex,
     "",
     "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",
     "Every task you draft gets its `id:` from a PLACEHOLDER, not a guess: NEW-1, NEW-2, NEW-3, ...",
@@ -1981,6 +1983,8 @@ export interface DraftSpawnContext {
   avoidModels: readonly string[];
   /** Report the request before awaiting the worker, so a rejected spawn retains its model. */
   onRequestedModel?: (model: string | null) => void;
+  /** Read the whole-run fit after routing, before the selected cash adapter runs. */
+  cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
 }
 
 export interface DraftRungDeps {
@@ -1988,10 +1992,9 @@ export interface DraftRungDeps {
   repoFacts?: DraftRepoFacts;
   clock?: Clock;
   spawn: DraftSpawn;
-  /** One optional subscription attempt after cash could not produce a lint-clean fragment. Undefined means reserve blocked it. */
-  escalate?: (proposal: Proposal, prompt: string) => Promise<DraftWorkerResult | undefined>;
-  /** W1-T13863: the whole-run fit read before each cash spawn. Undefined on a subscription lane. */
-  cashFit?: (prompt: string, ctx: { avoidModels: readonly string[]; expectedRequests: number }) => CashDraftFit;
+  /** One optional subscription attempt after a cash refusal or a failed draft. */
+  escalate?: (proposal: Proposal, prompt: string, reason: "cash-fit" | "dirty-lint" | "fragment-contract") => Promise<DraftWorkerResult | undefined>;
+  cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2483,16 +2486,14 @@ function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | 
       "the provider reported no served model for this call" } : {}) };
 }
 
-/** Draft EVERY proposal in `toDraft`. Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP};
- *  one proposal's self-lint retries stay serial. NEVER THROWS — each spawn and parse is isolated in its OWN try/catch
- *  (W1-T192's fail-soft requirement), which is what makes this safe on an unattended poll. */
 const CASH_DRAFT_REQUEST_HISTORY: number[] = [];
 
 /** The median request count of this process's last 20 cash drafts; 2 before any is observed. */
 function expectedCashDraftRequests(): number {
   if (CASH_DRAFT_REQUEST_HISTORY.length === 0) return 2;
   const sorted = [...CASH_DRAFT_REQUEST_HISTORY].sort((a, b) => a - b);
-  return sorted[Math.floor((sorted.length - 1) / 2)]!;
+  const middle = Math.floor(sorted.length / 2);
+  return Math.ceil((sorted[Math.floor((sorted.length - 1) / 2)]! + sorted[middle]!) / 2);
 }
 
 function observeCashDraftRequests(worker: DraftWorkerResult): void {
@@ -2502,15 +2503,20 @@ function observeCashDraftRequests(worker: DraftWorkerResult): void {
   if (CASH_DRAFT_REQUEST_HISTORY.length > 20) CASH_DRAFT_REQUEST_HISTORY.shift();
 }
 
+/** Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP}. Each proposal's
+ *  projection, spawn and parse failures are caught within that proposal. */
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
   const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
-  const planIndexChars = planProjectionForDependsOn(currentPlanText).length;
+  let planIndex: string | undefined;
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
     let lastWorker: DraftWorkerResult | undefined;
     let lastRequestedModel: string | null = null;
     try {
-      let prompt = inboxDraftPrompt(proposal, currentPlanText, runId);
+      planIndex ??= planProjectionForDependsOn(currentPlanText);
+      const planIndexChars = planIndex.length;
+      const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
+      let prompt = initialPrompt;
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
@@ -2518,26 +2524,36 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
       const avoidModels: string[] = [];
       let dirty: { from: string | null; violations: string[] } | undefined;
-      let cashAttempts = 0;
+      let attempts = 0;
+      let skipped: Extract<CashDraftFit, { fits: false }> | undefined;
+      const cashFit = deps.cashFit;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
-        const fit = deps.cashFit?.(prompt, { avoidModels: [...avoidModels], expectedRequests: expectedCashDraftRequests() });
-        if (fit && !fit.fits) {
-          deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt, reason: fit.reason, deployment: fit.deployment,
-            estimated_tokens: fit.estimatedTokens, window_tokens: fit.windowTokens ?? null, estimated_usd: fit.estimatedUsd ?? null,
-            left_usd: fit.leftUsd ?? null, expected_requests: expectedCashDraftRequests(), prompt_chars: prompt.length, plan_index_chars: planIndexChars });
-          // Unpaid first attempt: refused, so no attempt key. A later one keeps the paid dirty fragment, as before.
-          if (attempt === 1) return { proposalId: proposal.id, ok: false, error: `cash draft skipped before any request: ${fit.reason}`,
-            refused: { matched: `inbox.draft_cash_skipped:${fit.reason}` } };
-          break;
-        }
-        cashAttempts = attempt;
         lastWorker = undefined;
         lastRequestedModel = null;
-        const worker = await withGuardrailAttempt("relint-used", attempt, () =>
-          deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
-            onRequestedModel: model => { lastRequestedModel = model; } }));
+        const expectedRequests = expectedCashDraftRequests();
+        let worker: DraftWorkerResult;
+        try {
+          worker = await withGuardrailAttempt("relint-used", attempt, () =>
+            deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
+              onRequestedModel: model => { lastRequestedModel = model; },
+              ...(cashFit ? { cashFit: input => cashFit({ ...input, expectedRequests }) } : {}) }));
+        } catch (error) {
+          if (error instanceof CashDraftSkippedError) skipped = error.fit;
+          else if (cashFit && error instanceof OpenWeightRequestTooLargeError) {
+            skipped = { fits: false, reason: "window", deployment: null,
+              estimatedTokens: error.estimatedTokens * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS };
+          } else throw error;
+          deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt, reason: skipped.reason, deployment: skipped.deployment,
+            estimated_tokens: skipped.estimatedTokens, window_tokens: skipped.reason === "window" ? skipped.windowTokens ?? null : null,
+            estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
+            left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
+            prompt_chars: prompt.length, plan_index_chars: planIndexChars });
+          parsed = null;
+          break;
+        }
+        attempts = attempt;
         lastWorker = worker;
-        if (deps.cashFit) observeCashDraftRequests(worker);
+        if (cashFit && worker.provider === "cash") observeCashDraftRequests(worker);
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
           // here as from === to, which is the record a retried-same-model regression must leave.
@@ -2558,7 +2574,6 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           prompt_chars: prompt.length,
           plan_index_chars: planIndexChars,
-          ...(fit?.fits && fit.unread ? { cash_fit_unread: fit.unread } : {}),
           ...workerLedgerFields(worker),
         });
         parsed = parseDraftedCandidate(workerTranscript(worker), proposal, currentPlanText);
@@ -2572,27 +2587,27 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           const from = draftWorkerModel(worker);
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
           dirty = { from, violations: violations.map((v) => v.message) };
-          prompt = `${inboxDraftPrompt(proposal, currentPlanText, runId)}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
+          prompt = `${initialPrompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
         }
       }
-      if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
-        const reason = parsed ? "dirty-lint" : "fragment-contract";
-        const escalationPrompt = parsed
+      if ((skipped || (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0))) && deps.escalate) {
+        const reason = skipped ? "cash-fit" : parsed ? "dirty-lint" : "fragment-contract";
+        const escalationPrompt = skipped ? prompt : parsed
           ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
           const escalate = deps.escalate;
-          const escalated = await withGuardrailAttempt("relint-used", cashAttempts + 1, () => escalate(proposal, escalationPrompt));
+          const escalated = await withGuardrailAttempt("relint-used", attempts + 1, () => escalate(proposal, escalationPrompt, reason));
           if (escalated) {
             deps.log("inbox.draft_escalated", {
               proposal_id: proposal.id,
-              from: draftWorkerModel(lastWorker),
+              from: skipped ? skipped.deployment : lastWorker && draftWorkerModel(lastWorker),
               to: escalated.servedModel ?? draftWorkerModel(escalated),
               reason,
             });
             deps.log("inbox.draft_synthesized", {
               proposal_id: proposal.id,
-              attempt: cashAttempts + 1,
+              attempt: attempts + 1,
               session_id: escalated.sessionId,
               cost_usd: escalated.costUsd,
               subtype: escalated.subtype,
@@ -2612,6 +2627,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           // A failed subscription attempt cannot discard the cash fragment already produced.
           deps.log("inbox.draft_escalation_error", { proposal_id: proposal.id, error: String((error as Error)?.message ?? error) });
         }
+      }
+      if (skipped && (!parsed || violations.length > 0)) {
+        return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
+          refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` } };
       }
       if (!parsed) {
         // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING MALFORMED. The bare error sent every

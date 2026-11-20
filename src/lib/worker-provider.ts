@@ -4467,34 +4467,40 @@ export function readOpenWeightAllowance(config: Config,
 
 /** W1-T13863: a cash draft's whole-run fit, read before its first paid request. Reserves nothing. */
 export type CashDraftFit =
-  | { fits: true; deployment?: string; unread?: string }
-  | { fits: false; reason: "window" | "allowance"; deployment: string; estimatedTokens: number;
-    windowTokens?: number; estimatedUsd?: number; leftUsd?: number };
+  | { fits: true }
+  | { fits: false; reason: "window"; deployment: string | null; estimatedTokens: number; windowTokens?: number }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number; leftUsd: number };
 
-/** The first deployment whose window holds the whole run is the one checked against today's allowance. */
-export function cashDraftFit(config: Config, input: { deployments: readonly string[]; promptChars: number;
-  expectedRequests: number; squeezed?: boolean; atIso: string }): CashDraftFit {
-  const requests = Math.max(1, Math.ceil(input.expectedRequests));
-  const estimatedTokens = openWeightEstimatedTokens(input.promptChars) * requests + OPENWEIGHT_MAX_COMPLETION_TOKENS;
-  const windowOf = (deployment: string) => openWeightEffectiveWindow(deployment) ?? Number.POSITIVE_INFINITY;
-  const deployment = input.deployments.find((candidate) => estimatedTokens <= windowOf(candidate));
-  if (deployment === undefined) {
-    const widest = input.deployments.reduce<string | undefined>((a, b) => a === undefined || windowOf(b) > windowOf(a) ? b : a, undefined);
-    if (widest === undefined) return { fits: true, unread: "no cash deployment to check" };
-    return { fits: false, reason: "window", deployment: widest, estimatedTokens, windowTokens: windowOf(widest) };
+export interface CashDraftFitInput {
+  deployment: string;
+  promptChars: number;
+  promptBytes?: number;
+  expectedRequests: number;
+  squeezed?: boolean;
+  atIso: string;
+}
+
+export class CashDraftSkippedError extends RmdError {
+  constructor(readonly fit: Extract<CashDraftFit, { fits: false }>) {
+    super("usage", 1, `cash draft skipped before transport: ${fit.reason}`);
   }
-  let estimatedUsd: number, leftUsd: number;
-  try {
-    estimatedUsd = openWeightReservationUsd(deployment, input.promptChars) * requests;
-    leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso: input.atIso, squeezed: input.squeezed })
-      .deployments[0]!.remainingUsd;
-  } catch (error) {
-    // The per-request reservation still refuses an unreadable allowance; this check only moves a refusal earlier.
-    return { fits: true, deployment, unread: String((error as Error)?.message ?? error).slice(0, 512) };
+}
+
+/** Check the deployment and billing posture selected by the router. */
+export function cashDraftFit(config: Config, input: CashDraftFitInput): CashDraftFit {
+  const { deployment, squeezed, atIso } = input;
+  const expectedRequests = Math.max(1, Math.ceil(input.expectedRequests));
+  const promptBytes = input.promptBytes ?? input.promptChars;
+  const estimatedTokens = openWeightEstimatedTokens(promptBytes) * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS;
+  const windowTokens = openWeightEffectiveWindow(deployment, learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment)));
+  if (windowTokens === undefined || estimatedTokens > windowTokens) {
+    return { fits: false, reason: "window", deployment, estimatedTokens, windowTokens };
   }
+  const estimatedUsd = openWeightReservationUsd(deployment, promptBytes) * expectedRequests;
+  const leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso, squeezed }).deployments[0]!.remainingUsd;
   return estimatedUsd > leftUsd
     ? { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd }
-    : { fits: true, deployment };
+    : { fits: true };
 }
 
 /** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
