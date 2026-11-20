@@ -579,9 +579,12 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
 }
 
 /** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
- *  response named one (`withObservedServedModel` in worker-provider.ts). Absent when the error carries neither. */
-function thrownServedModel(error: unknown): Record<string, string | null> {
-  if (error === null || typeof error !== "object" || !("servedModel" in error)) return {};
+ *  response named one (`withObservedServedModel` in worker-provider.ts), on the error or its `cause` chain.
+ *  Absent when none carries either. */
+function thrownServedModel(error: unknown, depth = 0): Record<string, string | null> {
+  if (error === null || typeof error !== "object" || depth > 4) return {};
+  // A wrapper such as WorkerAbandonedError keeps the provider's own error as its `cause`.
+  if (!("servedModel" in error)) return thrownServedModel((error as { cause?: unknown }).cause, depth + 1);
   const { servedModel, servedModelReason } = error as { servedModel?: unknown; servedModelReason?: unknown };
   if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
   return typeof servedModelReason === "string" && servedModelReason.length > 0

@@ -222,6 +222,7 @@ import {
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
+  withObservedServedModel,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -3270,7 +3271,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
-          cashController.signal.throwIfAborted();
+          // W1-T13868: a rung the abort cut short still names the model its responses reported, on the error that replaces it.
+          if (cashController.signal.aborted) {
+            const reason: unknown = cashController.signal.reason;
+            throw withObservedServedModel(reason instanceof Error ? reason : new Error(String(reason)),
+              { servedModel: rung.servedModel ?? null, ...(rung.servedModelReason ? { servedModelReason: rung.servedModelReason } : {}) });
+          }
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;

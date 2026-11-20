@@ -8,7 +8,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
 import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
-import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_REROUTE_RE,
@@ -186,6 +186,24 @@ async function runHungCodex(items: Record<string, unknown>[]): Promise<unknown> 
   } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/** A cash call routed through production `spawnWorker` whose adapter returns `result` only once the clock-bound watchdog
+ * has aborted it: the reply that named a model came back, and a later turn stalled past the bound. */
+async function runAbandonedCash(result: Partial<WorkerResult>): Promise<unknown> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-abandoned-"));
+  try {
+    await spawnWorker({ cwd: root, settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"),
+      permissionMode: "bypassPermissions", prompt: "bounded worker", model: "sonnet", effort: "low", maxTurns: 4,
+      mountProvider: "cash", cashSqueezed: true, clockBound: { boundMs: 25, pollMs: 5 },
+      config: { root, dailyCapUsd: 25, workerProviders: { enabled: ["cash"], cashEndpoint: "https://openai.example.test/" } } as Config,
+      providerRouting: { spawnOpenWeight: (args: { signal?: AbortSignal }) => new Promise((resolve) => {
+        args.signal?.addEventListener("abort", () => resolve({ isError: true, subtype: "error_during_execution", text: "",
+          stderr: "stalled second turn", numTurns: 2, durationMs: 30, totalCostUsd: 0, ...result } as never), { once: true });
+      }) },
+    } as never);
+    return undefined;
+  } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 test("a codex result records a fixed named reason, since its exec --json stream carries no model id", async () => {
   const result = await runCodex();
   assert.equal(result.isError, false, result.stderr);
@@ -257,6 +275,16 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(hungUnnamed.served_model, null);
   assert.equal(hungUnnamed.served_model_reason, CODEX_SERVED_MODEL_REASON);
   assert.equal("served_model" in spawnFailureDetail(new Error("plain"), true), false, "an error with no observation adds nothing");
+
+  // Through production spawnWorker: the watchdog replaces a cash rung that named its model with WorkerAbandonedError, and
+  // the failed-attempt row still records that model (or the rung's named reason) through the error's cause.
+  const abandoned = await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" });
+  assert.ok(abandoned instanceof WorkerAbandonedError, String(abandoned));
+  assert.equal(spawnFailureDetail(abandoned, true).served_model, "gpt-5-nano-2025-08-07");
+  const abandonedUnnamed = spawnFailureDetail(await runAbandonedCash({ servedModel: null,
+    servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed }), true);
+  assert.equal(abandonedUnnamed.served_model, null);
+  assert.equal(abandonedUnnamed.served_model_reason, CASH_SERVED_MODEL_REASONS.unnamed);
 
   // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
   // so the recorded name comes from a real answer, not from an error result.
