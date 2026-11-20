@@ -52,7 +52,7 @@ test("W1-T13916 criterion 1: author static admission: real child and grandchild 
   // Both probes run with ordinaryChildEnvironment, which unsets NODE_DISABLE_COMPILE_CACHE even in a coverage
   // run, so the slot's NODE_COMPILE_CACHE directory is always written. readdir order is not defined: sort it.
   assert.deepEqual(readdirSync(dir).sort(), ["node-compile-cache", "slot-1.json"],
-    "W1-T13916 compile cache (after W1-T13853): the probes always enable the cache, so expect it and slot-1.json");
+    "W1-T13916 compile cache (after W1-T13853): the probes unset NODE_DISABLE_COMPILE_CACHE, so their compile cache is always on");
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
 });
 
