@@ -19,6 +19,7 @@
     - src/run-task.ts # the daemon draft hook passes its ledger rows to draftsDueOnDaemon
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
     - "src/lib/ledger.ts"
+    - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -64,6 +65,7 @@
     Drop the cleanDraftInputKeys filter: criterion 2's fixture, with an empty cache and a clean ledger row, drafts
     the proposal again and the test fails.
   note: |
+    files: amendment 2026-11-20 (operator, approving the recommendation on the #19786 clarification): acceptance-author-gate refused #19786 as canonical-task-scope-exceeded for test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts; each is a change the build needs.
     Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.
     AMENDED (2026-11-19): cleanDraftInputKeys needs the daemon's ledger rows, and only the daemon draft hook,
     buildInboxDraftHook in src/run-task.ts, holds them (it calls readLedgerLines(ledgerPath) and then
