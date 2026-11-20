@@ -17,6 +17,8 @@
   files:
     - src/lib/product-plan-operation.ts
     - test/dispatch/product-plan-operation.test.ts
+    - src/lib/ledger-union.ts
+    - test/ledger-union.test.ts
   status: queued
   attempts: 0
   acceptance:
