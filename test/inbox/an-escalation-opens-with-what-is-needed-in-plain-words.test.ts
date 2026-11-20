@@ -15,6 +15,7 @@ import {
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText } from "#src/lib/escalation-answers.js";
+import { parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 
 const prUrl = "https://github.com/fixture/repo/pull/12345";
@@ -86,6 +87,23 @@ test("W1-T12041 criterion 1: the body opens with the summary and choices and end
   assert.ok(delivered.endsWith(["## Machine fields", ...fields].join("\n")));
 });
 
+function conversationOf(body: string, subject = escalation) {
+  return parseEscalationConversationSource({
+    html_url: "https://github.com/fixture/repo/issues/42", title: escalationIssueTitle(subject), body,
+    state: "open", updated_at: "2026-11-20T00:00:00.000Z",
+  });
+}
+
+function assertConversation(body: string, subject: Escalation, detail: string): void {
+  assert.deepEqual(conversationOf(body, subject), {
+    identity: { taskId: subject.taskId, class: subject.class, cause: subject.cause, prRef: "12345" },
+    headline: subject.summary,
+    detail,
+    recommendation: subject.recommendation,
+    options: subject.options.map(({ label, detail: d }) => ({ label, detail: d, executable: false })),
+  });
+}
+
 function assertReaders(body: string, subject = escalation): void {
   assert.equal(escalationTaskId(body), subject.taskId);
   assert.equal(escalationHeadSha(body), subject.headSha);
@@ -130,6 +148,12 @@ test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body
   assert.ok(escalationIssueTitle(clipped).endsWith("/123…"));
   assertReaders(body, clipped);
   assert.match(body, /\n## Machine fields\n\*\*Class:\*\* BLOCKED/);
+  // The escalation conversation reader takes its fields from the trailing block and its detail from
+  // under "## Details", so field-shaped lines quoted in the detail never become its identity.
+  assertConversation(body, clipped, `${clipped.detail}\n\n**Head:** prior-head\n**Cause:** review\n**Contract:** prior-revision`);
+  assertConversation(renderIssueBody(clipped, ["_Degraded: a notice after the footer._"]), clipped, clipped.detail);
+  assert.equal(conversationOf(body.replace("\n## Details\n", "\n## Elsewhere\n"), clipped), undefined);
+  assert.equal(conversationOf(body.replace("\n## Machine fields\n", "\n## Elsewhere\n"), clipped), undefined);
 });
 
 test("W1-T12041 criterion 3: reconciliation, answers and dedup still read a legacy body", () => {
@@ -150,4 +174,5 @@ test("W1-T12041 criterion 3: reconciliation, answers and dedup still read a lega
     "retry",
   ].join("\n");
   assertReaders(legacyBody, clipped);
+  assertConversation(legacyBody, clipped, `${escalation.detail}\n\n## Machine fields\n**Head:** prior-head`);
 });

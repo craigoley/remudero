@@ -89,12 +89,29 @@ function sourceOf(raw: unknown, issueUrl: string): EscalationIssueSource | undef
   return { html_url: issueUrl, title: r.title, body: r.body, state: r.state, updated_at: r.updated_at };
 }
 
+const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/g;
+
+/**
+ * Where the native writer put its machine fields. A body that opens with `**Class:**` then
+ * `**Task:**` is the old order (fields first). Otherwise the fields follow the LAST "## Machine
+ * fields" heading (W1-T12041), so a same-named heading quoted in the prose above cannot replace them.
+ */
+function sourceLayout(body: string): { order: "fields-first" | "machine-fields-last"; header: string; fieldsAt: number } {
+  const [first = ""] = body.split(/\r?\n\r?\n/, 1);
+  if (/^\*\*Class:\*\* [^\r\n]*\r?\n\*\*Task:\*\* /.test(body)) return { order: "fields-first", header: first, fieldsAt: 0 };
+  const last = [...body.matchAll(MACHINE_FIELDS_RE)].at(-1);
+  if (last === undefined) return { order: "fields-first", header: first, fieldsAt: 0 };
+  const [fields = ""] = body.slice(last.index + last[0].length).split(/\r?\n\r?\n/, 1);
+  return { order: "machine-fields-last", header: fields, fieldsAt: last.index };
+}
+
 /** Parse only the native writer's anchored metadata and sections, never instructions from prose. */
 export function parseEscalationConversationSource(source: EscalationIssueSource): {
   identity: ThreadIdentity; headline: string; detail: string; recommendation: string | null;
   options: EscalationConversation["options"];
 } | undefined {
-  const [header = ""] = source.body.split(/\r?\n\r?\n/, 1);
+  const layout = sourceLayout(source.body);
+  const header = layout.header;
   const field = (name: string): string | undefined => {
     const matches = [...header.matchAll(new RegExp(`^\\*\\*${name}:\\*\\* (.+)$`, "gm"))];
     return matches.length === 1 ? matches[0]![1]!.trim() : undefined;
@@ -121,10 +138,22 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   if (optionsHeaders.length !== 1 || recommendationHeaders.length !== 1) return undefined;
   const optionsAt = optionsHeaders[0]!.index!, recommendationAt = recommendationHeaders[0]!.index!;
   if (optionsAt >= recommendationAt) return undefined;
-  const detail = source.body.slice(header.length, optionsAt).trim();
+  const afterRecommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length);
+  let detail: string, recommendationText: string;
+  if (layout.order === "machine-fields-last") {
+    // W1-T12041: the summary leads, the raw detail sits under its own heading after the recommendation.
+    const details = /^## Details\r?$/m.exec(afterRecommendation);
+    if (!details || layout.fieldsAt <= recommendationAt) return undefined;
+    recommendationText = afterRecommendation.slice(0, details.index);
+    const tail = afterRecommendation.slice(details.index + details[0].length, layout.fieldsAt - (recommendationAt + recommendationHeaders[0]![0].length));
+    const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
+    detail = (footer === -1 ? tail : tail.slice(0, footer)).trim();
+  } else {
+    detail = source.body.slice(header.length, optionsAt).trim();
+    recommendationText = afterRecommendation;
+  }
   // The footer is the native writer's source annotation, not recommendation text.
-  const recommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length)
-    .split(/\r?\n_Opened automatically by Remudero /, 1)[0]!.trim() || null;
+  const recommendation = recommendationText.split(/\r?\n_Opened automatically by Remudero /, 1)[0]!.trim() || null;
   const optionsText = source.body.slice(optionsAt + optionsHeaders[0]![0].length, recommendationAt);
   const options = [...optionsText.matchAll(/^- \*\*(.+)\*\* — (.+)$/gm)]
     .map((match) => ({ label: match[1]!, detail: match[2]!, executable: false as const }));
