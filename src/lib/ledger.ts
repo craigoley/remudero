@@ -745,6 +745,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-EV: ops.ts's `priorReconciledAlertFeedbackIds` counts these to decide whether an
   // alert-feedback entry was already closed; the local entry stays `new`, so the line IS the dedup.
   "ops.feedback_reconciled",
+  "inbox.drafted", // W1-T13864: the daemon skips inputs with a recorded lint-clean draft.
   "ratify.approved",
   "approve.id_materialized", // The saved improvement filing receipt recovers the actual task identities from this row.
   "ratify.reframed",
