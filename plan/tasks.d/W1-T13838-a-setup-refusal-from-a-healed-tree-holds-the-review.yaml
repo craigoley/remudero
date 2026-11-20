@@ -16,7 +16,7 @@
   files:
     - src/lib/tick-read-worker.ts
     - test/review/a-setup-refusal-from-a-healed-tree-holds-the-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Two refusals at the same PR, head and input digest whose reviewer_code_sha is a healed_sha from a review.ran_from_healed_tree row hold the review, while the running reviewer code sha differs"

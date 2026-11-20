@@ -21,7 +21,7 @@
     - test/daemon/ops-catalog-shadow-effects.test.ts
     - test/daemon/ops-catalog-shadow-revision.test.ts
     - test/daemon/a-test-that-runs-the-daemon-loop-reads-no-memory-figure-from-its-host.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "One helper returns the daemon dependencies that fix every host reading of the loop: the memory governor, the heap statistics, the clock and the boot checkout flag"
