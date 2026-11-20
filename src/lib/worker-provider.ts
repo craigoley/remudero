@@ -2308,6 +2308,37 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
   completion: CodexCompletionEvidence;
+  /** W1-T13960: which retained output lost bytes, per line, rather than whether any line did. */
+  retentionLoss: CodexRetentionLoss;
+}
+
+/** W1-T13960: where the dropped bytes fell. A spilled intermediate event (a command output) loses bytes that no
+ *  retained block holds; the final text and the blocks read truncated only when their own lines lost bytes. */
+export interface CodexRetentionLoss {
+  /** The final text block came from a rebuilt line, or was itself cut to the retention budget. */
+  text: boolean;
+  /** A retained block came from a rebuilt line, or a block was cut or dropped to the retention budget. */
+  blocks: boolean;
+  /** Spilled lines rebuilt from their bounded head and tail. */
+  rebuiltLines: number;
+  /** Rebuilt lines whose JSON envelope did not parse: a partial line never certifies. */
+  rejectedRebuiltLines: number;
+}
+
+/** W1-T13960: whether a Codex result's retained output is whole enough to count as complete. Every retention value
+ *  but stdout must read complete, as before: the final turn's turn.completed, the final text, the blocks (both by
+ *  their own lines' loss) and stderr. stdout may also read truncated, but only when that state came from spilled
+ *  lines that were all rebuilt and parsed as valid envelopes; a stdout read malformed, unreadable or absent, or a
+ *  rebuilt line that did not parse, stays incomplete. A partial line never certifies. */
+export function codexResultRetentionComplete(
+  retention: NonNullable<CodexWorkerResult["outputRetention"]>,
+  parsed: Pick<ParsedCodexEvents, "retentionLoss">,
+): boolean {
+  const { stdout, ...rest } = retention;
+  if (Object.values(rest).some(value => typeof value === "object" && value.state !== "complete")) return false;
+  if (stdout === undefined || stdout.state === "complete") return true;
+  const loss = parsed.retentionLoss;
+  return stdout.state === "truncated" && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0;
 }
 
 export interface CodexOutputTruncation {
@@ -2495,6 +2526,11 @@ class CodexJsonlAccumulator {
   private spillHeadFull = false;
   private spillEvidence?: Omit<FileTail, "text">;
   private failed = false;
+  /** W1-T13960: one entry per retained block, true when that block's bytes are not all there. */
+  private readonly blockLoss: boolean[] = [];
+  private blocksCut = false;
+  private rebuiltLines = 0;
+  private rejectedRebuiltLines = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -2547,6 +2583,7 @@ class CodexJsonlAccumulator {
   private consumePending(): void {
     let line = this.pending;
     let sourceBytes: number | undefined;
+    let rebuilt = false;
     if (this.spilling) {
       const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
       const { text, ...evidence } = tail;
@@ -2557,6 +2594,8 @@ class CodexJsonlAccumulator {
         const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
         line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
         this.droppedBytes += Math.max(0, omitted);
+        rebuilt = true;
+        this.rebuiltLines += 1;
       } else {
         line = text;
       }
@@ -2576,13 +2615,20 @@ class CodexJsonlAccumulator {
     this.spilling = false;
     this.spillHead = "";
     this.spillHeadFull = false;
-    this.consumeLine(line, sourceBytes);
+    this.consumeLine(line, sourceBytes, rebuilt);
     if (this.pendingFile) this.boundRetained();
   }
 
   finish(): ParsedCodexEvents {
     if (this.spilling || this.pending.trim()) this.consumePending();
     const text = this.blocks.at(-1) ?? "";
+    // Read before the marker block below shifts the blocks off their loss entries.
+    const retentionLoss: CodexRetentionLoss = {
+      text: this.blockLoss.at(-1) === true,
+      blocks: this.blocksCut || this.blockLoss.some(Boolean),
+      rebuiltLines: this.rebuiltLines,
+      rejectedRebuiltLines: this.rejectedRebuiltLines,
+    };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
     this.keptBytes = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
@@ -2609,6 +2655,7 @@ class CodexJsonlAccumulator {
         droppedBytes: this.droppedBytes,
         spilledBytes: this.spilledBytes,
       } } : {}),
+      retentionLoss,
     };
   }
 
@@ -2652,24 +2699,34 @@ class CodexJsonlAccumulator {
     while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
     if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
     const blockBudget = budget - bytes(this.errors);
-    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
+    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) {
+      this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
+      this.blockLoss.splice(1, 1);
+      this.blocksCut = true;
+    }
+    const cutBlock = (index: number, limit: number) => {
+      const before = this.droppedBytes;
+      this.blocks[index] = this.boundText(this.blocks[index]!, limit);
+      if (this.droppedBytes > before) this.blockLoss[index] = true;
+    };
     if (bytes(this.blocks) > blockBudget) {
-      if (this.blocks.length === 1) this.blocks[0] = this.boundText(this.blocks[0]!, blockBudget);
+      if (this.blocks.length === 1) cutBlock(0, blockBudget);
       else {
         const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
-        this.blocks[0] = this.boundText(this.blocks[0]!, headBudget);
-        this.blocks[1] = this.boundText(this.blocks[1]!, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        cutBlock(0, headBudget);
+        cutBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
       }
     }
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, rebuilt = false): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
+      if (rebuilt) this.rejectedRebuiltLines += 1;
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
@@ -2692,6 +2749,7 @@ class CodexJsonlAccumulator {
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
+      this.blockLoss.push(rebuilt);
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -6434,18 +6492,18 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
-    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
     const textBytes = Buffer.byteLength(parsed.text);
     const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    // W1-T13960: text and blocks read truncated by their own lines' loss, never because some other line lost bytes.
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
-      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
-      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      text: { state: parsed.retentionLoss.text ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: parsed.retentionLoss.blocks ? "truncated" : "complete", bytesRead: blockBytes },
       stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
       originalSubtype: parsed.subtype,
     };
-    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
+    const incomplete = !codexResultRetentionComplete(outputRetention, parsed);
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;
