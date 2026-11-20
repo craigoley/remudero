@@ -12,7 +12,7 @@ import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
-  PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS, PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
   type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -655,25 +655,67 @@ function preloadChildModule(t: TestContext, f: Fixture, source: string) {
 }
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
-  for (const legacy of [false, true]) {
-    const f = fixture(t);
-    const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
-    const operationId = first.observation.operationId;
-    if (legacy) seedLegacyRefusal(f, operationId); // the saved Nov 3 refusal: a journal written before this fix
-    else {
-      f.release("refused");
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
-    assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED });
+  const f = fixture(t);
+  const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  f.release("refused");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
+  assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED, beforeLaunch: true });
 
-    // Ledger rows that would read as a proposal: a refused hand-off must not even look.
-    const evidence = reader(() => proposalLines(f, operationId));
+  // Ledger rows that would read as a proposal: a refusal where nothing ran must not even look.
+  const evidence = reader(() => proposalLines(f, operationId));
+  for (let resume = 0; resume < 2; resume++) {
     const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
     assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
-    assert.equal(evidence.reads.length, 0, legacy ? "a legacy refusal" : "a pre-launch refusal");
-    assert.equal(f.calls.length, 1);
   }
+  assert.equal(evidence.reads.length, 0);
+  assert.equal(f.calls.length, 1);
+});
+
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a legacy refusal's window is read", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId); // the saved Nov 3 refusal: written before refusals said whether anything ran
+  const windows: Array<{ sinceTs: string; untilTs?: string }> = [];
+  const evidence = reader(() => []);
+  const read: typeof evidence.read = (stateDir, opts) => { windows.push({ sinceTs: opts.sinceTs, untilTs: opts.untilTs }); return evidence.read(stateDir, opts); };
+  for (let resume = 0; resume < 3; resume++) {
+    const again = await ok(f.service({ gateway: false, readLedgerLines: read }).execute(actor, f.command()));
+    assert.deepEqual([again.observation.operationId, again.observation.state], [operationId, "refused"]);
+  }
+  assert.deepEqual(windows, [{ sinceTs: REQUESTED, untilTs: new Date(Date.parse(REQUESTED) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS).toISOString() }],
+    "one read, of the request-to-refusal window only; later resumes read nothing");
+});
+
+test("W1-T13875: a legacy refusal can recover a proposal opened before the child exited nonzero", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  nativeRun(f, operationId, { pr: PR_URL });
+  f.row(at(4_000), { step: "ratify.cli_exited", task_id: productPlanLedgerTaskId(operationId), code: 1 });
+
+  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([resumed.replayed, resumed.observation.operationId, resumed.observation.state, resumed.observation.proposal],
+    [true, operationId, "proposed", PR_URL]);
+  const evidence = reader(() => []);
+  const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([again.observation.state, again.observation.proposal], ["proposed", PR_URL]);
+  assert.equal(evidence.reads.length, 0, "the recovered proposal was kept");
+  assert.equal(f.calls.length, 1);
+});
+
+test("W1-T13875: a legacy refusal never takes rows from outside its hand-off window", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  const late = at(PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS + 1_000);
+  const evidence = reader(() => proposalLines(f, operationId).map((line) => JSON.stringify({ ...JSON.parse(line), ts: new Date(late).toISOString() })));
+  const resumed = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["refused", undefined]);
 });
 
 test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 20_000 }, async (t) => {
@@ -701,8 +743,7 @@ test("W1-T13875: a nonzero child exit preserves an opened proposal across resume
   const first = await ok(service.execute(actor, f.command()));
   assert.deepEqual(await handoff, { outcome: "refused" });
   await new Promise<void>((resolve) => setImmediate(resolve));
-  const path = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
-  const journal = JSON.parse(readFileSync(path, "utf8"));
+  const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
   assert.equal(journal.operations[first.observation.operationId].handoff?.outcome, "exited");
   for (const resumed of [service, f.service({ gateway: false })]) {
     const next = await ok(resumed.execute(actor, f.command()));
@@ -846,7 +887,8 @@ test("W1-T13875: a proposal's evidence is read once and kept when the journal is
     const next = await ok(resumed.execute(actor, f.command()));
     assert.deepEqual([next.observation.operationId, next.observation.state, next.observation.proposal], [operationId, "proposed", PR_URL]);
   }
-  assert.equal(evidence.reads.length, 1, "a journal with no room still keeps the proposal it read");
+  assert.equal(evidence.reads.length, 1, "a journal with no room still keeps the proposal it read, across a restart");
+  assert.ok(existsSync(join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`)), "kept beside the journal, not in memory");
   assert.equal(statSync(path).size, limit, "nothing was written past the limit");
 });
 
@@ -887,6 +929,22 @@ test("W1-T13875: a proposal's evidence is read once and kept across rotation dur
   const restarted = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.deepEqual([restarted.observation.state, restarted.observation.proposal], ["proposed", PR_URL]);
   assert.equal(evidence.reads.length, 0, "the stable proposal was saved for later resumes");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept, and never from rows before its request", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const early = new Date(at(-1_000)).toISOString();
+  const stale = reader(() => [JSON.stringify({ ts: early, task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 })]);
+  const before = await ok(f.service({ gateway: false, readLedgerLines: stale.read }).execute(actor, f.command()));
+  assert.equal(before.observation.state, "unknown", "an exit stamped before the request is not this operation's");
+  const evidence = reader(() => proposalLines(f, operationId));
+  for (let resume = 0; resume < 2; resume++) {
+    const next = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+    assert.deepEqual([next.observation.state, next.observation.proposal], ["proposed", PR_URL]);
+  }
+  assert.equal(evidence.reads.length, 1, "the pre-request row was never kept as final");
 });
 
 test("W1-T13875: a correlated exit or failure survives restart without another read", async (t) => {

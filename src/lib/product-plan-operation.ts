@@ -29,7 +29,9 @@ export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as con
 /** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
-export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
+export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
+/** W1-T13875: how long after a legacy refusal was saved its run's last rows can still land in the ledger. */
+export const PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS = 60_000;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
@@ -234,16 +236,17 @@ export interface ProductPlanOperationOptions {
   /** W1-T13875: overrides PRODUCT_PLAN_LEDGER_READ_BOUND_MS; a test seam for the bounded evidence read. */
   ledgerReadBoundMs?: number;
   /** W1-T13875: test seam for the evidence reader. */
-  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; refuseIncomplete: true; keep: (line: string) => boolean }) =>
+  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; untilTs?: string; refuseIncomplete: true; keep: (line: string) => boolean }) =>
     Promise<{ ok: boolean; rawLines: readonly string[] }>;
   sync?: (fd: number) => void;
 }
 
 const hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 const modeSchema = z.enum(["create", "clarify"]);
+// `settled`: a legacy refusal whose hand-off window shows no run, so nothing ran.
 const finalEvidenceSchema = z.object({
-  exited: z.boolean(), failed: z.boolean(), opened: z.string().optional(),
-}).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined);
+  exited: z.boolean(), failed: z.boolean(), opened: z.string().max(512).optional(), settled: z.literal(true).optional(),
+}).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined || seen.settled === true);
 type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
 type LedgerRead = LedgerEvidence | "unread";
 const recordSchema = z.object({
@@ -252,9 +255,9 @@ const recordSchema = z.object({
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  // "exited" is a nonzero child exit; the gateway reports it as refused, and only a pre-launch refusal stays "refused".
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime() }).strict().optional(),
-  finalEvidence: finalEvidenceSchema.optional(),
+  // "exited" is a nonzero child exit, which the gateway reports as refused. `beforeLaunch` marks a refusal where nothing
+  // ran; a "refused" saved before this marker existed may be either, so only its hand-off window is read, once.
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
 const journalSchema = z.object({
@@ -262,9 +265,14 @@ const journalSchema = z.object({
   operations: z.record(hex64, recordSchema), requests: z.record(hex64, z.object({ operationId: hex64, payloadDigest: hex64 }).strict()),
 }).strict();
 type Journal = z.infer<typeof journalSchema>;
-interface Paths { directory: string; state: string; ownerKey: string }
+/** Final evidence lives beside the journal, so a journal at its byte limit still keeps what was read. */
+const keptSchema = z.object({
+  version: z.literal(PRODUCT_PLAN_OPERATION_VERSION), ownerKey: hex64, evidence: z.record(hex64, finalEvidenceSchema),
+}).strict();
+type Kept = z.infer<typeof keptSchema>;
+interface Paths { directory: string; state: string; kept: string; ownerKey: string }
 
-type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string };
+type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilTs?: string };
 const keepEvidenceLine = (taskId: string) => (line: string) =>
   line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
 const runLedgerReader = promisify(execFile);
@@ -284,7 +292,8 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
   for (;;) {
     const before = liveIdentity();
     const read = await readLedgerUnionRawLinesAsync(stateDir, {
-      sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId),
+      sinceTs: subject.requestedAt, ...(subject.untilTs !== undefined ? { untilTs: subject.untilTs } : {}), refuseIncomplete: true,
+      keep: keepEvidenceLine(taskId),
     });
     if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
@@ -306,7 +315,10 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
   });
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
-  const rows = parsed.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
+  // Only rows inside the operation's window: from its request, and for a legacy refusal up to that refusal.
+  const from = Date.parse(record.requestedAt);
+  const until = record.untilTs === undefined ? Number.POSITIVE_INFINITY : Date.parse(record.untilTs);
+  const rows = parsed.filter((row) => at(row) >= from && at(row) <= until).sort((a, b) => at(a) - at(b));
   const mine = rows.filter((row) => row.task_id === taskId);
   const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
   const pid = started?.pid as number | undefined;
@@ -327,10 +339,6 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
   return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
 }
-
-// W1-T13875: final evidence kept per journal and operation, also when a full journal cannot store it.
-const keptEvidence = new Map<string, LedgerEvidence>();
-const keptKey = (paths: Paths, operationId: string) => `${paths.state}\0${operationId}`;
 
 // Service instances share one actor journal. Order in-process writers before taking the real cross-process lock.
 const journalChains = new Map<string, Promise<unknown>>();
@@ -384,6 +392,7 @@ export class ProductPlanOperationService {
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
+  private readonly keptInMemory = new Map<string, LedgerEvidence>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -566,7 +575,8 @@ export class ProductPlanOperationService {
         const stored = journal.operations[record.operationId];
         if (!stored) return;
         // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
-        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso() };
+        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso(),
+          ...(outcome === "refused" && accepted === false ? { beforeLaunch: true as const } : {}) };
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
@@ -592,6 +602,7 @@ export class ProductPlanOperationService {
       if (proposal !== undefined) state = "proposed";
       else if (seen.exited) state = "refused";
       else if (seen.failed) state = "unknown";
+      else if (seen.settled) state = "refused";
       else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
       else if (this.inFlight(record.operationId)) state = "pending";
       else if (record.handoff?.outcome === "refused") state = "refused";
@@ -605,31 +616,53 @@ export class ProductPlanOperationService {
       requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
+  /** Final evidence is read once: kept beside the journal (and in memory if that write fails), never read again. */
   private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
-    if (record.finalEvidence) return record.finalEvidence;
-    const key = keptKey(paths, record.operationId);
-    const kept = keptEvidence.get(key);
+    const kept = this.keptInMemory.get(record.operationId) ?? this.readKept(paths)?.evidence[record.operationId];
     if (kept) return kept;
     const seen = await this.ledger(record);
-    if (seen !== "unread" && (seen.opened !== undefined || seen.exited || seen.failed)) {
-      const { opened, exited, failed } = seen;
-      const finalEvidence = { exited, failed, ...(opened !== undefined ? { opened } : {}) };
-      // Kept in memory first: a journal at its byte limit still answers this evidence without another read.
-      keptEvidence.set(key, finalEvidence);
-      try {
-        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...record, finalEvidence } } });
-        journal.operations[record.operationId] = { ...record, finalEvidence };
-      } catch (error) {
-        if (!(error instanceof Fault && error.code === "capacity")) throw error;
-      }
+    if (seen === "unread") return seen;
+    const { opened, exited, failed } = seen;
+    const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
+      : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
+    if (final === undefined) return seen;
+    this.keptInMemory.set(record.operationId, final);
+    this.keep(paths, journal, record.operationId, final);
+    return final;
+  }
+
+  private legacyRefusal(record: Record_): boolean {
+    return record.handoff?.outcome === "refused" && record.handoff.beforeLaunch !== true && !this.inFlight(record.operationId);
+  }
+
+  private readKept(paths: Paths): Kept | undefined {
+    try {
+      const parsed = keptSchema.safeParse(this.readPrivate(paths.kept, PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes));
+      return parsed.success && parsed.data.ownerKey === paths.ownerKey ? parsed.data : undefined;
+    } catch (error) {
+      void error; return undefined; // kept evidence is a cache of the ledger: an unreadable file means read the ledger
     }
-    return seen;
+  }
+
+  private keep(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence): void {
+    const prior = this.readKept(paths)?.evidence ?? {};
+    // Only operations the journal still holds, so the file stays within operations x one entry.
+    const evidence = Object.fromEntries(Object.entries({ ...prior, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
+    try {
+      this.writePrivate(paths, paths.kept, JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence }),
+        PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes);
+    } catch (error) {
+      void error; // the in-memory copy still answers this process; a restart reads the ledger once more
+    }
   }
 
   private async ledger(record: Record_): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && !this.inFlight(record.operationId))) return none;
+    const refused = record.handoff?.outcome === "refused" && !this.inFlight(record.operationId);
+    if (ledgerPath === undefined || (refused && record.handoff?.beforeLaunch === true)) return none;
+    // A legacy refusal can be a nonzero exit after a proposal opened: read only its request-to-refusal window.
+    const untilTs = refused ? new Date(Date.parse(record.handoff!.at) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS).toISOString() : undefined;
     const taskId = productPlanLedgerTaskId(record.operationId);
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
@@ -637,12 +670,14 @@ export class ProductPlanOperationService {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const { operationId, mode, repository, requestedAt } = record;
-      const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest };
+      const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest,
+        ...(untilTs !== undefined ? { untilTs } : {}) };
       const stateDir = dirname(ledgerPath);
       const seen = await Promise.race([
         new Promise<"unread">((resolve) => { timer = setTimeout(() => resolve("unread"), bound); }),
         this.options.readLedgerLines
-          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) })
+          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilTs !== undefined ? { untilTs } : {}), refuseIncomplete: true,
+            keep: keepEvidenceLine(taskId) })
             .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, read.rawLines) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.
           : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
@@ -687,7 +722,7 @@ export class ProductPlanOperationService {
     if (!this.options.root || !isAbsolute(this.options.root)) throw new Fault("unavailable");
     const ownerKey = digest(actor);
     const directory = join(realpathSync(this.options.root), "state", "products", "v1", "plan-operations");
-    return { directory, state: join(directory, `${ownerKey}.json`), ownerKey };
+    return { directory, state: join(directory, `${ownerKey}.json`), kept: join(directory, `${ownerKey}.evidence.json`), ownerKey };
   }
 
   private ensureDirectory(paths: Paths): void {
@@ -703,11 +738,20 @@ export class ProductPlanOperationService {
   }
 
   private readJournal(paths: Paths): Journal {
+    const raw = this.readPrivate(paths.state, PRODUCT_PLAN_OPERATION_LIMITS.stateBytes);
+    if (raw === undefined) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+    const parsed = journalSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+    return parsed.data;
+  }
+
+  /** One private (owner-only, single-link, bounded) JSON file; undefined when it does not exist. */
+  private readPrivate(file: string, limit: number): unknown {
     let fd: number | undefined;
     try {
-      fd = openSync(paths.state, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = fstatSync(fd);
-      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("unavailable");
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
       const buffer = Buffer.alloc(info.size);
       let size = 0;
       while (size < buffer.length) {
@@ -715,22 +759,22 @@ export class ProductPlanOperationService {
         if (count === 0) break;
         size += count;
       }
-      let raw: unknown;
-      try { raw = size === info.size ? JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) : undefined; }
+      if (size !== info.size) throw new Fault("corrupt");
+      try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) as unknown; }
       catch (error) { void error; throw new Fault("corrupt"); }
-      const parsed = journalSchema.safeParse(raw);
-      if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
-      return parsed.data;
     } catch (error) {
-      if (errno(error, "ENOENT")) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+      if (errno(error, "ENOENT")) return undefined;
       throw error;
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
   /** Atomic replace. A failure before the rename is `unavailable`; after it the outcome is unknowable. */
   private commit(paths: Paths, journal: Journal): void {
-    const body = JSON.stringify(journal);
-    if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("capacity");
+    this.writePrivate(paths, paths.state, JSON.stringify(journal), PRODUCT_PLAN_OPERATION_LIMITS.stateBytes);
+  }
+
+  private writePrivate(paths: Paths, file: string, body: string, limit: number): void {
+    if (Buffer.byteLength(body) > limit) throw new Fault("capacity");
     this.ensureDirectory(paths);
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let renamed = false;
@@ -738,7 +782,7 @@ export class ProductPlanOperationService {
       const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       try { fchmodSync(fd, 0o600); writeFileSync(fd, body, "utf8"); this.sync(fd); }
       finally { closeSync(fd); }
-      renameSync(temporary, paths.state);
+      renameSync(temporary, file);
       renamed = true;
       this.syncDirectory(paths.directory);
     } catch (error) {
