@@ -89,7 +89,7 @@ function sourceOf(raw: unknown, issueUrl: string): EscalationIssueSource | undef
   return { html_url: issueUrl, title: r.title, body: r.body, state: r.state, updated_at: r.updated_at };
 }
 
-const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/g;
+export const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/;
 
 /**
  * Where the native writer put its machine fields. A body that opens with `**Class:**` then
@@ -99,7 +99,7 @@ const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/g;
 function sourceLayout(body: string): { order: "fields-first" | "machine-fields-last"; header: string; fieldsAt: number } {
   const [first = ""] = body.split(/\r?\n\r?\n/, 1);
   if (/^\*\*Class:\*\* [^\r\n]*\r?\n\*\*Task:\*\* /.test(body)) return { order: "fields-first", header: first, fieldsAt: 0 };
-  const last = [...body.matchAll(MACHINE_FIELDS_RE)].at(-1);
+  const last = [...body.matchAll(new RegExp(MACHINE_FIELDS_RE, "g"))].at(-1);
   if (last === undefined) return { order: "fields-first", header: first, fieldsAt: 0 };
   const [fields = ""] = body.slice(last.index + last[0].length).split(/\r?\n\r?\n/, 1);
   return { order: "machine-fields-last", header: fields, fieldsAt: last.index };

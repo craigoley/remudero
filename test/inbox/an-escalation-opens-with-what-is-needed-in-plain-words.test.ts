@@ -15,7 +15,7 @@ import {
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText } from "#src/lib/escalation-answers.js";
-import { parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
+import { MACHINE_FIELDS_RE, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 
 const prUrl = "https://github.com/fixture/repo/pull/12345";
@@ -139,6 +139,13 @@ const clipped = {
   ...escalation,
   summary: "x".repeat(255 - titlePrefix.length - prUrl.length + 2) + prUrl + " needs a decision",
 };
+
+test("the machine fields matcher requires the exact heading after a blank line", () => {
+  assert.equal(MACHINE_FIELDS_RE.test(renderIssueBody(escalation)), true);
+  assert.equal(MACHINE_FIELDS_RE.test("Summary\r\n\r\n## Machine fields\r\n**Class:** BLOCKED"), true);
+  assert.equal(MACHINE_FIELDS_RE.test("Summary\n\n## Machine fields (example)\n**Class:** BLOCKED"), false);
+  assert.equal(MACHINE_FIELDS_RE.test("Summary\n## Machine fields\n**Class:** BLOCKED"), false);
+});
 
 test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body order", () => {
   const body = renderIssueBody({
