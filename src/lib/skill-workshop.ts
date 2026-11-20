@@ -14,7 +14,7 @@
  * cycle. TypeScript's structural typing means a real `ProceduralCandidate` satisfies this shape
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -24,6 +24,7 @@ import { withInflightLock } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
+import { ledgerRotationLockPath } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import {
@@ -1613,8 +1614,13 @@ type SkillDraftLedgerRows = LedgerUnionRecordRead["rows"];
 function readSkillDraftLedger(stateDir: string, step: readonly string[]): { rows: SkillDraftLedgerRows } | { unmeasured: string } {
   const livePath = ledgerLivePath(stateDir);
   const liveIdentity = () => statSync(livePath, { throwIfNoEntry: false });
+  const lockPath = ledgerRotationLockPath(livePath);
+  const rotationInProgress = () => lstatSync(lockPath, { throwIfNoEntry: false }) !== undefined;
+  const rotating = { unmeasured: "incomplete ledger union: ledger rotation in progress" };
   try {
     const before = liveIdentity();
+    // The rotator holds this lock until the replaced inode's tail is copied into live.
+    if (rotationInProgress()) return rotating;
     let unterminated = 0;
     const union = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete: true }, {
       ...realLedgerFs,
@@ -1630,10 +1636,12 @@ function readSkillDraftLedger(stateDir: string, step: readonly string[]): { rows
     if (!union.ok || torn > 0) {
       return { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${torn} torn row(s)` };
     }
+    if (!union.liveFileRead) return { unmeasured: "incomplete ledger union: live ledger is missing" };
 
     // A rotation can publish a new archive after the union lists archives and before it reads live.
     const archives = ledgerRotationEntries(realLedgerFs.readdirSync(stateDir), stateDir);
     const after = liveIdentity();
+    if (rotationInProgress()) return rotating;
     if (before?.dev !== after?.dev || before?.ino !== after?.ino || archives.length !== union.archiveFiles.length ||
         archives.some(({ path }, index) => path !== union.archiveFiles[index])) {
       return { unmeasured: "incomplete ledger union: ledger rotated during read" };
