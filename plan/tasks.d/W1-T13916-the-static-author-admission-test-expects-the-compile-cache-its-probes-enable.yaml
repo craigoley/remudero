@@ -16,7 +16,7 @@
     - W1-T13904
   files:
     - test/a-static-author-admits-its-nested-checks-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:static-admission-cache-on — the admission test requires exactly node-compile-cache and slot-1.json in the slot directory, in coverage runs and in ordinary runs, because its probes always unset NODE_DISABLE_COMPILE_CACHE"

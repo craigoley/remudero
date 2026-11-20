@@ -7,7 +7,7 @@ import { gzipSync } from "node:zlib";
 import { checkReaderAgreement, type ReaderFigures } from "#src/lib/reader-agreement.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
-import { runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { runSweep, settleReaderAgreement, type SweepDeps } from "#test/helpers/sweep-test.js";
 import { buildBatchedGithub } from "#src/lib/status.js";
 
 const figures: ReaderFigures = {
@@ -136,6 +136,7 @@ test("W1-T4841: the sweep records disagreements and dry-run writes nothing", asy
     readReportedAnomalies: async () => ({ complete: true, costAnomaly: new Set(), runningLong: new Set() }),
   };
   await runSweep([], deps);
+  await settleReaderAgreement(path); // W1-T13884: the pass starts the check and does not wait for it.
   assert.equal(rows.filter(row => row.step === "reader.disagreement").length, 1);
   rows.length = 0;
   await runSweep([], { ...deps, dryRun: true });
@@ -154,6 +155,7 @@ test("W1-T4841: unavailable readers are reported and do not fail reconciliation"
     appendLine: (_path, row) => rows.push(row), log: (step, extra) => logs.push({ step, reason: extra?.reason }),
     readReportedAnomalies: async () => ({ complete: true, costAnomaly: new Set(), runningLong: new Set() }),
   });
+  await settleReaderAgreement(path);
   assert.deepEqual(logs.filter(log => log.step === "reader.agreement.unavailable"),
     [{ step: "reader.agreement.unavailable", reason: "Error: reader transport failed" }]);
   assert.ok(!rows.some(row => row.step === "reader.disagreement"));

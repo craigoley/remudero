@@ -1,0 +1,45 @@
+- id: W1-T13951
+  title: A semantic reviewer whose output stream passes the 1 MiB retention cap still yields its final verdict
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 15.00
+  risk: medium # changes which bytes are retained under the cap; the cap itself is unchanged
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T9245
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A Codex stream of more than 1 MiB whose bulk is command output still retains its final agent_message item whole, and outputRetention.text reads complete"
+      proof: "grep: W1-T13951 criterion 1: in test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts"
+    - claim: "The bytes dropped under the cap are counted on worker.output_truncated as today"
+      proof: "grep: W1-T13951 criterion 2: in test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts"
+    - claim: "invariant:cap-unchanged — the retained total never exceeds the existing limit, and a stream whose final message alone passes the limit still reads truncated"
+      kind: guard
+      proof: "grep: W1-T13951 criterion 3: in test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core): 29 review.semantic_incomplete rows on #19673 from 11-19 13:48Z to
+    11-20 12:09Z, each after worker.output_truncated with limitBytes=1048576 (spilled 1088278 / dropped 760598 at
+    11:03Z; spilled 2176322 / dropped 1520962 at 11:36Z). #19830 died the same way at 10:52:44Z (spilled 1087719,
+    dropped 760039, retained 3912) and its pending status then stood for 95 minutes. In 06:20-12:20Z, 21 of the
+    review lane's 59 lost children exited 2 on incomplete output. A reviewer that reads large files emits large
+    command-output items; the verdict is in the final agent_message, which the cap drops with the rest.
+  design: |
+    INVARIANT cap-unchanged: retention stays within the existing byte limit.
+    1. worker-provider.ts (Codex stdout retention): when the limit is reached, drop command-output item bodies
+       before agent_message items, so the newest agent_message is kept whole when it fits the limit alone.
+    2. outputRetention.text reads complete when the final agent_message was retained; blocks may read truncated.
+    3. Keep worker.output_truncated counts exact.
+  falsifier: |
+    Without the change criterion 1's 1.1 MiB fixture reads text truncated and the final message is missing.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host. Do not raise the limit: the
+    healthy-condition doctrine applies, the population here is command output, not verdict text.

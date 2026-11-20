@@ -1,0 +1,87 @@
+- id: W1-T14002
+  title: The fix class learns its memory estimate from measured concurrent tree peaks, keeps lifetime-peak sums only as a labelled fallback, names why a tree went unmeasured, and reads its samples past the test-file rows, so fix admission stops charging 5.9 GiB for a tree whose measured p90 is 835 MiB (held rebuild)
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  band_meaning: span
+  origin: operator-session#serve-oom-2026-11-16
+  plan_refs:
+    - W1-T13842
+    - W1-T9679
+    - W1-T9498
+    - W1-T8879
+  files:
+    - src/lib/host-memory-learning.ts
+    - src/lib/sweep.ts
+    - test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts
+    - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: When the store holds concurrent-rss fix samples, the fix class estimate and typical are learned from their measured concurrent peaks, not from legacy-hwm lifetime sums
+      proof: "grep: W1-T13878 criterion 1: in test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts"
+    - claim: invariant:legacy-only-as-fallback — the fix class uses legacy-hwm samples only when it has no concurrent-rss sample, and its estimate then says legacy-hwm-fallback; other classes learn as before
+      kind: guard
+      proof: "grep: W1-T13878 criterion 2: in test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts"
+    - claim: A legacy-hwm peak row recorded at a reservation's release names why the tree's concurrent peak was not measured
+      proof: "grep: W1-T13878 criterion 3: in test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts"
+    - claim: Fix samples older than the last 256 KiB of a store file full of test-file rows still reach the fix estimate
+      proof: "grep: W1-T13878 criterion 4: in test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts"
+    - claim: The sweep.fix_capacity row names the basis of the fix estimate it charges
+      proof: "grep: W1-T13878 criterion 5: in test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts"
+  rationale: |
+    REBUILD of W1-T13878, filed by the sweep (W1-T12709) from https://github.com/craigoley/remudero/pull/19776 at bec129268ca52471b8991edfcc848f8ee308de25: the design hold covers 1 red checks and no criterion; a red check cannot leave the task, so the pull request is closed and rebuilt as a held task.
+    FINDINGS of the pull request:
+    - no unmet criterion was recorded
+    WHY: fix admission charges each fix at the fix class's learned p90 (classEstimate("fix")). On 2026-11-19 at
+    20:18:37Z the sweep.fix_capacity row showed fix_estimate_mib 5911 against fix_typical_mib 1628 (W1-T13842's
+    report, docs/forensics/fix-peak-estimate-drivers.md). At 6 to 9 GiB of headroom that is room for no fix while
+    one fix tree is live.
+    CAUSE (W1-T13842, OBSERVED): learnedClass (src/lib/host-memory-learning.ts) learns every class from the legacy
+    metric: a legacy-hwm sample's own peak and a concurrent-rss sample's paired legacy_p. The legacy metric is the
+    sum of each member's lifetime peak (VmHWM), so it counts each member at its own worst moment. On 11-19 the fleet
+    wrote 103 legacy-hwm fix samples (p50 4,077, p90 6,629 MiB) and 36 concurrent-rss fix samples, whose concurrent
+    RSS p90 was 835 MiB. A legacy-hwm row with no concurrent value is written when the tree's concurrent RSS was not
+    observed or was incomplete, and no row says which. readPeakSamples also reads only the last 256 KiB
+    (PEAK_TAIL_BYTES) of each store file. state2.ndjson is mostly test-file rows, so the learner saw only about six
+    hours of the fleet's fix samples, and the p90 followed whichever heavy legacy samples were newest.
+  design: |
+    INVARIANT legacy-only-as-fallback: the fix class estimate and typical use legacy-hwm samples only when the read
+    population holds no concurrent-rss fix sample, and an estimate learned that way is labelled legacy-hwm-fallback.
+    1. learnedClass: for the fix class, learn the estimate and the typical from the concurrent-rss samples' own peaks
+       (peakMib) when any exist, and label the estimate basis concurrent-rss. With none, learn from the legacy
+       population exactly as today and label it legacy-hwm-fallback. Other classes are unchanged.
+    2. The tree sampler keeps the first reason a tree's concurrent peak was not measured (listing-incomplete,
+       listing-failed, member-status-unreadable, member-rss-missing, never-observed), finishMeasurement and a nested
+       test run's finish return it, and each legacy-hwm row written at release carries it as `why`. parseSamples
+       reads it back and compaction keeps it.
+    3. readPeakSamples reads the fix class's samples from the whole retained store file (up to PEAK_COMPACT_BYTES,
+       the size past which an append compacts the file to the newest samples per class), not its last 256 KiB.
+       Compaction keeps samples per class, so test-file rows cannot crowd fix samples out of that read. Test-file
+       reads and other classes keep the 256 KiB tail. The whole-file read opens the store read-only with O_NOFOLLOW
+       and an explicit 0o600 mode, as src/lib/bounded-file-tail.ts does (CodeQL js/insecure-temporary-file).
+    4. sweep.fix_capacity carries fix_estimate_basis from the learned estimate.
+    UNCHANGED: the memory floor, the container limit, every existing refusal and rung of the fix admission
+    controller, and the typical (median-peak) rung's rule; no new cap.
+  falsifier: |
+    Put back the legacy-first fix estimate (paired legacy_p for concurrent samples): criterion 1 fails. Drop the
+    fallback label: criterion 2 fails. Drop the reason: criterion 3 fails. Read fix samples from the 256 KiB tail:
+    criterion 4 fails. Drop the row field: criterion 5 fails.
+  note: |
+    AMENDED (2026-11-20): two existing tests join files. #19776 (the W1-T13878 build) had to change both, and
+    acceptance-author-gate refused it for that. In
+    test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts a whole-object deepEqual of
+    classEstimate("fix") must include the basis label of design step 1 (legacy-hwm-fallback for its legacy-only
+    fixture). In test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts the bounded tail read may
+    read one byte before the tail to find a line boundary, so its byte bound moves from 14 to 15. Design step 3
+    also names the open mode, because CodeQL alert 1351 (high) flagged the same read on #19776 without one.
+  needs_input:
+    question: "Pull request https://github.com/craigoley/remudero/pull/19776 (task W1-T13878) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13878-1795182624098-45c2:1:1795183013572) — The canonical merge-base scope excludes two inherited test changes required by the estimate label and tail-boundary behavior. The CodeQL edit is saved, and required CI remains blocked on a separate scope amendment."
+    source_pr: https://github.com/craigoley/remudero/pull/19776
+    asked_at: 2026-11-20T14:24:48.860Z
