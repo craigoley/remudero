@@ -252,8 +252,8 @@ const recordSchema = z.object({
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  // A legacy refusal may instead be the result of a nonzero child exit.
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
+  // "exited" is a nonzero child exit; the gateway reports it as refused, and only a pre-launch refusal stays "refused".
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime() }).strict().optional(),
   finalEvidence: finalEvidenceSchema.optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
@@ -327,6 +327,10 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
   return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
 }
+
+// W1-T13875: final evidence kept per journal and operation, also when a full journal cannot store it.
+const keptEvidence = new Map<string, LedgerEvidence>();
+const keptKey = (paths: Paths, operationId: string) => `${paths.state}\0${operationId}`;
 
 // Service instances share one actor journal. Order in-process writers before taking the real cross-process lock.
 const journalChains = new Map<string, Promise<unknown>>();
@@ -562,8 +566,7 @@ export class ProductPlanOperationService {
         const stored = journal.operations[record.operationId];
         if (!stored) return;
         // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
-        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso(),
-          ...(outcome === "refused" && accepted === false ? { beforeLaunch: true as const } : {}) };
+        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso() };
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
@@ -604,11 +607,21 @@ export class ProductPlanOperationService {
 
   private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
     if (record.finalEvidence) return record.finalEvidence;
+    const key = keptKey(paths, record.operationId);
+    const kept = keptEvidence.get(key);
+    if (kept) return kept;
     const seen = await this.ledger(record);
     if (seen !== "unread" && (seen.opened !== undefined || seen.exited || seen.failed)) {
       const { opened, exited, failed } = seen;
-      journal.operations[record.operationId] = { ...record, finalEvidence: { opened, exited, failed } };
-      this.commit(paths, journal);
+      const finalEvidence = { exited, failed, ...(opened !== undefined ? { opened } : {}) };
+      // Kept in memory first: a journal at its byte limit still answers this evidence without another read.
+      keptEvidence.set(key, finalEvidence);
+      try {
+        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...record, finalEvidence } } });
+        journal.operations[record.operationId] = { ...record, finalEvidence };
+      } catch (error) {
+        if (!(error instanceof Fault && error.code === "capacity")) throw error;
+      }
     }
     return seen;
   }
@@ -616,7 +629,7 @@ export class ProductPlanOperationService {
   private async ledger(record: Record_): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.inFlight(record.operationId))) return none;
+    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && !this.inFlight(record.operationId))) return none;
     const taskId = productPlanLedgerTaskId(record.operationId);
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;

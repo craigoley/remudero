@@ -12,7 +12,7 @@ import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
-  productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
   type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -635,10 +635,10 @@ const proposalLines = (f: Fixture, operationId: string): string[] => {
 
 const journalPath = (f: Fixture) => join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.json`);
 
-function seedLegacyRefusal(f: Fixture, operationId: string) {
+function seedLegacyRefusal(f: Fixture, operationId: string, outcome: "refused" | "exited" = "refused") {
   const path = journalPath(f);
   const journal = JSON.parse(readFileSync(path, "utf8"));
-  journal.operations[operationId].handoff = { outcome: "refused", at: REQUESTED };
+  journal.operations[operationId].handoff = { outcome, at: REQUESTED };
   writeFileSync(path, JSON.stringify(journal));
 }
 
@@ -655,33 +655,25 @@ function preloadChildModule(t: TestContext, f: Fixture, source: string) {
 }
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
-  const f = fixture(t);
-  const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
-  const operationId = first.observation.operationId;
-  f.release("refused");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
-  assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED, beforeLaunch: true });
+  for (const legacy of [false, true]) {
+    const f = fixture(t);
+    const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
+    const operationId = first.observation.operationId;
+    if (legacy) seedLegacyRefusal(f, operationId); // the saved Nov 3 refusal: a journal written before this fix
+    else {
+      f.release("refused");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
+    assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED });
 
-  const evidence = reader(() => proposalLines(f, operationId));
-  const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
-  assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
-  assert.equal(evidence.reads.length, 0);
-  assert.equal(f.calls.length, 1);
-});
-
-test("W1-T13875: a legacy refusal can recover a proposal opened before the child exited nonzero", async (t) => {
-  const f = fixture(t);
-  const first = await ok(f.service().execute(actor, f.command()));
-  const operationId = first.observation.operationId;
-  seedLegacyRefusal(f, operationId);
-  nativeRun(f, operationId, { pr: PR_URL });
-  f.row(at(4_000), { step: "ratify.cli_exited", task_id: productPlanLedgerTaskId(operationId), code: 1 });
-
-  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
-  assert.deepEqual([resumed.replayed, resumed.observation.operationId, resumed.observation.state, resumed.observation.proposal],
-    [true, operationId, "proposed", PR_URL]);
-  assert.equal(f.calls.length, 1);
+    // Ledger rows that would read as a proposal: a refused hand-off must not even look.
+    const evidence = reader(() => proposalLines(f, operationId));
+    const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+    assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
+    assert.equal(evidence.reads.length, 0, legacy ? "a legacy refusal" : "a pre-launch refusal");
+    assert.equal(f.calls.length, 1);
+  }
 });
 
 test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 20_000 }, async (t) => {
@@ -733,7 +725,7 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   const key = createHash("sha256").update(actor).digest("hex");
   acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "after-ledger-timeout" }).release();
 
-  seedLegacyRefusal(f, first.observation.operationId);
+  seedLegacyRefusal(f, first.observation.operationId, "exited"); // a nonzero child exit still reads its evidence
   nativeRun(f, first.observation.operationId, { pr: PR_URL, exit: true });
   const entered = join(f.root, "listing-entered");
   const finished = join(f.root, "listing-finished");
@@ -825,6 +817,37 @@ test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
   }
   assert.equal(evidence.reads.length, 2, "only the first resume read the final proposal");
   assert.equal(f.calls.length, 1, "the moved head never launched a second planner for an unresolved brief");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept when the journal is full", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const path = journalPath(f);
+  const journal = JSON.parse(readFileSync(path, "utf8"));
+  const hex = (seed: string) => createHash("sha256").update(seed).digest("hex");
+  const record = journal.operations[operationId];
+  // Another brief's operation pads the journal to exactly its byte limit; it is never this brief's evidence.
+  const filler = { ...record, operationId: hex("filler"), briefDigest: hex("filler-brief"), command: { ...record.command, repoRoot: "/" } };
+  journal.operations[filler.operationId] = filler;
+  const limit = PRODUCT_PLAN_OPERATION_LIMITS.stateBytes;
+  const size = () => Buffer.byteLength(JSON.stringify(journal));
+  const entry = (i: number) => { journal.requests[hex(`request-${i}`)] = { operationId: filler.operationId, payloadDigest: hex(`payload-${i}`) }; };
+  const before = size();
+  entry(0);
+  const each = size() - before; // every entry and its comma have the same length
+  for (let i = 1, total = before + each; total < limit - 900; i++, total += each) entry(i);
+  filler.command.repoRoot = "/" + "x".repeat(limit - size());
+  writeFileSync(path, JSON.stringify(journal));
+  assert.equal(statSync(path).size, limit, "the journal is at its byte limit");
+
+  const evidence = reader(() => proposalLines(f, operationId));
+  for (const resumed of [f.service({ gateway: false, readLedgerLines: evidence.read }), f.service({ gateway: false, readLedgerLines: evidence.read })]) {
+    const next = await ok(resumed.execute(actor, f.command()));
+    assert.deepEqual([next.observation.operationId, next.observation.state, next.observation.proposal], [operationId, "proposed", PR_URL]);
+  }
+  assert.equal(evidence.reads.length, 1, "a journal with no room still keeps the proposal it read");
+  assert.equal(statSync(path).size, limit, "nothing was written past the limit");
 });
 
 test("W1-T13875: a proposal's evidence is read once and kept across rotation during the read", async (t) => {
