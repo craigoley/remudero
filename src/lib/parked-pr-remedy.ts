@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 
@@ -114,6 +114,7 @@ export interface ParkedPrHost {
   /**
    * R3: an id from reservePlanRepairTaskIdAsync, for the landing branch of `target`. W1-T13830: awaited, off the loop.
    * W1-T13944: `beforePush` runs, synchronously, before each push of a reservation ref, with the id and the anchor it pushes.
+   * With `beforePush`, the reservation takes over no other holder's ref, so every push it makes is one `beforePush` saw.
    */
   reserveTaskId(target: ParkedPrTarget, beforePush?: (taskId: string, anchor: string) => void): string | Promise<string>;
   /** W1-T13944: true when origin's reservation ref for `taskId` is the commit `anchor`, so the pass that pushed it holds it. */
@@ -121,18 +122,21 @@ export interface ParkedPrHost {
   /**
    * R3: lands new and amended task files through landTaskFilesAsync, in `target`. W1-T13830: `refusalChecks` names the
    * plan preflight checks that refused the draft (planPreflightRefusalChecks), only for a verdict on the draft itself.
+   * W1-T13944: `staged` names the inputs that wait in the landing queue with their own bytes, and `refused` the inputs it
+   * did not stage, each with its reason.
    */
   landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
-    Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[]; staged?: readonly string[] }>;
+    Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[]; staged?: readonly string[];
+      refused?: ReadonlyArray<{ relPath: string; reason: string }> }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
   readPrFiles?(prUrl: string): Promise<readonly string[]>;
   /**
-   * W1-T13944: the held follow-ups on the plan of origin/main of `target` (and of the daemon's own plans) and in the
-   * task-files landing queue.
+   * W1-T13944: the held follow-ups on the plan of origin/main of `target` and in the task-files landing queue; the
+   * daemon's own plans add one only for a task and criterion neither of those holds.
    */
   readHeldFollowUps?(target: ParkedPrTarget): readonly HeldFollowUp[] | Promise<readonly HeldFollowUp[]>;
-  /** W1-T13944: the daemon root; a split's claim on its held follow-up is a file under its state directory. */
+  /** W1-T13944: the daemon root; a split's claim on its held follow-up is a folder of generations under its state directory. */
   heldFollowUpClaimRoot?: string;
 }
 
@@ -174,17 +178,22 @@ function byTaskNumber(a: string, b: string): number {
 }
 
 /**
- * W1-T13944: one claim file per task and criterion, so two splits that share a criterion meet on one file. A pass that
- * dies takes its token with it. `pending` holds each reservation the holder was about to push, written before the push,
- * so a pass after a restart can find an id whose push went through before the id reached the claim.
+ * W1-T13944: one claim per task and criterion, so two splits that share a criterion meet on one claim. A claim is a
+ * folder of numbered generations. Each change writes the next generation with an exclusive link of a file that is
+ * already whole, so a reader never sees a part-written claim, and of two passes that read the same generation (in one
+ * process or in two), only one writes the next: the other gets EEXIST and holds nothing. A pass that dies takes its
+ * token with it. `pending` holds each reservation the holder was about to push, written before the push, with the
+ * criteria it was for, so a pass after a restart can find an id whose push went through before the id reached the claim.
  */
 const CLAIM_TOKEN = randomUUID();
-type ReservationPush = { taskId: string; anchor: string };
-type ClaimRecord = { parent?: unknown; claim?: unknown; id?: unknown; files?: unknown; pending?: unknown;
-  holder?: { pid?: unknown; token?: unknown } | null };
-type HeldClaims = { paths: string[]; claims: string[]; pending: ReservationPush[]; held?: { id: string; files: TaskFileInput[] } };
+const CLAIMS_DIR = "parked-pr-held-follow-up-claims";
+type ReservationPush = { taskId: string; anchor: string; claims: string[] };
+type ClaimHolder = { pid?: unknown; token?: unknown } | null;
+type ClaimRecord = { parent?: unknown; claim?: unknown; id?: unknown; files?: unknown; pending?: unknown; holder?: ClaimHolder };
+type ClaimSlot = { claim: string; dir: string; gen: number; record: ClaimRecord | undefined };
+type HeldClaims = { slots: ClaimSlot[]; claims: string[]; pending: ReservationPush[]; held?: { id: string; files: TaskFileInput[] } };
 
-function holderAlive(holder: { pid?: unknown; token?: unknown } | null | undefined): boolean {
+function holderAlive(holder: ClaimHolder | undefined): boolean {
   if (holder?.token === CLAIM_TOKEN) return true;
   if (typeof holder?.pid !== "number" || holder.pid === process.pid) return false;
   try { process.kill(holder.pid, 0); return true; } catch (error) {
@@ -193,102 +202,125 @@ function holderAlive(holder: { pid?: unknown; token?: unknown } | null | undefin
   }
 }
 
-function heldClaimPath(root: string, parentId: string, claim: string): string {
+function heldClaimDir(root: string, parentId: string, claim: string): string {
   const key = createHash("sha256").update(JSON.stringify({ parent: parentId, claim })).digest("hex").slice(0, 32);
-  return join(root, "state", "parked-pr-held-follow-up-claims", `${key}.json`);
+  return join(root, "state", CLAIMS_DIR, key);
 }
 
-/** A claim record, or `torn` when a crash left it half written (then this pass takes it over). */
-function readClaimRecord(path: string): ClaimRecord | "absent" | "torn" {
-  let text: string;
-  try { text = readFileSync(path, "utf8"); } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+function claimGenerations(dir: string): number[] {
+  let names: string[];
+  try { names = readdirSync(dir); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  try {
-    return JSON.parse(text) as ClaimRecord;
-  } catch (error) {
-    if (!(error instanceof SyntaxError)) throw error;
-    return "torn";
+  return names.flatMap(name => { const m = /^(\d+)\.json$/.exec(name); return m === null ? [] : [Number(m[1])]; });
+}
+
+/** The newest generation of a claim; generation 0 with no record when there is none. */
+function readClaimSlot(root: string, parentId: string, claim: string): ClaimSlot {
+  const dir = heldClaimDir(root, parentId, claim);
+  for (let tries = 0; ; tries++) {
+    const gen = Math.max(0, ...claimGenerations(dir));
+    if (gen === 0) return { claim, dir, gen, record: undefined };
+    let text: string;
+    try { text = readFileSync(join(dir, `${gen}.json`), "utf8"); } catch (error) {
+      // A newer generation replaced this one between the listing and the read: list again.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && tries < 16) continue;
+      throw error;
+    }
+    // A generation is linked only once whole, so a claim that does not parse is damage, and the split is refused.
+    return { claim, dir, gen, record: JSON.parse(text) as ClaimRecord };
   }
 }
 
-function pushesOf(record: ClaimRecord | "absent" | "torn"): ReservationPush[] {
-  if (typeof record !== "object" || !Array.isArray(record.pending)) return [];
-  return record.pending.filter((p): p is ReservationPush => typeof (p as ReservationPush)?.taskId === "string" &&
-    typeof (p as ReservationPush)?.anchor === "string");
+/** Writes the generation after `slot`, or throws when another pass wrote it first; a link never replaces a file. */
+function advanceClaim(slot: ClaimSlot, parentId: string, record: Omit<ClaimRecord, "parent" | "claim">): ClaimSlot {
+  mkdirSync(slot.dir, { recursive: true });
+  const gen = slot.gen + 1;
+  const whole: ClaimRecord = { parent: parentId, claim: slot.claim, ...record };
+  const tmp = join(slot.dir, `.${process.pid}.${randomUUID()}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify(whole)}\n`);
+  try {
+    linkSync(tmp, join(slot.dir, `${gen}.json`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw Object.assign(new Error(`another pass changed the claim on the held follow-up of ${parentId} first (${slot.dir}); ` +
+        "it reserves the one id (W1-T13944)"), { claimTaken: true });
+    }
+    throw error;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+  for (const old of claimGenerations(slot.dir)) if (old < gen) rmSync(join(slot.dir, `${old}.json`), { force: true });
+  return { ...slot, gen, record: whole };
 }
 
-function writeClaimRecord(path: string, record: Record<string, unknown>, exclusive = false): void {
-  const text = `${JSON.stringify(record)}\n`;
-  if (exclusive) { writeFileSync(path, text, { flag: "wx" }); return; }
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, text);
-  renameSync(tmp, path);
+function pushesOf(record: ClaimRecord | undefined): ReservationPush[] {
+  if (record === undefined || !Array.isArray(record.pending)) return [];
+  return record.pending.filter((p): p is ReservationPush => typeof (p as ReservationPush)?.taskId === "string" &&
+    typeof (p as ReservationPush)?.anchor === "string" && Array.isArray((p as ReservationPush)?.claims));
 }
 
 /**
- * W1-T13944: reads or creates the claims on the held follow-up of `parentId`, one for each of `claims`. It is one
- * synchronous step, so no other pass of this process runs between the reads and the writes. A claim that names an id
- * makes this pass land that id again (the lowest, when two do) and take no other claim. A claim a live pass holds with
- * no id makes this pass stand back (`busy`). Otherwise this pass holds every claim, keeping the pending pushes of a
- * pass that died.
+ * W1-T13944: reads or takes the claims on the held follow-up of `parentId`, one for each of `claims`. A claim that names
+ * an id makes this pass land that id again (the lowest, when two do) and take no other claim. A claim a live pass holds
+ * with no id makes this pass stand back (`busy`). Otherwise this pass takes every claim, keeping the pending pushes of a
+ * pass that died; when another pass takes one first, this pass gives back the ones it took and throws.
  */
 function takeHeldFollowUpClaims(root: string, parentId: string, claims: readonly string[]): HeldClaims | { busy: string } {
-  mkdirSync(join(root, "state", "parked-pr-held-follow-up-claims"), { recursive: true });
-  const wanted = [...new Set(claims)].sort().map(claim => ({ claim, path: heldClaimPath(root, parentId, claim) }));
-  const found = wanted.map(w => ({ ...w, record: readClaimRecord(w.path) }));
-  const withId = found.flatMap(f => typeof f.record === "object" && typeof f.record.id === "string" && Array.isArray(f.record.files)
-    ? [{ path: f.path, claim: f.claim, id: f.record.id, files: f.record.files as TaskFileInput[] }] : [])
-    .sort((a, b) => byTaskNumber(a.id, b.id));
+  const found = [...new Set(claims)].sort().map(claim => readClaimSlot(root, parentId, claim));
+  const withId = found.filter(s => typeof s.record?.id === "string" && Array.isArray(s.record.files))
+    .sort((a, b) => byTaskNumber(a.record!.id as string, b.record!.id as string));
   if (withId.length > 0) {
-    const first = withId.filter(w => w.id === withId[0]!.id);
-    return { paths: first.map(w => w.path), claims: first.map(w => w.claim), pending: [], held: { id: withId[0]!.id, files: withId[0]!.files } };
+    const id = withId[0]!.record!.id as string;
+    const first = withId.filter(s => s.record!.id === id);
+    return { slots: first, claims: first.map(s => s.claim), pending: [], held: { id, files: withId[0]!.record!.files as TaskFileInput[] } };
   }
-  const busy = found.find(f => typeof f.record === "object" && holderAlive(f.record.holder));
-  if (busy !== undefined) return { busy: busy.path };
-  const pending = found.flatMap(f => pushesOf(f.record));
-  const created: string[] = [];
+  const busy = found.find(s => holderAlive(s.record?.holder));
+  if (busy !== undefined) return { busy: busy.dir };
+  const taken: ClaimSlot[] = [];
   try {
-    for (const f of found) {
-      writeClaimRecord(f.path, { parent: parentId, claim: f.claim, holder: { pid: process.pid, token: CLAIM_TOKEN },
-        pending: pushesOf(f.record) }, f.record === "absent");
-      if (f.record === "absent") created.push(f.path);
+    for (const s of found) {
+      taken.push(advanceClaim(s, parentId, { holder: { pid: process.pid, token: CLAIM_TOKEN }, pending: pushesOf(s.record) }));
     }
   } catch (error) {
-    // A write failed, or another process created a claim since the read (EEXIST): this pass gives back what it made, and
-    // its refused row sends the split to the next pass.
-    for (const path of created) unlinkSync(path);
+    for (const s of taken) advanceClaim(s, parentId, { holder: null, pending: pushesOf(s.record) });
     throw error;
   }
-  return { paths: found.map(f => f.path), claims: found.map(f => f.claim), pending };
+  const pending = [...new Map(taken.flatMap(s => pushesOf(s.record)).map(p => [`${p.taskId} ${p.anchor}`, p])).values()];
+  return { slots: taken, claims: taken.map(s => s.claim), pending };
 }
 
-/** W1-T13944: records, before the push, that the holder of `paths` is about to push `push`. */
-function recordPendingPush(paths: readonly string[], parentId: string, push: ReservationPush): void {
-  for (const path of paths) {
-    const record = readClaimRecord(path);
-    writeClaimRecord(path, { parent: parentId, claim: typeof record === "object" ? record.claim : undefined,
-      holder: { pid: process.pid, token: CLAIM_TOKEN }, pending: [...pushesOf(record), push] });
+/** W1-T13944: writes the next generation of every claim `held` holds, as `record`. */
+function rewriteHeldFollowUpClaims(held: HeldClaims, parentId: string, record: (slot: ClaimSlot) => Omit<ClaimRecord, "parent" | "claim">): void {
+  held.slots = held.slots.map(slot => advanceClaim(slot, parentId, record(slot)));
+}
+
+/** W1-T13944: records, before the push, that the holder is about to push `push` for these criteria. */
+function recordPendingPush(held: HeldClaims, parentId: string, push: ReservationPush): void {
+  rewriteHeldFollowUpClaims(held, parentId, slot => ({ holder: { pid: process.pid, token: CLAIM_TOKEN },
+    pending: [...pushesOf(slot.record), push] }));
+}
+
+/** W1-T13944: gives the claims up; `keepPending` keeps their pending pushes, so the next pass can still find a pushed id. */
+function releaseHeldFollowUpClaims(held: HeldClaims, parentId: string, keepPending: boolean): void {
+  rewriteHeldFollowUpClaims(held, parentId, slot => ({ holder: null, pending: keepPending ? pushesOf(slot.record) : [] }));
+}
+
+function writeHeldFollowUpClaims(held: HeldClaims, parentId: string, id: string, files: readonly TaskFileInput[]): void {
+  rewriteHeldFollowUpClaims(held, parentId, () => ({ id, files, holder: { pid: process.pid, token: CLAIM_TOKEN } }));
+}
+
+/** W1-T13944: gives the claims up on a failure path; a pass that changed a claim since holds it, and this pass leaves it. */
+function giveBackHeldFollowUpClaims(held: HeldClaims, parentId: string, keepPending: boolean): void {
+  try { releaseHeldFollowUpClaims(held, parentId, keepPending); } catch (error) {
+    if ((error as { claimTaken?: unknown }).claimTaken !== true) throw error;
   }
 }
 
-/** W1-T13944: gives the claims up but keeps their pending pushes, so the next pass can still find a pushed id. */
-function releaseHeldFollowUpClaims(paths: readonly string[], parentId: string): void {
-  for (const path of paths) {
-    const record = readClaimRecord(path);
-    const pending = pushesOf(record);
-    if (pending.length === 0) { unlinkSync(path); continue; }
-    writeClaimRecord(path, { parent: parentId, claim: typeof record === "object" ? record.claim : undefined, holder: null, pending });
-  }
-}
-
-function writeHeldFollowUpClaims(paths: readonly string[], parentId: string, id: string, files: readonly TaskFileInput[]): void {
-  for (const path of paths) {
-    const record = readClaimRecord(path);
-    writeClaimRecord(path, { parent: parentId, claim: typeof record === "object" ? record.claim : undefined, id, files,
-      holder: { pid: process.pid, token: CLAIM_TOKEN } });
-  }
+/** W1-T13944: a pending push only a pass that holds every criterion it was for may take, so no two splits land one id. */
+function adoptablePush(push: ReservationPush, held: HeldClaims): boolean {
+  return push.claims.every(claim => held.claims.includes(claim));
 }
 
 export interface ParkedPrSubject {
@@ -461,40 +493,48 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     } else {
       let pushed = false;
       try {
-        // A push that went through before its id reached the claim: the pass that pushed it died, and this one holds it.
+        // A push that went through before its id reached the claim: the pass that pushed it died, and this one holds every
+        // criterion it was for. A push for other criteria too stays for the pass that holds them all (W1-T13944).
         let adopted: string | undefined;
         for (const push of claim?.pending ?? []) {
-          if (host.reservationHeld !== undefined && await host.reservationHeld(push.taskId, push.anchor, target)) {
+          if (adoptablePush(push, claim!) && host.reservationHeld !== undefined && await host.reservationHeld(push.taskId, push.anchor, target)) {
             adopted = push.taskId;
             pushed = true;
             break;
           }
         }
+        const moved = moving.inputCriteria.map(c => c.claim);
         heldTaskId = adopted ?? await host.reserveTaskId(target, claim === undefined ? undefined : (taskId, anchor) => {
-          recordPendingPush(claim.paths, pr.taskId!, { taskId, anchor });
+          recordPendingPush(claim, pr.taskId!, { taskId, anchor, claims: moved });
           pushed = true;
         });
         files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, moving, pr, ctx)
           : heldPlanRebuildFiles(heldTaskId, moving, pr, ctx);
       } catch (error) {
-        // With no push, no id is held, so the claims go; after one, the next pass looks for the pushed id first.
-        if (claim !== undefined) {
-          if (pushed) releaseHeldFollowUpClaims(claim.paths, pr.taskId!);
-          else for (const path of claim.paths) unlinkSync(path);
-        }
+        // With no push, no id is held by this pass; after one, the next pass looks for the pushed id first.
+        if (claim !== undefined) giveBackHeldFollowUpClaims(claim, pr.taskId!, true);
         throw error;
       }
-      if (claim !== undefined) writeHeldFollowUpClaims(claim.paths, pr.taskId!, heldTaskId, files);
+      if (claim !== undefined) writeHeldFollowUpClaims(claim, pr.taskId!, heldTaskId, files);
     }
     const landed = await host.landTaskFiles(files, target);
     if ((landed.refusalChecks?.length ?? 0) > 0) refusalChecks = [...landed.refusalChecks!].sort();
-    // W1-T13944: a split whose held file staged filed it, though the landing refused the edit of the parent task file.
-    const partial = split && landed.error !== undefined && landed.staged?.includes(files[0]!.relPath) === true;
+    // W1-T13944: a split whose held file staged filed it, though the plan preflight refused the edit of the parent task
+    // file. Only a refusal of another file makes a landing error partial; any other landing error stays a refusal.
+    const heldFile = files.find(f => f.newFile === true) ?? files[0]!;
+    const heldStaged = split && landed.staged?.includes(heldFile.relPath) === true &&
+      !(landed.refused ?? []).some(r => r.relPath === heldFile.relPath);
+    const otherRefusals = (landed.refused ?? []).filter(r => r.relPath !== heldFile.relPath).map(r => r.reason);
+    const partial = heldStaged && landed.error !== undefined && otherRefusals.length > 0;
     if (landed.error !== undefined && !partial) {
-      // The held file did not stage and its id may be released, so a later pass reserves a new one.
-      if (claim !== undefined) for (const path of claim.paths) unlinkSync(path);
+      // A held file that staged keeps its claim, so the next pass lands that id again; one that did not may have had its
+      // id released, so a later pass reserves a new one.
+      if (claim !== undefined && !heldStaged) giveBackHeldFollowUpClaims(claim, pr.taskId!, false);
       throw new Error(`the task files did not land: ${landed.error}`);
     }
+    // The refusal of the parent task file first, then a landing error beside it, such as a failed pull request listing.
+    const partialRefusal = partial
+      ? [...otherRefusals, ...(otherRefusals.includes(landed.error!) ? [] : [landed.error!])].join("; ") : undefined;
     if (closed) {
       await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
         `${pr.isPlanFiling === true ? "the plan-scoped round on this plan filing is exhausted, so it" : "no part of this pull request"} ` +
@@ -504,10 +544,10 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: heldTaskId,
       criteria: moving.inputCriteria.map(c => c.claim), ...(landed.prUrl === undefined ? {} : { landing_pr_url: landed.prUrl }),
       ...(closed ? { closed: true } : {}),
-      ...(partial ? { partial_refusal: landed.error, ...(refusalChecks === undefined ? {} : { refusal_checks: refusalChecks }) } : {}) });
+      ...(partialRefusal === undefined ? {} : { partial_refusal: partialRefusal, ...(refusalChecks === undefined ? {} : { refusal_checks: refusalChecks }) }) });
     return { remedy: decision.remedy, heldTaskId,
       reason: `${decision.reason}: held task ${heldTaskId}${landed.prUrl === undefined ? "" : ` (${landed.prUrl})`}` +
-        `${partial ? `; the landing refused the edit of the parent task file: ${landed.error}` : ""}` };
+        `${partialRefusal === undefined ? "" : `; the landing refused the edit of the parent task file: ${partialRefusal}`}` };
   } catch (error) {
     const reason = String((error as Error)?.message ?? error);
     ctx.append({ ...row, outcome: "refused", reason, ...(inputDigest === undefined ? {} : { input_digest: inputDigest }),

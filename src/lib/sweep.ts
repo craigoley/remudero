@@ -176,8 +176,9 @@ import {
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
-  loadPlanAtRefAsync,
+  defaultGitRunnerAsync,
   loadPlanReusingParses,
+  readBlobsAtRefAsync,
   PlanBlobCache,
   transitiveDependents,
   unmetDependencies,
@@ -402,7 +403,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5540,31 +5541,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
-        // W1-T13944: a file the plan preflight refused is named before a landing error, such as a failed pull request
-        // listing, so a split's partial_refusal keeps the refusal of the parent task file.
-        const reasons = [...landed.refused.map((r) => r.reason), ...(landed.error === undefined ? [] : [landed.error])];
-        const error = reasons.length === 0 ? undefined : reasons.join("; ");
+        const error = landed.error ?? landed.refused[0]?.reason;
         const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        // W1-T13944: `staged` names an input that waits with its own bytes; another edit waiting at its path is a refusal.
+        const refused = landed.refused.map((r) => ({ relPath: r.path, reason: r.reason }));
+        const staged = [...landed.landed, ...landed.waiting].filter((p) => !refused.some((r) => r.relPath === p));
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
-          ...(refusalChecks === undefined ? {} : { refusalChecks }), staged: [...landed.landed, ...landed.waiting] };
+          ...(refusalChecks === undefined ? {} : { refusalChecks }), staged, refused };
       },
-      // W1-T13944: a held follow-up on the plan or in the landing queue (staged, or carried by an open landing PR). The
-      // plan is origin/main of the repository that holds the task, the ref the daemon's plan reloader reads, beside the
-      // daemon's plan and the working tree: a working tree can lag origin/main, so no one plan read shadows another.
+      // W1-T13944: a held follow-up on the plan of origin/main or in the landing queue (staged, or carried by an open landing
+      // PR). origin/main is read file by file, so one task file the plan loader would refuse, such as an ops task that
+      // depends on a public one, hides no other. The daemon's plans can lag origin/main, so they add a held follow-up only
+      // for a task and criterion neither origin/main nor the queue holds.
       heldFollowUpClaimRoot: config.root,
       readHeldFollowUps: async (target) => {
-        let main: Plan | undefined;
+        let main: HeldFollowUp[] = [];
         try {
-          main = await loadPlanAtRefAsync(target.checkoutDir, "plan/tasks.yaml", "refs/remotes/origin/main");
+          main = await heldFollowUpsAtRefAsync(target.checkoutDir, "refs/remotes/origin/main");
         } catch (error) {
           log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
         }
-        const plans = [main, plan, reloadPlanForFix()].filter((p): p is Plan => p !== undefined);
-        return [...plans.flatMap((p) => p.tasks.flatMap((task) => heldFollowUpOf(task) ?? [])),
-          ...stagedTaskFiles(config.root).flatMap(({ relPath }) => {
-            const abs = join(config.root, "state", "task-files-landing-pending", relPath);
-            return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
-          })];
+        const queue = stagedTaskFiles(config.root).flatMap(({ relPath }) => {
+          const abs = join(config.root, "state", "task-files-landing-pending", relPath);
+          return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
+        });
+        const daemon = [plan, reloadPlanForFix()].filter((p): p is Plan => p !== undefined)
+          .flatMap((p) => p.tasks.flatMap((task) => heldFollowUpOf(task) ?? []));
+        return withLaggingHeldFollowUps([...main, ...queue], daemon);
       },
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
@@ -11855,11 +11858,39 @@ export async function reservePlanRepairTaskIdAsync(
 ): Promise<string> {
   const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
   const reserver = gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log });
-  // W1-T13944: the caller records the id and anchor before the push, so a restart after the push can find the id.
+  // W1-T13944: the caller records the id and anchor before the push, so a restart after the push can find the id. A
+  // takeover of another holder's ref pushes an anchor made inside the reserver, which the caller never sees, so with
+  // `beforePush` the reservation takes over no ref: a held id makes it ask the next one.
   const attempt = reserver.attempt;
   const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, beforePush === undefined ? reserver
-    : { ...reserver, attempt: (taskId, anchor) => { beforePush(taskId, anchor); return attempt(taskId, anchor); } });
+    : { ...reserver, reclaim: undefined, attempt: (taskId, anchor) => { beforePush(taskId, anchor); return attempt(taskId, anchor); } });
   return block.taskIds[0]!;
+}
+
+/**
+ * W1-T13944: the held follow-ups the task files at `ref` declare, each file parsed alone, so a file the plan loader
+ * would refuse (a dependency in another catalog, a duplicate id) hides no held follow-up in another file.
+ */
+async function heldFollowUpsAtRefAsync(checkoutDir: string, ref: string): Promise<HeldFollowUp[]> {
+  const runGit = defaultGitRunnerAsync(checkoutDir);
+  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", "plan/tasks.yaml", "plan/tasks.d/"]);
+  const paths = listing.split("\n").map((l) => l.trim()).filter((l) => /\.ya?ml$/.test(l));
+  const texts = await readBlobsAtRefAsync(runGit, ref, paths);
+  return texts.flatMap((text) => text.includes("(held follow-up)") ? heldFollowUpsOfTaskText(text) : []);
+}
+
+/**
+ * W1-T13944: `current` (origin/main and the landing queue) and the held follow-ups of `lagging` (the daemon's plans) for
+ * the criteria no held follow-up of the same task in `current` carries, so a lagging plan never names a task in place of
+ * the one origin/main holds. PURE.
+ */
+function withLaggingHeldFollowUps(current: readonly HeldFollowUp[], lagging: readonly HeldFollowUp[]): HeldFollowUp[] {
+  const carried = (parents: readonly string[], claim: string) =>
+    current.some((h) => h.claims.includes(claim) && h.depends_on.some((d) => parents.includes(d)));
+  return [...current, ...lagging.flatMap((h) => {
+    const claims = h.claims.filter((claim) => !carried(h.depends_on, claim));
+    return claims.length === 0 ? [] : [{ ...h, claims }];
+  })];
 }
 
 export interface StaleBaseReleaseTarget {

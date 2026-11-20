@@ -8,9 +8,9 @@
  * late, or dropped by compaction. The remedy now looks at the plan and the landing queue, and holds a claim file.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -114,9 +114,20 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
   seed.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
   const repo = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "one-held-checkout" });
   if (opts.realReservation === true) {
-    // The production reservation spawns commit-tree outside the fixture's Git wrapper.
+    // The production reservation spawns commit-tree outside the fixture's Git wrapper, with this process's environment,
+    // where an empty GIT_AUTHOR_NAME or GIT_COMMITTER_NAME outranks the checkout's config: name the fixture there too.
     repo.git("config", "--local", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
     repo.git("config", "--local", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
+    const identity = { GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+      GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email };
+    const before = Object.fromEntries(Object.keys(identity).map(k => [k, process.env[k]]));
+    Object.assign(process.env, identity);
+    t.after(() => {
+      for (const [k, v] of Object.entries(before)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
   }
   if (opts.mainExtra !== undefined) {
     const rel = `plan/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
@@ -129,6 +140,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
   const env = { ...process.env, GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
     GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email };
   const reserved: string[] = [], landed: TaskFileInput[][] = [];
+  const results: Awaited<ReturnType<ParkedPrHost["landTaskFiles"]>>[] = [];
   const planOf = () => mergePlanBlobs([{ label: "fixture.yaml", text: shardOf(TASK) },
     ...(opts.planExtra === undefined ? [] : [{ label: "held.yaml", text: opts.planExtra }])]);
   const effects = buildSweepEffects({
@@ -158,7 +170,12 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
   const production = effects.parkedPr;
   const host: ParkedPrHost = {
     ...production,
-    landTaskFiles: (files, target) => { landed.push([...files]); return production.landTaskFiles(files, target); },
+    landTaskFiles: async (files, target) => {
+      landed.push([...files]);
+      const result = await production.landTaskFiles(files, target);
+      results.push(result);
+      return result;
+    },
     closePr: async () => { throw new Error("a split closes no pull request"); },
   };
   const act = (rows: Row[], ledger: readonly Row[] = []) =>
@@ -172,7 +189,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     writeFileSync(`${abs}.meta.json`, `${JSON.stringify({ baseBlob: null, claim: "filed", proof: `grep: id: ${id} in ${rel}`,
       repository: `${OWNER}/${REPO}`, ...(prUrl === undefined ? {} : { prUrl }) })}\n`);
   };
-  return { act, reserved, landed, stage, host, production, origin, checkoutDir: repo.dir };
+  return { act, reserved, landed, results, stage, host, production, origin, checkoutDir: repo.dir };
 }
 
 /** The remedy module loaded again, as a restarted daemon loads it: a new claim token, so the old holder is gone. */
@@ -334,6 +351,9 @@ test("W1-T13944 criterion 5: when the landing also fails to list its pull reques
   assert.deepEqual(first.map(r => [r.outcome, r.held_task_id]), [["taken", w.reserved[0]]]);
   assert.match(String(first[0]!.partial_refusal), /design-invariant-proof/, "the parent refusal is kept");
   assert.match(String(first[0]!.partial_refusal), /cannot be listed/, "the listing error is kept after it");
+  // The landing's own error stays the transport error, as every other remedy (close-and-rebuild) reads it.
+  assert.match(String(w.results[0]!.error), /cannot be listed/, "the landing error keeps its precedence");
+  assert.match(String(w.results[0]!.refused?.map(r => r.reason).join("; ")), /design-invariant-proof/);
   const again = await w.act([], rows.filter(r => r.step !== PARKED_PR_REMEDY_STEP));
   assert.equal(again.heldTaskId, w.reserved[0]);
   assert.equal(w.reserved.length, 1, "the next call reserves no id");
@@ -370,9 +390,21 @@ test("W1-T13944 criterion 6: a taken row for one criterion does not stand for a 
   assert.equal(f.reserved.length, 2);
 });
 
-/** The claim file of `claim` of `parent`, as the remedy names it. */
-const claimFile = (root: string, parent: string, claim: string) => join(root, "state", "parked-pr-held-follow-up-claims",
-  `${createHash("sha256").update(JSON.stringify({ parent, claim })).digest("hex").slice(0, 32)}.json`);
+/** The newest generation of the claim on `claim` of `parent`, as the remedy names it, or undefined when there is none. */
+const claimDir = (root: string, parent: string, claim: string) => join(root, "state", "parked-pr-held-follow-up-claims",
+  createHash("sha256").update(JSON.stringify({ parent, claim })).digest("hex").slice(0, 32));
+function claimRecord(root: string, parent: string, claim: string): Row | undefined {
+  const dir = claimDir(root, parent, claim);
+  const gens = existsSync(dir) ? readdirSync(dir).flatMap(n => /^(\d+)\.json$/.exec(n)?.[1] ?? []).map(Number) : [];
+  return gens.length === 0 ? undefined : JSON.parse(readFileSync(join(dir, `${Math.max(...gens)}.json`), "utf8")) as Row;
+}
+/** Writes `record` as the next generation of the claim, as a pass in another process would. */
+function writeClaim(root: string, parent: string, claim: string, record: Row): void {
+  const dir = claimDir(root, parent, claim);
+  mkdirSync(dir, { recursive: true });
+  const gens = readdirSync(dir).flatMap(n => /^(\d+)\.json$/.exec(n)?.[1] ?? []).map(Number);
+  writeFileSync(join(dir, `${Math.max(0, ...gens) + 1}.json`), `${JSON.stringify({ parent, claim, ...record })}\n`);
+}
 
 test("W1-T13944 criterion 4: a reservation that fails after its push keeps the pushed id for the next pass; one that fails before keeps nothing", async t => {
   const root = tempRoot(t, "one-held-pending");
@@ -384,8 +416,9 @@ test("W1-T13944 criterion 4: a reservation that fails after its push keeps the p
   } };
   const out1 = await takeParkedPrRemedy(subject(), split(), [], failing, context([]));
   assert.match(String(out1.error), /answer was lost/);
-  const kept = JSON.parse(readFileSync(claimFile(root, TASK, CLAIMS[1]!), "utf8")) as Row;
-  assert.deepEqual([kept.holder, kept.pending], [null, [{ taskId: "W1-T13950", anchor }]], "the claim keeps the push and no holder");
+  const kept = claimRecord(root, TASK, CLAIMS[1]!)!;
+  assert.deepEqual([kept.holder, kept.pending], [null, [{ taskId: "W1-T13950", anchor, claims: [CLAIMS[1]] }]],
+    "the claim keeps the push and no holder");
   const held: string[] = [];
   const out2 = await takeParkedPrRemedy(subject(), split(), [], { ...f.h, reservationHeld: async (id, a) => {
     held.push(id);
@@ -397,36 +430,219 @@ test("W1-T13944 criterion 4: a reservation that fails after its push keeps the p
   const beforeAny: ParkedPrHost = { ...f.h, reserveTaskId: async () => { throw new Error("origin cannot be reached"); } };
   const out3 = await takeParkedPrRemedy(subject(), split([CLAIMS[2]!]), [], beforeAny, context([]));
   assert.match(String(out3.error), /cannot be reached/);
-  assert.equal(existsSync(claimFile(root, TASK, CLAIMS[2]!)), false, "with no push, the claim is removed");
+  const freed = claimRecord(root, TASK, CLAIMS[2]!)!;
+  assert.deepEqual([freed.holder, freed.pending, freed.id], [null, [], undefined], "with no push, the claim holds nothing");
 });
 
-test("W1-T13944 criterion 3: claims of a dead holder or a torn file are taken over, a live holder stands the split back, a failed write takes none", async t => {
+test("W1-T13944 criterion 4: a restart after a pass whose first id another holder held lands the id that pass pushed, reserving none", async t => {
+  const w = await world(t, { realReservation: true });
+  let planted: string | undefined;
+  let reached!: (reservation: Promise<string>) => void;
+  const pushed = new Promise<Promise<string>>(resolve => { reached = resolve; });
+  // The first id the pass asks for is held by a holder whose branch is gone and whose time is old, one a takeover
+  // would reclaim. A takeover pushes an anchor the claim never sees, so the pass must ask the next id instead.
+  const dying: ParkedPrHost = { ...w.host, reserveTaskId: (target, beforePush) => {
+    reached(Promise.resolve(w.production.reserveTaskId(target, (taskId, anchor) => {
+      if (planted === undefined) {
+        planted = taskId;
+        const sha = w.origin.git("commit-tree", w.origin.git("rev-parse", "main^{tree}"), "-m",
+          formatReservationAnchorMessage({ branch: "rmd/a-landing-branch-that-is-gone", startedAt: "2020-01-01T00:00:00Z" }));
+        w.origin.git("update-ref", taskIdReservationRef(taskId), sha);
+      }
+      beforePush?.(taskId, anchor);
+    })));
+    return new Promise<string>(() => {});
+  } };
+  void takeParkedPrRemedy(subject(), split(), [], dying, context([]));
+  const id = await (await pushed);
+  assert.ok(planted !== undefined && id !== planted, `the held id ${String(planted)} is not taken over: ${id}`);
+  const foreign = w.origin.git("log", "-1", "--format=%B", taskIdReservationRef(planted));
+  assert.match(foreign, /a-landing-branch-that-is-gone/, "the other holder keeps its ref");
+  const restarted = await restartedRemedy();
+  const reservedAfter: string[] = [];
+  const host: ParkedPrHost = { ...w.host, reserveTaskId: async (target, beforePush) => {
+    const next = await w.production.reserveTaskId(target, beforePush);
+    reservedAfter.push(next);
+    return next;
+  } };
+  const rows: Row[] = [];
+  const out = await withLiveWritesAllowed(() => restarted.takeParkedPrRemedy(subject(), split(), [], host, context(rows)));
+  assert.equal(out.error, undefined, out.reason);
+  assert.deepEqual(reservedAfter, [], "the restarted pass reserves no id");
+  assert.equal(out.heldTaskId, id, "the restarted pass lands the id the first pass pushed");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["taken", id]]);
+});
+
+test("W1-T13944 criterion 3: claims of a dead holder are taken over, a live holder stands the split back, damage takes none", async t => {
   const root = tempRoot(t, "one-held-holders");
   const f = fakeHost(root, []);
-  mkdirSync(join(root, "state", "parked-pr-held-follow-up-claims"), { recursive: true });
-  const write = (claim: string, text: string) => writeFileSync(claimFile(root, TASK, claim), text);
   // pid 1 lives under another user (EPERM), the parent process lives under this one: both hold their claims.
   for (const pid of [1, process.ppid]) {
-    write(CLAIMS[1]!, `${JSON.stringify({ parent: TASK, claim: CLAIMS[1], holder: { pid, token: "another-daemon" } })}\n`);
+    writeClaim(root, TASK, CLAIMS[1]!, { holder: { pid, token: "another-daemon" }, pending: [] });
     const out = await takeParkedPrRemedy(subject(), split(), [], f.h, context([]));
     assert.match(String(out.error), /another pass holds the claim/, `pid ${pid} holds the claim`);
   }
   assert.equal(f.reserved.length, 0);
-  // A claim whose file is not a file cannot be read, so the split is refused and takes no claim.
-  mkdirSync(claimFile(root, TASK, CLAIMS[0]!));
-  const unreadable = await takeParkedPrRemedy(subject(), split([CLAIMS[0]!]), [], f.h, context([]));
-  assert.match(String(unreadable.error), /EISDIR/);
-  // A torn claim is taken over; when its rewrite fails, the claim this pass created beside it is given back.
-  write(CLAIMS[2]!, "{\"parent\": ");
-  mkdirSync(`${claimFile(root, TASK, CLAIMS[2]!)}.${process.pid}.tmp`);
-  rmSync(claimFile(root, TASK, CLAIMS[1]!));
-  const failed = await takeParkedPrRemedy(subject(), split([CLAIMS[1]!, CLAIMS[2]!]), [], f.h, context([]));
-  assert.match(String(failed.error), /EISDIR/);
-  assert.equal(existsSync(claimFile(root, TASK, CLAIMS[1]!)), false, "the created claim is given back");
-  rmSync(`${claimFile(root, TASK, CLAIMS[2]!)}.${process.pid}.tmp`, { recursive: true });
-  // A dead holder (a pid no process has) and the torn claim are taken over, and the split files once.
-  write(CLAIMS[1]!, `${JSON.stringify({ parent: TASK, claim: CLAIMS[1], holder: { pid: 2 ** 22 + 7, token: "gone" } })}\n`);
+  // A generation is written whole, so one that does not parse is damage: the split is refused and takes no claim.
+  mkdirSync(claimDir(root, TASK, CLAIMS[2]!), { recursive: true });
+  writeFileSync(join(claimDir(root, TASK, CLAIMS[2]!), "1.json"), "{\"parent\": ");
+  const damaged = await takeParkedPrRemedy(subject(), split([CLAIMS[2]!]), [], f.h, context([]));
+  assert.match(String(damaged.error), /JSON/);
+  assert.equal(f.reserved.length, 0);
+  rmSync(claimDir(root, TASK, CLAIMS[2]!), { recursive: true });
+  // A dead holder (a pid no process has) is taken over, and the split files once.
+  writeClaim(root, TASK, CLAIMS[1]!, { holder: { pid: 2 ** 22 + 7, token: "gone" }, pending: [] });
   const taken = await takeParkedPrRemedy(subject(), split([CLAIMS[1]!, CLAIMS[2]!]), [], f.h, context([]));
   assert.equal(taken.error, undefined, taken.reason);
   assert.equal(f.reserved.length, 1);
+  assert.equal(claimRecord(root, TASK, CLAIMS[1]!)!.id, f.reserved[0]);
+});
+
+/**
+ * A pass in its own process: it loads the remedy, says it is ready, waits for `go`, and runs one split over a claim root
+ * and landing queue that every process shares. Each reservation it makes is a line in `reservations`.
+ */
+const CHILD_PASS = `
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const f = JSON.parse(process.env.RMD_T13944_PASS);
+const { takeParkedPrRemedy, heldFollowUpsOfTaskText } = await import(f.remedyUrl);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const host = {
+  heldFollowUpClaimRoot: f.root,
+  readHeldFollowUps: async () => readdirSync(f.queue).flatMap(n => heldFollowUpsOfTaskText(readFileSync(join(f.queue, n), "utf8"))),
+  readTaskShard: async () => ({ outcome: "read", shard: f.shard, target: { owner: "fixture", repo: "remudero", checkoutDir: "/unused" } }),
+  reserveTaskId: async (_target, beforePush) => {
+    const id = "W1-T" + (13919 + f.index);
+    beforePush?.(id, "a".repeat(40));
+    appendFileSync(f.reservations, id + "\\n");
+    await sleep(50);
+    return id;
+  },
+  landTaskFiles: async files => {
+    await sleep(20);
+    writeFileSync(join(f.queue, f.index + ".yaml"), files[0].content);
+    return { staged: files.map(file => file.relPath) };
+  },
+  closePr: async () => { throw new Error("a split closes no pull request"); },
+};
+writeFileSync(f.ready, "");
+while (!existsSync(f.go)) await sleep(1);
+const out = await takeParkedPrRemedy(f.subject, f.decision, [], host, { runId: "pass-" + f.index, ledgerTaskId: f.subject.taskId,
+  nowIso: "2026-11-20T08:00:00.000Z", cause: "needs-design", text: "which store?", append: () => {} });
+process.stdout.write(JSON.stringify(out));
+`;
+
+test("W1-T13944 criterion 3: invariant:one-held-follow-up-per-criterion, passes in four processes started together reserve one id", { timeout: 240_000 }, async t => {
+  const root = tempRoot(t, "one-held-processes");
+  const queue = join(root, "queue"), reservations = join(root, "reservations"), go = join(root, "go");
+  mkdirSync(queue);
+  writeFileSync(reservations, "");
+  const remedyUrl = pathToFileURL(join(REPO_ROOT, "src", "lib", "parked-pr-remedy.ts")).href;
+  const passes = [0, 1, 2, 3].map(index => {
+    const ready = join(root, `ready-${index}`);
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", CHILD_PASS], {
+      cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HOME: root, RMD_T13944_PASS: JSON.stringify({ index, root, queue, reservations, go, ready, remedyUrl,
+        shard: { relPath: shardRel(TASK), text: shardOf(TASK) }, subject: subject(), decision: split() }) },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", d => { stdout += String(d); });
+    child.stderr.on("data", d => { stderr += String(d); });
+    const done = new Promise<{ heldTaskId?: string; error?: string }>((resolve, reject) => child.on("close", code => code === 0
+      ? resolve(JSON.parse(stdout) as { heldTaskId?: string; error?: string })
+      : reject(new Error(`pass ${index} exited ${String(code)}: ${stderr}`))));
+    return { ready, done };
+  });
+  while (!passes.every(p => existsSync(p.ready))) await new Promise(resolve => setTimeout(resolve, 20));
+  writeFileSync(go, "");
+  const outs = await Promise.all(passes.map(p => p.done));
+  const reserved = readFileSync(reservations, "utf8").split("\n").filter(Boolean);
+  assert.equal(reserved.length, 1, `exactly one id is reserved: ${reserved.join(", ")} (${JSON.stringify(outs)})`);
+  const landed = readdirSync(queue).flatMap(n => heldFollowUpsOfTaskText(readFileSync(join(queue, n), "utf8")));
+  assert.ok(landed.length > 0 && landed.every(h => h.id === reserved[0]), `every landed file names ${reserved[0]}`);
+  assert.ok(outs.every(o => o.heldTaskId === undefined || o.heldTaskId === reserved[0]), JSON.stringify(outs));
+});
+
+test("W1-T13944 criterion 1: a lagging daemon plan that holds a lower matching id does not stand in for the task origin/main holds", async t => {
+  const w = await world(t, { mainExtra: { id: "W1-T20002", text: heldText("W1-T20002", TASK, [CLAIMS[1]!]) },
+    planExtra: heldText("W1-T20001", TASK, [CLAIMS[1]!]) });
+  const rows: Row[] = [];
+  const out = await w.act(rows, []);
+  assert.equal(out.error, undefined, out.reason);
+  assert.equal(out.heldTaskId, "W1-T20002", "the held follow-up origin/main holds is reused");
+  assert.equal(w.reserved.length, 0, "no id is reserved");
+  assert.equal(w.landed.length, 0, "no task file lands");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", "W1-T20002", true]]);
+});
+
+test("W1-T13944 criterion 7: readHeldFollowUps: a held follow-up on origin/main that depends on a task in another catalog is read", async t => {
+  const text = heldText("W1-T13919", TASK, [CLAIMS[1]!]).replace(`    - ${TASK}\n`, `    - ${TASK}\n    - W1-T13900001\n`);
+  const w = await world(t, { mainExtra: { id: "W1-T13919", text } });
+  const read = await w.host.readHeldFollowUps!({ owner: OWNER, repo: REPO, checkoutDir: w.checkoutDir });
+  assert.deepEqual(read.map(h => [h.id, h.depends_on]), [["W1-T13919", [TASK, "W1-T13900001"]]]);
+  const rows: Row[] = [];
+  const out = await w.act(rows, []);
+  assert.equal(out.heldTaskId, "W1-T13919", out.reason);
+  assert.equal(w.reserved.length, 0, "no id is reserved");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", "W1-T13919", true]]);
+});
+
+test("W1-T13944 criterion 5: a split whose files all stage and whose landing only fails to list its pull requests is refused and names no parent refusal", async t => {
+  const w = await world(t, { listFails: true });
+  const rows: Row[] = [];
+  const out = await w.act(rows, []);
+  assert.match(String(out.error), /cannot be listed/);
+  const first = remedyRows(rows);
+  assert.deepEqual(first.map(r => [r.outcome, r.held_task_id, r.partial_refusal]), [["refused", undefined, undefined]]);
+  assert.doesNotMatch(String(first[0]!.reason), /refused the edit of the parent/);
+  // The held file waits in the landing queue, so the next call, with no remedy row, reuses it.
+  const next: Row[] = [];
+  const again = await w.act(next, []);
+  assert.equal(again.heldTaskId, w.reserved[0], again.reason);
+  assert.equal(w.reserved.length, 1, "the next call reserves no id");
+});
+
+test("W1-T13944 criterion 6: a reservation pushed for two criteria is not taken by a split of one, so each files its own id", async t => {
+  const root = tempRoot(t, "one-held-shared-push");
+  const queue: HeldFollowUp[] = [];
+  const f = fakeHost(root, queue);
+  const anchor = "c".repeat(40);
+  const dying: ParkedPrHost = { ...f.h, reserveTaskId: async (_target, beforePush) => {
+    beforePush?.("W1-T13950", anchor);
+    throw new Error("the daemon stopped after the push");
+  } };
+  const out0 = await takeParkedPrRemedy(subject(), split([CLAIMS[1]!, CLAIMS[2]!]), [], dying, context([]));
+  assert.match(String(out0.error), /stopped after the push/);
+  const held: ParkedPrHost = { ...f.h, reservationHeld: async (id, a) => id === "W1-T13950" && a === anchor };
+  const rows: Row[] = [];
+  const first = await takeParkedPrRemedy(subject(), split([CLAIMS[1]!]), [], held, context(rows));
+  const second = await takeParkedPrRemedy(subject(), split([CLAIMS[2]!]), [], held, context(rows));
+  assert.equal(first.error, undefined, first.reason);
+  assert.equal(second.error, undefined, second.reason);
+  assert.notEqual(first.heldTaskId, second.heldTaskId, "the two criteria name two held follow-ups");
+  assert.deepEqual(f.reserved, [first.heldTaskId, second.heldTaskId], "each reserves its own id");
+  assert.equal(carries(f.landed.flat(), CLAIMS[1]!).length, 1);
+  assert.equal(carries(f.landed.flat(), CLAIMS[2]!).length, 1);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["taken", first.heldTaskId], ["taken", second.heldTaskId]]);
+});
+
+test("W1-T13944 criterion 6: a held file the landing refuses because other bytes wait at its path is not staged, so its split is refused", async t => {
+  const w = await world(t);
+  w.stage("W1-T13919");
+  const rel = "plan/tasks.d/W1-T13919-fixture-task-held-follow-up.yaml";
+  const landed = await withLiveWritesAllowed(() => w.production.landTaskFiles([{ relPath: rel, newFile: true,
+    content: heldText("W1-T13919", TASK, [CLAIMS[2]!]), claim: "filed", proof: `grep: id: W1-T13919 in ${rel}` }],
+  { owner: OWNER, repo: REPO, checkoutDir: w.checkoutDir }));
+  assert.deepEqual(landed.refused?.map(r => r.relPath), [rel], "the other bytes are refused");
+  assert.equal(landed.staged?.includes(rel), false, "a path that waits with other bytes is not this file's staging");
+  // The remedy then writes refused and names no held task.
+  const root = tempRoot(t, "one-held-other-bytes");
+  const f = fakeHost(root, []);
+  const rows: Row[] = [];
+  const out = await takeParkedPrRemedy(subject(), split([CLAIMS[2]!]), [], { ...f.h, landTaskFiles: async files => ({
+    error: landed.error ?? "refused", staged: [files[0]!.relPath], refused: [{ relPath: files[0]!.relPath, reason: "another edit waits" }] }) },
+  context(rows));
+  assert.ok(out.error !== undefined, out.reason);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["refused", undefined]]);
 });
