@@ -2500,11 +2500,11 @@ interface CodexCutMarker { marker: string; textAt: number | undefined }
 /** W1-T13951: the decoded length of the agent_message text a raw JSONL head holds, which is where a marker
  *  appended to that head lands. Inside a JSON string every `"` is escaped, so a raw `"text":"` is a key. */
 function decodedTextOffset(head: string): number | undefined {
-  const key = '"text":"';
-  const start = head.indexOf(key);
-  if (start < 0) return undefined;
+  // JSON allows whitespace around the colon; a marker missed here would later be counted as dropped source.
+  const key = /"text"[ \t\n\r]*:[ \t\n\r]*"/.exec(head);
+  if (!key) return undefined;
   // A fragment holding an unescaped quote (the text closed inside the head) does not parse as one string.
-  const fragment = `"${head.slice(start + key.length)}"`;
+  const fragment = `"${head.slice(key.index + key[0].length)}"`;
   return jsonParseStatus(fragment).status === "parsed" ? (JSON.parse(fragment) as string).length : undefined;
 }
 
@@ -2816,10 +2816,15 @@ class CodexJsonlAccumulator {
       else {
         // W1-T13951: the newest message keeps every byte whenever it fits the limit alone; the earlier one gives way.
         const lastBytes = Buffer.byteLength(this.blocks[1]!);
-        const headBudget = lastBytes <= blockBudget - 128 ? blockBudget - lastBytes
-          : Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
-        this.boundBlock(0, headBudget);
-        this.boundBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        if (lastBytes > blockBudget - 128 && lastBytes <= CODEX_WORKER_STDOUT_MAX_BYTES - bytes(this.errors)) {
+          // It fits alone but not beside the earlier one and its marker: the earlier one goes whole.
+          this.evictBlock(0);
+        } else {
+          const headBudget = lastBytes <= blockBudget - 128 ? blockBudget - lastBytes
+            : Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
+          this.boundBlock(0, headBudget);
+          this.boundBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        }
       }
       if (this.blocks.at(-1) !== last) this.lastBlockTruncated = true;
     }

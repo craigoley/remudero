@@ -244,3 +244,45 @@ test("W1-T13951 criterion 2: a message whose source opens with the marker text c
     assert.equal(result.outputTruncation!.droppedBytes, Buffer.byteLength(source) - retainedSource);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
+
+test("W1-T13951 criterion 1: a final message whose line fits the limit beside a short earlier message evicts it rather than be cut", async () => {
+  const child = reviewer();
+  try {
+    // The reviewer's counterexample: 2 MiB of command output, a 20-byte earlier message, and a final
+    // agent_message whose JSONL payload is 1,048,531 bytes. The line never spills, so boundRetained() decides.
+    const envelope = (text: string) => JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } });
+    const final = "FINAL\n" + "f".repeat(1_048_531 - Buffer.byteLength(envelope("FINAL\n")));
+    assert.equal(Buffer.byteLength(envelope(final)), 1_048_531);
+    const earlier = "an earlier message.\n";
+    assert.equal(Buffer.byteLength(earlier), 20);
+    child.message(earlier);
+    child.command("c".repeat(2 * 1024 * 1024));
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.equal(Buffer.byteLength(result.text), Buffer.byteLength(final));
+    assert.ok(result.text === final, "the final message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    const bytes = result.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.ok(bytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.equal(result.outputTruncation!.retainedBytes, bytes);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: an evicted spilled message with JSON whitespace after its text key counts only source bytes", async () => {
+  const child = reviewer();
+  try {
+    // Valid JSON whitespace between `"text":` and its string; the spill marker must still be located and excluded.
+    const evicted = "E".repeat(2 * 1024 * 1024);
+    child.raw(`{"type":"item.completed","item":{"type":"agent_message","text": \t${JSON.stringify(evicted)}}}\n`);
+    const final = "C".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 200);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(!result.blocks.some(block => block.startsWith("EEEE")), "the cut message was evicted");
+    assert.equal(result.text, final);
+    assert.equal(result.outputTruncation!.droppedBytes, Buffer.byteLength(evicted));
+    const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
+    assert.equal(receipt.output_truncation.droppedBytes, Buffer.byteLength(evicted));
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
