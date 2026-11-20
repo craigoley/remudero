@@ -10,8 +10,8 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
   runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHoldForSweep, PRIOR_ROUND_HOLD_FIELD,
-  scopeAmendmentsWithoutMergeTime,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
+  scopeAmendmentsWithoutMergeTime, priorRoundRuling, unfiledScopeGrant, type PriorRoundFacts,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
@@ -3011,8 +3011,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           (pin == null || pin === -1 || pin === run.app?.id) ? [{ name: run.name, completedAt: run.completed_at }] : [];
       }));
     } catch (error) {
-      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
-      return [];
+      // The statuses below are a separate source: a red required status releases the hold on its own.
+      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "check-runs", error: String(error) });
+      runs = [];
     }
     // Branch protection also requires commit statuses (remudero-review). A status meets a requirement pinned to no App,
     // or one pinned to the App whose bot created it.
@@ -3405,12 +3406,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     if (!union.ok) return undefined;
     const rows = union.rows;
     const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, ...contractRevisionFor(pr) };
-    const held = priorRoundHoldForSweep(rows, facts);
-    if (held?.hold === "NEEDS_SCOPE") {
-      return priorRoundHoldForSweep(rows, { ...facts, amendmentMergedAt: await amendmentMergeTimes(rows, facts.taskId, readAmendmentMergedAt) });
-    }
-    if (held?.hold !== "FLAKE") return held;
-    return priorRoundHoldForSweep(rows, { ...facts, checkCompletions: await readRequiredCheckCompletions(pr) });
+    return await readPriorRoundHold(rows, facts, { readAmendmentMergedAt, readCheckCompletions: () => readRequiredCheckCompletions(pr) });
   };
   // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
   // carry the landing too, so it never runs a real child against the checkout the test runs in.
@@ -15795,6 +15791,30 @@ export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | unde
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
 
 const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
+/** W1-T13865: the hold the sweep applies. An unfiled PR's owner `revise-pr` grant ({@link unfiledScopeGrant}) authorizes
+ *  a round with the granted paths, so a NEEDS_SCOPE ruling made BEFORE that grant no longer stands the round down; a
+ *  ruling made after it, by the granted round itself, still does. */
+export function priorRoundHoldForSweep(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number }):
+  PriorRoundHold | undefined {
+  const held = priorRoundHold(ledger, facts);
+  if (held?.hold !== "NEEDS_SCOPE") return held;
+  const answeredAt = unfiledScopeGrant(ledger, { prNumber: facts.prNumber })?.answeredAt;
+  const grantedAfter = answeredAt !== undefined && Date.parse(answeredAt) > Date.parse(held.since);
+  return grantedAfter ? undefined : held;
+}
+/** W1-T13865: {@link priorRoundHoldForSweep} with the live inputs its ruling waits on. A NEEDS_SCOPE ruling always reads
+ *  its amendments' live merge times, even when the ledger alone releases it: a local receipt's ts is not a merge time. */
+export async function readPriorRoundHold(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number },
+  reads: { readAmendmentMergedAt?: (url: string) => Promise<string | null | undefined>;
+    readCheckCompletions?: () => Promise<readonly { name: string; completedAt: string }[]> }): Promise<PriorRoundHold | undefined> {
+  if (reads.readAmendmentMergedAt !== undefined && priorRoundRuling(ledger, facts.taskId, facts.headSha) === "NEEDS_SCOPE") {
+    const amendmentMergedAt = await amendmentMergeTimes(ledger, facts.taskId, reads.readAmendmentMergedAt);
+    return priorRoundHoldForSweep(ledger, { ...facts, amendmentMergedAt });
+  }
+  const held = priorRoundHoldForSweep(ledger, facts);
+  if (held?.hold !== "FLAKE" || reads.readCheckCompletions === undefined) return held;
+  return priorRoundHoldForSweep(ledger, { ...facts, checkCompletions: await reads.readCheckCompletions() });
+}
 /** W1-T13865: live merge times for the task's amendment PRs that no pr.terminal row dates; unreadable ones are left out. */
 async function amendmentMergeTimes(rows: readonly Record<string, unknown>[], taskId: string | undefined,
   read: (url: string) => Promise<string | null | undefined>): Promise<Map<string, string | null>> {
@@ -22459,20 +22479,14 @@ export async function runSweep(
       const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
       priorRoundHistory = archived === undefined ? ledgerLines : [...archived, ...ledgerLines];
     }
-    const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha,
-      get contractRevision() {
-        return pr.taskId === undefined ? undefined : readWitnessContractRevision(pr.taskId);
-      },
-    };
-    const held = priorRoundHoldForSweep(priorRoundHistory, facts);
-    if (held?.hold === "NEEDS_SCOPE" && deps.readAmendmentMergedAt !== undefined) {
-      const amendmentMergedAt = await amendmentMergeTimes(priorRoundHistory, facts.taskId, deps.readAmendmentMergedAt);
-      return priorRoundHoldForSweep(priorRoundHistory, { taskId: facts.taskId, prNumber: pr.prNumber, headSha: facts.headSha,
-        contractRevision: facts.contractRevision, amendmentMergedAt });
-    }
-    if (held?.hold !== "FLAKE" || deps.readRequiredCheckCompletions === undefined) return held;
-    const checkCompletions = await deps.readRequiredCheckCompletions(pr);
-    return priorRoundHoldForSweep(priorRoundHistory, { taskId: facts.taskId, prNumber: pr.prNumber, headSha: facts.headSha, checkCompletions });
+    const taskId = fixLedgerTaskIdFor(pr);
+    // A FLAKE hold never reads the contract, so read it only for a NEEDS_SCOPE ruling.
+    const contractRevision = pr.taskId !== undefined && priorRoundRuling(priorRoundHistory, taskId, pr.headSha) === "NEEDS_SCOPE"
+      ? readWitnessContractRevision(pr.taskId) : undefined;
+    const readCompletions = deps.readRequiredCheckCompletions;
+    return await readPriorRoundHold(priorRoundHistory, { taskId, prNumber: pr.prNumber, headSha: pr.headSha, contractRevision },
+      { readAmendmentMergedAt: deps.readAmendmentMergedAt,
+        readCheckCompletions: readCompletions === undefined ? undefined : () => readCompletions(pr) });
   };
   const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
     ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}) });

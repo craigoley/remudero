@@ -727,4 +727,58 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.deepEqual(deferredAtHold(free.rows), []);
     assert.deepEqual(free.rungs, [TASK], "with no ruling at the adopted head, the round runs there");
   });
+
+  test("W1-T13865 criterion 1: a late local merge receipt does not skip the live merge time of an amendment merged before the round", async () => {
+    const earlier = "a".repeat(40);
+    const created = { ...pendingAmendment, head_sha: earlier, ts: at(70_000) };
+    // Adopted locally after the round, with no merged_at: its ts dates the receipt, not the merge.
+    const receipt = { step: "fix.scope_amendment", task_id: TASK, head_sha: earlier, outcome: "merged", amendmentNumber: 900,
+      amendment_url: AMENDMENT_URL, ts: at(5_000) };
+    const rows = swept([created, ...round("NEEDS_SCOPE", { contract_revision: "contract-A" }), receipt]);
+    const f = fixture(rows);
+    const reads: string[] = [];
+    f.deps.readAmendmentMergedAt = async url => { reads.push(url); return at(50_000); };
+    await runSweep([pr()], f.deps);
+    assert.deepEqual(reads, [AMENDMENT_URL], "the sweep reads the amendment's live merge time");
+    assert.equal(f.state.dispatched, 0, "the amendment merged before the NEEDS_SCOPE ruling, so the ruling stands");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+  });
+
+  test("W1-T13865 criterion 3: a fresh red required status releases FLAKE when the check-runs read fails", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    const logged: string[] = [];
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() },
+      log: (step, fields) => { logged.push(`${step}:${String(fields?.read ?? "")}`); },
+      ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.endsWith("/protection/required_status_checks")) return {
+          contexts: ["remudero-review"], checks: [{ context: "remudero-review", app_id: null }],
+        };
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) throw new Error("HTTP 502");
+        if (endpoint.includes(`/commits/${HEAD}/statuses?`)) return [[
+          { context: "remudero-review", state: "failure", created_at: at(1_000), updated_at: at(1_000) }]];
+        assert.fail(`unexpected check read ${endpoint}`);
+      },
+    });
+    assert.deepEqual(await effects.readRequiredCheckCompletions!(pr()), [{ name: "remudero-review", completedAt: at(1_000) }],
+      "the statuses response is read on its own");
+    assert.deepEqual(logged, ["sweep.ci_gate_rollup.error:check-runs"]);
+    f.deps.readRequiredCheckCompletions = effects.readRequiredCheckCompletions;
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the fresh red status releases the hold");
+  });
+
+  test("W1-T13865 criterion 4: a NEEDS_SCOPE ruling made after the owner's revise-pr grant still stands the round down", async () => {
+    const { rows, grant } = grantedScopeRound();
+    // The granted round ran at this head and ruled NEEDS_SCOPE again after the grant.
+    const done = rows.pop()!;
+    rows.push({ ...grant, ts: at(32_000) }, done);
+    const f = fixture(rows);
+    await runSweep([pr({ taskId: "unfiled" })], f.deps);
+    assert.equal(f.state.dispatched, 0, "an older grant does not override a newer ruling");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+  });
 });

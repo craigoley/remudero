@@ -339,7 +339,7 @@ const wellFormedScopeHold = (row: Record<string, unknown>): boolean =>
   Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0);
 const unfiledHoldRow = (row: Record<string, unknown>, prNumber: number): boolean =>
   row.step === "fix.scope_amendment" && rowPrNumber(row) === prNumber && row.outcome === "unfiled-escalated" && wellFormedScopeHold(row);
-export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: string; heldHead?: string }
+export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: string; heldHead?: string; answeredAt?: string }
 /** The repository owner's grant of an unfiled PR's held scope: an accepted `revise-pr` answer (an owner reply on the
  * escalation issue, which lib/escalation-answers.ts ledgers as `panel.question_answered`, or the console's answer
  * route) for this PR's own `PR-<n>` key, newer than its newest well-formed unfiled hold. It grants exactly that hold's
@@ -358,7 +358,8 @@ export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr
     (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`) && row.bare_option === true)));
   if (!answer) return undefined;
   return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
-    ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
+    ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}),
+    ...(typeof answer.ts === "string" ? { answeredAt: answer.ts } : {}) };
 }
 const grantHint = (paths: readonly unknown[]): string =>
   `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;
@@ -736,17 +737,16 @@ export function scopeAmendmentsWithoutMergeTime(ledger: readonly Record<string, 
   }
   return [...urls.values()];
 }
-/** The hold the sweep applies: an unfiled PR's owner `revise-pr` grant ({@link unfiledScopeGrant}) authorizes a round
- *  with the granted paths, so the NEEDS_SCOPE ruling stays recorded but no longer stands the round down. */
-export function priorRoundHoldForSweep(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number }):
-  PriorRoundHold | undefined {
-  const held = priorRoundHold(ledger, facts);
-  if (held?.hold === "NEEDS_SCOPE" && unfiledScopeGrant(ledger, { prNumber: facts.prNumber }) !== undefined) return undefined;
-  return held;
+const newestRoundIndex = (ledger: readonly Record<string, unknown>[], taskId: string | undefined, headSha: string) =>
+  taskId === undefined ? -1 : ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === taskId && row.head_sha === headSha);
+/** The ruling of the task's newest fix.done at this head, whatever it is; the sweep reads live inputs only for a ruling
+ *  that waits on them, before it asks {@link priorRoundHold} whether one changed. */
+export function priorRoundRuling(ledger: readonly Record<string, unknown>[], taskId: string | undefined, headSha: string): string | undefined {
+  return stringValue(ledger[newestRoundIndex(ledger, taskId, headSha)]?.fix_outcome);
 }
 export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts): PriorRoundHold | undefined {
   if (facts.taskId === undefined) return undefined;
-  const doneIndex = ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === facts.taskId && row.head_sha === facts.headSha);
+  const doneIndex = newestRoundIndex(ledger, facts.taskId, facts.headSha);
   const done = ledger[doneIndex];
   const outcome = done?.fix_outcome;
   if ((outcome !== "NEEDS_SCOPE" && outcome !== "FLAKE") || typeof done?.ts !== "string") return undefined;
