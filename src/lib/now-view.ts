@@ -1187,7 +1187,7 @@ export function createNowView(opts: NowViewOptions): {
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
     // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
     const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [],
-      (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined, catalog?.opsIds);
+      (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined, catalog?.opsIds, instance.name === core);
     const heldIds = new Set(held.map((decision) => decision.taskId));
     if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
       all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));

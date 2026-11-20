@@ -124,7 +124,7 @@ export function taskQuestionDecisions(
 /** W1-T13940: each queued task held by a needs_input question that `answered` says has no answer. An id in
  *  `privateIds` (the ops catalog) shows only its title: W1-T12211 lets no other field of it leave the private plan. */
 export function heldTaskDecisions(instance: string, tasks: readonly Task[], answered: (taskId: string) => boolean,
-  privateIds?: ReadonlySet<string>): NowDecision[] {
+  privateIds?: ReadonlySet<string>, isCore = true): NowDecision[] {
   return tasks.flatMap((task): NowDecision[] => {
     if (task.needs_input === undefined || task.status !== "queued" || answered(task.id)) return [];
     const { question, source_pr, asked_at } = task.needs_input;
@@ -132,7 +132,8 @@ export function heldTaskDecisions(instance: string, tasks: readonly Task[], answ
     return [{
       id: `question:${task.id}:${asked_at}`, kind: "task_question", instance, taskId: task.id, title: firstLine(task.title, TITLE_CHARS) || task.id,
       prompt: bounded(prompt), ...(asked_at ? { askedAt: asked_at } : {}),
-      answer: { method: "POST", path: "/v1/questions/answer", tier: ESCALATION_OPTION_ROUTES["/v1/questions/answer"], fields: { taskId: task.id }, input: "text" },
+      answer: { method: "POST", path: instanceAnswerPath(instance, isCore, "/v1/questions/answer"), tier: ESCALATION_OPTION_ROUTES["/v1/questions/answer"],
+        fields: { taskId: task.id }, input: "text" },
     }];
   });
 }

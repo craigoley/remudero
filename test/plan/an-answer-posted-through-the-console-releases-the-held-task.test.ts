@@ -12,6 +12,7 @@ import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
 import { appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { composeNeedsYou } from "#src/lib/needs-you-view.js";
 import { createNowView, NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowViewContext, type NowViewData } from "#src/lib/now-view.js";
@@ -104,6 +105,16 @@ function issueReplyGateway(): EscalationAnswerGateway {
   const issue: OpenIssue = { number: 501, url: "https://github.com/craigoley/remudero/issues/501", body: renderIssueBody(escalation()) };
   return { listOpen: () => [issue], reactPlusOne: () => {},
     listComments: () => [{ id: 9001, body: "Use 5 passes.", authorLogin: "craigoley", authorAssociation: "OWNER", authorType: "User" }] };
+}
+
+/** A secondary instance's own gateway routes, mounted under `/v1/i/wreck/`, over that instance's ledger. */
+function secondaryRoutes(t: TestCtx, ledgerPath: string): { routes: ReturnType<typeof instanceRouteSet>; checkout: string } {
+  const root = tempDir(t, "wreck-root");
+  const checkout = join(root, "repos", "wreckterra");
+  mkdirSync(join(checkout, "plan"), { recursive: true });
+  const routes = mountUnderInstance(instanceRouteSet({ instance: "wreck", root, ledgerPath, planPath: join(checkout, "plan", "tasks.yaml") },
+    { plan: PLAN, ledgerPath, github: fakeGitHub() }, {}, "craigoley/wreckterra"), "wreck");
+  return { routes, checkout };
 }
 
 /** The daemon's dispatch check: its reason when it refuses the task, undefined when it admits it. */
@@ -331,10 +342,10 @@ test("W1-T13940 criterion 3: a held task on a secondary daemon instance is one a
   const [decision] = before.held;
   assert.equal(decision.instance, "wreck");
   assert.equal(decision.id, `question:${TASK}:${ASKED_AT}`);
-  assert.deepEqual(decision.answer, { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
+  assert.deepEqual(decision.answer, { method: "POST", path: "/v1/i/wreck/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
   assert.deepEqual(before.gates.map((gate) => gate.key), [`task_question:wreck:${encodeURIComponent(decision.id)}`]);
 
-  await routeAnswer(box.serveRoot, box.ledgerPath, "Use 5 passes.");
+  assert.equal(await post(secondaryRoutes(t, box.ledgerPath).routes, decision.answer.path, { ...decision.answer.fields, answer: "Use 5 passes." }), 200);
   const after = box.needsYou();
   assert.equal(after.held.length, 0, "the ledger answer clears it");
   assert.equal(after.gates.length, 0);
@@ -394,4 +405,21 @@ test("W1-T13940 criterion 4: an ordinary escalation reply on an unfiled PR's thr
   assert.ok(rows.some((row) => row.step === "panel.escalation_replied" && row.task_id === key), "control: the reply was ledgered");
   assert.deepEqual(answerRows(ledgerPath, key), [], "no answer row for a PR key");
   assert.equal(unfiledScopeGrant(rows, { prNumber: pr }), undefined, "the reply grants no scope");
+});
+
+test("W1-T13940 criterion 3: a secondary instance's held task, answered through its Inbox form, is answered in that instance's own ledger and leaves its list", async (t) => {
+  const box = inbox(t, "wreck");
+  const [decision] = box.needsYou().held;
+  assert.ok(decision, "control: the secondary instance lists its held task");
+  const coreLedger = join(tempDir(t, "core-state"), "ledger.ndjson");
+  const { routes, checkout } = secondaryRoutes(t, box.ledgerPath);
+  const core = buildAnswerQuestionRoute(deps(tempDir(t, "core-serve"), coreLedger));
+  assert.equal(await post([core, ...routes], decision.answer.path, { ...decision.answer.fields, answer: "Use 5 passes." }), 200);
+  assert.equal(answerRows(coreLedger).length, 0, "core's ledger does not take the secondary instance's answer");
+  assert.equal(answerRows(box.ledgerPath).length, 1, "the instance's own ledger holds it");
+  assert.equal(storeLines(checkout).filter((line) => line.task === TASK).length, 1, "and the instance checkout's store");
+  assert.equal(refusal(checkout, box.ledgerPath), undefined, "the secondary daemon releases the task");
+  const after = box.needsYou();
+  assert.equal(after.held.length, 0, "the secondary view no longer lists it");
+  assert.equal(after.gates.length, 0);
 });
