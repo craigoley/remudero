@@ -4486,6 +4486,12 @@ export class CashDraftSkippedError extends RmdError {
   }
 }
 
+export class CashDraftResumeBlockedError extends RmdError {
+  constructor() {
+    super("usage", 1, "no eligible cash deployment after excluding previously paid draft work");
+  }
+}
+
 /** Check the deployment and billing posture selected by the router. */
 export function cashDraftFit(config: Config, input: CashDraftFitInput): CashDraftFit {
   const { deployment, squeezed, atIso } = input;

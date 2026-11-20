@@ -650,7 +650,7 @@ const SEED_ROWS: readonly SeedRow[] = [
     meaning:
       "A cash inbox draft was not started, because its estimated whole run was larger than the model's window " +
       "(reason window) or the cash allowance left today (reason allowance). The refused cash run sent no request. " +
-      "The proposal stays due without an attempt key.",
+      "The proposal stays due without an attempt key. A retry resumes any earlier paid work separately.",
     writer: ["runDraftRung"],
     outcomes: ["window", "allowance"],
   },

@@ -28,7 +28,7 @@ import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCau
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { defaultGetProcessStartTime, isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import { defaultGetProcessStartTime, isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
@@ -42,7 +42,7 @@ import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, CashDraftSkippedError,
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, CashDraftResumeBlockedError, CashDraftSkippedError,
   OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
@@ -1986,6 +1986,38 @@ export interface DraftSpawnContext {
   onRequestedModel?: (model: string | null) => void;
   /** Read the whole-run fit after routing, before the selected cash adapter runs. */
   cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
+  paidCashDeployments?: readonly string[];
+  onCashFallback?: (deployment: string, result: WorkerResult) => void;
+}
+
+interface DraftRelint {
+  from: string | null;
+  violations: string[];
+  prompt: string;
+}
+
+/** Resume the refused spawn under the same proposal generation. Exclude deployments already paid for this attempt. */
+interface DraftCashResume {
+  generation: string;
+  attempt: number;
+  paidDeployments: string[];
+  avoidModels: string[];
+  relint?: DraftRelint;
+}
+
+export type DraftCashResumes = Record<string, DraftCashResume>;
+
+function draftCashResumesPath(stateDir: string): string {
+  return join(stateDir, "inbox-draft-cash-resumes.json");
+}
+
+export function readDraftCashResumes(stateDir: string): DraftCashResumes {
+  const path = draftCashResumesPath(stateDir);
+  const raw = readFileIfExists(path);
+  if (raw === undefined) return {};
+  const resumes = JSON.parse(raw) as DraftCashResumes;
+  if (!resumes || typeof resumes !== "object" || Array.isArray(resumes)) throw new Error(`invalid draft object at ${path}`);
+  return resumes;
 }
 
 export interface DraftRungDeps {
@@ -1996,6 +2028,7 @@ export interface DraftRungDeps {
   /** One optional subscription attempt after a failed draft. */
   escalate?: (proposal: Proposal, prompt: string, reason: "dirty-lint" | "fragment-contract") => Promise<DraftWorkerResult | undefined>;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
+  cashResumes?: DraftCashResumes;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2006,7 +2039,8 @@ export type DraftRungOutcome =
   /** W1-T2564: `refused` marks a run the ACCOUNT turned away, as distinct from a run that happened and failed. That
    *  decides whether a {@link DraftAttemptCache} key is written, and keying a refusal retires work that never ran.
    *  Why: the 267-of-353 measurement — docs/forensics/inbox.md. */
-  | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number }; snapshot?: InboxDraftSnapshot };
+  | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number };
+      cashResume?: DraftCashResume; snapshot?: InboxDraftSnapshot };
 
 export interface InboxDraftSnapshot {
   repository: string;
@@ -2084,6 +2118,7 @@ export function commitInboxDraftOutcomes(opts: {
   updateProposalRegistry(registryPath, current => {
     const drafts = readObject(draftsPath) as DraftCache, attempts = (opts.lane ? readObject(attemptsPath) : {}) as DraftAttemptCache,
       outbox = readObject(outboxPath) as Record<string, DraftCompletionOutboxEntry>;
+    const cashResumes = opts.lane ? readDraftCashResumes(opts.stateDir) : undefined;
     const saveOutbox = () => writeAtomic(outboxPath, JSON.stringify(outbox));
     const flush = () => {
       for (const [id, record] of Object.entries(outbox)) {
@@ -2109,6 +2144,10 @@ export function commitInboxDraftOutcomes(opts: {
       const snapshot = expected.get(outcome.proposalId), matches = current.filter(proposal => proposal.id === outcome.proposalId);
       if (!snapshot || !validDraftSnapshot(snapshot, opts.scope) || matches.length !== 1 || inboxDraftGeneration(matches[0]) !== snapshot.generation) continue;
       if (outcome.snapshot && (!validDraftSnapshot(outcome.snapshot, opts.scope) || outcome.snapshot.generation !== snapshot.generation)) continue;
+      if (cashResumes && !outcome.ok && outcome.cashResume?.generation === snapshot.generation) {
+        cashResumes[outcome.proposalId] = outcome.cashResume;
+        writeAtomic(draftCashResumesPath(opts.stateDir), JSON.stringify(cashResumes));
+      }
       if (outcome.ok) {
         if (outcome.candidate.proposalId !== outcome.proposalId || outcome.candidate.anchorFingerprint !== anchorFingerprint(snapshot.proposal.evidenceAnchors)) throw new Error("draft outcome names a foreign proposal or anchor set");
         const completion = outcome.candidate.completion;
@@ -2121,6 +2160,11 @@ export function commitInboxDraftOutcomes(opts: {
       if (opts.lane && (outcome.ok || !outcome.refused)) attempts[outcome.proposalId] = draftAttemptKey(snapshot.proposal, opts.lane);
       if (opts.lane) writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
       else writeAtomic(draftsPath, JSON.stringify(drafts));
+      const previousResume = cashResumes?.[outcome.proposalId];
+      if (cashResumes && previousResume && (outcome.ok || previousResume.generation !== snapshot.generation)) {
+        delete cashResumes[outcome.proposalId];
+        writeAtomic(draftCashResumesPath(opts.stateDir), JSON.stringify(cashResumes));
+      }
       if (outcome.ok && outcome.candidate.completion) {
         outbox[outcome.candidate.completion.snapshot.completionId].adopted = true; saveOutbox();
       }
@@ -2504,6 +2548,10 @@ function observeCashDraftRequests(worker: DraftWorkerResult): void {
   if (CASH_DRAFT_REQUEST_HISTORY.length > 20) CASH_DRAFT_REQUEST_HISTORY.shift();
 }
 
+function draftHasPaidCashWork(result: WorkerResult): boolean {
+  return result.provider === "cash" && (result.costUsd > 0 || (result.budgetHeldUsd ?? 0) > 0);
+}
+
 /** Independent proposals run concurrently up to {@link DAEMON_DRAFT_BATCH_CAP}. Each proposal's
  *  projection, spawn and parse failures are caught within that proposal. */
 export async function runDraftRung(toDraft: Proposal[], currentPlanText: string, deps: DraftRungDeps, runId: string): Promise<DraftRungOutcome[]> {
@@ -2517,26 +2565,35 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       planIndex ??= planProjectionForDependsOn(currentPlanText);
       const planIndexChars = planIndex.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
-      let prompt = initialPrompt;
+      const cashFit = deps.cashFit;
+      const generation = snapshot?.generation;
+      const saved = cashFit ? deps.cashResumes?.[proposal.id] : undefined;
+      const resume = saved?.generation === generation ? saved : undefined;
+      let dirty = resume?.relint;
+      let prompt = dirty ? `${initialPrompt}\n\n${dirty.prompt}` : initialPrompt;
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
       // fired proposal reaches READY without an operator cleanup pass.
       // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
-      const avoidModels: string[] = [];
-      let dirty: { from: string | null; violations: string[] } | undefined;
+      const avoidModels = [...(resume?.avoidModels ?? [])];
+      let hasPaidCashWork = resume !== undefined;
       let attempts = 0;
-      const cashFit = deps.cashFit;
-      for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
+      for (let attempt = resume?.attempt ?? 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         lastWorker = undefined;
         lastRequestedModel = null;
         const expectedRequests = expectedCashDraftRequests();
+        const paidDeployments = new Set(attempt === resume?.attempt ? resume.paidDeployments : []);
         let worker: DraftWorkerResult;
         try {
           worker = await withGuardrailAttempt("relint-used", attempt, () =>
             deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
               onRequestedModel: model => { lastRequestedModel = model; },
-              ...(cashFit ? { cashFit: input => cashFit({ ...input, expectedRequests }) } : {}) }));
+              ...(cashFit ? { cashFit: input => cashFit({ ...input, expectedRequests }),
+                onCashFallback: (deployment, result) => {
+                  if (draftHasPaidCashWork(result)) paidDeployments.add(deployment);
+                } } : {}),
+              ...(paidDeployments.size > 0 ? { paidCashDeployments: [...paidDeployments] } : {}) }));
         } catch (error) {
           let skipped: Extract<CashDraftFit, { fits: false }>;
           if (error instanceof CashDraftSkippedError) skipped = error.fit;
@@ -2550,10 +2607,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
             prompt_chars: prompt.length, plan_index_chars: planIndexChars });
           return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
-            refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` } };
+            refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` },
+            ...(generation && (hasPaidCashWork || paidDeployments.size > 0)
+              ? { cashResume: { generation, attempt, paidDeployments: [...paidDeployments], avoidModels, relint: dirty } } : {}) };
         }
         attempts = attempt;
         lastWorker = worker;
+        hasPaidCashWork ||= draftHasPaidCashWork(worker) || paidDeployments.size > 0;
         if (cashFit && worker.provider === "cash") observeCashDraftRequests(worker);
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
@@ -2587,8 +2647,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           deps.log("inbox.draft_relint", { proposal_id: proposal.id, attempt, violations: violations.map((v) => v.message) });
           const from = draftWorkerModel(worker);
           if (from !== null && !avoidModels.includes(from)) avoidModels.push(from);
-          dirty = { from, violations: violations.map((v) => v.message) };
-          prompt = `${initialPrompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
+          dirty = { from, violations: violations.map((v) => v.message),
+            prompt: inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations) };
+          prompt = `${initialPrompt}\n\n${dirty.prompt}`;
         }
       }
       if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
@@ -2678,7 +2739,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
       deps.log("inbox.draft_error", { proposal_id: proposal.id, ...draftModelFields(lastWorker, lastRequestedModel), error });
-      return { proposalId: proposal.id, ok: false, error };
+      return { proposalId: proposal.id, ok: false, error,
+        ...(e instanceof CashDraftResumeBlockedError ? { refused: { matched: e.message } } : {}) };
     }
   };
 

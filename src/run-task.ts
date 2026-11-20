@@ -1106,6 +1106,7 @@ import {
   runDraftRung,
   captureInboxDraftSnapshot,
   commitInboxDraftOutcomes,
+  readDraftCashResumes,
   parseDraftedCandidate,
   lintDraftedFragment,
   stageBundleProposals,
@@ -1114,6 +1115,7 @@ import {
   writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftCashResumes,
   type DraftSelectionContext,
   type DraftRungOutcome,
   type DraftWorkerResult,
@@ -37501,6 +37503,7 @@ export function buildInboxDraftSpawnArgs(args: {
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
   cashFit?: NonNullable<SpawnWorkerArgs["draftRouting"]>["cashFit"];
+  paidCashDeployments?: readonly string[];
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
@@ -37516,6 +37519,7 @@ export function buildInboxDraftSpawnArgs(args: {
       // With no batch session, the spawn awaits the process's slice read: still no union on the loop (W1-T13185).
       readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
       cashFit: args.cashFit,
+      paidCashDeployments: args.paidCashDeployments,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37626,6 +37630,7 @@ export async function draftProposalBatch(
   rawSpawn: typeof spawnWorker = spawnWorker,
   providerRouting?: SpawnWorkerArgs["providerRouting"],
   mount?: Mount,
+  cashResumes?: DraftCashResumes,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
   const causalScope = { repository: `${owner}/${repo}` };
@@ -37677,6 +37682,7 @@ export async function draftProposalBatch(
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
             cashFit: ctx?.cashFit,
+            paidCashDeployments: ctx?.paidCashDeployments,
             avoidModels: ctx?.avoidModels,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
@@ -37688,6 +37694,9 @@ export async function draftProposalBatch(
           return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
             ...spawnArgs,
             providerRouting,
+            onModelFallbackAttempt: attempt => {
+              if (attempt.result) ctx?.onCashFallback?.(attempt.model, attempt.result);
+            },
           }), requestedModel };
         },
         ...(inboxDraftMount.provider === "cash" ? {
@@ -37699,6 +37708,7 @@ export async function draftProposalBatch(
           },
         } : {}),
         cashFit: input => cashDraftFit(config, input),
+        cashResumes,
         log,
       },
       runId,
@@ -37920,7 +37930,9 @@ export function buildInboxDraftHook(
     repo: string,
     runId: string,
     log: (step: string, extra?: Record<string, unknown>) => void,
-  ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
+    cashResumes?: DraftCashResumes,
+  ) => Promise<DraftRungOutcome[]> = (proposals, config, owner, repo, runId, log, cashResumes) =>
+    draftProposalBatch(proposals, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes),
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
@@ -38126,7 +38138,7 @@ export function buildInboxDraftHook(
       let outcomes: DraftRungOutcome[];
       const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
-        outcomes = await draftBatch(due, config, owner, repo, runId, log);
+        outcomes = await draftBatch(due, config, owner, repo, runId, log, readDraftCashResumes(join(inboxRoot, "state")));
       } finally {
         // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
         // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial

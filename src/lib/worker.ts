@@ -217,6 +217,7 @@ import {
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
   CashDraftSkippedError,
+  CashDraftResumeBlockedError,
   type CashDraftFit,
   type CashDraftFitInput,
   markOpenWeightDeploymentAbsent,
@@ -1342,6 +1343,7 @@ export interface SpawnWorkerArgs {
     readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
     cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
+    paidCashDeployments?: readonly string[];
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -1349,7 +1351,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall" | "cash-fit";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -2362,8 +2364,8 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 /** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
- * on failed output contracts (W1-T4067). Whole-run fit gates the initial draft and each
- * fallback deployment. An admitted draft already walking the ladder may skip an unfit rung.
+ * on failed output contracts (W1-T4067). Whole-run fit gates each draft deployment and
+ * its refusal ends the walk so the draft rung can record it.
  * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
  * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
  * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
@@ -2372,12 +2374,11 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall" | "cash-fit"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
   let lastRefusal: unknown;
-  let lastCashSkip: CashDraftSkippedError | undefined;
   for (const [index, model] of rungs.entries()) {
     try {
       const result = await run({ ...selection, model });
@@ -2405,15 +2406,6 @@ export async function runOpenWeightWalkingLadder(
       }
       return result;
     } catch (err) {
-      if (err instanceof CashDraftSkippedError) {
-        if (index === 0) throw err;
-        lastCashSkip = err;
-        if (rungs[index + 1]) {
-          try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "cash-fit" }); }
-          catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
-        }
-        continue;
-      }
       if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
@@ -2435,7 +2427,7 @@ export async function runOpenWeightWalkingLadder(
       if (!next) break;
     }
   }
-  throw lastCashSkip ?? lastRefusal;
+  throw lastRefusal;
 }
 
 /** True when a Foundry Sonnet attempt failed at zero cost, or was stopped by the Foundry Claude sub-cap,
@@ -2636,6 +2628,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // one worker's advisory status read must not switch another's home.
   const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  const paidCashDeployments = args.draftRouting?.paidCashDeployments ?? [];
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
@@ -2898,7 +2891,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         const sonnetEnv = args.env ?? process.env;
         const canTrySonnet = requestedCapability === "balanced" &&
           !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-        if (refusal === undefined && !checkDraftFit) {
+        const avoided = args.avoidModels ?? [];
+        if (refusal === undefined && (!checkDraftFit || avoided.length > 0 || paidCashDeployments.length > 0)) {
           let models: string[];
           try { models = plainCashModels(); }
           catch (selectionError) {
@@ -2907,10 +2901,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             models = [];
           }
           if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt, config, args));
-          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
+          const candidates = models.filter(model => !avoided.includes(model));
+          const eligible = candidates.filter(model => !paidCashDeployments.includes(model));
+          const held = checkDraftFit
+            ? (eligible.length === 0 ? "no eligible cash deployment" : undefined)
+            : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
             publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
             error.message += `; ${held}`;
             throw error;
           }
@@ -3189,10 +3188,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
-    const remaining = [openWeight.model, ...openWeight.alternatives]
-      .filter((model) => !(args.avoidModels ?? []).includes(model));
+    const unpaid = [openWeight.model, ...openWeight.alternatives]
+      .filter(model => !paidCashDeployments.includes(model));
+    const remaining = unpaid.filter(model => !(args.avoidModels ?? []).includes(model));
     const avoidExhausted = remaining.length === 0;
-    if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
+    const eligible = avoidExhausted ? unpaid : remaining;
+    if (eligible.length > 0) openWeight = { ...openWeight, model: eligible[0]!, alternatives: eligible.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
     let stats: DraftStats | undefined;
@@ -3225,6 +3226,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         }
       }
     }
+    if (eligible.length === 0) throw new CashDraftResumeBlockedError();
     if (args.draftRouting) {
       if (stats) {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({

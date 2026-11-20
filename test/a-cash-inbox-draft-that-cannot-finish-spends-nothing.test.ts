@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, inboxDraftExampleFragmentYaml,
-  MAX_DRAFT_LINT_ATTEMPTS, planProjectionForDependsOn, resolvedInboxDraftLane, runDraftRung,
-  type DraftRungOutcome, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
+  MAX_DRAFT_LINT_ATTEMPTS, planProjectionForDependsOn, readDraftCashResumes, resolvedInboxDraftLane, runDraftRung,
+  type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
 import { cashRequestEffort } from "#src/lib/cash-request-effort.js";
 import { draftStatsFromRows } from "#src/lib/draft-routing.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import { cashDraftFit, openWeightAllowancePath, openWeightReservationUsd, readOpenWeightAllowance,
-  reserveOpenWeightBudget } from "#src/lib/worker-provider.js";
+  reserveOpenWeightBudget, settleOpenWeightBudget } from "#src/lib/worker-provider.js";
 import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { withWorkspaceCleanup } from "#src/lib/workspace-cleanup-contract.js";
 import { draftProposalBatch } from "#test/helpers/run-task-test.js";
@@ -43,26 +44,31 @@ type FixtureOptions = {
   blockedAuction?: boolean;
   cashResult?: DraftWorkerResult;
   leaveUsd?: number;
+  relintDeployment?: string;
+  root?: string;
+  resume?: boolean;
 };
 
 /** Exercise the real batch, router and ladder, replacing the external provider boundaries. */
 async function productionBatch(t: TestContext, opts: FixtureOptions) {
-  const root = ownedFixtureDir(t, "cash-fit-batch").dir;
-  const target = gitRepo({ scope: t, kind: "cash-fit-repo" });
-  mkdirSync(join(target.dir, "plan"));
-  writeFileSync(join(target.dir, "plan", "tasks.yaml"), inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1"));
-  mkdirSync(join(target.dir, "src", "lib"), { recursive: true });
-  writeFileSync(join(target.dir, "src", "lib", "plan.ts"), "export {};\n");
-  for (const manifest of ["package.json", "package-lock.json"]) {
-    writeFileSync(join(target.dir, manifest), readFileSync(join(REPO_ROOT, manifest)));
+  const root = opts.root ?? ownedFixtureDir(t, "cash-fit-batch").dir;
+  if (!opts.root) {
+    const target = gitRepo({ scope: t, kind: "cash-fit-repo" });
+    mkdirSync(join(target.dir, "plan"));
+    writeFileSync(join(target.dir, "plan", "tasks.yaml"), inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1"));
+    mkdirSync(join(target.dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(target.dir, "src", "lib", "plan.ts"), "export {};\n");
+    for (const manifest of ["package.json", "package-lock.json"]) {
+      writeFileSync(join(target.dir, manifest), readFileSync(join(REPO_ROOT, manifest)));
+    }
+    target.git("add", ".");
+    target.git("commit", "-m", "fixture plan");
+    const origin = gitRepo({ scope: t, bare: true, kind: "cash-fit-origin" });
+    target.addRemote("origin", origin.dir);
+    target.git("push", "origin", "main");
+    mkdirSync(join(root, "repos"));
+    renameSync(target.dir, join(root, "repos", "remudero"));
   }
-  target.git("add", ".");
-  target.git("commit", "-m", "fixture plan");
-  const origin = gitRepo({ scope: t, bare: true, kind: "cash-fit-origin" });
-  target.addRemote("origin", origin.dir);
-  target.git("push", "origin", "main");
-  mkdirSync(join(root, "repos"));
-  renameSync(target.dir, join(root, "repos", "remudero"));
   const config = { root, installRoot: REPO_ROOT, dailyCapUsd: opts.cap,
     workerProviders: { enabled: opts.allowCodex || opts.blockedAuction ? ["cash", "codex"] : ["cash"], reservePercent: 5,
       cashFallbackWhenBlocked: opts.blockedAuction } } as Config;
@@ -91,10 +97,20 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
       const first = transports.length === 0;
       transports.push(selection.model);
       cashPostures.push(args.cashSqueezed);
-      return { ...(first ? opts.cashResult ?? worker() : worker()), model: selection.model, servedModel: selection.model };
+      const result = first ? opts.cashResult ?? worker() : worker();
+      if (result.costUsd > 0) {
+        const requestId = randomUUID();
+        const identity = { requestId, attemptId: requestId, provider: "cash" as const, deployment: selection.model,
+          endpoint: "https://cash.example.test" };
+        reserveOpenWeightBudget(config, { requestId, identity, deployment: selection.model, requestBodyBytes: Buffer.byteLength(args.prompt),
+          atIso: AT, squeezed: args.cashSqueezed });
+        settleOpenWeightBudget(config, { requestId, identity, atIso: AT, actualUsd: result.costUsd });
+      }
+      return { ...result, model: selection.model, servedModel: selection.model };
     },
   };
-  const outcomes = await draftProposalBatch([opts.proposal ?? proposal], config, "acme", "remudero", "cash-fit",
+  const draftedProposal = opts.proposal ?? proposal;
+  const outcomes = await draftProposalBatch([draftedProposal], config, "acme", "remudero", "cash-fit",
     (step, extra) => { rows.push({ step, ...extra }); }, args => {
       if (!args.draftRouting) return spawnWorker(args);
       prompts.push(withWorkspaceCleanup(args.prompt));
@@ -102,9 +118,12 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
       const stats = draftStatsFromRows([{ step: "draft.routing.outcome", lane: "inbox-draft", deployment,
         outcome: "clean", clean: true, draft_cost_usd: 0.000001 }], "inbox-draft");
       return spawnWorker({ ...args,
+        ...((draft > 1 || opts.resume) && opts.relintDeployment ? {
+          routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: "fixture relint deployment", models: [opts.relintDeployment] },
+        } : {}),
         draftRouting: { ...args.draftRouting, random: () => 0.5, readStats: () => stats } });
-    }, providerRouting, mount);
-  return { config, rows, transports, prompts, outcomes, auctionReads, cashPostures };
+    }, providerRouting, mount, opts.resume ? readDraftCashResumes(join(root, "state")) : undefined);
+  return { config, rows, transports, prompts, outcomes, auctionReads, cashPostures, proposal: draftedProposal };
 }
 
 function skipRow(rows: Row[]) {
@@ -113,17 +132,17 @@ function skipRow(rows: Row[]) {
   return skipped;
 }
 
-function commitAndFindDue(t: TestContext, outcomes: DraftRungOutcome[]) {
-  const stateDir = ownedFixtureDir(t, "cash-fit-state").dir;
-  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [costProposal] }));
+function commitBatch(run: Awaited<ReturnType<typeof productionBatch>>) {
+  const stateDir = join(run.config.root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [run.proposal] }));
   const scope = { repository: "acme/remudero" };
   const lane = resolvedInboxDraftLane(REPO_ROOT);
-  commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(costProposal, scope)], outcomes, lane, log: () => {} });
+  commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(run.proposal, scope)],
+    outcomes: run.outcomes, lane, log: () => {} });
   const attempts = JSON.parse(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8")) as Record<string, string>;
-  assert.equal(Object.hasOwn(attempts, costProposal.id), false);
   const drafts = JSON.parse(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8"));
-  assert.deepEqual(drafts, {});
-  return draftsDueOnDaemon([costProposal], drafts, attempts, 3, undefined, lane);
+  return { attempts, drafts, due: draftsDueOnDaemon([run.proposal], drafts, attempts, 3, undefined, lane) };
 }
 
 test("W1-T13863 criterion 1: the cash draft is held to the deployment selected by the real router", async t => {
@@ -142,6 +161,31 @@ test("W1-T13863 criterion 1: the cash draft is held to the deployment selected b
   assert.ok(run.prompts[0].length / 4 + 8000 < 131_072);
   assert.deepEqual(cashDraftFit(run.config, { deployment: "gpt-5-nano", expectedRequests: 2,
     promptChars: run.prompts[0].length, atIso: AT }), { fits: true });
+
+  const ladder = await productionBatch(t, { cap: 1000, proposal: big, deployments: ["gpt-6-luna"],
+    cashResult: worker({ text: "missing the fragment markers", costUsd: 0.001 }) });
+  assert.deepEqual(ladder.transports, ["gpt-6-luna"]);
+  assert.equal(ladder.outcomes[0].ok, false);
+  assert.equal(skipRow(ladder.rows).deployment, "gpt-oss-120b");
+  assert.equal(skipRow(ladder.rows).reason, "window");
+  const pending = commitBatch(ladder);
+  assert.deepEqual(pending.attempts, {});
+  assert.deepEqual(pending.drafts, {});
+  assert.deepEqual(readDraftCashResumes(join(ladder.config.root, "state"))[big.id]?.paidDeployments, ["gpt-6-luna"]);
+  assert.deepEqual(pending.due, [big]);
+
+  for (const blockedAuction of [false, true]) {
+    const alreadyPaid = await productionBatch(t, { cap: 1000, root: ladder.config.root, resume: true, proposal: big,
+      deployments: ["gpt-6-luna"], relintDeployment: "gpt-6-luna", unpinnedMount: blockedAuction, blockedAuction });
+    assert.deepEqual(alreadyPaid.transports, []);
+    assert.equal(alreadyPaid.outcomes[0].ok, false);
+    assert.match(alreadyPaid.outcomes[0].ok ? "" : alreadyPaid.outcomes[0].error, /excluding previously paid draft work/);
+    assert.deepEqual(commitBatch(alreadyPaid).due, [big]);
+  }
+  const retry = await productionBatch(t, { cap: 1000, root: ladder.config.root, resume: true, proposal: big,
+    deployments: ["gpt-5-nano"] });
+  assert.deepEqual(retry.transports, ["gpt-5-nano"]);
+  assert.equal(retry.outcomes[0].ok, true);
 });
 
 test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allowance figures", async t => {
@@ -172,6 +216,18 @@ test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allow
   assert.equal(held.estimated_usd, single * 2);
   assert.ok(single < cap.squeezed && cap.squeezed < single * 2);
   assert.throws(() => readFileSync(openWeightAllowancePath(fallback.config)), { code: "ENOENT" });
+
+  const ladder = await productionBatch(t, { cap: 0.02, proposal: costProposal, deployments: ["gpt-6-luna"],
+    cashResult: worker({ text: "missing the fragment markers" }) });
+  assert.deepEqual(ladder.transports, ["gpt-6-luna"]);
+  assert.equal(ladder.outcomes[0].ok, false);
+  const later = skipRow(ladder.rows);
+  assert.equal(later.reason, "allowance");
+  assert.equal(later.deployment, "gpt-oss-120b");
+  assert.equal(later.left_usd, 0.02);
+  assert.equal(later.estimated_usd, openWeightReservationUsd("gpt-oss-120b", Buffer.byteLength(ladder.prompts[0])) * 2);
+  assert.deepEqual(cashDraftFit(ladder.config, { deployment: "gpt-5-nano", expectedRequests: 2,
+    promptChars: ladder.prompts[0].length, atIso: AT }), { fits: true });
 });
 
 test("W1-T13863 criterion 3: a skipped draft stays due, costs zero and can draft on a subscription", async t => {
@@ -180,10 +236,15 @@ test("W1-T13863 criterion 3: a skipped draft stays due, costs zero and can draft
   assert.equal(held.auctionReads, 0);
   assert.equal(skipRow(held.rows).attempt, 1);
   assert.throws(() => readFileSync(openWeightAllowancePath(held.config)), { code: "ENOENT" });
-  const [due] = commitAndFindDue(t, held.outcomes);
+  const committed = commitBatch(held);
+  assert.deepEqual(committed.attempts, {});
+  assert.deepEqual(committed.drafts, {});
+  assert.deepEqual(readDraftCashResumes(join(held.config.root, "state")), {});
+  const [due] = committed.due;
   assert.deepEqual(due, costProposal);
 
-  const next = await productionBatch(t, { cap: 0.02, proposal: due, deployments: [], allowCodex: true, unpinnedMount: true });
+  const next = await productionBatch(t, { cap: 0.02, root: held.config.root, proposal: due,
+    deployments: [], allowCodex: true, unpinnedMount: true });
   assert.ok(next.auctionReads > 0);
   assert.deepEqual(next.transports, ["codex"]);
   assert.equal(next.outcomes[0].ok, true, JSON.stringify(next.rows));
@@ -191,14 +252,31 @@ test("W1-T13863 criterion 3: a skipped draft stays due, costs zero and can draft
   assert.throws(() => readFileSync(openWeightAllowancePath(next.config)), { code: "ENOENT" });
 });
 
-test("a refused relint cannot commit the dirty fragment or retire the proposal", async t => {
+test("W1-T13863 criterion 3: a refused relint resumes after the paid synthesis without replaying it", async t => {
   const run = await productionBatch(t, { cap: 0.02, proposal: costProposal,
     deployments: ["gpt-5-nano", "claude-haiku-5-5"], cashResult: worker({ text: dirty, costUsd: 0.001 }) });
   assert.deepEqual(run.transports, ["gpt-5-nano"]);
   assert.equal(skipRow(run.rows).attempt, 2);
   assert.equal(run.rows.find(row => row.step === "inbox.draft_synthesized")?.cost_usd, 0.001);
   assert.equal(run.outcomes[0].ok, false);
-  assert.deepEqual(commitAndFindDue(t, run.outcomes).map(p => p.id), [costProposal.id]);
+  const stateDir = join(run.config.root, "state");
+  const committed = commitBatch(run);
+  assert.deepEqual(committed.attempts, {});
+  assert.deepEqual(committed.drafts, {});
+  assert.deepEqual(committed.due, [costProposal]);
+  assert.equal(readDraftCashResumes(stateDir)[costProposal.id]?.attempt, 2);
+
+  const retry = await productionBatch(t, { cap: 1, root: run.config.root, resume: true, proposal: committed.due[0],
+    deployments: ["gpt-5-nano"], relintDeployment: "gpt-5-nano" });
+  assert.deepEqual(retry.transports, ["gpt-5-nano"]);
+  assert.equal(retry.outcomes[0].ok, true, JSON.stringify(retry.rows));
+  assert.match(retry.prompts[0], /FAILED the plan's own linter/);
+  assert.equal(retry.rows.find(row => row.step === "inbox.draft_synthesized")?.attempt, 2);
+  const allowance = readOpenWeightAllowance(retry.config, { deployments: ["gpt-5-nano"], atIso: AT });
+  assert.equal(allowance.attemptsToday, 1);
+  assert.equal(allowance.settledToday["gpt-5-nano"]?.settledUsd, 0.001);
+  assert.deepEqual(commitBatch(retry).due, []);
+  assert.deepEqual(readDraftCashResumes(stateDir), {});
 });
 
 test("W1-T13863 criterion 4: a fitting nano route and subscription routing retain their behavior", async t => {
@@ -214,15 +292,21 @@ test("W1-T13863 criterion 4: a fitting nano route and subscription routing retai
   assert.equal(subscription.outcomes[0].ok, true);
   assert.equal(subscription.rows.some(row => row.step === "inbox.draft_cash_skipped"), false);
 
-  const big = { ...proposal, summary: "x".repeat(300_000) };
-  const ladder = await productionBatch(t, { cap: 1000, proposal: big, deployments: ["gpt-6-luna"],
+  const ladder = await productionBatch(t, { cap: 1000, deployments: ["gpt-6-luna"],
     cashResult: worker({ text: "missing the fragment markers" }) });
-  assert.deepEqual(ladder.transports, ["gpt-6-luna", "gpt-5-nano"]);
+  assert.deepEqual(ladder.transports, ["gpt-6-luna", "gpt-oss-120b"]);
   assert.equal(ladder.outcomes[0].ok, true);
   assert.deepEqual(ladder.rows.filter(row => row.step === "draft.routing.choice")
     .map(row => [row.deployment, row.reason]), [
-    ["gpt-6-luna", "thompson-clean-per-dollar"], ["gpt-oss-120b", "draft-contract"], ["gpt-5-nano", "cash-fit"],
+    ["gpt-6-luna", "thompson-clean-per-dollar"], ["gpt-oss-120b", "draft-contract"],
   ]);
+
+  const excluded = await productionBatch(t, { cap: 1000, deployments: ["gpt-5-nano"], unpinnedMount: true,
+    blockedAuction: true, relintDeployment: "gpt-5-nano", cashResult: worker({ text: dirty }) });
+  assert.deepEqual(excluded.transports, ["gpt-5-nano"]);
+  assert.equal(excluded.outcomes[0].ok, false);
+  assert.match(excluded.outcomes[0].ok ? "" : excluded.outcomes[0].error, /no eligible cash deployment/);
+  assert.equal(excluded.rows.some(row => row.step === "inbox.draft_cash_skipped"), false);
 });
 
 test("a subscription batch returns per-proposal projection failures for an empty plan", async () => {
