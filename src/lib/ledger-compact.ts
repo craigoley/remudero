@@ -15,8 +15,8 @@ import { flagValue, unknownArgError } from "./cli-args.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { compactRotations, compactedArchiveName, type LedgerCompactionResult } from "./ledger.js";
-import { ledgerRotationEntries, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
+import { compactRotations, compactedArchiveName, ledgerRotationLockPath, tryAcquireRotationLock, type LedgerCompactionResult } from "./ledger.js";
+import { ledgerLivePath, ledgerRotationEntries, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
 import { ledgerPathFor } from "./ledger-path.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -59,6 +59,9 @@ export interface LedgerCompactFs {
   /** Stamps a moved file with the move time, so retention counts from when it went cold. */
   touch?: (path: string, atMs: number) => void;
   mtimeMs?: (path: string) => number;
+  /** W1-T13859: takes the ledger rotation lock for an apply; null when a live holder has it. Absent, an
+   *  in-memory seam compacts without it, as before. */
+  rotationLock?: (lockPath: string) => (() => void) | null;
 }
 
 /** Where merged sources go instead of being deleted; a union read lists only `ledger.*` names, so
@@ -76,6 +79,8 @@ export interface LedgerCompactCommandDeps {
   fs?: LedgerCompactFs;
   /** Test seam may lower the production ceiling, never raise it. */
   maxArchiveBytes?: number;
+  /** W1-T13859: the caller already holds the ledger rotation lock for this pass (the worker's parent thread). */
+  rotationLockHeld?: boolean;
   out?: (line: string) => void;
   error?: (line: string) => void;
 }
@@ -101,6 +106,7 @@ const realFs: LedgerCompactFs = {
   renameSync: (from, to) => renameSync(from, to),
   touch: (path, atMs) => utimesSync(path, atMs / 1000, atMs / 1000),
   mtimeMs: (path) => statSync(path).mtimeMs,
+  rotationLock: (lockPath) => tryAcquireRotationLock(lockPath),
 };
 
 /** Select parseable rotations strictly older than the requested age, preferring shared UTC days. The hard source
@@ -425,8 +431,57 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     return 1;
   }
 
+  const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
+  const window: CompactWindow = { mode, olderThanDays, maxSources, maxArchiveBytes, stateDir, fs, now: (deps.clock ?? systemClock).date(), out, log };
+  // W1-T13859: an apply replaces archives one file at a time, so a reader between two replacements sees a
+  // union that lacks the rows in transit. Hold the rotation lock for the whole pass, as rotation does;
+  // the skill-draft expiry reader takes the same lock and refuses while it is held.
+  if (mode === "dry-run" || !fs.rotationLock || deps.rotationLockHeld) return compactWindow(window);
+  const lock = takeCompactionRotationLock(stateDir, fs.rotationLock);
+  if ("refused" in lock) {
+    log(lock.refused);
+    return 1;
+  }
+  try {
+    return compactWindow(window);
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * W1-T13859: take the ledger rotation lock for one compaction pass. The daemon's worker parent takes it on
+ * the main thread, so a worker that is ended from outside cannot leave it held under a live pid.
+ */
+export function takeCompactionRotationLock(
+  stateDir: string,
+  take: (lockPath: string) => (() => void) | null = tryAcquireRotationLock,
+): { release: () => void } | { refused: string } {
+  let release: (() => void) | null;
+  try {
+    release = take(ledgerRotationLockPath(ledgerLivePath(stateDir)));
+  } catch (err) {
+    return { refused: `rmd ledger-compact: cannot take the ledger rotation lock in ${stateDir} — ${(err as Error)?.message ?? String(err)}` };
+  }
+  return release === null
+    ? { refused: "rmd ledger-compact: a ledger rotation or a complete-ledger read holds the rotation lock; nothing was compacted" }
+    : { release };
+}
+
+interface CompactWindow {
+  mode: "dry-run" | "apply";
+  olderThanDays: number;
+  maxSources: number;
+  maxArchiveBytes: number;
+  stateDir: string;
+  fs: LedgerCompactFs;
+  now: Date;
+  out: (line: string) => void;
+  log: (line: string) => void;
+}
+
+function compactWindow({ mode, olderThanDays, maxSources, maxArchiveBytes, stateDir, fs, now, out, log }: CompactWindow): number {
   let selection: LedgerCompactSelection;
-  const now = (deps.clock ?? systemClock).date();
   try {
     const names = fs.readdirSync(stateDir);
     selection = selectLedgerCompactionSources(
@@ -510,7 +565,6 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     result = { sourceCount: 0, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "", archiveNames: [] };
   }
 
-  const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
   const report = reportFor(
     mode,
     olderThanDays,

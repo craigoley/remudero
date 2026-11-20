@@ -1469,8 +1469,10 @@ export function isRotationLockHolderStale(
  * Skip live holders immediately: append already landed and the holder's catch-up folds it in.
  * W1-T4820: judge other-container holders by age; treating daemon/serve peers as dead cut twin archives.
  * Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-ledger-row-once.test.ts.
- * See docs/forensics/ledger.md#tryacquirerotationlock (R-1). */
-function tryAcquireRotationLock(lockPath: string): (() => void) | null {
+ * See docs/forensics/ledger.md#tryacquirerotationlock (R-1).
+ * W1-T13859: `rmd ledger-compact` holds it while it replaces archives, and the skill-draft expiry reader
+ * holds it while it reads the union, so no archive moves under a read that must be complete. */
+export function tryAcquireRotationLock(lockPath: string): (() => void) | null {
   const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
   for (;;) {
     try {

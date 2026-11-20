@@ -9,8 +9,9 @@ import { fixedClock } from "#src/lib/clock.js";
 import { realWriteAtomicIo, writeAtomic } from "#src/lib/fs-race-safe.js";
 import { applyProposalVerdict, ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
 import { registryThreadItems } from "#src/lib/inbox-responder.js";
-import { appendLedger, compactedArchiveName, ledgerRotationLockPath, rotateLedger } from "#src/lib/ledger.js";
+import { appendLedger, compactedArchiveName, ledgerRotationLockPath, rotateLedger, tryAcquireRotationLock } from "#src/lib/ledger.js";
 import { ledgerCompactCommand } from "#src/lib/ledger-compact.js";
+import { compactLedgerInWorker } from "#src/lib/ledger-compact-worker.js";
 import { readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
 import { inboxFirstSeenPath } from "#src/lib/panel-graph.js";
 import { expireUnansweredSkillDrafts, reportSkillDraftExpiry, skillDraftExpiryBound } from "#src/lib/skill-workshop.js";
@@ -389,7 +390,7 @@ test("W1-T13859 criterion 1: a committed approval awaiting the old inode's drain
       assert.equal(beforeDrain.archiveFiles.length, 1);
       assert.deepEqual(beforeDrain.rows.map((r) => r.task_id), ["short"]);
 
-      const unmeasured = "incomplete ledger union: ledger rotation in progress";
+      const unmeasured = "incomplete ledger union: the ledger is being rotated or compacted";
       const bound = skillDraftExpiryBound(s.stateDir);
       const printed: string[] = [];
       reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
@@ -422,20 +423,206 @@ test("W1-T13859 criterion 1: a committed approval awaiting the old inode's drain
   } finally { s.done(); }
 });
 
-test("W1-T13859 criterion 4: the rotation lock is checked again after reading the union", (t) => {
+test("W1-T13859 criterion 4: a held rotation lock leaves the bound unmeasured, and the read keeps rotation out", (t) => {
   const s = site();
   try {
     drafts(s);
-    const list = realLedgerFs.readdirSync;
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
     const lockPath = ledgerRotationLockPath(s.ledgerPath);
-    let listings = 0;
+    const unmeasured = "incomplete ledger union: the ledger is being rotated or compacted";
+    const release = tryAcquireRotationLock(lockPath);
+    assert.ok(release, "the test holds the rotation lock");
+    try {
+      assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured });
+      assert.deepEqual(pass(s), { expired: [], reason: `no skill draft expires: ${unmeasured}` });
+    } finally { release(); }
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+
+    const list = realLedgerFs.readdirSync;
+    let rotated: boolean | undefined;
     t.mock.method(realLedgerFs, "readdirSync", (dir: string) => {
-      if (++listings === 2) writeFileSync(lockPath, "", { flag: "wx" });
+      if (rotated === undefined) {
+        assert.equal(existsSync(lockPath), true, "the reader holds the lock while it lists the union");
+        rotated = rotateLedger(s.ledgerPath, { ceilingBytes: 1, smoothingWindowMs: 0, now: () => new Date(NOW) }).rotated;
+      }
       return list(dir);
     });
-    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured: "incomplete ledger union: ledger rotation in progress" });
-    rmSync(lockPath);
     assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 7.5 * DAY, sample: 4 });
+    assert.equal(rotated, false, "rotation waits for the reader");
+    assert.equal(existsSync(lockPath), false, "the reader releases the lock");
+  } finally { s.done(); }
+});
+
+/**
+ * A corpus where the production compactor overwrites archive X (named for 11-05) with its 11-05 rows first,
+ * and only then writes the 11-06 rows to a new archive. Between those two writes the union lacks them.
+ */
+function rowsInTransit(s: Site, inTransit: Record<string, unknown>[]) {
+  const short = { step: "ratify.approved", task_id: "short", ts: "2026-11-05T01:00:00Z" };
+  const x = writeArchive(s, short.ts, [short, ...inTransit]);
+  // Two same-day rotations of similar size, so the compactor selects all three as ordinary rotations.
+  writeArchive(s, "2026-11-05T00:30:00Z", [short, short]);
+  writeArchive(s, "2026-11-05T00:10:00Z", [short, short]);
+  writeFileSync(s.ledgerPath, "");
+  return x;
+}
+
+function transitDrafts(s: Site): string {
+  writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({
+    backfill: BACKFILL, short: "2026-11-03T01:00:00Z", long: "2026-10-20T12:00:00Z",
+    "skill-draft:middle": "2026-11-09T12:00:00Z", "skill-draft:old": "2026-11-01T12:00:00Z",
+    "skill-draft:approved": "2026-11-01T12:00:00Z",
+  }));
+  writeFileSync(s.registryPath, JSON.stringify({ proposals: [
+    skillDraft("skill-draft:middle"), skillDraft("skill-draft:old"), skillDraft("skill-draft:approved"),
+  ] }));
+  return rowsInTransit(s, [
+    { step: "panel.proposal_declined", task_id: "long", ts: "2026-11-06T00:00:00Z", origin: "rmd-cli" }, // 16.5 days
+    { step: "ratify.approved", task_id: "skill-draft:approved", ts: "2026-11-06T06:00:00Z", origin: "rmd-cli" },
+  ]);
+}
+
+/** Run the production `rmd ledger-compact`, with its own filesystem, and call `between` right after it replaces `x`. */
+function compactWithReadBetweenReplacements(t: TestContext, s: Site, x: string, between: () => void) {
+  const rename = realWriteAtomicIo.renameSync;
+  let calls = 0;
+  const hook = t.mock.method(realWriteAtomicIo, "renameSync", (from: string, to: string) => {
+    rename(from, to);
+    if (to !== x || calls++ > 0) return;
+    const text = gunzipSync(readFileSync(x)).toString();
+    assert.doesNotMatch(text, /2026-11-06/, "the rows in transit are in no archive at this instant");
+    assert.equal(readdirSync(s.stateDir).some((name) => name.startsWith("ledger.2026-11-06")), false);
+    between();
+  });
+  const errors: string[] = [];
+  const code = ledgerCompactCommand(["--older-than", "0", "--max-sources", "3"], {
+    stateDir: s.stateDir, clock, out: () => {}, error: (message) => errors.push(message),
+  });
+  hook.mock.restore();
+  assert.equal(code, 0, errors.join("\n"));
+  assert.equal(calls, 1, "the compactor replaced x");
+}
+
+const allDeclinesOf = (s: Site, id: string) => readLedgerUnionRecordsSync(s.stateDir, { step: "panel.proposal_declined", refuseIncomplete: true })
+  .rows.filter((r) => r.task_id === id);
+
+test("W1-T13859 criterion 1: the production compactor waits while the bound is read", (t) => {
+  const s = site();
+  try {
+    const x = transitDrafts(s);
+    const complete = { bound: 16.5 * DAY, sample: 3 };
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
+    const corpus = () => readdirSync(s.stateDir).sort().map((name) => `${name}:${sha(readFileSync(join(s.stateDir, name)).toString("base64"))}`);
+    const before = corpus();
+    const read = realLedgerFs.readFileSync;
+    const outcome: { code?: number; errors: string[] } = { errors: [] };
+    t.mock.method(realLedgerFs, "readFileSync", (path: string) => {
+      if (path === x && outcome.code === undefined) {
+        outcome.code = ledgerCompactCommand(["--older-than", "0", "--max-sources", "3"], {
+          stateDir: s.stateDir, clock, out: () => {}, error: (message) => outcome.errors.push(message),
+        });
+      }
+      return read(path);
+    });
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
+    assert.equal(outcome.code, 1);
+    assert.match(outcome.errors.join("\n"), /holds the rotation lock; nothing was compacted/);
+    assert.deepEqual(corpus(), before, "the compactor changed nothing during the read");
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: a read between two production compactor replacements closes nothing and retro prints why", (t) => {
+  const s = site();
+  try {
+    const x = transitDrafts(s);
+    const registry = readFileSync(s.registryPath);
+    const unmeasured = "incomplete ledger union: the ledger is being rotated or compacted";
+    const printed: string[] = [];
+    let bound: unknown;
+    compactWithReadBetweenReplacements(t, s, x, () => {
+      bound = skillDraftExpiryBound(s.stateDir);
+      reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    });
+    assert.deepEqual(bound, { unmeasured });
+    assert.deepEqual(printed, [`skill drafts: no skill draft expires: ${unmeasured}`]);
+    assert.deepEqual(rows(s), []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+
+    // W1-T13859 criterion 2: after the pass, the complete union closes only the draft past the true bound, once.
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 16.5 * DAY, sample: 3 });
+    assert.deepEqual(pass(s).expired, ["skill-draft:old"]);
+    assert.deepEqual(pass(s).expired, []);
+    // W1-T13859 criterion 3: the approval the compactor moved still protects its draft, and the younger draft stays open.
+    assert.deepEqual(rows(s).map(({ step, task_id, origin, reason }) => ({ step, task_id, origin, reason })), [{
+      step: "panel.proposal_declined", task_id: "skill-draft:old", origin: "skill-workshop",
+      reason: "expired: unanswered for 18.00 days; the longest wait of any answered proposal is 16.50 days (3 answered)",
+    }]);
+    assert.deepEqual(loadProposalRegistry(s.registryPath).map(({ id, skillDraftClose }) => [id, skillDraftClose === undefined]), [
+      ["skill-draft:middle", true], ["skill-draft:old", false], ["skill-draft:approved", true],
+    ]);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 6: a restored expiry stays open while the compactor moves its receipts", (t) => {
+  const s = site();
+  try {
+    const id = "skill-draft:old";
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({ backfill: BACKFILL, short: "2026-11-03T01:00:00Z", [id]: "2026-11-01T12:00:00Z" }));
+    // The expiry decline landed, its registry write failed, and the operator restored the draft.
+    const registry = JSON.stringify({ proposals: [skillDraft(id)] });
+    writeFileSync(s.registryPath, registry);
+    const x = rowsInTransit(s, [
+      { step: "panel.proposal_declined", task_id: id, ts: "2026-11-06T00:00:00Z", origin: "skill-workshop",
+        reason: "expired: unanswered for 4.50 days; the longest wait of any answered proposal is 2.00 days (1 answered)",
+        skill_draft_close_id: "close-1", skill_draft_sha256: sha(SKILL_MARKDOWN) },
+      { step: "panel.proposal_restored", task_id: id, ts: "2026-11-06T06:00:00Z", origin: "rmd-cli", reason: "still considering it" },
+    ]);
+    assert.deepEqual(pass(s).expired, []);
+    let between: unknown;
+    compactWithReadBetweenReplacements(t, s, x, () => { between = pass(s); });
+    assert.deepEqual(between, { expired: [], reason: "no skill draft expires: incomplete ledger union: the ledger is being rotated or compacted" });
+    assert.deepEqual(pass(s).expired, []);
+    assert.equal(allDeclinesOf(s, id).length, 1, "the restored draft is not closed again");
+    assert.equal(readFileSync(s.registryPath, "utf8"), registry);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: the daemon's compaction worker waits for a held rotation lock and frees its own when the thread ends", async () => {
+  const s = site();
+  try {
+    transitDrafts(s);
+    const corpus = () => readdirSync(s.stateDir).sort().map((name) => `${name}:${sha(readFileSync(join(s.stateDir, name)).toString("base64"))}`);
+    const before = corpus();
+    const lockPath = ledgerRotationLockPath(s.ledgerPath);
+    const args = ["--older-than", "0", "--max-sources", "3"];
+    const release = tryAcquireRotationLock(lockPath);
+    assert.ok(release, "the test holds the rotation lock, as a complete-ledger read does");
+    try {
+      assert.deepEqual(await compactLedgerInWorker(args, s.stateDir), {
+        code: 1, errors: ["rmd ledger-compact: a ledger rotation or a complete-ledger read holds the rotation lock; nothing was compacted"],
+      });
+    } finally { release(); }
+    assert.deepEqual(corpus(), before, "no worker ran while the lock was held");
+    const passed = await compactLedgerInWorker(args, s.stateDir);
+    assert.equal(passed.code, 0, passed.errors.join("\n"));
+    assert.equal(existsSync(lockPath), false, "the parent thread freed the lock when the worker exited");
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 16.5 * DAY, sample: 3 });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: a rotation lock that cannot be taken leaves the bound unmeasured and compacts nothing", () => {
+  const s = site();
+  try {
+    const missing = join(s.root, "missing-state");
+    const bound = skillDraftExpiryBound(missing);
+    assert.ok("unmeasured" in bound);
+    assert.match(bound.unmeasured, /^incomplete ledger union: could not take the ledger rotation lock: Error: ENOENT/);
+    const errors: string[] = [];
+    assert.equal(ledgerCompactCommand(["--older-than", "0"], { stateDir: missing, clock, out: () => {}, error: (m) => errors.push(m) }), 1);
+    assert.match(errors.join("\n"), /^rmd ledger-compact: cannot take the ledger rotation lock in .*missing-state — ENOENT/);
+    assert.equal(existsSync(missing), false);
   } finally { s.done(); }
 });
 

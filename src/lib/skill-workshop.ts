@@ -14,7 +14,7 @@
  * cycle. TypeScript's structural typing means a real `ProceduralCandidate` satisfies this shape
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -25,7 +25,7 @@ import { withInflightLock } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { ledgerRotationLockPath } from "./ledger.js";
+import { ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import {
@@ -1617,16 +1617,33 @@ function archiveVersion(path: string): string | undefined {
   return stat && `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
 }
 
+/**
+ * Read the answer rows from a complete ledger union. Rotation and `rmd ledger-compact` move rows between
+ * files while they hold the ledger rotation lock, so a read taken without the lock can finish between two
+ * replacements and see neither copy of a row. This read holds that lock, and refuses while anyone else
+ * holds it; the identity checks below still catch a writer that bypasses the lock.
+ */
 function readSkillDraftLedger(stateDir: string, step: readonly string[]): { rows: SkillDraftLedgerRows } | { unmeasured: string } {
   const livePath = ledgerLivePath(stateDir);
+  let release: (() => void) | null;
+  try {
+    release = tryAcquireRotationLock(ledgerRotationLockPath(livePath));
+  } catch (error) {
+    const reason = `incomplete ledger union: could not take the ledger rotation lock: ${String(error)}`;
+    return { unmeasured: reason };
+  }
+  if (release === null) return { unmeasured: "incomplete ledger union: the ledger is being rotated or compacted" };
+  try {
+    return readLockedSkillDraftLedger(stateDir, livePath, step);
+  } finally {
+    release();
+  }
+}
+
+function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: readonly string[]): { rows: SkillDraftLedgerRows } | { unmeasured: string } {
   const liveIdentity = () => statSync(livePath, { throwIfNoEntry: false });
-  const lockPath = ledgerRotationLockPath(livePath);
-  const rotationInProgress = () => lstatSync(lockPath, { throwIfNoEntry: false }) !== undefined;
-  const rotating = { unmeasured: "incomplete ledger union: ledger rotation in progress" };
   try {
     const before = liveIdentity();
-    // The rotator holds this lock until the replaced inode's tail is copied into live.
-    if (rotationInProgress()) return rotating;
     let unterminated = 0;
     const versions = new Map<string, string | undefined>();
     const union = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete: true }, {
@@ -1651,14 +1668,13 @@ function readSkillDraftLedger(stateDir: string, step: readonly string[]): { rows
     }
     if (!union.liveFileRead) return { unmeasured: "incomplete ledger union: live ledger is missing" };
 
-    // A rotation can publish a new archive after the union lists archives and before it reads live.
+    // A writer that skips the lock can still publish or replace a file during the read.
     const archives = ledgerRotationEntries(realLedgerFs.readdirSync(stateDir), stateDir);
     const archivesChanged = archives.some(({ path }) => {
       const version = versions.get(path);
       return version === undefined || version !== archiveVersion(path);
     });
     const after = liveIdentity();
-    if (rotationInProgress()) return rotating;
     if (before?.dev !== after?.dev || before?.ino !== after?.ino || archives.length !== union.archiveFiles.length ||
         archives.some(({ path }, index) => path !== union.archiveFiles[index])) {
       return { unmeasured: "incomplete ledger union: ledger rotated during read" };
