@@ -1,0 +1,59 @@
+- id: W1-T14035
+  title: A review claim whose owner is proven dead is re-run while the head's checks are still pending
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # widens one sweep disposition row to a dead pending claim; the one-review-per-input rule is unchanged
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T12994
+    - W1-T13951
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A head whose checks are pending, whose remudero-review status is pending, and whose pending owner is proven dead (reviewPendingOwnerDead true) is disposed post-review alongside CI, not wait"
+      proof: "grep: W1-T14035 criterion 1: in test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts"
+    - claim: "The disposition reason names the dead owner, so the ledger row says why the review runs again before CI ends"
+      proof: "grep: W1-T14035 criterion 2: in test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts"
+    - claim: "invariant:live-claim-waits — a pending claim whose owner is alive, or only old with no proof it is dead, still waits while checks are pending, exactly as today"
+      kind: guard
+      proof: "grep: W1-T14035 criterion 3: in test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core) on #19791:
+    - 15:14:46 sweep.review_started; the post-review lane ran "one exact-input review alongside CI".
+    - 15:15:10 review.pending_posted (run review-PR19791-1795187698034).
+    - 15:19:52 worker.output_truncated, then 15:19:55 review.reviewer error_incomplete_output and
+      review.semantic_incomplete; 15:20:06 daemon.child_work_settled outcome lost. No review.posted row.
+    - 15:38:37 sweep.disposed wait: "checks pending 42m (< 60m ceiling) — waiting, re-deriving next sweep".
+    - No review ran again until 16:07:47, when an operator hand run took over the stale claim.
+    Window 12:00Z to 16:28Z: 59 review runs claimed a pending status and 14 of them never posted a verdict;
+    12 of the 14 ended in review.semantic_incomplete.
+    OBSERVED at origin/main f5c90bcd4, src/lib/sweep.ts:
+    - The alongside-CI post-review row requires `pr.reviewState === "none"`, so a head that still shows the
+      dead run's pending claim never matches it.
+    - The dead-owner re-run row ("owner proven dead — re-running the review lane") requires
+      `pr.checksState === "green"`.
+    - So while checks are pending, a dead claim falls to the wait row until CI ends or the claim passes
+      REVIEW_LOCK_TTL_MS (42 minutes).
+    W1-T13951 removes the most common way a reviewer dies (output past the 1 MiB cap). This task makes any
+    other death cost one sweep pass instead of the rest of the CI run.
+  design: |
+    INVARIANT live-claim-waits: only the view producer's own proof that the owner is dead releases the claim.
+    1. In the alongside-CI post-review row of src/lib/sweep.ts, also match `pr.reviewState === "pending"` when
+       `pr.reviewPendingOwnerDead === true`, with the same age, refusal and unreadable-context guards it has today.
+    2. Keep the existing `(pr.priorReviewAttemptsForInput ?? 0) === 0` and reviewInputLoop bounds, so one input is
+       still reviewed at most as often as today; a dead claim that never posted adds no completed judgment.
+    3. Give the reason its own wording for this case, naming the dead owner, beside the existing text.
+    4. A stale-only pending (reviewPendingIsStale without reviewPendingOwnerDead) keeps waiting while checks run.
+  falsifier: |
+    Remove the new match and criterion 1's fixture is disposed wait, as #19791 was at 15:38:37Z.
+  note: |
+    Id reserved for run-unfiled-1795192209733 with rmd next-task-id on the host.
