@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
-import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { watch } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
-import { realLedgerFs } from "#src/lib/ledger-union.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
   productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
-  type PlanHandoffOutcome, type PlanRepository, type PlanTargetPort,
+  type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
@@ -75,10 +76,10 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
     return JSON.stringify([{ name: "WRECK-T1-first.yaml" }]);
   };
   const checkout = join(root, "repos", "wreckterra");
-  const service = (options: { alive?: boolean; head?: string; gateway?: boolean; sync?: (fd: number) => void; readLedgerLines?: EvidenceReader; ledgerReadBoundMs?: number } = {}) => new ProductPlanOperationService({
+  const service = (options: { alive?: boolean; head?: string; gateway?: boolean; inFlight?: PlanHandoffPort["inFlight"]; sync?: (fd: number) => void; readLedgerLines?: EvidenceReader; ledgerReadBoundMs?: number } = {}) => new ProductPlanOperationService({
     root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined, runnerConfig,
     clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => options.alive ?? true,
-    ...(options.gateway === false || over.gateway === false ? {} : { gateway }),
+    ...(options.gateway === false || over.gateway === false ? {} : { gateway: { ...gateway, inFlight: options.inFlight } }),
     ...(options.sync === undefined ? {} : { sync: options.sync }),
     readLedgerLines: options.readLedgerLines, ledgerReadBoundMs: options.ledgerReadBoundMs,
   });
@@ -426,12 +427,16 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
     appendLedger(${JSON.stringify(f.ledgerPath)}, { run_id, task_id, step: "plan.start", lane: "plan", mode: parsed.mode, brief: parsed.brief });
     appendLedger(${JSON.stringify(f.ledgerPath)}, { run_id, task_id, step: "pr.opened", lane: "plan", pr_url: ${JSON.stringify(PR_URL)} });
   `);
+  // Keep the gateway in flight while the first observation reads evidence, regardless of launcher speed.
+  let launch!: () => void;
+  const launchReady = new Promise<void>((resolve) => { launch = resolve; });
   const gateway = ratifyCliGateway(cli, join(f.root, "logs"), { ledgerPath: f.ledgerPath,
-    freshTree: async (action) => action({ path: cli, sha: "f".repeat(40) }) });
+    freshTree: async (action) => { await launchReady; return action({ path: cli, sha: "f".repeat(40) }); } });
   const service = new ProductPlanOperationService({ root: f.root, store: f.store, provider: f.provider, target: f.target,
     bootstrapConfirmed, ledgerPath: f.ledgerPath, text: async () => "[]", checkout: () => f.checkout, runnerConfig, gateway });
   const first = await ok(service.execute(actor, f.command()));
   assert.equal(first.observation.state, "pending");
+  launch();
   // inFlight tracks the real detached child lifetime. No fixed sleep is a completion proof.
   const deadline = Date.now() + 60_000;
   while (gateway.inFlight(productPlanLedgerTaskId(first.observation.operationId))) {
@@ -628,26 +633,58 @@ const proposalLines = (f: Fixture, operationId: string): string[] => {
   ].map((row) => JSON.stringify(row));
 };
 
-test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
-  const f = fixture(t);
-  const first = await ok(f.service().execute(actor, f.command()));
-  const operationId = first.observation.operationId;
-  f.release("queued");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const path = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
+const journalPath = (f: Fixture) => join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.json`);
+
+function seedLegacyRefusal(f: Fixture, operationId: string) {
+  const path = journalPath(f);
   const journal = JSON.parse(readFileSync(path, "utf8"));
-  // This is the stored shape from before the journal distinguished a refusal from a child exit.
   journal.operations[operationId].handoff = { outcome: "refused", at: REQUESTED };
   writeFileSync(path, JSON.stringify(journal));
+}
 
-  const evidence = reader(() => []);
+/** Load a filesystem fault in the reader subprocess. */
+function preloadChildModule(t: TestContext, f: Fixture, source: string) {
+  const path = join(f.root, "ledger-io.mjs");
+  writeFileSync(path, source);
+  const prior = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = [prior, `--import=${pathToFileURL(path).href}`].filter(Boolean).join(" ");
+  t.after(() => {
+    if (prior === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = prior;
+  });
+}
+
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  f.release("refused");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
+  assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED, beforeLaunch: true });
+
+  const evidence = reader(() => proposalLines(f, operationId));
   const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
   assert.equal(evidence.reads.length, 0);
   assert.equal(f.calls.length, 1);
 });
 
-test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 5_000 }, async (t) => {
+test("W1-T13875: a legacy refusal can recover a proposal opened before the child exited nonzero", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  nativeRun(f, operationId, { pr: PR_URL });
+  f.row(at(4_000), { step: "ratify.cli_exited", task_id: productPlanLedgerTaskId(operationId), code: 1 });
+
+  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([resumed.replayed, resumed.observation.operationId, resumed.observation.state, resumed.observation.proposal],
+    [true, operationId, "proposed", PR_URL]);
+  assert.equal(f.calls.length, 1);
+});
+
+test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 20_000 }, async (t) => {
   const f = fixture(t);
   mkdirSync(join(f.root, "bin"));
   writeFileSync(join(f.root, "bin", "rmd"), `#!${process.execPath}\n` + String.raw`
@@ -682,7 +719,7 @@ test("W1-T13875: a nonzero child exit preserves an opened proposal across resume
   }
 });
 
-test("W1-T13875: invariant:bounded-read — an evidence read past its bound answers unknown and releases the journal", { timeout: 5_000 }, async (t) => {
+test("W1-T13875: invariant:bounded-read — an evidence read past its bound answers unknown and releases the journal", { timeout: 25_000 }, async (t) => {
   const f = fixture(t);
   const evidence = reader(() => "never");
   const service = f.service({ readLedgerLines: evidence.read, ledgerReadBoundMs: 20 });
@@ -696,17 +733,52 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   const key = createHash("sha256").update(actor).digest("hex");
   acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "after-ledger-timeout" }).release();
 
-  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
-  const list = realLedgerFs.readdirSync;
-  const listing = t.mock.method(realLedgerFs, "readdirSync", (directory: string) => {
-    block();
-    return list(directory);
-  });
-  const delayedDefault = await ok(f.service({ gateway: false, ledgerReadBoundMs: 10 }).execute(actor, f.command()));
-  assert.equal(listing.mock.callCount(), 1, "the production reader performed its synchronous listing");
-  assert.equal(delayedDefault.observation.state, "unknown", "late directory work cannot report a stale target");
-  listing.mock.restore();
+  seedLegacyRefusal(f, first.observation.operationId);
+  nativeRun(f, first.observation.operationId, { pr: PR_URL, exit: true });
+  const entered = join(f.root, "listing-entered");
+  const finished = join(f.root, "listing-finished");
+  const bound = 5_000;
+  preloadChildModule(t, f, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const list = fs.readdirSync;
+    fs.readdirSync = (directory, ...args) => {
+      if (directory === ${JSON.stringify(dirname(f.ledgerPath))} && !fs.existsSync(${JSON.stringify(entered)})) {
+        fs.writeFileSync(${JSON.stringify(entered)}, "entered");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_000);
+        fs.writeFileSync(${JSON.stringify(finished)}, "finished");
+      }
+      return list(directory, ...args);
+    };
+    syncBuiltinESMExports();
+  `);
+  const listingStarted = (async () => {
+    for await (const change of watch(f.root, { signal: AbortSignal.timeout(10_000) })) {
+      if (change.filename === "listing-entered") return;
+    }
+    assert.fail("the default reader never reached the stalled directory listing");
+  })();
+  // Advance serve's deadline only once the actual filesystem call is blocked in the reader.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let pending = true;
+    const resume = ok(f.service({ gateway: false, ledgerReadBoundMs: bound }).execute(actor, f.command()))
+      .finally(() => { pending = false; });
+    await Promise.race([listingStarted, resume.then(() => assert.fail("the reader answered before reaching its listing"))]);
+    t.mock.timers.tick(bound - 1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pending, true, "the read is pending one tick before its deadline");
+    t.mock.timers.tick(1);
+    const delayedDefault = await resume;
+    assert.equal(delayedDefault.observation.state, "unknown");
+    assert.equal(delayedDefault.observation.proposal, undefined);
+    acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "while-listing-stalled" }).release();
+    assert.ok(!existsSync(finished), "journal lock released while the listing was still blocked");
+  } finally {
+    t.mock.timers.reset();
+  }
 
+  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
   const delayedProposal = reader(() => { block(); return proposalLines(f, first.observation.operationId); });
   const late = await ok(f.service({ readLedgerLines: delayedProposal.read, ledgerReadBoundMs: 10 }).execute(actor, f.command()));
   assert.equal(delayedProposal.reads.length, 1);
@@ -718,10 +790,19 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   assert.equal(await refused(f.service({ readLedgerLines: earlyFailure.read }).execute(actor, f.command())), "unavailable");
   acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "after-late-evidence" }).release();
 
-  const ready = reader(() => proposalLines(f, first.observation.operationId));
-  const next = await ok(f.service({ gateway: false, readLedgerLines: ready.read }).execute(actor, f.command()));
+  const savedLive = `${f.ledgerPath}.saved`;
+  renameSync(f.ledgerPath, savedLive);
+  symlinkSync(f.ledgerPath, f.ledgerPath);
+  try {
+    assert.equal(await refused(f.service({ gateway: false }).execute(actor, f.command())), "unavailable",
+      "a failed live-file identity check refuses to use the snapshot");
+  } finally {
+    unlinkSync(f.ledgerPath);
+    renameSync(savedLive, f.ledgerPath);
+  }
+  const next = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.equal(next.observation.state, "proposed");
-  assert.equal(ready.reads.length, 1, "late evidence was discarded and a new read could succeed");
+  assert.equal(next.observation.proposal, PR_URL, "late evidence was discarded and a new read could succeed");
 });
 
 test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
@@ -744,6 +825,45 @@ test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
   }
   assert.equal(evidence.reads.length, 2, "only the first resume read the final proposal");
   assert.equal(f.calls.length, 1, "the moved head never launched a second planner for an unresolved brief");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept across rotation during the read", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const proposal = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const liveDir = dirname(f.ledgerPath);
+  writeLedger(proposal, { dir: liveDir });
+  const exit = { ts: new Date(at(5_000)).toISOString(), task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 };
+  const rotated = writeLedger([exit], { dir: join(f.root, "rotated"),
+    rotations: [{ at: new Date(at(4_000)).toISOString(), gz: true, rows: proposal }] });
+  const archiveName = readdirSync(rotated.dir).find((name) => name.endsWith(".ndjson.gz"));
+  assert.ok(archiveName);
+  const archive = join(liveDir, archiveName);
+  preloadChildModule(t, f, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const live = ${JSON.stringify(f.ledgerPath)};
+    const archive = ${JSON.stringify(archive)};
+    const read = fs.promises.readFile;
+    fs.promises.readFile = (path, ...args) => {
+      if (path === live && !fs.existsSync(archive)) {
+        fs.renameSync(${JSON.stringify(join(rotated.dir, archiveName))}, archive);
+        fs.renameSync(${JSON.stringify(rotated.path)}, live);
+      }
+      return read(path, ...args);
+    };
+    syncBuiltinESMExports();
+  `);
+  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.ok(existsSync(archive), "the archive landed after the default reader listed the directory");
+  assert.equal(readFileSync(f.ledgerPath, "utf8").trim(), JSON.stringify(exit), "only the exit remained in the live file");
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL]);
+
+  const evidence = reader(() => []);
+  const restarted = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([restarted.observation.state, restarted.observation.proposal], ["proposed", PR_URL]);
+  assert.equal(evidence.reads.length, 0, "the stable proposal was saved for later resumes");
 });
 
 test("W1-T13875: a correlated exit or failure survives restart without another read", async (t) => {
