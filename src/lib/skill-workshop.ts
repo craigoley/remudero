@@ -1658,9 +1658,15 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
   try {
     const before = liveStat();
     let unterminated = 0;
+    // Torn rows inside archives: they make the union incomplete, but say nothing about the live file.
+    let archiveTorn = 0;
     let liveVersion: string | undefined;
     const versions = new Map<string, string | undefined>();
-    const union = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete: true }, {
+    const union = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete: true, rotationRecords: (_entry, parse) => {
+      const read = parse();
+      archiveTorn += read.torn;
+      return read;
+    } }, {
       ...realLedgerFs,
       readdirSync: (dir) => {
         const names = realLedgerFs.readdirSync(dir);
@@ -1681,7 +1687,7 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
     });
     const torn = union.torn + unterminated;
     const incomplete = { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${torn} torn row(s)` };
-    if (torn > 0 || (!union.ok && (!union.liveFileRead || union.unread.includes(livePath)))) return incomplete;
+    if (torn > archiveTorn || (!union.ok && (!union.liveFileRead || union.unread.includes(livePath)))) return incomplete;
     if (!union.liveFileRead) return { unmeasured: "incomplete ledger union: live ledger is missing" };
 
     // A writer that skips the lock can still publish or replace a file during the read.
@@ -1699,7 +1705,8 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
     if (liveVersion === undefined || after === undefined || liveVersion !== ledgerFileVersion(after)) {
       return { unmeasured: "incomplete ledger union: live ledger changed during read" };
     }
-    return union.ok ? { rows: union.rows, liveVersion } : { ...incomplete, archivesUnreadable: true };
+    // An unreadable archive and a torn archive row leave the live file complete, so restore can still use it.
+    return union.ok && archiveTorn === 0 ? { rows: union.rows, liveVersion } : { ...incomplete, archivesUnreadable: true };
   } catch (error) {
     const reason = `incomplete ledger union: could not verify ledger files: ${String(error)}`;
     return { unmeasured: reason };

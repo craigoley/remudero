@@ -251,7 +251,7 @@ function openLedgerForAppend(path: string, expectedLiveVersion: string | undefin
   }
 }
 
-function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): void {
+function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): bigint {
   const { size } = fstatSync(fd, { bigint: true });
   const tail = Buffer.alloc(1);
   if (size > 0n && (readSync(fd, tail, 0, 1, size - 1n) !== 1 || tail[0] !== 0x0a)) {
@@ -260,6 +260,21 @@ function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): void
   if (ledgerFileVersion(fstatSync(fd, { bigint: true })) !== expectedLiveVersion) {
     throw new LedgerAppendConflict("live ledger changed before the decline append");
   }
+  return size;
+}
+
+/**
+ * W1-T13859: a writer can append between the version check and this row. If it left its row unterminated, this
+ * row joined it, and neither parses. Find the row past the checked size and refuse unless it starts a line.
+ */
+function verifyAppendStartedALine(fd: number, checkedSize: bigint, row: Buffer): void {
+  const end = fstatSync(fd, { bigint: true }).size;
+  const span = Buffer.alloc(Number(end - checkedSize));
+  const read = span.length === 0 ? 0 : readSync(fd, span, 0, span.length, checkedSize);
+  const at = span.subarray(0, read).indexOf(row);
+  // At the checked size the row follows the newline the check confirmed.
+  if (at === 0 || (at > 0 && span[at - 1] === 0x0a)) return;
+  throw new LedgerAppendConflict("live ledger gained an unterminated row before the decline append");
 }
 
 export function appendLedger(
@@ -304,8 +319,9 @@ export function appendLedger(
   let behind: Buffer[];
   const fd = openLedgerForAppend(path, opts.expectedLiveVersion);
   try {
-    if (opts.expectedLiveVersion !== undefined) verifyLedgerBeforeAppend(fd, opts.expectedLiveVersion);
+    const checkedSize = opts.expectedLiveVersion === undefined ? undefined : verifyLedgerBeforeAppend(fd, opts.expectedLiveVersion);
     const written = writeSync(fd, buf, 0, buf.length);
+    if (checkedSize !== undefined && written === buf.length) verifyAppendStartedALine(fd, checkedSize, buf);
     if (written !== buf.length) {
       console.error(
         `ledger: short write for ${path} (${written}/${buf.length} bytes written) — ` +

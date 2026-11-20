@@ -1,22 +1,26 @@
 import assert from "node:assert/strict";
 import fs, { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
 import { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { fixedClock } from "#src/lib/clock.js";
+import * as analytics from "#src/lib/analytics-route.js";
+import { fixedClock, systemClock } from "#src/lib/clock.js";
 import { realWriteAtomicIo, writeAtomic } from "#src/lib/fs-race-safe.js";
 import { applyProposalVerdict, ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
 import { registryThreadItems } from "#src/lib/inbox-responder.js";
 import { appendLedger, compactedArchiveName, ledgerRotationLockPath, rotateLedger, tryAcquireRotationLock } from "#src/lib/ledger.js";
-import { ledgerCompactCommand } from "#src/lib/ledger-compact.js";
+import { LEDGER_COLD_STORE_DIRNAME, ledgerCompactCommand } from "#src/lib/ledger-compact.js";
 import { compactLedgerInWorker } from "#src/lib/ledger-compact-worker.js";
 import { readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
 import { inboxFirstSeenPath } from "#src/lib/panel-graph.js";
 import { expireUnansweredSkillDrafts, reportSkillDraftExpiry, skillDraftExpiryBound } from "#src/lib/skill-workshop.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
+import { proposalVerdictCliCommand } from "#src/run-task.js";
 
 const DAY = 86_400_000;
 const at = (iso: string) => Date.parse(iso);
@@ -498,8 +502,9 @@ function compactWithReadBetweenReplacements(t: TestContext, s: Site, x: string, 
       assert.equal(outputs.length, 1, "the first output is already readable");
       assert.deepEqual(readFileSync(x), source, "the source stays readable during publication");
       assert.match(gunzipSync(source).toString(), /2026-11-06/);
-      assert.doesNotMatch(gunzipSync(readFileSync(join(s.stateDir, outputs[0]!))).toString(), /2026-11-06/);
-      assert.equal(names.some((name) => name.startsWith("ledger.2026-11-06")), false);
+      // The new 11-06 name goes first; the 11-05 output replaces the source that also holds 11-06 rows last.
+      assert.doesNotMatch(gunzipSync(readFileSync(join(s.stateDir, outputs[0]!))).toString(), /2026-11-05/);
+      assert.equal(outputs[0]!.startsWith("ledger.2026-11-06"), true);
       between();
     }
     write(...args);
@@ -646,7 +651,9 @@ test("W1-T13859 criterion 2: a failed second publication preserves approvals and
     assert.equal(ledgerCompactCommand(["--older-than", "0", "--max-sources", "4"], {
       stateDir: s.stateDir, clock, out: () => {}, error: assert.fail,
     }), 0);
-    assert.equal(existsSync(source), false, "a complete retry retires the source");
+    // The 11-05 output keeps the source's name and replaces it; the source's own bytes go to cold storage.
+    assert.notDeepEqual(readFileSync(source), sourceBytes, "a complete retry retires the source");
+    assert.deepEqual(readFileSync(join(s.stateDir, LEDGER_COLD_STORE_DIRNAME, basename(source))), sourceBytes);
     assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
     assert.deepEqual(pass(s).expired, []);
   } finally { s.done(); }
@@ -1070,5 +1077,103 @@ test("W1-T13859 criterion 6: restoring after a failed registry write keeps that 
     assert.deepEqual(pass(s).expired, [proposalId]);
     assert.deepEqual(declinesOf(s, proposalId).map((row) => row.skill_draft_sha256), [sha(SKILL_MARKDOWN), sha(markdown)]);
     assert.deepEqual(treeOf(skills), tree);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 2: a compaction onto the newest source's own name keeps the analytics checkpoint count", async () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}skill-draft-analytics-`));
+  try {
+    const invoked = (verb: string, ts: string, n = 0) => JSON.stringify({ ts, task_id: "CLI", run_id: `CLI-${verb}-${n}`, step: "cli.invoked", verb });
+    // Three similar rotations, each named for its own newest row, so the day's output name collides with the
+    // newest one. Each holds more rows than the scan's per-step replay window, so a re-read past the checkpoint
+    // cannot be deduplicated.
+    const rotation = (verb: string, newestIso: string) => writeFileSync(join(dir, compactedArchiveName(newestIso)), gzipSync(
+      `${Array.from({ length: 300 }, (_, i) => invoked(verb, new Date(Date.parse(newestIso) - i * 1000).toISOString(), i)).join("\n")}\n`));
+    const newest = "2026-09-20T12:00:00.000Z";
+    rotation("alpha", "2026-09-20T10:00:00.000Z");
+    rotation("bravo", "2026-09-20T11:00:00.000Z");
+    rotation("charlie", newest);
+    writeFileSync(join(dir, "ledger.ndjson"), `${invoked("delta", "2026-10-06T20:00:00.000Z")}\n`);
+    const scanClock = fixedClock(Date.parse("2026-10-06T21:00:00.000Z"));
+    const first = await analytics.deriveAnalyticsSnapshotFromCheckpointedLedger(dir, scanClock);
+    const prior = JSON.parse(JSON.stringify(first.checkpoint)) as analytics.AnalyticsCheckpoint;
+
+    assert.equal(ledgerCompactCommand(["--older-than", "7"], { stateDir: dir, clock: scanClock, out: () => {}, error: assert.fail }), 0);
+    const resumed = await analytics.deriveAnalyticsSnapshotFromCheckpointedLedger(dir, scanClock, undefined, prior);
+    const fresh = await analytics.deriveAnalyticsSnapshotFromCheckpointedLedger(dir, scanClock);
+    assert.deepEqual(resumed.snapshot.invocationsByVerb, fresh.snapshot.invocationsByVerb, "a resumed scan counts what a fresh scan counts");
+    assert.deepEqual(fresh.snapshot.invocationsByVerb, { alpha: 300, bravo: 300, charlie: 300, delta: 1 });
+    assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith(".ndjson.gz")), [compactedArchiveName(newest)],
+      "the output keeps the newest source's name, never a stamp past the checkpoint");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T13859 criterion 4: an unterminated row appended after the final version check stops expiry and retro prints why", (t) => {
+  const s = site();
+  try {
+    drafts(s);
+    const registry = readFileSync(s.registryPath);
+    const torn = JSON.stringify({ step: "ratify.approved", task_id: "skill-draft:old", ts: clock.iso() });
+    const write = fs.writeSync;
+    let injected = false;
+    const hook = t.mock.method(fs, "writeSync", (...args: Parameters<typeof fs.writeSync>) => {
+      const [, data] = args;
+      if (!injected && Buffer.isBuffer(data) && data.includes('"origin":"skill-workshop"') && data.includes('"expired:')) {
+        injected = true;
+        appendFileSync(s.ledgerPath, torn);
+      }
+      return (write as (...a: unknown[]) => number)(...args);
+    });
+    syncBuiltinESMExports();
+    const printed: string[] = [];
+    try {
+      reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    } finally {
+      hook.mock.restore();
+      syncBuiltinESMExports();
+    }
+    assert.equal(injected, true, "the competing append landed after the version check");
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: live ledger gained an unterminated row before the decline append"]);
+    assert.deepEqual(rows(s).filter((r) => r.step === "skill.expire_failed"), []);
+    assert.deepEqual(declinesOf(s, "skill-draft:old"), []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.deepEqual(pass(s), { expired: [], reason: "no skill draft expires: incomplete ledger union: 0 unread file(s), 1 torn row(s)" });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 6: rmd restore reopens live declines and expiries beside a malformed row in a readable archive", (t) => {
+  const s = site();
+  try {
+    const skills = join(s.root, ".claude", "skills");
+    mkdirSync(skills, { recursive: true });
+    writeFileSync(join(skills, "existing.md"), "existing skill\n");
+    mkdirSync(join(s.root, "plan"));
+    writeFileSync(join(s.root, "plan", "tasks.yaml"), "[]\n");
+    assert.deepEqual(writeDaemonTargetRecord(s.stateDir, { owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: s.root }), { written: true });
+    const expired = "skill-draft:expired";
+    const declined = "skill-draft:declined";
+    t.mock.method(systemClock, "now", clock.now);
+    writeFileSync(s.registryPath, JSON.stringify({ proposals: [skillDraft(expired), skillDraft(declined)] }));
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({ backfill: BACKFILL, answered: "2026-11-01T00:00:00Z", [expired]: "2026-11-01T00:00:00Z" }));
+    row(s, "ratify.approved", "answered", "2026-11-03T00:00:00Z", { origin: "rmd-cli" });
+    assert.deepEqual(pass(s).expired, [expired]);
+    const config = { root: s.root } as never;
+    assert.equal(proposalVerdictCliCommand("decline", [declined, "--reason", "operator decline"], config), 0);
+    t.mock.method(systemClock, "now", () => NOW + 1000);
+    // One unrelated malformed row in an archive that gunzips cleanly.
+    writeArchive(s, "2026-10-31T00:00:00.000Z", [{ step: "unrelated", task_id: "other", ts: "2026-10-30T00:00:00Z" }]);
+    const malformed = join(s.stateDir, compactedArchiveName("2026-10-31T00:00:00.000Z"));
+    writeFileSync(malformed, gzipSync(`${JSON.stringify({ step: "unrelated", task_id: "other", ts: "2026-10-30T00:00:00Z" })}\n{"step":"unrel\n`));
+    const registry = readFileSync(s.registryPath);
+    for (const id of [declined, expired]) {
+      assert.equal(proposalVerdictCliCommand("restore", [id, "--reason", "keep open"], config), 0, `restore ${id}`);
+    }
+    assert.deepEqual(rows(s).filter((r) => r.step === "panel.proposal_restored").map((r) => r.task_id), [declined, expired]);
+    // Expiry still refuses the incomplete union, so the restored draft stays open.
+    assert.match(pass(s).reason, /incomplete ledger union: 0 unread file\(s\), 1 torn row\(s\)/);
+    rmSync(malformed);
+    assert.deepEqual(pass(s).expired, []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.deepEqual(readdirSync(skills), ["existing.md"]);
   } finally { s.done(); }
 });

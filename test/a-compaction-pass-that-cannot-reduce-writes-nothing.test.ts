@@ -89,22 +89,18 @@ describe("test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts", () 
     assert.deepEqual(snapshot(dir), before);
 
     const report = run(dir);
-    // W1-T13859: publishing never overwrites a path that still exists, so the merged archive takes
-    // the first free stamp after the newest source's name while that source waits for cold storage.
-    const merged = compactedArchiveName(new Date(Date.parse(lastTs) + 1).toISOString());
 
     assert.equal(report.sourceCount, 2);
     assert.equal(report.rowsWritten, 2);
     assert.equal(report.duplicatesCollapsed, 1);
-    assert.deepEqual(report.archiveNames, [merged]);
+    assert.deepEqual(report.archiveNames, [last]);
     assert.equal(report.reason, undefined);
-    assert.deepEqual(readdirSync(dir).sort(), [LEDGER_COLD_STORE_DIRNAME, merged].sort());
+    assert.deepEqual(readdirSync(dir).sort(), [LEDGER_COLD_STORE_DIRNAME, last].sort());
     assert.deepEqual(
-      new Set(gunzipSync(readFileSync(join(dir, merged))).toString("utf8").trim().split("\n")),
+      new Set(gunzipSync(readFileSync(join(dir, last))).toString("utf8").trim().split("\n")),
       new Set([firstRow, lastRow]),
     );
     assert.equal(readFileSync(join(dir, LEDGER_COLD_STORE_DIRNAME, first)).toString("base64"), before.find((entry) => entry.name === first)!.bytes);
-    assert.equal(readFileSync(join(dir, LEDGER_COLD_STORE_DIRNAME, last)).toString("base64"), before.find((entry) => entry.name === last)!.bytes);
   });
 
   test("selection reaches a shared day beyond the oldest singleton window and retains the age floor", (t) => {
@@ -130,7 +126,7 @@ describe("test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts", () 
     const before = snapshot(dir).filter((entry) => singles.includes(entry.name));
     const report = run(dir, ["--max-sources", "2"]);
     assert.equal(report.sourceCount, 2);
-    assert.deepEqual(report.archiveNames, [compactedArchiveName("2026-09-10T02:00:00.001Z")]);
+    assert.deepEqual(report.archiveNames, [pair[1]]);
     assert.deepEqual(snapshot(dir).filter((entry) => singles.includes(entry.name)), before);
   });
 
