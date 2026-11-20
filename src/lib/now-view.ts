@@ -1142,7 +1142,7 @@ export function createNowView(opts: NowViewOptions): {
       deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, index: LedgerIndex, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, index: LedgerIndex, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number, catalog?: BoardCatalogContext): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
@@ -1185,7 +1185,9 @@ export function createNowView(opts: NowViewOptions): {
       else storeLines = store.lines;
     }
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
-    const held = heldTaskDecisions(instance.name, plan?.tasks ?? [], (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined);
+    // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
+    const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [],
+      (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined, catalog?.opsIds);
     const heldIds = new Set(held.map((decision) => decision.taskId));
     if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
       all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));
@@ -1352,7 +1354,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.index!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.index!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation, b.catalog))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: recentActivityEntries(h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });

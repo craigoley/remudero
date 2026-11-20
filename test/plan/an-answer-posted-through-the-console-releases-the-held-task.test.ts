@@ -16,8 +16,10 @@ import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-p
 import { composeNeedsYou } from "#src/lib/needs-you-view.js";
 import { createNowView, NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowViewContext, type NowViewData } from "#src/lib/now-view.js";
 import { buildAnswerQuestionRoute, buildEscalationReplyRoute, type PanelActionDeps } from "#src/lib/panel-actions.js";
+import { unfiledScopeGrant } from "#src/lib/fix-progress-judge.js";
 import { assertRunnable, loadPlanFromYaml, TaskAdmissionError, type Plan } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
+import type { BoardCatalogClient, BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
 import { createService } from "#src/lib/service.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { viewEtag, type ViewBodyEntry } from "#src/lib/views.js";
@@ -139,7 +141,7 @@ async function kick(daemonRoot: string, ledgerPath: string): Promise<{ ran: stri
 interface Stepped extends Clock { set(ms: number): void }
 
 /** Serve's side: a read model over the shared ledger, serve's question root, and the now view over both. */
-function inbox(t: TestCtx, instance = "core") {
+function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient } = {}) {
   const root = readModelFixtureDir(t, "t13940").dir;
   // The answer writers stamp their ledger rows with the system clock; the read model must not see them as future rows.
   let nowMs = Date.now();
@@ -157,7 +159,8 @@ function inbox(t: TestCtx, instance = "core") {
   const serveRoot = join(root, "serve-gen");
   mkdirSync(join(serveRoot, "plan"), { recursive: true });
   const view = createNowView({
-    instances: [instance === "core" ? { name: "core", ledgerDir, feedbackRoot: serveRoot } : { name: instance, ledgerDir }], coreInstance: "core", clock, readPlan: () => PLAN, listGrilling: () => [],
+    instances: [instance === "core" ? { name: "core", ledgerDir, feedbackRoot: serveRoot } : { name: instance, ledgerDir }], coreInstance: "core", clock, readPlan: () => plans.readPlan ?? PLAN, listGrilling: () => [],
+    ...(plans.catalogs ? { catalogs: plans.catalogs } : {}),
     github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: null, state: "fresh" } }),
     hostProbe: { rateLimit: () => 4321, diskFree: () => 1 },
   });
@@ -335,4 +338,60 @@ test("W1-T13940 criterion 3: a held task on a secondary daemon instance is one a
   const after = box.needsYou();
   assert.equal(after.held.length, 0, "the ledger answer clears it");
   assert.equal(after.gates.length, 0);
+});
+
+/** The public plan without the held task: an ops-catalog shard holds it, as the daemon's combined plan does. */
+const PUBLIC_PLAN: Plan = loadPlanFromYaml(`- id: W1-T90003
+  title: "a public fixture task"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  origin: architect
+  files: [src/lib/plan.ts]
+`, "plan/tasks.d/W1-T90003-public.yaml");
+
+function opsCatalog(): BoardCatalogClient {
+  const context = { outcome: "ok", observedAt: new Date(T0).toISOString(), taskCount: 1, plan: PLAN, publicPlan: PUBLIC_PLAN,
+    opsIds: new Set([TASK]) } as BoardCatalogContext;
+  return { current: () => context, revision: () => "ops-r1", accept: () => {} };
+}
+
+test("W1-T13940 criterion 3: a held task from the ops catalog is listed from the combined plan the daemon holds it over, with its question kept private", async (t) => {
+  assert.equal(PUBLIC_PLAN.byId.has(TASK), false, "control: the public plan does not hold the task");
+  const box = inbox(t, "core", { readPlan: PUBLIC_PLAN, catalogs: opsCatalog() });
+  const before = box.needsYou();
+  assert.equal(before.held.length, 1, "the Inbox lists the held ops task");
+  const [decision] = before.held;
+  assert.equal(decision.id, `question:${TASK}:${ASKED_AT}`);
+  assert.equal(decision.title, "a held fixture task");
+  assert.equal(decision.prompt.includes(QUESTION) || decision.prompt.includes("#18449"), false, "the private question stays private");
+  assert.deepEqual(decision.answer, { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
+  assert.deepEqual(before.gates.map((gate) => gate.key), [`task_question:core:${encodeURIComponent(decision.id)}`]);
+
+  await routeAnswer(box.serveRoot, box.ledgerPath, "Use 5 passes.");
+  const after = box.needsYou();
+  assert.equal(after.held.length, 0);
+  assert.equal(after.gates.length, 0);
+});
+
+test("W1-T13940 criterion 4: an ordinary escalation reply on an unfiled PR's thread writes no answer row, so it grants that PR no scope", async (t) => {
+  const pr = 14217;
+  const key = `PR-${pr}`;
+  const root = tempDir(t, "scope");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const hold = { ts: new Date(T0 - 60_000).toISOString(), task_id: key, step: "fix.scope_amendment", pr_number: pr, head_sha: "a".repeat(40),
+    outcome: "unfiled-escalated", paths: ["scripts/mutation-relevant-paths.json"], issue_url: "https://github.com/craigoley/remudero/issues/14273" };
+  writeFileSync(ledgerPath, `${JSON.stringify(hold)}\n`);
+  const threads = join(root, "threads.jsonl");
+  appendThreadMessage({ taskId: key, class: "BLOCKED" }, "escalation", "the fix needs a path outside the PR", { threadStorePath: threads });
+  assert.equal(await post([buildEscalationReplyRoute(deps(join(root, "config"), ledgerPath, threads))], "/v1/escalation/reply",
+    { taskId: key, class: "BLOCKED", text: "revise-pr" }), 200);
+  const rows = rowsIn(ledgerPath);
+  assert.ok(rows.some((row) => row.step === "panel.escalation_replied" && row.task_id === key), "control: the reply was ledgered");
+  assert.deepEqual(answerRows(ledgerPath, key), [], "no answer row for a PR key");
+  assert.equal(unfiledScopeGrant(rows, { prNumber: pr }), undefined, "the reply grants no scope");
 });

@@ -1075,8 +1075,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         origin,
         answer_id: answerId,
       });
-      // W1-T13940: the daemon reads this row; config.root's store is not its own.
-      ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
+      // W1-T13940: the daemon reads this row; config.root's store is not its own. A PR-<n> key holds no plan task, and
+      // its row would read as that PR's unfiled scope grant (fix-progress-judge.ts unfiledScopeGrant), which a reply never is.
+      if (!/^PR-\d+$/.test(input.taskId)) ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
         answer: input.text, answer_id: answerId, flows_to: "plan/questions.ndjson", recorded_to_question_store: recordedToQuestionStore,
       });
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
