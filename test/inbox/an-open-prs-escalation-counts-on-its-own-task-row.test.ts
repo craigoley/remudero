@@ -16,6 +16,8 @@ test("W1-T13957 own task row: an open PR whose only row is its own task (source 
   assert.deepEqual(read.states.get("#19691"), { status: "open", unhandledEscalations: 1 });
   const byTrailer = inboxBoardReferents(projection(row("W1-T13855")), [open(19728, "feature/x", "Fix.\n\nRemudero-Task: W1-T13855\n")]);
   assert.deepEqual(byTrailer.states.get("#19728"), { status: "open", unhandledEscalations: 0 }, "the trailer names the task as well");
+  const splitId = inboxBoardReferents(projection(row("W1-T1B", { needsHuman: true })), [open(11, "run-W1-T1B-1795095230170", "Remudero-Task: W1-T1B")]);
+  assert.deepEqual(splitId.states.get("#11"), { status: "open", unhandledEscalations: 1 }, "a split task id such as W1-T1B is owned too");
 });
 
 test("W1-T13957 own task row: contradicting evidence stays unreadable", () => {
@@ -24,6 +26,10 @@ test("W1-T13957 own task row: contradicting evidence stays unreadable", () => {
   assert.deepEqual(twoOwners.states.get("#5"), { status: "open" }, "a branch and a trailer naming different tasks own nothing");
   const otherPr = inboxBoardReferents(projection(row("W1-T1", { needsHuman: true, prNumber: 6, prState: "CLOSED" })), [open(7, "run-W1-T1-2")]);
   assert.equal(otherPr.states.get("#7")?.unhandledEscalations, undefined, "the task's row names a different PR");
+  const tabTrailer = inboxBoardReferents(projection(row("W1-T1"), row("W1-T2", { needsHuman: true })), [open(9, "run-W1-T1-1", "Remudero-Task:\tW1-T2")]);
+  assert.deepEqual(tabTrailer.states.get("#9"), { status: "open" }, "a tab-separated trailer that names another task is still a conflict");
+  const unreadBody = inboxBoardReferents(projection(row("W1-T1")), [{ number: 10, state: "OPEN", headRefName: "run-W1-T1-1" }]);
+  assert.deepEqual(unreadBody.states.get("#10"), { status: "open" }, "an unread body may hold a conflicting trailer, so ownership is unknown");
   for (const extra of [{ escalationUnverified: true }, { indeterminate: true }, { githubUnobservableSince: "2026-11-20T00:00:00Z" }, { merged: true }] as const) {
     const read = inboxBoardReferents(projection(row("W1-T3", { needsHuman: true, ...extra })), [open(8, "run-W1-T3-3")]);
     assert.equal(read.states.get("#8")?.unhandledEscalations, undefined, `an unobservable or merged own row (${Object.keys(extra)[0]}) supplies no count`);
