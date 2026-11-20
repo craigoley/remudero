@@ -849,6 +849,34 @@ test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved depe
   }
 });
 
+test("W1-T13785 criterion 2: a readable reverse edge holds its own record while a sound public neighbour keeps the local pin", async t => {
+  const everything = everythingSaid(t);
+  const sound = shardText(DEPENDANT_ID);
+  const boot = dependingOn(PUBLIC_ID, OPS_ID) + sound;
+  const main = boot.replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  const localRecord = parseTasksFromYaml(sound, "local.yaml")[0]!;
+  for (const mode of MODES) {
+    const host = hostWithSecondCatalog(t), from = everything.length;
+    const { code } = await approveIn(mode, t, host, boot, DEPENDANT_ID, main);
+    assert.equal(code, 0, `${mode}: ${everything.slice(from).join("\n")}`);
+    assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(localRecord)], mode);
+    assert.equal(host.durableRecords()[DEPENDANT_ID]?.pin, pinBeforeThisTask(localRecord), mode);
+    assert.equal(host.releaseRows(PUBLIC_ID).length, 0, mode);
+  }
+});
+
+test("W1-T13785 criterion 2: an unreadable ops catalog leaves a deferred origin/main edge to the strict loader's fallback", async t => {
+  everythingSaid(t);
+  const boot = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID);
+  const main = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID).replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  const host = hostWithSecondCatalog(t, { transport: "down" });
+  const { code, planPath } = await approveIn("checkout, as the host runs it", t, host, boot, DEPENDANT_ID, main);
+  const local = loadPlan(planPath).byId.get(DEPENDANT_ID)!;
+  assert.equal(code, 0);
+  assert.equal(host.calls.length, 1, "strict fallback reuses the unsuccessful catalog read");
+  assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(local)]);
+});
+
 test("W1-T13785 criterion 2: the public loader still normalizes scalar dependencies before an ops outage or destination shutdown", async t => {
   everythingSaid(t);
   const text = shardText(PUBLIC_ID).replace("depends_on: []", `depends_on: ${OPS_ID}`);

@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -19,7 +19,7 @@ import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-ca
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
 import {
-  APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
+  APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, productionStuckStateProbe, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
 } from "#src/lib/stuck-state-gardener.js";
 import { composeSecondaryPlan, findApproveReleasePlan, loadLocalReleasePlan, readReleasePublicPlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -43,6 +43,7 @@ const planOf = (text: string, label: string): Plan => {
 /** A state directory naming the ops repository, and that repository's read-only routes over a text a test may change. */
 function opsCatalog(t: TestContext, initial: string) {
   let text = initial;
+  let blobUnreadable = false;
   const root = mkdtempSync(join(tmpdir(), "rmd-held-public-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state"); mkdirSync(stateDir);
@@ -57,9 +58,11 @@ function opsCatalog(t: TestContext, initial: string) {
     if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
     if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
     assert.equal(path, `${base}/git/blobs/${blob}`, "only pinned read-only fixture routes may run");
+    if (blobUnreadable) throw new Error("fixture ops blob unavailable");
     return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
   };
   return { stateDir, api, lookup: { stateDir, api }, set: (next: string) => { text = next; },
+    setBlobUnreadable: (unreadable: boolean) => { blobUnreadable = unreadable; },
     read: () => readOpsCatalogSnapshotAsync({ repository: REPOSITORY }, api) };
 }
 
@@ -84,7 +87,7 @@ const viewOf = (plan: Plan, read: "origin/main" | "working_tree"): (() => Promis
 test("W1-T13785 criterion 3: findApproveReleasePlan answers held with the reason and the edge for each held public record, and undefined for a sound one", async t => {
   const cases = [
     { world: WORLDS[1]!, held: { "PUB-2": DUP_HOLD, "PUB-2-CHILD": DUP_HOLD }, sound: ["PUB-1"] },
-    { world: WORLDS[2]!, held: { "PUB-REV": REV_HOLD, "PUB-REV-CHILD": REV_HOLD }, sound: [] },
+    { world: WORLDS[2]!, held: { "PUB-REV": REV_HOLD, "PUB-REV-CHILD": REV_HOLD }, sound: ["PUB-1"] },
   ];
   for (const { world, held, sound } of cases) {
     const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
@@ -173,6 +176,52 @@ test("W1-T13785 criterion 4: the release probe reads a held public record's caus
   assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }], "one replay pins the verified public record");
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
   assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
+});
+
+test("W1-T13785 criterion 4: a failed ops blob read leaves the new ref pending for a single replay at the same ref", async t => {
+  const { fx, main, rows, ports, pass, approved } = await refusalFixture(t);
+  const readOpsStamp = ports.eventStamps["ops-main"]!;
+  const initialRef = await readOpsStamp();
+  await pass();
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item);
+
+  fx.set(record("OPS-GOOD"));
+  fx.setBlobUnreadable(true);
+  const advancedRef = await readOpsStamp();
+  assert.equal(typeof advancedRef, "string");
+  assert.notEqual(advancedRef, initialRef);
+  const probe = await ports.probe(item);
+  assert.equal(probe.present, true);
+  assert.match(probe.reason ?? "", /^ops-/);
+  assert.equal("digest" in probe, false);
+  await pass();
+  assert.deepEqual(approved, []);
+  const state = JSON.parse(readFileSync(join(fx.stateDir, "stuck-state.json"), "utf8"));
+  assert.equal(state.items[item.key].stamps["ops-main"], initialRef, "the unread blob did not consume the ref advance");
+
+  fx.setBlobUnreadable(false);
+  assert.equal(await readOpsStamp(), advancedRef, "recovery needs no further ref movement");
+  const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
+  assert.deepEqual(await ports.probe(item), { present: false, digest: publicRecordDigest(current) });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
+  assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.events), [["ops-main"]]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+});
+
+test("W1-T13785 criterion 4: a public replay can proceed while an unrelated public-to-ops edge remains held", async t => {
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
+  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  fx.set(record("OPS-GOOD"));
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item);
+  const current = (await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true })).plan.byId.get("PUB-2")!;
+  assert.deepEqual(await ports.probe(item), { present: false, digest: publicRecordDigest(current) });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
 });
 
 test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only edit or switching the destination off", async t => {
@@ -321,6 +370,11 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
   const malformed = { ...fx.lookup, opsSnapshot: { ...snapshot, plan: { ...snapshot.plan!, tasks: [] } } };
   assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, malformed, append, expected),
     { outcome: "unreadable", reason: "compose-malformed" });
+  const publicPlan = (await readReleasePublicPlan(main.dir)).plan;
+  const probe = productionStuckStateProbe({
+    ...fx.lookup, publicPlan: () => ({ ...publicPlan, tasks: [] }), destinationRead: async () => undefined,
+  });
+  assert.deepEqual(await probe(item!), { present: true, reason: "compose-malformed" });
   const offline = { ...fx.lookup, api: async () => { throw new Error("ops offline"); } };
   assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, offline, append, expected),
     { outcome: "unreadable", reason: "public-replay-ops-unreadable" });
@@ -341,45 +395,27 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
 test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-catalog — no record the composition holds is answered found by the approve release plan, and every other record is answered as on origin/main", async t => {
   let heldSeen = 0, soundSeen = 0;
   for (const world of WORLDS) {
-    const fx = opsCatalog(t, world.opsText), main = publicMain(t, world.publicText);
-    const publicPlan = loadLocalReleasePlan(main.planPath, fx.stateDir);
-    const readPublic = (keepUnseenDependencies = true) => readReleasePublicPlan(main.dir, { keepUnseenDependencies });
-    let legacyPlan: Plan | undefined;
-    let legacyError: unknown;
-    try {
-      legacyPlan = loadPlan(main.planPath);
-    } catch (error) {
-      legacyError = error;
-      assert.equal(world.name, "a public task naming an ops id");
-      assert.match(String(error), /task PUB-REV: depends_on unknown task 'OPS-GOOD'/);
-    }
-    if (world.name === "a public task naming an ops id") assert.ok(legacyError, "the original public loader rejects the whole plan");
-    // The tick composes over the snapshot its reader returns, so the reference does too.
-    const opsPlan = (await fx.read()).plan!;
+    const fx = opsCatalog(t, world.opsText), publicPlan = planOf(world.publicText, "public");
+    const opsSnapshot = await fx.read();
+    assert.equal(opsSnapshot.outcome, "ok");
+    const opsPlan = opsSnapshot.plan!;
     const composition = composeSecondaryPlan(publicPlan, opsPlan);
     assert.equal(composition.outcome, "ok", world.name);
     if (composition.outcome !== "ok") continue;
     const ids = new Set([...publicPlan.tasks, ...opsPlan.tasks].map(task => task.id));
     for (const id of ids) {
-      const resolve = () => findApproveReleasePlan(id, publicPlan, readPublic, fx.lookup);
+      const answer = await findApproveReleasePlan(id, publicPlan, viewOf(publicPlan, "origin/main"), { ...fx.lookup, opsSnapshot });
       const hold = composition.held.get(id), label = `${world.name}: ${id}`;
       if (hold !== undefined) {
         heldSeen += 1;
-        assert.deepEqual(await resolve(), { outcome: "held", hold }, `${label} is held, never found`);
-      } else if (legacyError instanceof Error) {
-        soundSeen += 1;
-        await assert.rejects(resolve, { name: legacyError.name, message: legacyError.message }, `${label}: the original public loader refused the release`);
+        assert.deepEqual(answer, { outcome: "held", hold }, `${label} is held, never found`);
       } else if (publicPlan.byId.has(id)) {
         soundSeen += 1;
-        assert.equal(await resolve(), undefined, `${label}: a sound public record keeps its local plan, as on origin/main`);
-        assert.equal(operatorReleasePin(publicPlan.byId.get(id)!), operatorReleasePin(legacyPlan!.byId.get(id)!), label);
+        assert.equal(answer, undefined, `${label}: origin/main defers a public hit to the local plan`);
       } else {
         soundSeen += 1;
-        const answer = await resolve();
-        assert.equal(answer?.outcome, "found", label);
-        assert.equal(answer?.outcome === "found" ? answer.catalog : undefined, "ops", label);
-        assert.deepEqual(answer?.outcome === "found" ? answer.plan.byId.get(id) : undefined, composition.plan.byId.get(id),
-          `${label}: a sound ops record is released from the composed plan, as on origin/main`);
+        assert.deepEqual(answer, { outcome: "found", catalog: "ops", plan: composition.plan },
+          `${label}: origin/main releases an ops hit from the composed plan`);
       }
     }
   }

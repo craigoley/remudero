@@ -249,7 +249,7 @@ function rowEventStamps(rows: readonly Row[], untilMs = Number.POSITIVE_INFINITY
   return { ...(boot ? { "daemon-boot": String(boot.ts) } : {}), ...(normal ? { "memory-normal": String(normal.ts) } : {}) };
 }
 
-/** What a probe read: whether the cause is still present, and for a release, the record's current digest. */
+/** The cause's status and current record digest. A verified public probe includes the digest property even for an absent record. */
 export interface ProbeResult { present: boolean; reason?: string; digest?: string }
 
 export interface StuckStatePorts {
@@ -352,7 +352,7 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
       for (const event of ["daemon-boot", "memory-normal"] as const) baseline[event] = before[event];
       const evidence = item.publicRelease;
       if (evidence) baseline["public-main"] = evidence.publicCommit;
-      if (evidence?.opsCommit !== undefined) baseline["ops-main"] = evidence.opsCommit;
+      if (evidence) baseline["ops-main"] = evidence.opsCommit;
       if (evidence && evidence.publicCommit === undefined) baseline["public-working-tree"] = evidence.workingTreeDigest;
       prior = next.items[item.key] = { stamps: baseline };
       if (evidence === undefined) continue;
@@ -369,9 +369,11 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
     if (changed.length === 0 && !ageProbe) continue;
     if (ageProbe) entry.ageProbed = true;
     const probed = await ports.probe(item);
-    for (const event of probeOn) {
-      // Keep a working-tree edit pending if the probe could not verify the catalog and record.
-      if (now[event] !== undefined && (event !== "public-working-tree" || "digest" in probed)) entry.stamps[event] = now[event];
+    // A public release can retry at the same ref after a failed catalog read.
+    if (!item.publicRelease || "digest" in probed) {
+      for (const event of probeOn) {
+        if (now[event] !== undefined) entry.stamps[event] = now[event];
+      }
     }
     const checkedRelease = cls.retry === "approve" && (probed.present
       ? item.publicRelease !== undefined && "digest" in probed
@@ -480,7 +482,17 @@ export async function readApproveRelease(
     }
     return view;
   };
-  const release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
+  let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
+  if (release?.outcome !== "held") {
+    const opsPlan = lookup.opsSnapshot?.outcome === "ok" &&
+      planDestinationRepository(lookup.stateDir).outcome === "named" ? lookup.opsSnapshot.plan : undefined;
+    const localError = publicReleaseDependencyError(localPlan, opsPlan);
+    if (localError) throw localError;
+    if (publicPlan && publicReleaseDependencyError(publicPlan, opsPlan)) {
+      // Match the strict ref loader's working-tree fallback for an unresolved public dependency.
+      release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
+    }
+  }
   const evidence = { publicCommit, publicPlan, opsSnapshot: lookup.opsSnapshot, append };
   if (release?.outcome === "unreadable") recordApproveReleaseRefusal(taskId, { reason: release.reason }, evidence);
   if (release?.outcome === "held" && (publicCommit !== undefined || publicPlan?.byId.has(taskId))) {
@@ -531,7 +543,9 @@ function resolvePublicReplay(taskId: string, plan: Plan, read: OpsRead): TaskRel
     const hold = composition.held.get(taskId);
     if (hold !== undefined) return { outcome: "held", hold };
   }
-  if (publicReleaseDependencyError(plan)) return { outcome: "unreadable", reason: "public-replay-plan-invalid" };
+  if (publicReleaseDependencyError(plan, read.outcome === "ok" ? read.plan : undefined)) {
+    return { outcome: "unreadable", reason: "public-replay-plan-invalid" };
+  }
   return { outcome: "found", catalog: "public", plan };
 }
 
@@ -578,6 +592,7 @@ export function productionStuckStateProbe(opts: {
       const moved = record === undefined && read.outcome === "ok" ? read.plan?.byId.get(item.taskId!) : undefined;
       const digest = record ? publicRecordDigest(record) : moved ? opsRecordDigest(moved) : undefined;
       const release = resolvePublicReplay(item.taskId!, plan, read);
+      if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { present: true, reason: release.reason };
       return release.outcome === "found" ? { present: false, digest } : { present: true, digest, reason: "reason" in release ? release.reason : release.outcome };
     }
     if (read.outcome !== "ok" || read.plan === undefined) return { present: true, reason: `ops-${read.outcome}` };
