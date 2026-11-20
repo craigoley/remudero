@@ -2476,8 +2476,14 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13951: how a Codex agent_message line opens. */
-const CODEX_AGENT_MESSAGE_LINE_RE = /^\{"type":"item\.completed","item":\{(?:"id":"[^"\\]*",)?"type":"agent_message"/;
+/** W1-T13951: whether a Codex JSONL line opens as an agent_message item, `"id"` field optional. */
+function opensAsAgentMessage(head: string): boolean {
+  const prefix = '{"type":"item.completed","item":{';
+  if (!head.startsWith(prefix)) return false;
+  let rest = head.slice(prefix.length);
+  if (rest.startsWith('"id":"')) rest = rest.indexOf('",') < 0 ? "" : rest.slice(rest.indexOf('",') + 2);
+  return rest.startsWith('"type":"agent_message"');
+}
 
 /** W1-T13951: a JSON text cut at a byte boundary may end inside an escape; drop the dangling part. */
 function withoutDanglingJsonEscape(text: string): string {
@@ -2489,10 +2495,9 @@ function withoutDanglingJsonEscape(text: string): string {
 
 /** W1-T13951: whether a reconstructed line parses, as a value naming the failure. */
 function jsonParseStatus(text: string): { status: "parsed" | "unparseable"; reason?: string } {
-  let reason: string | undefined;
   try { JSON.parse(text); }
-  catch (error) { reason = String((error as Error).message ?? error); }
-  return reason === undefined ? { status: "parsed" } : { status: "unparseable", reason };
+  catch (error) { return { status: "unparseable", reason: String((error as Error).message ?? error) }; }
+  return { status: "parsed" };
 }
 
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
@@ -2597,7 +2602,10 @@ class CodexJsonlAccumulator {
           return { omitted, marker, line: head + JSON.stringify(marker).slice(1, -1) + text.slice(skip) };
         };
         let cut = build(0);
-        if (text.startsWith("\"") && jsonParseStatus(cut.line).status === "unparseable") cut = build(1);
+        if (text.startsWith("\"") && jsonParseStatus(cut.line).status === "unparseable") {
+          const retry = build(1);
+          if (jsonParseStatus(retry.line).status === "parsed") cut = retry;
+        }
         line = cut.line;
         cutMarker = cut.marker;
         this.droppedBytes += cut.omitted;
@@ -2707,7 +2715,7 @@ class CodexJsonlAccumulator {
   /** W1-T13951: a line that opens as an agent_message, judged from its first bytes. */
   private pendingIsAgentMessage(part: string): boolean {
     const head = this.pending.length >= 256 ? this.pending.slice(0, 256) : this.pending + part.slice(0, 256);
-    return CODEX_AGENT_MESSAGE_LINE_RE.test(head);
+    return opensAsAgentMessage(head);
   }
 
   /** W1-T13951: room for an incoming agent_message that fits the limit alone, taken from earlier messages
