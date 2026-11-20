@@ -498,11 +498,21 @@ function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: strin
   return ok;
 }
 
-/** The memo key for a stored message's content, or undefined when the content cannot be serialized (too deep, a
- *  cycle, a BigInt): that content is checked without the memo, exactly as before W1-T13877 (#19775 review). */
+/** The memo key for a stored message's content: exactly the fields the checks read, so unused metadata on an option
+ *  neither splits the memo nor keeps a card out of it (#19775 review). Each option stays an object so an absent intent
+ *  and a null one name different content. Undefined when even those fields cannot be serialized (too deep, a cycle, a
+ *  BigInt): that content is checked without the memo, exactly as before W1-T13877. */
 function contentKey(stored: PlainInboxMessage): string | undefined {
+  const options: unknown = stored.options;
+  const checkedOptions = Array.isArray(options)
+    ? options.map((o: unknown) => {
+      if (typeof o !== "object" || o === null) return null;
+      const { label, consequence, intent } = o as Record<string, unknown>;
+      return { label, consequence, intent };
+    })
+    : { notAList: typeof options };
   try {
-    return JSON.stringify([stored.sourceFingerprint, stored.source, stored.headline, stored.whatHappened, stored.whatWeNeed, stored.ifNothingHappens, stored.options]);
+    return JSON.stringify([stored.sourceFingerprint, stored.source, stored.headline, stored.whatHappened, stored.whatWeNeed, stored.ifNothingHappens, checkedOptions]);
   } catch {
     return undefined; // deliberate: unnameable content is not an error, only unmemoized; the caller checks it in full
   }

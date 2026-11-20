@@ -67,3 +67,22 @@ test("W1-T13877 memo: content too deep to name is checked without the memo, as b
   const valid = { ...base, options } as PlainInboxMessage;
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: valid }), valid, "a valid card with deep unused option metadata is still served");
 });
+
+test("W1-T13877 memo: unused option metadata is not part of the content, so a card carrying it is checked once", () => {
+  const { message, reads } = counted("The record asks for a contained drill, with option metadata.");
+  const withMetadata = { ...message, options: base.options.map((option) => ({ ...option, metadata: deep(20_000) })) } as PlainInboxMessage;
+  Object.defineProperty(withMetadata, "whatHappened", Object.getOwnPropertyDescriptor(message, "whatHappened")!);
+  assert.equal(plainInboxMessage(proposal, { [proposal.id]: withMetadata }), withMetadata, "positive control: the card is served");
+  const afterFirst = reads();
+  for (let i = 0; i < 5; i += 1) assert.equal(plainInboxMessage(proposal, { [proposal.id]: withMetadata }), withMetadata);
+  assert.equal(reads() - afterFirst, 5, "each repeat read whatHappened only to name the content: deep metadata kept it out of no memo");
+
+  const other = { ...withMetadata, options: withMetadata.options.map((option) => ({ ...option, metadata: { note: "changed" } })) } as PlainInboxMessage;
+  Object.defineProperty(other, "whatHappened", Object.getOwnPropertyDescriptor(message, "whatHappened")!);
+  const before = plainCheckMemoSizes().storedChecks;
+  assert.equal(plainInboxMessage(proposal, { [proposal.id]: other }), other);
+  assert.equal(plainCheckMemoSizes().storedChecks, before, "different unused metadata over the same checked content adds no memo entry");
+
+  const nullIntent = { ...base, options: base.options.map((option) => ({ ...option, intent: null })) } as unknown as PlainInboxMessage;
+  assert.equal(plainInboxMessage(proposal, { [proposal.id]: nullIntent }).source, "template", "a null intent is still refused, never answered from the absent-intent entry");
+});
