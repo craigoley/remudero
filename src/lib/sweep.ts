@@ -1076,11 +1076,12 @@ interface TerminalUncreditableHead {
   escalated: boolean;
 }
 
-// W1-T2723: effects built for the same ledger share fix decisions, including deliveries made
-// after those effects were built. A new build refreshes the index from the slice reader.
+// W1-T2723: effects for the same ledger share fix decisions. A new build queues a refresh for
+// the next fix decision, keeping terminal archive verification off the fleet-state read path.
 const terminalUncreditableHeadsByLedger = new Map<string, {
   heads: Map<string, TerminalUncreditableHead>;
   historyHold?: string;
+  refreshPending: boolean;
 }>();
 
 function terminalUncreditableHeadKey(prNumber: number, headSha: string): string {
@@ -2992,12 +2993,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
-  const terminalHistory = readTerminalUncreditableHistory(ledgerPath);
   const terminalState = terminalUncreditableHeadsByLedger.get(ledgerPath)
-    ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined };
+    ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined, refreshPending: true };
   terminalUncreditableHeadsByLedger.set(ledgerPath, terminalState);
-  terminalState.historyHold = terminalHistory === undefined ? "terminal uncreditable head history is unreadable" : undefined;
-  if (terminalHistory !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, terminalHistory);
+  terminalState.refreshPending = true;
+  const refreshTerminalHistory = (): void => {
+    if (!terminalState.refreshPending) return;
+    const history = readTerminalUncreditableHistory(ledgerPath);
+    terminalState.historyHold = history === undefined ? "terminal uncreditable head history is unreadable" : undefined;
+    if (history !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, history);
+    terminalState.refreshPending = false;
+  };
   const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     const key = terminalUncreditableHeadKey(terminal.prNumber, terminal.headSha);
     if ((terminalState.heads.get(key) ?? terminal).escalated) return;
@@ -3044,7 +3050,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       { issues, ledgerPath, runId },
     );
     if (!issueUrl) return;
-    // An effects build during issue delivery can replace the index entry before delivery returns.
+    // Apply any refresh queued during delivery before marking the current entry as escalated.
+    refreshTerminalHistory();
     const delivered = terminalState.heads.get(key) ?? terminal;
     delivered.escalated = true;
     log(TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP, {
@@ -4434,6 +4441,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
+      refreshTerminalHistory();
       if (terminalState.historyHold) return { roundNotRun: true, reason: terminalState.historyHold };
       await observePr(pr, "repair");
       let worktreePath = "";
@@ -5413,6 +5421,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
     // dispatch surface invokes `dispatchFix`. Both share the history hold and the same head index.
     terminalFixStandDown: (pr) => {
+      refreshTerminalHistory();
       if (terminalState.historyHold) return terminalState.historyHold;
       const terminal = terminalState.heads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
@@ -26291,10 +26300,9 @@ export async function runSweep(
               // `dispatchFix` already declines it internally (W1-T2723's `priorTerminal?.escalated`
               // check), but only after being invoked, so an unmoved head still recorded a phantom
               // `acted:true` on every poll after the one that delivered the escalation. This outer
-              // check stands the whole disposition down BEFORE the claim/invocation below —
-              // synchronous, read-only, no GitHub call — while a cached entry whose delivery
-              // FAILED falls through unchanged, exactly as {@link SweepDeps.terminalFixStandDown}'s
-              // own doc requires.
+              // check stands the whole disposition down synchronously before the claim below.
+              // A cached entry whose delivery failed falls through, as
+              // {@link SweepDeps.terminalFixStandDown}'s own doc requires.
               const terminalStandDown = deps.terminalFixStandDown?.(pr);
               if (terminalStandDown) {
                 acted = false;
