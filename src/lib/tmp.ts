@@ -176,7 +176,7 @@ function removalReason(dir: string, error: unknown): string {
 function makeOwnedDirsWritable(path: string | Buffer): void {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW, 0o600);
     const entry = fs.lstatSync(path, { bigint: true });
     if (!entry.isDirectory()) return;
     const opened = fs.fstatSync(fd, { bigint: true });
