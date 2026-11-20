@@ -1,0 +1,44 @@
+- id: W1-T13963
+  title: A PR body repair never writes a partial Acceptance block under a task trailer
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#field-trials-refresh-2026-11-20
+  plan_refs: [W1-T4263]
+  files:
+    - src/run-task.ts
+    - test/a-body-repair-never-writes-a-partial-acceptance-block-under-a-task-trailer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-20: an automated body edit appended an "Acceptance:" block to #19791 (10:09Z) and to #19801.
+    Both PRs carry a Remudero-Task trailer. The block held only the plan's criterion 1 (its unit test proof) and
+    dropped criterion 2 (its grep proof). acceptance-author-gate then refused each PR with
+    trailer-body-proof-divergence and ci-gate held it; deleting the block cleared the gate both times (gate jobs
+    136222222518 for #19791 and 136240548463 for #19801). INFERRED writer: the fix rung's acceptance-gate body
+    repair, where runFixRung (src/cli/commands/fix.ts) calls host.acceptanceGateBodyRepair(liveBody,
+    bodyRepairFallback(...)) with acceptanceGateBodyRepair in src/run-task.ts. The sweep's trailer repair
+    (renderMissingTaskTrailerRepairBody in src/lib/sweep.ts) writes only the trailer, so it is not the writer.
+  design: |
+    RECON first: confirm which repair wrote the partial block on #19791 and #19801 (ledger rows of the fix rung's
+    body repair at those times, and the body before and after). Then, in acceptanceGateBodyRepair (and its
+    fallback), when the body carries a Remudero-Task trailer whose plan task declares acceptance, write no
+    Acceptance block of its own: the gate reads the criteria from the plan. Without such a trailer, any block it
+    writes copies every plan proof, never a subset. The repair's result must always pass the same gate check it
+    repairs for.
+
+    INVARIANT repair-never-diverges: a body the acceptance-gate repair produces never fails acceptance-author-gate with trailer-body-proof-divergence.
+  acceptance:
+    - claim: invariant:repair-never-diverges — with a plan of two proofs and a Remudero-Task trailer, the repair writes no partial Acceptance block and the gate accepts the repaired body
+      proof: 'unit test: test/a-body-repair-never-writes-a-partial-acceptance-block-under-a-task-trailer.test.ts'
+    - claim: the test pins the two-proof trailer case for W1-T13963
+      proof: 'grep: W1-T13963 two proofs in test/a-body-repair-never-writes-a-partial-acceptance-block-under-a-task-trailer.test.ts'
+  falsifier: |
+    Restore the repair that writes only the first proof under a trailer: the gate check in the test must refuse the
+    repaired body with trailer-body-proof-divergence.

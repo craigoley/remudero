@@ -1,0 +1,42 @@
+- id: W1-T13956
+  title: A plan-only pull request whose checks are green and whose review never posted is admitted to the review lane
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # one admission path for plan-only heads
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T13361
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-plan-only-pr-with-no-review-gets-reviewed.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A plan-only PR disposed post-review with checks green and no review posted writes sweep.review_started in the same pass"
+      proof: "grep: W1-T13956 criterion 1: in test/sweep/a-plan-only-pr-with-no-review-gets-reviewed.test.ts"
+    - claim: "A plan-gate remedy refused under W1-T13361 no longer replaces that admission"
+      proof: "grep: W1-T13956 criterion 2: in test/sweep/a-plan-only-pr-with-no-review-gets-reviewed.test.ts"
+    - claim: "invariant:one-review-per-input — a plan-only PR whose input already has a delivered verdict is not reviewed again"
+      kind: guard
+      proof: "grep: W1-T13956 criterion 3: in test/sweep/a-plan-only-pr-with-no-review-gets-reviewed.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core): #19730 (plan-only amendment of W1-T13057, CI green since 11:52Z) has
+    0 sweep.review_started rows. Its dispositions alternate between "post-review: checks green, review never
+    posted — running the review lane" (12:15:16Z) and plan-gate remedies refused under W1-T13361; an escalation
+    issue opened at 10:14Z. No admission row ever follows the post-review disposition.
+    INFERRED: the post-review action is dropped for plan-only heads when a plan-gate remedy is considered first.
+  design: |
+    INVARIANT one-review-per-input: an input with a delivered verdict is never reviewed a second time.
+    1. Find where the plan-gate remedy arm runs for a plan-only head after a post-review disposition and returns
+       before the review admission; admit the review first when no review status exists on the head.
+    2. Fixture from #19730's rows: post-review disposition then one review_started.
+  falsifier: |
+    Without the change criterion 1's pass writes no sweep.review_started row.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.
