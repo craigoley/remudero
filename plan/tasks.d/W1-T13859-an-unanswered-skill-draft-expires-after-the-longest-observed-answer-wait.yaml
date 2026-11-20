@@ -19,6 +19,9 @@
     - src/lib/panel-graph.ts
     - test/an-unanswered-skill-draft-expires.test.ts
     - src/lib/ledger-compact.ts
+    - test/ledger-compact-command.test.ts # amended 2026-11-20 for PR 19830: compaction publishes archives to unused paths
+    - test/the-terminal-can-decline-a-proposal.test.ts # amended 2026-11-20 for PR 19830: the verdict lock reclaims a stale holder
+    - test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts # amended 2026-11-20 for PR 19830: archive names when a source path is never overwritten
   status: queued
   attempts: 0
   acceptance:
