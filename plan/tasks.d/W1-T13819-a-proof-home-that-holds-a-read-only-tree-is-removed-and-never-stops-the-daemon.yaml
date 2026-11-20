@@ -21,6 +21,9 @@
     - src/run-task.ts
     - test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts
     - test/host-capability-fixtures.test.ts
+  # refusal-amendment (W1-T13819, run work-fix-dispatch-W1-T13819-1795174762831-669c@5d6dcaceb9cf1d6a58fafbdcf6890db18e1dbfab, 2026-11-20T12:03:55.784Z): the worker refused criterion 4 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: The ownership invariant requires a design that prevents an uncoordinated rename between directory validation and the permission change.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

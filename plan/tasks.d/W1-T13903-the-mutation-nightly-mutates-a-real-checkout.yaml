@@ -16,7 +16,7 @@
     - scripts/mutation-ratchet.mjs
     - .github/workflows/mutation-nightly.yml
     - test/ci/gates/the-nightly-mutates-a-real-checkout-so-git-sees-tracked-files.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Mutation Nightly failed 7 of 10 nights (2026-11-10..14, 11-17, 11-19; runs 42750186208, 42953579466,
