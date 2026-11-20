@@ -147,21 +147,48 @@ test("W1-T13869 criterion 1: a memory-held fix dispatch runs again at the same h
   assert.deepEqual(retry.dispatchedHeads, [pr.headSha], "dispatches again at the same head, with no new push");
 });
 
+test("W1-T13869 criterion 1: ordinary full-pass reclaim releases the memory hold on that pass", async (t) => {
+  const rows = seed();
+  let collections = 0;
+  const fixture = fixtureProductionProbe(t, () => collections > 0 ? HOST_FLOOR + 64_000 : HOST_FLOOR - 1);
+  const short = await runProductionPass(fixture, rows, NOW);
+  assert.equal(short.disposed.probe_result, "present");
+  assert.deepEqual(short.dispatchedHeads, []);
+  installDaemonSlackReclaimer(createDaemonSlackReclaimer({ collect: () => { collections++; }, setFlags: () => {},
+    snapshot: () => ({ rss_bytes: 1, swap_bytes: 0, heap_used_bytes: 1, heap_physical_bytes: 1,
+      external_bytes: 0, heap_size_limit_bytes: 100 }),
+  }));
+
+  const retry = await runProductionPass(fixture, rows, NOW + PASS_MS);
+  assert.equal(collections, 1, "ordinary admission reclaimed before the dispatch claim");
+  assert.ok(Number(retry.capacity[0]?.fix_admissions_available) >= 1);
+  assert.ok(Date.parse(String(retry.disposed.ts)) < Date.parse(String(short.disposed.failure_at)) + Number(short.disposed.backoff_ms));
+  assert.ok(retry.capacity.some(row => row.fixes_admitted === 1), "dispatch still claims capacity");
+  assert.equal(retry.disposed.acted, true);
+  assert.equal(retry.disposed.dispatch_held, undefined);
+  assert.deepEqual(retry.dispatchedHeads, [pr.headSha]);
+});
+
+test("W1-T13869 criterion 1: the dispatch claim rechecks capacity after the full pass clears a memory hold", async (t) => {
+  let readings = 0;
+  const fixture = fixtureProductionProbe(t, () => ++readings === 2 ? HOST_FLOOR + 64_000 : HOST_FLOOR - 1);
+  const { disposed, capacity, dispatchedHeads } = await runProductionPass(fixture, seed(), NOW);
+  assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "the full pass reads room after the first probe");
+  const refusal = capacity.find(row => row.fixes_refused === 1);
+  assert.equal(refusal?.fix_admissions_available, 0, "the claim rereads pressure and refuses when the room disappears");
+  assert.equal(disposed.acted, false);
+  assert.equal(disposed.dispatch_held, undefined, "the old failure hold was cleared");
+  assert.deepEqual(dispatchedHeads, []);
+});
+
 test("W1-T13869 criterion 2: while the admission still refuses, the hold names probe present and a retry one pass away", async (t) => {
   const rows = seed();
-  let transientRoom = false;
-  let readings = 0;
-  const fixture = fixtureProductionProbe(t, () => transientRoom && ++readings === 2 ? HOST_FLOOR + 64_000 : HOST_FLOOR - 1);
+  const fixture = fixtureProductionProbe(t, () => HOST_FLOOR - 1);
   for (const now of [NOW, NOW + PASS_MS, NOW + 2 * PASS_MS]) {
-    transientRoom = now === NOW + 2 * PASS_MS;
     const { disposed, capacity, dispatchedHeads } = await runProductionPass(fixture, rows, now);
-    if (transientRoom) {
-      assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "a separate capacity reading briefly saw room");
-    } else {
-      assert.equal(capacity[0]?.fix_admissions_available, 0);
-    }
+    assert.equal(capacity[0]?.fix_admissions_available, 0);
     assert.match(String(disposed.cause), /^fix dispatch refused: worker admission refused \(live host capacity exhausted/);
-    assert.equal(disposed.probe_result, "present", "a separate capacity reading cannot lift the hold");
+    assert.equal(disposed.probe_result, "present");
     assert.equal(disposed.next_retry_at, at(now + PASS_MS), "one sweep cadence after the pass");
     assert.equal(disposed.backoff_ms, 2 * 40 * 60_000);
     assert.notEqual(disposed.next_retry_at, at(Date.parse(String(disposed.failure_at)) + Number(disposed.backoff_ms)));

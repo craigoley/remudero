@@ -3314,9 +3314,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
-    fixDispatchCauseProbe: async (cause) => fixDispatchMemoryCause(cause)
-      ? fixAdmissionCauseProbe(sweepFixAdmissionReaders({ ledgerPath }, policy, "probe"))
-      : fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
+    fixDispatchCauseProbe: async (cause, reading) => {
+      if (!fixDispatchMemoryCause(cause)) return fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") });
+      const readers = sweepFixAdmissionReaders({ ledgerPath }, policy, "probe");
+      return fixAdmissionCauseProbe(reading === undefined ? readers : {
+        ...readers, readPressure: () => reading.pressure, readActiveWorkers: () => reading.activeWorkers,
+      });
+    },
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -15912,7 +15916,6 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
 
 const FIX_ADMISSION_MEMORY_CAUSE = /^fix dispatch refused: worker admission refused \((?:live host capacity|host worker budget <n>) exhausted/;
 
-/** W1-T13869: a cause (as dispatchFailureCause normalises it) where the run child's own fix admission refused for memory. */
 export function fixDispatchMemoryCause(cause: string): boolean {
   return FIX_ADMISSION_MEMORY_CAUSE.test(cause);
 }
@@ -16243,7 +16246,7 @@ export interface SweepDeps {
   /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
   fixDispatchFleetHold?: () => string | undefined;
   /** W1-T13750: the stuck-state registry's probe for a fix-dispatch cause it names; undefined for any other cause. */
-  fixDispatchCauseProbe?: (cause: string) => Promise<"clear" | "present" | undefined>;
+  fixDispatchCauseProbe?: (cause: string, reading?: { pressure: FixHostPressure; activeWorkers: number }) => Promise<"clear" | "present" | undefined>;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
@@ -20384,20 +20387,17 @@ export function createSweepFixAdmissionController(input: {
   };
 }
 
-/** W1-T13869: "clear" when the run child's fix admission (full surface, queue depth 1, no review reserved) would admit
- *  one fix on these readings now, else "present". It builds the same controller and claims nothing. */
 export function fixAdmissionCauseProbe(readers: Pick<
   Parameters<typeof createSweepFixAdmissionController>[0],
   "hostWorkerBudget" | "readPressure" | "readActiveWorkers" | "readEstimate" | "readTypical" | "readResidents">): "clear" | "present" {
+  let reading: SweepFixCapacitySnapshot | { reason: unknown };
   try {
-    const controller = createSweepFixAdmissionController({ ...readers, surface: "full", queueDepth: 1,
-      activeWorkers: 0, reviewReservations: 0 });
-    const snapshot = controller.snapshot();
-    return snapshot.pressure && snapshot.fixAdmissionsAvailable > 0 ? "clear" : "present";
+    reading = createSweepFixAdmissionController({ ...readers, surface: "full", queueDepth: 1,
+      activeWorkers: 0, reviewReservations: 0 }).snapshot();
   } catch (error) {
-    void error; // An unreadable reading does not prove that memory freed, so the cause stays present.
-    return "present";
+    reading = { reason: error };
   }
+  return !("reason" in reading) && reading.pressure && reading.fixAdmissionsAvailable > 0 ? "clear" : "present";
 }
 
 /** Production composition for both full-sweep entry points. Kept pure so wiring cannot drift. */
@@ -22107,6 +22107,16 @@ export async function runSweep(
           reviewQueue: fullReviewQueue,
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
+  const fullRepairReading = fullRepairAdmission?.snapshot();
+  if (fullRepairReading?.pressure && deps.fixDispatchCauseProbe) {
+    const reading = { pressure: fullRepairReading.pressure, activeWorkers: fullRepairReading.activeWorkers };
+    for (const [prNumber, hold] of dispatchCauseHolds) {
+      if (hold?.fields.probe_result !== "present") continue;
+      const cause = String(hold.fields.cause);
+      if (fixDispatchMemoryCause(cause) && await deps.fixDispatchCauseProbe(cause, reading) === "clear")
+        dispatchCauseHolds.delete(prNumber);
+    }
+  }
   const fixCapacityReleases = new Map<number, () => void>();
   const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
