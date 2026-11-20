@@ -10,7 +10,9 @@
   origin: "operator session 2026-10-04: watch log, deny-floor refuses a command whose text contains ghJsonAsync"
   plan_refs: [W1-T3275, W1-T1066, W1-T4915]
   files: [hooks/deny-floor.sh, test/github/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # 2026-11-20 operator: withdrawn as superseded by the ops-catalog deny-floor task (remudero-ops #227) that routes only an actual GitHub CLI invocation and carries this record's design; held so two builds never edit invokes_gh at once.
   # queue judge: priority=1.5 evidence=50f6c7d98125f1e7
   priority: 1.5  # operator-2026-10-21: three stalled builds; W1-T9281 waits on it | queue-judge-2026-10-27: Pinned task has two open dependents; raising its priority reduces waiting cost.
   attempts: 0

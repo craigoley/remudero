@@ -1,0 +1,48 @@
+- id: W1-T14012
+  title: A scope-amendment branch that was pushed but has no pull request gets its pull request on the next pass
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # opens a plan pull request from a branch the writer already pushed
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T7959
+  files:
+    - src/lib/proof-amendment.ts
+    - test/fix-lane/a-pushed-scope-amendment-without-a-pr-gets-its-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the scope-amendment branch already exists on origin with the same files edit and no pull request has it as head, requestScopeAmendment opens the pull request from that branch and records it, with no second push"
+      proof: "grep: W1-T14012 criterion 1: in test/fix-lane/a-pushed-scope-amendment-without-a-pr-gets-its-pr.test.ts"
+    - claim: "A push followed by a failed createPr returns an outcome that is not created, so the caller never treats the amendment as delivered"
+      proof: "grep: W1-T14012 criterion 2: in test/fix-lane/a-pushed-scope-amendment-without-a-pr-gets-its-pr.test.ts"
+    - claim: "invariant:open-pr-is-resumed — a branch whose pull request is open still resumes it as today"
+      kind: guard
+      proof: "grep: W1-T14012 criterion 3: in test/fix-lane/a-pushed-scope-amendment-without-a-pr-gets-its-pr.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 on GitHub: branch scope-amendment/W1-T12041-19695-tests held the scope amendment #19695 needed
+    (its tip merged main at 11:59Z), but no pull request had it as head until a hand open (#19879). #19695 sat behind a
+    needs-human clarification (#19747) meanwhile.
+    OBSERVED at origin/main ca83732bd, src/lib/proof-amendment.ts `requestScopeAmendment`:
+    - It names the branch `scope-amendment/<task>-<pr>` and calls `deps.probeExisting(branch)`, which returns only a pull
+      request (`{ prUrl, prNumber }`). A pushed branch with no pull request reads as nothing.
+    - It then commits, calls `deps.gitPush`, and only after that `deps.createPr`. A createPr that throws after the push
+      leaves exactly that state, and the next pass cannot see it.
+    INFERRED: which writer pushed this branch is not on the ledger read here; the gap holds for any writer that pushes
+    first. Repository doctrine records that `gh pr create` can die after a git push succeeds.
+  design: |
+    INVARIANT open-pr-is-resumed: a branch with an open pull request keeps today's resumed outcome.
+    1. When probeExisting finds no pull request, check whether the branch exists on origin. If its tip carries the same
+       shard edit the writer would make (compare the shard text), open the pull request from it and record the identity.
+    2. If the tip differs, refuse with a stated reason rather than force-pushing over it.
+    3. A createPr failure after the push returns a refused or pending outcome with the branch named, never created.
+  falsifier: |
+    Without step 1, criterion 1's fixture pushes again or refuses, and no pull request is opened.
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host.

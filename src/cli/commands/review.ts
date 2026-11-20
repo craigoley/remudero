@@ -8,9 +8,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
+import { parseReviewerHistoryEvidence, parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
-import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -28,17 +28,17 @@ import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, try
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
-import { classifyReviewOutcome, recordedReviewVerdictLines, reviewReplayLedgerFields, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
+import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
-import { readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
+import { listedLedgerFiles, readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
 import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -426,6 +426,32 @@ export function reappendLostReviewPosted(
   });
   ctx.say(`remudero-review: review.posted for ${ctx.headSha.slice(0, 7)} was missing from the ledger — re-appended (W1-T5516)`);
   return "reappended";
+}
+
+/** W1-T13849: an earlier downgrade-unclassified hold at this head and input digest (else decision digest). History
+ *  that cannot be read counts as held, so the FAIL folds as origin/main does and is never withheld again blindly. */
+export async function unclassifiedHoldRecorded(ledgerPath: string | undefined, headSha: string,
+  inputDigest: string | undefined, decisionDigest: string, shadow = false): Promise<boolean> {
+  if (!ledgerPath) return true;
+  const stateDir = dirname(ledgerPath);
+  const step = reviewerShadowStep("review.semantic_incomplete", shadow);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { step, refuseIncomplete: true,
+      keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
+    if (!read.ok || read.rawLines.some((line) => {
+      // The union's exact step filter already verified each line as a JSON object.
+      const row = JSON.parse(line) as Record<string, unknown>;
+      return row.reason === DOWNGRADE_UNCLASSIFIED && row.head_sha === headSha && (inputDigest !== undefined
+        ? row.review_input_digest === inputDigest : row.review_decision_digest === decisionDigest);
+    })) return true;
+    // Rotation publishes its archive before replacing the live file. A second listing after a miss
+    // detects an archive that landed between the first listing and the live read.
+    let listed = true;
+    const { rotations } = listedLedgerFiles(stateDir, { readdirSync }, () => { listed = false; });
+    if (!listed) return true;
+    if (rotations.length === read.archiveFiles.length && rotations.every((entry, i) => entry.path === read.archiveFiles[i])) return false;
+  }
+  return true; // Repeated rotation leaves history uncertain, just like an unreadable ledger.
 }
 
 /**
@@ -1244,18 +1270,21 @@ export async function runReview(host: ReviewCommandHost, args: {
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
     verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length) };
-  const replayDecision = classifyReviewOutcome(replayInput);
-  const semanticRefusal = replayDecision.class === "posted" ? undefined : replayDecision.reason;
-  if (semanticRefusal !== undefined) {
-    recordReplay(replayDecision);
+  const completionDecision = classifyReviewOutcome(replayInput);
+  const withholdSemanticVerdict = (decision: ReviewOutcomeDecision): ReviewRunResult => {
+    const semanticRefusal = decision.reason;
+    recordReplay(decision);
     log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
-      reviewer_outcome: outcome, review_decision_digest: decisionDigest });
+      reviewer_outcome: outcome, review_decision_digest: decisionDigest,
+      ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
+      ...(semanticRefusal === DOWNGRADE_UNCLASSIFIED ? { downgrade_unclassified: replayInput.downgrade_unclassified } : {}) });
     say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
     return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
       summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
       headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
       reviewDecisionDigest: decisionDigest, evaluatorProvenance };
-  }
+  };
+  if (completionDecision.class !== "posted") return withholdSemanticVerdict(completionDecision);
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -1341,6 +1370,16 @@ export async function runReview(host: ReviewCommandHost, args: {
   let { verdict, suppressed } = applyVerdictStability(computed, headSha,
     prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
+
+  // Ask again once per head and input when an unclassified downgrade survives stability and the floor did not fail.
+  const downgradeUnclassified = suppressed || preliminaryProofs?.floorState === "failure" ? []
+    : unclassifiedDowngrades(semantic, semanticClauses, preliminaryProofs?.criteria);
+  if (downgradeUnclassified.length > 0) {
+    replayInput = { ...replayInput, downgrade_unclassified: downgradeUnclassified,
+      downgrade_unclassified_withheld: await unclassifiedHoldRecorded(args.ledgerPath, headSha, inputDigest, decisionDigest, args.shadow) };
+  }
+  const replayDecision = classifyReviewOutcome(replayInput);
+  if (replayDecision.class !== "posted") return withholdSemanticVerdict(replayDecision);
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
   // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and
@@ -1451,7 +1490,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     sha: headSha,
     state: verdict.state,
     verdict,
-    reviewerTranscript: reviewerFindingText ?? "",
+    reviewerHistoryEvidence: reviewerFindingText === undefined ? undefined
+      : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length),
     presentedFailureIds: initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [],
     readReviewStatusHistory: readStatusHistory,
     description,
@@ -1689,6 +1729,13 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
     provenance: evaluatorProvenance, log });
+  const followUps = reviewFollowUps(verdict.criteria, reviewerFindingText);
+  for (const followUp of followUps) {
+    log("review.follow_up_finding", { ...followUp, provider: evaluatorProvenance.provider,
+      model: evaluatorProvenance.servedModel ?? evaluatorProvenance.routedModel ?? evaluatorProvenance.requestedModel,
+      head_sha: headSha, review_decision_digest: decisionDigest,
+      ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}) });
+  }
   if (verdict.capped) {
     // W1-T1085: the annotation gets the SAME `planOnly` fact the status three-ways on, so one run
     // stops emitting two contradictory sentences about one verdict. No decision changes here.
@@ -1749,6 +1796,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (unwiredSection) parts.push(unwiredSection);
   if (inverseScopeSection) parts.push(inverseScopeSection);
   if (parts.length === 0) parts.push(`**remudero-review=${verdict.state}** — ${verdict.summary}`);
+  // A holdout criterion's text never reaches a worker-readable surface (W1-T166), so its follow-ups stay host-side.
+  const followUpSection = followUpFindingsSection(followUps.filter((f) => verdict.criteria[f.criterion - 1]?.holdout !== true));
+  if (followUpSection) parts.push(followUpSection);
   // Ops publication permits only acceptance text; derived reasons, proof output and scope stay local.
   const body = task.catalog === "ops"
     ? `**remudero-review=${verdict.state}** — detailed evidence retained on host\n\n` +
