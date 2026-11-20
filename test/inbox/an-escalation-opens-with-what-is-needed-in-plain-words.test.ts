@@ -15,6 +15,7 @@ import {
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText } from "#src/lib/escalation-answers.js";
+import { parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 
 const prUrl = "https://github.com/fixture/repo/pull/12345";
@@ -86,7 +87,7 @@ test("W1-T12041 criterion 1: the body opens with the summary and choices and end
   assert.ok(delivered.endsWith(["## Machine fields", ...fields].join("\n")));
 });
 
-function assertReaders(body: string, subject = escalation): void {
+function assertReaders(body: string, subject: Escalation, detail: string): void {
   assert.equal(escalationTaskId(body), subject.taskId);
   assert.equal(escalationHeadSha(body), subject.headSha);
   assert.equal(escalationIssueCause(body), subject.cause);
@@ -95,6 +96,13 @@ function assertReaders(body: string, subject = escalation): void {
   assert.equal(reactionAnswerText("+1", body), "retry");
 
   const issue = { number: 42, url: "https://github.com/fixture/repo/issues/42", title: escalationIssueTitle(subject), body };
+  const conversation = parseEscalationConversationSource({
+    title: issue.title, body, html_url: issue.url, updated_at: "2026-11-10T00:00:00Z", state: "open",
+  });
+  assert.deepEqual(conversation?.identity, { taskId: subject.taskId, class: subject.class, cause: subject.cause, prRef: "12345" });
+  assert.equal(conversation?.headline, subject.summary);
+  assert.equal(conversation?.recommendation, subject.recommendation);
+  assert.equal(conversation?.detail, detail);
   const candidates = buildEscalationReconcileCandidates("fixture", "repo", { tasks: [], byId: new Map() }, "unused", undefined, {
     issues: { listOpen: () => [issue] },
     evidenceRootFor: () => undefined,
@@ -123,24 +131,21 @@ const clipped = {
 };
 
 test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body order", () => {
-  const body = renderIssueBody({
-    ...clipped,
-    detail: `${clipped.detail}\n\n**Head:** prior-head\n**Cause:** review\n**Contract:** prior-revision`,
-  });
+  const detail = `${clipped.detail}\n\n**Task:** PR-999\n**Head:** prior-head\n**Cause:** review\n**Contract:** prior-revision`;
+  const body = renderIssueBody({ ...clipped, detail });
   assert.ok(escalationIssueTitle(clipped).endsWith("/123…"));
-  assertReaders(body, clipped);
+  assertReaders(body, clipped, detail);
+  assertReaders(body.replaceAll("\n", "\r\n"), clipped, detail.replaceAll("\n", "\r\n"));
   assert.match(body, /\n## Machine fields\n\*\*Class:\*\* BLOCKED/);
 });
 
 test("W1-T12041 criterion 3: reconciliation, answers and dedup still read a legacy body", () => {
+  const detail = `${escalation.detail}\n\n## Machine fields\n**Head:** prior-head`;
   const legacyBody = [
     ...fields,
     `**Full summary (JSON):** ${JSON.stringify(clipped.summary)}`,
     "",
-    escalation.detail,
-    "",
-    "## Machine fields",
-    "**Head:** prior-head",
+    detail,
     "",
     "## Options",
     "- **retry** — Run the checks again",
@@ -149,5 +154,5 @@ test("W1-T12041 criterion 3: reconciliation, answers and dedup still read a lega
     "## Recommendation",
     "retry",
   ].join("\n");
-  assertReaders(legacyBody, clipped);
+  assertReaders(legacyBody, clipped, detail);
 });

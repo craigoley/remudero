@@ -1112,6 +1112,7 @@ function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
 }
 
 const MACHINE_FIELDS_HEADING = "## Machine fields";
+const MACHINE_FIELDS_MARKER = new RegExp(`(?:\\r?\\n){2}${MACHINE_FIELDS_HEADING}\\r?\\n`, "g");
 
 /** Open with the decision summary or the producer's summary, then the choices. Keep the raw detail
  * intact for diagnostics and always name Host so operators can identify the affected machine. */
@@ -1297,11 +1298,10 @@ export function taskSemanticRevision(task: {
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** Prefer the trailing producer fields to similarly labelled lines in the issue's prose. */
-function machineFields(body = ""): string | undefined {
-  if (/^\*\*Class:\*\* [^\n]*\n\*\*Task:\*\* /.test(body)) return undefined;
-  const marker = `\n\n${MACHINE_FIELDS_HEADING}\n`;
-  const start = body.lastIndexOf(marker);
-  return start === -1 ? undefined : body.slice(start + marker.length).split("\n\n", 1)[0];
+export function machineFields(body = ""): string | undefined {
+  if (/^\*\*Class:\*\* [^\r\n]*\r?\n\*\*Task:\*\* /.test(body)) return undefined;
+  const heading = [...body.matchAll(MACHINE_FIELDS_MARKER)].at(-1);
+  return heading && body.slice(heading.index + heading[0].length).split(/\r?\n\r?\n/, 1)[0];
 }
 
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads
@@ -1476,7 +1476,7 @@ export function openEscalationStandDownReason(
  * Preserve `\n` so honest metadata still parses (criterion 2); never normalize renderIssueBody,
  * whose new issue detail must remain byte-identical (criterion 3; summarizeCiFailure, run-task.ts). */
 function normalizeCandidateBody(body: string): string {
-  return body.replace(/\r|\u2028|\u2029/g, " ");
+  return body.replace(/\r\n/g, "\n").replace(/\r|\u2028|\u2029/g, " ");
 }
 
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
