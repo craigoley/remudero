@@ -5,13 +5,15 @@
   priority: 2
   type: recon
   verify: auto
-  risk: low
+  risk: high  # Rule 19 span: widened to docs-index, fix-peak-estimate-drivers by a scope amendment for #19772
+  band_meaning: span
   origin: "operator-session#serve-oom-2026-11-16"
   plan_refs:
     - W1-T9679
     - W1-T9498
   files:
     - docs/forensics/fix-peak-estimate-drivers.md
+    - "docs/docs-index.json"
   status: queued
   attempts: 0
   acceptance:
