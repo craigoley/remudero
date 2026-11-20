@@ -28,6 +28,8 @@
     - claim: "invariant:same-answer-either-path — for archive, snooze and decline, the exit code and printed body are the same whether the verb ran through serve or in-process"
       kind: guard
       proof: "grep: W1-T13238 criterion 3 in test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts"
+    - claim: "src/run-task.ts's Inbox verb command reaches the verb through src/lib/inbox-cli-serve.ts's serve-first entry"
+      proof: "grep: inboxVerbViaServe( in src/run-task.ts"
   rationale: |
     WHY: gardeners and operators use `rmd archive` and the other Inbox verbs for automation, and on 2026-11-16 it was
     unusable. OBSERVED by the Inbox defects thread: from the Azure host, `rmd archive verify-human:W1-T235` timed out at
