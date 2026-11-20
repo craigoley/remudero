@@ -8295,6 +8295,13 @@ export function reviewerVerdictContract(count: number): string {
  *  lines by construction. {@link parseReviewerVerdicts} reads groups 1 and 2 for observed verdicts;
  *  {@link parseReviewerVerdictClauses} reads group 3. One regex, two readers. */
 const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL|UNABLE)\b([^\r\n]*)/gi;
+export const REVIEWER_RECORD_LINE_RE = new RegExp(
+  String.raw`(${REVIEW_VERDICT_LINE_RE.source})|REVIEW_FOLLOW_UP[ \t]+(?<criterion>\d+)[ \t]*:(?<clause>[^\r\n]*)`, "gi");
+
+/** The first record on a line owns its prose. Leave verdict records intact and drop follow-up records. */
+export function withoutReviewerFollowUpRecords(text: string): string {
+  return text.replace(REVIEWER_RECORD_LINE_RE, "$1");
+}
 
 /** Parse the reviewer's `REVIEW_VERDICT <n>: PASS|FAIL` lines into a semantic array index-aligned to the criteria.
  *  `FAIL` is `false`, an observed `PASS` is `true`, and missing output remains `undefined`. The required
@@ -8302,7 +8309,7 @@ const REVIEW_VERDICT_LINE_RE = /REVIEW_VERDICT\s+(\d+)\s*:\s*(PASS|FAIL|UNABLE)\
  *  downgrade-only: judgeCriterion consults only `semantic === false`, so true never rescues a failed floor. */
 export function parseReviewerVerdicts(text: string, count: number): (boolean | undefined)[] {
   const semantic: (boolean | undefined)[] = new Array(count).fill(undefined);
-  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
+  for (const m of withoutReviewerFollowUpRecords(text).matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
     // A witnessed FAIL wins even if a later line says PASS. Presence is not certification.
@@ -8340,7 +8347,8 @@ export function clauseCutLength(clause: string | undefined): number | undefined 
 function extractBoundedClause(trailing: string): string | undefined {
   const tag = DOWNGRADE_TAG_RE.exec(trailing);
   const text = trailing.slice(tag?.[0].length ?? 0).trim();
-  const explanation = tag ? text : (text.match(/^\(([^)]*)\)/)?.[1] ?? text).trim();
+  const legacy = tag ? null : /^\(([^)]*)\)/.exec(text);
+  const explanation = legacy?.[1].trim() || (legacy?.[0] === text ? "" : text);
   if (!explanation) return undefined;
   const bounded = explanation.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(explanation) : explanation;
   return tag ? `(${tag[1]!.toLowerCase()}) ${bounded}` : bounded;
@@ -8352,7 +8360,7 @@ function extractBoundedClause(trailing: string): string | undefined {
 /** W1-T11428: criteria the reviewer could not inspect. */
 export function parseReviewerUnable(text: string, count: number): (string | undefined)[] {
   const unable: (string | undefined)[] = new Array(count).fill(undefined);
-  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
+  for (const m of withoutReviewerFollowUpRecords(text).matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count || m[2].toUpperCase() !== "UNABLE") continue;
     unable[n] = extractBoundedClause(m[3]) ?? unable[n] ?? "";
@@ -8374,9 +8382,10 @@ export function classifyDowngrade(clause: string | undefined): { class: Downgrad
 /** W1-T13849: `REVIEW_FOLLOW_UP <n>: <input and result>` lines, the first per criterion, bounded like a clause. */
 export function parseReviewerFollowUps(text: string, count: number): (string | undefined)[] {
   const followUps: (string | undefined)[] = new Array(count).fill(undefined);
-  for (const m of text.matchAll(/REVIEW_FOLLOW_UP\s+(\d+)\s*:([^\r\n]*)/gi)) {
-    const n = Number(m[1]) - 1;
-    const line = m[2]!.trim();
+  for (const { groups } of text.matchAll(REVIEWER_RECORD_LINE_RE)) {
+    if (groups?.criterion === undefined) continue;
+    const n = Number(groups.criterion) - 1;
+    const line = groups.clause.trim();
     if (n < 0 || n >= count || !line || followUps[n] !== undefined) continue;
     followUps[n] = line.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(line) : line;
   }
@@ -8406,7 +8415,7 @@ export function parseReviewerVerdictClauses(text: string, count: number): (strin
   // On conflicting FAILs, keep the binding class. A bare FAIL also outranks a follow-up.
   const priority: Record<DowngradeClass, number> = { b: 0, unclassified: 1, a: 2, c: 2 };
   const seenPriority: number[] = new Array(count).fill(-1);
-  for (const m of text.matchAll(REVIEW_VERDICT_LINE_RE)) {
+  for (const m of withoutReviewerFollowUpRecords(text).matchAll(REVIEW_VERDICT_LINE_RE)) {
     const n = Number(m[1]) - 1;
     if (n < 0 || n >= count) continue;
     if (m[2].toUpperCase() !== "FAIL") continue; // PASS lines never gain a clause.

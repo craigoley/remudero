@@ -1257,28 +1257,24 @@ export async function runReview(host: ReviewCommandHost, args: {
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
   });
-  // Ask again once per head and input, unless the floor has already settled the review as a failure.
-  const downgradeUnclassified = preliminaryProofs?.floorState === "failure" ? []
-    : unclassifiedDowngrades(semantic, semanticClauses, preliminaryProofs?.criteria);
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
-    verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length),
-    ...(downgradeUnclassified.length === 0 ? {} : { downgrade_unclassified: downgradeUnclassified,
-      downgrade_unclassified_withheld: await unclassifiedHoldRecorded(args.ledgerPath, headSha, inputDigest, decisionDigest, args.shadow) }) };
-  const replayDecision = classifyReviewOutcome(replayInput);
-  const semanticRefusal = replayDecision.class === "posted" ? undefined : replayDecision.reason;
-  if (semanticRefusal !== undefined) {
-    recordReplay(replayDecision);
+    verdict_lines: recordedReviewVerdictLines(reviewerFindingText ?? "", criteria.length) };
+  const completionDecision = classifyReviewOutcome(replayInput);
+  const withholdSemanticVerdict = (decision: ReviewOutcomeDecision): ReviewRunResult => {
+    const semanticRefusal = decision.reason;
+    recordReplay(decision);
     log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
       reviewer_outcome: outcome, review_decision_digest: decisionDigest,
       ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
-      ...(semanticRefusal === DOWNGRADE_UNCLASSIFIED ? { downgrade_unclassified: downgradeUnclassified } : {}) });
+      ...(semanticRefusal === DOWNGRADE_UNCLASSIFIED ? { downgrade_unclassified: replayInput.downgrade_unclassified } : {}) });
     say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);
     return { state: "failure", criteria: [], cannotEvaluate: true, testTheater: false,
       summary: semanticRefusal, floorDegraded: true, capped: true, keywordOnly: false, planOnly: false,
       headSha, reviewerOutcome: outcome, verdictWithheld: semanticRefusal,
       reviewDecisionDigest: decisionDigest, evaluatorProvenance };
-  }
+  };
+  if (completionDecision.class !== "posted") return withholdSemanticVerdict(completionDecision);
   // A missing envelope is UNKNOWN, not a measured zero. Parse is bounded and purely
   // advisory; a filesystem/telemetry problem cannot become a review failure.
   let findingCapture: FindingCapture = { state: "unavailable", findings: [], verifiedCount: 0, invalidCount: 0, droppedCount: 0 };
@@ -1364,6 +1360,16 @@ export async function runReview(host: ReviewCommandHost, args: {
   let { verdict, suppressed } = applyVerdictStability(computed, headSha,
     prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
+
+  // Ask again once per head and input when an unclassified downgrade survives stability and the floor did not fail.
+  const downgradeUnclassified = suppressed || preliminaryProofs?.floorState === "failure" ? []
+    : unclassifiedDowngrades(semantic, semanticClauses, preliminaryProofs?.criteria);
+  if (downgradeUnclassified.length > 0) {
+    replayInput = { ...replayInput, downgrade_unclassified: downgradeUnclassified,
+      downgrade_unclassified_withheld: await unclassifiedHoldRecorded(args.ledgerPath, headSha, inputDigest, decisionDigest, args.shadow) };
+  }
+  const replayDecision = classifyReviewOutcome(replayInput);
+  if (replayDecision.class !== "posted") return withholdSemanticVerdict(replayDecision);
 
   // W1-T3704 (completed here) — RECORD WHAT THIS VERDICT ACTUALLY JUDGED, so a LATER push can be compared against
   // it instead of re-deriving a verdict that did not change. `ReviewVerdict.ownDiffDigest` and

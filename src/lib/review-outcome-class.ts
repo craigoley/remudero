@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { classifyDowngrade, parseReviewerUnable, parseReviewerVerdicts, type CriterionVerdict } from "./review.js";
+import { classifyDowngrade, parseReviewerUnable, parseReviewerVerdicts, withoutReviewerFollowUpRecords, type CriterionVerdict } from "./review.js";
 import { requiredSemanticRefusal } from "./required-semantic-review.js";
 
 export type ReviewOutcomeClass = "posted" | "withheld" | "refused";
@@ -62,7 +62,7 @@ export function classifyReviewOutcome(input: ReviewReplayInput): ReviewOutcomeDe
 /** Scan independently of the verdict parser; keep tokens, never the reviewer's prose. */
 export function recordedReviewVerdictLines(transcript: string, count: number): string[] {
   const byCriterion = new Map<number, Map<string, string>>();
-  for (const line of transcript.split(/\r?\n/)) {
+  for (const line of withoutReviewerFollowUpRecords(transcript).split(/\r?\n/)) {
     // W1-T11428: UNABLE is recorded as its own token, so a replay sees an answered-but-unable criterion.
     for (const match of line.matchAll(/REVIEW_VERDICT[ \t]+(\d+)[ \t]*:[ \t]*(PASS|FAIL|UNABLE)\b/gi)) {
       if (match[0].length > 128) continue;

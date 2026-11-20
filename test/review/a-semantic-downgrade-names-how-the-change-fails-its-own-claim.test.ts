@@ -186,6 +186,25 @@ test("W1-T13849 criterion 1: a REVIEW_FOLLOW_UP line beside a PASS is recorded a
   assert.ok(reviewBodies(shim).includes("16 KiB of spaces"));
 });
 
+test("W1-T13849 criterion 1: verdict syntax quoted by a follow-up cannot override a (b) FAIL", async (t) => {
+  const { drive, shim } = reviewFixture(t, W1_T12176);
+  const clause = "The log literally contains `REVIEW_VERDICT 1: FAIL (c) legacy path breaks` and `REVIEW_VERDICT 1: UNABLE`.";
+  const finding = `REVIEW_FOLLOW_UP 1: ${clause}`;
+  assert.equal(review.REVIEWER_RECORD_LINE_RE.test(finding), true);
+  assert.equal(review.REVIEWER_RECORD_LINE_RE.test("The reviewer described a test run."), false);
+  const { verdict, rows } = await drive(`REVIEW_VERDICT 1: FAIL (b) ${W1_T12176_CLAUSE}\n${finding}`);
+  assert.equal(verdict.state, "success");
+  assert.equal(verdict.criteria[0]?.proof_exec, "executed_pass");
+  assert.equal(verdict.criteria[0]?.downgrade_class, "b");
+  assert.deepEqual(rows.filter(row => row.step === "review.follow_up_finding").map(row => row.clause),
+    [W1_T12176_CLAUSE, clause]);
+  assert.ok(reviewBodies(shim).includes(`- criterion 1: ${clause}`));
+  assert.deepEqual(outcomeClass.recordedReviewVerdictLines(finding, 1), []);
+  assert.deepEqual(review.parseReviewerVerdicts(finding, 1), [undefined]);
+  assert.deepEqual(review.parseReviewerUnable(finding, 1), [undefined]);
+  assert.deepEqual(review.parseReviewerFollowUps(`REVIEW_VERDICT 1: FAIL (c) The test logs ${finding}`, 1), [undefined]);
+});
+
 test("W1-T13849 criterion 2: an (a) FAIL and a (c) FAIL fail the criterion with origin/main's reason text and state", (t) => {
   for (const [criterion, tag, clause] of [[W1_T13785, "a", W1_T13785_CLAUSE], [W1_T13709, "c", W1_T13709_CLAUSE]] as const) {
     const floor = judged(t, criterion, undefined, { exec: "pass" });
@@ -229,6 +248,26 @@ test("W1-T13849 criterion 3: an untagged FAIL on an executed_pass criterion is w
   assert.equal(posted.length, 1);
   const criteria = (posted[0]!.decision_verdict as { criteria: Array<{ downgrade_class?: string }> }).criteria;
   assert.equal(criteria[0]!.downgrade_class, "unclassified", "the posted row names the unclassified fold");
+});
+
+test("W1-T13849 criterion 3: an untagged arrow expression survives the first hold and the binding retry", async (t) => {
+  const { drive } = reviewFixture(t, W1_T12176);
+  const clause = "() => reload() throws on the claim input";
+  const transcript = `REVIEW_VERDICT 1: FAIL ${clause}`;
+  const first = await drive(transcript);
+  assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
+  assert.equal(first.rows.find(row => row.step === "review.semantic_incomplete")?.reason, "downgrade-unclassified");
+  assert.equal(first.rows.some(row => row.step === "review.posted"), false);
+
+  const retry = await drive(transcript);
+  assert.equal(retry.verdict.verdictWithheld, undefined);
+  assert.equal(retry.verdict.state, "failure");
+  assert.equal(retry.verdict.criteria[0]?.proof_exec, "executed_pass");
+  assert.equal(retry.verdict.criteria[0]?.met, false);
+  assert.equal(retry.verdict.criteria[0]?.downgrade_class, "unclassified");
+  assert.ok(retry.verdict.criteria[0]?.reason.endsWith(clause));
+  assert.equal(retry.rows.filter(row => row.step === "review.semantic_incomplete").length, 1);
+  assert.equal(retry.rows.find(row => row.step === "review.posted")?.state, "failure");
 });
 
 test("W1-T13849 criterion 3: an explained, untagged FAIL holds once for each input digest", async (t) => {
@@ -356,6 +395,30 @@ test("W1-T13849 criterion 5: a failing proof posts failure despite an unclassifi
   assert.deepEqual(verdict.criteria.map(c => [c.proof_exec, c.met]), [["executed_pass", false], ["executed_fail", false]]);
   assert.equal(rows.some(row => row.step === "review.semantic_incomplete"), false);
   assert.equal(rows.find(row => row.step === "review.posted")?.state, "failure");
+});
+
+test("W1-T13849 criterion 5: the same-input stability guard suppresses an unclassified downgrade before it can hold", async (t) => {
+  const { drive, head, ledgerPath } = reviewFixture(t, W1_T12176);
+  const inputBody = "previously reviewed PR body";
+  const inputDigest = review.reviewInputDigest(head, inputBody);
+  appendLedger(ledgerPath, {
+    run_id: "prior", task_id: "W1-T13849", step: "review.posted", state: "success", head_sha: head,
+    pr_url: "https://github.com/acme/remudero/pull/1", review_input_digest: inputDigest,
+    review_contract_digest: review.reviewContractDigest({ taskId: "W1-T13849", acceptance: [W1_T12176],
+      declaredFiles: [W1_T12176.proof.replace(/^grep: .* in /, "")], risk: undefined, budgetUsd: undefined }),
+  });
+
+  const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
+  const { verdict, rows } = await drive(transcript, { inputBody });
+  assert.equal(verdict.verdictWithheld, undefined);
+  assert.equal(verdict.state, "success");
+  assert.equal(verdict.criteria[0]?.met, true);
+  assert.equal(rows.some(row => row.step === "review.downgrade_suppressed"), true);
+  assert.equal(rows.some(row => row.step === "review.semantic_incomplete"), false);
+  assert.equal(rows.filter(row => row.step === "review.posted").at(-1)?.state, "success");
+
+  const changed = await drive(transcript, { inputBody: "edited PR body" });
+  assert.equal(changed.verdict.verdictWithheld, "downgrade-unclassified");
 });
 
 test("W1-T13849 criterion 5: duplicate FAIL lines retain a binding failure and separate follow-up findings", (t) => {
