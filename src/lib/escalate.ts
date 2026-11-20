@@ -1112,6 +1112,8 @@ function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
 }
 
 const MACHINE_FIELDS_HEADING = "## Machine fields";
+const DETAILS_HEADING = "## Details";
+const ISSUE_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_";
 
 /** Open with the decision summary or the producer's summary, then the choices. Keep the raw detail
  * intact for diagnostics and always name Host so operators can identify the affected machine. */
@@ -1128,10 +1130,10 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
     "## Recommendation",
     e.recommendation,
     "",
-    "## Details",
+    DETAILS_HEADING,
     e.detail,
     "",
-    "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
+    ISSUE_FOOTER,
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
     // W1-T4471: how to answer — QUESTION issues only (an ACTION is performed, not answered);
     // owner-only per G-6, see lib/escalation-answers.ts.
@@ -1298,6 +1300,7 @@ export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** Prefer the trailing producer fields to similarly labelled lines in the issue's prose. */
 function machineFields(body = ""): string | undefined {
+  body = body.replaceAll("\r\n", "\n");
   if (/^\*\*Class:\*\* [^\n]*\n\*\*Task:\*\* /.test(body)) return undefined;
   const marker = `\n\n${MACHINE_FIELDS_HEADING}\n`;
   const start = body.lastIndexOf(marker);
@@ -1347,9 +1350,13 @@ function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefine
   return title === escalationIssueTitle(e) && fields.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
-/** Only the producer's machine fields (the header in legacy issues) can replace a clipped title. */
-function candidatePrRef(title: string | undefined, body: string): string | undefined {
-  const header = machineFields(body) ?? body.split("\n\n", 1)[0]!;
+/** The producer's summary and Details carry its PR. Choice links can refer to other PRs. */
+function candidatePrText(title: string | undefined, body: string, fields: string | undefined): string | undefined {
+  const marker = `\n\n${DETAILS_HEADING}\n`;
+  const detailsAt = fields === undefined ? -1 : body.indexOf(marker, body.indexOf("\n\n## Recommendation\n"));
+  const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`);
+  const detail = detailsAt !== -1 && footerAt > detailsAt ? body.slice(detailsAt + marker.length, footerAt) : body;
+  const header = fields ?? body.split("\n\n", 1)[0]!;
   const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
   if (line) {
     let summary: unknown;
@@ -1364,12 +1371,26 @@ function candidatePrRef(title: string | undefined, body: string): string | undef
     if (typeof summary === "string" && taskId && issueClass) {
       const key = { summary, taskId, class: issueClass as EscalationClass };
       if (title !== unboundedEscalationTitle(key) && title === escalationIssueTitle(key)
-          && line === fullEscalationSummaryLine(key)) return extractPrRef(`${summary}\n${body}`);
+          && line === fullEscalationSummaryLine(key)) return `${summary}\n${detail}`;
     }
   }
   // A clipped numeric token is not an identity when its full producer metadata is unavailable.
   if (/(?:\/pull\/|\bPR\s*#?\s*)\d+…$/i.test(title ?? "")) return undefined;
-  return extractPrRef(`${title ?? ""}\n${body}`);
+  return `${title ?? ""}\n${detail}`;
+}
+
+function candidatePrRef(title: string | undefined, body: string): string | undefined {
+  const text = candidatePrText(title, body, machineFields(body));
+  return text === undefined ? undefined : extractPrRef(text) ?? extractPrRef(body);
+}
+
+/** The reconciler requires a full link. Fields-first issues keep their original body/title scan. */
+export function escalationIssuePrReferent({ title, body }: Pick<OpenIssue, "title" | "body">): number | undefined {
+  const normalized = normalizeCandidateBody(body ?? "");
+  const fields = machineFields(normalized);
+  return fields === undefined
+    ? prReferentFromIssueText(body) ?? prReferentFromIssueText(title)
+    : prReferentFromIssueText(candidatePrText(title, normalized, fields));
 }
 
 function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {
@@ -1476,7 +1497,7 @@ export function openEscalationStandDownReason(
  * Preserve `\n` so honest metadata still parses (criterion 2); never normalize renderIssueBody,
  * whose new issue detail must remain byte-identical (criterion 3; summarizeCiFailure, run-task.ts). */
 function normalizeCandidateBody(body: string): string {
-  return body.replace(/\r|\u2028|\u2029/g, " ");
+  return body.replaceAll("\r\n", "\n").replace(/\r|\u2028|\u2029/g, " ");
 }
 
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate

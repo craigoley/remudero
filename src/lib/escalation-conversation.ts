@@ -108,6 +108,7 @@ function sourceLayout(body: string): { order: "fields-first" | "machine-fields-l
 /** Parse only the native writer's anchored metadata and sections, never instructions from prose. */
 export function parseEscalationConversationSource(source: EscalationIssueSource): {
   identity: ThreadIdentity; headline: string; detail: string; recommendation: string | null;
+  decisionSummary?: string;
   options: EscalationConversation["options"];
 } | undefined {
   const layout = sourceLayout(source.body);
@@ -139,7 +140,7 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   const optionsAt = optionsHeaders[0]!.index!, recommendationAt = recommendationHeaders[0]!.index!;
   if (optionsAt >= recommendationAt) return undefined;
   const afterRecommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length);
-  let detail: string, recommendationText: string;
+  let detail: string, recommendationText: string, decisionSummary: string | undefined;
   if (layout.order === "machine-fields-last") {
     // W1-T12041: the summary leads, the raw detail sits under its own heading after the recommendation.
     const details = /^## Details\r?$/m.exec(afterRecommendation);
@@ -148,6 +149,9 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
     const tail = afterRecommendation.slice(details.index + details[0].length, layout.fieldsAt - (recommendationAt + recommendationHeaders[0]![0].length));
     const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
     detail = (footer === -1 ? tail : tail.slice(0, footer)).trim();
+    if (source.body.startsWith("## Decision Summary\n") || source.body.startsWith("## Decision Summary\r\n")) {
+      decisionSummary = source.body.slice(0, optionsAt).trimEnd();
+    }
   } else {
     detail = source.body.slice(header.length, optionsAt).trim();
     recommendationText = afterRecommendation;
@@ -161,7 +165,8 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   // These are the native producer's PR referent rules, exercised against its real writer in tests.
   const text = `${headline}\n${detail}`;
   const prRef = /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1];
-  return { identity: { taskId, class: cls, ...(cause ? { cause } : {}), ...(prRef ? { prRef } : {}) }, headline, detail, recommendation, options };
+  return { identity: { taskId, class: cls, ...(cause ? { cause } : {}), ...(prRef ? { prRef } : {}) },
+    headline, detail, recommendation, options, ...(decisionSummary === undefined ? {} : { decisionSummary }) };
 }
 
 export function boundedMessages(messages: ThreadMessage[]): EscalationConversation["messages"] | undefined {
@@ -356,6 +361,7 @@ export function createEscalationConversationReader(opts: {
       && Boolean(opts.threadStorePath && existsSync(opts.threadStorePath))
       && !/^## Decision Summary\r?$/m.test(source.body);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
+    const whatHappened = parsed.decisionSummary ? `${parsed.decisionSummary}\n\n${parsed.detail}` : parsed.detail;
     const acceptedText = parsed.recommendation ? `I accept this recommendation: ${parsed.recommendation}` : undefined;
     const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && (messages === undefined || messages.every(message => message.from !== "operator")) && acceptedText ? {
       ...(acceptedText.length <= 4000 ? { accept: acceptedText } : {}),
@@ -365,11 +371,11 @@ export function createEscalationConversationReader(opts: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
       revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation, recommendationReplies ?? null,
         activeQuestion ? [activeQuestion.issueUrl, activeQuestion.feedbackId, activeQuestion.revision, activeQuestion.seq] : null]), headline: parsed.headline,
-      whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
+      whatHappened, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
       history, attention, messages: messages ?? [], canReply, canStartConversation,
       ...(activeQuestion ? { activeQuestion } : {}),
-      ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
+      ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${whatHappened}` } : {}),
       ...(recommendationReplies ? { recommendationReplies } : {}),
       wordingCorrection: { kind: CONSOLE_CORRECTION_KIND, version: CONSOLE_CORRECTION_VERSION },
       ...(!canReply && !canStartConversation ? { replyUnavailableReason: questionFailure === "invalid" ? "The current question no longer matches this conversation. Refresh before answering."
