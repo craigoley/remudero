@@ -1,7 +1,8 @@
-import { execFile, execFileSync, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
@@ -504,11 +505,35 @@ function* prePushGateSteps(
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
   const env = prePushGateEnv();
   // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
-  if (required) delete env.RMD_PREPUSH_GATES;
+  if (required) {
+    delete env.RMD_PREPUSH_GATES;
+    Object.assign(env, operatorGithubAuthEnv());
+  }
   return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
+
+/** A required gate runs from an operator session, where the open-PR body check must read the stored body with the
+ *  operator's own `gh` login: the throwaway HOME would otherwise hide it, and the check would report UNCHECKED. */
+function operatorGithubAuthEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"] as const) if (base[key]) env[key] = base[key];
+  env.GH_CONFIG_DIR = base.GH_CONFIG_DIR || (base.XDG_CONFIG_HOME ? join(base.XDG_CONFIG_HOME, "gh") : join(base.HOME || homedir(), ".config", "gh"));
+  return env;
+}
+
+/** The open-PR body check's lines for a body it could not judge: UNCHECKED, unreadable, or not run at all. */
+const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|open-pr-body-proof-precheck could not read this push|open-pr-body-proof-precheck\.mjs absent|open-pr-body-proof-precheck: SKIP -- the pushed tree could not be read here/;
+
+/** A required gate never reads an unjudged open-PR body check as a pass: the push is refused, and the reason says why. */
+function requiredGateOutcome(outcome: HookOutcome): HookOutcome {
+  if (outcome.refused) return outcome;
+  const text = `${String(outcome.out.stdout ?? "")}\n${String(outcome.out.stderr ?? "")}`;
+  if (!UNCHECKED_BODY_CHECK.test(text)) return outcome;
+  const reason = "the open PR's stored body could not be read, so its open-PR body proofs were not checked";
+  return { refused: true, err: { ...outcome.out, stderr: `${String(outcome.out.stderr ?? "")}${reason}\n`, reason } };
+}
 
 /** W1-T6120 — the gate's env is an ALLOWLIST: GH_TOKEN, GH_APP_* and provider keys stay with the push. Its git calls
  *  carry {@link HOST_GIT_CONFIG}, and {@link withGateHome} gives it a throwaway HOME. */
@@ -585,7 +610,8 @@ export function gateHookRefused(res: { error?: Error; status: number | null }): 
 }
 
 function gateFailureDetail(err: unknown): string {
-  const failed = err as { status?: unknown; signal?: unknown; code?: unknown; error?: { code?: unknown } } | null;
+  const failed = err as { status?: unknown; signal?: unknown; code?: unknown; error?: { code?: unknown }; reason?: unknown } | null;
+  if (typeof failed?.reason === "string") return failed.reason;
   const spawned = failed?.error?.code ?? (typeof failed?.code === "string" ? failed.code : undefined);
   if (spawned !== undefined && spawned !== "EPIPE") return `spawn ${String(spawned)}`;
   return typeof failed?.signal === "string" ? `signal ${failed.signal}` : `exit ${String(failed?.status ?? failed?.code)}`;
@@ -797,11 +823,78 @@ export function worktreePushExec(worktreePath: string, { verdicts = defaultPushG
 }
 
 function runHookAsync(worktreePath: string, gate: PrePushGate, signal?: AbortSignal): Promise<HookOutcome> {
+  if (signal !== undefined) return runStoppableHook(worktreePath, gate, signal);
   return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
-    const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER, signal },
+    const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
       (err, stdout, stderr) => resolveGate(err ? { refused: true, err: Object.assign(err, { stdout, stderr }) } : { refused: false, out: { stdout, stderr } }));
     child.stdin?.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") resolveGate({ refused: true, err }); });
     child.stdin?.end(gate.input);
+  }));
+}
+
+const HOOK_STOP_GRACE_MS = 2_000;
+
+function signalHookGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try { process.kill(-pid, signal); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; }
+}
+
+/** A stoppable hook leads its own process group. A stop signals the whole group, and the outcome settles only once
+ *  every member is gone: a SIGTERM-ignoring child of the hook shell is killed when the grace period ends. */
+function runStoppableHook(worktreePath: string, gate: PrePushGate, signal: AbortSignal): Promise<HookOutcome> {
+  return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
+    const child = spawn(gate.hook, gate.args, { cwd: worktreePath, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    let length = 0;
+    let failure: unknown;
+    let stopping: number | undefined;
+    let force: NodeJS.Timeout | undefined;
+    const stop = (reason: unknown) => {
+      failure ??= reason;
+      if (stopping !== undefined || child.pid === undefined) return;
+      const pid = child.pid;
+      stopping = systemClock.now() + HOOK_STOP_GRACE_MS;
+      signalHookGroup(pid, "SIGTERM");
+      // A member that ignores SIGTERM can hold the hook's pipes open, so the kill cannot wait for them to close.
+      force = setTimeout(() => signalHookGroup(pid, "SIGKILL"), HOOK_STOP_GRACE_MS);
+    };
+    const onAbort = () => stop(signal.reason);
+    for (const stream of ["stdout", "stderr"] as const) {
+      child[stream].on("data", (chunk: Buffer) => {
+        length += chunk.length;
+        if (length <= GATE_MAX_BUFFER) out[stream].push(chunk);
+        else stop(Object.assign(new Error(`${gate.hook}: output exceeded ${GATE_MAX_BUFFER} bytes`), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }));
+      });
+    }
+    let settled = false;
+    const settle = (code: number | null, killedBy: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(force);
+      signal.removeEventListener("abort", onAbort);
+      const stdout = Buffer.concat(out.stdout).toString("utf8"), stderr = Buffer.concat(out.stderr).toString("utf8");
+      if (failure !== undefined) resolveGate({ refused: true, err: { error: failure, message: String((failure as Error)?.message ?? failure), stdout, stderr } });
+      else if (code !== 0) resolveGate({ refused: true, err: Object.assign(new Error(`Command failed: ${gate.hook}`), { code, signal: killedBy, stdout, stderr }) });
+      else resolveGate({ refused: false, out: { stdout, stderr } });
+    };
+    child.stdin.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") stop(err); });
+    child.on("error", (err) => {
+      failure ??= err;
+      if (child.pid === undefined) settle(null, null); // it never started, so there is no group to wait for
+    });
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code, killedBy) => {
+      if (stopping === undefined || child.pid === undefined) return settle(code, killedBy);
+      const pid = child.pid;
+      const reaped = stopping + HOOK_STOP_GRACE_MS;
+      void (async () => {
+        while (signalHookGroup(pid, 0) && systemClock.now() < stopping!) await delay(50);
+        signalHookGroup(pid, "SIGKILL");
+        // A killed member leaves the group once it is reaped; the wait is bounded for a host whose init never reaps.
+        while (signalHookGroup(pid, 0) && systemClock.now() < reaped) await delay(20);
+      })().then(() => settle(code, killedBy), (error: unknown) => { failure ??= error; settle(code, killedBy); });
+    });
+    child.stdin.end(gate.input);
   }));
 }
 
@@ -821,10 +914,12 @@ export function worktreePushExecAsync(
       ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requireGate))
       : undefined;
     if (gate) {
-      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => {
+      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, async () => {
         signal?.throwIfAborted();
-        return runHookAsync(worktreePath, gate, signal);
+        const ran = await runHookAsync(worktreePath, gate, signal);
+        return requireGate ? requiredGateOutcome(ran) : ran;
       }, verdicts, "worktreePushExecAsync"));
+      signal?.throwIfAborted();
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }

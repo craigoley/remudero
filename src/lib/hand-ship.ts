@@ -23,7 +23,8 @@ interface ShipHost {
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
 interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean;
-  fileLevel?: boolean; state?: string }
+  /** A `describe` row: Node's `# tests` and `# fail` count only the tests inside it, never the row itself. */
+  describeRow?: boolean; fileLevel?: boolean; state?: string }
 type Priority = "low" | "normal";
 type FailureClass = "caused by the change" | "caused by the host" | "also failing on main";
 
@@ -150,7 +151,8 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
     const fileLevel = file !== null && result[3]!.replace(/\\/g, "/").endsWith(file);
     rows.push({ file, title: fileLevel ? "(whole file)" : [...parents.slice(0, result[1]!.length / 4), result[3]!].join(" > "),
       location: locationMatch ? `${locationMatch[2]}:${locationMatch[3]}` : null,
-      failed: result[2] === "not ok", ...(fields.type === "suite" || fields.failureType === "subtestsFailed" ? { suite: true } : {}), fileLevel });
+      failed: result[2] === "not ok", ...(fields.type === "suite" || fields.failureType === "subtestsFailed" ? { suite: true } : {}),
+      ...(fields.type === "suite" ? { describeRow: true } : {}), fileLevel });
   }
   return rows;
 }
@@ -266,7 +268,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     let failedRows = 0;
     for (const file of [...new Set(suites)].sort()) {
       const rows = await workspace.rerun("head", file, receipt.headSha);
-      failedRows += rows.filter((test) => test.failed).length;
+      failedRows += rows.filter((test) => test.failed && !test.describeRow).length;
       tests.push(...rows.filter((test) => test.failed && !test.suite));
     }
     if (failedRows !== summary.fail) {
@@ -733,9 +735,11 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         const { testSummary } = await authorTools();
         const summary = testSummary(result.stdout);
         const results = tapResults(result.stdout, cwd, file);
+        // A failing `it` in a `describe` reports two rows, but the summary counts one test: suites are not tests.
+        const testRows = results.filter((test) => !test.describeRow);
         const targetSelected = title === undefined || results.some((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
-        if (result.truncated || !summary || summary.cancelled !== 0 || results.length !== summary.tests ||
-          results.filter((test) => test.failed).length !== summary.fail ||
+        if (result.truncated || !summary || summary.cancelled !== 0 || testRows.length !== summary.tests ||
+          testRows.filter((test) => test.failed).length !== summary.fail ||
           (result.code !== 0 && result.code !== 1) ||
           (title === undefined && result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : false) ||
           (title !== undefined && !targetSelected && tree === "head") ||

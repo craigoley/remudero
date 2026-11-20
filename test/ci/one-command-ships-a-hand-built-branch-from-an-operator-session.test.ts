@@ -789,3 +789,128 @@ test("a stopped child is reported stopped only after every member of its process
   for (let i = 0; i < 50 && liveProcess(pid); i += 1) await delay(20);
   assert.equal(liveProcess(pid), false, "the SIGTERM-ignoring group member is killed before the stop is reported");
 });
+
+test("W1-T12169 criterion 3: a failing it inside a describe is isolated on head without counting its suite row as a test", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), [
+    'import { describe, it } from "node:test";',
+    'describe("group", () => {',
+    '  it("leaf", () => { throw new Error("described leaf"); });',
+    '  it("sibling", () => {});',
+    '});',
+    "",
+  ].join("\n"));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "describe test fixture");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  try {
+    const rows = await workspace.rerun("head", file, source.head, "group > leaf");
+    assert.ok(rows.some((row) => row.title === "group > leaf" && row.failed === true && !row.suite), JSON.stringify(rows));
+    assert.ok(rows.some((row) => row.title === "group" && row.failed === true && row.suite === true), JSON.stringify(rows));
+    assert.ok(!rows.some((row) => row.title === "group > sibling"), "the sibling must be skipped by the runner");
+    const mainRows = await workspace.rerun("main", file, source.head, "group > leaf");
+    assert.ok(mainRows.some((row) => row.title === "group > leaf" && row.failed === true), JSON.stringify(mainRows));
+  } finally {
+    await workspace.close();
+  }
+});
+
+test("W1-T12169 criterion 4: an update push whose open-PR body check cannot read the stored body is refused", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo);
+  // The production open-PR body check, run as the harness hook runs it for an update of an existing branch.
+  const precheck = [shellQuote(process.execPath), "--import", shellQuote(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs")),
+    shellQuote(join(REPO_ROOT, "scripts/open-pr-body-proof-precheck.mjs")), "--head-ref", branch, "--old-sha", base,
+    '--new-sha "$sha"', '--remote-url "$2"'].join(" ");
+  const gate = harnessGate(t, [
+    'read -r _ sha _ _; echo ran >> "$MARK"',
+    `${precheck}; rc=$?`,
+    '[ "$rc" -eq 2 ] && echo "pre-push: open-pr-body-proof-precheck could not read this push — not blocking on an unreadable check" >&2',
+    '[ "$rc" -eq 1 ] && exit 1',
+    "exit 0",
+  ].join("\n"));
+  // The operator's gh login is passed to the hook, and this gh answers as one whose login cannot read the PR.
+  const ghConfig = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-gh-`));
+  const ghBin = join(ghConfig, "bin");
+  mkdirSync(ghBin);
+  writeFileSync(join(ghBin, "gh"), `#!/bin/sh\necho "$GH_CONFIG_DIR" >> '${join(ghConfig, "seen")}'\n` +
+    'echo "To get started with GitHub CLI, please run:  gh auth login" >&2\nexit 4\n');
+  chmodSync(join(ghBin, "gh"), 0o755);
+  const saved = { config: process.env.GH_CONFIG_DIR, token: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, path: process.env.PATH };
+  process.env.GH_CONFIG_DIR = ghConfig;
+  process.env.PATH = `${ghBin}:${process.env.PATH ?? ""}`;
+  delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  t.after(() => {
+    for (const [key, value] of [["GH_CONFIG_DIR", saved.config], ["GH_TOKEN", saved.token], ["GITHUB_TOKEN", saved.github],
+      ["PATH", saved.path]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(ghConfig, { recursive: true, force: true });
+  });
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /open-PR body proofs were not checked/);
+  assert.equal(readFileSync(gate, "utf8"), "ran\n", "the production body check ran in the gate");
+  assert.equal(readFileSync(join(ghConfig, "seen"), "utf8"), `${ghConfig}\n`, "the body check read GitHub with the operator's gh login");
+  assert.deepEqual(requests, [], "an unchecked body proof stops the push");
+});
+
+test("W1-T12169 criterion 5: a stop during the pre-push gate settles only after the hook's whole process group is gone", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const pidFile = join(f.root, "hook-member.pid");
+  harnessGate(t, `cat > /dev/null; echo started >> "$MARK"; sh -c 'trap "" TERM; echo $$ > ${shellQuote(pidFile)}; exec sleep 60' & wait`);
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const controller = new AbortController();
+  const run = { dir: f.root, signal: controller.signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const pushing = withLiveWritesAllowed(() => defaults.push(source, run));
+  pushing.catch(() => {});
+  while (!existsSync(pidFile) || !readFileSync(pidFile, "utf8").trim()) await delay(20);
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } });
+  controller.abort(new Error("stop requested"));
+  await assert.rejects(pushing, /stop requested/);
+  assert.equal(liveProcess(pid), false, "the hook's SIGTERM-ignoring child is gone before the stop is reported");
+  assert.deepEqual(requests, [], "a stopped gate never pushes");
+});
+
+function shellQuote(word: string): string { return "'" + word.replaceAll("'", "'\\''") + "'"; }
+
+test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or overflows its output refuses the push", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const mark = harnessGate(t, 'cat > /dev/null; head -c 67108865 /dev/zero; echo overflowed >> "$MARK"');
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  // The refusal writes the gate's output through; keep 64 MiB of it out of the TAP stream.
+  const writes = { out: process.stdout.write, err: process.stderr.write };
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /refused this push/);
+  } finally {
+    process.stdout.write = writes.out;
+    process.stderr.write = writes.err;
+  }
+  assert.deepEqual(requests, [], "an overflowing gate stops the push");
+  chmodSync(join(dirname(mark), "pre-push"), 0o644);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /refused this push \(spawn EACCES\)/);
+  assert.deepEqual(requests, [], "a gate that cannot start stops the push");
+});
