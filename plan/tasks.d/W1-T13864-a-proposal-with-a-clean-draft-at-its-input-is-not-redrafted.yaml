@@ -18,6 +18,7 @@
     - src/lib/ledger-steps.ts
     - src/run-task.ts # the daemon draft hook passes its ledger rows to draftsDueOnDaemon
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
+    - "src/lib/ledger.ts"
   status: queued
   attempts: 0
   acceptance:
