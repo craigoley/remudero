@@ -187,6 +187,48 @@ test("W1-T13238: the CLI's restated serve port and token path match serve's own"
 const verdictFind = (id: string) => id === "P1" ? { exists: true, classification: { proposalId: "P1", state: "ready" } as never }
   : id === "Pd" ? { exists: true, classification: { proposalId: "Pd", state: "declined", declinedReason: "duplicate" } as never } : { exists: false };
 
+test("W1-T13238: decline warns when the write token is missing and returns the local refusal", async (t) => {
+  const config = { root: root(t, null) };
+  const args = ["Pgone", "--reason", "duplicate"];
+  const connect = t.mock.method(globalAgent, "createConnection", () => assert.fail("attempted to connect without a token"));
+  const result = await captured(t, () => proposalVerdictViaServe("decline", args, config, () =>
+    proposalVerdictCommand("decline", args, verdictFind, () => assert.fail("recorded a verdict for a missing proposal"))));
+
+  assert.deepEqual(result, {
+    code: 1,
+    out: [],
+    err: [
+      "rmd decline: no serve write token (ENOENT); running in-process",
+      'rmd decline: no active proposal "Pgone"',
+    ],
+  });
+  assert.equal(connect.mock.callCount(), 0);
+});
+
+test("W1-T13238: restore warns when serve refuses the connection and records the local verdict", async (t) => {
+  const config = { root: root(t), serve: { port: 1 } };
+  const args = ["Pd", "--reason", "reconsidered"];
+  const socket = Object.assign(new Socket(), { connecting: true });
+  t.after(() => { socket.destroy(); });
+  const connect = t.mock.method(globalAgent, "createConnection", () => socket);
+  const recorded: Array<[string, string, string]> = [];
+  const result = await captured(t, async () => {
+    const run = proposalVerdictViaServe("restore", args, config, () =>
+      proposalVerdictCommand("restore", args, verdictFind, (step, id, reason) => { recorded.push([step, id, reason]); }));
+    await setImmediate();
+    assert.equal(connect.mock.callCount(), 1);
+    socket.destroy(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" }));
+    return run;
+  });
+
+  assert.deepEqual(result, {
+    code: 0,
+    out: ["rmd restore: Pd RESTORED — it is back in the inbox and classifies as it would have before the decline"],
+    err: ["rmd restore: no serve answered at http://127.0.0.1:1 (ECONNREFUSED); running in-process"],
+  });
+  assert.deepEqual(recorded, [["panel.proposal_restored", "Pd", "reconsidered"]]);
+});
+
 /** A serve stand-in for the verdict routes, answering as panel-graph.ts's route does from applyProposalVerdict. */
 async function verdictServe(t: Ctx) {
   const server: Server = createServer((req, res) => {
