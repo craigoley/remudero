@@ -16,7 +16,7 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/a-freshness-exit-waits-for-a-pass-no-longer-than-its-drain-deadline.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A latched freshness exit stops waiting for an in-flight pass at latch plus the drain limit and logs the abandonment"
