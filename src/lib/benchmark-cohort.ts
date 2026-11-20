@@ -219,16 +219,23 @@ function checkpointPath(stateDir: string): string {
 
 /** `seen.identity` becomes the identity of the index this read returns: the file it read, or the one its migration
  * published. A later rewrite publishes only while that index is still the one on disk. */
-function readCheckpoint(stateDir: string, io: CheckpointIO, seen?: { identity: string | null }): Checkpoint {
+function readCheckpoint(stateDir: string, io: CheckpointIO, seen: { identity: string | null }): Checkpoint {
   const legacy = join(stateDir, "benchmark-cohort-v1.json");
   const destination = checkpointPath(stateDir);
-  const path = existsSync(destination) ? destination : legacy;
+  let path = destination;
   let parsed: { version?: string; sources?: unknown; baselineSources?: unknown; sourceFaults?: unknown; lastGood?: unknown };
   try {
-    const fd = openSync(path, "r");
+    // Open, never test-then-open: the descriptor read is the file whose identity is recorded.
+    let fd: number;
+    try { fd = openSync(destination, "r"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+      path = legacy;
+      fd = openSync(legacy, "r");
+    }
     let encoded: Buffer;
     try {
-      if (seen && path === destination) seen.identity = identityOf(fstatSync(fd, { bigint: true }));
+      if (path === destination) seen.identity = identityOf(fstatSync(fd, { bigint: true }));
       encoded = readFileSync(fd);
     } finally { closeSync(fd); }
     io.checkpointReadBytes += encoded.length;
@@ -250,7 +257,7 @@ function readCheckpoint(stateDir: string, io: CheckpointIO, seen?: { identity: s
         ...(validLastGood(parsed.lastGood, lastGoodSources, parsed.sourceFaults ?? [], parsed.baselineSources !== undefined)
           ? { lastGood: parsed.lastGood } : {}) };
       writeCheckpoint(stateDir, checkpoint, io);
-      if (seen) seen.identity = publishedIdentities.get(io) ?? null;
+      seen.identity = publishedIdentities.get(io) ?? null;
       unlinkSync(legacy);
       return checkpoint;
     }
