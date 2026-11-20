@@ -344,6 +344,8 @@ import {
   CODEQL_CHECK_NAME,
   SECURITY_MERGE_POLICY_CONTEXT,
   compareRestArgs,
+  checkRunsRestArgs,
+  combinedStatusRestArgs,
   fetchReviewReuseReachFacts,
   type ReviewReuseReachFacts,
   prFilesRestArgs,
@@ -2944,16 +2946,27 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
   });
   const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
-  let branchRequiredChecks: Promise<readonly string[]> | undefined;
+  let branchRequiredChecks: Promise<ReadonlyMap<string, number | null> | undefined> | undefined;
   const readBranchRequiredChecks = async () => {
-    if (deps.readRequiredContextsImpl) return deps.readRequiredContextsImpl(owner, repo) ?? [];
+    if (deps.readRequiredContextsImpl) {
+      return new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null]));
+    }
+    let checks: readonly { context: string; app_id: number | null }[] = [];
     const protection = await readRequiredStatusCheckContextsAsync(owner, repo, "main",
-      async args => JSON.stringify(await readJsonImpl(args)));
-    return protection.kind === "contexts" ? protection.contexts : [];
+      async args => {
+        const snapshot = await readJsonImpl(args) as { checks?: typeof checks } | undefined;
+        checks = snapshot?.checks ?? [];
+        return JSON.stringify(snapshot);
+      });
+    if (protection.kind === "unreadable") return undefined;
+    const required = new Map<string, number | null>();
+    if (protection.kind === "contexts") for (const name of protection.contexts) required.set(name, null);
+    for (const check of checks) required.set(check.context, check.app_id);
+    return required;
   };
-  const readCiGateRollup = async (pr: OpenPrView): Promise<RollupCheckEntry[] | undefined> => {
+  const readCiGateRollup = async (pr: OpenPrView, read = readJsonImpl): Promise<RollupCheckEntry[] | undefined> => {
     try {
-      return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
+      return await restRollupFor(owner, repo, pr.headSha, read);
     } catch (e) {
       log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(e) });
       return undefined;
@@ -3999,9 +4012,28 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     readCiGateRollup,
     readRequiredCheckCompletions: async (pr) => {
-      branchRequiredChecks ??= readBranchRequiredChecks();
-      const [rollup, branchChecks] = await Promise.all([readCiGateRollup(pr), branchRequiredChecks]);
-      const required = new Set([...requiredChecks, ...branchChecks]);
+      const branchChecks = await (branchRequiredChecks ??= readBranchRequiredChecks());
+      if (branchChecks === undefined) return [];
+      const required = new Set([...requiredChecks, ...branchChecks.keys()]);
+      const matchesSource = (name: string | undefined, appId?: number) => {
+        const pin = name === undefined ? undefined : branchChecks.get(name);
+        return pin == null || pin === -1 || pin === appId;
+      };
+      // Apply the pin before the common rollup projects away publisher identity.
+      const checkRunsEndpoint = checkRunsRestArgs(owner, repo, pr.headSha)[1];
+      const statusEndpoint = combinedStatusRestArgs(owner, repo, pr.headSha)[1];
+      const rollup = await readCiGateRollup(pr, async (args, opts) => {
+        const body = await readJsonImpl(args, opts);
+        if (args[1] === checkRunsEndpoint) {
+          const page = body as { check_runs?: Array<{ name?: string; app?: { id?: number } }> } | undefined;
+          return { ...page, check_runs: page?.check_runs?.filter(run => matchesSource(run.name, run.app?.id)) };
+        }
+        if (args[1] === statusEndpoint) {
+          const page = body as { statuses?: Array<{ context?: string }> } | undefined;
+          return { ...page, statuses: page?.statuses?.filter(status => matchesSource(status.context)) };
+        }
+        return body;
+      });
       return (rollup ?? []).flatMap(check => {
         const name = check.name ?? check.context;
         const state = rollupState(check);
@@ -5292,8 +5324,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               // it must reach this SAME "already acted" path, never the "wrote no fix.* row"
               // rethrow meant for a dispatch that never got this far.
               if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
+              // The next sweep compares main to this revision. The worker's task above came from the PR head.
               log(s, { task_id: task.id, ...extra,
-                ...(s === "fix.done" && extra?.fix_outcome === "NEEDS_SCOPE" ? { contract_revision: taskContractRevision(task) } : {}) });
+                ...(s === "fix.done" && extra?.fix_outcome === "NEEDS_SCOPE"
+                  ? { contract_revision: contractRevisionFor(pr).contractRevision } : {}) });
             },
             say,
             account: (r: WorkerResult) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
@@ -25874,6 +25908,7 @@ export async function runSweep(
                   break;
                 }
               }
+              if (await standDownForPriorRound()) break;
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
                 row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
@@ -25922,7 +25957,6 @@ export async function runSweep(
                   break;
                 }
               }
-              if (await standDownForPriorRound()) break;
               if (refusedSameRed && fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length === 0) {
                 progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { baseReproductionFiles } from "./base-reproduction.js";
-import { PR_TERMINAL_STEP } from "./ledger-carry.js";
+import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 
 export const FIX_BUDGET_JUDGE_SITES = [
   { name: "diagnose-retry", file: "src/lib/classify.ts", formerCeiling: 2 },
@@ -732,21 +732,29 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
       "check has completed on this head since — no fix round until one does" };
   }
   const amendments = ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId);
-  const amendmentNumbers = new Set(amendments.map(row => Number(row.amendmentNumber ?? row.amendment_number))
-    .filter(n => Number.isSafeInteger(n) && n > 0));
-  const mergeTimes = new Map<number, string>();
+  const amendmentKey = (row: Record<string, unknown>) => prUrlKey(row.amendment_url ?? row.amendmentUrl)?.toLowerCase();
+  const amendmentKeys = new Set(amendments.map(amendmentKey).filter(key => key !== undefined));
+  const mergeTimes = new Map<string, string>();
   for (const row of ledger) {
-    const number = Number(row.pr_number);
-    if (row.step === PR_TERMINAL_STEP && row.state === "merged" && amendmentNumbers.has(number) &&
+    if (row.step !== PR_TERMINAL_STEP || row.state !== "merged") continue;
+    const key = prUrlKey(row.pr_url)?.toLowerCase();
+    if (key !== undefined && amendmentKeys.has(key) &&
         typeof row.merged_at === "string" && Number.isFinite(Date.parse(row.merged_at))) {
       if (after(row.merged_at)) return undefined;
-      mergeTimes.set(number, row.merged_at);
+      mergeTimes.set(key, row.merged_at);
     }
   }
   if (amendments.some(row => {
     const outcome = row.outcome ?? row.kind ?? row.state;
-    const mergedAt = mergeTimes.get(Number(row.amendmentNumber ?? row.amendment_number)) ?? row.merged_at ?? row.ts;
-    return (outcome === "merged" || outcome === "amendment_merged") && after(mergedAt);
+    if (outcome !== "merged" && outcome !== "amendment_merged") return false;
+    let key = amendmentKey(row);
+    if (key === undefined) {
+      // A local merge receipt can omit its URL. Only a unique amendment recorded for this task supplies it.
+      const number = Number(row.amendmentNumber ?? row.amendment_number);
+      const candidates = [...amendmentKeys].filter(candidate => candidate.endsWith(`#${number}`));
+      if (candidates.length === 1) key = candidates[0];
+    }
+    return after((key === undefined ? undefined : mergeTimes.get(key)) ?? row.merged_at ?? row.ts);
   })) return undefined;
   const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
     row.task_id === facts.taskId && row.head_sha === facts.headSha &&
