@@ -20888,6 +20888,15 @@ let lastReportedAnomalyGap: string | undefined;
 
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+/** W1-T13884: the reader agreement check in flight per ledger. A full pass starts it and goes on: it scans about
+ *  2M ledger lines twice, and awaited inline it held host passes for up to 40 min (reader.agreement duration_ms,
+ *  2026-11-19). One runs at a time, so a slow check is never doubled by the next interval. */
+const readerAgreementInFlight = new Map<string, Promise<void>>();
+
+/** W1-T13884: settles once the reader agreement check started for `ledgerPath` has finished, if one is in flight. */
+export function settleReaderAgreement(ledgerPath: string): Promise<void> {
+  return readerAgreementInFlight.get(ledgerPath) ?? Promise.resolve();
+}
 const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
@@ -21397,15 +21406,20 @@ export async function runSweep(
   }
   const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
   if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+      !readerAgreementInFlight.has(deps.ledgerPath) &&
       (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
     lastReaderAgreementAt.set(deps.ledgerPath, now);
-    try {
-      const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath: deps.ledgerPath,
-        runId: deps.runId, appendLine });
-      for (const finding of findings) log("reader.disagreement", { ...finding });
-    } catch (error) {
-      log("reader.agreement.unavailable", { reason: String(error) });
-    }
+    const ledgerPath = deps.ledgerPath;
+    // W1-T13884: started, not awaited. Its findings and failures are still logged when it settles.
+    const check = (async () => {
+      try {
+        const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath, runId: deps.runId, appendLine });
+        for (const finding of findings) log("reader.disagreement", { ...finding });
+      } catch (error) {
+        log("reader.agreement.unavailable", { reason: String(error) });
+      }
+    })().finally(() => { if (readerAgreementInFlight.get(ledgerPath) === check) readerAgreementInFlight.delete(ledgerPath); });
+    readerAgreementInFlight.set(ledgerPath, check);
   }
   deps.markPrelude?.("reader_agreement");
   if (endsForRestart("reader_agreement")) return endedEarly();

@@ -115,7 +115,8 @@ test("W1-T12754 criterion 1: each full_prelude row that was not served names its
       () => facts([], "own")) as never);
     assert.equal(stale.prelude?.tick_read_miss, "stale");
     const unpublished = await fullPass(wired(() => undefined, joinableRead(p.read), () => facts()) as never);
-    assert.equal(unpublished.prelude?.tick_read_source, "none");
+    // W1-T13880: with a plane, an unpublished generation is read by the plane, never rebuilt on the loop.
+    assert.equal(unpublished.prelude?.tick_read_source, "own_read");
     assert.equal(unpublished.prelude?.tick_read_miss, "unpublished");
     const planeless = wired(() => published, undefined, () => facts());
     await planeless();
