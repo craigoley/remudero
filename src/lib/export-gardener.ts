@@ -305,9 +305,22 @@ const goneTitle = (a: { file: string; name: string }) => `${a.name} is not expor
  *  alias, since test/a-test-imports-through-the-subpath-alias.test.ts (W1-T9864) refuses a new
  *  location-relative specifier and the gardener's PRs went red on it (#19731). */
 function rootMapsSrcAlias(root: string): boolean {
-  // A textual match, not JSON.parse: an unreadable or malformed package.json simply has no alias,
-  // and the proof falls back to the relative specifier it always used.
-  return /"#src\/\*"\s*:\s*"\.\/src\/\*"/.test(readFileIfExists(join(root, "package.json")) ?? "");
+  return readSrcAliasMap(root).status === "mapped";
+}
+
+/** The parsed `imports["#src/*"]` reading of `root`'s package.json. A manifest that does not parse is `unparsed`, never
+ *  `mapped`: the proof then keeps its location-relative specifier, whatever text the broken file holds. */
+function readSrcAliasMap(root: string): { status: "mapped" | "unmapped" | "unparsed"; reason?: string } {
+  const text = readFileIfExists(join(root, "package.json"));
+  if (text === undefined) return { status: "unmapped", reason: "no package.json" };
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(text);
+  } catch (error) {
+    return { status: "unparsed", reason: error instanceof Error ? error.message : String(error) };
+  }
+  const imports = (manifest as { imports?: Record<string, unknown> } | null)?.imports;
+  return imports?.["#src/*"] === "./src/*" ? { status: "mapped" } : { status: "unmapped", reason: "no #src/* mapping to ./src/*" };
 }
 
 function goneTest(a: { file: string; name: string }, srcAlias: boolean): string {

@@ -71,6 +71,11 @@ test("W1-T13955 criterion 1: a root that maps #src/* gets a proof importing thro
   writeFileSync(join(repo.dir, SOURCE), DEAD_TEXT);
   const base = runTitle(repo.dir);
   assert.match(base, /^# fail 1$/m, base);
+
+  // The mapping is read from the PARSED manifest, so a key JSON spells with an escape is the same key.
+  const escaped = fixture({ [SOURCE]: DEAD_TEXT, [TESTS]: SEEDED_TESTS, "package.json": '{"imports":{"#src/\\u002a":"./src/*"}}\n' });
+  assert.ok(applyOnce(escaped.repo, escaped.stateDir), "the deletion lands");
+  assert.match(readFileSync(join(escaped.repo.dir, TESTS), "utf8"), /await import\("#src\/lib\/dead-thing\.js"\)/);
 });
 
 test("W1-T13955 criterion 2: a root whose package.json does not parse keeps the location-relative proof", () => {
@@ -79,5 +84,12 @@ test("W1-T13955 criterion 2: a root whose package.json does not parse keeps the 
   const tests = readFileSync(join(repo.dir, TESTS), "utf8");
   // The relative specifier is assembled, so this file itself carries none (W1-T9864 reads test text).
   const relative = [".", ".", "/src/lib/dead-thing.js"].join("");
-  assert.ok(tests.endsWith(`  const module = await import("${relative}");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`), tests);
+  const tail = `  const module = await import("${relative}");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`;
+  assert.ok(tests.endsWith(tail), tests);
+
+  // A manifest that does not parse keeps the relative proof even when its broken text holds the alias mapping.
+  const broken = fixture({ [SOURCE]: DEAD_TEXT, [TESTS]: SEEDED_TESTS, "package.json": '{ "imports": { "#src/*": "./src/*" }\n' });
+  assert.ok(applyOnce(broken.repo, broken.stateDir), "the deletion lands");
+  const brokenTests = readFileSync(join(broken.repo.dir, TESTS), "utf8");
+  assert.ok(brokenTests.endsWith(tail), brokenTests);
 });
