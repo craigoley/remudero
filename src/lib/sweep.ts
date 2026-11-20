@@ -401,7 +401,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5535,8 +5535,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const error = landed.error ?? landed.refused[0]?.reason;
         const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
-          ...(refusalChecks === undefined ? {} : { refusalChecks }) };
+          ...(refusalChecks === undefined ? {} : { refusalChecks }), staged: [...landed.landed, ...landed.waiting] };
       },
+      // W1-T13944: a held follow-up on main's plan or in the landing queue (staged, or carried by an open landing PR).
+      heldFollowUpClaimRoot: config.root,
+      readHeldFollowUps: () => [...(reloadPlanForFix() ?? plan).tasks.flatMap((task) => heldFollowUpOf(task) ?? []),
+        ...stagedTaskFiles(config.root).flatMap(({ relPath }) => {
+          const abs = join(config.root, "state", "task-files-landing-pending", relPath);
+          return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
+        })],
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
         await ghTextAsync(["pr", "close", prUrl, "--comment", comment]);

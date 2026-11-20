@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { posix } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, posix } from "node:path";
 import { isMap, isSeq, parseDocument, stringify } from "yaml";
 
 import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
@@ -117,10 +118,93 @@ export interface ParkedPrHost {
    * plan preflight checks that refused the draft (planPreflightRefusalChecks), only for a verdict on the draft itself.
    */
   landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
-    Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[] }>;
+    Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[]; staged?: readonly string[] }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
   readPrFiles?(prUrl: string): Promise<readonly string[]>;
+  /** W1-T13944: the held follow-ups on the plan of origin/main and in the task-files landing queue. */
+  readHeldFollowUps?(): readonly HeldFollowUp[] | Promise<readonly HeldFollowUp[]>;
+  /** W1-T13944: the daemon root; a split's claim on its held follow-up is a file under its state directory. */
+  heldFollowUpClaimRoot?: string;
+}
+
+/** W1-T13944: a held follow-up task, as the remedy matches it to a task and criterion. */
+export interface HeldFollowUp { id: string; title: string; depends_on: readonly string[]; claims: readonly string[] }
+
+const HELD_FOLLOW_UP_TITLE = "(held follow-up)";
+
+/** W1-T13944: `task` as a held follow-up, or undefined when its title does not mark it as one. PURE. */
+export function heldFollowUpOf(task: unknown): HeldFollowUp | undefined {
+  const t = task as { id?: unknown; title?: unknown; depends_on?: unknown; acceptance?: unknown } | null;
+  if (typeof t?.id !== "string" || typeof t.title !== "string" || !t.title.endsWith(HELD_FOLLOW_UP_TITLE)) return undefined;
+  const strings = (value: unknown) => Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  const claims = Array.isArray(t.acceptance) ? t.acceptance.map(c => (c as { claim?: unknown } | null)?.claim) : [];
+  return { id: t.id, title: t.title, depends_on: strings(t.depends_on), claims: strings(claims) };
+}
+
+/** W1-T13944: the held follow-ups a task file's text declares. PURE. */
+export function heldFollowUpsOfTaskText(text: string): HeldFollowUp[] {
+  const doc = parseDocument(text);
+  const tasks: unknown = doc.errors.length > 0 ? undefined : doc.toJSON();
+  return Array.isArray(tasks) ? tasks.flatMap(t => heldFollowUpOf(t) ?? []) : [];
+}
+
+/** W1-T13944: the lowest held follow-up of `parentId` that carries every claim, or undefined. PURE. */
+function heldFollowUpFor(held: readonly HeldFollowUp[], parentId: string, claims: readonly string[]): string | undefined {
+  const number = (id: string) => Number(/T(\d+)/.exec(id)?.[1] ?? Number.MAX_SAFE_INTEGER);
+  const ids = claims.map(claim => held.filter(h => h.title.endsWith(HELD_FOLLOW_UP_TITLE) && h.depends_on.includes(parentId) &&
+    h.claims.includes(claim)).map(h => h.id));
+  if (ids.length === 0 || ids.some(found => found.length === 0)) return undefined;
+  return ids.flat().sort((a, b) => number(a) - number(b) || a.localeCompare(b))[0];
+}
+
+/** W1-T13944: one claim file per task and criteria; a pass that dies takes its token with it. */
+const CLAIM_TOKEN = randomUUID();
+type HeldClaim = { path: string; held?: { id: string; files: TaskFileInput[] } };
+
+function holderAlive(holder: { pid?: unknown; token?: unknown } | undefined): boolean {
+  if (holder?.token === CLAIM_TOKEN) return true;
+  if (typeof holder?.pid !== "number" || holder.pid === process.pid) return false;
+  try { process.kill(holder.pid, 0); return true; } catch (error) {
+    // EPERM: the pid lives, under another user; any other error means no process holds it.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * W1-T13944: reads or creates the claim on the held follow-up of `parentId` for `claims`. It is one synchronous step, so
+ * no other pass of this process runs between the read and the write. A claim with an id names the held follow-up to
+ * land again; a claim a live pass holds with no id yet makes this pass stand back (`busy`).
+ */
+function takeHeldFollowUpClaim(root: string, parentId: string, claims: readonly string[]): HeldClaim | { busy: string } {
+  const sorted = [...new Set(claims)].sort();
+  const key = createHash("sha256").update(JSON.stringify({ parent: parentId, claims: sorted })).digest("hex").slice(0, 32);
+  const dir = join(root, "state", "parked-pr-held-follow-up-claims");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${key}.json`);
+  const mine = `${JSON.stringify({ parent: parentId, claims: sorted, holder: { pid: process.pid, token: CLAIM_TOKEN } })}\n`;
+  try {
+    writeFileSync(path, mine, { flag: "wx" });
+    return { path };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  let found: { id?: unknown; files?: unknown; holder?: { pid?: unknown; token?: unknown }; unreadable?: string };
+  try { found = JSON.parse(readFileSync(path, "utf8")) as typeof found; } catch (error) {
+    // A claim that does not parse was torn by a crash while it was created, so this pass takes it over.
+    found = { unreadable: String((error as Error)?.message ?? error) };
+  }
+  if (typeof found?.id === "string" && Array.isArray(found.files)) return { path, held: { id: found.id, files: found.files as TaskFileInput[] } };
+  if (found?.unreadable === undefined && holderAlive(found?.holder)) return { busy: path };
+  writeFileSync(path, mine);
+  return { path };
+}
+
+function writeHeldFollowUpClaim(path: string, parentId: string, claims: readonly string[], id: string, files: readonly TaskFileInput[]): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ parent: parentId, claims: [...new Set(claims)].sort(), id, files,
+    holder: { pid: process.pid, token: CLAIM_TOKEN } })}\n`);
+  renameSync(tmp, path);
 }
 
 export interface ParkedPrSubject {
@@ -254,6 +338,16 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     if (fromPr && (pr.planFiles ?? []).length === 0) throw new Error("the plan files the pull request adds or changes cannot be read");
     const target = read?.target ?? host.planFilingTarget;
     if (target === undefined) throw new Error("the repository for the held plan rebuild cannot be resolved");
+    // W1-T13944, invariant:one-held-follow-up-per-criterion: the plan and the landing queue, not the ledger, say what was filed.
+    const split = decision.remedy === "split-follow-up" && read?.outcome === "read";
+    const claims = decision.inputCriteria.map(c => c.claim);
+    const reusable = split && host.readHeldFollowUps !== undefined
+      ? heldFollowUpFor(await host.readHeldFollowUps(), pr.taskId!, claims) : undefined;
+    if (reusable !== undefined) {
+      ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: reusable, reused: true, criteria: claims });
+      return { remedy: decision.remedy, heldTaskId: reusable, reason: `held follow-up ${reusable} of ${pr.taskId} for these ` +
+        "criteria is on the plan or in the task-files landing queue; this pass reuses it (W1-T13944)" };
+    }
     // W1-T13830: the plan preflight refused this same input before, so a retry would get the same verdict.
     inputDigest = remedyInputDigest(decision.remedy, pr, read?.outcome === "read" ? read.shard : undefined, decision);
     const last = ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.cause === ctx.cause &&
@@ -263,12 +357,35 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
       return { remedy: decision.remedy, unchanged: true, reason: `the ${decision.remedy} remedy was refused by the plan preflight ` +
         `(${last.refusal_checks.map(String).join(", ")}) at this head, task file and criteria, so it is not tried again (W1-T13830)` };
     }
-    const heldTaskId = await host.reserveTaskId(target);
-    const files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, decision, pr, ctx)
-      : heldPlanRebuildFiles(heldTaskId, decision, pr, ctx);
+    const claim = split && host.heldFollowUpClaimRoot !== undefined
+      ? takeHeldFollowUpClaim(host.heldFollowUpClaimRoot, pr.taskId!, claims) : undefined;
+    if (claim !== undefined && "busy" in claim) {
+      throw new Error(`another pass holds the claim on the held follow-up of ${pr.taskId} for these criteria (${claim.busy}); ` +
+        "it reserves the one id (W1-T13944)");
+    }
+    let heldTaskId: string;
+    let files: TaskFileInput[];
+    if (claim?.held !== undefined) ({ id: heldTaskId, files } = claim.held);
+    else {
+      try {
+        heldTaskId = await host.reserveTaskId(target);
+        files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, decision, pr, ctx)
+          : heldPlanRebuildFiles(heldTaskId, decision, pr, ctx);
+      } catch (error) {
+        if (claim !== undefined) unlinkSync(claim.path);
+        throw error;
+      }
+      if (claim !== undefined) writeHeldFollowUpClaim(claim.path, pr.taskId!, claims, heldTaskId, files);
+    }
     const landed = await host.landTaskFiles(files, target);
     if ((landed.refusalChecks?.length ?? 0) > 0) refusalChecks = [...landed.refusalChecks!].sort();
-    if (landed.error !== undefined) throw new Error(`the task files did not land: ${landed.error}`);
+    // W1-T13944: a split whose held file staged filed it, though the landing refused the edit of the parent task file.
+    const partial = split && landed.error !== undefined && landed.staged?.includes(files[0]!.relPath) === true;
+    if (landed.error !== undefined && !partial) {
+      // The held file did not stage and its id may be released, so a later pass reserves a new one.
+      if (claim !== undefined) unlinkSync(claim.path);
+      throw new Error(`the task files did not land: ${landed.error}`);
+    }
     if (closed) {
       await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
         `${pr.isPlanFiling === true ? "the plan-scoped round on this plan filing is exhausted, so it" : "no part of this pull request"} ` +
@@ -277,9 +394,11 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     }
     ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: heldTaskId,
       criteria: decision.inputCriteria.map(c => c.claim), ...(landed.prUrl === undefined ? {} : { landing_pr_url: landed.prUrl }),
-      ...(closed ? { closed: true } : {}) });
+      ...(closed ? { closed: true } : {}),
+      ...(partial ? { partial_refusal: landed.error, ...(refusalChecks === undefined ? {} : { refusal_checks: refusalChecks }) } : {}) });
     return { remedy: decision.remedy, heldTaskId,
-      reason: `${decision.reason}: held task ${heldTaskId}${landed.prUrl === undefined ? "" : ` (${landed.prUrl})`}` };
+      reason: `${decision.reason}: held task ${heldTaskId}${landed.prUrl === undefined ? "" : ` (${landed.prUrl})`}` +
+        `${partial ? `; the landing refused the edit of the parent task file: ${landed.error}` : ""}` };
   } catch (error) {
     const reason = String((error as Error)?.message ?? error);
     ctx.append({ ...row, outcome: "refused", reason, ...(inputDigest === undefined ? {} : { input_digest: inputDigest }),
