@@ -738,10 +738,11 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
   for (const row of ledger) {
     if (row.step !== PR_TERMINAL_STEP || row.state !== "merged") continue;
     const key = prUrlKey(row.pr_url)?.toLowerCase();
-    if (key !== undefined && amendmentKeys.has(key) &&
-        typeof row.merged_at === "string" && Number.isFinite(Date.parse(row.merged_at))) {
-      if (after(row.merged_at)) return undefined;
-      mergeTimes.set(key, row.merged_at);
+    // A receipt without merged_at is written after the merge, so its ts can only release the hold early.
+    const mergedAt = typeof row.merged_at === "string" && Number.isFinite(Date.parse(row.merged_at)) ? row.merged_at : row.ts;
+    if (key !== undefined && amendmentKeys.has(key) && typeof mergedAt === "string" && Number.isFinite(Date.parse(mergedAt))) {
+      if (after(mergedAt)) return undefined;
+      mergeTimes.set(key, mergedAt);
     }
   }
   if (amendments.some(row => {
