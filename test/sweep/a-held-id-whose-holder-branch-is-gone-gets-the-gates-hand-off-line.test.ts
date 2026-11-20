@@ -510,3 +510,103 @@ test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attem
   assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${other.headSha}@held-task-id-handoff`), true);
   assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${HEAD}@held-task-id-handoff`), true);
 });
+
+for (const phase of ["before worktree setup", "before push"]) {
+  test(`W1-T13829 criterion 2: an earlier reservation replaced while a later one is fetched ${phase} stops the hand-off`, async (t) => {
+    const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
+    const firstRef = taskIdReservationRef(IDS[0]!);
+    const secondRef = taskIdReservationRef(IDS[1]!);
+    const tree = f.remote.git("rev-parse", "refs/heads/main^{tree}");
+    // A new holder's reservation, 1 ms old, replaces the first one after it was already proved abandoned.
+    const fresh = f.remote.git("commit-tree", tree, "-m",
+      formatReservationAnchorMessage({ branch: HOLDER, startedAt: new Date(NOW - 1).toISOString() }));
+    let committed = false;
+    let replaced = false;
+    const out = await handOff(f, planPr({ headSha: f.headSha }), async (cwd, args) => {
+      const result = await hostWorktreeGitAsync(cwd, args);
+      if (args[0] === "commit") committed = true;
+      if (args[0] === "fetch" && args.at(-1) === secondRef && committed === (phase === "before push") && !replaced) {
+        f.remote.git("update-ref", firstRef, fresh);
+        replaced = true;
+      }
+      return result;
+    });
+    assert.equal(replaced, true);
+    assert.deepEqual(out, { outcome: "stood-down", reason: `the reservation of ${IDS[0]} changed while the hand-off was being checked` });
+    assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha, "nothing was pushed");
+  });
+}
+
+test("W1-T13829 criterion 3: a note that aliases a string gets the printed line after the aliased text", async (t) => {
+  const texts = SHARD_TEXTS.map((text) => text
+    .replace("  title: a fixture shard with a note\n", "  title: &filed a fixture shard with a note\n")
+    .replace("  note: filed by hand\n", "  note: *filed # keep this comment\n"));
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts });
+  const id = IDS[1]!;
+  const file = SHARDS[1]!;
+  const loadAt = (sha: string) => loadPlanAtRef(f.remote.dir, "plan/tasks.yaml", sha).byId.get(id);
+  assert.equal(loadAt(f.headSha)?.note, "a fixture shard with a note", "the plan loader accepts the aliased note");
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(heldLog([{ id, file, handoff: handoffLine }]))] }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  const head = f.remote.git("rev-parse", `refs/heads/${FILER}`);
+  assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), file);
+  const after = f.remote.git("show", `${head}:${file}`) + "\n";
+  assert.equal(after, texts[1]!.replace("  note: *filed # keep this comment\n",
+    `  note: | # keep this comment\n    a fixture shard with a note\n    ${handoffLine}\n`));
+  assert.equal(loadAt(head)?.title, "a fixture shard with a note", "the anchor's own text is unchanged");
+  assert.equal(loadAt(head)?.note, `a fixture shard with a note\n${handoffLine}\n`);
+  assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
+function overlappingSweepDeps(ledgerPath: string, ledger: Record<string, unknown>[], repairPlanPr: SweepDeps["repairPlanPr"],
+  readPlanRepairFacts: SweepDeps["readPlanRepairFacts"] = () => ({})): SweepDeps {
+  return {
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: async () => {},
+    readPlanRepairFacts, repairPlanPr, ledgerPath, runId: "W1-T13829-overlap",
+    readLedger: () => ledger, appendLine: (_path: string, line: Record<string, unknown>) => { ledger.push(line); },
+    now: () => NOW,
+  } as unknown as SweepDeps;
+}
+
+test("W1-T13829 criterion 4: two overlapping sweeps make one hand-off attempt at a head", async () => {
+  const ledger: Record<string, unknown>[] = [];
+  let calls = 0;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const inside = new Promise<void>((resolve) => { entered = resolve; });
+  const deps = overlappingSweepDeps("/dev/null/w1-t13829-overlap.ndjson", ledger, async () => {
+    // Only the first attempt waits, so a second one would finish rather than deadlock the test.
+    if (++calls === 1) {
+      entered();
+      await released;
+    }
+    return { outcome: "error", reason: "the push was refused" };
+  });
+  const first = runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  await inside;
+  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  release();
+  await first;
+  const rows = ledger.filter((l) => l.step === sweep.PLAN_REPAIR_STEP && l.signature === "held-task-id-handoff");
+  assert.equal(calls, 1, "the second sweep began while the first attempt was in flight and did not attempt again");
+  assert.deepEqual(rows.map((r) => r.outcome), ["error"], "one failure is ledgered for the head");
+});
+
+test("W1-T13829 criterion 4: a sweep whose snapshot predates another process's attempt reads the ledger again", async () => {
+  // Another sweep process recorded its failed attempt after this pass read its ledger snapshot.
+  const ledger: Record<string, unknown>[] = [{ step: sweep.PLAN_REPAIR_STEP, run_id: "other-process", pr_number: 19604, head_sha: HEAD,
+    signature: "held-task-id-handoff", action: "handoff", outcome: "error", reason: "the push was refused" }];
+  let calls = 0;
+  let reads = 0;
+  const deps = overlappingSweepDeps("/dev/null/w1-t13829-other-process.ndjson", ledger, async () => {
+    calls++;
+    return { outcome: "error", reason: "the push was refused" };
+  });
+  deps.readLedger = () => (reads++ === 0 ? [] : ledger);
+  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  const rows = ledger.filter((l) => l.step === sweep.PLAN_REPAIR_STEP && l.signature === "held-task-id-handoff");
+  assert.ok(reads > 1, "the pass read the ledger again before the attempt");
+  assert.equal(calls, 0, "the other process's attempt already spent this head");
+  assert.deepEqual(rows.map((r) => r.run_id), ["other-process"], "no second failure is ledgered");
+});

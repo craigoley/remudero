@@ -66,7 +66,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -11866,6 +11866,9 @@ export async function renumberPlanPrIds(
   }
 }
 
+/** W1-T13829: hand-off attempts this process began, by ledger and PR head. */
+const handoffAttempts = new Set<string>();
+
 /** W1-T13829: the gate's printed hand-off line, added to each named shard's note of a PR whose holders are abandoned
  *  (W1-T6026's proof: no holder head on origin, no open PR on it, a reservation past RESERVATION_PUSH_GRACE_MS). */
 export async function handOffHeldPlanPrIds(
@@ -11936,10 +11939,12 @@ async function handoffStandDown(
   deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
 ): Promise<string | undefined> {
   try {
+    const readShas = async (refs: readonly string[]) => new Map((await git(repoDir, ["ls-remote", "--refs", "origin", ...refs]))
+      .split("\n").map((row) => row.split("\t")).filter(([, name]) => name !== undefined && refs.includes(name)).map(([sha, name]) => [name!, sha!]));
+    const validated = new Map<string, string>();
     for (const { id, holder } of handoffs) {
       const ref = taskIdReservationRef(id);
-      const readSha = async () => (await git(repoDir, ["ls-remote", "--refs", "origin", ref]))
-        .split("\n").map((row) => row.split("\t")).find(([, name]) => name === ref)?.[0] ?? "";
+      const readSha = async () => (await readShas([ref])).get(ref) ?? "";
       const sha = await readSha();
       if (!/^[0-9a-f]{40,64}$/.test(sha)) return `the reservation of ${id} is not on origin`;
       await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", ref]);
@@ -11951,6 +11956,7 @@ async function handoffStandDown(
       if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
         return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
       }
+      validated.set(ref, sha);
     }
     const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
       const rows = await deps.readJson(args);
@@ -11970,6 +11976,10 @@ async function handoffStandDown(
         return `holder branch ${holder} of ${id} is on origin`;
       }
     }
+    // Validating one reservation at a time leaves the earlier ones free to change: read them all again, together.
+    const final = await readShas([...validated.keys()]);
+    const moved = handoffs.find(({ id }) => final.get(taskIdReservationRef(id)) !== validated.get(taskIdReservationRef(id)));
+    if (moved !== undefined) return `the reservation of ${moved.id} changed while the hand-off was being checked`;
     return undefined;
   } catch (error) {
     return `a holder fact is unreadable: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}`;
@@ -11992,21 +12002,26 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
     return { reason: `the shard does not declare ${id} once` };
   }
   const pad = " ".repeat(keyStart - (text.lastIndexOf("\n", keyStart - 1) + 1));
-  const note = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "note")?.value;
-  if (note !== undefined && !(isScalar(note) && (typeof note.value === "string" || note.value === null) && note.range)) {
+  const noteNode = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "note")?.value;
+  // The plan loader resolves an aliased note to its anchor's text; the alias is replaced by a block holding that text.
+  const resolved = isAlias(noteNode) ? noteNode.resolve(doc) : noteNode;
+  if (resolved !== undefined && !(isScalar(resolved) && (typeof resolved.value === "string" || resolved.value === null) &&
+      (isAlias(noteNode) ? noteNode.range : resolved.range))) {
     return { reason: `the note of ${id} is not text` };
   }
-  const prior = isScalar(note) && typeof note.value === "string" ? note.value : "";
+  const prior = isScalar(resolved) && typeof resolved.value === "string" ? resolved.value : "";
+  const note: { range?: readonly number[] | null; type?: string | null } | undefined =
+    isAlias(noteNode) ? { range: noteNode.range } : isScalar(resolved) ? resolved : undefined;
   const prefix = prior + (prior && !prior.endsWith("\n") ? "\n" : "");
   const joined = prefix + line;
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const body = joined.split("\n").map((l) => (l ? `${pad}  ${l}` : "")).join(eol);
-  const folded = isScalar(note) && note.type === "BLOCK_FOLDED";
-  const emptyBlock = prior === "" && (folded || (isScalar(note) && note.type === "BLOCK_LITERAL"));
+  const folded = note?.type === "BLOCK_FOLDED";
+  const emptyBlock = prior === "" && (folded || note?.type === "BLOCK_LITERAL");
   let expected = `${joined}\n`;
   let next: string;
-  if (isScalar(note) && note.range) {
-    const [start, end] = note.range;
+  if (note?.range) {
+    const [start, end] = note.range as [number, number];
     if (note.type === "BLOCK_LITERAL" || folded) {
       const block = text.slice(start, end);
       const indicators = /^[|>]([1-9+-]*)/.exec(block)?.[1] ?? "";
@@ -22717,6 +22732,16 @@ export async function runSweep(
       if (!planRepairHistory.has(key)) appendLine(deps.ledgerPath, { ...ledgered, cause: decision.cause, main_sha: mainLatestRun?.sha });
       planRepairHistory.add(key);
       return { repaired: true, reason: `plan repair (base-red): ${decision.check} also fails on main's latest run — waiting for main, no escalation` };
+    }
+    if (decision.action === "handoff") {
+      // Once per head across overlapping passes: this pass's ledger snapshot can predate another pass's attempt.
+      const attempt = `${deps.ledgerPath}\0${head}`;
+      if (handoffAttempts.has(attempt) ||
+          planRepairHistoryFromLedger(readLedger(deps.ledgerPath)).has(`${head}@held-task-id-handoff`)) {
+        planRepairHistory.add(`${head}@held-task-id-handoff`);
+        return notRepaired;
+      }
+      handoffAttempts.add(attempt);
     }
     let result: PlanRepairOutcome;
     try {
