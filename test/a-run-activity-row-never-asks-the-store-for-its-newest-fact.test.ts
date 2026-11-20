@@ -196,10 +196,12 @@ test("W1-T13905 criterion 3: removing a cached task-only fact restores an older 
   const board = w.caughtUp(w.board(counted.db));
   board.index(board.rows()).byStep.get(FACT);
   assert.deepEqual(standIns(board), [], "the newer task-only fact initially holds the task's slot");
+  assert.deepEqual(board.update({ force: true }).rederived, [], "the unchanged task projection is reused");
   assert.equal(counted.count.grouped, 0);
 
   assert.equal(w.raw.prepare("DELETE FROM fact WHERE task_id = ? AND run_id IS NULL").run("W1-T1").changes, 1);
-  board.index(board.rows());
+  const update = board.update({ force: true });
+  assert.deepEqual(update.rederived, ["W1-T1"], "the update re-derives the task with its rebuilt stamp");
   assert.equal(counted.count.grouped, 1, "one grouped read after the deletion below the tail");
   const fresh = standIns(w.caughtUp(w.board()));
   assert.deepEqual(fresh, [`W1-T1|older@${at(OLD)}`]);
