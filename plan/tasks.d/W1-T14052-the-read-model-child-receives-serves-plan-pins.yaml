@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # adds one IPC message on the child path only; thread mode is unchanged
+  risk: high # adds one IPC message on the child path only; thread mode is unchanged
   band_meaning: span
   origin: "operator-session#serve-cpu-2026-11-20"
   plan_refs:
