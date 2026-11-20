@@ -5,8 +5,8 @@ import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
-import { runFixRung } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { runFixRung } from "#test/helpers/run-task-test.js";
 
 test("W1-T10581: fix_refusal:non-test-paths-need-scope-shard-drifted is prevented, not retried", async (t) => {
   await t.test("task shard", (sub) => checkAmendmentUsesMain(sub, "plan/tasks.d/W1-T10581-fixture.yaml"));
