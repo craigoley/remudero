@@ -4469,7 +4469,10 @@ export function readOpenWeightAllowance(config: Config,
 export type CashDraftFit =
   | { fits: true }
   | { fits: false; reason: "window"; deployment: string | null; estimatedTokens: number; windowTokens?: number }
-  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number; leftUsd: number };
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: number; allowanceError?: never }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: null; allowanceError: string };
 
 export interface CashDraftFitInput {
   deployment: string;
@@ -4503,7 +4506,13 @@ export function cashDraftFit(config: Config, input: CashDraftFitInput): CashDraf
     return { fits: false, reason: "window", deployment, estimatedTokens, windowTokens };
   }
   const estimatedUsd = openWeightReservationUsd(deployment, promptBytes) * expectedRequests;
-  const leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso, squeezed }).deployments[0]!.remainingUsd;
+  let leftUsd: number;
+  try {
+    leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso, squeezed }).deployments[0]!.remainingUsd;
+  } catch (error) {
+    return { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd: null,
+      allowanceError: String(error).slice(0, 512) };
+  }
   return estimatedUsd > leftUsd
     ? { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd }
     : { fits: true };

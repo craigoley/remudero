@@ -41,7 +41,7 @@ import { workerLedgerFields, workerTranscript, type WorkerResult } from "./worke
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isNode, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { loadMounts, mountsPath } from "./mounts.js";
+import { loadMounts, mountsPath, type CapabilityLadder, type Mount } from "./mounts.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, CashDraftResumeBlockedError, CashDraftSkippedError,
   OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
@@ -478,11 +478,14 @@ export interface DraftLaneIdentity {
 /** Resolve the draft spawn's synthesis mount/cash row; daemon supplies its install root, callers default to checkout. */
 export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLaneIdentity {
   const mounts = loadMounts(mountsPath(repoDir));
-  const mount = mounts.synthesis.inbox_draft;
+  return inboxDraftLaneForMount(mounts.synthesis.inbox_draft, mounts.capabilities);
+}
+
+export function inboxDraftLaneForMount(mount: Mount, capabilities: CapabilityLadder | undefined): DraftLaneIdentity {
   const leadDeployment = mount.provider === "cash"
     ? openWeightCandidatesForCapability(
-      mounts.capabilities,
-      openWeightCapabilityForRequestedModel(mounts.capabilities, mount.model),
+      capabilities,
+      openWeightCapabilityForRequestedModel(capabilities, mount.model),
       mount.effort,
     )[0]!
     : mount.model;
@@ -491,11 +494,13 @@ export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLa
     : { leadDeployment, effort: mount.effort };
 }
 
+function draftLaneFingerprint(lane: DraftLaneIdentity): string {
+  return JSON.stringify([lane.leadDeployment, lane.effort, lane.escalationDeployment ?? null, lane.escalationEffort ?? null]);
+}
+
 /** Lead + Sonnet rescue fingerprint: old lanes become due once, unless a clean cached draft already wins. */
 export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
-  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${JSON.stringify([
-    lane.leadDeployment, lane.effort, lane.escalationDeployment ?? null, lane.escalationEffort ?? null,
-  ])}`;
+  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${draftLaneFingerprint(lane)}`;
 }
 
 /** Daemon-only last cause per proposal: <config.root>/state/inbox-draft-attempts.json; manual force never reads/writes. */
@@ -2027,7 +2032,8 @@ export interface DraftRungDeps {
   clock?: Clock;
   spawn: DraftSpawn;
   /** One optional subscription attempt after a failed draft. */
-  escalate?: (proposal: Proposal, prompt: string, reason: "dirty-lint" | "fragment-contract") => Promise<DraftWorkerResult | undefined>;
+  escalate?: (proposal: Proposal, prompt: string, reason: "dirty-lint" | "fragment-contract" | "allowance-unreadable") => Promise<DraftWorkerResult | undefined>;
+  lane?: DraftLaneIdentity;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   cashResumes?: DraftCashResumes;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -2532,21 +2538,21 @@ function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | 
       "the provider reported no served model for this call" } : {}) };
 }
 
-const CASH_DRAFT_REQUEST_HISTORY: number[] = [];
+const CASH_DRAFT_REQUEST_HISTORY = new Map<string, number[]>();
 
-/** The median request count of this process's last 20 cash draft attempts; 2 before any is observed. */
-function expectedCashDraftRequests(): number {
-  if (CASH_DRAFT_REQUEST_HISTORY.length === 0) return 2;
-  const sorted = [...CASH_DRAFT_REQUEST_HISTORY].sort((a, b) => a - b);
+/** The median request count of the lane's last 20 cash draft attempts, rounded up. */
+function expectedCashDraftRequests(history: readonly number[]): number {
+  if (history.length === 0) return 2;
+  const sorted = [...history].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return Math.ceil((sorted[Math.floor((sorted.length - 1) / 2)]! + sorted[middle]!) / 2);
 }
 
-function observeCashDraftRequests(worker: DraftWorkerResult): void {
+function observeCashDraftRequests(history: number[], worker: DraftWorkerResult): void {
   const requests = (worker.requestEfforts ?? []).reduce((total, row) => total + row.requests, 0);
   if (requests <= 0) return;
-  CASH_DRAFT_REQUEST_HISTORY.push(requests);
-  if (CASH_DRAFT_REQUEST_HISTORY.length > 20) CASH_DRAFT_REQUEST_HISTORY.shift();
+  history.push(requests);
+  if (history.length > 20) history.shift();
 }
 
 function draftHasPaidCashWork(result: WorkerResult): boolean {
@@ -2559,6 +2565,10 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
   const captured = toDraft.map(proposal => ({ proposal: structuredClone(proposal),
     snapshot: deps.causalScope ? captureInboxDraftSnapshot(proposal, deps.causalScope) : undefined }));
   let planIndex: string | undefined;
+  const cashFit = deps.cashFit;
+  const lane = cashFit && deps.lane ? draftLaneFingerprint(deps.lane) : undefined;
+  const requestHistory = (lane === undefined ? undefined : CASH_DRAFT_REQUEST_HISTORY.get(lane)) ?? [];
+  if (lane !== undefined) CASH_DRAFT_REQUEST_HISTORY.set(lane, requestHistory);
   const draftOne = async (proposal: Proposal, snapshot?: InboxDraftSnapshot): Promise<DraftRungOutcome> => {
     let lastWorker: DraftWorkerResult | undefined;
     let lastRequestedModel: string | null = null;
@@ -2566,7 +2576,6 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       planIndex ??= planProjectionForDependsOn(currentPlanText);
       const planIndexChars = planIndex.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
-      const cashFit = deps.cashFit;
       const generation = snapshot?.generation;
       const saved = cashFit ? deps.cashResumes?.[proposal.id] : undefined;
       const resume = saved?.generation === generation ? saved : undefined;
@@ -2580,6 +2589,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       let avoidModels: string[] = [];
       let hasPaidCashWork = false;
       let attempts = 0;
+      let unreadableCash: { outcome: DraftRungOutcome; deployment: string } | undefined;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         lastWorker = undefined;
         lastRequestedModel = null;
@@ -2589,12 +2599,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         const cashPrompt = retry && cashDirty ? `${initialPrompt}\n\n${cashDirty.prompt}` : prompt;
         const cashAvoidModels = retry ? [...retry.avoidModels] : avoidModels;
         const paidDeployments = [...(retry?.paidDeployments ?? [])];
-        const logCashSkip = (skipped: Extract<CashDraftFit, { fits: false }>, expectedRequests: number) => {
+        const logCashSkip = (skipped: Extract<CashDraftFit, { fits: false }>, expectedRequests: number, promptChars: number) => {
           deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt: cashAttempt, reason: skipped.reason, deployment: skipped.deployment,
             estimated_tokens: skipped.estimatedTokens, window_tokens: skipped.reason === "window" ? skipped.windowTokens ?? null : null,
             estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
             left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
-            prompt_chars: cashPrompt.length, plan_index_chars: planIndexChars });
+            ...(skipped.reason === "allowance" && skipped.leftUsd === null ? { allowance_error: skipped.allowanceError } : {}),
+            prompt_chars: promptChars, plan_index_chars: planIndexChars });
         };
         let worker: DraftWorkerResult;
         try {
@@ -2602,13 +2613,13 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
               onRequestedModel: model => { lastRequestedModel = model; },
               ...(cashFit ? { cashFit: input => {
-                  const expectedRequests = expectedCashDraftRequests();
+                  const expectedRequests = expectedCashDraftRequests(requestHistory);
                   const fit = cashFit({ ...input, expectedRequests });
-                  if (!fit.fits) logCashSkip(fit, expectedRequests);
+                  if (!fit.fits) logCashSkip(fit, expectedRequests, input.promptChars);
                   return fit;
                 }, paidCashDeployments: paidDeployments,
                 onCashFallback: (deployment, result) => {
-                  if (result.provider === "cash") observeCashDraftRequests(result);
+                  if (result.provider === "cash") observeCashDraftRequests(requestHistory, result);
                   if (draftHasPaidCashWork(result) && !paidDeployments.includes(deployment)) paidDeployments.push(deployment);
                 } } : {}),
               ...(retry ? { cashRetry: { prompt: cashPrompt, avoidModels: cashAvoidModels } } : {}) }));
@@ -2616,15 +2627,20 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           let skipped: Extract<CashDraftFit, { fits: false }>;
           if (error instanceof CashDraftSkippedError) skipped = error.fit;
           else if (cashFit && error instanceof OpenWeightRequestTooLargeError) {
-            const expectedRequests = expectedCashDraftRequests();
+            const expectedRequests = expectedCashDraftRequests(requestHistory);
             skipped = { fits: false, reason: "window", deployment: null,
               estimatedTokens: error.estimatedTokens * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS };
-            logCashSkip(skipped, expectedRequests);
+            logCashSkip(skipped, expectedRequests, cashPrompt.length);
           } else throw error;
-          return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
+          const outcome: DraftRungOutcome = { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
             refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` }, cashDeferred: true,
             ...(generation && (retry || hasPaidCashWork || paidDeployments.length > 0)
               ? { cashResume: { generation, attempt: cashAttempt, paidDeployments, avoidModels: cashAvoidModels, relint: cashDirty } } : {}) };
+          if (skipped.reason !== "allowance" || skipped.leftUsd !== null || !deps.escalate) return outcome;
+          unreadableCash = { outcome, deployment: skipped.deployment };
+          attempts = attempt;
+          parsed = null;
+          break;
         }
         if (retry && worker.provider === "cash") {
           attempt = cashAttempt;
@@ -2636,7 +2652,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         attempts = attempt;
         lastWorker = worker;
         hasPaidCashWork ||= draftHasPaidCashWork(worker) || paidDeployments.length > 0;
-        if (cashFit && worker.provider === "cash") observeCashDraftRequests(worker);
+        if (cashFit && worker.provider === "cash") observeCashDraftRequests(requestHistory, worker);
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
           // here as from === to, which is the record a retried-same-model regression must leave.
@@ -2655,7 +2671,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           session_id: worker.sessionId,
           cost_usd: worker.costUsd,
           subtype: worker.subtype,
-          prompt_chars: prompt.length,
+          prompt_chars: worker.promptChars ?? prompt.length,
           plan_index_chars: planIndexChars,
           ...workerLedgerFields(worker),
         });
@@ -2674,8 +2690,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           prompt = `${initialPrompt}\n\n${dirty.prompt}`;
         }
       }
-      if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
-        const reason = parsed ? "dirty-lint" : "fragment-contract";
+      if (deps.escalate && (unreadableCash || (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0)))) {
+        const reason = unreadableCash ? "allowance-unreadable" : parsed ? "dirty-lint" : "fragment-contract";
         const escalationPrompt = parsed
           ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
@@ -2685,7 +2701,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           if (escalated) {
             deps.log("inbox.draft_escalated", {
               proposal_id: proposal.id,
-              from: draftWorkerModel(lastWorker),
+              from: unreadableCash?.deployment ?? (lastWorker ? draftWorkerModel(lastWorker) : null),
               to: escalated.servedModel ?? draftWorkerModel(escalated),
               reason,
             });
@@ -2695,7 +2711,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               session_id: escalated.sessionId,
               cost_usd: escalated.costUsd,
               subtype: escalated.subtype,
-              prompt_chars: escalationPrompt.length,
+              prompt_chars: escalated.promptChars ?? escalationPrompt.length,
               plan_index_chars: planIndexChars,
               ...workerLedgerFields(escalated),
             });
@@ -2712,6 +2728,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           deps.log("inbox.draft_escalation_error", { proposal_id: proposal.id, error: String((error as Error)?.message ?? error) });
         }
       }
+      if (unreadableCash && !lastWorker) return unreadableCash.outcome;
       if (!parsed) {
         // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING MALFORMED. The bare error sent every
         // reader toward the prompt; `lastWorker.usageRefusal` re-labels it.

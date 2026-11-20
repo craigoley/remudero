@@ -286,6 +286,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Characters in the rendered prompt supplied to the provider adapter. */
+  promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
   providerExchange?: ProviderExchangeReceiptV1;
   outputRetention?: {
@@ -1345,6 +1347,7 @@ export interface SpawnWorkerArgs {
     cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
     paidCashDeployments?: readonly string[];
     cashAvoidModels?: readonly string[];
+    subscriptionRetry?: boolean;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -2407,6 +2410,7 @@ export async function runOpenWeightWalkingLadder(
       return result;
     } catch (err) {
       const skippedDraft = err instanceof CashDraftSkippedError;
+      if (skippedDraft && err.fit.reason === "allowance" && err.fit.leftUsd === null) throw err;
       if (!skippedDraft && !(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
@@ -2631,6 +2635,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const config = args.config ?? loadConfig();
   const paidCashDeployments = args.draftRouting?.paidCashDeployments ?? [];
   const cashAvoidModels = args.draftRouting?.cashAvoidModels ?? args.avoidModels ?? [];
+  const subscriptionRetry = args.draftRouting?.subscriptionRetry === true;
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
@@ -2727,9 +2732,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     throw new ProviderCapacityBlockedError([capacity]);
   }
+  const claudeOnlyWithoutAuction = providers.length === 1 && providers[0] === "claude" && !subscriptionRetry;
   if (
-    providers.length === 1 &&
-    providers[0] === "claude" &&
+    claudeOnlyWithoutAuction &&
     (args.model !== undefined || routingPolicy.provenance === "overridden" || routingPolicy.fallback)
   ) {
     try {
@@ -2746,7 +2751,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
     }
   }
-  if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
+  if (!args.mountProvider && !claudeOnlyWithoutAuction) {
     const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
       (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
         requestedModel: args.model,
@@ -2859,7 +2864,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         return [choice.model, ...choice.alternatives];
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
-      const deferred = args.cashDeferred !== undefined;
+      const deferred = args.cashDeferred !== undefined || subscriptionRetry;
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -3057,6 +3062,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        result.promptChars = execution.prompt.length;
         result.continuation = execution.receipt;
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
@@ -3138,6 +3144,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     try {
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
@@ -3150,6 +3157,13 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   if (args.mountProvider === "cash") {
     if (subscriptionOnly && !(args.cashOpusEmergency === true && args.cashSqueezed === true && args.routingFallback?.rule === "cash-opus-fallback")) {
       throw new SubscriptionOnlyRefusedError(args.model!);
+    }
+    // A draft refused on the previous poll can use subscription headroom before retrying its cash mount.
+    if (subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders)) {
+      try { return await spawnWorker({ ...args, mountProvider: undefined }); }
+      catch (error) {
+        if (!(error instanceof ProviderCapacityBlockedError)) throw error;
+      }
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     const execution = executionFor("cash");
@@ -3211,7 +3225,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     // W1-T13672: ordinary mount work runs on cash first only while its measured cost fits its share of the day; otherwise
     // the Claude and Codex auction runs it, and a blocked auction hands it back to this route unchanged.
-    if (cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
+    if (!subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
       const deferral = cashDeferral(config, args, [openWeight.model, ...openWeight.alternatives], executionPrompt, stats);
       if (deferral) {
         console.error(JSON.stringify({ event: "worker.provider.cash_deferred", ...deferral }));
@@ -3297,6 +3311,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           cashController.signal.throwIfAborted();
+          rung.promptChars = executionPrompt.length;
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
@@ -3703,6 +3718,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         teardownOnce,
       );
       result.provider = "claude";
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);

@@ -1062,6 +1062,7 @@ import {
   classifyProposal,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
+  inboxDraftLaneForMount,
   decideDraftDeferral,
   type ProposalVerdictKind,
   deferralFromOutcomes,
@@ -37637,6 +37638,7 @@ export async function draftProposalBatch(
   providerRouting?: SpawnWorkerArgs["providerRouting"],
   mount?: Mount,
   cashResumes?: DraftCashResumes,
+  subscriptionRetryIds?: ReadonlySet<string>,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
   const causalScope = { repository: `${owner}/${repo}` };
@@ -37648,7 +37650,9 @@ export async function draftProposalBatch(
   // it to plan authorship's tier. It rides its OWN mount (`synthesis.inbox_draft`, mounts.yaml),
   // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
   // called here any more — see the identical note at the retro call site.
-  const inboxDraftMount = mount ?? loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
+  const mounts = loadMounts(mountsPath(repoRoot));
+  const inboxDraftMount = mount ?? mounts.synthesis.inbox_draft;
+  const lane = inboxDraftLaneForMount(inboxDraftMount, mounts.capabilities);
   const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log, readInboxDraftStats);
 
   const settingsFile = renderWorkerSettings({
@@ -37675,6 +37679,7 @@ export async function draftProposalBatch(
       {
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
+        lane,
         spawn: async (proposal, prompt, ctx) => {
           const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -37701,6 +37706,9 @@ export async function draftProposalBatch(
           return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
             ...spawnArgs,
             providerRouting,
+            ...(inboxDraftMount.provider === "cash" && spawnArgs.draftRouting && subscriptionRetryIds?.has(proposal.id) ? {
+              draftRouting: { ...spawnArgs.draftRouting, subscriptionRetry: true },
+            } : {}),
             onModelFallbackAttempt: attempt => {
               if (attempt.result) ctx?.onCashFallback?.(attempt.model, attempt.result);
             },
@@ -37711,7 +37719,8 @@ export async function draftProposalBatch(
             const args = { cwd: worktreePath, settingsFile, mount: inboxDraftMount, config, prompt, proposal,
               currentPlanText: planText, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS };
             const spawn = benchmarkNonDispatchSpawn("inbox-draft", rawSpawn);
-            return spawnEscalatedInboxDraft(args, spawn);
+            const readClaude = providerRouting?.readClaude;
+            return spawnEscalatedInboxDraft(args, spawn, readClaude && (() => readClaude({ forceRefresh: true })));
           },
         } : {}),
         cashFit: input => cashDraftFit(config, input),
@@ -38040,10 +38049,11 @@ export function buildInboxDraftHook(
       const eligibleIds = new Set(eligible.map(proposal => proposal.id));
       for (const id of cashDeferred.keys()) if (!eligibleIds.has(id)) cashDeferred.delete(id);
       // Keep fit refusals due, behind fresh work and in least-recently-refused order.
-      const due = eligible.map(proposal => {
+      const selected = eligible.map(proposal => {
         const deferred = cashDeferred.get(proposal.id);
         return { proposal, batch: deferred && deferred.generation === inboxDraftGeneration(proposal) ? deferred.batch : 0 };
-      }).sort((a, b) => a.batch - b.batch).slice(0, DAEMON_DRAFT_BATCH_CAP).map(({ proposal }) => proposal);
+      }).sort((a, b) => a.batch - b.batch).slice(0, DAEMON_DRAFT_BATCH_CAP);
+      const due = selected.map(({ proposal }) => proposal);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -38145,7 +38155,8 @@ export function buildInboxDraftHook(
       const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
         const cashResumes = readDraftCashResumes(join(inboxRoot, "state"));
-        outcomes = await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes);
+        const subscriptionRetryIds = new Set(selected.filter(({ batch }) => batch > 0).map(({ proposal }) => proposal.id));
+        outcomes = await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes, subscriptionRetryIds);
       } finally {
         // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
         // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial
