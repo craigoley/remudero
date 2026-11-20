@@ -65,7 +65,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -11918,27 +11918,32 @@ export async function handOffHeldPlanPrIds(
   }
 }
 
-/** Fetch all reservations before checking live holders, and stand down on unreadable facts. */
 async function handoffStandDown(
   handoffs: readonly HeldIdHandoff[], repoDir: string, git: (cwd: string, args: string[]) => Promise<string>,
   deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
 ): Promise<string | undefined> {
   try {
+    if (handoffs.length === 0) return "there are no gate hand-offs to check";
+    const reservationRefs = handoffs.map(({ id }) => taskIdReservationRef(id));
+    const holderRefs = [...new Set(handoffs.map(({ holder }) => `refs/heads/${holder}`))];
+    const listRefs = async (refs: string[]) => new Map((await git(repoDir, ["ls-remote", "--refs", "origin", ...refs]))
+      .trim().split("\n").filter(Boolean).map((row) => {
+        const [sha, ref] = row.split("\t");
+        if (!sha || !/^[0-9a-f]{40,64}$/.test(sha) || !ref) throw new Error("origin returned an unreadable ref");
+        return [ref, sha] as const;
+      }));
+    const observed = await listRefs(reservationRefs);
+    const starts = new Map<string, string>();
     for (const { id, holder } of handoffs) {
       const ref = taskIdReservationRef(id);
-      const readSha = async () => (await git(repoDir, ["ls-remote", "--refs", "origin", ref]))
-        .split("\n").map((row) => row.split("\t")).find(([, name]) => name === ref)?.[0] ?? "";
-      const sha = await readSha();
-      if (!/^[0-9a-f]{40,64}$/.test(sha)) return `the reservation of ${id} is not on origin`;
+      const sha = observed.get(ref);
+      if (sha === undefined) return `the reservation of ${id} is not on origin`;
       await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", ref]);
-      if (await readSha() !== sha) return `the reservation of ${id} changed while it was being read from origin`;
       const parsed = parseReservationHolderLine(await git(repoDir, ["log", "-1", "--format=%B", sha]));
       if (parsed.status !== "known" || parsed.holder.branch !== holder) return `the reservation of ${id} does not name ${holder} as its holder`;
-      const started = Date.parse(parsed.holder.startedAt ?? "");
-      if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
-      if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
-        return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
-      }
+      const started = parsed.holder.startedAt;
+      if (!started || !Number.isFinite(Date.parse(started))) return `the reservation of ${id} records no start time`;
+      starts.set(id, started);
     }
     const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
       const rows = await deps.readJson(args);
@@ -11951,12 +11956,19 @@ async function handoffStandDown(
       return rows;
     }, undefined, "open");
     if (open.truncated) return "the open pull request list is incomplete";
+    // Validate every observed anchor and holder branch in the same origin read.
+    const latest = await listRefs([...reservationRefs, ...holderRefs]);
+    const now = deps.nowMs();
     for (const { id, holder } of handoffs) {
+      const ref = taskIdReservationRef(id);
+      if (latest.get(ref) !== observed.get(ref)) return `the reservation of ${id} changed while it was being read from origin`;
+      const started = starts.get(id)!;
+      if (!(now - Date.parse(started) > RESERVATION_PUSH_GRACE_MS)) {
+        return `the reservation of ${id} started at ${started}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
+      }
       const openPr = open.rows.find((row) => row.headRefName === holder);
       if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
-      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
-        return `holder branch ${holder} of ${id} is on origin`;
-      }
+      if (latest.has(`refs/heads/${holder}`)) return `holder branch ${holder} of ${id} is on origin`;
     }
     return undefined;
   } catch (error) {
@@ -11981,10 +11993,11 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
   }
   const pad = " ".repeat(keyStart - (text.lastIndexOf("\n", keyStart - 1) + 1));
   const note = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "note")?.value;
-  if (note !== undefined && !(isScalar(note) && (typeof note.value === "string" || note.value === null) && note.range)) {
+  const priorValue = before.find((row) => row?.id === id)?.note;
+  if (note !== undefined && !((isScalar(note) || isAlias(note)) && note.range && (typeof priorValue === "string" || priorValue === null))) {
     return { reason: `the note of ${id} is not text` };
   }
-  const prior = isScalar(note) && typeof note.value === "string" ? note.value : "";
+  const prior = typeof priorValue === "string" ? priorValue : "";
   const prefix = prior + (prior && !prior.endsWith("\n") ? "\n" : "");
   const joined = prefix + line;
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
@@ -11993,9 +12006,9 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
   const emptyBlock = prior === "" && (folded || (isScalar(note) && note.type === "BLOCK_LITERAL"));
   let expected = `${joined}\n`;
   let next: string;
-  if (isScalar(note) && note.range) {
+  if ((isScalar(note) || isAlias(note)) && note.range) {
     const [start, end] = note.range;
-    if (note.type === "BLOCK_LITERAL" || folded) {
+    if ((isScalar(note) && note.type === "BLOCK_LITERAL") || folded) {
       const block = text.slice(start, end);
       const indicators = /^[|>]([1-9+-]*)/.exec(block)?.[1] ?? "";
       const width = Number(/[1-9]/.exec(indicators)?.[0]);
@@ -12012,8 +12025,15 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
       const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "").replace(/^#/, " #");
       const rest = at < 0 ? text.length : at + 1;
       const separator = text[start - 1] === ":" ? " " : "";
-      const indicator = /^\n*[ \t]/.test(joined) ? "|2" : "|";
-      next = `${text.slice(0, start)}${separator}${indicator}${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
+      const source = text.slice(start, end);
+      if (isScalar(note) && note.type === "PLAIN" && source.includes("\n")) {
+        const wrapped = source.split(/\r?\n/).map((row) => row.trim()).map((row) => row ? `${pad}  ${row}` : "").join(eol);
+        const comment = note.comment === undefined ? "" : `${pad}${headerSuffix.trimStart()}${eol}`;
+        next = `${text.slice(0, start)}${separator}>${eol}${wrapped}${eol}${eol}${pad}  ${line}${eol}${comment}${text.slice(rest)}`;
+      } else {
+        const indicator = /^\n*[ \t]/.test(joined) ? "|2" : "|";
+        next = `${text.slice(0, start)}${separator}${indicator}${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
+      }
     }
   } else {
     const end = task.range[1];

@@ -997,21 +997,19 @@ export function main(argv) {
     for (const c of holderConflicts) {
       console.error(`  ${c.id} -- ${formatHolderConflictLine(c)}`);
       for (const occ of c.occurrences) console.error(`    ${occ.file}:${occ.line}`);
-      // Print the EXACT line that clears this row when there is one, rather than a shape the
-      // author has to guess the left-hand side of -- an unreadable holder has no branch name to
-      // read off the failure, which is precisely why this remedy used to look inapplicable.
-      //
+      // A takeover loser cannot clear the refusal with a note.
+      const handoffFrom = c.reason === "holder differs" ? c.holderBranch : c.recordedBranch;
       // W1-T3648: printed as a BLOCK, hand-off ALONE on its own line, never fused with existing
       // note text on the same physical line -- see reservationHandoffNoteLine's comment for why
       // the old one-line fragment silently failed the very matcher it named once a note already
       // had content.
-      if (c.recordedBranch !== undefined && c.filerBranch) {
+      if (handoffFrom !== undefined && c.filerBranch) {
         console.error(
           "    remedy: add this as a NEW line in the shard's note -- do not merge it into any " +
             "existing note text on the same line, or the check that requires it will not see it:",
         );
         console.error("        note: |");
-        console.error(`          ${reservationHandoffNoteLine(c.recordedBranch, c.filerBranch)}`);
+        console.error(`          ${reservationHandoffNoteLine(handoffFrom, c.filerBranch)}`);
       }
     }
     console.error(

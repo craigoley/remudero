@@ -2,10 +2,9 @@
  * A HELD ID WHOSE HOLDER BRANCH IS GONE GETS THE GATE'S HAND-OFF LINE (W1-T13829).
  *
  * #19604 (head run-unfiled-1795065953000) added three shards whose ids were reserved for run-unfiled-1795065820000,
- * a branch that never reached origin. task-id-existence refused them as "HELD by a different reservation holder" and
- * printed the cure, `reservation hand-off: <holder> -> <filer>`, for each one. The sweep's only held-id rung renumbers
- * fleet heads, so the PR sat red about 5 h until a hand commit added the three lines. The sweep now adds the printed
- * line itself, once per head, when W1-T6026's proof of abandonment holds for every holder.
+ * a branch that never reached origin. task-id-existence refused them as "HELD by a different reservation holder".
+ * The sweep's renumber rung applies to fleet heads, so the PR sat red about 5 h until a hand commit added the three
+ * hand-off lines. The sweep adds the gate's printed line once per head when every holder passes the abandonment check.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -18,6 +17,7 @@ import { loadPlanAtRef } from "#src/lib/plan.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS, taskIdReservationRef } from "#src/lib/task-id-reservation.js";
 import { ciFailureRegionReducer } from "#src/lib/tick-read-worker.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import * as sweep from "#test/helpers/sweep-test.js";
@@ -25,7 +25,10 @@ import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type S
 
 // The gate's own matcher, read from the script the check runs (it ships no type declarations).
 const GATE: string = "#scripts/task-id-existence-check.mjs";
-const { shardNoteRecordsReservationHandoff } = (await import(GATE)) as { shardNoteRecordsReservationHandoff(text: string, holder: string, filer: string): boolean };
+const { main: runExistenceGate, shardNoteRecordsReservationHandoff } = (await import(GATE)) as {
+  main(args: string[]): void;
+  shardNoteRecordsReservationHandoff(text: string, holder: string, filer: string): boolean;
+};
 
 const NOW = Date.parse("2026-11-19T07:30:00Z");
 const HOLDER = "run-unfiled-1795065820000";
@@ -34,7 +37,7 @@ const IDS = ["W1-T13787", "W1-T13788", "W1-T13789"];
 const SHARDS = IDS.map((id) => `plan/tasks.d/${id}-fixture.yaml`);
 const HEAD = "b".repeat(40);
 
-/** The gate's own HELD block, as scripts/task-id-existence-check.mjs prints it, with the Actions timestamp prefix. */
+/** Synthetic variations on the gate's HELD block, with the Actions timestamp prefix. */
 function heldLog(entries: Array<{ id: string; file: string; handoff?: string; holder?: string }>): string {
   const stamp = "2026-11-19T05:33:01.1234567Z ";
   const lines = ["task-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:", ""];
@@ -277,6 +280,42 @@ test("W1-T13829 criterion 2: a holder published after the local commit stops the
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+for (const change of ["holder branch", "reservation"]) {
+  test(`W1-T13829 criterion 2: the final ref check catches the first ${change} changing during the second holder's probe`, async (t) => {
+    const otherHolder = "run-unfiled-1795065830000";
+    const first = IDS[0]!;
+    const second = IDS[1]!;
+    const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, holders: [HOLDER, otherHolder] });
+    const tree = f.remote.git("rev-parse", "refs/heads/main^{tree}");
+    const recent = f.remote.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: HOLDER, startedAt: new Date(NOW).toISOString() }));
+    const logTail = heldLog([HOLDER, otherHolder].map((holder, i) => ({
+      id: IDS[i]!, file: SHARDS[i]!, holder, handoff: `reservation hand-off: ${holder} -> ${FILER}`,
+    })));
+    let committed = false;
+    let changed = false;
+    let pushAttempted = false;
+    const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }), async (cwd, args) => {
+      if (args[0] === "push") pushAttempted = true;
+      const secondProbe = change === "reservation"
+        ? args[0] === "fetch" && args.includes(taskIdReservationRef(second))
+        : args[0] === "ls-remote" && args.includes(`refs/heads/${otherHolder}`);
+      if (committed && secondProbe && !changed) {
+        if (change === "reservation") f.remote.git("update-ref", taskIdReservationRef(first), recent);
+        else f.remote.git("update-ref", `refs/heads/${HOLDER}`, "refs/heads/main");
+        changed = true;
+      }
+      const result = await hostWorktreeGitAsync(cwd, args);
+      if (args[0] === "commit") committed = true;
+      return result;
+    });
+    assert.equal(changed, true);
+    assert.equal(pushAttempted, false);
+    assert.equal(out.outcome, "stood-down", JSON.stringify(out));
+    assert.match(out.reason ?? "", change === "reservation" ? /reservation of W1-T13787 changed/ : /holder branch .* of W1-T13787 is on origin/);
+    assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+  });
+}
+
 test("W1-T13829 criterion 3: the line is added as its own note line per named shard, in one commit pushed with a lease", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
   const out = await handOff(f, planPr({ headSha: f.headSha }));
@@ -319,6 +358,37 @@ for (const { name, original, prior, replacement } of [
     const after = f.remote.git("show", `${head}:${file}`) + "\n";
     assert.equal(after, texts[1]!.replace(`${original}\n`, `${replacement}    ${handoffLine}\n`));
     assert.equal(loadAt(head)?.note, `${prior ? `${prior}\n` : ""}${handoffLine}\n`);
+    assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+  });
+}
+
+for (const { name, original, expected, prior } of [
+  {
+    name: "an alias-backed note",
+    original: "  title: &title shared text\n  note: *title # preserve this comment\n",
+    expected: `  title: &title shared text\n  note: | # preserve this comment\n    shared text\n    ${handoffLine}\n`,
+    prior: "shared text",
+  },
+  {
+    name: "a wrapped plain note",
+    original: "  title: a fixture shard with a note\n  note: filed by hand\n    with two source lines # preserve this comment\n",
+    expected: `  title: a fixture shard with a note\n  note: >\n    filed by hand\n    with two source lines\n\n    ${handoffLine}\n  # preserve this comment\n`,
+    prior: "filed by hand with two source lines",
+  },
+]) {
+  test(`W1-T13829 criterion 3: ${name} keeps its text and comments`, async (t) => {
+    const originalText = SHARD_TEXTS[1]!.replace("  title: a fixture shard with a note\n  repo: remudero\n  note: filed by hand\n", original + "  repo: remudero\n");
+    const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [SHARD_TEXTS[0]!, originalText] });
+    const id = IDS[1]!;
+    const file = SHARDS[1]!;
+    const logTail = heldLog([{ id, file, handoff: handoffLine }]);
+    const loadAt = (sha: string) => loadPlanAtRef(f.remote.dir, "plan/tasks.yaml", sha).byId.get(id)?.note;
+    assert.equal(loadAt(f.headSha), prior);
+    const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+    assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+    const after = f.remote.git("show", `${out.newHeadSha}:${file}`) + "\n";
+    assert.equal(after, originalText.replace(original, expected));
+    assert.equal(loadAt(out.newHeadSha!), `${prior}\n${handoffLine}\n`);
     assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
   });
 }
@@ -433,7 +503,36 @@ test("W1-T13829 criterion 3: two different remedies for one shard stand down", a
 
 test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI excerpt drops the HELD header", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
-  const lines = `${fullLog}\n2026-11-19T05:33:02.1234567Z ##[error]Process completed with exit code 1.`.split("\n");
+  const baseline = join(dirname(f.hooksDir), "baseline.json");
+  writeFileSync(baseline, "[]\n");
+  const gateAt = async (sha: string) => {
+    f.host.git("checkout", "--quiet", "--detach", sha);
+    const output: string[] = [];
+    const stderr = t.mock.method(console, "error", (message: string) => { output.push(message); });
+    const stdout = t.mock.method(console, "log", (message: string) => { output.push(message); });
+    const exitCode = process.exitCode;
+    try {
+      process.exitCode = 0;
+      return await withGhShim([{ when: "api repos/acme/remudero/pulls?state=open&per_page=100", stdout: "[]" }], () => {
+        runExistenceGate(["--base", "origin/main", "--cwd", f.host.dir, "--head-ref", FILER, "--baseline", baseline,
+          "--owner", "acme", "--repo", "remudero", "--require-open-prs"]);
+        return { status: process.exitCode, output: output.join("\n") };
+      });
+    } finally {
+      process.exitCode = exitCode;
+      stderr.mock.restore();
+      stdout.mock.restore();
+    }
+  };
+  const refused = await gateAt(f.headSha);
+  assert.equal(refused.status, 1);
+  assert.match(refused.output, /HELD by a different reservation holder/);
+  const printed = refused.output.split("\n").map((line) => `2026-11-19T05:33:01.1234567Z ${line}`);
+  assert.deepEqual(sweep.decidePlanRepair(planPr({ ciFailures: [failure(printed.join("\n"))] }), {}, undefined, new Set()), {
+    signature: "held-task-id-handoff", action: "handoff", check: "task-id-existence",
+    handoffs: IDS.map((id, i) => ({ id, holder: HOLDER, filer: FILER, files: [SHARDS[i]!] })),
+  });
+  const lines = [...printed, "2026-11-19T05:33:02.1234567Z ##[error]Process completed with exit code 1."];
   const reducer = ciFailureRegionReducer(60);
   for (const line of lines) reducer.push(line);
   const logTail = reducer.finish();
@@ -477,6 +576,9 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   assert.equal(f.remote.git("rev-parse", `${head}^`), f.headSha);
   assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), SHARDS.join("\n"));
   assert.equal(ledger.find((row) => row.step === sweep.PLAN_REPAIR_STEP)?.outcome, "handed-off");
+  const repaired = await gateAt(head);
+  assert.equal(repaired.status, 0, repaired.output);
+  assert.match(repaired.output, /task-id-existence: OK/);
 });
 
 test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attempt at their head", async () => {
