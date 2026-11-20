@@ -32,11 +32,12 @@ import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSy
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
-import { renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
+import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
+import { readReviewEvidenceRecord } from "./review-evidence-record.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -104,8 +105,11 @@ export interface ReviewerShaRecord {
    *  the PR head and the posted review's own identity (its decision digest, else its attempt id), so a
    *  replayed row counts once and a FAIL and a later PASS at one head both count. Absent in a file written
    *  before it. */
-  models?: Record<string, { provider: string | null; units: Record<string, "pass" | "fail"> }>;
+  models?: EvaluatorModelUnits;
 }
+
+type EvaluatorModelUnits = Record<string, { provider: string | null; units: Record<string, "pass" | "fail">; counts?: { pass: number; fail: number } }>;
+type EvaluatorModelCounts = Record<string, { provider: string | null; pass: number; fail: number }>;
 
 /** W1-T13850: what an ops-catalog review publishes in place of its reasons (src/cli/commands/review.ts). */
 export const REVIEW_EVIDENCE_RETAINED_ON_HOST = "detailed evidence retained on host";
@@ -116,7 +120,7 @@ export interface ReviewerEvaluator { provider: string | null; model: string }
 /** One of a model's FAILs, with the clauses its review row carries. `key` is its decision's identity
  *  (absent in a file written before it: the unit). `published` marks a review whose reasons its own
  *  publication already made public; any other FAIL's clauses stay on the host. */
-export interface EvaluatorModelFail { unit: string; key?: string; sha: string; at: string; clauses: string[]; published?: true }
+export interface EvaluatorModelFail { unit: string; key?: string; sha: string; at: string; clauses: string[]; published?: true; inputDigest?: string }
 
 /** One model's FAIL rate against the other models' pooled, over one population of reviewer code shas. */
 export interface EvaluatorModelJudgment {
@@ -137,7 +141,7 @@ export interface EvaluatorModelJudgment {
   population: { kind: "shared-shas" | "healthy-shas"; shas: number; pooledShas: number };
 }
 
-/** An open model-divergence incident: one per model, until its interval overlaps the baseline again. */
+/** One incident per model. An absent issue URL means delivery is pending. */
 export interface EvaluatorModelIncident {
   id: string;
   model: string;
@@ -187,13 +191,12 @@ export interface ReviewerHealthState {
   /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
   operatorHeal: { withPr: number; at: string } | null;
   coverage: { rows: number; unattributed: number };
-  /** W1-T13850: the per-model verdicts of the healthy shas pooled away (counts only). */
-  pooledModels: Record<string, { provider: string | null; pass: number; fail: number }>;
-  /** W1-T13850: the pooled-away healthy shas that carried more than one model, grouped by the set of models
-   *  they carried (the key is that sorted set, JSON-encoded): how many shas, and their per-model counts. The
-   *  shared-sha comparison reads them after their shas are pooled. */
-  pooledSharedModels: Record<string, { shas: number; models: Record<string, { provider: string | null; pass: number; fail: number }> }>;
-  /** W1-T13850: the open model-divergence incidents, by model. */
+  /** Eviction keeps model decisions keyed by sha so cursor re-reads dedupe and late verdicts can join. */
+  pooledModelShas: Record<string, { models: EvaluatorModelUnits; healed: boolean; regressed: boolean }>;
+  /** Aggregate counts from a state written before model pooling retained sha identities. */
+  pooledModels?: EvaluatorModelCounts;
+  pooledSharedModels?: Record<string, { shas: number; models: EvaluatorModelCounts }>;
+  /** W1-T13850: model-divergence incidents pending delivery or open, by model. */
   modelIncidents: Record<string, EvaluatorModelIncident>;
   /** W1-T13850: each model's newest FAILs, newest last, no more than an issue body can quote. */
   modelFails: Record<string, EvaluatorModelFail[]>;
@@ -202,7 +205,7 @@ export interface ReviewerHealthState {
 export function emptyReviewerHealthState(): ReviewerHealthState {
   return { version: REVIEWER_HEALTH_VERSION, seededAt: null, seq: 0, cursor: null, shas: {},
     pooled: { k: 0, n: 0, shas: 0 }, bootHeads: {}, pending: {}, incident: null, closed: [],
-    operatorHeal: null, coverage: { rows: 0, unattributed: 0 }, pooledModels: {}, pooledSharedModels: {}, modelIncidents: {}, modelFails: {} };
+    operatorHeal: null, coverage: { rows: 0, unattributed: 0 }, pooledModelShas: {}, modelIncidents: {}, modelFails: {} };
 }
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
@@ -210,7 +213,7 @@ const SHA = /^[0-9a-f]{40,64}$/i;
 
 /** A posted code-PR verdict's evaluator, its row state, the posted review's identity, a FAIL's clauses and
  *  whether its review published them (W1-T13850). */
-type VerdictFields = { evaluator?: ReviewerEvaluator; state?: string; decision?: string; clauses?: string[]; published?: true };
+type VerdictFields = { evaluator?: ReviewerEvaluator; state?: string; decision?: string; clauses?: string[]; published?: true; inputDigest?: string };
 
 type Classified =
   | ({ kind: "outcome"; sha?: string; unit: string; cls: ReviewerOutcomeClass; reason: string | null;
@@ -240,14 +243,6 @@ function failClauses(row: Record<string, unknown>): string[] {
   return line === undefined ? [] : [line];
 }
 
-/**
- * THE PUBLICATION BOUNDARY (src/cli/commands/review.ts, runReview): an ops-catalog task's review publishes
- * "detailed evidence retained on host" and its acceptance claims, never its reasons. The posted row does not
- * name its catalog, so a FAIL's clauses may leave the host only when the row itself shows its review was
- * public: an unfiled PR's (`PR-<n>`), which no catalog holds, so its review published its reasons in full.
- */
-const reviewPublishedItsReasons = (row: Record<string, unknown>): boolean => /^PR-\d+$/.test(str(row.task_id) ?? "");
-
 /** A published verdict's evaluator and state; a shadow published nothing, so it names no model. */
 function verdictFields(row: Record<string, unknown>, shadow: boolean): VerdictFields {
   const provenance = row.evaluator_provenance as Record<string, unknown> | undefined;
@@ -257,9 +252,12 @@ function verdictFields(row: Record<string, unknown>, shadow: boolean): VerdictFi
   // The posted review's own identity: W1-T2722 gives one decision one digest (a second terminal on it is a
   // replay or a conflict hold), so two digests are two decisions; the attempt id stands in for a row without one.
   const decision = str(row.review_decision_digest) ?? str(row.review_attempt_id);
+  const inputDigest = str(row.review_input_digest);
+  const published = /^PR-\d+$/.test(str(row.task_id) ?? "");
   return { evaluator: { provider: str(provenance?.provider) ?? null, model }, ...(state === undefined ? {} : { state }),
     ...(decision === undefined ? {} : { decision }),
-    ...(state === "failure" ? { clauses: failClauses(row), ...(reviewPublishedItsReasons(row) ? { published: true as const } : {}) } : {}) };
+    ...(state === "failure" ? { clauses: failClauses(row), ...(published ? { published: true as const } : {}),
+      ...(inputDigest === undefined ? {} : { inputDigest }) } : {}) };
 }
 
 /** One ledger row as this module sees it, or undefined for a row it does not count. */
@@ -304,28 +302,64 @@ export function classifyReviewerHealthRow(row: Record<string, unknown>): Classif
     pr: prNumberOf(row), at: str(row.ts) ?? "", healed: !shadow && str(row.incident_id) !== undefined, ...verdict };
 }
 
-const clauseChars = (fails: readonly EvaluatorModelFail[]): number => fails.reduce((sum, f) => sum + f.clauses.join("").length, 0);
+const failChars = (f: EvaluatorModelFail): number => f.unit.length + f.at.length + f.clauses.reduce((sum, clause) => sum + clause.length, 0);
+const modelValue = <T>(entries: Record<string, T> | undefined, model: string): T | undefined =>
+  entries !== undefined && Object.hasOwn(entries, model) ? entries[model] : undefined;
+
+function countModelUnits(units: Record<string, "pass" | "fail">): { pass: number; fail: number } {
+  const counts = { pass: 0, fail: 0 };
+  for (const verdict of Object.values(units)) counts[verdict] += 1;
+  return counts;
+}
 
 /** Count a posted verdict for its evaluator model under `rec`, and remember a FAIL's clauses. */
 function recordVerdict(state: ReviewerHealthState, rec: ReviewerShaRecord, outcome: Extract<Classified, { kind: "outcome" }>): void {
   if (outcome.cls !== "posted" || outcome.evaluator === undefined || (outcome.state !== "success" && outcome.state !== "failure")) return;
   const { model, provider } = outcome.evaluator;
-  const entry = ((rec.models ??= {})[model] ??= { provider, units: {} });
-  entry.provider = provider;
-  const failed = outcome.state === "failure";
-  // One count per posted decision: a replayed row lands on its own key; a row with no identity keys by its unit.
+  const owner = state.pooledModelShas?.[rec.sha] ?? rec;
+  let entry = modelValue(owner.models, model);
+  if (entry === undefined) {
+    entry = { provider, units: {} };
+    owner.models = { ...owner.models, [model]: entry };
+  }
+  const verdict = outcome.state === "failure" ? "fail" : "pass";
   const key = outcome.decision === undefined ? outcome.unit : `${outcome.unit}@${outcome.decision}`;
-  entry.units[key] = failed ? "fail" : "pass";
-  const fails = (state.modelFails[model] ?? []).filter((f) => (f.key ?? f.unit) !== key);
-  if (failed) fails.push({ unit: outcome.unit, key, sha: rec.sha, at: outcome.at, clauses: outcome.clauses ?? [], ...(outcome.published ? { published: true as const } : {}) });
+  const prior = entry.units[key];
+  if (prior === verdict) return;
+  const counts = entry.counts ??= countModelUnits(entry.units);
+  if (prior !== undefined) counts[prior] -= 1;
+  counts[verdict] += 1;
+  entry.provider = provider;
+  entry.units[key] = verdict;
+  const fails = (modelValue(state.modelFails, model) ?? []).filter((f) => f.sha !== rec.sha || (f.key ?? f.unit) !== key);
+  if (verdict === "fail") {
+    fails.push({ unit: outcome.unit, key, sha: rec.sha, at: outcome.at, clauses: outcome.clauses ?? [],
+      ...(outcome.published ? { published: true as const } : {}), ...(outcome.inputDigest === undefined ? {} : { inputDigest: outcome.inputDigest }) });
+    fails.sort((a, b) => a.at.localeCompare(b.at));
+  }
   // Never more than an issue body could quote: the oldest FAIL goes first.
-  while (fails.length > 1 && clauseChars(fails) > GITHUB_ISSUE_BODY_LIMIT) fails.shift();
-  state.modelFails[model] = fails;
+  let chars = fails.reduce((sum, fail) => sum + failChars(fail), 0);
+  while (fails.length > 1 && chars > GITHUB_ISSUE_BODY_LIMIT) chars -= failChars(fails.shift()!);
+  state.modelFails = { ...state.modelFails, [model]: fails };
+}
+
+type ReviewerHealthLog = (step: string, extra?: Record<string, unknown>) => void;
+
+function reportModelHealthFailure(error: unknown, log?: ReviewerHealthLog): void {
+  const step = "reviewer.model_divergence_failed";
+  const failure = { error: String((error as Error)?.message ?? error) };
+  try {
+    if (log !== undefined) { log(step, failure); return; }
+  } catch (logError) {
+    console.error(JSON.stringify({ step, ...failure, log_error: String((logError as Error)?.message ?? logError) }));
+    return;
+  }
+  console.error(JSON.stringify({ step, ...failure }));
 }
 
 const isFailure = (cls: ReviewerOutcomeClass): boolean => cls === "withheld-success" || cls === "setup-refused";
 
-function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract<Classified, { kind: "outcome" }>): void {
+function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract<Classified, { kind: "outcome" }>, log?: ReviewerHealthLog): void {
   let rec = state.shas[sha];
   if (rec === undefined) {
     state.seq += 1;
@@ -334,7 +368,12 @@ function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract
   } else if (!outcome.healed) {
     rec.healed = false;
   }
-  recordVerdict(state, rec, outcome);
+  try {
+    recordVerdict(state, rec, outcome);
+  } catch (error) {
+    // SHA ingestion still owns this PR head even if its model record is unreadable.
+    reportModelHealthFailure(error, log);
+  }
   const prior = rec.units[outcome.unit];
   // A unit that ever posted at this sha is posted; otherwise its newest class stands.
   if (prior === "posted") return;
@@ -346,7 +385,7 @@ function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract
   }
 }
 
-function pool(state: ReviewerHealthState): void {
+function pool(state: ReviewerHealthState, log?: ReviewerHealthLog): void {
   const live = Object.values(state.shas).sort((a, b) => a.seq - b.seq);
   // The open incident's shas are never pooled away: the incident reads them until it closes.
   const keepFrom = state.incident?.regressedSeq ?? Number.POSITIVE_INFINITY;
@@ -356,28 +395,26 @@ function pool(state: ReviewerHealthState): void {
       const { k, n } = shaCounts(rec);
       state.pooled.k += k;
       state.pooled.n += n;
-      const models = Object.entries(evaluatorModelCounts(state, rec.sha)).filter(([, c]) => c.pass + c.fail > 0);
-      // A sha more than one model judged keeps its models' association: the shared-sha comparison still reads it.
-      const group = models.length > 1
-        ? ((state.pooledSharedModels ??= {})[JSON.stringify(models.map(([model]) => model).sort())] ??= { shas: 0, models: {} })
-        : undefined;
-      if (group !== undefined) group.shas += 1;
-      for (const [model, counts] of models) {
-        for (const into of [state.pooledModels, ...(group === undefined ? [] : [group.models])]) {
-          const pooled = (into[model] ??= { provider: counts.provider, pass: 0, fail: 0 });
-          pooled.provider = counts.provider;
-          pooled.pass += counts.pass;
-          pooled.fail += counts.fail;
-        }
-      }
     }
     if (shaCounts(rec).n > 0) state.pooled.shas += 1;
+    try {
+      const archived = state.pooledModelShas?.[rec.sha];
+      if (archived !== undefined) {
+        archived.healed &&= rec.healed;
+        archived.regressed ||= rec.regressedAt !== undefined;
+      } else if (rec.models !== undefined) {
+        (state.pooledModelShas ??= {})[rec.sha] = { models: rec.models, healed: rec.healed, regressed: rec.regressedAt !== undefined };
+      }
+    } catch (error) {
+      // A failed model archive write does not keep this SHA in the tracked SHA window.
+      reportModelHealthFailure(error, log);
+    }
     delete state.shas[rec.sha];
   }
 }
 
 /** Fold rows into the state. Pure apart from the state object; replaying a row changes nothing. */
-export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Iterable<Record<string, unknown>>): string[] {
+export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Iterable<Record<string, unknown>>, log?: ReviewerHealthLog): string[] {
   const touched = new Set<string>();
   for (const row of rows) {
     const c = classifyReviewerHealthRow(row);
@@ -389,7 +426,7 @@ export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Itera
       for (const key of Object.keys(state.pending).filter((k) => k.startsWith(`${c.host}\u0000`))) {
         for (const p of state.pending[key]!) {
           if (prior === undefined) { state.coverage.unattributed += 1; continue; }
-          recordOutcome(state, prior, { ...p, kind: "outcome", host: c.host, pr: null, healed: false });
+          recordOutcome(state, prior, { ...p, kind: "outcome", host: c.host, pr: null, healed: false }, log);
           touched.add(prior);
         }
         delete state.pending[key];
@@ -400,14 +437,14 @@ export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Itera
     if (c.kind === "fresh-tree") {
       const key = `${c.host}\u0000${c.pr}`;
       for (const p of state.pending[key] ?? []) {
-        recordOutcome(state, c.sha, { ...p, kind: "outcome", host: c.host, pr: c.pr, healed: false });
+        recordOutcome(state, c.sha, { ...p, kind: "outcome", host: c.host, pr: c.pr, healed: false }, log);
         touched.add(c.sha);
       }
       delete state.pending[key];
       continue;
     }
     if (c.sha !== undefined) {
-      recordOutcome(state, c.sha, c);
+      recordOutcome(state, c.sha, c, log);
       touched.add(c.sha);
       continue;
     }
@@ -417,9 +454,10 @@ export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Itera
     (state.pending[key] ??= []).push({ unit: c.unit, cls: c.cls, reason: c.reason, at: c.at,
       ...(c.evaluator === undefined ? {} : { evaluator: c.evaluator }), ...(c.state === undefined ? {} : { state: c.state }),
       ...(c.decision === undefined ? {} : { decision: c.decision }),
-      ...(c.clauses === undefined ? {} : { clauses: c.clauses }), ...(c.published ? { published: c.published } : {}) });
+      ...(c.clauses === undefined ? {} : { clauses: c.clauses }), ...(c.published ? { published: c.published } : {}),
+      ...(c.inputDigest === undefined ? {} : { inputDigest: c.inputDigest }) });
   }
-  pool(state);
+  pool(state, log);
   return [...touched];
 }
 
@@ -528,13 +566,10 @@ export function returnedToBaseline(state: ReviewerHealthState, incident: Reviewe
 }
 
 /** Each evaluator model's posted verdicts under one sha: pass and fail counts, by model. */
-export function evaluatorModelCounts(state: ReviewerHealthState, sha: string): Record<string, { provider: string | null; pass: number; fail: number }> {
-  const counts: Record<string, { provider: string | null; pass: number; fail: number }> = {};
-  for (const [model, entry] of Object.entries(state.shas[sha]?.models ?? {})) {
-    const units = Object.values(entry.units);
-    counts[model] = { provider: entry.provider, pass: units.filter((u) => u === "pass").length, fail: units.filter((u) => u === "fail").length };
-  }
-  return counts;
+export function evaluatorModelCounts(state: ReviewerHealthState, sha: string): EvaluatorModelCounts {
+  const models = state.pooledModelShas?.[sha]?.models ?? state.shas[sha]?.models ?? {};
+  return Object.fromEntries(Object.entries(models).map(([model, entry]) =>
+    [model, { provider: entry.provider, ...(entry.counts ?? countModelUnits(entry.units)) }]));
 }
 
 /**
@@ -547,19 +582,25 @@ export function evaluatorModelCounts(state: ReviewerHealthState, sha: string): R
  * state and writes nothing.
  */
 export function judgeEvaluatorModels(state: ReviewerHealthState): EvaluatorModelJudgment[] {
-  const healthy = Object.values(state.shas).filter((rec) => !rec.healed && rec.regressedAt === undefined);
-  const counts = new Map(healthy.map((rec) => [rec.sha, evaluatorModelCounts(state, rec.sha)]));
-  const carried = (sha: string): string[] => Object.entries(counts.get(sha) ?? {}).filter(([, c]) => c.pass + c.fail > 0).map(([model]) => model);
-  const pooled = Object.entries(state.pooledModels ?? {}).filter(([, c]) => c.pass + c.fail > 0);
-  const live = healthy.filter((rec) => carried(rec.sha).length > 0);
-  const models = [...new Set([...live.flatMap((rec) => carried(rec.sha)), ...pooled.map(([model]) => model)])].sort();
+  const archived = state.pooledModelShas ?? {};
+  const countedModels = (counts: EvaluatorModelCounts) => Object.entries(counts).filter(([, c]) => c.pass + c.fail > 0);
+  const live = Object.values(state.shas).filter((rec) => archived[rec.sha] === undefined && rec.models !== undefined)
+    .map((rec) => ({ models: countedModels(evaluatorModelCounts(state, rec.sha)), healthy: !rec.healed && rec.regressedAt === undefined, shas: 1 }));
+  const pooled = Object.entries(archived).map(([sha, rec]) => ({
+    models: countedModels(evaluatorModelCounts(state, sha)), shas: 1,
+    healthy: !rec.regressed && state.shas[sha]?.regressedAt === undefined && !(rec.healed && (state.shas[sha]?.healed ?? true)),
+  }));
+  const legacy = countedModels(state.pooledModels ?? {});
+  const legacyShared = Object.values(state.pooledSharedModels ?? {}).map((group) => ({ shas: group.shas, models: countedModels(group.models) }));
+  const models = [...new Set([...live, ...pooled, ...legacyShared, { models: legacy }].flatMap((s) => s.models.map(([model]) => model)))].sort();
   const z = upperNormalQuantile(REVIEWER_HEALTH_FAMILY_ALPHA / (2 * Math.max(1, models.length)));
-  // Pooled-away shas that carried more than one model, by the set of models they carried.
-  const pooledShared = Object.entries(state.pooledSharedModels ?? {}).map(([set, group]) => ({ models: JSON.parse(set) as string[], group }));
   return models.map((model) => {
-    const shared = live.filter((rec) => carried(rec.sha).includes(model) && carried(rec.sha).length > 1);
-    const sharedPooled = pooledShared.filter((p) => p.models.includes(model)).map((p) => p.group);
-    const kind = shared.length > 0 || sharedPooled.length > 0 ? "shared-shas" as const : "healthy-shas" as const;
+    const shared = (s: { models: typeof legacy }) => s.models.length > 1 && s.models.some(([name]) => name === model);
+    const sharedLive = live.filter(shared);
+    const sharedPooled = [...pooled, ...legacyShared].filter(shared);
+    const kind = sharedLive.length > 0 || sharedPooled.length > 0 ? "shared-shas" : "healthy-shas";
+    const livePopulation = kind === "shared-shas" ? sharedLive : live.filter((s) => s.healthy);
+    const pooledPopulation = kind === "shared-shas" ? sharedPooled : pooled.filter((s) => s.healthy);
     const own = { fail: 0, n: 0 };
     const base = { fail: 0, n: 0, models: new Set<string>() };
     let provider: string | null = null;
@@ -575,12 +616,11 @@ export function judgeEvaluatorModels(state: ReviewerHealthState): EvaluatorModel
       base.n += c.pass + c.fail;
       base.models.add(name);
     };
-    for (const rec of kind === "shared-shas" ? shared : live) for (const [name, c] of Object.entries(counts.get(rec.sha)!)) add(name, c);
-    if (kind === "shared-shas") for (const group of sharedPooled) for (const [name, c] of Object.entries(group.models)) add(name, c);
-    else for (const [name, c] of pooled) add(name, c);
-    const population = kind === "shared-shas"
-      ? { kind, shas: shared.length, pooledShas: sharedPooled.reduce((sum, group) => sum + group.shas, 0) }
-      : { kind, shas: live.length, pooledShas: state.pooled.shas };
+    for (const group of [...livePopulation, ...pooledPopulation]) for (const [name, c] of group.models) add(name, c);
+    if (kind === "healthy-shas") for (const [name, c] of legacy) add(name, c);
+    const pooledShas = kind === "healthy-shas" && legacy.length > 0
+      ? state.pooled.shas : pooledPopulation.reduce((sum, group) => sum + group.shas, 0);
+    const population: EvaluatorModelJudgment["population"] = { kind, shas: livePopulation.length, pooledShas };
     const counted = { model, provider, fail: own.fail, n: own.n, baseline: { fail: base.fail, n: base.n, models: [...base.models].sort() }, population };
     if (own.n === 0) return { ...counted, state: "insufficient", reason: "no-outcomes", below: false, interval: null, baselineInterval: null, z: null };
     if (base.n === 0) return { ...counted, state: "insufficient", reason: "no-baseline", below: false, interval: null, baselineInterval: null, z: null };
@@ -629,22 +669,44 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
       evaluatorModelEvidenceText(incident.evidence),
       "",
       `Its latest FAILs, newest first (${shown.length} of ${fails.length} remembered), with the clauses the review rows carry:`,
-      // The publication boundary: only a review that published its reasons has them quoted here (reviewPublishedItsReasons).
       ...[...shown].reverse().flatMap((f) => [`- ${f.unit} (reviewer code ${f.sha.slice(0, 12)}, ${f.at})`,
         ...(f.published ? f.clauses : [REVIEW_EVIDENCE_RETAINED_ON_HOST]).map((c) => `  - ${c}`)]),
       "",
       "Observe-only (W1-T13850): routing, verdicts, the reviewer-sha judgment and the healed tree are unchanged.",
     ].join("\n"),
-    options: [
-      { label: "File a calibration task", detail: `File a task to calibrate ${incident.model}'s review against the known-answer set (W1-T12145) and the replay (W1-T13448).`, kind: { type: "operator-only" } },
-      { label: "Close as expected", detail: "Close this issue; the detector keeps measuring and closes the incident itself once the model's FAIL rate overlaps the other models' again.", kind: { type: "operator-only" } },
-    ],
+    options: [{ label: "File a calibration task", detail: `File a task to calibrate ${incident.model}'s review against the known-answer set (W1-T12145) and the replay (W1-T13448).`, kind: { type: "operator-only" } }],
     recommendation: "File a calibration task",
     consequence: `Reviews keep running on ${incident.model} as routed, and its FAILs keep holding PRs.`,
   });
   let shown = [...fails];
   while (shown.length > 0 && renderIssueBody(build(shown)).length > GITHUB_ISSUE_BODY_LIMIT) shown = shown.slice(1);
   return build(shown);
+}
+
+/** Filed reviews can supply their own verified reasons. The ops producer removes those reasons. */
+async function publishedModelFails(fails: readonly EvaluatorModelFail[], readEvidence: typeof readReviewEvidenceRecord, log: ReviewerHealthLog): Promise<EvaluatorModelFail[]> {
+  const published: EvaluatorModelFail[] = [];
+  for (const fail of fails) {
+    if (fail.published || fail.inputDigest === undefined || fail.clauses.length === 0) {
+      published.push(fail);
+      continue;
+    }
+    const delimiter = fail.unit.lastIndexOf("#");
+    const prUrl = fail.unit.slice(0, delimiter);
+    const headSha = fail.unit.slice(delimiter + 1);
+    let clauses: string[] = [];
+    try {
+      const evidence = await readEvidence({ prUrl, headSha, reviewInputDigest: fail.inputDigest, reviewState: "failure" });
+      if (evidence?.row.reasons.length) {
+        const approved = new Set(failClauses(evidence.row));
+        clauses = fail.clauses.filter((clause) => approved.has(clause));
+      }
+    } catch (error) {
+      log("reviewer.model_divergence_evidence_unavailable", { review_unit: fail.unit, error: String((error as Error)?.message ?? error) });
+    }
+    published.push(clauses.length === 0 ? fail : { ...fail, clauses, published: true });
+  }
+  return published;
 }
 
 export interface OffendingMerge { sha: string; subject: string; pr: number | null; reason: string }
@@ -925,13 +987,13 @@ function signatureOf(rec: ReviewerShaRecord): string[] {
  * {@link Clock} port — and git, the ledger reader and the log are plain functions.
  */
 export async function evaluateReviewerHealthNow(
-  input: { originMainSha: string | null },
+  input: { originMainSha: string | null; readEvidence?: typeof readReviewEvidenceRecord },
   statePath: string,
   readRows: (cursor: ReviewerHealthCursor | null) => Promise<{ rows: Iterable<Record<string, unknown>>; cursor: ReviewerHealthCursor }>,
   git: GitText,
   escalation: EscalateDeps<AsyncIssueGateway>,
   lane: MainRepairLane,
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  log: ReviewerHealthLog,
   clock: Pick<Clock, "iso">,
 ): Promise<ReviewerHealthDecision> {
   const state = loadReviewerHealthState(statePath);
@@ -1063,33 +1125,55 @@ export async function evaluateReviewerHealthNow(
     const judged = judgeEvaluatorModels(state);
     log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged: judged.filter((j) => j.state === "diverged").map((j) => j.model) });
     for (const j of judged) {
-      const open = state.modelIncidents[j.model];
-      if (open === undefined && j.state === "diverged") {
-        const incident: EvaluatorModelIncident = { id: `reviewer-model-divergence-${j.model}`, model: j.model, provider: j.provider, openedAt: clock.iso(), evidence: j };
-        state.modelIncidents[j.model] = incident;
-        // tryEscalateAsync never rejects: a failed filing is ledgered as escalation.failed and reads null.
-        incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, state.modelFails[j.model] ?? []), escalation);
-        log("reviewer.model_divergence_opened", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: incident.issueUrl });
-        continue;
-      }
-      // Closes only on a true overlap: an interval wholly below the baseline has not returned to it either.
-      if (open === undefined || j.interval === null || j.baselineInterval === null || !intervalsOverlap(j.interval, j.baselineInterval)) continue;
-      delete state.modelIncidents[j.model];
-      if (open.issueUrl && escalation.issues.closeWithComment) {
+      const pending = modelValue(state.modelIncidents, j.model);
+      const diverged = j.state === "diverged";
+      const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
+      if (diverged && pending?.issueUrl) continue;
+      if (!diverged && (pending === undefined || !overlap)) continue;
+      const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
+        provider: j.provider, openedAt: clock.iso(), evidence: j };
+      state.modelIncidents = { ...state.modelIncidents, [j.model]: incident };
+
+      if (!incident.issueUrl) {
         try {
-          await escalation.issues.closeWithComment(open.issueUrl, `Back inside its baseline (W1-T13850). ${evaluatorModelEvidenceText(j)}`);
+          const open = await escalation.issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [];
+          // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
+          incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
+          if (diverged && !incident.issueUrl) {
+            const fails = await publishedModelFails(modelValue(state.modelFails, j.model) ?? [], input.readEvidence ?? readReviewEvidenceRecord, log);
+            incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, fails), {
+              ...escalation, issues: { ...escalation.issues, listOpen: async () => open },
+            });
+          }
         } catch (error) {
-          log("reviewer.model_divergence_issue_close_failed", { incident_id: open.id, issue_url: open.issueUrl, error: String((error as Error)?.message ?? error) });
+          // Leave the issue pending when the lookup or delivery fails so the next evaluation can retry.
+          reportModelHealthFailure(error, log);
+          continue;
         }
       }
-      log("reviewer.model_divergence_closed", { incident_id: open.id, ...evaluatorModelFields(j), issue_url: open.issueUrl ?? null });
+      if (diverged) {
+        if (incident.issueUrl) log("reviewer.model_divergence_opened", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: incident.issueUrl });
+        continue;
+      }
+      const { issueUrl } = incident;
+      if (issueUrl) {
+        if (!escalation.issues.closeWithComment) continue;
+        try {
+          await escalation.issues.closeWithComment(issueUrl, `Back inside its baseline (W1-T13850). ${evaluatorModelEvidenceText(j)}`);
+        } catch (error) {
+          log("reviewer.model_divergence_issue_close_failed", { incident_id: incident.id, issue_url: issueUrl, error: String((error as Error)?.message ?? error) });
+          continue;
+        }
+      }
+      delete state.modelIncidents[j.model];
+      if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
     }
   };
 
   /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
    *  open incident's close against `current`. `live` false is the seed: history replayed, effects off. */
   const step = async (rows: Iterable<Record<string, unknown>>, current: string | null, live: boolean): Promise<void> => {
-    const touched = ingestReviewerHealthRows(state, rows);
+    const touched = ingestReviewerHealthRows(state, rows, log);
     const candidates = touched.map((sha) => state.shas[sha])
       .filter((rec): rec is ReviewerShaRecord => rec !== undefined && !rec.healed && rec.regressedAt === undefined)
       .sort((a, b) => a.seq - b.seq);
@@ -1147,12 +1231,8 @@ export async function evaluateReviewerHealthNow(
   try {
     await judgeModels();
   } catch (error) {
-    const failure = { error: String((error as Error)?.message ?? error) };
-    try {
-      log("reviewer.model_divergence_failed", failure);
-    } catch (logError) {
-      console.error(JSON.stringify({ step: "reviewer.model_divergence_failed", ...failure, log_error: String((logError as Error)?.message ?? logError) }));
-    }
+    // The caller still needs the SHA state and route if model judgment fails.
+    reportModelHealthFailure(error, log);
   }
   state.cursor = read.cursor;
   saveReviewerHealthState(statePath, state);
