@@ -12,6 +12,7 @@ import {
   escalationTaskId,
   matchDuplicateEscalation,
   renderIssueBody,
+  SECTION_HEADING_LINE_RE,
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
@@ -196,6 +197,11 @@ test("the machine fields matcher requires the exact heading after a blank line",
   assert.equal(MACHINE_FIELDS_RE.test("Summary\r\n\r\n## Machine fields\r\n**Class:** BLOCKED"), true);
   assert.equal(MACHINE_FIELDS_RE.test("Summary\n\n## Machine fields (example)\n**Class:** BLOCKED"), false);
   assert.equal(MACHINE_FIELDS_RE.test("Summary\n## Machine fields\n**Class:** BLOCKED"), false);
+});
+
+test("section heading quoting matches reserved headings and rejects lookalikes", () => {
+  assert.equal(SECTION_HEADING_LINE_RE.test("## Details\t"), true);
+  assert.equal(SECTION_HEADING_LINE_RE.test("## Details from the prior run"), false);
 });
 
 test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body order", async (t) => {

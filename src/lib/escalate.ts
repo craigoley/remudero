@@ -1118,7 +1118,7 @@ const ISSUE_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalat
 /** Text placed ABOVE "## Details" must not open a line with one of the body's own section
  *  headings: readers split the body at them, so a quoted heading would move the Details boundary
  *  and the PR identity read from it. A backslash keeps the quoted text visible verbatim. */
-const SECTION_HEADING_LINE_RE = /^(?=## (?:Decision Summary|Options|Recommendation|Details|Machine fields)[ \t\r]*$)/gm;
+export const SECTION_HEADING_LINE_RE = /^(?=## (?:Decision Summary|Options|Recommendation|Details|Machine fields)[ \t\r]*$)/gm;
 function quoteSectionHeadings(text: string): string {
   return text.replace(SECTION_HEADING_LINE_RE, "\\");
 }
