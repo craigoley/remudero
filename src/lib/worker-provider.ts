@@ -1477,7 +1477,7 @@ export function selectCodexModel(
   requestedModel?: string,
   requestedEffort?: string,
   capabilities?: CapabilityLadder,
-  policy: { preferredModel?: CodexModelPreference; reservePercent?: number; requiresSpendableCredits?: boolean;
+  policy: { preferredModel?: CodexModelPreference; reservePercent?: number;
     switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string } } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
@@ -1514,9 +1514,8 @@ export function selectCodexModel(
     const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
     const hasHeadroom = measured && capacity.windows.every((window) => window.usedPercent < 100 - reserve);
     // W1-T10382: past the reserve, prepaid credits keep the model eligible as the credits lane.
-    const spendableCredits = codexCreditsSpendable(capacity.credits);
-    const creditsLane = measured && !hasHeadroom && spendableCredits;
-    const quotaEligible = creditsLane || (hasHeadroom && (!policy.requiresSpendableCredits || spendableCredits));
+    const creditsLane = measured && !hasHeadroom && codexCreditsSpendable(capacity.credits);
+    const quotaEligible = hasHeadroom || creditsLane;
     const reason: CodexModelIneligibleReason | undefined = !mapped
       ? "unmapped"
       : !effortSupported
@@ -2118,7 +2117,6 @@ function selectCodexRuntime(
   config: Config,
   deps: CodexCapacityDeps,
   capabilities: CapabilityLadder | undefined,
-  requiresSpendableCredits = false,
 ): ProviderCapacity {
   // An attribution re-read measures a route that is already chosen, so it never consults the pool.
   const pooled = deps.routingPool && !deps.selectedModel
@@ -2137,7 +2135,6 @@ function selectCodexRuntime(
     : selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, requestedEffort, capabilities, {
       preferredModel,
       reservePercent: deps.reservePercent,
-      requiresSpendableCredits,
       switchback: deps.switchback,
     });
   const capacity: ProviderCapacity = !deps.selectedModel && !read.readable && !read.exhausted
@@ -2274,9 +2271,8 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id])])) };
     let hasUnresetWindow = false;
     let rejectedWindow: string | undefined;
-    let requiresSpendableCredits = false;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
-      credits: CodexCredits | undefined, perModel: boolean): CodexRateLimitWindow | string | null => {
+      credits: CodexCredits | undefined): CodexRateLimitWindow | string | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
@@ -2290,20 +2286,16 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) return "unreadable quota window";
-      if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) {
-        const reason = "projected burn reaches the reserve";
-        if (perModel) return reason;
-        // The generic window can still carry when a candidate has spendable credits of its own.
-        requiresSpendableCredits = true;
-        rejectedWindow ??= reason;
-      }
+      // A bucket past its reserve carries only on its own (or inherited) spendable credits. The generic bucket's
+      // refusal makes only the models it meters unavailable: a model with its own headroom still carries on it.
+      if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) return "projected burn reaches the reserve";
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
-    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined, perModel = false) => {
+    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
       if (b == null) return b;
       const { credits } = codexCreditsFor(b, carriedRates);
-      const primary = project(b.primary, old?.primary, credits, perModel);
-      const secondary = project(b.secondary, old?.secondary, credits, perModel);
+      const primary = project(b.primary, old?.primary, credits);
+      const secondary = project(b.secondary, old?.secondary, credits);
       if (typeof primary !== "string" && typeof secondary !== "string") {
         hasUnresetWindow ||= primary !== null || secondary !== null;
         return { ...b, primary, secondary };
@@ -2314,10 +2306,10 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     };
     const rateLimits = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
       rateLimitsByLimitId: carriedRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(carriedRates.rateLimitsByLimitId)
-        .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id], id !== "codex" && b?.limitId !== "codex")])) };
+        .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
     if (!hasUnresetWindow) throw new Error(rejectedWindow ?? "no unreset quota window with a duration");
-    const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities, requiresSpendableCredits);
-    if (!selected.readable || (requiresSpendableCredits && !codexCreditsSpendable(selected.credits))) {
+    const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
+    if (!selected.readable) {
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     }
     const rescued = providerEligibility(selected, reserve).lane === "codex-credits"

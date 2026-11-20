@@ -219,27 +219,47 @@ test("borrowed credits project from the generic bucket's own history", async (t)
   assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
 });
 
-test("a generic window crossing the reserve without credits refuses the carry even with model headroom", async (t) => {
-  const account = codexAccount(t);
-  account.state.extras.credits = null;
-  account.state.buckets.sol = { limitName: SOL.id,
-    primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset } };
-  const fresh = await account.read();
-  assert.equal(fresh.readable, true);
-  assert.equal(fresh.windows[0]?.usedPercent, 40);
+test("W1-T13855 criterion 9: an unfunded generic window past the reserve leaves a model with its own headroom on subscription", async (t) => {
+  for (const generic of [{ credits: null }, { credits: { hasCredits: true, unlimited: false, balance: "0" } }]) {
+    const account = codexAccount(t);
+    Object.assign(account.state.extras, generic);
+    account.state.buckets.sol = { limitName: SOL.id,
+      primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset } };
+    const fresh = await account.read();
+    assert.equal(fresh.readable, true);
+    assert.equal(fresh.windows[0]?.usedPercent, 40);
+    assert.equal(providerEligibility(fresh, 5).lane, undefined, "control: the fresh read is subscription headroom");
 
-  account.fail();
-  const capacity = await account.read();
-  assert.equal(capacity.readable, false, capacity.detail);
-  assert.equal(capacity.probeFailure, "timeout");
-  assert.match(capacity.detail ?? "", /projected burn reaches the reserve/);
-  const routed = await routeSpawn(account);
-  assert.equal(routed.decision?.rule, "cash-fallback");
-  assert.equal(routed.cashSpawns, 1);
-  assert.equal(routed.codexSpawns, 0);
+    account.fail();
+    const capacity = await account.read();
+    assert.equal(capacity.readable, true, `the model's own window carries without any credits: ${capacity.detail}`);
+    assert.equal(capacity.model, SOL.id);
+    assert.equal(providerEligibility(capacity, 5).lane, undefined, "subscription headroom, not the credits lane");
+    assert.equal(capacity.creditsRescue, undefined, "no credits rescued a reading with headroom");
+    const routed = await routeSpawn(account);
+    assert.equal(routed.decision?.rule === "cash-fallback", false, "subscription headroom is never sent to cash");
+    assert.equal(routed.cashSpawns, 0);
+    assert.equal(routed.codexSpawns, 1);
+    assert.equal(routed.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue, undefined);
+  }
 });
 
-test("an unfunded model with headroom cannot veto another model's funded carry", async (t) => {
+test("W1-T13855 criterion 6: a carried model past its reserve on borrowed credits names the carried rescue", async (t) => {
+  const account = codexAccount(t);
+  account.state.used = 40; // the generic bucket has headroom and the account's credits
+  account.state.buckets.sol = { limitName: SOL.id,
+    primary: { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset } };
+  await account.read();
+  account.fail();
+  const capacity = await account.read();
+  assert.equal(capacity.readable, true, capacity.detail);
+  assert.equal(capacity.model, SOL.id);
+  assert.equal(providerEligibility(capacity, 5).lane, "codex-credits");
+  assert.deepEqual(capacity.creditsRescue,
+    { path: "carried", projectedBalance: Number(BALANCE), ageMs: 61_000, failureKind: "timeout" });
+});
+
+test("W1-T13855 criterion 9: a carried model with its own headroom is chosen before a funded peer past its reserve", async (t) => {
   const account = codexAccount(t);
   const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
   const credits = { hasCredits: true, unlimited: false, balance: "10" };
@@ -253,12 +273,13 @@ test("an unfunded model with headroom cannot veto another model's funded carry",
   assert.equal((await account.read()).model, SOL61.id, "the fresh read prefers the model with subscription headroom");
   account.fail();
   const carried = await account.read();
-  assert.equal(carried.model, SOL.id);
-  assert.equal(carried.credits?.balance, 10);
-  assert.equal(providerEligibility(carried, 5).lane, "codex-credits");
+  assert.equal(carried.readable, true, carried.detail);
+  assert.equal(carried.model, SOL61.id, "subscription headroom is drawn before the peer's credits");
+  assert.equal(providerEligibility(carried, 5).lane, undefined);
+  assert.equal(carried.creditsRescue, undefined);
   const attribution = await account.read({ selectedModel: SOL61.id });
-  assert.equal(attribution.readable, false);
-  assert.match(attribution.detail ?? "", /projected burn reaches the reserve/);
+  assert.equal(attribution.readable, true, attribution.detail);
+  assert.equal(providerEligibility(attribution, 5).lane, undefined);
 
   account.state.mode = "ok";
   account.state.now += 61_000;
