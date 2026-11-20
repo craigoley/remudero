@@ -27,6 +27,7 @@ export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as con
 /** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 type LedgerEvidence = { pid?: number; exited: boolean; failed: boolean; opened?: string };
+type LedgerRead = LedgerEvidence | "timed-out";
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
 
@@ -208,6 +209,8 @@ export interface PlanTargetPort {
 export type PlanHandoffOutcome = "queued" | "refused" | "unknown";
 export interface PlanHandoffPort {
   productPlan?(target: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }): Promise<{ outcome: PlanHandoffOutcome }>;
+  /** Accepted calls register synchronously under their ledger task id before returning their promise. */
+  inFlight?(taskId: string): boolean;
 }
 
 export interface ProductPlanOperationOptions {
@@ -243,7 +246,7 @@ const recordSchema = z.object({
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "unknown"]), at: z.string().datetime() }).strict().optional(),
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
 const journalSchema = z.object({
@@ -368,6 +371,7 @@ export class ProductPlanOperationService {
     if (known && !record) throw new Fault("corrupt");
     let replayed = known !== undefined;
     let head: string | undefined;
+    let selectedEvidence: LedgerRead | undefined;
     if (!record) {
       // A fresh request: everything the operation will freeze is verified against the live target first.
       if (!repository) throw new Fault("repository_missing");
@@ -398,6 +402,7 @@ export class ProductPlanOperationService {
         const state = this.observeWith(entry, product, head, seen).state;
         if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
           reusable = entry;
+          selectedEvidence = seen;
           break;
         }
       }
@@ -439,7 +444,7 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const seen = await this.ledger(record);
+    const seen = selectedEvidence ?? await this.ledger(record);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };
@@ -477,15 +482,18 @@ export class ProductPlanOperationService {
   private handOff(paths: Paths, record: Record_, brief: string): void {
     const gateway = this.options.gateway!;
     this.flying.add(record.operationId);
+    let accepted: boolean | undefined;
     const finished = (outcome: PlanHandoffOutcome) => this.enqueue(async () => {
       // Completion is known in memory even if another writer prevents persisting its outcome.
-      // With no durable result or ledger row, observe() must report unknown instead of pending.
+      // With no durable result or ledger row, observeWith() must report unknown instead of pending.
       this.flying.delete(record.operationId);
       await this.mutate(paths, async () => {
         const journal = this.readJournal(paths);
         const stored = journal.operations[record.operationId];
         if (!stored) return;
-        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff: { outcome, at: this.clock.iso() } } } });
+        const beforeLaunch = outcome === "refused" && accepted === false ? true as const : undefined;
+        const handoff = { outcome, at: this.clock.iso(), beforeLaunch };
+        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
     let started: Promise<{ outcome: PlanHandoffOutcome }>;
@@ -494,30 +502,29 @@ export class ProductPlanOperationService {
       // A gateway that throws before returning a promise has handed nothing off; the outcome is recorded unknown, never retried.
       void error; started = Promise.resolve({ outcome: "unknown" as const });
     }
+    accepted = gateway.inFlight?.(productPlanLedgerTaskId(record.operationId));
     void started.then((result) => finished(result.outcome), () => finished("unknown"));
   }
 
-  /** The state this record is in NOW: the ledger's correlated rows first, the live brief and target head only on top. */
-  private async state(record: Record_, product: StoredProduct, liveHead: string | undefined): Promise<ProductPlanState> {
-    return this.observeWith(record, product, liveHead, await this.ledger(record)).state;
-  }
-
   /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
-  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerEvidence): ProductPlanObservation {
-    let state: ProductPlanState;
-    if (seen.opened !== undefined) state = "proposed";
-    else if (seen.exited) state = "refused";
-    else if (seen.failed) state = "unknown";
-    else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
-    else if (this.flying.has(record.operationId)) state = "pending";
-    else state = record.handoff?.outcome === "refused" ? "refused" : "unknown";
-    // A late proposal is historical evidence for its frozen brief, never for a newer objective.
-    if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
-    // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
-    else if (state !== "proposed" && liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
+  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerRead): ProductPlanObservation {
+    let state: ProductPlanState = "unknown";
+    const proposal = seen === "timed-out" ? undefined : seen.opened;
+    if (seen !== "timed-out") {
+      if (proposal !== undefined) state = "proposed";
+      else if (seen.exited) state = "refused";
+      else if (seen.failed) state = "unknown";
+      else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
+      else if (this.flying.has(record.operationId)) state = "pending";
+      else if (record.handoff?.outcome === "refused") state = "refused";
+      // A late proposal is historical evidence for its frozen brief, never for a newer objective.
+      if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
+      // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
+      else if (state !== "proposed" && liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
+    }
     return { operationId: record.operationId, state, mode: record.mode, planEvidenceId: record.planEvidenceId, repository: record.repository,
       targetHead: record.targetHead, revision: record.revision, objectiveRevision: record.objectiveRevision, briefDigest: record.briefDigest,
-      requestedAt: record.requestedAt, ...(seen.opened !== undefined ? { proposal: seen.opened } : {}) };
+      requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
   /**
@@ -526,11 +533,11 @@ export class ProductPlanOperationService {
    * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
    * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
    */
-  private async ledger(record: Record_): Promise<LedgerEvidence> {
+  private async ledger(record: Record_): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
     if (this.options.ledgerPath === undefined) return none;
-    // W1-T13875: a refused hand-off started nothing, so the ledger holds no evidence for it; final evidence never changes.
-    if (record.handoff?.outcome === "refused" && !this.flying.has(record.operationId)) return none;
+    // Older refusals can be child exits. Only a confirmed pre-launch refusal can skip the read.
+    if (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.flying.has(record.operationId)) return none;
     const settled = this.settledEvidence.get(record.operationId);
     if (settled) return settled;
     const taskId = productPlanLedgerTaskId(record.operationId);
@@ -541,9 +548,10 @@ export class ProductPlanOperationService {
     const read = await Promise.race([
       (this.options.readLedgerLines ?? readLedgerUnionRawLinesAsync)(dirname(this.options.ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
         keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") }),
-      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), bound); timer.unref?.(); }),
+      new Promise<"timed-out">((resolve) => { timer = setTimeout(() => resolve("timed-out"), bound); }),
     ]).finally(() => clearTimeout(timer));
-    if (read === undefined || !read.ok) return none;
+    if (read === "timed-out") return read;
+    if (!read.ok) return none;
     const parsed = read.rawLines.flatMap((line): Array<Record<string, unknown>> => {
       try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
     });
