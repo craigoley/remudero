@@ -108,10 +108,11 @@ function observeBuild(root: string, ledgerPath: string, expectedReason = standDo
   }
 }
 
-function buildInNewProcess(root: string, ledgerPath: string, expectedReason = standDownReason): BuildObservation {
+function buildInNewProcess(root: string, ledgerPath: string, expectedReason = standDownReason, eioArchive?: string): BuildObservation {
   const child = spawnSync(process.execPath, [
     "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
     fileURLToPath(import.meta.url), childFlag, root, ledgerPath, expectedReason,
+    ...(eioArchive === undefined ? [] : [eioArchive]),
   ], {
     cwd: REPO_ROOT,
     encoding: "utf8",
@@ -123,6 +124,21 @@ function buildInNewProcess(root: string, ledgerPath: string, expectedReason = st
   return JSON.parse(child.stdout) as BuildObservation;
 }
 
+function failRotationRead(archive: string, code: "EACCES" | "EIO"): () => void {
+  const read = fs.readFileSync;
+  fs.readFileSync = new Proxy(read, {
+    apply(target, receiver, args) {
+      if (args[0] === archive) throw Object.assign(new Error(`rotation read failed: ${code}`), { code });
+      return Reflect.apply(target, receiver, args);
+    },
+  });
+  syncBuiltinESMExports();
+  return () => {
+    fs.readFileSync = read;
+    syncBuiltinESMExports();
+  };
+}
+
 function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidates {
   return candidates.filter(({ prNumber, headSha }) => {
     const headRows = rows.filter((row) => row.pr_number === prNumber && row.head_sha === headSha);
@@ -132,7 +148,13 @@ function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidate
 }
 
 if (process.argv[2] === childFlag) {
-  process.stdout.write(JSON.stringify(observeBuild(process.argv[3]!, process.argv[4]!, process.argv[5])));
+  const archive = process.argv[6];
+  const restore = archive === undefined ? undefined : failRotationRead(archive, "EIO");
+  try {
+    process.stdout.write(JSON.stringify(observeBuild(process.argv[3]!, process.argv[4]!, process.argv[5])));
+  } finally {
+    restore?.();
+  }
 } else {
   test("W1-T12271 criterion 1: a fresh sweep process reuses the shared snapshot without rotation digests", (t) => {
     const { root, dir, path } = fixture(t);
@@ -370,18 +392,45 @@ if (process.argv[2] === childFlag) {
   test("an unreadable rotation holds dispatch even when its slice is cached", (t) => {
     const { root, path, archive } = fixture(t);
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
-    const access = fs.accessSync;
+    const restore = failRotationRead(archive, "EACCES");
     try {
-      fs.accessSync = ((candidate: Parameters<typeof fs.accessSync>[0], mode?: Parameters<typeof fs.accessSync>[1]) => {
-        if (String(candidate) === archive) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-        return access(candidate, mode);
-      }) as typeof fs.accessSync;
-      syncBuiltinESMExports();
       assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 0, stoodDown: candidates });
     } finally {
-      fs.accessSync = access;
-      syncBuiltinESMExports();
+      restore();
     }
+  });
+
+  test("W1-T12271 criterion 3: cached rotation read EIO holds dispatch even when stat and R_OK succeed", async (t) => {
+    const { root, dir, path, archive } = fixture(t);
+    assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 3) });
+    rmSync(join(dir, "cache", "rotation-digests"), { recursive: true, force: true });
+    const previouslyFree = candidates[3] as OpenPrView;
+    const restore = failRotationRead(archive, "EIO");
+    try {
+      assert.ok(statSync(archive).isFile());
+      fs.accessSync(archive, fs.constants.R_OK);
+      const union = resolveLedgerUnion(dir, legacyPattern);
+      assert.equal(union.ok, false);
+      assert.deepEqual(union.unread, [archive]);
+      assert.deepEqual(union.matches, []);
+
+      let preflights = 0;
+      const effects = buildEffects(root, path, {
+        dispatchFixPreflightStandDownImpl: async () => {
+          preflights++;
+          return true;
+        },
+      });
+      assert.equal(effects.terminalFixStandDown!(previouslyFree), unreadHistoryReason);
+      assert.deepEqual(await effects.dispatchFix!(previouslyFree, { unmetCriteria: [] }), {
+        roundNotRun: true, reason: unreadHistoryReason,
+      });
+      assert.equal(preflights, 0);
+      assert.deepEqual(buildInNewProcess(root, path, unreadHistoryReason, archive), { gunzips: 0, stoodDown: candidates });
+    } finally {
+      restore();
+    }
+    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
   });
 
   test("without rotations the sweep uses the caller's live ledger path", (t) => {

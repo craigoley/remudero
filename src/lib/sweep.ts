@@ -1092,10 +1092,10 @@ function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordR
   const history = reader.current(stateDir, { publishSnapshot: true });
   if (!history.ok) return undefined;
   try {
-    for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
+    for (const archive of history.archiveFiles) readFileSync(archive);
     if (history.liveFileRead) fs.accessSync(ledgerLivePath(stateDir), fs.constants.R_OK);
   } catch {
-    // Cached rows can outlive a read permission change on a file or its parent.
+    // A failed read or access check makes cached history unknown and holds dispatch.
     return undefined;
   }
   return history;
