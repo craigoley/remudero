@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
 import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
-import type { AsyncIssueGateway } from "#src/lib/escalate.js";
+import { matchDuplicateEscalation, type AsyncIssueGateway } from "#src/lib/escalate.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
+import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 type Row = Record<string, unknown>;
@@ -61,7 +62,7 @@ function elevenNineteen(): { rows: Row[]; solShas: string[]; claudeShas: string[
   return { rows, solShas, claudeShas };
 }
 
-function harness(t: TestContext) {
+function harness(t: TestContext, beforeLog?: (step: string, extra: Row) => void) {
   const dir = ownedFixtureDir(t, "reviewer-model-health").dir;
   const ledgerPath = join(dir, "ledger.ndjson");
   const statePath = join(dir, "reviewer-health.json");
@@ -83,12 +84,14 @@ function harness(t: TestContext) {
     closePr: async () => undefined,
   };
   const escalation = { issues, ledgerPath, runId: "reviewer-model-health-test" };
-  const log = (step: string, extra: Row = {}) => { logs.push({ step, extra }); };
-  const readRows = async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } });
+  const log = (step: string, extra: Row = {}) => { beforeLog?.(step, extra); logs.push({ step, extra }); };
+  const readRows = async () => ({ rows: queue.splice(0), cursor: { liveOffset: 97 } });
   const git: health.GitText = async () => { throw new Error("no git: no sha regresses here"); };
   const evaluate = (originMainSha: string | null) =>
     health.evaluateReviewerHealthNow({ originMainSha }, statePath, readRows, git, escalation, lane, log, { iso: () => new Date(clock).toISOString() });
-  return { queue, logs, created, closed, reverts, statePath, evaluate, steps: (step: string) => logs.filter((l) => l.step === step) };
+  const route = (originMainSha: string) =>
+    health.evaluateReviewerHealth({ originMainSha }, statePath, readRows, git, escalation, lane, log, { iso: () => new Date(clock).toISOString() });
+  return { queue, logs, created, closed, reverts, ledgerPath, statePath, evaluate, route, steps: (step: string) => logs.filter((l) => l.step === step) };
 }
 
 type ModelRow = Record<string, unknown> & { model: string };
@@ -135,6 +138,22 @@ test("W1-T13850 criterion 1: a posted verdict keeps its evaluator and state, and
   assert.deepEqual(health.evaluatorModelCounts(loaded, sha), { "gpt-6.2-sol": { provider: "codex", pass: 0, fail: 1 } });
 });
 
+test("W1-T13850 criterion 1: distinct attempts on one head survive delivery replays and a state reload", (t) => {
+  const sha = fake("retried-reviewer");
+  const statePath = join(ownedFixtureDir(t, "reviewer-model-attempts").dir, "reviewer-health.json");
+  const state = health.emptyReviewerHealthState();
+  const first = verdict(sha, SOL, "success", { review_attempt_id: "first-attempt" });
+  const second = verdict(sha, SOL, "failure", { review_attempt_id: "second-attempt", pr_url: first.pr_url, head_sha: first.head_sha });
+  const manual = verdict(sha, SOL, "failure", { run_id: "manual-review", pr_url: first.pr_url, head_sha: first.head_sha });
+  health.ingestReviewerHealthRows(state, [first, second, manual]);
+  health.saveReviewerHealthState(statePath, state);
+  const loaded = health.loadReviewerHealthState(statePath);
+  health.ingestReviewerHealthRows(loaded, [{ ...first, ts: tick() }, manual, { ...second, ts: tick() }, { ...manual, ts: tick() }]);
+  assert.deepEqual(health.evaluatorModelCounts(loaded, sha)[SOL.model], { provider: SOL.provider, pass: 1, fail: 2 });
+  assert.equal(health.shaCounts(loaded.shas[sha]!).n, 1);
+  assert.deepEqual(loaded.modelFails[SOL.model]?.map((f) => f.at), [second.ts, manual.ts]);
+});
+
 test("W1-T13850 criterion 2: the 11-19 counts read gpt-6.2-sol diverged and one reviewer.model_divergence row names it", async (t) => {
   const h = harness(t);
   await h.evaluate(null); // the seed: an empty history
@@ -177,6 +196,29 @@ test("W1-T13850 criterion 2: shas both models carry are the population when they
   const sol = health.judgeEvaluatorModels(state).find((j) => j.model === "gpt-6.2-sol")!;
   assert.deepEqual([sol.population.kind, sol.population.shas, sol.fail, sol.n, sol.baseline.fail, sol.baseline.n, sol.state],
     ["shared-shas", 1, 20, 20, 0, 40, "diverged"]);
+});
+
+test("W1-T13850 criterion 2: evicting the only shared sha preserves the comparison and attempt counts", (t) => {
+  const state = health.emptyReviewerHealthState();
+  const shared = fake("old-shared-sha");
+  const first = verdict(shared, SOL, "failure", { review_attempt_id: "pooled-attempt" });
+  health.ingestReviewerHealthRows(state, [first, ...repeat(29, () => verdict(shared, SOL, "failure")),
+    ...repeat(100, () => verdict(shared, SONNET, "success")),
+    ...repeat(100, () => verdict(fake("sol-only"), SOL, "success")),
+    ...repeat(80, () => verdict(fake("sonnet-only"), SONNET, "failure"))]);
+  const sol = (s: health.ReviewerHealthState) => health.judgeEvaluatorModels(s).find((j) => j.model === SOL.model)!;
+  const before = sol(state);
+  assert.deepEqual([before.state, before.fail, before.n, before.baseline.fail, before.baseline.n], ["diverged", 30, 30, 0, 100]);
+  health.ingestReviewerHealthRows(state, Array.from({ length: health.MAX_TRACKED_REVIEWER_SHAS - 2 }, (_, i) =>
+    verdict(fake(`filler-${i}`), SONNET, "success", { evaluator_provenance: undefined })));
+  assert.equal(state.shas[shared], undefined, "the shared sha left the live sha window");
+  const statePath = join(ownedFixtureDir(t, "reviewer-model-pooling").dir, "reviewer-health.json");
+  health.saveReviewerHealthState(statePath, state);
+  const loaded = health.loadReviewerHealthState(statePath);
+  const expected = { ...before, population: { kind: "shared-shas", shas: 0, pooledShas: 1 } };
+  assert.deepEqual(sol(loaded), expected);
+  health.ingestReviewerHealthRows(loaded, [{ ...first, ts: tick() }]);
+  assert.deepEqual(sol(loaded), expected, "re-reading a pooled attempt has no effect on the model");
 });
 
 test("W1-T13850 criterion 3: equal counts never diverge, and a sample that could not show it reads insufficient", () => {
@@ -237,6 +279,7 @@ test("W1-T13850 criterion 4: a divergence opens one incident naming its latest F
   assert.ok(body.indexOf("the newest FAIL's own clause") < body.indexOf("the bare failure line"), "newest first");
   assert.match(body, /calibrat/i, "the action: a calibration task");
   assert.match(body, /W1-T12145/);
+  assert.match(body, /W1-T13448/);
   assert.equal(h.steps("reviewer.model_divergence_opened").length, 1);
   assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents["gpt-6.2-sol"]?.issueUrl, "https://github.com/acme/remudero/issues/1");
 
@@ -263,6 +306,47 @@ test("W1-T13850 criterion 4: a divergence opens one incident naming its latest F
   assert.equal(h.created.length, 1);
 });
 
+test("W1-T13850 criterion 4: the production reconciler leaves a model incident open when evidence PRs close", async (t) => {
+  const h = harness(t);
+  await h.evaluate(null);
+  const shared = fake("closed-pr-evidence");
+  h.queue.push(...repeat(100, () => verdict(shared, SONNET, "success")),
+    ...repeat(30, () => verdict(shared, SOL, "failure", {
+      reasons: [`(semantic downgrade): compare ${PULL}/123 and PR #456`],
+    })));
+  await h.evaluate(shared);
+  const issue = { ...h.created[0]!, number: 1, url: "https://github.com/acme/remudero/issues/1" };
+  const control = { ...issue, number: 2, body: "**Task:** PR-123", url: "https://github.com/acme/remudero/issues/2" };
+  const candidates = buildEscalationReconcileCandidates("acme", "remudero", { tasks: [], byId: new Map() }, h.ledgerPath, undefined, {
+    evidenceRootFor: () => undefined,
+    issues: { listOpen: () => [issue, control] },
+    github: { prByRef: (ref) => ({ number: Number(ref), url: `${PULL}/${ref}`, state: "CLOSED" }),
+      findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+  });
+  assert.deepEqual(candidates.map((c) => [c.issueNumber, c.derived.closed]), [[2, true]]);
+  const state = health.loadReviewerHealthState(h.statePath);
+  const incident = state.modelIncidents[SOL.model]!;
+  const evidence = state.modelFails[SOL.model]!.slice(-1);
+  assert.equal(matchDuplicateEscalation(health.evaluatorModelDivergenceEscalation(incident, evidence), [issue]), issue,
+    "dedup uses the model even when a later evaluation quotes different PRs");
+});
+
+test("W1-T13850 criterion 4: a jump below the baseline without overlap keeps the incident open", async (t) => {
+  const h = harness(t);
+  await h.evaluate(null);
+  const sha = fake("interval-overshoot");
+  h.queue.push(...repeat(100, () => verdict(sha, SOL, "failure")),
+    ...repeat(50, () => verdict(sha, SONNET, "failure")), ...repeat(50, () => verdict(sha, SONNET, "success")));
+  await h.evaluate(sha);
+  assert.equal(h.created.length, 1);
+  h.queue.push(...repeat(400, () => verdict(sha, SOL, "success")));
+  await h.evaluate(sha);
+  const state = health.loadReviewerHealthState(h.statePath);
+  assert.equal(health.judgeEvaluatorModels(state).find((j) => j.model === SOL.model)?.below, true);
+  assert.equal(h.closed.length, 0);
+  assert.ok(state.modelIncidents[SOL.model]);
+});
+
 test("W1-T13850 criterion 5: invariant:observe-only — the model judgment changes no route, sha judgment or reviewer-sha incident", async (t) => {
   const { rows, solShas, claudeShas } = elevenNineteen();
   // The same rows with every evaluator and verdict state removed: what origin/main's sha judgment reads.
@@ -286,4 +370,33 @@ test("W1-T13850 criterion 5: invariant:observe-only — the model judgment chang
   assert.deepEqual(seen.logs.filter((l) => l.step.startsWith("reviewer.regression")), []);
   assert.deepEqual(Object.values(a.shas).map((rec) => rec.units), Object.values(b.shas).map((rec) => rec.units));
   assert.ok(readFileSync(seen.statePath, "utf8").includes("gpt-6.2-sol"));
+});
+
+test("W1-T13850 criterion 5: model telemetry failure leaves the active healed route and sha checkpoint intact", async (t) => {
+  const h = harness(t, (step, extra) => {
+    if (step === "reviewer.model_divergence" || (step === "reviewer.health_unavailable" && extra.phase === "models")) {
+      throw new Error("model telemetry append failed");
+    }
+  });
+  const state = health.emptyReviewerHealthState();
+  const regressed = fake("active-regression");
+  const unhealthy = { ...verdict(regressed, SONNET, "success"), step: "review.semantic_setup_refused" };
+  health.ingestReviewerHealthRows(state, [unhealthy]);
+  state.shas[regressed]!.regressedAt = tick();
+  const evidence = health.judgeReviewerSha(state, regressed);
+  state.incident = { id: "active-regression", regressedSha: regressed, regressedSeq: state.shas[regressed]!.seq,
+    openedAt: tick(), bootHeadSha: null, lastHealthySha: null, evidence, signature: ["setup-refused"],
+    offending: { sha: regressed, subject: "review regression", pr: 17, reason: "changed review code" } };
+  state.cursor = { liveOffset: 0 };
+  health.saveReviewerHealthState(h.statePath, state);
+  const posted = verdict(regressed, SOL, "success");
+  h.queue.push(posted);
+  health.ingestReviewerHealthRows(state, [{ ...posted, evaluator_provenance: undefined }]);
+  assert.deepEqual(await h.route(regressed), {
+    route: "healed", incident: state.incident, shadow: false, withPr: null, current: health.judgeReviewerSha(state, regressed),
+  });
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.deepEqual(saved.cursor, { liveOffset: 97 });
+  assert.deepEqual(saved.incident, state.incident);
+  assert.equal(health.shaCounts(saved.shas[regressed]!).n, 2);
 });
