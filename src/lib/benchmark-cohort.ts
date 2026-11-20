@@ -831,16 +831,24 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
   const byTask = caseFilesByTask(caseFiles);
   const tallies = new Map<string, CohortVerifiedOutcome>();
   for (const assignment of assignments) {
-    const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
     const tally = tallies.get(assignment.cohortKey)
       ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} };
+    tallies.set(assignment.cohortKey, tally);
+    // An assignment that never reached a worker call is not a call, so it never counts as a completed one.
+    if (!assignment.attempted) {
+      tally.assignments += 1; tally.unavailable += 1;
+      tally.reasons["no-worker-call"] = (tally.reasons["no-worker-call"] ?? 0) + 1;
+      continue;
+    }
+    const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
     tally.assignments += coverage.assignments;
     tally.completed += coverage.completed;
     tally.endedWithoutCompletion += coverage.endedWithoutCompletion;
     tally.censored += coverage.censored;
     tally.unavailable += coverage.unavailable;
     for (const [reason, count] of Object.entries(coverage.reasons)) tally.reasons[reason] = (tally.reasons[reason] ?? 0) + count;
-    tallies.set(assignment.cohortKey, tally);
+    // The join censors only a call whose PR is open at the cutoff; the row names that reason too.
+    if (coverage.censored > 0) tally.reasons["open-at-cutoff"] = (tally.reasons["open-at-cutoff"] ?? 0) + coverage.censored;
   }
   return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: tallies.get(JSON.stringify(cohort.dimensions))
     ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} } }));

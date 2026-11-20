@@ -725,9 +725,11 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
   const notCollected = { state: "unavailable" as const, reason: "not-collected", source: "fixture", asOf: cutoff };
   const at = (i: number, seconds = 0) => `2026-09-27T10:${String(i).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.000Z`;
   // Model and PR state per assignment; no `pr` = no case file for that task.
-  const cases: { model: string; pr?: "MERGED" | "CLOSED" | "OPEN" }[] = [
+  // `noCall`: the assignment was written but no worker call followed it.
+  const cases: { model: string; pr?: "MERGED" | "CLOSED" | "OPEN"; noCall?: true }[] = [
     { model: "gpt-luna", pr: "MERGED" }, { model: "gpt-luna", pr: "CLOSED" }, { model: "gpt-luna", pr: "OPEN" },
     { model: "gpt-luna" }, { model: "claude-opus", pr: "MERGED" }, { model: "claude-opus", pr: "MERGED" },
+    { model: "claude-opus", pr: "MERGED", noCall: true },
   ];
   const caseFiles: TaskCaseFile[] = cases.flatMap(({ model, pr }, i) => pr === undefined ? [] : [{
     version: "task-case-file-v1", taskId: `W1-T${9000 + i}`, asOf: cutoff,
@@ -743,12 +745,17 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
   } as TaskCaseFile]);
   const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-call-outcome-"));
   try {
-    writeFileSync(join(stateDir, "ledger.ndjson"), cases.map(({ model }, i) => row({ ts: at(i), host: "core-host",
+    writeFileSync(join(stateDir, "ledger.ndjson"), cases.map(({ model, noCall }, i) => row({ ts: at(i), host: "core-host",
       task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.assignment",
       worker_assignment: { id: `assign-${i}`, requested: { model }, selected: { provider: "codex", model } },
       benchmark_run: { work: { taskClass: { state: "observed", value: "fix" } } } })
-      + row({ ts: at(i, 30), host: "core-host", task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.attempt",
-        selection_assignment_id: `assign-${i}`, success: true, billing_mode: "api", total_cost_usd: 0.02 })).join(""));
+      + (noCall ? "" : row({ ts: at(i, 30), host: "core-host", task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.attempt",
+        selection_assignment_id: `assign-${i}`, success: true, billing_mode: "api", total_cost_usd: 0.02 }))).join(""));
+    // Each pass's rows come from the same join as that pass's own cohort-level total: both joined, or both unavailable.
+    const agrees = (snapshot: Awaited<ReturnType<typeof runBenchmarkCohortPass>>["snapshot"], label: string): void => {
+      for (const cohort of snapshot.cohorts) assert.equal(typeof cohort.verifiedOutcome === "string",
+        typeof snapshot.verifiedTaskOutcome === "string", `${label}: a row and its snapshot's total agree on whether a join exists`);
+    };
     const joined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles })).snapshot;
     const byModel = Object.fromEntries(joined.cohorts.map((cohort) => [cohort.dimensions.model, cohort]));
     assert.deepEqual(Object.keys(byModel).sort(), ["claude-opus", "gpt-luna"]);
@@ -760,22 +767,30 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
     }
     const luna = byModel["gpt-luna"]!.verifiedOutcome as Exclude<BenchmarkCohort["verifiedOutcome"], string>;
     assert.equal(luna.completed, 1); assert.equal(luna.censored, 1); assert.equal(luna.unavailable, 2);
-    assert.equal(Object.values(luna.reasons).reduce((sum, count) => sum + count, 0), luna.endedWithoutCompletion + luna.unavailable,
-      "each call neither completed nor censored names why");
+    assert.equal(Object.values(luna.reasons).reduce((sum, count) => sum + count, 0), luna.endedWithoutCompletion + luna.unavailable + luna.censored,
+      "each call not completed names why");
     assert.ok(luna.reasons["closed-unmerged-unadjudicated"] === 1, "a closed PR names its reason");
-    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 2, completed: 2, endedWithoutCompletion: 0,
-      censored: 0, unavailable: 0, reasons: {} });
+    assert.equal(luna.reasons["open-at-cutoff"], 1, "a censored call names why it is not completed");
+    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 3, completed: 2, endedWithoutCompletion: 0,
+      censored: 0, unavailable: 1, reasons: { "no-worker-call": 1 } }, "an assignment with no worker call is never a completed call");
+    agrees(joined, "joined");
     const totals = joined.verifiedTaskOutcome as Exclude<typeof joined.verifiedTaskOutcome, string>;
-    assert.equal(totals.coverage.completed, 3, "the cohort-level join is unchanged");
+    assert.equal(totals.coverage.completed, 4, "the cohort-level join is unchanged: it counts assignments, the no-call one included");
     // A cached pass without case files keeps its cohort-level totals unchanged, and each row agrees with them: it keeps
     // the outcome the same earlier join gave it, never the unavailable reason beside a retained joined total.
     const cached = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
     assert.deepEqual(cached.verifiedTaskOutcome, joined.verifiedTaskOutcome, "cohort-level totals do not change");
     assert.deepEqual(cached.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    agrees(cached, "cached without case files");
     rmSync(join(stateDir, "benchmark-cohort-index.json"), { force: true }); // a fresh pass, with no cached snapshot
     const unjoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
     assert.equal(unjoined.cohorts.length, 2);
     for (const cohort of unjoined.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
     assert.equal(unjoined.verifiedTaskOutcome, "unavailable-no-github-verification-join", "a fresh pass with no case files joins nothing");
+    agrees(unjoined, "fresh without case files");
+    // A cached pass WITH case files over an index written without them joins its rows exactly as a fresh joined pass does.
+    const rejoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles })).snapshot;
+    assert.deepEqual(rejoined.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    agrees(rejoined, "cached with case files");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
