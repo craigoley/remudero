@@ -115,3 +115,78 @@ test("W1-T13951 criterion 3: a spilled command line that does not parse still re
     assert.equal(result.isError, true);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
+
+test("W1-T13951 criterion 1: an earlier message is reclaimed before the newest one that fits the limit alone is cut", async () => {
+  const child = reviewer();
+  try {
+    const final = "FINAL\n" + "f".repeat(800 * 1024);
+    child.message("EARLIER\n" + "e".repeat(400 * 1024));
+    child.command("c".repeat(2 * 1024 * 1024));
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.equal(Buffer.byteLength(result.text), Buffer.byteLength(final));
+    assert.ok(result.text === final, "the newest message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
+    assert.ok(result.blocks[0]!.startsWith("EARLIER"), "the earlier message keeps its head");
+    const bytes = result.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.ok(bytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.equal(result.outputTruncation!.retainedBytes, bytes);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: an evicted message that was cut once counts only its source bytes, never its marker", async () => {
+  const child = reviewer();
+  try {
+    const commandLine = (output: string) => Buffer.byteLength(JSON.stringify({ type: "item.completed", item: {
+      id: "item_7", type: "command_execution", command: "/bin/bash -lc 'cat src/lib/worker-provider.ts'",
+      aggregated_output: output, exit_code: 0, status: "completed" } }));
+    const spillKept = 64 * 1024 + 256 * 1024;
+    const outputs = ["a".repeat(1536 * 1024), "b".repeat(1536 * 1024)];
+    const evicted = "E".repeat(2 * 1024 * 1024);
+    child.message("first");
+    child.command(outputs[0]!);
+    child.message(evicted);
+    child.command(outputs[1]!);
+    child.message("B".repeat(400 * 1024));
+    child.message("C".repeat(400 * 1024));
+    child.end();
+    const result = await child.run;
+    assert.ok(!result.blocks.some(block => block.startsWith("EEEE")), "the cut message was evicted");
+    const expected = outputs.reduce((sum, output) => sum + commandLine(output) - spillKept, 0) + Buffer.byteLength(evicted);
+    assert.equal(result.outputTruncation!.droppedBytes, expected);
+    const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
+    assert.equal(receipt.output_truncation.droppedBytes, expected);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 3: a final message with an escaped quote at the spill boundary reconstructs and reads truncated", async () => {
+  const child = reviewer();
+  try {
+    // The spilled tail is the line's last 256 KiB; place `\"` so the tail begins on its quote.
+    const text = "HEAD" + "a".repeat(1_048_000) + "\"" + "b".repeat(262_140);
+    const line = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } });
+    assert.equal(line.slice(-262_144 - 1, -262_144 + 1), "\\\"");
+    child.raw(line + "\n");
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text.startsWith("HEAD"), "the head survives the cut");
+    assert.ok(result.text.endsWith("b".repeat(1000)), "the tail survives the cut");
+    assert.equal(result.outputRetention?.text.state, "truncated");
+    assert.equal(result.isError, true);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 3: a final message whose spilled line cannot be reconstructed never reads complete", async () => {
+  const child = reviewer();
+  try {
+    const line = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "m".repeat(1.2 * 1024 * 1024) } });
+    child.raw(line.slice(0, -3) + "\n");
+    child.end();
+    const result = await child.run;
+    assert.equal(result.text, "");
+    assert.equal(result.outputRetention?.text.state, "truncated");
+    assert.equal(result.isError, true);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
