@@ -16,9 +16,6 @@
     - W1-T11914
   files:
     - src/lib/hand-ship.ts
-    - src/lib/git-push.ts
-    - src/lib/worktree-git.ts
-    - src/lib/github-transport.ts
     - src/run-task.ts
     - test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts
     - docs/cli-reference.md
