@@ -503,17 +503,19 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** Retain every clean input for each proposal, including inputs it has since moved away from. */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
-  const keys = new Map<string, Set<string>>();
+/** Each proposal's input key from its NEWEST lint-clean inbox.drafted row, by `ts`; a later row wins a tie.
+ *  An input the proposal has since moved away from is not retained, so returning to it drafts again. */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
+  const newest = new Map<string, { key: string; at: number }>();
   for (const row of rows) {
     if (row.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
       typeof row.draft_input_key !== "string") continue;
-    const seen = keys.get(row.proposal_id) ?? new Set<string>();
-    seen.add(row.draft_input_key);
-    keys.set(row.proposal_id, seen);
+    const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    const at = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+    const prior = newest.get(row.proposal_id);
+    if (!prior || at >= prior.at) newest.set(row.proposal_id, { key: row.draft_input_key, at });
   }
-  return keys;
+  return new Map([...newest].map(([id, { key }]) => [id, key]));
 }
 
 /** Failed-attempt identity includes the lead and rescue lanes, so changing lanes allows a retry. */
@@ -569,10 +571,16 @@ export function draftsDueOnDaemon(
     const inputKey = draftInputKey(p);
     const cached = drafts[p.id];
     const cachedInput = cached?.completion?.snapshot?.proposal;
+    // A legacy entry has no snapshot of its input, only its anchors: it is current only when the attempt key
+    // names this input, or, with no attempt key, when the proposal has never been reframed.
+    const attempted = attempts[p.id];
+    const legacyInputMatches = attempted === undefined
+      ? (p.reframeHistory ?? []).length === 0
+      : attempted.startsWith(`${inputKey}::[`);
     const hasCurrentDraft = cachedInput
       ? draftInputKey(cachedInput) === inputKey
-      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors));
-    if (clean.get(p.id)?.has(inputKey)) {
+      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors) && legacyInputMatches);
+    if (clean.get(p.id) === inputKey) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }

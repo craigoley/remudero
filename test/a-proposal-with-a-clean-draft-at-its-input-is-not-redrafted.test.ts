@@ -141,7 +141,31 @@ test("W1-T13864 criterion 4: a proposal whose anchors changed or that got a new 
   fixture.append(cleanRow(reframed));
   fixture.setProposals([bare, reframed]);
   await poll();
-  assert.deepEqual(fixture.drafted, [moved.id, reframed.id], "returning to the original anchors preserves its clean receipt");
+  assert.deepEqual(fixture.drafted, [moved.id, reframed.id, bare.id], "only the newest clean input is retired");
+});
+
+test("W1-T13864 criterion 2: a proposal returning to an older clean input after a newer clean draft is drafted again", () => {
+  const moved: Proposal = { ...bare, evidenceAnchors: anchors };
+  const rows: Row[] = [
+    { ...cleanRow(bare), ts: "2026-11-20T00:00:00.000Z" },
+    { ...cleanRow(moved), ts: "2026-11-20T00:00:01.000Z" },
+  ];
+  const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>() };
+  // The union reads the live file before the archives, so the newest row can come first.
+  for (const draftLedgerRows of [rows, [...rows].reverse()]) {
+    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneA), [bare]);
+    assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneA), []);
+  }
+});
+
+test("W1-T13864 criterion 4: a new reframe round is drafted over a legacy cached draft that has no input snapshot", () => {
+  const legacy = { [bare.id]: { proposalId: bare.id, fragmentYaml: "- id: NEW-1\n", stampLine: "STAMP", anchorFingerprint: "" } };
+  const reframed: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
+  const priorAttempt = { [bare.id]: draftAttemptKey(bare, laneA) };
+  assert.deepEqual(draftsDueOnDaemon([reframed], legacy, priorAttempt, 3, undefined, laneA), [reframed]);
+  assert.deepEqual(draftsDueOnDaemon([reframed], legacy, {}, 3, undefined, laneA), [reframed]);
+  assert.deepEqual(draftsDueOnDaemon([bare], legacy, priorAttempt, 3, undefined, laneB), [], "the legacy draft still covers its own input");
+  assert.deepEqual(draftsDueOnDaemon([bare], legacy, {}, 3, undefined, laneB), []);
 });
 
 test("W1-T13864 criterion 5: a dirty attempt inside one run still redrafts up to MAX_DRAFT_LINT_ATTEMPTS", async t => {
