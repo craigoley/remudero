@@ -20137,6 +20137,10 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
   };
 }
 
+function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount">): number {
+  return deps.readActiveWorkerCount?.() ?? activeWorkerCount(dirname(deps.ledgerPath));
+}
+
 function sweepFixAdmissionReaders(
   deps: Parameters<typeof productionFixAdmissionReaders>[0] & Pick<SweepDeps, "readActiveWorkerCount">,
   policy: SweepPolicy, mode: "pass" | "probe" = "pass",
@@ -20144,7 +20148,7 @@ function sweepFixAdmissionReaders(
   const live = mode === "probe" || deps.fixProgressJudge !== undefined;
   return {
     hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
-    readActiveWorkers: live || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
+    readActiveWorkers: live || deps.readFixPressure ? () => sweepActiveWorkerCount(deps) : undefined,
     readPressure: deps.readFixPressure ?? (live ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath,
       classEstimate("fix").estimateMib, mode === "pass") : undefined),
     ...productionFixAdmissionReaders(deps, live),
@@ -22058,7 +22062,7 @@ export async function runSweep(
   // Light passes share one controller across their per-PR calls.
   const fullRepairActiveWorkers =
     deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
-      ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
+      ? sweepActiveWorkerCount(deps)
       : undefined;
   const fullOutcomes: ReviewAdmissionOutcomes = {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
@@ -22102,11 +22106,6 @@ export async function runSweep(
           reviewQueue: fullReviewQueue,
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
-  if (fullRepairAdmission && fullRepairAdmission.snapshot().fixAdmissionsAvailable > 0) {
-    for (const [prNumber, hold] of dispatchCauseHolds) {
-      if (hold && fixDispatchMemoryCause(String(hold.fields.cause))) dispatchCauseHolds.delete(prNumber);
-    }
-  }
   const fixCapacityReleases = new Map<number, () => void>();
   const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {

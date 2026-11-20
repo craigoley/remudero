@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
-import fs, { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import os, { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
-import type { BuildSweepEffectsDeps, FixAdmissionResidents, FixHostPressure, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
+import type { BuildSweepEffectsDeps, FixAdmissionRung, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
+import { configPath } from "#src/lib/config.js";
 import { createDaemonSlackReclaimer, installDaemonSlackReclaimer, installedDaemonSlackReclaimer } from "#src/lib/daemon-memory-policy.js";
 import type { FixProgressJudge } from "#src/lib/fix-progress-judge.js";
-import { repairMemoryDemandMark } from "#src/lib/repair-memory-demand.js";
+import { classEstimate, classTypical, recordPeak, resetLearnedEstimateCacheForTests } from "#src/lib/host-memory-learning.js";
+import { openMemoryReservation, readMemoryLedger } from "#src/lib/host-memory-ledger.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
+import { clearRepairMemoryDemand, freshRepairMemoryDemand, repairMemoryDemandMark } from "#src/lib/repair-memory-demand.js";
+import { childIdentity, runDir, RUN_CHILD_SCHEMA, writeStatus } from "#src/lib/run-child-contract.js";
+import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV } from "#src/lib/test-slot.js";
+import { activeWorkerCount } from "#src/lib/worker.js";
 
-const { buildSweepEffects, createSweepFixAdmissionController, DEFAULT_SWEEP_POLICY, fixAdmissionCauseProbe,
-  fixDispatchHoldAtHeadAsync, fixDispatchMemoryCause, productionFixPressure, runSweep, withFullSweepRepairAdmission } = sweep;
+const { buildSweepEffects, createSweepFixAdmissionController, DEFAULT_SWEEP_POLICY,
+  fixDispatchHoldAtHeadAsync, fixDispatchMemoryCause, productionFixAdmissionResidents, productionFixPressure,
+  runSweep, withFullSweepRepairAdmission } = sweep;
 const NOW = Date.parse("2026-11-19T17:57:29Z");
 const PASS_MS = 5 * 60_000;
 const pr: OpenPrView = { prNumber: 19695, prUrl: "https://github.com/craigoley/remudero/pull/19695",
@@ -36,31 +44,31 @@ const seed = (): Record<string, unknown>[] => [failure(NOW - 10 * 3_600_000, MEM
   failure(NOW - 60_000), failure(NOW - 30_000)];
 
 const FLOOR = 1024;
-type Readers = Required<Parameters<typeof fixAdmissionCauseProbe>[0]>;
-/** The readings the run child reads: a fix p90 of 6258 MiB, a typical of 1754 MiB and one live fix tree. */
-const readers = (headroomMib: number, extra: Partial<Readers> = {}): Readers => ({
-  hostWorkerBudget: 4, readActiveWorkers: () => 8,
-  readPressure: () => ({ availableMib: FLOOR + headroomMib, floorMib: FLOOR, binding: "host",
-    tier: headroomMib >= 6258 ? "fits" : "host-short" }),
-  readEstimate: (workerClass) => ({ estimateMib: workerClass === "fix" ? 6258 : 2048, samples: 9 }),
-  readTypical: (workerClass) => ({ estimateMib: workerClass === "fix" ? 1754 : 1200, samples: 9 }),
-  readResidents: () => ({ fix: [1500], review: [] }),
-  ...extra,
-});
-const probeOn = (headroom: () => number): NonNullable<SweepDeps["fixDispatchCauseProbe"]> =>
-  async (cause) => fixDispatchMemoryCause(cause) ? fixAdmissionCauseProbe(readers(headroom())) : undefined;
+const HOST_FLOOR = DEFAULT_SWEEP_POLICY.memoryFloorMib;
 const sweepDeps = (rows: Record<string, unknown>[], counts: { dispatched: number; escalated: number },
   extra: Partial<SweepDeps> = {}): SweepDeps => ({
   arm: () => {}, close: () => {}, dispatchFix: () => { counts.dispatched++; },
   escalate: () => { counts.escalated++; }, runId: "memory-held", ledgerPath: "/unused", now: () => NOW,
-  readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(NOW), ...row }); }, ...extra });
+  readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: at(extra.now?.() ?? NOW), ...row }); }, ...extra });
 
-function fixtureProductionProbe(t: TestContext, availableMib: () => number) {
+function fixtureProductionProbe(t: TestContext, availableMib: () => number | undefined) {
   const root = mkdtempSync(join(tmpdir(), "rmd-memory-admission-"));
-  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const ledgerPath = ledgerPathFor({ root });
+  const stateDir = dirname(ledgerPath);
+  const home = join(root, "unconfigured-home");
+  const priorSlotDir = process.env[TEST_SLOT_DIR_ENV];
+  const priorSlotParent = process.env[TEST_SLOT_PARENT_ENV];
+  process.env[TEST_SLOT_DIR_ENV] = join(root, "test-slots");
+  delete process.env[TEST_SLOT_PARENT_ENV];
+  resetLearnedEstimateCacheForTests();
   const readFileSync = fs.readFileSync;
+  t.mock.method(os, "homedir", () => home);
   t.mock.method(fs, "readFileSync", ((path: fs.PathOrFileDescriptor, options?: unknown) => {
-    if (path === "/proc/meminfo") return `MemTotal: 131072000 kB\nMemAvailable: ${availableMib() * 1024} kB\n`;
+    if (path === "/proc/meminfo") {
+      const available = availableMib();
+      return available === undefined ? "MemAvailable unreadable\n"
+        : `MemTotal: 131072000 kB\nMemAvailable: ${available * 1024} kB\n`;
+    }
     if (path === "/sys/fs/cgroup/memory.current") return "0";
     if (path === "/sys/fs/cgroup/memory.max" || path === "/sys/fs/cgroup/memory.high") return "max";
     return readFileSync(path, options as BufferEncoding);
@@ -72,93 +80,176 @@ function fixtureProductionProbe(t: TestContext, availableMib: () => number) {
     installDaemonSlackReclaimer(priorReclaimer);
     t.mock.restoreAll();
     syncBuiltinESMExports();
+    if (priorSlotDir === undefined) delete process.env[TEST_SLOT_DIR_ENV];
+    else process.env[TEST_SLOT_DIR_ENV] = priorSlotDir;
+    if (priorSlotParent === undefined) delete process.env[TEST_SLOT_PARENT_ENV];
+    else process.env[TEST_SLOT_PARENT_ENV] = priorSlotParent;
+    resetLearnedEstimateCacheForTests();
+    clearRepairMemoryDemand(pr.prNumber);
     rmSync(root, { recursive: true, force: true });
   });
   const effects = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root } as BuildSweepEffectsDeps["config"],
     ledgerPath, runId: "memory-probe", plan: { tasks: [], byId: new Map() }, ciGateRequired: [], log: () => {} });
-  return { ledgerPath, fixDispatchCauseProbe: effects.fixDispatchCauseProbe };
+  const identity = childIdentity(process.pid);
+  assert.ok(identity);
+  const runId = "existing-worker";
+  const dir = runDir(stateDir, runId);
+  mkdirSync(dir, { recursive: true });
+  const setWorkerState = (state: "running" | "done") => writeStatus(dir, {
+    schema: RUN_CHILD_SCHEMA, runId, identity, engineSha: "fixture", entryKind: "tsx", phase: "fix",
+    heartbeatAt: NOW, state,
+  });
+  setWorkerState("running");
+  return { root, ledgerPath, stateDir, home, setWorkerState, fixDispatchCauseProbe: effects.fixDispatchCauseProbe };
+}
+
+async function runProductionPass(fixture: ReturnType<typeof fixtureProductionProbe>, rows: Record<string, unknown>[], now: number,
+  effects: Partial<Pick<SweepDeps, "fixProgressJudge" | "escalate">> = {}) {
+  const runId = `memory-pass-${now}`;
+  const dispatchedHeads: string[] = [];
+  await runSweep([{ ...pr }], withFullSweepRepairAdmission(sweepDeps(rows, { dispatched: 0, escalated: 0 }, {
+    ledgerPath: fixture.ledgerPath, fixDispatchCauseProbe: fixture.fixDispatchCauseProbe, runId, now: () => now,
+    fixProgressJudge: async () => ({ verdict: "continue", reason: "retry when room opens" }),
+    log: (step, fields) => {
+      if (step === "sweep.fix_capacity") rows.push({ ...fields, step, run_id: runId, ts: at(now) });
+    },
+    dispatchFix: (candidate) => { dispatchedHeads.push(candidate.headSha); },
+    ...effects,
+  })));
+  const disposed = rows.findLast(row => row.step === "sweep.disposed" && row.run_id === runId && row.pr_number === pr.prNumber);
+  assert.ok(disposed, "the full pass wrote a disposition for this PR");
+  assert.equal(disposed.head_sha, pr.headSha);
+  const capacity = rows.filter(row => row.step === "sweep.fix_capacity" && row.run_id === runId);
+  assert.equal(capacity[0]?.surface, "full");
+  assert.equal(capacity[0]?.active_workers, 1, "admission counts the live run child in the sweep state directory");
+  assert.equal(capacity[0]?.review_reservations, 0);
+  return { disposed, capacity, dispatchedHeads };
 }
 
 test("W1-T13869 criterion 1: a memory-held fix dispatch runs again at the same head on the first pass whose admission has room", async (t) => {
   const rows = seed();
-  const counts = { dispatched: 0, escalated: 0 };
-  let laterPass = false;
-  let memoryReads = 0;
-  const floor = DEFAULT_SWEEP_POLICY.memoryFloorMib;
-  const production = fixtureProductionProbe(t, () => laterPass && ++memoryReads > 1 ? floor + 64_000 : floor - 1);
-  const capacity: Record<string, unknown>[] = [];
-  const dispatchedHeads: string[] = [];
-  const deps = withFullSweepRepairAdmission(sweepDeps(rows, counts, { ...production,
-    fixProgressJudge: async () => ({ verdict: "continue", reason: "retry when room opens" }),
-    log: (step, fields) => { if (step === "sweep.fix_capacity" && fields) capacity.push(fields); },
-    dispatchFix: (candidate) => { dispatchedHeads.push(candidate.headSha); },
-  }));
-  await runSweep([pr], deps);
-  assert.deepEqual(dispatchedHeads, []);
-  assert.equal(capacity[0]?.fix_admissions_available, 0, "the first full pass still refuses one fix");
-  const held = rows.findLast(row => row.step === "sweep.disposed")!;
-  assert.equal(held.probe_result, "present");
-  const learnedRetry = Date.parse(String(held.failure_at)) + Number(held.backoff_ms);
-  assert.equal(held.backoff_ms, 2 * 40 * 60_000, "the learned backoff is unchanged");
-  laterPass = true;
-  capacity.length = 0;
-  const later = NOW + PASS_MS;
-  assert.ok(later < learnedRetry, "the next pass comes before the learned next retry");
-  await runSweep([pr], { ...deps, runId: "memory-free", now: () => later });
-  assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "the full controller sees room after the probe's short read");
-  assert.ok(capacity.some(row => row.fixes_admitted === 1), "dispatch still takes an admission claim");
-  assert.deepEqual(dispatchedHeads, [pr.headSha], "dispatches again at the same head, with no new push");
+  let available = HOST_FLOOR - 1;
+  const fixture = fixtureProductionProbe(t, () => available);
+  const short = await runProductionPass(fixture, rows, NOW);
+  assert.equal(short.capacity[0]?.fix_admissions_available, 0);
+  assert.equal(short.disposed.acted, false);
+  assert.deepEqual(short.dispatchedHeads, []);
+  assert.equal(short.disposed.backoff_ms, 2 * 40 * 60_000, "the learned backoff is unchanged");
+
+  available = HOST_FLOOR + 64_000;
+  const retry = await runProductionPass(fixture, rows, NOW + PASS_MS);
+  const learnedRetry = Date.parse(String(short.disposed.failure_at)) + Number(short.disposed.backoff_ms);
+  assert.ok(Date.parse(String(retry.disposed.ts)) < learnedRetry, "the retry precedes the learned backoff deadline");
+  assert.ok(Number(retry.capacity[0]?.fix_admissions_available) >= 1);
+  assert.ok(retry.capacity.some(row => row.fixes_admitted === 1), "dispatch still takes an admission claim");
+  assert.equal(retry.disposed.acted, true);
+  assert.equal(retry.disposed.dispatch_held, undefined);
+  assert.deepEqual(retry.dispatchedHeads, [pr.headSha], "dispatches again at the same head, with no new push");
 });
 
-test("W1-T13869 criterion 2: while the admission still refuses, the hold names probe present and a retry one pass away", async () => {
+test("W1-T13869 criterion 2: while the admission still refuses, the hold names probe present and a retry one pass away", async (t) => {
   const rows = seed();
-  const counts = { dispatched: 0, escalated: 0 };
-  for (const [i, now] of [NOW, NOW + PASS_MS, NOW + 2 * PASS_MS].entries()) {
-    await runSweep([pr], sweepDeps(rows, counts, { runId: `held-${i}`, now: () => now,
-      fixDispatchCauseProbe: probeOn(() => 6149) }));
-    const held = rows.findLast(row => row.step === "sweep.disposed")!;
-    assert.equal(held.probe_result, "present");
-    assert.equal(held.next_retry_at, at(now + PASS_MS), "one sweep cadence after the pass");
-    assert.notEqual(held.next_retry_at, at(Date.parse(String(held.failure_at)) + Number(held.backoff_ms)));
+  let transientRoom = false;
+  let readings = 0;
+  const fixture = fixtureProductionProbe(t, () => transientRoom && ++readings === 2 ? HOST_FLOOR + 64_000 : HOST_FLOOR - 1);
+  for (const now of [NOW, NOW + PASS_MS, NOW + 2 * PASS_MS]) {
+    transientRoom = now === NOW + 2 * PASS_MS;
+    const { disposed, capacity, dispatchedHeads } = await runProductionPass(fixture, rows, now);
+    if (transientRoom) {
+      assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "a separate capacity reading briefly saw room");
+    } else {
+      assert.equal(capacity[0]?.fix_admissions_available, 0);
+    }
+    assert.match(String(disposed.cause), /^fix dispatch refused: worker admission refused \(live host capacity exhausted/);
+    assert.equal(disposed.probe_result, "present", "a separate capacity reading cannot lift the hold");
+    assert.equal(disposed.next_retry_at, at(now + PASS_MS), "one sweep cadence after the pass");
+    assert.equal(disposed.backoff_ms, 2 * 40 * 60_000);
+    assert.notEqual(disposed.next_retry_at, at(Date.parse(String(disposed.failure_at)) + Number(disposed.backoff_ms)));
+    assert.equal(capacity.length, 1, "the present probe keeps the hold before any dispatch claim");
+    assert.equal(disposed.acted, false);
+    assert.deepEqual(dispatchedHeads, []);
   }
-  assert.equal(counts.dispatched, 0);
+
   const standIn = await fixDispatchHoldAtHeadAsync(pr, [failure(NOW, STAND_IN)], () => true, undefined,
     { nowMs: NOW, sweepPassMs: PASS_MS, causeProbe: async () => "present" });
   assert.equal(standIn?.fields.probe_result, "present", "the stand-in worker budget refusal is a memory cause too");
   assert.equal(standIn?.fields.next_retry_at, at(NOW + PASS_MS));
 });
 
-test("W1-T13869 criterion 3: the probe answers clear exactly when the run child's claim admits, and claims nothing", () => {
-  const child = (r: Readers) => createSweepFixAdmissionController({ surface: "full", queueDepth: 1,
-    hostWorkerBudget: r.hostWorkerBudget, activeWorkers: r.readActiveWorkers(), readActiveWorkers: r.readActiveWorkers,
-    reviewReservations: 0, readPressure: r.readPressure, readEstimate: r.readEstimate, readTypical: r.readTypical,
-    readResidents: r.readResidents }).claim(pr).admitted;
-  const tiers: FixHostPressure["tier"][] = ["fits", "host-short", "container-short", "nothing-to-wait-for"];
-  const trees: FixAdmissionResidents[] = [undefined, { fix: [], review: [] }, { fix: [1500], review: [] }, { fix: [], review: [900] }];
-  let clear = 0;
-  let present = 0;
-  for (const headroom of [0, 1000, 1754, 2000, 6257, 6258, 9204, 13000])
-    for (const tier of tiers)
-      for (const residents of trees)
-        for (const active of [0, 8])
-          for (const reason of [undefined, "memory reading unreadable"]) {
-            const r = readers(headroom, { readActiveWorkers: () => active, readResidents: () => residents,
-              readPressure: () => ({ availableMib: FLOOR + headroom, floorMib: FLOOR, binding: "host", tier,
-                ...(reason === undefined ? {} : { reason }) }) });
-            const answer = fixAdmissionCauseProbe(r);
-            assert.equal(answer, child(r) ? "clear" : "present", JSON.stringify({ headroom, tier, residents, active, reason }));
-            if (answer === "clear") clear++;
-            else present++;
-          }
-  assert.ok(clear > 0 && present > 0, "the grid holds both answers");
-  const oneFix = readers(6258);
-  for (let i = 0; i < 3; i++) assert.equal(fixAdmissionCauseProbe(oneFix), "clear");
-  const controller = createSweepFixAdmissionController({ surface: "full", queueDepth: 1, hostWorkerBudget: 4,
-    activeWorkers: 8, readActiveWorkers: oneFix.readActiveWorkers, reviewReservations: 0, readPressure: oneFix.readPressure,
-    readEstimate: oneFix.readEstimate, readTypical: oneFix.readTypical, readResidents: oneFix.readResidents });
-  assert.equal(controller.claim(pr).admitted, true, "the probes reserved nothing: the one fix the headroom holds is still free");
-  assert.equal(fixAdmissionCauseProbe(readers(9204, { readPressure: () => { throw new Error("vm_stat failed"); } })), "present",
-    "an unreadable pressure reading is present");
+test("W1-T13869 criterion 3: the production probe matches a child admission claim without claiming or creating config", async (t) => {
+  let available: number | undefined;
+  const { root, stateDir, home, ledgerPath, setWorkerState, fixDispatchCauseProbe } = fixtureProductionProbe(t, () => available);
+  const cause = "fix dispatch refused: worker admission refused (live host capacity exhausted";
+  const path = configPath();
+  assert.ok(path.startsWith(`${home}/`));
+  assert.equal(existsSync(home), false);
+  const realMkdir = fs.mkdirSync;
+  let configCreationAttempts = 0;
+  t.mock.method(fs, "mkdirSync", ((pathArg: fs.PathLike, options?: fs.Mode | fs.MakeDirectoryOptions | null) => {
+    if (pathArg === dirname(path)) {
+      configCreationAttempts++;
+      throw new Error("probe attempted config bootstrap");
+    }
+    return realMkdir(pathArg, options as fs.MakeDirectoryOptions);
+  }) as typeof fs.mkdirSync);
+  syncBuiltinESMExports();
+
+  for (const peak of [1600, 1600, 1600, 1600, 1600, 1600, 6400, 6400, 6400]) {
+    assert.equal(recordPeak("fix", peak, { root }), true);
+  }
+  assert.deepEqual(classEstimate("fix"), { estimateMib: 6400, samples: 9 });
+  assert.deepEqual(classTypical("fix"), { estimateMib: 1600, samples: 9 });
+
+  async function compare(headroom: number | undefined, rung: FixAdmissionRung | undefined, activeWorkers: number, admitted: boolean) {
+    available = headroom === undefined ? undefined : HOST_FLOOR + headroom;
+    const countWorkers = () => activeWorkerCount(stateDir);
+    const child = createSweepFixAdmissionController({
+      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      activeWorkers: countWorkers(), readActiveWorkers: countWorkers, reviewReservations: 0,
+      readPressure: () => productionFixPressure(HOST_FLOOR, ledgerPath, classEstimate("fix").estimateMib),
+      readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(root),
+    });
+    assert.equal(child.snapshot().activeWorkers, activeWorkers);
+    assert.equal(child.snapshot().charge?.admissionRung, rung);
+    const before = readMemoryLedger({ root })!.entries.map(entry => [entry.path, fs.readFileSync(entry.path, "utf8")]);
+    const demandMark = repairMemoryDemandMark();
+    const demand = freshRepairMemoryDemand(Date.now());
+    const first = await fixDispatchCauseProbe!(cause);
+    assert.equal(await fixDispatchCauseProbe!(cause), first, "a second probe sees the same capacity");
+    assert.equal(configCreationAttempts, 0, "the worker census does not enter config bootstrap");
+    assert.equal(existsSync(home), false, "no config directory was created");
+    assert.equal(repairMemoryDemandMark(), demandMark, "the probe recorded no refusal");
+    assert.deepEqual(freshRepairMemoryDemand(Date.now()), demand, "the probe cleared no demand");
+    const after = readMemoryLedger({ root })!.entries.map(entry => [entry.path, fs.readFileSync(entry.path, "utf8")]);
+    assert.deepEqual(after, before, "the probe changed no reservation");
+    const grant = child.claim(pr);
+    assert.equal(grant.admitted, admitted);
+    assert.equal(first, grant.admitted ? "clear" : "present");
+    if (grant.admitted) grant.release?.();
+  }
+
+  await compare(undefined, undefined, 1, false);
+  await compare(1599, "none", 1, false);
+  setWorkerState("done");
+  await compare(1599, "nothing-live", 0, true);
+  await compare(1600, "typical", 0, true);
+
+  setWorkerState("running");
+  const reservation = openMemoryReservation({ root, workerClass: "fix" });
+  try {
+    assert.equal(reservation.published, true);
+    reservation.bindRoot(process.pid);
+    assert.equal(productionFixAdmissionResidents(root)?.fix.length, 1);
+    await compare(6399, "none", 1, false);
+    await compare(6400, "fits", 1, true);
+  } finally {
+    reservation.releaseOccupancy();
+  }
+  const runs = join(stateDir, "runs");
+  rmSync(runs, { recursive: true });
+  writeFileSync(runs, "unreadable worker census");
+  assert.equal(await fixDispatchCauseProbe!(cause), "present", "an unreadable worker census keeps the hold");
+  assert.equal(configCreationAttempts, 0);
 });
 
 test("W1-T13869 criterion 3: the production probe leaves reclaim to ordinary admission", async (t) => {
@@ -180,27 +271,27 @@ test("W1-T13869 criterion 3: the production probe leaves reclaim to ordinary adm
   assert.equal(collections, 1);
 });
 
-test("W1-T13869 criterion 4: a memory refusal is never escalated", async () => {
+test("W1-T13869 criterion 4: a memory refusal is never escalated", async (t) => {
+  const fixture = fixtureProductionProbe(t, () => HOST_FLOOR - 1);
   const rows = seed();
   for (let i = 1; i <= 3; i++) rows.push(failure(NOW - 30_000 + i * 1000));
-  const counts = { dispatched: 0, escalated: 0 };
+  let escalated = 0;
   let judged = 0;
   const judge: FixProgressJudge = async () => { judged++; return { verdict: "escalate", loop: "memory", reason: "same refusal" }; };
   const extra: Partial<SweepDeps> = { fixProgressJudge: judge,
     readFixPressure: () => ({ availableMib: 64_000, floorMib: FLOOR, tier: "fits" }) };
   for (let i = 0; i < 3; i++) {
-    await runSweep([pr], sweepDeps(rows, counts, { ...extra, runId: `escalate-${i}`, now: () => NOW + i * PASS_MS,
-      fixDispatchCauseProbe: probeOn(() => 6149) }));
-    const hold = rows.findLast(row => row.step === "sweep.disposed")!;
+    const { disposed: hold, dispatchedHeads } = await runProductionPass(fixture, rows, NOW + i * PASS_MS,
+      { fixProgressJudge: judge, escalate: () => { escalated++; } });
     assert.equal(hold.judge_verdict, "escalate");
     assert.equal(hold.probe_result, "present");
     assert.ok(!("dispatch_cause_escalated" in hold));
     assert.ok(!("fix_dispatch_failed_escalated" in hold));
+    assert.deepEqual(dispatchedHeads, []);
     if (i === 0) rows.splice(rows.indexOf(hold), 0, { ...pass(NOW - 1), dispatch_cause_escalated: hold.dispatch_cause_key });
   }
   assert.ok(judged >= 1, "the judge is still read for its reason");
-  assert.equal(counts.escalated, 0, "no escalation is filed");
-  assert.equal(counts.dispatched, 0);
+  assert.equal(escalated, 0, "no escalation is filed");
   const unprobed = seed();
   const unprobedCounts = { dispatched: 0, escalated: 0 };
   const late = NOW + 3 * 3_600_000;
