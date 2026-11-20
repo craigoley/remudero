@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -12,13 +12,15 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { HANDLERS } from "#test/helpers/run-task-test.js";
 
 const head = "1".repeat(40);
 const main = "2".repeat(40);
 const branch = "run-unfiled-123";
 const file = "test/ci/example.test.ts";
-const mac = { name: "mac", target: "mac.example", kind: "mac", checkout: "/donor" };
+// The design's host entry: a name, an SSH target or "local", and a kind. A checkout is optional.
+const mac = { name: "mac", target: "mac.example", kind: "mac" };
 const linux = { name: "azure", target: "local", kind: "linux" } as const;
 
 function receipt(): ShipReceipt {
@@ -275,15 +277,29 @@ test("a nested target comparison ignores sibling results from its selected paren
 
 test("different same-title failures at distinct source locations never become base-red evidence", async (t) => {
   const f = fixture(t);
-  const original = redReceipt(["duplicate"]);
+  const original = redReceipt(["duplicate", "duplicate"]);
   original.failureAttribution!.tests![0]!.location = "10:1";
+  original.failureAttribution!.tests![1]!.location = "20:1";
   f.workspace.preflight = async () => original;
-  f.workspace.rerun = async (tree) => rerunResults(tree === "head" ? ["duplicate"] : ["duplicate"]).map((result) => ({
-    ...result, location: tree === "head" ? "10:1" : "20:1",
-  }));
+  f.workspace.rerun = async (tree) => tree === "head"
+    ? [{ file, title: "duplicate", location: "10:1", failed: true }, { file, title: "duplicate", location: "20:1", failed: true }]
+    : [{ file, title: "duplicate", location: "25:1", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("a failing test that only moved lines between main and head is also failing on main", async (t) => {
+  const f = fixture(t);
+  const original = redReceipt(["unchanged red"]);
+  original.failureAttribution!.tests![0]!.location = "11:1";
+  f.workspace.preflight = async () => original;
+  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", location: tree === "head" ? "11:1" : "10:1", failed: true }];
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
+  assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: unchanged red/);
+  assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
+  assert.ok(f.calls.includes(`push ${head}`));
 });
 
 test("the production rerun selects one nested leaf and retains passing TAP rows without locations", async (t) => {
@@ -586,20 +602,55 @@ test("cancellation reaches both a local child and the SSH supervisor", async (t)
   }), /SSH control pipe failed/);
 });
 
+function harnessGate(t: TestContext, script: string): string {
+  const hooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-hooks-`));
+  const mark = join(hooks, "ran");
+  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${script.replaceAll("$MARK", mark)}\n`);
+  chmodSync(join(hooks, "pre-push"), 0o755);
+  const saved = { hooks: process.env.RMD_HARNESS_HOOKS_DIR, gates: process.env.RMD_PREPUSH_GATES };
+  process.env.RMD_HARNESS_HOOKS_DIR = hooks;
+  t.after(() => {
+    if (saved.hooks === undefined) delete process.env.RMD_HARNESS_HOOKS_DIR; else process.env.RMD_HARNESS_HOOKS_DIR = saved.hooks;
+    if (saved.gates === undefined) delete process.env.RMD_PREPUSH_GATES; else process.env.RMD_PREPUSH_GATES = saved.gates;
+    rmSync(hooks, { recursive: true, force: true });
+  });
+  return mark;
+}
+
 test("the source publisher sends one non-forced refspec pinned to the receipt head and refuses drift", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   seedHandBranch(repo);
   repo.git("config", "--local", "core.hooksPath", "");
+  const gate = harnessGate(t, 'cat > /dev/null; echo pass >> "$MARK"');
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
   assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
   await assert.rejects(defaults.push(source, run), /changed during verification/);
   assert.equal(requests.length, 1);
+});
+
+test("an operator checkout with Git's default hooks still runs every pre-push check and has no opt-out", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const gate = harnessGate(t, '[ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0\ncat > /dev/null; echo refused >> "$MARK"; exit 1');
+  process.env.RMD_PREPUSH_GATES = "0";
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)));
+  assert.equal(readFileSync(gate, "utf8"), "refused\n");
+  assert.deepEqual(requests, [], "a refused check stops the push");
+  rmSync(join(dirname(gate), "pre-push"));
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /required pre-push gate .* is missing/);
+  assert.deepEqual(requests, []);
 });
 
 test("the GitHub adapter creates or updates and then checks the freshly stored body", async (t) => {
@@ -653,4 +704,88 @@ test("a stop after the GitHub write prevents publication readback", async (t) =>
   finishWrite();
   await assert.rejects(publishing, /stop requested/);
   assert.equal(calls.length, 1, "no PR readback starts after cancellation");
+});
+
+/** An SSH client whose host has its own filesystem: the host's /tmp is `remote`/tmp, and paths it prints read as its own. */
+function separateHost(remote: string) {
+  const host = `const { spawn } = require("node:child_process");
+const [root, command] = process.argv.slice(1);
+const out = [];
+const child = spawn("bash", ["-c", command.replaceAll("/tmp/rmd-hand-ship.", root + "/tmp/rmd-hand-ship.")], { stdio: ["inherit", "pipe", "inherit"] });
+child.stdout.on("data", (chunk) => out.push(chunk));
+child.on("close", (code) => { process.stdout.write(Buffer.concat(out).toString("utf8").replaceAll(root + "/tmp/", "/tmp/")); process.exitCode = code ?? 1; });`;
+  return (command: string, args: string[], options: SpawnOptions) =>
+    command === "ssh" ? spawn(process.execPath, ["-e", host, remote, args.at(-1)!], options) : spawn(command, args, options);
+}
+
+test("a named failure on a separate SSH host is isolated there and compared with main there", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), [
+    'import { test } from "node:test";',
+    'test("parent", async (context) => {',
+    '  await context.test("leaf", () => { throw new Error("remote leaf"); });',
+    '  await context.test("sibling", () => {});',
+    '});',
+    "",
+  ].join("\n"));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "remote test fixture");
+  const remote = realpathSync(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-remote-`)));
+  t.after(() => rmSync(remote, { recursive: true, force: true }));
+  mkdirSync(join(remote, "tmp"));
+  const bin = join(remote, "bin");
+  mkdirSync(bin);
+  // The host has no configured checkout, so it installs the locked dependencies itself.
+  writeFileSync(join(bin, "npm"), `#!/bin/sh\n[ "$1 $2" = "ci --no-audit" ] || exit 9\nln -s '${join(REPO_ROOT, "node_modules")}' node_modules\n`);
+  chmodSync(join(bin, "npm"), 0o755);
+  const hosts = join(f.root, "hosts.json");
+  writeFileSync(hosts, JSON.stringify([{ name: "azure", target: "azure.example", kind: "linux", pathPrefix: bin }]));
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write, spawn: separateHost(remote) };
+  const source = await defaults.readSource(repo.dir, run);
+  const host = JSON.parse(readFileSync(hosts, "utf8"))[0];
+  const workspace = await defaults.prepare(host, source, run);
+  try {
+    const scratch = readdirSync(join(remote, "tmp")).find((name) => name.startsWith("rmd-hand-ship."))!;
+    assert.ok(scratch, "the scratch checkout is on the host");
+    assert.equal(existsSync(join("/tmp", scratch)), false, "the operator's filesystem has no copy of the host's scratch path");
+    const headRows = await workspace.rerun("head", file, source.head, "parent > leaf");
+    assert.ok(headRows.some((row) => row.title === "parent > leaf" && row.failed === true), JSON.stringify(headRows));
+    assert.ok(!headRows.some((row) => row.title === "parent > sibling"));
+    const mainRows = await workspace.rerun("main", file, source.head, "parent > leaf");
+    assert.ok(mainRows.some((row) => row.title === "parent > leaf" && row.failed === true), JSON.stringify(mainRows));
+  } finally {
+    await workspace.close();
+  }
+  assert.deepEqual(readdirSync(join(remote, "tmp")), [], "the host's private checkout is removed");
+});
+
+function liveProcess(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { return !execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim().startsWith("Z"); }
+  catch { return false; }
+}
+
+test("a stopped child is reported stopped only after every member of its process group is gone", async (t) => {
+  const f = fixture(t);
+  const defaults = handShipEffects(() => 0);
+  const pidFile = join(f.root, "member.pid");
+  const member = `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const leader = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(member)}], { stdio: "ignore" }); setInterval(() => {}, 1000);`;
+  const controller = new AbortController();
+  const reading = defaults.readHost(linux, {
+    dir: f.root, signal: controller.signal, log: f.options.write,
+    spawn: (_file, _args, options) => spawn(process.execPath, ["-e", leader], options),
+  });
+  while (!existsSync(pidFile) || !readFileSync(pidFile, "utf8")) await delay(20);
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } });
+  controller.abort(new Error("stop requested"));
+  await assert.rejects(reading, /stop requested/);
+  for (let i = 0; i < 50 && liveProcess(pid); i += 1) await delay(20);
+  assert.equal(liveProcess(pid), false, "the SIGTERM-ignoring group member is killed before the stop is reported");
 });

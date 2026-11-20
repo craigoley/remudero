@@ -468,12 +468,18 @@ function* prePushGateSteps(
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
   readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
+  required = false,
 ): Steps<PrePushGate | undefined> {
   const pin = pinWorktreeGit(worktreePath);
   const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
-  if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  // A required gate runs whatever the checkout configures: an operator checkout with Git's default hooks
+  // directory still has every check run, because the leaf points Git at hooks/host, which has no pre-push.
+  if (!required && (configured === undefined || configured === "" || configured === "/dev/null")) return undefined;
   const hook = join(harnessHooksDir(), "pre-push");
-  if (!existsSync(hook)) return undefined;
+  if (!existsSync(hook)) {
+    if (required) throw new Error(`git-push: the required pre-push gate ${hook} is missing`);
+    return undefined;
+  }
   const tryRead = function* (args: string[]): Steps<string | undefined> {
     try {
       const out = String(yield* step(() => read(args))).trim();
@@ -496,7 +502,10 @@ function* prePushGateSteps(
   const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
-  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env: prePushGateEnv() };
+  const env = prePushGateEnv();
+  // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
+  if (required) delete env.RMD_PREPUSH_GATES;
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
@@ -798,8 +807,10 @@ function runHookAsync(worktreePath: string, gate: PrePushGate, signal?: AbortSig
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal }: {
+  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal, requireGate = false }: {
     prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>; signal?: AbortSignal;
+    /** Run the harness pre-push gate even when the checkout's config disables hooks, with no opt-out. */
+    requireGate?: boolean;
   } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
@@ -807,7 +818,7 @@ export function worktreePushExecAsync(
     const pushArgs = leafArgs(worktreePath, args);
     const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a, { signal });
     const gate = prGates
-      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requireGate))
       : undefined;
     if (gate) {
       const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => {

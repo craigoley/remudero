@@ -94,10 +94,9 @@ function readHosts(path: string): ShipHost[] {
     typeof host.name !== "string" || !host.name.trim() || /[\r\n]/.test(host.name) ||
     typeof host.target !== "string" || !/^[a-zA-Z0-9_][\w.@:-]*$/.test(host.target) ||
     (host.kind !== "mac" && host.kind !== "linux") ||
-    (host.target !== "local" && host.checkout === undefined) ||
     (host.checkout !== undefined && (typeof host.checkout !== "string" || !isAbsolute(host.checkout))) ||
     (host.pathPrefix !== undefined && (typeof host.pathPrefix !== "string" || !isAbsolute(host.pathPrefix))))) {
-    throw new Error(`${path}: expected hosts with name, target (SSH or local), kind (mac or linux), and an absolute checkout for SSH`);
+    throw new Error(`${path}: expected hosts with name, target (SSH or local), kind (mac or linux), and optionally an absolute checkout`);
   }
   return data;
 }
@@ -339,8 +338,10 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const remainingMain = [...mainFailures];
   const rows = [];
   for (const test of exactHeadFailures) {
+    // A test is the same test on main by its file and full title, never by its line: an unrelated edit above
+    // it moves the line. Same-title duplicates still match one to one, by count.
     const index = remainingMain.findIndex((other) => other.file === test.file && other.title === test.title &&
-      other.location === test.location && other.suite === test.suite);
+      other.suite === test.suite);
     const classification: FailureClass = index >= 0 ? "also failing on main" : "caused by the change";
     if (index >= 0) remainingMain.splice(index, 1);
     run.log(`${classification}: ${test.file} :: ${test.title}`);
@@ -509,9 +510,16 @@ interface ChildOptions { cwd?: string; input?: string; control?: boolean; captur
   env?: NodeJS.ProcessEnv; signal?: AbortSignal }
 const outputLimit = 32 * 1024 * 1024;
 
-function signalGroup(pid: number, signal: NodeJS.Signals): void {
-  try { process.kill(-pid, signal); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+function signalGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try { process.kill(-pid, signal); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; }
+}
+
+/** A cancelled child's leader can exit while another member of its group ignores SIGTERM. The run is not
+ *  stopped until the whole group is gone: wait out the grace period, then kill what is left. */
+async function reapGroup(pid: number, deadline: number): Promise<void> {
+  while (signalGroup(pid, 0) && systemClock.now() < deadline) await delay(50);
+  signalGroup(pid, "SIGKILL");
 }
 
 async function runChild(run: ShipRun, file: string, args: string[], opts: ChildOptions = {}): Promise<CommandResult> {
@@ -537,12 +545,15 @@ async function runChild(run: ShipRun, file: string, args: string[], opts: ChildO
       });
     }
     let force: NodeJS.Timeout | undefined;
+    let deadline: number | undefined;
     const abort = () => {
       if (child.pid === undefined || force !== undefined) return;
       const pid = child.pid;
       if (opts.control) child.stdin!.end();
       else signalGroup(pid, "SIGTERM");
-      force = setTimeout(() => signalGroup(pid, "SIGKILL"), opts.control ? 10_000 : 2_000);
+      const grace = opts.control ? 10_000 : 2_000;
+      deadline = systemClock.now() + grace;
+      force = setTimeout(() => signalGroup(pid, "SIGKILL"), grace);
     };
     let failure: unknown;
     const recordError = (error: unknown) => { failure ??= error; abort(); };
@@ -556,13 +567,17 @@ async function runChild(run: ShipRun, file: string, args: string[], opts: ChildO
     signal.addEventListener("abort", abort, { once: true });
     child.on("error", recordError);
     child.on("close", (code) => {
-      clearTimeout(force);
       signal.removeEventListener("abort", abort);
       input?.destroy();
-      if (signal.aborted) reject(signal.reason);
-      else if (failure !== undefined) reject(failure);
-      else resolveChild({ code, stdout: Buffer.concat(buffers.stdout).toString("utf8"),
-        stderr: Buffer.concat(buffers.stderr).toString("utf8"), truncated });
+      const settle = () => {
+        clearTimeout(force);
+        if (signal.aborted) reject(signal.reason);
+        else if (failure !== undefined) reject(failure);
+        else resolveChild({ code, stdout: Buffer.concat(buffers.stdout).toString("utf8"),
+          stderr: Buffer.concat(buffers.stderr).toString("utf8"), truncated });
+      };
+      if (deadline === undefined || child.pid === undefined) settle();
+      else reapGroup(child.pid, deadline).then(settle, (error: unknown) => { failure ??= error; settle(); });
     });
   });
 }
@@ -629,7 +644,9 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
   const scratch = (await command(["mktemp", "-d", "/tmp/rmd-hand-ship.XXXXXXXX"], { signal: AbortSignal.timeout(30_000) })).trim();
   if (!/^\/tmp\/rmd-hand-ship\.[a-zA-Z0-9]{8}$/.test(scratch)) throw new Error("host returned an invalid temporary directory");
   const bundle = join(run.dir, "head.bundle");
-  const donor = host.checkout ?? source.root;
+  // A host entry needs only a name, a target and a kind. Without a configured checkout, a remote host
+  // installs the head's locked dependencies in its private scratch tree instead of borrowing a donor's.
+  const donor = host.checkout ?? (host.target === "local" ? source.root : undefined);
   const close = async () => {
     rmSync(bundle, { force: true });
     if (host.target === "local") rmSync(scratch, { recursive: true, force: true });
@@ -648,8 +665,11 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
     const git = (args: string[], opts: ChildOptions = {}) => command(["git", ...args], { cwd: headDir, ...opts });
     await git(["checkout", "--detach", source.head]);
     await git(["remote", "set-url", "origin", source.origin]);
-    await command(["cmp", "-s", join(headDir, "package-lock.json"), join(donor, "package-lock.json")]);
-    await command(["ln", "-s", join(donor, "node_modules"), join(headDir, "node_modules")]);
+    if (donor === undefined) await command(["npm", "ci", "--no-audit", "--no-fund"], { cwd: headDir, record: true });
+    else {
+      await command(["cmp", "-s", join(headDir, "package-lock.json"), join(donor, "package-lock.json")]);
+      await command(["ln", "-s", join(donor, "node_modules"), join(headDir, "node_modules")]);
+    }
     let priority: Priority = "normal";
     let nodeExecutable = "node";
     if (host.target === "local" && host.kind === "mac") {
@@ -687,7 +707,8 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           await git(["diff", "--quiet", source.head, sha, "--", "package-lock.json"]);
           await command(["git", "clone", "--shared", "--no-checkout", "--", headDir, mainDir]);
           await git(["checkout", "--detach", sha], { cwd: mainDir });
-          await command(["ln", "-s", join(donor, "node_modules"), join(mainDir, "node_modules")]);
+          // The lockfile is unchanged between head and main, so main reuses head's dependencies.
+          await command(["ln", "-s", join(donor ?? headDir, "node_modules"), join(mainDir, "node_modules")]);
           baseCut = true;
         }
         const cwd = tree === "main" ? mainDir : headDir;
@@ -698,7 +719,10 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        const namePattern = title === undefined ? [] : isolatedTestPatterns(readFileSync(join(cwd, file), "utf8"), title, expectedCount);
+        // The checkout lives on the host that runs the test, so its source is read there too.
+        const text = title === undefined ? "" : host.target === "local" ? readFileSync(join(cwd, file), "utf8")
+          : await command(["cat", "--", file], { cwd });
+        const namePattern = title === undefined ? [] : isolatedTestPatterns(text, title, expectedCount);
         if (title !== undefined && namePattern === null && tree === "main") return [];
         if (title !== undefined && (namePattern === undefined || namePattern === null)) {
           throw new Error(`${tree} ${file}: could not isolate the named test and its ancestors`);
@@ -749,7 +773,7 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       if (current.head !== source.head || current.branch !== source.branch || current.origin !== source.origin) {
         throw new Error("source branch, head or origin changed during verification");
       }
-      const execute = worktreePushExecAsync(source.root, { prGates: true, signal: run.signal, push: (worktree, args, opts) => {
+      const execute = worktreePushExecAsync(source.root, { prGates: true, requireGate: true, signal: run.signal, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
       } });
