@@ -10,7 +10,7 @@
  * require explicit run/task attribution and, in production, an exact opaque
  * installation scope. Missing or foreign attribution is reported, not killed.
  */
-import { accessSync, constants as fsConstants, existsSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -455,6 +455,18 @@ export interface OrphanSweepReport {
  * then kills only when that attributed run is no longer tracked in-flight.
  */
 export function sweepOrphanWorkers(deps: OrphanSweepDeps): OrphanSweepReport {
+  // W1-T14087: open this sweep's marker-listing scope, so a ps fallback in defaultReadMarkers
+  // lists once for every candidate. Restored in `finally`, so it never outlives the sweep.
+  const outerListing = sweepMarkerListing;
+  sweepMarkerListing = {};
+  try {
+    return sweepOrphanCandidates(deps);
+  } finally {
+    sweepMarkerListing = outerListing;
+  }
+}
+
+function sweepOrphanCandidates(deps: OrphanSweepDeps): OrphanSweepReport {
   const killed: OrphanSweepReport["killed"] = [];
   const leftAlone: OrphanSweepReport["leftAlone"] = [];
   for (const candidate of deps.listCandidates()) {
@@ -536,24 +548,106 @@ export function defaultListCandidates(): OrphanCandidate[] {
   return rows;
 }
 
-/**
- * Real-world marker read: parses `ps eww -o command= -p <pid>` output for
- * `KEY=value` tokens matching the marker env names — macOS/Linux `ps eww`
- * appends a process's environment after its argv for processes the caller
- * owns. A process this cannot introspect (permission, already exited, or
- * genuinely marker-less) yields `undefined`, the safe never-guess default
- * the blast-radius rule requires — this is deliberately NOT a fail-open
- * "assume attributable" default.
- */
-export function defaultReadMarkers(pid: number): OrphanMarkers | undefined {
-  let out: string;
-  try {
-    out = execFileSync("ps", ["eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" });
-  } catch {
-    return undefined;
-  }
-  const runId = out.match(new RegExp(`(?:^|\\s)${RUN_ID_ENV}=(\\S+)`))?.[1];
-  const taskId = out.match(new RegExp(`(?:^|\\s)${TASK_ID_ENV}=(\\S+)`))?.[1];
-  const scope = out.match(new RegExp(`(?:^|\\s)${WORKER_SCOPE_ENV}=(\\S+)`))?.[1];
+/** The marker shape from a per-name value reader: run AND task id required, scope optional. */
+function orphanMarkersFrom(value: (name: string) => string | undefined): OrphanMarkers | undefined {
+  const runId = value(RUN_ID_ENV);
+  const taskId = value(TASK_ID_ENV);
+  const scope = value(WORKER_SCOPE_ENV);
   return runId && taskId ? { runId, taskId, ...(scope ? { scope } : {}) } : undefined;
+}
+
+/** Markers from `ps eww` text: a `KEY=value` token after the line start or whitespace. */
+function orphanMarkersFromPsText(text: string): OrphanMarkers | undefined {
+  return orphanMarkersFrom((name) => text.match(new RegExp(`(?:^|\\s)${name}=(\\S+)`))?.[1]);
+}
+
+/** One environment read from `/proc`: markers, `undefined` (exited, not ours, or marker-less), or `unreadable`. */
+export type ProcOrphanMarkers = OrphanMarkers | undefined | "unreadable";
+
+/**
+ * W1-T14087: a pid's markers from `/proc/<pid>/environ` (NUL-separated `KEY=value`), with no
+ * child process. The same three names and result shape as the ps reader, and the same value: the
+ * first entry of a name, cut at its first whitespace exactly as the ps token's `\S+` is.
+ * ENOENT/ESRCH (the pid exited) and EACCES/EPERM (not ours: ps eww shows no environment either)
+ * answer `undefined`, never attributable. Any other failure is `unreadable`, so the caller falls
+ * back to ps. `readEnviron` is the fs seam.
+ */
+export function readOrphanMarkersFromProc(
+  pid: number,
+  readEnviron: (path: string) => Buffer = (path) => readFileSync(path),
+): ProcOrphanMarkers {
+  let raw: Buffer;
+  try {
+    raw = readEnviron(`/proc/${pid}/environ`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // Gone or not ours reads as unattributable, as base's ps did; anything else is a failure to say.
+    if (code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM") return undefined;
+    return "unreadable";
+  }
+  const env = new Map<string, string>();
+  for (const entry of raw.toString("utf8").split("\0")) {
+    const eq = entry.indexOf("=");
+    if (eq > 0 && !env.has(entry.slice(0, eq))) env.set(entry.slice(0, eq), entry.slice(eq + 1));
+  }
+  return orphanMarkersFrom((name) => env.get(name)?.match(/^\S+/)?.[0]);
+}
+
+/** The open sweep's single ps listing (pid -> its `command` column), or `failed`; absent outside a sweep. */
+let sweepMarkerListing: { listing?: Map<number, string> | "failed" } | undefined;
+
+/** Split a `ps eww -Ao pid=,command=` listing into each pid's command column. */
+function parseMarkerListing(out: string): Map<number, string> {
+  const rows = new Map<number, string>();
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s(.*)$/);
+    if (m) rows.set(Number(m[1]), m[2]);
+  }
+  return rows;
+}
+
+/**
+ * Real-world marker read. On Linux it reads `/proc/<pid>/environ` with no child process
+ * ({@link readOrphanMarkersFromProc}, W1-T14087). Elsewhere, or when that read is
+ * `unreadable`, it parses `ps eww` output for `KEY=value` tokens matching the marker env names:
+ * macOS/Linux `ps eww` appends a process's environment after its argv for processes the caller
+ * owns. Inside {@link sweepOrphanWorkers} that is ONE `ps eww -Ao pid=,command=` listing for the
+ * whole sweep (`-A`, not `-e`: on macOS `-e` means "show environment", not "every process"), never
+ * reused by a later sweep. A direct call outside a sweep reads one pid with
+ * `ps eww -o command= -p <pid>` as before. A process this cannot introspect (permission, already
+ * exited, or genuinely marker-less) yields `undefined`, the safe never-guess default the
+ * blast-radius rule requires — this is deliberately NOT a fail-open "assume attributable" default.
+ * `platform` and `readEnviron` are test seams, appended so every `(pid)` caller is unchanged.
+ */
+export function defaultReadMarkers(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  readEnviron?: (path: string) => Buffer,
+): OrphanMarkers | undefined {
+  if (platform === "linux") {
+    const fromProc = readOrphanMarkersFromProc(pid, readEnviron);
+    if (fromProc !== "unreadable") return fromProc;
+  }
+  const ps = (args: string[]) => execFileSync("ps", args, { encoding: "utf8", maxBuffer: Number.POSITIVE_INFINITY });
+  const sweep = sweepMarkerListing;
+  if (!sweep) {
+    let out: string;
+    try {
+      out = ps(["eww", "-o", "command=", "-p", String(pid)]);
+    } catch {
+      return undefined;
+    }
+    return orphanMarkersFromPsText(out);
+  }
+  if (sweep.listing === undefined) {
+    try {
+      sweep.listing = parseMarkerListing(ps(["eww", "-Ao", "pid=,command="]));
+    } catch {
+      // Remembered for this sweep: every candidate reads unattributable, as base's failed per-pid ps did.
+      sweep.listing = "failed";
+    }
+  }
+  if (sweep.listing === "failed") return undefined;
+  const line = sweep.listing.get(pid);
+  return line === undefined ? undefined : orphanMarkersFromPsText(line);
 }
