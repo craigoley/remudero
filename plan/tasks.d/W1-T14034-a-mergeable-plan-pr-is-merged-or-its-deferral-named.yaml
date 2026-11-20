@@ -1,0 +1,49 @@
+- id: W1-T14034
+  title: A light pass that disposes a plan PR "merging directly" merges it in that pass or writes the named reason it did not
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # which plan PRs the light pass merges and what it records when it does not
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T5901
+    - W1-T9212
+    - W1-T12266
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-mergeable-plan-pr-is-merged-or-its-deferral-named.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A light pass that disposes a plan PR mergeable with the reason merging directly either makes a plan merge attempt for it in the same pass or writes one sweep.plan_merge.deferred row naming the PR, its head and the reason"
+      proof: "grep: W1-T14034 criterion 1: in test/sweep/a-mergeable-plan-pr-is-merged-or-its-deferral-named.test.ts"
+    - claim: "A plan PR whose mergeability is unread in the pass gets a deferral row with that reason, and the next pass that reads it clean merges it"
+      proof: "grep: W1-T14034 criterion 2: in test/sweep/a-mergeable-plan-pr-is-merged-or-its-deferral-named.test.ts"
+    - claim: "invariant:one-claim-merges-unchanged — the plan PRs a pass already merges, and their order and budget under the single claim, are unchanged"
+      kind: guard
+      proof: "grep: W1-T14034 criterion 3: in test/sweep/a-mergeable-plan-pr-is-merged-or-its-deferral-named.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core, 15:25-15:56Z): at 15:39:23Z the light pass (scope idle, enumerated 1)
+    disposed #19882 "mergeable: review success, required checks green — a plan PR is never armed (W1-T5615): merging
+    directly — mergeability unread this pass; last known clean ... is not inherited (W1-T11166)". Its sweep.summary
+    at 15:40:12Z read mergeable 1, actions_taken 0, plan_merge_attempts 0, plan_merges 0. No automerge, merge or
+    deferral row followed for #19882 or #19879 (plan-only, review PASS, every check green), and no later pass merged
+    either. Both were merged by hand at 15:53:58Z and 15:54:04Z, 15 minutes later.
+    - src/lib/sweep.ts: the mergeable row's reason says "merging directly" for every plan PR, and a plan-merge turn
+      that ends with no attempt spends nothing (W1-T12266) and writes nothing, so the summary is the only trace.
+  design: |
+    INVARIANT one-claim-merges-unchanged: selection, order and the merge budget of runSweepLightPass are unchanged.
+    1. When a pass disposes a plan PR mergeable and makes no plan merge attempt for it, write one
+       sweep.plan_merge.deferred row with pr_number, head_sha and the reason (mergeability unread, not selected this
+       pass, budget spent, claim held by another owner). Declare the step where ledger steps are declared.
+    2. Tests drive runSweepLightPass with injected deps: an unread mergeability (criterion 2), a second plan PR not
+       selected this pass (criterion 1), and the existing one-per-pass merge (criterion 3).
+  falsifier: |
+    At origin/main criterion 1 fails: the pass writes no row for a mergeable plan PR it did not attempt.
+  note: |
+    Id reserved for run-unfiled-1795196000000 with rmd next-task-id on the host.

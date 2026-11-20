@@ -14,7 +14,7 @@
   files:
     - src/lib/inbox-plain.ts
     - test/inbox/a-stored-plain-message-is-checked-once-per-content.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A stored plain message is checked once per content, and a changed content is checked again"
