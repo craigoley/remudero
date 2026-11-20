@@ -1,10 +1,3 @@
-/**
- * W1-T13991. On 2026-11-20 fifteen fix rounds stood down with "a later round reclaimed this round's worktree": each
- * pushed, wrote fix.done (which released its branch claim) and waited on CI for its own head; a new failure on that
- * head made the next sweep pass dispatch a second round, which took the claim, reclaimed the first round's worktree
- * and was charged for memory beside it. A round live in its CI wait now holds its claim, the sweep defers to it and
- * hands it the failure, and the round's next strike starts on that failure in its own worktree.
- */
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -14,13 +7,17 @@ import { test, type TestContext } from "node:test";
 import {
   DEFAULT_SWEEP_POLICY,
   acquireFixRoundClaim,
+  buildFixDispatchEnvelope,
   deferToLiveFixRound,
+  drainDetachedSweepActions,
   fixRoundBranchClaim,
   fixRoundClaimEnded,
   fixRoundHandoffPath,
   fixRoundIsLiveOnHead,
+  installDetachedWorkHost,
   readFixRoundHandoff,
   reclaimFixRoundBranch,
+  runFixDispatchChild,
   runSweep,
   type FixRoundLiveProbe,
   type OpenPrView,
@@ -36,6 +33,7 @@ import {
   fixBranchClaimKey,
   registeredFixWorktreeOwner,
   removeAbandonedFixWorktreeOwner,
+  waitForCiGreen,
   type BuildSweepEffectsDeps,
 } from "#test/helpers/run-task-test.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -49,7 +47,10 @@ const PUSHED = "11ddc2fe";
 const ROUND = "work-fix-dispatch-W1-T900-1795148454407-5263";
 const CLAIM = `${ROUND}:fix-claim:${PR}:1795148611956`;
 const BOUND_MS = 3_600_000;
+const PROCESS_START = "proc:12345";
+const ROUND_ID = `${ROUND}:1`;
 const UNMET = "the live round takes the new failure on its own head";
+const REMEDY = "remove the unsupported change claim from the report";
 
 type Row = Record<string, unknown>;
 
@@ -65,14 +66,22 @@ const keyFor = (branch: string): string => fixBranchClaimKey("acme", "remudero",
 function waitingRound(nowMs: number): Row[] {
   return [
     { ts: new Date(nowMs - 120_000).toISOString(), run_id: ROUND, task_id: TASK, step: "fix.done",
-      branch_claim_run_id: CLAIM, head_sha: "3179eb03", pushed_head_sha: PUSHED },
-    { ts: new Date(nowMs - 110_000).toISOString(), run_id: ROUND, task_id: TASK, step: "run.awaiting_external", waiting_on: "ci" },
+      pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: CLAIM, head_sha: "3179eb03", pushed_head_sha: PUSHED },
+    { ts: new Date(nowMs - 110_000).toISOString(), run_id: ROUND, task_id: TASK, step: "run.awaiting_external", waiting_on: "ci",
+      pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: CLAIM, head_sha: PUSHED, process_start: PROCESS_START,
+      round_started_at_ms: nowMs - 180_000 },
   ];
 }
 
 function probeFor(holder: Pick<InflightLockInfo, "pid" | "run_id"> & { host?: string }, nowMs: number,
   over: Partial<FixRoundLiveProbe> = {}): FixRoundLiveProbe {
-  return { headSha: PUSHED, holder, nowMs, boundMs: BOUND_MS, isPidAlive: () => true, hostname: hostname(), ...over };
+  return { headSha: PUSHED, holder, nowMs, boundMs: BOUND_MS, isPidAlive: () => true, processStart: () => PROCESS_START,
+    hostname: hostname(), ...over };
+}
+
+function reviewGatePr(headSha = PUSHED): OpenPrView {
+  return { ...redPr(headSha), checksState: "green", reviewState: "failure", ciFailures: [], redRequiredChecks: [],
+    reviewSummary: `Review gate refused: ${REMEDY}`, actionableGateFailures: [{ reason: REMEDY }] };
 }
 
 function redPr(headSha = PUSHED): OpenPrView {
@@ -83,7 +92,8 @@ function redPr(headSha = PUSHED): OpenPrView {
 }
 
 /** A runSweep harness over one PR whose branch claim lives in `inflightDir`. */
-function sweepHarness(t: TestContext, opts: { live: boolean; seam?: boolean; isPidAlive?: (pid: number) => boolean }) {
+function sweepHarness(t: TestContext, opts: { live: boolean; seam?: boolean; isPidAlive?: FixRoundLiveProbe["isPidAlive"];
+  processStart?: FixRoundLiveProbe["processStart"] }) {
   const root = scratch(t, "sweep");
   const inflightDir = join(root, "state", "inflight");
   const nowMs = Date.now();
@@ -108,7 +118,7 @@ function sweepHarness(t: TestContext, opts: { live: boolean; seam?: boolean; isP
     ...(opts.seam === false ? {} : {
       deferToLiveFixRound: (pr: OpenPrView, lines: ReadonlyArray<Row>) => deferToLiveFixRound(pr, lines, {
         inflightDir, stateRoot: root, claimKeyFor: keyFor, nowMs, boundMs: BOUND_MS,
-        isPidAlive: opts.isPidAlive ?? (() => true), hostname: hostname() }),
+        isPidAlive: opts.isPidAlive ?? (() => true), processStart: opts.processStart ?? (() => PROCESS_START), hostname: hostname() }),
     }),
   };
   return { root, inflightDir, rows, deps, dispatched, admitted, nowMs, goLive,
@@ -132,7 +142,7 @@ test("W1-T13991 criterion 1: a live waiting round keeps its claim, and the next 
     fixRoundClaimEnded(ledger, id, held && probeFor(held, h.nowMs))), InflightLockError);
   assert.equal(readInflightLock(h.inflightDir, key)?.run_id, CLAIM, "the live round's claim is kept");
 
-  const first = await runSweep([redPr()], h.deps, DEFAULT_SWEEP_POLICY);
+  const first = await runSweep([reviewGatePr()], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, [], JSON.stringify(first.actions));
   const action = first.actions.find((a) => a.prNumber === PR)!;
   assert.equal(action.acted, false);
@@ -140,31 +150,81 @@ test("W1-T13991 criterion 1: a live waiting round keeps its claim, and the next 
   assert.equal(h.deferred().length, 1);
   assert.equal(h.deferred()[0].live_round_run_id, ROUND);
   assert.equal(h.deferred()[0].claim_run_id, CLAIM);
-  assert.equal(readFixRoundHandoff(fixRoundHandoffPath(h.root, key))?.failure, "check");
+  const marker = readFixRoundHandoff(fixRoundHandoffPath(h.root, CLAIM));
+  assert.equal(marker?.failure, "review");
+  assert.deepEqual(marker?.unmet_criteria, []);
+  assert.deepEqual(marker?.actionable_gate_failures, [{ reason: REMEDY }]);
 
-  await runSweep([redPr()], h.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([reviewGatePr()], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.dispatched, [], "no second round on the live round's head");
   assert.equal(h.deferred().length, 1, "one row per hand-off, not one per pass");
 
   // origin/main's sweep, with no deferral: a second round is dispatched on the same head.
   const base = sweepHarness(t, { live: true, seam: false });
-  await runSweep([redPr()], base.deps, DEFAULT_SWEEP_POLICY);
+  await runSweep([reviewGatePr()], base.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(base.dispatched, [PR]);
   assert.equal(base.deferred().length, 0);
 });
 
 test("W1-T13991 criterion 3: at most one fix round per pull request is charged for memory by the fix admission", async (t) => {
   const h = sweepHarness(t, { live: false });
-  await runSweep([redPr("3179eb03")], h.deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(h.admitted, [PR], "the first round is charged");
-  assert.deepEqual(h.dispatched, [PR]);
-  h.goLive();
-  for (let pass = 0; pass < 3; pass++) await runSweep([redPr()], h.deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(h.admitted, [PR], "the live round's new failure charges no second round");
-  assert.deepEqual(h.dispatched, [PR]);
-  const base = sweepHarness(t, { live: true, seam: false });
-  await runSweep([redPr()], base.deps, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(base.admitted, [PR], "origin/main charges a second round for the same PR");
+  const firstHead = "3179eb03";
+  let settleFirst!: () => void;
+  const firstSettlement = new Promise<void>((resolve) => { settleFirst = resolve; });
+  const launched: string[] = [];
+  const granted: string[] = [];
+  let active = 0;
+  let peak = 0;
+  const childPorts = (head: string) => ({
+    readLivePr: async () => ({ state: "OPEN", headSha: head }),
+    readTask: () => ({ found: true as const, merged: false, retired: false }),
+    hold: () => undefined,
+    log: h.deps.log!,
+    claimFixAdmission: () => {
+      granted.push(head);
+      peak = Math.max(peak, ++active);
+      return { admitted: true as const, release: () => { active--; } };
+    },
+    dispatcher: () => ({
+      dispatchFix: async () => { if (head === firstHead) await firstSettlement; },
+    }),
+  });
+  const deps: SweepDeps = { ...h.deps, detachFixWait: true, dispatchFix: () => assert.fail("the host runs the fix") };
+  installDetachedWorkHost({
+    hosts: new Set(["fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async ({ envelope, pr }) => {
+      launched.push(pr.headSha);
+      return { runId: `host-${pr.headSha}`, settled: runFixDispatchChild({ envelope }, childPorts(pr.headSha)) };
+    },
+  });
+  try {
+    await runSweep([redPr(firstHead)], deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(granted, [firstHead], "the first child owns a grant before publishing a CI wait");
+    assert.equal(active, 1);
+
+    await runSweep([redPr()], deps, DEFAULT_SWEEP_POLICY);
+    assert.deepEqual(launched, [firstHead], "the sweep keeps the same PR's other head out of the host");
+    const envelope = buildFixDispatchEnvelope(redPr(), { unmetCriteria: [] }, { fixKey: `${TASK}@${PUSHED}`, decidedAtMs: h.nowMs });
+    await assert.rejects(runFixDispatchChild({ envelope }, childPorts(PUSHED)), /already holds admission/);
+    assert.deepEqual(granted, [firstHead], "the child refused a second grant before charging it");
+
+    h.goLive();
+    await runSweep([redPr()], deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(h.deferred().length, 1, "the existing owner receives its failure even while holding admission");
+    assert.deepEqual(h.admitted, [PR]);
+    settleFirst();
+    await drainDetachedSweepActions();
+    h.rows.push({ step: "fix.stood_down", run_id: ROUND, pr_number: PR, ts: new Date(h.nowMs).toISOString() });
+    await runSweep([redPr()], deps, DEFAULT_SWEEP_POLICY);
+    await drainDetachedSweepActions();
+    assert.deepEqual(granted, [firstHead, PUSHED], "a settled round releases admission for the next head");
+    assert.equal(peak, 1);
+    assert.equal(active, 0);
+  } finally {
+    settleFirst();
+    await drainDetachedSweepActions();
+    installDetachedWorkHost(undefined);
+  }
 });
 
 test("W1-T13991 criterion 4: a dead round, an ended round and a head someone else moved are reclaimed as on origin/main", async (t) => {
@@ -176,12 +236,14 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
   const later = new Date(nowMs - 100_000).toISOString();
   const cases: Array<[string, Row[], Partial<FixRoundLiveProbe>]> = [
     ["the round's process is gone", waitingRound(nowMs), { isPidAlive: () => false }],
+    ["the PID now belongs to another process", waitingRound(nowMs), { processStart: () => "proc:45678" }],
+    ["the process start is unreadable", waitingRound(nowMs), { processStart: () => undefined }],
     ["the claim names another host", waitingRound(nowMs), { holder: { ...holder, host: "another-host" } }],
     ["someone else moved the head", waitingRound(nowMs), { headSha: "f00dfeed" }],
-    ["the round stood down", [...waitingRound(nowMs), { ts: later, run_id: ROUND, step: "fix.stood_down", reason: "yielded" }], {}],
-    ["the round yielded its wait", [...waitingRound(nowMs), { ts: later, run_id: ROUND, step: "run.freshness_handoff" }], {}],
-    ["the round's wait ended red", [...waitingRound(nowMs), { ts: later, run_id: ROUND, step: "fix.ci_not_green" }], {}],
-    ["the round is past its spawn bound", waitingRound(nowMs), { nowMs: nowMs + BOUND_MS }],
+    ...["fix.stood_down", "run.freshness_handoff", "fix.ci_not_green", "fix.commit_refused", "sweep.fix.error"].map(
+      (step): [string, Row[], Partial<FixRoundLiveProbe>] =>
+        [step, [...waitingRound(nowMs), { ts: later, run_id: ROUND, pr_number: PR, step }], {}]),
+    ["the round is past its spawn bound", waitingRound(nowMs), { nowMs: nowMs + BOUND_MS - 150_000 }],
     ["the round never started its wait", waitingRound(nowMs).slice(0, 1), {}],
   ];
   for (const [name, rows, over] of cases) {
@@ -197,10 +259,13 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
     stale.release();
   }
 
-  // The sweep dispatches as before on a dead round and on a head someone else moved.
-  for (const [name, live] of [["dead", () => false], ["moved", () => true]] as const) {
-    const h = sweepHarness(t, { live: true, isPidAlive: live });
-    await runSweep([redPr(name === "moved" ? "f00dfeed" : PUSHED)], h.deps, DEFAULT_SWEEP_POLICY);
+  for (const [name, head, options] of [
+    ["dead", PUSHED, { isPidAlive: () => false }],
+    ["reused PID", PUSHED, { processStart: () => "proc:45678" }],
+    ["moved", "f00dfeed", {}],
+  ] as const) {
+    const h = sweepHarness(t, { live: true, ...options });
+    await runSweep([redPr(head)], h.deps, DEFAULT_SWEEP_POLICY);
     assert.deepEqual(h.dispatched, [PR], name);
     assert.equal(h.deferred().length, 0, name);
   }
@@ -228,6 +293,19 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
   successor.release();
 });
 
+test("W1-T13991 criterion 5: the wait belongs to the exact round and another PR's dispatch under the same run does not end it", () => {
+  const nowMs = Date.now();
+  const probe = probeFor({ pid: process.pid, run_id: CLAIM, host: hostname() }, nowMs);
+  const [done, wait] = waitingRound(nowMs);
+  const unrelated = { run_id: ROUND, pr_number: PR + 1, ts: new Date(nowMs).toISOString() };
+  assert.equal(fixRoundIsLiveOnHead([done, wait, { ...unrelated, step: "fix.dispatch" }], probe), true);
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, ...unrelated }], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, waiting_on: "pr" }], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, head_sha: "f00dfeed" }], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, round_id: "OTHER" }], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([done, wait, { ...unrelated, pr_number: PR, step: "fix.dispatch" }], probe), false);
+});
+
 // ── the sweep's real dispatchFix and fix rung ───────────────────────────────────────────────
 
 const PLAN: Plan = (() => {
@@ -244,8 +322,8 @@ function worker(text: string): WorkerResult {
   };
 }
 
-test("W1-T13991 criterion 2: a new failure on the live round's head ends its CI wait, and its next strike starts on it in its own worktree", async (t) => {
-  for (const failure of ["review", "check"] as const) {
+test("W1-T13991 criterion 2: red terminal polls and actionable review failures resume the waiting round on its own worktree", async (t) => {
+  for (const failure of ["review", "check", "foreign-head", "marker-error"] as const) {
     const root = scratch(t, `rung-${failure}`);
     const repo = "scratch-w1t13991";
     // A checkout of a bare origin under <root>/repos/<repo>, with the run branch pushed.
@@ -265,7 +343,7 @@ test("W1-T13991 criterion 2: a new failure on the live round's head ends its CI 
     const key = fixBranchClaimKey("acme", repo, BRANCH);
     const logs: Row[] = [];
     const spawns: SpawnWorkerArgs[] = [];
-    const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean } = {};
+    const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number } = {};
     let waits = 0;
     const shim = ghShim([
       { when: "commits/cafe1234/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] }) },
@@ -300,23 +378,61 @@ test("W1-T13991 criterion 2: a new failure on the live round's head ends its CI 
           remove: (repoDir: string, ownerPath: string) => removeAbandonedFixWorktreeOwner(repoDir, ownerPath),
         },
         pushFixRoundImpl: async () => undefined,
-        waitForCiGreenImpl: async (_url: string, waitLog: (step: string, extra?: Row) => void, _every: number,
-          poll: { sleep: (ms: number) => Promise<void> }) => {
-          if (++waits > 1) return "red";
-          waitLog("run.awaiting_external", { waiting_on: "ci" });
+        waitForCiGreenImpl: async (url: string, waitLog: (step: string, extra?: Row) => void, _every: number,
+          poll: { sleep: (ms: number) => Promise<void>; readJson: (args: string[]) => Promise<unknown> }) => {
+          if (++waits > 1) return { state: "red", sha: logs.findLast((row) => row.step === "fix.done")?.pushed_head_sha };
           const done = logs.find((row) => row.step === "fix.done")!;
           // GitHub now reads the head this round pushed.
           const head = String(done.pushed_head_sha);
           shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: head, ref: BRANCH }, base: { sha: "deadbeef" } }) });
           shim.addRoute({ when: "headRefName", stdout: JSON.stringify({ headRefName: BRANCH, headRefOid: head, body: "" }) });
-          seen.heldDuringWait = readInflightLock(join(root, "state", "inflight"), key)?.run_id;
-          // The sweep's next pass sees the new failure on the head this round pushed.
-          const view = failure === "check" ? redPr(String(done.pushed_head_sha))
-            : { ...redPr(String(done.pushed_head_sha)), checksState: "pending", redRequiredChecks: [], ciFailures: [],
-              unmetCriteria: [{ claim: UNMET, proof: "unit test: takes it", met: false, reason: "the review failed", proof_exec: "not_executable" }] };
-          seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound({ ...view, headRefName: BRANCH } as OpenPrView,
-            readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
-          for (let i = 0; i < 3; i++) await poll.sleep(1);
+          const logWait = (step: string, extra?: Row) => {
+            waitLog(step, extra);
+            if (step === "run.awaiting_external") seen.heldDuringWait = readInflightLock(join(root, "state", "inflight"), key)?.run_id;
+          };
+          const handoff = (view: OpenPrView) => {
+            seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound(view,
+              readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
+          };
+          if (failure === "check" || failure === "foreign-head") {
+            let polls = 0;
+            return waitForCiGreen(url, logWait, 0, {
+              sleep: async () => {
+                await poll.sleep(0);
+                if (failure === "foreign-head") {
+                  shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false,
+                    head: { sha: "f00dfeed", ref: BRANCH }, base: { sha: "deadbeef" } }) });
+                }
+              },
+              requiredContexts: () => ["coverage-shard (1/12)"],
+              readJson: async (args) => {
+                if (args[1].includes("commits/f00dfeed/check-runs")) {
+                  seen.foreignPolls = (seen.foreignPolls ?? 0) + 1;
+                  const failed = seen.foreignPolls > 1;
+                  return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
+                    conclusion: failed ? "failure" : null }] };
+                }
+                if (args[1].includes(`commits/${head}/check-runs`)) {
+                  const failed = ++polls > 1;
+                  if (failed) handoff(redPr(head));
+                  return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
+                    conclusion: failed ? "failure" : null }] };
+                }
+                if (args[1].endsWith("/status")) return { statuses: [] };
+                if (args[1].includes("actions/runs?")) return { workflow_runs: [] };
+                return poll.readJson(args);
+              },
+            });
+          }
+          logWait("run.awaiting_external", { waiting_on: "ci", head_sha: head });
+          if (failure === "marker-error") {
+            mkdirSync(fixRoundHandoffPath(root, String(done.branch_claim_run_id)), { recursive: true });
+            await poll.sleep(0);
+            return { state: "freshness_handoff", sha: head, recycle: "fixture recycle" };
+          }
+          const sleeping = poll.sleep(0);
+          handoff(reviewGatePr(head));
+          await sleeping;
           seen.waitedOut = true;
           return "pending" as never;
         },
@@ -332,6 +448,25 @@ test("W1-T13991 criterion 2: a new failure on the live round's head ends its CI 
     const steps = (step: string) => logs.filter((row) => row.step === step);
     const firstDone = steps("fix.done")[0];
     assert.equal(seen.heldDuringWait, firstDone?.branch_claim_run_id, `${failure}: the waiting round holds the claim fix.done named`);
+    assert.equal(readInflightLock(join(root, "state", "inflight"), key), null, `${failure}: the branch claim was released`);
+    if (failure === "foreign-head") {
+      const stoodDown = steps("fix.stood_down")[0];
+      assert.equal(stoodDown?.site, "rung.ci_wait_head");
+      assert.equal(stoodDown?.head_sha, firstDone?.pushed_head_sha);
+      assert.equal(stoodDown?.current_head_sha, "f00dfeed");
+      assert.equal(seen.foreignPolls, 1, "the old round yields on the first pending poll of the foreign head");
+      assert.equal(steps("fix.live_round_resumed").length, 0);
+      assert.equal(spawns.length, 1, "the old round releases instead of striking on the foreign head");
+      continue;
+    }
+    if (failure === "marker-error") {
+      assert.ok(steps("sweep.fix.handoff_unreadable").length > 0);
+      assert.equal(steps("sweep.fix.handoff_cleanup_failed").length, 1);
+      assert.equal(steps("fix.live_round_resumed").length, 0);
+      assert.equal(steps("fix.stood_down")[0]?.reason, "recycle_yield");
+      assert.equal(steps("sweep.fix.error").length, 0);
+      continue;
+    }
     assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id, failure, handedOff: true });
     assert.equal(seen.waitedOut, undefined, `${failure}: the hand-off ended the wait at its next poll`);
     const resumed = steps("fix.live_round_resumed");
@@ -340,12 +475,12 @@ test("W1-T13991 criterion 2: a new failure on the live round's head ends its CI 
     assert.equal(resumed[0].head_sha, firstDone?.pushed_head_sha);
     assert.ok(spawns.length >= 2, `${failure}: the round struck again: ${JSON.stringify(logs.slice(logs.indexOf(resumed[0])).map((row) => [row.step, row.reason ?? row.site]))}`);
     assert.equal(spawns[1].cwd, spawns[0].cwd, `${failure}: in its own worktree`);
-    if (failure === "review") assert.match(String(spawns[1].prompt), new RegExp(UNMET), "the strike targets the handed review");
+    if (failure === "review") assert.match(String(spawns[1].prompt), new RegExp(REMEDY), "the strike targets the handed gate remedy");
     else {
       assert.ok(logs.indexOf(steps("fix.ci_not_green")[0]) > logs.indexOf(resumed[0]), "the wait reads the handed red");
       assert.match(String(spawns[1].prompt), /coverage-shard \(1\/12\)/, "the strike targets the red check");
     }
     assert.deepEqual(steps("fix.stood_down").filter((row) => /a later round reclaimed/.test(String(row.reason))), []);
-    assert.equal(existsSync(fixRoundHandoffPath(root, key)), false, `${failure}: the round removed its hand-off when it ended`);
+    assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false, `${failure}: the round removed its hand-off when it ended`);
   }
 });

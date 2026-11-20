@@ -2379,6 +2379,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     bodyRepairFallback,
     allCiFailuresAreGeneratorFixable,
     runGeneratorFixForCiFailures,
+    branchAuthorshipStandDownReason,
     ciGateSha,
     ciLogNamedSourcePaths,
     mainOwnedPaths,
@@ -2462,6 +2463,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       settingsFile: opts.settingsFile,
     });
   let review = opts.initialReview;
+  let handedReview: LiveRoundHandoff | undefined;
   let reconstructedReviewChecked = false;
   let bodyCoverageSelfHealAttempted = false;
   const proofDiscriminationStillNeedsRepair = () =>
@@ -4008,12 +4010,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // `reviewer-unmet` off the review's own `summary` (see the guard immediately below for
     // what happens if it recurs) — see `test/escalation-evidence-floor.test.ts`, W1-T487,
     // protected and out of this task's scope.
+    const gateFailureSeed = handedReview?.review === review ? handedReview?.actionableGateFailures
+      : strikes === 0 ? opts.actionableGateFailures : undefined;
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
-        ? strikes === 0 && opts.actionableGateFailures !== undefined
+        ? gateFailureSeed !== undefined
           ? // W1-T10574: re-filter the seed through the single-form producer so an unfixable-in-place
             // reason (rule 15 / entanglement) never reaches the pre-strike dispatch.
-            actionableGateFailuresFromReasons(opts.actionableGateFailures.map((f) => f.reason))
+            actionableGateFailuresFromReasons(gateFailureSeed.map((f) => f.reason))
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
 
@@ -5466,20 +5470,35 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       },
     );
 
-    // W1-T13991: the wait holds the claim fix.done released once it is recorded, so a new failure on this head comes here.
+    const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
+    if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
     const waited = await deps.waitForCiGreen(opts.prUrl, (step, extra) => {
-      deps.log(step, extra);
-      if (step === "run.awaiting_external") deps.branchClaim?.holdForWait?.();
+      if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
+        deps.branchClaim?.holdForWait === undefined) return deps.log(step, extra);
+      deps.branchClaim.holdForWait();
+      deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: deps.branchClaim.id() });
     });
     const resumed = opts.liveRoundHandoff?.();
-    if (resumed) deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: resumed.headSha, failure: resumed.failure });
-    const ci: CiGateOutcome | "green" | "red" | "timeout" = resumed?.failure === "check" ? { state: "red", sha: resumed.headSha } : waited;
+    const ci = resumed?.failure === "check" && host.ciGateState(waited) !== "red"
+      ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
+    const ciHead = ciGateSha(ci);
+    const foreign = deps.branchClaim?.holdForWait === undefined ? undefined :
+      branchAuthorshipStandDownReason(pushedHead, { ok: true, headSha: ciHead });
+    if (foreign) {
+      deps.log("fix.stood_down", { site: "rung.ci_wait_head", head_sha: pushedHead, current_head_sha: foreign.headSha,
+        strike: strikes, reason: foreign.reason });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: foreign.reason, standDownReason: foreign.reason };
+    }
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return claimLostAfterCi;
+    if (resumed) {
+      deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: resumed.headSha, failure: resumed.failure });
+    }
     if (resumed?.review) {
-      currentPinnedSha = currentPrHeadSha = rungOwnHeadSha = resumed.headSha;
+      currentPinnedSha = currentPrHeadSha = resumed.headSha;
+      handedReview = resumed;
       review = resumed.review;
       noReviewYet = false;
       currentMergeConflict = undefined;
