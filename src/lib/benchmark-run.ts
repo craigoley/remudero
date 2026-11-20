@@ -576,7 +576,17 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
     .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
     .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
   return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message,
-    ...thrownServedModel(error, observations) };
+    ...thrownServedModelEvidence(error, observations) };
+}
+
+/** W1-T13868: named when a getter on the thrown error or its `cause` chain throws while its served model is read. */
+export const THROWN_SERVED_MODEL_UNREADABLE = "the thrown error's served-model evidence could not be read";
+
+/** Reading evidence never replaces the rejection or drops the row: a throwing getter is named, not propagated. */
+function thrownServedModelEvidence(error: unknown,
+  observations: WeakMap<object, { servedModel: string | null; servedModelReason?: string }> | undefined): Record<string, string | null> {
+  try { return thrownServedModel(error, observations); }
+  catch { const reason = THROWN_SERVED_MODEL_UNREADABLE; return { served_model: null, served_model_reason: reason }; }
 }
 
 /** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
@@ -908,4 +918,57 @@ export function recordBenchmarkWorkerAttempt(
     failed(error);
     throw error;
   }).finally(stopPolling);
+}
+
+/**
+ * The routing receipt fields for a terminal `verdict` row — the ONE helper every terminal
+ * `verdict` writer in `runTaskBody` spreads. The assignment ID joins the pre-execution policy
+ * decision to this terminal receipt; the receipt then names the worker result's served model,
+ * token envelope, duration, cost, and worker-level success separately from the run verdict.
+ * `routed_model` rides along only when present, the same "absent when unset" discipline
+ * {@link workerLedgerFields} already keeps.
+ *
+ * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
+ * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
+ * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
+ * absent means "not written"; `null` means "checked, no worker ran" (P48).
+ */
+export function terminalVerdictFields(r: WorkerResult | null): {
+  provider?: WorkerResult["provider"];
+  model: string | null;
+  served_model: string | null;
+  /** W1-T13868: beside a null served model, the provider's own reason, as the worker row carries it. */
+  served_model_reason?: string;
+  routed_model?: string;
+  selection_assignment_id?: string;
+  tokens?: WorkerResult["tokens"];
+  worker_duration_ms?: number;
+  total_cost_usd?: number;
+  notional_cost_usd?: number;
+  /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
+  spend_role?: "restated";
+  success?: boolean;
+} {
+  if (!r) return { model: null, served_model: null };
+  // A successful result envelope can be followed by an SDK iterator error. The existing terminal
+  // verdict classifier treats that exact `{ isError: true, subtype: "success", apiError: false }`
+  // shape as clean success; routing telemetry must use the same outcome rather than reporting a
+  // completed call as a model failure. API errors and usage refusals remain unsuccessful even when
+  // their envelope subtype says `success`.
+  const success = !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
+  return {
+    model: r.model,
+    served_model: r.servedModel ?? null,
+    ...(r.servedModel == null
+      ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" } : {}),
+    ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
+    ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
+    tokens: r.tokens,
+    ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
+    total_cost_usd: r.costUsd,
+    ...(r.provider === "codex" && r.notionalCostUsd !== undefined ? { notional_cost_usd: r.notionalCostUsd } : {}),
+    spend_role: "restated",
+    success,
+  };
 }

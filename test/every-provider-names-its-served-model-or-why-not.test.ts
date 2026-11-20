@@ -7,7 +7,8 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, recordBenchmarkWorkerAttempt, spawnFailureDetail } from "#src/lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, recordBenchmarkWorkerAttempt, spawnFailureDetail,
+  terminalVerdictFields, THROWN_SERVED_MODEL_UNREADABLE } from "#src/lib/benchmark-run.js";
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { recordReviewFindings } from "#src/lib/review-findings.js";
@@ -490,4 +491,40 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
     assert.equal(foundryTimedOut.isError, true, "the deadline still fails the attempt");
     assert.equal(foundryTimedOut.servedModel, "claude-opus-5-5-20260920");
   } finally { f.cleanup(); }
+});
+
+test("W1-T13868 criterion 1: a terminal verdict row carries the provider's reason beside a null served model", async () => {
+  const codex = terminalVerdictFields(await runCodex());
+  assert.equal(codex.served_model, null);
+  assert.equal(codex.served_model_reason, CODEX_SERVED_MODEL_REASON, "a codex verdict row names why it has no model");
+  const unnamed = terminalVerdictFields(await runCash(cashReply({})) as WorkerResult);
+  assert.equal(unnamed.served_model, null);
+  assert.equal(unnamed.served_model_reason, CASH_SERVED_MODEL_REASONS.unnamed, "a GPT verdict row names why it has no model");
+  const named = terminalVerdictFields(await runCash(cashReply({ model: "gpt-5-nano-2025-08-07" })) as WorkerResult);
+  assert.equal(named.served_model, "gpt-5-nano-2025-08-07");
+  assert.equal("served_model_reason" in named, false, "positive control: a named model carries no reason");
+});
+
+test("W1-T13868 criterion 1: a throwing getter on a spawn error never replaces the rejection or drops the failed-attempt row", async () => {
+  const hostile = new Error("spawn failed before any result");
+  Object.defineProperty(hostile, "cause", { get() { throw new Error("cause getter exploded"); } });
+  const named = { served_model: null, served_model_reason: THROWN_SERVED_MODEL_UNREADABLE };
+  assert.deepEqual({ served_model: spawnFailureDetail(hostile, false).served_model,
+    served_model_reason: spawnFailureDetail(hostile, false).served_model_reason }, named);
+  // The dispatch lane: the original error rejects, and its spawn-threw row is still logged.
+  const logged: Record<string, unknown>[] = [];
+  await assert.rejects(recordBenchmarkWorkerAttempt(() => Promise.reject(hostile), (step, fields) => logged.push({ step, ...fields }),
+    () => undefined, () => {}), (error) => error === hostile);
+  assert.deepEqual(logged.filter((row) => row.worker_failure === "spawn-threw-before-result")
+    .map((row) => [row.step, row.served_model, row.served_model_reason]), [["worker.attempt", null, THROWN_SERVED_MODEL_UNREADABLE]]);
+  // The non-dispatch lane: the same, through its ledger.
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-hostile-cause-"));
+  try {
+    const spawn = benchmarkNonDispatchSpawn("served-model-hostile-cause", (() => Promise.reject(hostile)) as typeof spawnWorker);
+    await assert.rejects(spawn({ cwd: root, config: { root } } as never), (error) => error === hostile);
+    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>).filter((row) => row.worker_failure === "spawn-threw-before-result");
+    assert.deepEqual(rows.map((row) => [row.step, row.served_model, row.served_model_reason]),
+      [["worker.attempt", null, THROWN_SERVED_MODEL_UNREADABLE]]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
