@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { inboxBoardReferents } from "#src/lib/inbox-board-referents.js";
-import type { StatusProjection } from "#src/lib/status.js";
+import { ghGateway, type StatusProjection } from "#src/lib/status.js";
 
 const row = (taskId: string, extra: Partial<StatusProjection> = {}): StatusProjection =>
   ({ taskId, status: "blocked", source: "none", merged: false, ...extra });
@@ -42,4 +42,21 @@ test("W1-T13957 own task row: a PR seen only as an overlap entry on another task
   assert.deepEqual(read.states.get("#19691"), { status: "open" }, "its own task has no row, so the escalation stays unverified");
   const unowned = inboxBoardReferents(projection(overlap), [open(19691, "dependabot/npm")]);
   assert.deepEqual(unowned.states.get("#19691"), { status: "open" });
+});
+
+test("W1-T13957 own task row: the Inbox CLI's ghGateway open-PR list carries the body, so its own task row counts there too", () => {
+  const pulls = [
+    { number: 19691, html_url: "https://github.com/craigoley/remudero/pull/19691", state: "open", head: { ref: "run-W1-T13785-1795095230170" }, body: null, updated_at: "2026-11-20T00:00:00Z" },
+    { number: 19728, html_url: "https://github.com/craigoley/remudero/pull/19728", state: "open", head: { ref: "run-W1-T13855-1795095230171" }, body: "Remudero-Task: W1-T1", updated_at: "2026-11-20T00:00:00Z" },
+    { number: 19729, html_url: "https://github.com/craigoley/remudero/pull/19729", state: "open", head: { ref: "run-W1-T13856-1795095230172" }, updated_at: "2026-11-20T00:00:00Z" },
+  ];
+  const github = ghGateway("craigoley", "remudero", {
+    exec: (args) => (args[0] === "api" && /\/pulls\?state=open&/.test(args[1] ?? "") && /[?&]page=1(&|$)/.test(args[1] ?? "") ? JSON.stringify(pulls) : "[]"),
+  });
+  const open = github.listOpenHeadBranches?.();
+  assert.ok(open, "the fixture's open-PR list was read");
+  const read = inboxBoardReferents(projection(row("W1-T13785", { needsHuman: true }), row("W1-T13855", { needsHuman: true }), row("W1-T13856", { needsHuman: true })), open);
+  assert.deepEqual(read.states.get("#19691"), { status: "open", unhandledEscalations: 1 }, "a REST null body is an empty body: read, with no conflicting trailer");
+  assert.deepEqual(read.states.get("#19728"), { status: "open" }, "the carried body's trailer names another task, so ownership conflicts");
+  assert.deepEqual(read.states.get("#19729"), { status: "open" }, "a row with no body key stays unread");
 });
