@@ -1115,20 +1115,29 @@ const MACHINE_FIELDS_HEADING = "## Machine fields";
 const DETAILS_HEADING = "## Details";
 const ISSUE_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_";
 
+/** Text placed ABOVE "## Details" must not open a line with one of the body's own section
+ *  headings: readers split the body at them, so a quoted heading would move the Details boundary
+ *  and the PR identity read from it. A backslash keeps the quoted text visible verbatim. */
+const SECTION_HEADING_LINE_RE = /^(?=## (?:Decision Summary|Options|Recommendation|Details|Machine fields)[ \t\r]*$)/gm;
+function quoteSectionHeadings(text: string): string {
+  return text.replace(SECTION_HEADING_LINE_RE, "\\");
+}
+
 /** Open with the decision summary or the producer's summary, then the choices. Keep the raw detail
  * intact for diagnostics and always name Host so operators can identify the affected machine. */
 export function renderIssueBody(e: Escalation, notices: readonly string[] = []): string {
   const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
+  const q = quoteSectionHeadings;
   const lines = [
     ...(decisionSummary
-      ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`]
-      : [e.summary.replace(/[\r\n\u2028\u2029]/g, " ")]),
+      ? ["## Decision Summary", q(decisionSummary.headline), "", q(decisionSummary.what_happened), "", `**Decision:** ${q(decisionSummary.decision)}`]
+      : [q(e.summary.replace(/[\r\n\u2028\u2029]/g, " "))]),
     "",
     "## Options",
-    ...e.options.map((o) => `- **${o.label}** — ${o.detail}`),
+    ...e.options.map((o) => `- **${q(o.label)}** — ${q(o.detail)}`),
     "",
     "## Recommendation",
-    e.recommendation,
+    q(e.recommendation),
     "",
     DETAILS_HEADING,
     e.detail,
@@ -1350,12 +1359,26 @@ function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefine
   return title === escalationIssueTitle(e) && fields.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
+/** A machine-fields-last body's sections: the lead (summary or decision card), the choices
+ *  (Options and Recommendation) and the raw detail under "## Details". `undefined` when the
+ *  body is fields-first or its Details section cannot be located. */
+function machineFieldsLastSections(body: string, fields: string | undefined): { lead: string; choices: string; detail: string } | undefined {
+  if (fields === undefined) return undefined;
+  const marker = `\n\n${DETAILS_HEADING}\n`;
+  const optionsAt = body.indexOf("\n\n## Options\n");
+  const detailsAt = body.indexOf(marker, body.indexOf("\n\n## Recommendation\n"));
+  const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`);
+  if (detailsAt === -1 || footerAt <= detailsAt) return undefined;
+  return {
+    lead: optionsAt === -1 || optionsAt > detailsAt ? "" : body.slice(0, optionsAt),
+    choices: body.slice(optionsAt === -1 || optionsAt > detailsAt ? 0 : optionsAt, detailsAt),
+    detail: body.slice(detailsAt + marker.length, footerAt),
+  };
+}
+
 /** The producer's summary and Details carry its PR. Choice links can refer to other PRs. */
 function candidatePrText(title: string | undefined, body: string, fields: string | undefined): string | undefined {
-  const marker = `\n\n${DETAILS_HEADING}\n`;
-  const detailsAt = fields === undefined ? -1 : body.indexOf(marker, body.indexOf("\n\n## Recommendation\n"));
-  const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`);
-  const detail = detailsAt !== -1 && footerAt > detailsAt ? body.slice(detailsAt + marker.length, footerAt) : body;
+  const detail = machineFieldsLastSections(body, fields)?.detail ?? body;
   const header = fields ?? body.split("\n\n", 1)[0]!;
   const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
   if (line) {
@@ -1384,13 +1407,17 @@ function candidatePrRef(title: string | undefined, body: string): string | undef
   return text === undefined ? undefined : extractPrRef(text) ?? extractPrRef(body);
 }
 
-/** The reconciler requires a full link. Fields-first issues keep their original body/title scan. */
+/** The reconciler requires a full link. Both layouts scan the body before the title, in the
+ *  fields-first order — fields, decision card, Details, then choices — so reordering the body never
+ *  changes which PR an issue is reconciled against. */
 export function escalationIssuePrReferent({ title, body }: Pick<OpenIssue, "title" | "body">): number | undefined {
   const normalized = normalizeCandidateBody(body ?? "");
   const fields = machineFields(normalized);
-  return fields === undefined
-    ? prReferentFromIssueText(body) ?? prReferentFromIssueText(title)
-    : prReferentFromIssueText(candidatePrText(title, normalized, fields));
+  const sections = machineFieldsLastSections(normalized, fields);
+  const legacyOrdered = sections === undefined ? body : [
+    fields, sections.lead.startsWith("## Decision Summary\n") ? sections.lead : "", sections.detail, sections.choices,
+  ].join("\n\n");
+  return prReferentFromIssueText(legacyOrdered) ?? prReferentFromIssueText(title);
 }
 
 function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {

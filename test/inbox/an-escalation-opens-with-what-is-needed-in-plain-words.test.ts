@@ -284,3 +284,53 @@ test("the console retains decision context and keeps the native reply destinatio
   assert.equal(starter.conversation.canStartConversation, true);
   assert.equal(starter.conversation.initialMessage, `${escalation.summary}\n\n${escalation.detail}`);
 });
+
+test("W1-T12041 criterion 1: quoted section headings in an option cannot divert deduplication from Details", (t) => {
+  const quoted = `Compare the checks.\n\n## Recommendation\nquoted\n\n## Details\nSee ${otherPrUrl}.`;
+  const subject = {
+    ...escalation,
+    options: [{ label: "retry", detail: quoted }, escalation.options[1]!],
+    recommendation: `retry\n\n## Details\nSee ${otherPrUrl}.`,
+  };
+  const body = renderIssueBody(subject);
+  const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body };
+  assert.equal(matchDuplicateEscalation(subject, [issue]), issue);
+  const directory = mkdtempSync(join(tmpdir(), "rmd-escalation-quoted-headings-"));
+  t.after(() => rmSync(directory, { recursive: true }));
+  const commented: string[] = [];
+  const delivered = escalate(subject, {
+    issues: {
+      listOpen: () => [issue],
+      create: () => assert.fail("a repeat opened a second issue"),
+      comment: (url) => { commented.push(url); },
+    },
+    ledgerPath: join(directory, "ledger.ndjson"),
+    runId: "run-42",
+  });
+  assert.equal(delivered, issueUrl);
+  assert.deepEqual(commented, [issueUrl]);
+  assert.equal(conversationOf(body, subject)?.identity.prRef, "12345");
+  assert.equal(conversationOf(body, subject)?.detail, subject.detail);
+});
+
+test("W1-T12041 criterion 2: a PR in the title does not outrank the PR in Details for reconciliation", () => {
+  const subject = { ...escalation, summary: `The release checks failed twice; related ${otherPrUrl}` };
+  const legacyBody = [...fields, "", subject.detail, "", "## Options", "- **retry** — Run the checks again", "",
+    "## Recommendation", "retry"].join("\n");
+  for (const body of [legacyBody, renderIssueBody(subject)]) {
+    const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body };
+    const candidates = buildEscalationReconcileCandidates("fixture", "repo", { tasks: [], byId: new Map() }, "unused", undefined, {
+      issues: { listOpen: () => [issue] },
+      evidenceRootFor: () => undefined,
+      github: {
+        prByRef: (ref) => Number(ref) === 12345
+          ? { number: 12345, url: prUrl, state: "OPEN" }
+          : { number: 54321, url: otherPrUrl, state: "MERGED" },
+        findMergedByTrailer: () => null,
+        headRefName: () => undefined,
+        prBody: () => undefined,
+      },
+    });
+    assert.deepEqual(candidates.map(({ derived }) => [derived.prNumber, derived.merged]), [[12345, false]]);
+  }
+});
