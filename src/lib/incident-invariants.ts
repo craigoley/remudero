@@ -70,11 +70,17 @@ function stringField(row: IncidentInvariantRow, key: string): string | undefined
   return typeof v === "string" ? v : undefined;
 }
 
+/** W1-T13828: each row's parsed time, kept for as long as the row is: the live tail hands back the same row objects
+ *  every minute, and parsing every row's time once per rule window held serve's loop. */
+const rowTimes = new WeakMap<object, number | null>();
 function rowTimeMs(row: IncidentInvariantRow): number | undefined {
+  const held = rowTimes.get(row);
+  if (held !== undefined) return held ?? undefined;
   const ts = row.ts;
-  if (typeof ts !== "string") return undefined;
-  const parsed = Date.parse(ts);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  const parsed = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+  const ms = Number.isFinite(parsed) ? parsed : null;
+  rowTimes.set(row, ms);
+  return ms ?? undefined;
 }
 
 /** Rows strictly newer than `sinceMs`, at or before `nowMs` — half-open, so one instant is never
@@ -331,6 +337,64 @@ export const INCIDENT_RULE_INPUTS: Readonly<Record<string, readonly string[]>> =
 
 export const INCIDENT_LONGEST_WINDOW_MS = Math.max(...RULES.map((rule) => rule.longMs));
 
+/** W1-T13828: whether a step is one of a rule's declared inputs: an exact step, `*suffix` or `prefix*`. */
+function stepMatches(step: unknown, inputs: readonly string[]): boolean {
+  if (typeof step !== "string") return false;
+  return inputs.some((input) => input.startsWith("*") ? step.endsWith(input.slice(1))
+    : input.endsWith("*") ? step.startsWith(input.slice(0, -1)) : step === input);
+}
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function incidentStepPattern(wildcard: string): string {
+  return [...new Set(RULES.flatMap((rule) => rule.inputs))].map((input) =>
+    input.startsWith("*") ? wildcard + escapeRegExp(input.slice(1))
+      : input.endsWith("*") ? escapeRegExp(input.slice(0, -1)) + wildcard : escapeRegExp(input),
+  ).join("|");
+}
+const plainIncidentField = new RegExp(`"step"[ \\t\\r\\n]*:[ \\t\\r\\n]*"(?:${incidentStepPattern('[^"]*')})"`);
+
+// Consume quoted strings as units, so braces and brackets inside them never change the nesting depth.
+const jsonString = String.raw`"[^"\\]*(?:\\.[^"\\]*)*"`;
+const jsonTokens = new RegExp(String.raw`[\[\]{}]|(${jsonString})([ \t\r\n]*:[ \t\r\n]*(${jsonString})?)?`, "g");
+const jsonEscapes: Readonly<Record<string, string>> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+function decodeJsonString(token: string): string {
+  return token.slice(1, -1).replace(/\\(?:u([\da-fA-F]{4})|(["\\/bfnrt]))/g, (_, hex, escape) =>
+    hex === undefined ? jsonEscapes[escape] ?? escape : String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+function topLevelStep(line: string): string | undefined {
+  if (!line.trimStart().startsWith("{")) return undefined;
+  let depth = 0;
+  let step: string | undefined;
+  for (const [token, key, field, value] of line.matchAll(jsonTokens)) {
+    if (token === "{" || token === "[") depth += 1;
+    else if (token === "}" || token === "]") {
+      depth -= 1;
+      if (depth === 0) break;
+    } else if (depth === 1 && field !== undefined &&
+      (key === '"step"' || (key.includes("\\") && decodeJsonString(key) === "step"))) {
+      // JSON.parse uses the last occurrence of a repeated key.
+      step = value === undefined ? undefined : decodeJsonString(value);
+    }
+  }
+  return step;
+}
+
+class IncidentInputLine extends RegExp {
+  override test(line: string): boolean {
+    // Reject ordinary unrelated lines before scanning their JSON tokens. Escapes can change keys or values.
+    if (!line.includes("\\") && !plainIncidentField.test(line)) return false;
+    const step = topLevelStep(line);
+    return step !== undefined && super.test(step);
+  }
+}
+
+/** W1-T13828: test the top-level step against every rule's inputs before the tail parses the row. */
+export const INCIDENT_INPUT_LINE: RegExp = new IncidentInputLine(`^(?:${incidentStepPattern("[\\s\\S]*")})$`);
+
 /**
  * Evaluate every rule over `rows` at instant `nowMs`. A rule fires (and appears in the returned
  * array) only when BOTH its long window AND its short (1/12th) confirmation window are bad — see
@@ -344,8 +408,10 @@ export function evaluateIncidentInvariants(
   const findings: InvariantFinding[] = [];
   for (const rule of RULES) {
     const shortMs = rule.longMs / 12;
-    const long = rule.bad(rowsSince(rows, nowMs - rule.longMs, nowMs));
-    const short = rule.bad(rowsSince(rows, nowMs - shortMs, nowMs));
+    // W1-T13828: a rule reads only its declared inputs, so each window scans those rows, not the whole tail.
+    const inputs = rows.filter((row) => stepMatches(row.step, rule.inputs));
+    const long = rule.bad(rowsSince(inputs, nowMs - rule.longMs, nowMs));
+    const short = rule.bad(rowsSince(inputs, nowMs - shortMs, nowMs));
     if (long.bad && short.bad) {
       findings.push({ ruleId: rule.id, message: long.message, longMs: rule.longMs, shortMs });
     }
