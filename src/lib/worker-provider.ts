@@ -2336,6 +2336,14 @@ export function observedServedModelOf(error: unknown,
   return (observations ?? observedServedModels).get(error);
 }
 
+/** W1-T13868: the record {@link withObservedServedModel} made OUTSIDE any call's scope, for this thrown value. A call's
+ * reader falls back to it: an observation made where no call's scope reached (a stream or a wrapper whose async context
+ * opened before the call's) would otherwise be lost. An in-scope record never lands here, so calls sharing an error
+ * inside their scopes still never read each other's evidence. */
+export function unscopedObservedServedModelOf(error: unknown): ObservedServedModel | undefined {
+  return error !== null && typeof error === "object" ? observedServedModels.get(error) : undefined;
+}
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;

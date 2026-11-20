@@ -23,6 +23,7 @@ import {
   cashServedModel,
   spawnCodexWorker,
   spawnOpenWeightWorker,
+  withObservedServedModel,
 } from "#src/lib/worker-provider.js";
 
 // W1-T4650: claude attempts named their served model in 242 of 258 rows, codex in 0 of 100 and
@@ -526,5 +527,25 @@ test("W1-T13868 criterion 1: a throwing getter on a spawn error never replaces t
       .map((line) => JSON.parse(line) as Record<string, unknown>).filter((row) => row.worker_failure === "spawn-threw-before-result");
     assert.deepEqual(rows.map((row) => [row.step, row.served_model, row.served_model_reason]),
       [["worker.attempt", null, THROWN_SERVED_MODEL_UNREADABLE]]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("W1-T13868 criterion 1: a receipt scope that opens after the model was observed still records it", async () => {
+  // The fix lane (fixWorkerReceipt) writes through recordBenchmarkWorkerAttempt, whose per-call scope may open after
+  // the observation was made, as here, where the error is observed before the call starts.
+  const thrown = withObservedServedModel(new Error("codex call failed after naming its model"), { servedModel: "gpt-5.3-codex" });
+  const rows: Record<string, unknown>[] = [];
+  await assert.rejects(recordBenchmarkWorkerAttempt(() => Promise.reject(thrown), (step, fields) => rows.push({ step, ...fields }),
+    () => undefined, () => {}), (error) => error === thrown);
+  assert.deepEqual(rows.filter((row) => row.worker_failure === "spawn-threw-before-result")
+    .map((row) => [row.step, row.served_model]), [["worker.attempt", "gpt-5.3-codex"]], "the dispatch lane's row");
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-unscoped-"));
+  try {
+    const spawn = benchmarkNonDispatchSpawn("served-model-unscoped", (() => Promise.reject(thrown)) as typeof spawnWorker);
+    await assert.rejects(spawn({ cwd: root, config: { root } } as never), (error) => error === thrown);
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>).filter((row) => row.worker_failure === "spawn-threw-before-result");
+    assert.deepEqual(ledger.map((row) => row.served_model), ["gpt-5.3-codex"], "the non-dispatch lane's row");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -18,7 +18,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -597,9 +597,11 @@ function thrownServedModel(error: unknown,
   if (error === null || typeof error !== "object" || depth > 4) return {};
   // A wrapper such as WorkerAbandonedError keeps the provider's own error as its `cause`.
   // The side table holds the observation even for a frozen error; an own property is the older shape.
-  // With a call's own table, only that table speaks: a property on a shared error may be another call's evidence.
+  // With a call's own table, that table speaks first; a record made outside every call's scope is the fallback (the
+  // fix lane's receipt scope can open after the observation was made). A property is never read there: on a shared
+  // error it may be another call's evidence.
   const observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined = observations !== undefined
-    ? observedServedModelOf(error, observations)
+    ? observedServedModelOf(error, observations) ?? unscopedObservedServedModelOf(error)
     : observedServedModelOf(error) ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
   if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, observations, depth + 1);
   const { servedModel, servedModelReason } = observed;
