@@ -3,7 +3,6 @@
   repo: remudero
   depends_on:
     - W1-T13865
-  priority: 2
   type: implement
   verify: auto
   principles:
@@ -18,7 +17,9 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # duplicate held follow-up; W1-T13919 holds the same question
+  superseded_by: W1-T13919
   attempts: 0
   acceptance:
     - claim: invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds
@@ -52,7 +53,9 @@
   falsifier: |
     Remove the priorRoundHold call from the sweep: criterion 4's fixture spawns a second fix worker at the same head
     after a FLAKE round and the test fails.
-  needs_input:
-    question: 'Pull request https://github.com/craigoley/remudero/pull/19767 (task W1-T13865) cannot meet these criteria without your input. "invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds". What it needs: fix stall on review:invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds: 4 rounds left it unmet with the same failure'
-    source_pr: https://github.com/craigoley/remudero/pull/19767
-    asked_at: 2026-11-20T11:17:42.761Z
+  note: |
+    WITHDRAWN 2026-11-20 (operator session): W1-T13935 is a duplicate of W1-T13919. The sweep filed the same held
+    follow-up of W1-T13865 for the same criterion of https://github.com/craigoley/remudero/pull/19767 at the same
+    head, 004f62a8fa, eleven times. Its split landed the held task file while the edit of W1-T13865 failed
+    design-invariant-proof, so the remedy recorded no held id and filed again on every pass. W1-T13944 fixes the
+    cause. W1-T13919 keeps the one question; this record keeps none.
