@@ -22,7 +22,7 @@
     - test/legacy-skill-stamp-scanned-text.test.ts
     - test/skill-draft-ratification.test.ts
     - test/a-skill-draft-approval-only-ever-writes-the-skill.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "stageSkillDraft refuses a draft whose every Procedure step is a signal-table step (a PROCEDURAL_STEP_TEXT line), including a draft whose only step is the fully_executed_proof line. The reason starts with 'outcome-only:' and the registry is not written."

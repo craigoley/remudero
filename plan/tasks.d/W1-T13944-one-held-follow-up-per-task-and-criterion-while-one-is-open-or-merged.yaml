@@ -1,0 +1,97 @@
+- id: W1-T13944
+  title: "The sweep files one held follow-up per task and criterion while one is open or merged, across restarts, ledger compaction and open filing pull requests"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the remedy files fewer held tasks; a new criterion, a new task, or a held file that never staged still files one
+  origin: "operator-session#duplicate-held-follow-ups-2026-11-20"
+  plan_refs:
+    - W1-T12709
+    - W1-T12710
+    - W1-T13830
+    - W1-T12199
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - src/lib/sweep.ts
+    - src/lib/ledger-steps.ts
+    - test/sweep/one-held-follow-up-per-task-and-criterion.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A split-follow-up for a task and criterion that a task on origin/main already holds (depends_on names the task, the title ends with (held follow-up), and its acceptance carries the criterion's claim) reserves no id, lands no file, and writes one taken parked_pr.remedy row that names that task as held_task_id, with a ledger that holds no earlier parked_pr.remedy row"
+      proof: "grep: W1-T13944 criterion 1: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "The same holds when the held follow-up is not on origin/main but waits in the task-files landing queue, staged or carried by an open landing pull request"
+      proof: "grep: W1-T13944 criterion 2: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "invariant:one-held-follow-up-per-criterion — two remedy calls for the same task and criterion started together on an empty ledger reserve exactly one id, and every file they land names that one id"
+      kind: guard
+      proof: "grep: W1-T13944 criterion 3: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "After a restart, a pass with a new host and an empty ledger that finds a claim left by a pass that reserved an id and stopped before its file staged lands that same id again and reserves none"
+      proof: "grep: W1-T13944 criterion 4: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "A split whose held file stages but whose edit of the parent task file the plan preflight refuses writes a row that names held_task_id, and the next call, with every parked_pr.remedy row removed from its ledger, reserves no id"
+      proof: "grep: W1-T13944 criterion 5: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "A different criterion of the same task, and the same criterion of a different task, each still file their own held follow-up"
+      proof: "grep: W1-T13944 criterion 6: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
+    - claim: "The sweep's parked pull request host gives the remedy the held follow-ups on the plan and in the landing queue"
+      proof: "grep: readHeldFollowUps: in src/lib/sweep.ts"
+  rationale: |
+    WHY: between 07:46 and 11:17 UTC on 2026-11-20 the sweep filed eleven identical held follow-ups of
+    W1-T13865 (W1-T13919, 13921, 13924, 13925, 13926, 13929, 13931, 13932, 13933, 13934, 13935) for one
+    criterion of https://github.com/craigoley/remudero/pull/19767 at one head, 004f62a8fa. A twelfth,
+    W1-T13938, waits in open landing pull request #19862. The same fault filed W1-T13942 and W1-T13943 for
+    W1-T13819 on the same day. Each one asks the operator the same question.
+    OBSERVED (ledger union, parked_pr.remedy rows for pull request 19767): twelve rows, 07:55 to 11:45, all
+    outcome refused, all with the same input_digest f31900f1ab22 and refusal_checks [lint-plan]. Not one row
+    names a held_task_id. Each refusal reason is "the task files did not land: the plan preflight refused it:
+    ... [design-invariant-proof]".
+    OBSERVED in code (src/lib/parked-pr-remedy.ts, takeParkedPrRemedy):
+    1. A split lands two files, each through its own plan preflight (feedback-landing.ts stage loop): the new
+       held task file, and the parent task file with the moved criterion removed. The new file passed and was
+       staged; the parent edit failed design-invariant-proof, because the moved criterion is the one that
+       proves the parent's INVARIANT. The landing then opened its pull request (#19839 at 07:54:56) with the
+       new file, and returned an error for the parent edit. takeParkedPrRemedy wrote outcome refused and no
+       held_task_id. The task-files landing pull requests #19839, #19842, #19846, #19849 and #19852 merged
+       every held file to main.
+    2. The one check that reuses a held task reads only a taken row with held_task_id, so it never matched.
+    3. The W1-T13830 check that skips a refused retry at the same input reads the refused rows from the live
+       ledger. parked_pr.remedy is not a retained step, so ledger compaction drops it: compactions at 07:57,
+       08:36, 09:39, 10:28 and 11:03 each wiped the earlier rows, and the passes that asked at 08:39, 09:45,
+       10:28 and 11:14 saw none. The other passes read their ledger before the earlier pass wrote its row, which
+       comes only after a preflight of 7 to 25 minutes.
+    So every check keys on a ledger row, and the ledger row is wrong (refused), late (after the preflight) or
+    gone (compaction). The plan and the landing queue are the durable record of what was filed.
+  design: |
+    INVARIANT one-held-follow-up-per-criterion: while a held follow-up for a task and criterion is on origin/main,
+    in the task-files landing queue, or claimed by a pass, the sweep files no second one for that task and
+    criterion; every other remedy path is unchanged.
+    1. parked-pr-remedy.ts: the key of a held follow-up is (parent task id, criterion claim). A held task
+       matches when its depends_on names the parent, its title ends with "(held follow-up)", and its acceptance
+       carries the claim. ParkedPrHost gains readHeldFollowUps(): the tasks of the plan on origin/main and the
+       task files in the landing queue (stagedTaskFiles, parsed), as { id, title, depends_on, claims }.
+    2. Before takeParkedPrRemedy reserves an id for a split-follow-up, it looks for a match for every moved
+       criterion. If each has one, it reuses the lowest such id: one taken row with held_task_id and
+       reused: true, no reservation and no landing.
+    3. A durable claim closes the window between the check and the staged file. In one synchronous step (no
+       await between the read and the write) the remedy reads, or creates with an exclusive write, a claim
+       file under the daemon state root, keyed by a hash of the parent id and the sorted claims. It writes the
+       reserved id into the claim before it lands. A later pass, or a pass after a restart, that finds a claim
+       with an id lands that id again (the same path and bytes, which the landing queue takes as already
+       waiting) and reserves none. A claim is never removed by a timer.
+    4. When the landing staged the held file (it is in landed or waiting) but refused another file, the row
+       names held_task_id with outcome taken and keeps the refusal in partial_refusal, so the ledger says what
+       landed.
+    5. sweep.ts: the parkedPr host implements readHeldFollowUps from (reloadPlanForFix() ?? plan) and
+       stagedTaskFiles(config.root), and passes config.root for the claims.
+    6. ledger-steps.ts: the parked_pr.remedy meaning names reused and partial_refusal.
+    No count or cap: a held follow-up stops the next one only while it exists.
+  falsifier: |
+    Remove the readHeldFollowUps lookup and the claim: criterion 1's fixture reserves a second id and lands a
+    second held file, and criterion 3's two concurrent calls reserve two ids.
+  note: |
+    Filed by the operator session on 2026-11-20. The duplicates W1-T13921 to W1-T13935 are withdrawn in a
+    separate plan-only pull request, superseded by W1-T13919. Not in scope: the split of a criterion that proves
+    the parent's INVARIANT always fails design-invariant-proof on the parent edit; with this task it files once
+    and stays held instead of filing again.

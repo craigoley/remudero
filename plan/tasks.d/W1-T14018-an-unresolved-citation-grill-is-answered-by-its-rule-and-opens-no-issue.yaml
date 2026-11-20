@@ -1,0 +1,47 @@
+- id: W1-T14018
+  title: An unresolved-citation triage GRILL is answered by its deterministic rule and opens no issue
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # which triage grills reach the operator; a wrong match would hide a real question
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T8868
+  files:
+    - src/lib/escalation-triage.ts
+    - test/inbox/an-unresolved-citation-grill-is-answered-by-its-rule-and-opens-no-issue.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The GRILL that triage.ts unresolvedCitationGrill produces, escalated through the production escalation path, is auto-resolved by the rule and opens no GitHub issue"
+      proof: "grep: W1-T14018 criterion 1: in test/inbox/an-unresolved-citation-grill-is-answered-by-its-rule-and-opens-no-issue.test.ts"
+    - claim: "The subject the rule reads is built from the same fields the issue is built from, so the rule matches the subject shape of issue #19209"
+      proof: "grep: W1-T14018 criterion 2: in test/inbox/an-unresolved-citation-grill-is-answered-by-its-rule-and-opens-no-issue.test.ts"
+    - claim: "invariant:other-grills-still-deliver — a GRILL with any other cause or recommendation still reaches the operator"
+      kind: guard
+      proof: "grep: W1-T14018 criterion 3: in test/inbox/an-unresolved-citation-grill-is-answered-by-its-rule-and-opens-no-issue.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20: at least 9 open GRILL issues asked the same question, "ALREADY_DECIDED was claimed but the
+    citation names …" with recommendation file-as-task (for example #19209, #19350, #19358, #19401, #19435, #19467,
+    #18961, #18988, #19078). The operator answered three of them and the rest were closed by hand.
+    - escalation-triage.ts `isUnresolvedCitationGrill` (W1-T8868, #11487) already auto-resolves exactly this grill:
+      class GRILL, recommendation file-as-task, detail containing "ALREADY_DECIDED was claimed but", summary naming
+      feedback#.
+    - triage.ts `unresolvedCitationGrill` writes that detail, so the rule should have matched, yet the issues opened.
+    INFERRED: the subject reaching `triageEscalation` is built from different fields than the issue, or this grill
+    is escalated by a path that skips triage. Not yet read on the ledger.
+  design: |
+    INVARIANT other-grills-still-deliver: only the unresolved-citation grill is auto-resolved.
+    1. Read the ledger rows for TRIAGE-incident-89a9c688886ac0a3 (escalation.judged, escalation.triaged,
+       escalation.issue_opened) to find which path opened #19209 and what subject it carried.
+    2. Fix that path so it passes the subject the rule reads; do not widen the rule's match.
+    3. Criterion 1 drives the production escalation path with a gh shim and asserts no issue is created.
+  falsifier: |
+    At origin/main criterion 1 fails: the shimmed gh receives an issue create for the unresolved-citation grill.
+  note: |
+    Id reserved for run-unfiled-1795191000000 with rmd next-task-id on the host.

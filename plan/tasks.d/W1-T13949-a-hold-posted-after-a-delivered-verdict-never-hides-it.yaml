@@ -1,0 +1,57 @@
+- id: W1-T13949
+  title: A cannot-evaluate hold posted after a delivered verdict of the same head and input never hides that verdict
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # changes which review.posted row the restore and the settle read; one restore per regression is unchanged
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T11729
+    - W1-T11929
+    - W1-T12994
+  files:
+    - src/lib/sweep.ts
+    - test/ledger/a-hold-posted-after-a-delivered-verdict-never-hides-it.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A pending cannot-evaluate review.posted row written after a delivered failure of the same head and input is restored to the failure once, and the next pass settles the view and dispatches the fix lane"
+      proof: "grep: W1-T13949 criterion 1: in test/ledger/a-hold-posted-after-a-delivered-verdict-never-hides-it.test.ts"
+    - claim: "restorableDeliveredVerdict and the delivered-failure settle read the newest full success or failure row of the input, never a hold after it"
+      proof: "grep: W1-T13949 criterion 2: in test/ledger/a-hold-posted-after-a-delivered-verdict-never-hides-it.test.ts"
+    - claim: "invariant:hold-never-a-verdict — a hold after a delivered success restores the success, and a hold with no full verdict before it keeps the refusal it has today"
+      kind: guard
+      proof: "grep: W1-T13949 criterion 3: in test/ledger/a-hold-posted-after-a-delivered-verdict-never-hides-it.test.ts"
+    - claim: "Both readers call the newest-full-verdict helper"
+      proof: "grep: newestFullVerdictRow( in src/lib/sweep.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core): on #19691 (W1-T13785) the lane review posted a FAILURE at 08:53:11Z
+    (run review-PR19691-1795164527950). At 08:55:02Z the still-running fix worker's in-round review posted a
+    review.posted row of state pending with cannotEvaluate=true for the same head and input digest (run
+    work-fix-dispatch-W1-T13785-1795160780513-6cd0, "promise source unavailable"). #19721 (W1-T13850) shows the
+    same shape at 08:40:00Z and 08:55:15Z. From then on every sweep pass disposed "owner proven dead — would re-run
+    ... NO REVIEW STARTED: a verdict is already recorded delivered for this head and input" (last at 11:47Z).
+    OBSERVED in code (sweep.ts): restorableDeliveredVerdict takes the newest review.posted row of the input, the
+    hold, and refuses "not a full success or failure"; deliveredFailureView takes .at(-1), the hold, and settles
+    nothing; pendingHoldOwnerProvenDead refuses because a failure exists for the input. No release path is left,
+    so no review and no fix round ran for 3+ hours on either PR. W1-T11929 already ruled that a pending row after
+    a verdict is never a newer verdict; it covered review.pending_posted claims but not a pending review.posted hold.
+  design: |
+    INVARIANT hold-never-a-verdict: a review.posted row of state pending or with cannotEvaluate never counts as the
+    newest outcome of an input that already has a full success or failure.
+    1. sweep.ts: add newestFullVerdictRow(posted), the newest row whose state is success or failure, whose
+       decision_verdict.state matches it and whose verdict is not cannotEvaluate.
+    2. restorableDeliveredVerdict reads postedRowsForInput, then newestFullVerdictRow; with no rows it keeps
+       "no delivered verdict ..."; with no full row it keeps "the delivered verdict is not a full success or failure".
+    3. deliveredFailureView reads newestFullVerdictRow instead of .at(-1).
+    One restore per observed regression and the settle bases (verdict-after-pending, restore-spent) are unchanged.
+  falsifier: |
+    Revert the two readers to the newest row: all three tests fail; criterion 1's first pass restores nothing and
+    disposes "already DELIVERED".
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host. Released by hand: #19691, #19721.

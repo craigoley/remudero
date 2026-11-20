@@ -1,0 +1,48 @@
+- id: W1-T14016
+  title: A cash deployment that one boot could not read is not escalated as a lost worker provider
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 8.00
+  risk: low # narrows one startup escalation; provider selection is unchanged
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T11421
+  files:
+    - src/cli/commands/daemon.ts
+    - test/daemon/a-provider-unreadable-at-one-boot-is-not-lost.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A boot that reads a previously reachable cash deployment as unreadable, with confirmed_absent empty, raises no DAEMON-PROVIDERS escalation"
+      proof: "grep: W1-T14016 criterion 1: in test/daemon/a-provider-unreadable-at-one-boot-is-not-lost.test.ts"
+    - claim: "A deployment confirmed absent, or unreadable on three boots in a row, still raises the escalation"
+      proof: "grep: W1-T14016 criterion 2: in test/daemon/a-provider-unreadable-at-one-boot-is-not-lost.test.ts"
+    - claim: "invariant:provider-removal-raises — a worker provider missing from the enabled list still raises as today"
+      kind: guard
+      proof: "grep: W1-T14016 criterion 3: in test/daemon/a-provider-unreadable-at-one-boot-is-not-lost.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (GitHub and host ledger, read only): MANUAL issues "Worker providers lost at startup" on
+    remudero-console #2709, remudero-site #260 and remudero-ops #147. The boots that raised them (console 11-19 08:55,
+    site 11-20 12:04, ops 11-18 12:58) listed the lost names as unreadable, with TimeoutError or "fetch failed", and an
+    empty confirmed-absent list. The next boot of each daemon read all 10 cash deployments.
+    OBSERVED at origin/main ca83732bd, src/cli/commands/daemon.ts `recordWorkerProvidersAtStart`:
+    - `cash` holds only the deployments read as reachable; `cashUnreadable` and `cashConfirmedAbsent` are recorded on
+      the row but not used in the comparison.
+    - `lostWorkerProviders(previous.cash_deployments, cash)` therefore counts an unreadable deployment as lost.
+    - reachableCashDeployments shares one timeout, GATEWAY_FETCH_TIMEOUT_MS (60 s, src/lib/git-fetch-retry.ts), across
+      its startup reads.
+  design: |
+    INVARIANT provider-removal-raises: the enabled-provider comparison is unchanged.
+    1. Count a cash deployment as lost only when it is in cashConfirmedAbsent, or when it was unreadable on this boot and
+       on the previous two boots' rows (read them from the ledger rows this function already writes).
+    2. Keep recording the unreadable list on the row, so the count across boots is readable.
+    NOT IN SCOPE: the startup timeout itself.
+  falsifier: |
+    Without step 1, criterion 1's fixture raises DAEMON-PROVIDERS for an unreadable deployment.
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host.

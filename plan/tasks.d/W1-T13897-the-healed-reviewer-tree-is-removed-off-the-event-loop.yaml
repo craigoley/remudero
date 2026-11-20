@@ -16,7 +16,7 @@
     - src/lib/worker.ts
     - src/run-task.ts
     - test/worker/spawn/the-healed-reviewer-tree-is-removed-off-the-event-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The healed tree's remove returns before git removes the tree, and the tree is gone once it settles"

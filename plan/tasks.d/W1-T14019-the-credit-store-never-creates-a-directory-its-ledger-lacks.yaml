@@ -1,0 +1,46 @@
+- id: W1-T14019
+  title: The merge-credit store is written only beside a ledger directory that exists, never into a directory it creates
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 8.00
+  risk: low # a best-effort cache write; the projection is correct without it
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T5058
+  files:
+    - src/lib/status.ts
+    - test/console-api/board/the-credit-store-never-creates-a-directory-its-ledger-lacks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "saveCreditStore with a path whose directory does not exist writes nothing and creates no directory"
+      proof: "grep: W1-T14019 criterion 1: in test/console-api/board/the-credit-store-never-creates-a-directory-its-ledger-lacks.test.ts"
+    - claim: "deriveStatus with ledgerPath /nonexistent/ledger.ndjson, run twice, gives the same projection both times"
+      proof: "grep: W1-T14019 criterion 2: in test/console-api/board/the-credit-store-never-creates-a-directory-its-ledger-lacks.test.ts"
+    - claim: "invariant:existing-dir-still-persists — a credit found beside an existing ledger directory is still written atomically and read back"
+      kind: guard
+      proof: "grep: W1-T14019 criterion 3: in test/console-api/board/the-credit-store-never-creates-a-directory-its-ledger-lacks.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 in a cloud session that runs tests as root: /nonexistent/merge-credit.json existed (written 14:04Z
+    during an author preflight). Afterwards 16 tests in test/open-pr-corroboration.test.ts and
+    test/owned-branch-slug-credit.test.ts failed at origin/main ca83732bd ("an open PR is never a merge credit": true),
+    because their deps pass ledgerPath "/nonexistent/ledger.ndjson".
+    - status.ts `defaultCreditStorePath` puts the store beside the ledger, and `saveCreditStore` calls
+      `mkdirSync(dirname(path), { recursive: true })` (realCreditStoreFs), so a root process creates /nonexistent.
+    - A later run's `deriveStatus` reads that store and credits a task the fixture never merged. As a non-root user
+      the mkdir fails and the write is swallowed, which is why hosted CI stays green.
+  design: |
+    INVARIANT existing-dir-still-persists: the store beside a real ledger directory is still written.
+    1. `saveCreditStore` writes only when the directory already exists; it never creates one. The ledger directory
+       always exists before a credit can be found, since the ledger is written first.
+    2. Criterion 1 injects CreditStoreFsDeps and asserts mkdirSync and writeFileSync are not called for a missing
+       directory; criterion 3 uses a real temp directory.
+  falsifier: |
+    At origin/main criterion 1 fails: the injected mkdirSync is called with the missing directory.
+  note: |
+    Id reserved for run-unfiled-1795191000000 with rmd next-task-id on the host.

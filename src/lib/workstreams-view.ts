@@ -44,8 +44,6 @@ export const WORKSTREAMS_VIEW_NAME = "workstreams";
 export const WORKSTREAMS_VIEW_VERSION = 1;
 /** How long a change waits before the body is rebuilt with it and every change after it (design §1.1). */
 export const WORKSTREAMS_DEBOUNCE_MS = 1_000;
-/** @deprecated Build telemetry now emits when the counts change. */
-export const WORKSTREAMS_BUILT_ROW_WINDOW_MS = 10 * 60_000;
 
 export interface WorkstreamsData {
   /** One entry per instance the worker projects, in its order: what GET /v1/operator-activity answers for it. */
