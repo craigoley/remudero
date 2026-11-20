@@ -344,8 +344,6 @@ import {
   CODEQL_CHECK_NAME,
   SECURITY_MERGE_POLICY_CONTEXT,
   compareRestArgs,
-  checkRunsRestArgs,
-  combinedStatusRestArgs,
   fetchReviewReuseReachFacts,
   type ReviewReuseReachFacts,
   prFilesRestArgs,
@@ -4015,32 +4013,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       const branchChecks = await (branchRequiredChecks ??= readBranchRequiredChecks());
       if (branchChecks === undefined) return [];
       const required = new Set([...requiredChecks, ...branchChecks.keys()]);
-      const matchesSource = (name: string | undefined, appId?: number) => {
-        const pin = name === undefined ? undefined : branchChecks.get(name);
-        return pin == null || pin === -1 || pin === appId;
-      };
-      // Apply the pin before the common rollup projects away publisher identity.
-      const checkRunsEndpoint = checkRunsRestArgs(owner, repo, pr.headSha)[1];
-      const statusEndpoint = combinedStatusRestArgs(owner, repo, pr.headSha)[1];
-      const rollup = await readCiGateRollup(pr, async (args, opts) => {
-        const body = await readJsonImpl(args, opts);
-        if (args[1] === checkRunsEndpoint) {
-          const page = body as { check_runs?: Array<{ name?: string; app?: { id?: number } }> } | undefined;
-          return { ...page, check_runs: page?.check_runs?.filter(run => matchesSource(run.name, run.app?.id)) };
-        }
-        if (args[1] === statusEndpoint) {
-          const page = body as { statuses?: Array<{ context?: string }> } | undefined;
-          return { ...page, statuses: page?.statuses?.filter(status => matchesSource(status.context)) };
-        }
-        return body;
-      });
-      return (rollup ?? []).flatMap(check => {
-        const name = check.name ?? check.context;
-        const state = rollupState(check);
-        const completed = check.status?.toUpperCase() === "COMPLETED" || REQUIRED_CHECK_OK.has(state) || REQUIRED_CHECK_FAIL.has(state);
-        return name !== undefined && required.has(name) && completed && check.completedAt !== undefined
-          ? [{ name, completedAt: check.completedAt }] : [];
-      });
+      try {
+        // Match ci-gate's paginated check-runs read. Any completed attempt can release this hold.
+        const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/check-runs?per_page=100&filter=all`,
+          "--paginate", "--slurp"], { fresh: true }) as { check_runs: {
+            name: string; status: string; completed_at: string | null; app?: { id?: number } | null;
+          }[] }[];
+        return pages.flatMap(page => page.check_runs.flatMap(run => {
+          const pin = branchChecks.get(run.name);
+          return required.has(run.name) && run.status === "completed" && typeof run.completed_at === "string" &&
+            (pin == null || pin === -1 || pin === run.app?.id) ? [{ name: run.name, completedAt: run.completed_at }] : [];
+        }));
+      } catch (error) {
+        log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
+        return [];
+      }
     },
 
     // W1-T2300 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job: the SAME per-job Actions
@@ -18262,7 +18249,7 @@ function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<strin
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
   steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS, "fix.scope_amendment", PR_TERMINAL_STEP,
-    "fix.progress_judged", "fix.progress_reused"] };
+    "fix.progress_judged", "fix.progress_reused", "panel.question_answered"] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
@@ -25095,8 +25082,7 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
-    const standDownForPriorRound = async () => {
-      const hold = await readSweepPriorRoundHold(pr);
+    const standDownForPriorRound = (hold: PriorRoundHold | undefined) => {
       if (hold === undefined) return false;
       acted = false;
       spent = false;
@@ -25325,7 +25311,7 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
-                if (await standDownForPriorRound()) break;
+                if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
                 const retryHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (retryHold !== undefined) {
                   acted = false;
@@ -25794,7 +25780,7 @@ export async function runSweep(
               // below applies to a PR whose every required check is green.
               const codeqlAlert = repairableCodeqlBlocker(pr);
               if (codeqlAlert) {
-                if (await standDownForPriorRound()) break;
+                if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
                 const hold = workerAdmissionHoldReason(deps);
                 if (hold) {
                   acted = false;
@@ -25908,7 +25894,9 @@ export async function runSweep(
                   break;
                 }
               }
-              if (await standDownForPriorRound()) break;
+              const roundHold = await readSweepPriorRoundHold(pr);
+              // A deferred job retry can produce the completion this FLAKE hold is waiting for.
+              if ((roundHold?.hold !== "FLAKE" || !pendingDeferral) && standDownForPriorRound(roundHold)) break;
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
                 row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
@@ -26229,11 +26217,14 @@ export async function runSweep(
                 }
                 ciFailuresForFix = ciFailuresForFix.filter((f) => !deferredFailures.includes(f));
                 if (ciFailuresForFix.length === 0) {
+                  const retryReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   acted = false;
-                  standDownReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
+                  standDownForPriorRound(roundHold);
+                  standDownReason = roundHold ? `${roundHold.reason}; ${retryReason}` : retryReason;
                   break;
                 }
               }
+              if (standDownForPriorRound(roundHold)) break;
               const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
                 ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
               if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
@@ -26620,7 +26611,7 @@ export async function runSweep(
                 standDownReason = deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
                 break;
               }
-              if (await standDownForPriorRound()) break;
+              if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are

@@ -243,11 +243,14 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
         if (endpoint.endsWith("/protection/required_status_checks")) return {
           contexts: ["ci-gate"], checks: [{ context: "ci-gate", app_id: 15368 }],
         };
-        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return { check_runs: [
-          { name: "ci", status: "completed", conclusion: "failure", completed_at: at(45_000) },
-          { name: "ci-gate", status: "completed", conclusion: "failure", completed_at: completedAt, app: { id: 15368 } },
-          { name: "ci-gate", status: "completed", conclusion: "success", completed_at: at(1_000), app: { id: 42 } },
-        ] };
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) {
+          const page = { check_runs: [
+            { name: "ci", status: "completed", conclusion: "failure", completed_at: at(45_000) },
+            { name: "ci-gate", status: "completed", conclusion: "failure", completed_at: completedAt, app: { id: 15368 } },
+            { name: "ci-gate", status: "completed", conclusion: "success", completed_at: at(1_000), app: { id: 42 } },
+          ] };
+          return args.includes("--slurp") ? [page] : page;
+        }
         if (endpoint.endsWith(`/commits/${HEAD}/status`)) return { statuses: [
           { context: "ci-gate", state: "success", updated_at: at(1_000) },
         ] };
@@ -265,24 +268,31 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(f.state.dispatched, 1, "a fresh failure from the pinned App releases the hold");
   });
 
-  test("W1-T13865 criterion 5: the sweep reads required completions from the head rollup even with another red", async () => {
+  test("W1-T13865 criterion 2: a commit status cannot satisfy a ci-gate requirement", async () => {
     const rows = swept(round("FLAKE"));
     const f = fixture(rows);
     let completedAt = at(45_000);
+    let readError: Error | undefined;
+    const errors: unknown[] = [];
     const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
-      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() },
+      log: (step, fields) => { if (step === "sweep.ci_gate_rollup.error") errors.push(fields?.error); },
       ciGateRequired: ["ci", "lint-plan"], issuesImpl: { create: () => assert.fail("unexpected issue") },
       restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
         if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["ci-gate"] };
-        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return { check_runs: [
-          { name: "ci", status: "completed", conclusion: "failure", completed_at: at(45_000) },
-          { name: "lint-plan", status: "completed", conclusion: "success", completed_at: completedAt },
-          { name: "advisory", status: "completed", conclusion: "failure", completed_at: at(1_000) },
-        ] };
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) {
+          if (readError !== undefined) throw readError;
+          const page = { check_runs: [
+            { name: "ci", status: "completed", conclusion: "failure", completed_at: at(45_000) },
+            { name: "lint-plan", status: "completed", conclusion: "success", completed_at: completedAt },
+            { name: "advisory", status: "completed", conclusion: "failure", completed_at: at(1_000) },
+          ] };
+          return args.includes("--slurp") ? [page] : page;
+        }
         if (endpoint.endsWith(`/commits/${HEAD}/status`)) return { statuses: [
-          { context: "ci-gate", state: "pending", updated_at: at(1_000) },
+          { context: "lint-plan", state: "success", updated_at: at(1_000) },
         ] };
         assert.fail(`unexpected check read ${endpoint}`);
       },
@@ -290,11 +300,104 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     const deps = { ...f.deps, readRequiredCheckCompletions: effects.readRequiredCheckCompletions };
     const candidate = pr({ ciFailures: [{ name: "advisory", logTail: "optional failure", completedAt: at(1_000) }, ...pr().ciFailures!] });
     await runSweep([candidate], deps);
-    assert.equal(f.state.dispatched, 0, "a fresh optional failure and a pending status do not release the hold");
+    assert.equal(f.state.dispatched, 0, "a fresh optional failure and a same-name commit status do not release the hold");
     assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
     completedAt = at(1_000);
+    readError = new Error("check-runs page unavailable");
+    await runSweep([candidate], deps);
+    assert.deepEqual(errors, [String(readError)]);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    readError = undefined;
     await runSweep([candidate], deps);
     assert.equal(f.state.dispatched, 1, "a fresh green required check releases the hold even while another stays red");
+  });
+
+  test("W1-T13865 criterion 3: a new red on a later check-runs page releases FLAKE", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    const first = { check_runs: Array.from({ length: 100 }, (_, i) => ({
+      name: `optional-${i}`, status: "completed", conclusion: "success", completed_at: at(1_000),
+    })) };
+    const second = { check_runs: [{ name: "lint-plan", status: "completed", conclusion: "failure", completed_at: at(30_000) }] };
+    let requests: string[][] = [];
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ciGateRequired: ["lint-plan"], restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["ci-gate"] };
+        if (endpoint.endsWith(`/commits/${HEAD}/status`)) return { statuses: [] };
+        assert.match(endpoint, new RegExp(`/commits/${HEAD}/check-runs\\?`));
+        requests.push(args);
+        return args.includes("--paginate") && args.includes("--slurp") ? [first, second] : first;
+      },
+    });
+    f.deps.readRequiredCheckCompletions = effects.readRequiredCheckCompletions;
+    await runSweep([pr()], f.deps);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE", "a completion at the round time is not newer");
+    assert.equal(f.state.dispatched, 0);
+    second.check_runs[0]!.completed_at = at(1_000);
+    requests = [];
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the required failed check on page two releases the hold");
+    assert.equal(requests.length, 1);
+    assert.match(requests[0]![1]!, /[?&]filter=all\b/);
+  });
+
+  test("W1-T13865 criterion 4: a FLAKE hold allows the deferred job retry to produce a new completion", async () => {
+    const name = "ci-shard (1/8)";
+    const rows = swept([...round("FLAKE", { flake_claim: "requeue_deferred" }),
+      { step: "sweep.check_requeue.deferred", task_id: TASK, pr_number: 13865, head_sha: HEAD, check_name: name,
+        job_id: "70", refusal: "already_running", outcome: "deferred", ts: at(31_000) }]);
+    const f = fixture(rows);
+    const retried: string[] = [];
+    let retryCompletedAt = at(45_000);
+    let runInFlight = true;
+    f.deps.readRequiredCheckCompletions = async () => [{ name, completedAt: retryCompletedAt }];
+    f.deps.readCiGateRollup = () => [{ name, status: "COMPLETED", conclusion: "FAILURE", jobId: "80", workflowRunId: 900 },
+      { name: "ci-shard (2/8)", status: "COMPLETED", conclusion: "FAILURE", jobId: "81" },
+      { name: "sibling", status: runInFlight ? "IN_PROGRESS" : "COMPLETED", workflowRunId: 900 }];
+    f.deps.requeueCheck = (_pr, check) => { retried.push(String(check.jobId)); return true; };
+    const candidate = pr({ ciFailures: [...pr().ciFailures!, { name: "ci-shard (2/8)", logTail: "another red" }] });
+    await runSweep([pr()], f.deps);
+    assert.deepEqual(retried, [], "the existing retry still waits for its workflow run");
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /its run is still in flight/);
+    runInFlight = false;
+    await runSweep([candidate], f.deps);
+    assert.deepEqual(retried, ["80"], "the retry targets the current job before a new round can start");
+    assert.equal(f.state.dispatched, 0, "a sibling red cannot start a worker while the retry is pending");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled FLAKE/);
+    retryCompletedAt = at(1_000);
+    await runSweep([candidate], f.deps);
+    assert.deepEqual(retried, ["80"], "the completed retry isn't sent again");
+    assert.equal(f.state.dispatched, 1, "the retried job completed red, releasing the hold");
+  });
+
+  test("W1-T13865 criterion 4: an owner grant releases an unfiled PR's NEEDS_SCOPE hold", async () => {
+    const task_id = "PR-13865";
+    const roundRows = round("NEEDS_SCOPE").map(row => ({ ...row, task_id, pr_number: 13865 }));
+    const scopeQuestion = { step: "fix.scope_amendment", task_id, pr_number: 13865, head_sha: HEAD, round_id: "R1",
+      outcome: "unfiled-escalated", issue_url: "https://github.com/o/remudero/issues/901", paths: ["src/lib/fixture.ts"], ts: at(35_000) };
+    const grant = { step: "panel.question_answered", task_id, answer: "revise-pr", authority: "repository-owner",
+      bare_option: true, origin: "issue#901:comment:9", ts: at(10_000) };
+    const rows = swept([roundRows[0]!, scopeQuestion, roundRows[1]!]);
+    const f = fixture(rows);
+    const candidate = pr({ taskId: "unfiled" });
+    rows.push({ ...grant, origin: "issue#900:comment:9" });
+    await runSweep([candidate], f.deps);
+    assert.equal(f.state.dispatched, 0);
+    assert.match(String(lastDisposed(rows).stand_down_reason), /unfiled scope decision awaits resolution/);
+    rows.push(grant);
+    await runSweep([candidate], f.deps);
+    assert.equal(f.state.dispatched, 1, "the matching owner grant releases the hold at the original head");
+    assert.equal(priorRoundHold([...rows, { ...roundRows[1], round_id: "R2", ts: at(5_000) }], facts({ taskId: task_id }))?.hold,
+      "NEEDS_SCOPE", "a grant already seen by a later round cannot release its ruling");
+    assert.equal(priorRoundHold([roundRows[0]!, scopeQuestion, grant, roundRows[1]!], facts({ taskId: task_id })),
+      undefined, "an answer to this round's own question can arrive before the done receipt");
   });
 
   test("W1-T13865 criterion 4: the existing NEEDS_DESIGN hold is unchanged", async () => {
