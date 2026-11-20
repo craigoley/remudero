@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
 import fs, { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import os, { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import type { BuildSweepEffectsDeps, FixAdmissionResidents, FixHostPressure, OpenPrView, SweepDeps } from "#src/lib/sweep.js";
+import { configPath } from "#src/lib/config.js";
 import { createDaemonSlackReclaimer, installDaemonSlackReclaimer, installedDaemonSlackReclaimer } from "#src/lib/daemon-memory-policy.js";
 import type { FixProgressJudge } from "#src/lib/fix-progress-judge.js";
+import { classEstimate, classTypical } from "#src/lib/host-memory-learning.js";
 import { repairMemoryDemandMark } from "#src/lib/repair-memory-demand.js";
+import { childIdentity, RUN_CHILD_SCHEMA, runDir, writeStatus } from "#src/lib/run-child-contract.js";
+import { TEST_SLOT_DIR_ENV, TEST_SLOT_PARENT_ENV } from "#src/lib/test-slot.js";
+import { activeWorkerCount } from "#src/lib/worker.js";
 
 const { buildSweepEffects, createSweepFixAdmissionController, DEFAULT_SWEEP_POLICY, fixAdmissionCauseProbe,
-  fixDispatchHoldAtHeadAsync, fixDispatchMemoryCause, productionFixPressure, runSweep, withFullSweepRepairAdmission } = sweep;
+  fixDispatchHoldAtHeadAsync, fixDispatchMemoryCause, productionFixAdmissionResidents, productionFixPressure,
+  runSweep, withFullSweepRepairAdmission } = sweep;
 const NOW = Date.parse("2026-11-19T17:57:29Z");
 const PASS_MS = 5 * 60_000;
 const pr: OpenPrView = { prNumber: 19695, prUrl: "https://github.com/craigoley/remudero/pull/19695",
@@ -58,6 +64,8 @@ const sweepDeps = (rows: Record<string, unknown>[], counts: { dispatched: number
 function fixtureProductionProbe(t: TestContext, availableMib: () => number) {
   const root = mkdtempSync(join(tmpdir(), "rmd-memory-admission-"));
   const ledgerPath = join(root, "state", "ledger.ndjson");
+  t.mock.method(os, "homedir", () => root);
+  t.mock.property(process, "env", { ...process.env, [TEST_SLOT_DIR_ENV]: join(root, "slots"), [TEST_SLOT_PARENT_ENV]: "" });
   const readFileSync = fs.readFileSync;
   t.mock.method(fs, "readFileSync", ((path: fs.PathOrFileDescriptor, options?: unknown) => {
     if (path === "/proc/meminfo") return `MemTotal: 131072000 kB\nMemAvailable: ${availableMib() * 1024} kB\n`;
@@ -76,52 +84,74 @@ function fixtureProductionProbe(t: TestContext, availableMib: () => number) {
   });
   const effects = buildSweepEffects({ owner: "acme", repo: "scratch", config: { root } as BuildSweepEffectsDeps["config"],
     ledgerPath, runId: "memory-probe", plan: { tasks: [], byId: new Map() }, ciGateRequired: [], log: () => {} });
-  return { ledgerPath, fixDispatchCauseProbe: effects.fixDispatchCauseProbe };
+  return { root, ledgerPath, fixDispatchCauseProbe: effects.fixDispatchCauseProbe };
 }
 
-test("W1-T13869 criterion 1: a memory-held fix dispatch runs again at the same head on the first pass whose admission has room", async (t) => {
+function fixtureFullSweep(t: TestContext, availableMib: () => number) {
   const rows = seed();
   const counts = { dispatched: 0, escalated: 0 };
-  let laterPass = false;
-  let memoryReads = 0;
-  const floor = DEFAULT_SWEEP_POLICY.memoryFloorMib;
-  const production = fixtureProductionProbe(t, () => laterPass && ++memoryReads > 1 ? floor + 64_000 : floor - 1);
+  const { ledgerPath, fixDispatchCauseProbe } = fixtureProductionProbe(t, availableMib);
   const capacity: Record<string, unknown>[] = [];
   const dispatchedHeads: string[] = [];
-  const deps = withFullSweepRepairAdmission(sweepDeps(rows, counts, { ...production,
+  const deps = withFullSweepRepairAdmission(sweepDeps(rows, counts, { ledgerPath, fixDispatchCauseProbe,
     fixProgressJudge: async () => ({ verdict: "continue", reason: "retry when room opens" }),
     log: (step, fields) => { if (step === "sweep.fix_capacity" && fields) capacity.push(fields); },
     dispatchFix: (candidate) => { dispatchedHeads.push(candidate.headSha); },
   }));
-  await runSweep([pr], deps);
+  const run = async (now: number) => {
+    capacity.length = 0;
+    await runSweep([pr], { ...deps, runId: `memory-pass-${now}`, now: () => now });
+    const disposed = rows.findLast(row => row.step === "sweep.disposed" && row.run_id === `memory-pass-${now}`);
+    assert.ok(disposed, "this full pass wrote a disposition");
+    assert.equal(disposed.head_sha, pr.headSha);
+    return disposed;
+  };
+  return { run, capacity, dispatchedHeads };
+}
+
+test("W1-T13869 criterion 1: a memory-held fix dispatch runs again at the same head on the first pass whose admission has room", async (t) => {
+  const floor = DEFAULT_SWEEP_POLICY.memoryFloorMib;
+  let available = floor - 1;
+  const { run, capacity, dispatchedHeads } = fixtureFullSweep(t, () => available);
+  const held = await run(NOW);
   assert.deepEqual(dispatchedHeads, []);
   assert.equal(capacity[0]?.fix_admissions_available, 0, "the first full pass still refuses one fix");
-  const held = rows.findLast(row => row.step === "sweep.disposed")!;
   assert.equal(held.probe_result, "present");
+  assert.match(String(held.cause), /^fix dispatch refused: worker admission refused \(live host capacity exhausted/);
   const learnedRetry = Date.parse(String(held.failure_at)) + Number(held.backoff_ms);
   assert.equal(held.backoff_ms, 2 * 40 * 60_000, "the learned backoff is unchanged");
-  laterPass = true;
-  capacity.length = 0;
+  available = floor + 64_000;
   const later = NOW + PASS_MS;
   assert.ok(later < learnedRetry, "the next pass comes before the learned next retry");
-  await runSweep([pr], { ...deps, runId: "memory-free", now: () => later });
-  assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "the full controller sees room after the probe's short read");
+  const retried = await run(later);
+  assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "the first full pass after memory frees has room");
+  assert.equal(retried.probe_result, undefined, "the production probe cleared the memory hold");
   assert.ok(capacity.some(row => row.fixes_admitted === 1), "dispatch still takes an admission claim");
   assert.deepEqual(dispatchedHeads, [pr.headSha], "dispatches again at the same head, with no new push");
 });
 
-test("W1-T13869 criterion 2: while the admission still refuses, the hold names probe present and a retry one pass away", async () => {
-  const rows = seed();
-  const counts = { dispatched: 0, escalated: 0 };
-  for (const [i, now] of [NOW, NOW + PASS_MS, NOW + 2 * PASS_MS].entries()) {
-    await runSweep([pr], sweepDeps(rows, counts, { runId: `held-${i}`, now: () => now,
-      fixDispatchCauseProbe: probeOn(() => 6149) }));
-    const held = rows.findLast(row => row.step === "sweep.disposed")!;
+test("W1-T13869 criterion 2: while the admission still refuses, the hold names probe present and a retry one pass away", async (t) => {
+  const floor = DEFAULT_SWEEP_POLICY.memoryFloorMib;
+  let reads = 0;
+  let transientCapacity = false;
+  const { run, capacity, dispatchedHeads } = fixtureFullSweep(t, () =>
+    transientCapacity && ++reads === 2 ? floor + 64_000 : floor - 1);
+  for (const now of [NOW, NOW + PASS_MS, NOW + 2 * PASS_MS]) {
+    const held = await run(now);
     assert.equal(held.probe_result, "present");
     assert.equal(held.next_retry_at, at(now + PASS_MS), "one sweep cadence after the pass");
     assert.notEqual(held.next_retry_at, at(Date.parse(String(held.failure_at)) + Number(held.backoff_ms)));
+    assert.equal(held.backoff_ms, 2 * 40 * 60_000);
+    if (transientCapacity) {
+      assert.ok(Number(capacity[0]?.fix_admissions_available) >= 1, "the later capacity snapshot briefly saw room");
+    } else {
+      assert.equal(capacity[0]?.fix_admissions_available, 0);
+    }
+    assert.ok(capacity.every(row => row.fixes_admitted === 0 && row.fixes_refused === 0), "a present probe retains the hold without claiming");
+    transientCapacity = true;
+    reads = 0;
   }
-  assert.equal(counts.dispatched, 0);
+  assert.deepEqual(dispatchedHeads, []);
   const standIn = await fixDispatchHoldAtHeadAsync(pr, [failure(NOW, STAND_IN)], () => true, undefined,
     { nowMs: NOW, sweepPassMs: PASS_MS, causeProbe: async () => "present" });
   assert.equal(standIn?.fields.probe_result, "present", "the stand-in worker budget refusal is a memory cause too");
@@ -159,6 +189,54 @@ test("W1-T13869 criterion 3: the probe answers clear exactly when the run child'
   assert.equal(controller.claim(pr).admitted, true, "the probes reserved nothing: the one fix the headroom holds is still free");
   assert.equal(fixAdmissionCauseProbe(readers(9204, { readPressure: () => { throw new Error("vm_stat failed"); } })), "present",
     "an unreadable pressure reading is present");
+});
+
+test("W1-T13869 criterion 3: the production probe reads live workers in a fresh state root without loading config", async (t) => {
+  const policy = DEFAULT_SWEEP_POLICY;
+  let available = policy.memoryFloorMib + 1;
+  const { root, ledgerPath, fixDispatchCauseProbe } = fixtureProductionProbe(t, () => available);
+  const stateDir = dirname(ledgerPath);
+  const runId = "live-fix-worker";
+  const identity = childIdentity(process.pid);
+  assert.ok(identity, "the test process has a live identity for the worker census");
+  writeStatus(runDir(stateDir, runId), { schema: RUN_CHILD_SCHEMA, runId, identity, engineSha: "fixture",
+    entryKind: "tsx", phase: "worker", heartbeatAt: NOW, state: "running" });
+  assert.equal(activeWorkerCount(stateDir), 1, "the instance has one live worker");
+
+  const configDir = dirname(configPath());
+  const mkdirSync = fs.mkdirSync;
+  const mkdir = t.mock.method(fs, "mkdirSync", ((path: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+    assert.notEqual(path, configDir, "the probe must not enter loadConfig");
+    return mkdirSync(path, options);
+  }) as typeof fs.mkdirSync);
+  syncBuiltinESMExports();
+  const filesBefore = fs.readdirSync(root, { recursive: true }).sort();
+  const demandBefore = repairMemoryDemandMark();
+  const cause = "fix dispatch refused: worker admission refused (live host capacity exhausted";
+  const needed = policy.memoryFloorMib + classEstimate("fix").estimateMib;
+  const short = await fixDispatchCauseProbe!(cause);
+  available = needed;
+  const clear = await fixDispatchCauseProbe!(cause);
+  const repeated = await fixDispatchCauseProbe!(cause);
+  assert.equal(mkdir.mock.callCount(), 0, "the probes created no directory, including the missing config directory");
+  assert.deepEqual(fs.readdirSync(root, { recursive: true }).sort(), filesBefore, "the probes created no files or reservations");
+  assert.equal(repairMemoryDemandMark(), demandBefore, "the probes did not register a refused claim");
+  assert.equal(short, "present", "one MiB and a live worker do not admit a fix");
+  assert.equal(clear, "clear", "the exact learned estimate now fits");
+  assert.equal(repeated, clear, "a second probe sees the same room");
+
+  const claim = () => createSweepFixAdmissionController({ surface: "full", queueDepth: 1,
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget, activeWorkers: activeWorkerCount(stateDir),
+    readActiveWorkers: () => activeWorkerCount(stateDir), reviewReservations: 0,
+    readPressure: () => productionFixPressure(policy.memoryFloorMib, ledgerPath, classEstimate("fix").estimateMib),
+    readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(root),
+  }).claim(pr);
+  available = policy.memoryFloorMib + 1;
+  assert.equal(claim().admitted, false, "the same short production reading refuses a claim");
+  available = needed;
+  const admitted = claim();
+  assert.equal(admitted.admitted, true, "probing left the one admissible fix free to claim");
+  if (admitted.admitted) admitted.release?.();
 });
 
 test("W1-T13869 criterion 3: the production probe leaves reclaim to ordinary admission", async (t) => {
