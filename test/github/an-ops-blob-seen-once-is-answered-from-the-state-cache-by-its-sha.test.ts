@@ -434,11 +434,11 @@ test("W1-T13970: a cache entry that cannot be read, removed or written leaves th
   fs.rmSync(join(dir, first));
   fs.mkdirSync(join(dir, first));
   fs.writeFileSync(join(dir, third), taskYaml("OPS-T666"));
-  const read = fs.readFileSync;
+  const open = fs.openSync;
   const remove = fs.rmSync;
-  t.mock.method(fs, "readFileSync", (path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+  t.mock.method(fs, "openSync", (path: fs.PathLike, ...rest: unknown[]) => {
     if (String(path) === join(dir, second)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
-    return (read as (...args: unknown[]) => unknown)(path, ...rest);
+    return (open as (...args: unknown[]) => unknown)(path, ...rest);
   });
   t.mock.method(fs, "rmSync", (path: fs.PathLike, opts?: fs.RmOptions) => {
     if (String(path) === join(dir, third)) throw Object.assign(new Error("EPERM"), { code: "EPERM" });

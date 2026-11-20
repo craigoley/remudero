@@ -295,15 +295,27 @@ export function opsCatalogBlobCacheDir(stateDir: string, repositoryId: number): 
 function readBlobFile(files: BlobFiles, blobSha: string): KeptBlob | undefined {
   const path = join(files.dir, blobSha);
   let bytes: Buffer;
+  let fd: number | undefined;
   try {
-    const stat = fs.statSync(path, { throwIfNoEntry: false });
-    if (!stat) return undefined;
+    // One descriptor is both checked and read, so the bytes read are the bytes the checks saw (no check-then-use race).
+    try { fd = fs.openSync(path, "r"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const stat = fs.fstatSync(fd);
     // The per-blob bound applies before the read, so an oversized file is never loaded.
-    if (!stat.isFile() || stat.size > OPS_CATALOG_MAX_BLOB_BYTES) return removeBlobFile(path);
-    bytes = fs.readFileSync(path);
+    if (!stat.isFile() || stat.size > OPS_CATALOG_MAX_BLOB_BYTES) {
+      fs.closeSync(fd);
+      fd = undefined;
+      return removeBlobFile(path);
+    }
+    bytes = fs.readFileSync(fd);
   } catch (error) {
     void error; // An unreadable file is a miss: the blob is fetched from GitHub, as with no cache.
     return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
   try { return verifiedBlob(blobSha, bytes); }
   catch (error) {
