@@ -40,8 +40,8 @@ function row(s: Site, step: string, taskId: string, ts: string, extra: Record<st
 }
 
 /** The retro's own log shape (run-task.ts retroCommand). */
-const retroLog = (s: Site) => (step: string, extra: Record<string, unknown> = {}) =>
-  appendLedger(s.ledgerPath, { run_id: "RETRO-1", task_id: "RETRO", step, lane: "retro", ...extra });
+const retroLog = (s: Site) => (step: string, extra: Record<string, unknown> = {}, expectedLiveVersion?: string) =>
+  appendLedger(s.ledgerPath, { run_id: "RETRO-1", task_id: "RETRO", step, lane: "retro", ...extra }, { expectedLiveVersion });
 
 /** An answered population whose longest measured wait is p-b's 7.5 days. */
 function answered(s: Site, firstSeen: Record<string, string>) {
@@ -879,6 +879,78 @@ test("W1-T13859 criterion 4: expiry stops if an approval tears after its first r
     assert.match(result.reason, /incomplete ledger union: 0 unread file\(s\), 1 torn row\(s\)/);
     assert.equal(readFileSync(s.ledgerPath, "utf8"), ledger);
     assert.equal(readFileSync(s.registryPath, "utf8"), registry);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: a same-inode torn append after the final live read leaves both stores unchanged by expiry", (t) => {
+  const s = site();
+  try {
+    drafts(s);
+    const registry = readFileSync(s.registryPath);
+    const original = readFileSync(s.ledgerPath, "utf8");
+    const torn = '{"step":"ratify.approved","task_id":"skill-draft:old"';
+    const inode = statSync(s.ledgerPath).ino;
+    const read = realLedgerFs.readFileSync;
+    let liveReads = 0;
+    t.mock.method(realLedgerFs, "readFileSync", (path: string) => {
+      const bytes = read(path);
+      if (path === s.ledgerPath && ++liveReads === 2) appendFileSync(path, torn);
+      return bytes;
+    });
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.equal(statSync(s.ledgerPath).ino, inode);
+    assert.equal(readFileSync(s.ledgerPath, "utf8"), original + torn);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: live ledger changed during read"]);
+  } finally { s.done(); }
+});
+
+for (const tail of ["torn", "complete"] as const) {
+  test(`W1-T13859 criterion 4: a ${tail} approval appended at the decline boundary invalidates the expiry decision`, () => {
+    const s = site();
+    try {
+      drafts(s);
+      const registry = readFileSync(s.registryPath);
+      const original = readFileSync(s.ledgerPath, "utf8");
+      const answer = JSON.stringify({ step: "ratify.approved", task_id: "skill-draft:old", ts: clock.iso() });
+      const added = tail === "torn" ? answer : answer + "\n";
+      const log = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) => {
+        if (step === "panel.proposal_declined") appendFileSync(s.ledgerPath, added);
+        retroLog(s)(step, extra, expectedLiveVersion);
+      };
+      const printed: string[] = [];
+      reportSkillDraftExpiry(
+        () => expireUnansweredSkillDrafts(s.registryPath, s.stateDir, log, clock),
+        log,
+        (message) => printed.push(message),
+      );
+      assert.equal(readFileSync(s.ledgerPath, "utf8"), original + added);
+      assert.deepEqual(readFileSync(s.registryPath), registry);
+      assert.deepEqual(printed, [`skill drafts: skill draft expiry stopped: incomplete ledger union: ${tail === "torn"
+        ? "live ledger has an unterminated tail" : "live ledger changed before the decline append"}`]);
+    } finally { s.done(); }
+  });
+}
+
+test("W1-T13859 criterion 4: expiry reports when the live ledger disappears before append without recreating it", () => {
+  const s = site();
+  try {
+    drafts(s);
+    const registry = readFileSync(s.registryPath);
+    const racingClock = { ...clock, iso: () => {
+      rmSync(s.ledgerPath);
+      return clock.iso();
+    } };
+    const printed: string[] = [];
+    reportSkillDraftExpiry(
+      () => expireUnansweredSkillDrafts(s.registryPath, s.stateDir, retroLog(s), racingClock),
+      retroLog(s),
+      (message) => printed.push(message),
+    );
+    assert.equal(existsSync(s.ledgerPath), false);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: live ledger is missing before the decline append"]);
   } finally { s.done(); }
 });
 

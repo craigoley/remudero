@@ -160,8 +160,8 @@ test("W1-T13859 criterion 6: rmd restore reclaims a stale foreign verdict lock a
     backfill: "2026-10-13T00:00:00Z", answered: "2026-11-01T00:00:00Z", [id]: "2026-11-01T00:00:00Z",
   }));
   const answer = { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" };
-  const log = (step: string, extra?: Record<string, unknown>) =>
-    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra });
+  const log = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra }, { expectedLiveVersion });
   appendLedger(ledgerPath, answer);
   const expire = () => expireUnansweredSkillDrafts(registryPath, stateDir, log, clock);
   assert.deepEqual(expire().expired, [id]);
@@ -209,4 +209,60 @@ test("W1-T13859 criterion 6: rmd restore reclaims a stale foreign verdict lock a
   assert.equal(verdicts.isDeclined(id), undefined);
   assert.deepEqual(readdirSync(skills), ["existing.md"]);
   assert.equal(readFileSync(skillPath, "utf8"), "existing skill\n");
+});
+
+test("W1-T13859 criterion 6: rmd restore reverses live operator declines and expiries despite an unrelated unreadable archive", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-live-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const ledgerPath = ledgerLivePath(stateDir);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  const skills = join(root, ".claude", "skills");
+  mkdirSync(stateDir);
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(join(skills, "existing.md"), "existing skill\n");
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  assert.deepEqual(writeDaemonTargetRecord(stateDir, {
+    owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: root,
+  }), { written: true });
+
+  const expired = "skill-draft:expired";
+  const declined = "skill-draft:declined";
+  const clock = fixedClock(Date.parse("2026-11-19T12:00:00Z"));
+  t.mock.method(systemClock, "now", clock.now);
+  const markdown = "---\nname: proc\n---\n";
+  writeFileSync(registryPath, JSON.stringify({ proposals: [expired, declined].map((id) => ({
+    id, summary: markdown, evidenceAnchors: [], skillFile: { name: "proc", markdown },
+  })) }));
+  writeFileSync(inboxFirstSeenPath(stateDir), JSON.stringify({
+    backfill: "2026-10-13", answered: "2026-11-01", [expired]: "2026-11-01",
+  }));
+  appendLedger(ledgerPath, { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" });
+  const log = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra }, { expectedLiveVersion });
+  const expire = () => expireUnansweredSkillDrafts(registryPath, stateDir, log, clock);
+  assert.deepEqual(expire().expired, [expired]);
+  const config = { root } as never;
+  assert.equal(proposalVerdictCliCommand("decline", [declined, "--reason", "operator decline"], config), 0);
+  t.mock.method(systemClock, "now", () => clock.now() + 1000);
+  const unreadable = join(stateDir, compactedArchiveName("2026-10-31T00:00:00Z"));
+  writeFileSync(unreadable, "not gzip");
+  const registry = readFileSync(registryPath);
+  const restore = (id: string) => proposalVerdictCliCommand("restore", [id, "--reason", "keep open"], config);
+  const intactLedger = readFileSync(ledgerPath, "utf8");
+  const tornLedger = intactLedger + JSON.stringify({ step: "unrelated", task_id: "other", ts: clock.iso() });
+  writeFileSync(ledgerPath, tornLedger);
+  assert.throws(() => restore(declined), /incomplete ledger union: 1 unread file\(s\), 1 torn row\(s\)/);
+  assert.equal(readFileSync(ledgerPath, "utf8"), tornLedger);
+  writeFileSync(ledgerPath, intactLedger);
+  for (const id of [declined, expired]) assert.equal(restore(id), 0);
+  assert.deepEqual(readLedgerLines(ledgerPath).filter((r) => r.step === "panel.proposal_restored").map((r) => r.task_id), [declined, expired]);
+  rmSync(unreadable);
+  const ledger = readFileSync(ledgerPath);
+  assert.deepEqual(expire().expired, []);
+  assert.deepEqual(readFileSync(ledgerPath), ledger);
+  assert.deepEqual(readFileSync(registryPath), registry);
+  assert.deepEqual(readdirSync(skills), ["existing.md"]);
+  assert.equal(readFileSync(join(skills, "existing.md"), "utf8"), "existing skill\n");
 });

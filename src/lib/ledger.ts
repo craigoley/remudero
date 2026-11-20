@@ -2,6 +2,7 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  constants,
   cpSync,
   existsSync,
   fstatSync,
@@ -18,6 +19,7 @@ import {
   statSync,
   writeFileSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
@@ -26,6 +28,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { sameHost } from "./host-identity.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
@@ -228,6 +231,37 @@ export interface LedgerWriterDeps {
   writeLedger?: typeof appendLedger;
 }
 
+export class LedgerAppendConflict extends RmdError {
+  constructor(message: string) {
+    super("read-model", GENERIC_EXIT_CODE, message);
+  }
+}
+
+export function ledgerFileVersion(stat: BigIntStats): string {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+function openLedgerForAppend(path: string, expectedLiveVersion: string | undefined): number {
+  if (expectedLiveVersion === undefined) return openSync(path, "a+");
+  try {
+    return openSync(path, constants.O_RDWR | constants.O_APPEND);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new LedgerAppendConflict("live ledger is missing before the decline append");
+  }
+}
+
+function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): void {
+  const { size } = fstatSync(fd, { bigint: true });
+  const tail = Buffer.alloc(1);
+  if (size > 0n && (readSync(fd, tail, 0, 1, size - 1n) !== 1 || tail[0] !== 0x0a)) {
+    throw new LedgerAppendConflict("live ledger has an unterminated tail");
+  }
+  if (ledgerFileVersion(fstatSync(fd, { bigint: true })) !== expectedLiveVersion) {
+    throw new LedgerAppendConflict("live ledger changed before the decline append");
+  }
+}
+
 export function appendLedger(
   path: string,
   line: LedgerLine,
@@ -237,6 +271,8 @@ export function appendLedger(
     actor?: () => LedgerActor;
     clock?: Clock;
     fstat?: (fd: number) => { mtimeMs: number };
+    /** Append only to the complete live file version used to make the decision. */
+    expectedLiveVersion?: string;
   } = {},
 ): void {
   const actor = (opts.actor ?? deriveLedgerActor)();
@@ -266,8 +302,9 @@ export function appendLedger(
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
   const rows = [buf];
   let behind: Buffer[];
-  const fd = openSync(path, "a+");
+  const fd = openLedgerForAppend(path, opts.expectedLiveVersion);
   try {
+    if (opts.expectedLiveVersion !== undefined) verifyLedgerBeforeAppend(fd, opts.expectedLiveVersion);
     const written = writeSync(fd, buf, 0, buf.length);
     if (written !== buf.length) {
       console.error(

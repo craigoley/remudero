@@ -24406,8 +24406,8 @@ async function retroCommand(
   const wrk = workerModel(config);
 
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+  const log = (step: string, extra: Record<string, unknown> = {}, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra }, { expectedLiveVersion });
 
   // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
   // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
@@ -39803,11 +39803,17 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
       if (proposal) summaries.set(id, proposal.summary);
       if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
         const verdicts = readSkillDraftVerdicts(dirname(ledgerPath));
-        if ("unmeasured" in verdicts) throw new Error(`rmd restore: ${verdicts.unmeasured}`);
-        const declinedReason = verdicts.isDeclined(id);
-        if (verdicts.isRatified(id)) classification = { proposalId: id, state: "ratified", reasons: [] };
-        else if (declinedReason !== undefined) classification = { proposalId: id, state: "declined", reasons: [], declinedReason };
-        else if (classification?.state === "declined") classification = undefined;
+        if ("unmeasured" in verdicts) {
+          // The normal classifier can already have a live or retained verdict.
+          if (!verdicts.archivesUnreadable || (classification?.state !== "declined" && classification?.state !== "ratified")) {
+            throw new Error(`rmd restore: ${verdicts.unmeasured}`);
+          }
+        } else {
+          const declinedReason = verdicts.isDeclined(id);
+          if (verdicts.isRatified(id)) classification = { proposalId: id, state: "ratified", reasons: [] };
+          else if (declinedReason !== undefined) classification = { proposalId: id, state: "declined", reasons: [], declinedReason };
+          else if (classification?.state === "declined") classification = undefined;
+        }
       }
       return { exists: proposal !== undefined, classification };
     },
