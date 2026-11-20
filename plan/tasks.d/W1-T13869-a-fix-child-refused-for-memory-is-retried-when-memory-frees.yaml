@@ -1,0 +1,101 @@
+- id: W1-T13869
+  title: "A fix run child refused for memory is retried on the first pass whose fix admission has room, not after a learned backoff of up to 2 h 11 min"
+  repo: remudero
+  priority: 1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes when a held fix dispatch is retried; a wrong probe could retry a repair the host cannot hold, or hold one it can
+  origin: "operator-session#fleet-health-2026-11-19"
+  plan_refs:
+    - W1-T11168
+    - W1-T13750
+    - W1-T9114
+    - W1-T9498
+    - W1-T9679
+    - W1-T13842
+    - W1-T13711
+  files:
+    - src/lib/sweep.ts
+    - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
+    - test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "Through the production sweep entry, a PR whose newest sweep.fix.dispatch_failed row at its head carries the run child's memory refusal (\"fix dispatch refused: worker admission refused (live host capacity exhausted ...\") is dispatched again at the same head, with no new push, on the first full pass whose fix admission reading admits one fix, before the hold's learned next_retry_at"
+      proof: "unit test: test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts"
+    - claim: "While the fix admission reading still admits no fix, the sweep.disposed hold row for that PR names probe_result \"present\" and a next_retry_at one sweep cadence after the pass, not failure_at plus the doubled learned backoff_ms"
+      proof: "grep: W1-T13869 criterion 2 in test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts"
+    - claim: "invariant:the-admission-rule-is-unchanged — for the same pressure reading, estimates, typical peaks and live trees, the probe answers clear exactly when the run child's claimFixAdmission admits, and present exactly when it refuses; the probe admits nothing and reserves nothing"
+      kind: guard
+      proof: "grep: W1-T13869 criterion 3 in test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts"
+    - claim: "A memory refusal is never escalated: after several consecutive memory refusals at one head with a fix progress judge that answers escalate, no escalation is filed and no hold row carries dispatch_cause_escalated"
+      proof: "grep: W1-T13869 criterion 4 in test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts"
+    - claim: "Other causes keep today's behaviour: a task catalog cause is still probed by the ops catalog read, and a head-moved or already-merged cause is still unprobed and retried on the learned backoff"
+      proof: "grep: W1-T13869 criterion 5 in test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts"
+    - claim: "The production sweep deps answer a memory cause with the fix admission probe"
+      proof: "grep: fixAdmissionCauseProbe( in src/lib/sweep.ts"
+  rationale: |
+    WHY: on 2026-11-19 review-failed and red PRs went hours with no fix round. The rows say "NOT DISPATCHED this
+    pass: detached fix dispatch failed before fix.dispatch on #<pr>". That text is a wrapper. The cause is in its
+    parentheses, and it is almost always one cause.
+    OBSERVED (fleet ledger and archives, 2026-11-19 00:00-18:47Z, rows deduplicated with sort -u):
+    - 60 sweep.disposed rows carry that wrapper. Their causes: 55 the run child's memory refusal (11 PR heads:
+      #19605, #19619, #19643 at two heads, #19648, #19649, #19655, #19679, #19695, #19699, #19705), 3 "task
+      W1-T12206 is already merged", 1 a declined checkout claim (process_cwd_probe_unreadable), 1 head moved.
+    - 25 sweep.fix.dispatch_failed rows: 14 memory refusals, 4 run children lost at the two crash restarts
+      (08:16Z and 10:36Z), 3 head moved, 1 already merged, 1 checkout claim declined. No sweep.fix.child_spawn_failed
+      row. The spawn helper and the checkout claim are not the cause.
+    - All 14 memory refusals happen INSIDE the run child (actor run_child, lane sweep-fix, prepare stage
+      child-admission). Example #19695 (W1-T12041): the daemon queued and spawned the child at 17:54:59Z, its
+      run-child reservation took 186 ms, and at 17:55:30Z the child's own claimFixAdmission refused it: headroom
+      6149 MiB over the floor, fix estimate 6258 MiB (p90, measured), typical 1754 MiB, 8 active, rung none.
+      runFixDispatchChild (src/lib/sweep.ts) throws, the child settles as lost, and the daemon writes
+      sweep.fix.dispatch_failed.
+    - fixDispatchHoldAtHeadSteps (src/lib/sweep.ts) then holds the PR at that head. dispatchFailureCause gives the
+      cause "fix dispatch refused: worker admission refused (live host capacity exhausted ...". No probe reads it:
+      only fleet-held, owner-held, preservation and the registered catalog class (fixDispatchRefusalClass,
+      src/lib/stuck-state-gardener.ts) are probed. So the hold lifts only at failure_at plus backoff_ms, the
+      median measured failure-to-success wait doubled per consecutive failure (W1-T11168). The backoff_ms values
+      on today's memory holds were 1442646, 3190507, 3309299, 4938368 and 7862225 (24 min to 2 h 11 min).
+    - The hold outlives the shortage. At 17:57:29Z, 2 min after #19695 was refused, the daemon's own full-pass
+      controller read headroom 9204 MiB and rung "fits". #19695 stayed held to 20:06:38Z, #19699 to 20:09:36Z,
+      #19649 to 19:38:18Z. The child's refusal text itself says "repair remains queued and will be re-derived
+      next pass", but the hold does not re-derive it.
+    OBSERVED, not a regression of W1-T13711 or W1-T13712: fix dispatches ran as run children on every day from
+    11-15 to 11-19 (84, 67, 89, 96 and 120 run_child.spawned rows for work-fix-dispatch). Memory refusals inside the
+    child were 0 on 11-15, 11-16 and 11-17, 2 on 11-18 (both after 18:00Z) and 14 on 11-19. They follow the host:
+    the median headroom on sweep.fix_capacity rows fell from 11 to 14 GiB (11-15 to 11-18) to 8 to 9 GiB, and the
+    median active workers rose from 2 to 5 to 7 to 9. W1-T13842 (queued) asks why the fix p90 is 3.5 times its
+    typical; this task does not change the estimate or the admission rule.
+  design: |
+    INVARIANT the-admission-rule-is-unchanged: the probe only reads. It answers clear exactly when the same fix
+    admission controller, on the same readings, would admit one fix. It never admits, reserves, or changes an
+    estimate, a floor, a rung or the charge. The run child's claimFixAdmission still decides at dispatch time.
+    1. In src/lib/sweep.ts add an exported predicate for the memory cause: true when dispatchFailureCause's cause
+       starts with "fix dispatch refused: worker admission refused (" followed by "live host capacity" or
+       "host worker budget <n>", then " exhausted". Match the normalised cause (digits are "<n>" there).
+    2. Add an exported fixAdmissionCauseProbe that builds a createSweepFixAdmissionController for the "full"
+       surface from the same production readers the full pass uses (productionFixPressure with
+       policy.memoryFloorMib and classEstimate("fix"), productionFixAdmissionReaders, the live active worker
+       count, queue depth 1, no review reservations beyond the live read) and returns "clear" when its snapshot
+       admits at least one fix, else "present". An unreadable pressure reading is "present". Reuse the full
+       pass's construction (extract a shared helper if needed); do not write a second copy of the rule.
+    3. In fixDispatchHoldAtHeadSteps, run options.causeProbe for a memory cause as it runs for a registered
+       class. "clear" returns no hold, so the pass decides the PR as usual. "present" sets probe "present", so the
+       next retry is one sweep cadence away (the existing probe-present path), not failure_at plus backoff_ms.
+    4. A memory cause never escalates: skip the judge's escalate path for it (the hold row keeps its cause, probe
+       and next retry; the judge may still be read for its reason).
+    5. In the production deps (the fixDispatchCauseProbe entry next to fixDispatchFleetHold), answer a memory cause
+       with fixAdmissionCauseProbe and every other cause with the existing stuck-state-gardener probe.
+    Do not add a new Deps interface; take plain parameters or Pick an existing seam. Run
+    test/sweep/compress-src-lib-sweep-ts.test.ts and npm run census:source-size; put explanations in the
+    why-file, not in sweep.ts comments.
+  falsifier: |
+    Remove the memory branch in step 3: criterion 1 fails (the PR stays held to next_retry_at) and criterion 2
+    fails (next_retry_at is failure_at plus backoff_ms). Make the probe answer clear on a reading the controller
+    refuses: criterion 3 fails.
+  note: |
+    Filed from the 2026-11-19 fleet health investigation (boots, fix dispatch failures, capacity, pause holds).

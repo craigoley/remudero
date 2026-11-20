@@ -424,23 +424,42 @@ export function redirectChildCoverage(
  *  redirected value (tsx's module-hooks thread) writes its report after every exit handler, and it
  *  must land flat, as it did before (MEASURED: without the link, one report per suite was lost).
  *  Returns the moved names; a report that cannot be moved throws, naming it. */
-export function flattenChildCoverage(redirect: ChildCoverageRedirect, now: () => number = Date.now): string[] {
+export function flattenChildCoverage(
+  redirect: ChildCoverageRedirect,
+  now: () => number = Date.now,
+  removeChildDir: (path: string) => void = (path) => fs.rmSync(path, { recursive: true, force: true }),
+  createChildDirLink: (target: string, path: string) => void = (target, path) => fs.symlinkSync(target, path, "dir"),
+): string[] {
   const moved: string[] = [];
-  for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
-    const from = join(redirect.childDir, name);
-    const to = join(redirect.coverageDir, name);
-    try {
-      fs.renameSync(from, to);
-    } catch (error) {
-      // Another filesystem: copy, then remove. Any other failure is the caller's to report.
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-      fs.copyFileSync(from, to);
-      fs.rmSync(from);
+  const moveReports = (): void => {
+    for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
+      const from = join(redirect.childDir, name);
+      const to = join(redirect.coverageDir, name);
+      try {
+        fs.renameSync(from, to);
+      } catch (error) {
+        // Another filesystem: copy, then remove. Any other failure is the caller's to report.
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+        fs.copyFileSync(from, to);
+        fs.rmSync(from);
+      }
+      moved.push(name);
     }
-    moved.push(name);
+  };
+  moveReports();
+  // A late V8 thread can publish during removal or recreate the path before the symlink is installed.
+  // Collect its report and retry both operations when those races surface as ENOTEMPTY or EEXIST.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      removeChildDir(redirect.childDir);
+      createChildDirLink(redirect.coverageDir, redirect.childDir);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== "ENOTEMPTY" && code !== "EEXIST") || attempt >= 4) throw error;
+      moveReports();
+    }
   }
-  fs.rmSync(redirect.childDir, { recursive: true, force: true });
-  fs.symlinkSync(redirect.coverageDir, redirect.childDir, "dir");
   if (moved.length > 0) {
     const record = join(redirect.coverageDir, `rmd-v8-children-${process.pid}-${now()}.json`);
     fs.writeFileSync(`${record}.part`, JSON.stringify({ format: CHILD_COVERAGE_RECORD_FORMAT, suite: redirect.suite, reports: moved }));

@@ -1,0 +1,47 @@
+- id: W1-T13897
+  title: "The healed reviewer tree is removed off the event loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: run-task (the reviewer self-heal route) and worker (worktree removal)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10269
+    - W1-T10075
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - test/worker/spawn/the-healed-reviewer-tree-is-removed-off-the-event-loop.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "The healed tree's remove returns before git removes the tree, and the tree is gone once it settles"
+      proof: "grep: W1-T13897 criterion 1 in test/worker/spawn/the-healed-reviewer-tree-is-removed-off-the-event-loop.test.ts"
+    - claim: "A healed cut over a leftover tree removes it off the event loop, then cuts again"
+      proof: "grep: W1-T13897 criterion 2 in test/worker/spawn/the-healed-reviewer-tree-is-removed-off-the-event-loop.test.ts"
+    - claim: "invariant:cut-refusal-stands — a cut with nothing to remove keeps its own refusal"
+      proof: "grep: W1-T13897 invariant in test/worker/spawn/the-healed-reviewer-tree-is-removed-off-the-event-loop.test.ts"
+  rationale: |
+    WHY: the largest single daemon loop stall under pid 1098566 (OBSERVED, host core ledger, 2026-11-20 00:46:28Z) was
+    253,258 ms of lag, 248,261 ms of it sync spawn: execFileSync git -C (worktree remove) in worktreeRemove, under
+    buildHealedReviewerTree. buildReviewerHealthRoute in src/run-task.ts hands buildHealedReviewerTree a sync
+    worktreeRemove for both its remove and its cut's leftover fallback, although buildHealedReviewerTree accepts an
+    async remove and src/lib/worker.ts already has worktreeRemoveAsync. A stalled loop holds every review admission,
+    merge and sweep for the stall's length.
+  design: |
+    src/lib/worker.ts: healedReviewerTreeTools(repoDir, worktreeRoot, prepare) returns { cut, remove }. remove is
+    worktreeRemoveAsync. cut calls prepare; when it refuses, it awaits worktreeRemoveAsync on
+    <worktreeRoot>/<prefix>-<sha12> and prepares again, and when nothing is there to remove the cut's own refusal
+    stands, as today. buildReviewerHealthRoute builds its cut and remove from it, passing prepareFreshOriginMainTree as
+    prepare. buildHealedReviewerTree is unchanged. prepareFreshOriginMainTree's own sync add is out of scope.
+    INVARIANT cut-refusal-stands: a refused cut with nothing to remove rejects with the cut's own error.
+  falsifier: |
+    Use the sync worktreeRemove in healedReviewerTreeTools again: criteria 1 and 2 fail (the tree is removed, or cut
+    again, on the caller's turn of the loop); the invariant test still passes.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795138975977
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

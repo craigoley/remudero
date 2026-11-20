@@ -71,6 +71,7 @@ function doctorDeps(root: string): NonNullable<Parameters<typeof doctorCommand>[
     readGitLocks: () => [],
     readCheckoutDepth: () => ({ shallow: false, commitCount: 1000 }),
     readNvmrcVersion: () => "22.22.3",
+    hostPieceExists: () => true,
   };
 }
 

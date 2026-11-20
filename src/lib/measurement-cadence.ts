@@ -1,5 +1,5 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
-import { reconcilePlan } from "./plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus } from "./plan-reconcile.js";
 import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
@@ -1530,7 +1530,7 @@ export interface PlanReconcileCadenceInputOptions {
   checkoutRoot: string;
   readShards: () => readonly PlanReconcileShardRecord[];
   creditedMergedIds: () => ReadonlySet<string>;
-  land: (inputs: readonly { relPath: string; content: string }[]) => void;
+  land: (inputs: readonly { relPath: string; content: string; edit?: (current: string) => string | undefined }[]) => void;
   threshold?: number;
   lint?: PlanReconcileLint;
 }
@@ -1588,7 +1588,10 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
         return relative(deps.checkoutRoot, path);
       };
       // W1-T11859: one bounded batch per fire; the next fire reads the merged flips as no longer drifted and takes the next.
-      const inputs = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId)).map((write) => ({ relPath: relPathOf(write.taskId), content: write.text }));
+      // W1-T13816: the landing applies `edit` to main's current shard text; `content` is only this read's flip.
+      const statusEdit = (taskId: string) => (current: string) => reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
+      const inputs = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId)).map((write) =>
+        ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write.taskId) }));
       if (inputs.length > 0) deps.land(inputs);
       return { held, landed: inputs.length };
     },

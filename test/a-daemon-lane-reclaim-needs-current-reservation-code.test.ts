@@ -209,6 +209,7 @@ test("test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts", async 
       ["ciLearningTaskIdMinter", "ci-learning"], ["triageCommandLocked", "triage"],
       ["planCommand", "plan"], ["approveCommand", "approve"], ["approveBatchCommand", "approve-batch"],
       ["prefixedNextTaskIdCommand", "next-task-id-prefix"], ["reservePlanRepairTaskId", "plan-repair"],
+      ["reservePlanRepairTaskIdAsync", "plan-repair"],
     ]);
     const seen = new Set<string>();
     let operator = 0;

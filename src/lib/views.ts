@@ -24,6 +24,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { Route } from "./service.js";
 import { awaitViewDemand, DEMAND_VIEWS, TASK_VIEW_NAME, touchViewDemand } from "./view-demand.js";
+import type { ViewAnswerSource, ViewProbeReader } from "./serve-swap-probe.js";
 
 /** What a view source is (the `<kind>:<instance>` prefix of its name); its budget is in view-freshness.ts. */
 export type SourceKind =
@@ -268,8 +269,12 @@ export interface ReadModelViewRoutesOptions {
   /** Told of each view response answered with a body (200 or 304), so stale answers are counted by source. */
   onServed?: (view: string, body: ViewBody) => void;
   /** W1-T13602: told of every view read's final answer (GET or one batch entry): status, error code (`ok` below 400) and judged staleness. */
-  onAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
+  onAnswer?: (view: string, status: number, code: string, stale: boolean, source?: ViewAnswerSource) => void;
+  /** W1-T13832: handed, once, the reader a serve generation's swap probe reads each view through. */
+  onProbeReader?: (reader: ViewProbeReader) => void;
 }
+
+export type { ViewAnswerSource, ViewProbeReader };
 
 /**
  * `/v1/views/<name>` served from the read-model worker's in-memory bodies (Phase 1 P1-06).
@@ -309,25 +314,28 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     ({ status, headers: { "content-type": "application/json; charset=utf-8", ...extra }, json: body });
   /** W1-T13602: the judged staleness of each 200/304 answer, read back when the answer is reported. */
   const staleOf = new WeakMap<ViewReadAnswer, boolean>();
-  const report = (name: string, read: ViewReadAnswer): ViewReadAnswer => {
-    const code = read.status < 400 ? "ok" : String((read.json as { error?: unknown } | undefined)?.error ?? "error");
-    opts.onAnswer?.(name, read.status, code, staleOf.get(read) ?? false);
+  const answerCode = (read: ViewReadAnswer): string => read.status < 400 ? "ok" : String((read.json as { error?: unknown } | undefined)?.error ?? "error");
+  const report = (name: string, read: ViewReadAnswer, source: ViewAnswerSource): ViewReadAnswer => {
+    opts.onAnswer?.(name, read.status, answerCode(read), staleOf.get(read) ?? false, source);
     return read;
   };
+  const modeOf = (name: string): EffectiveViewMode => viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
   /** W1-T13294: one view read, answered exactly as GET /v1/views/<name> answers it; the GET and the batch both call it. */
-  const answerRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
-    const read = unreportedRead(name, params, ifNoneMatch);
+  const answerRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined, source: ViewAnswerSource = "client"): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
+    const read = unreportedRead(name, params, ifNoneMatch, source === "swap-probe");
     if (!opts.onAnswer) return read;
     const { answer } = read;
-    return { shadowSampled: read.shadowSampled, answer: answer instanceof Promise ? answer.then((got) => report(name, got)) : report(name, answer) };
+    return { shadowSampled: read.shadowSampled, answer: answer instanceof Promise ? answer.then((got) => report(name, got, source)) : report(name, answer, source) };
   };
-  const unreportedRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
+  // W1-T13832: a probe read answers from what is held now; it never touches or asks the demand book.
+  const unreportedRead = (name: string, params: URLSearchParams, ifNoneMatch: string | string[] | undefined, probe = false): { shadowSampled: boolean; answer: ViewReadAnswer | Promise<ViewReadAnswer> } => {
     const missing = (requiredParams[name] ?? []).find((param) => !params.get(param));
     if (missing !== undefined) return { shadowSampled: false, answer: json(400, { error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }) };
-    let mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+    let mode = modeOf(name);
     const sampled = shadowSampled(opts.readModel?.switches().views[name]) && opts.shadow !== undefined;
     const fallback = legacy.get(name);
-    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, mode === "serve" ? opts.readModel : undefined);
+    const source = mode !== "serve" || !opts.readModel ? undefined : probe ? withoutDemand(opts.readModel) : opts.readModel;
+    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, source);
     if (refused) {
       const { status = 400, ...body } = refused;
       return { shadowSampled: sampled, answer: json(status, body) };
@@ -353,7 +361,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       staleOf.set(read, body.stale === true);
       return read;
     };
-    if (mode !== "serve" || !opts.readModel || !demandViews.has(name)) return { shadowSampled: sampled, answer: answer(entry) };
+    if (mode !== "serve" || !opts.readModel || !demandViews.has(name) || probe) return { shadowSampled: sampled, answer: answer(entry) };
     // An on-demand view: a key it holds is re-wanted now and then so it stays; a key it lacks is asked for and awaited, off the loop.
     if (entry) {
       touchViewDemand(opts.readModel, name, key, clock.now());
@@ -414,7 +422,25 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       res.end(JSON.stringify({ answers }));
     },
   });
+  opts.onProbeReader?.({
+    names,
+    mode: modeOf,
+    requiredParams: (name) => requiredParams[name] ?? [],
+    read: async (name, params) => {
+      const got = await answerRead(name, params, undefined, "swap-probe").answer;
+      return { status: got.status, code: answerCode(got), stale: staleOf.get(got) ?? false };
+    },
+  });
   return routes;
+}
+
+/** W1-T13832: the read model as a swap probe's validators see it: it reads bodies but can never ask for a key. */
+function withoutDemand(readModel: ViewBodySource): ViewBodySource {
+  return {
+    body: (view, key) => readModel.body(view, key),
+    judge: (sources, now, body) => readModel.judge(sources, now, body),
+    switches: () => readModel.switches(),
+  };
 }
 
 /** W1-T13294: one view read's answer, as the GET writes it: status, headers and the JSON body (none for a 304). */

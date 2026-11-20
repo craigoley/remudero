@@ -174,6 +174,9 @@ export interface Task {
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
   dispatch_hold?: boolean;
+  /** W1-T10331: opaque non-secret reference to an operator's new-path-approval-v1 confirmation. It
+   *  names a receipt; it never carries one, and on its own it admits nothing. */
+  new_path_approval_ref?: string;
   not_before?: string;
   /** W1-T12715: held from dispatch until the question store has an answer for this task. */
   needs_input?: TaskNeedsInput;
@@ -403,6 +406,11 @@ export interface MachineFilingAdmissionContext {
   dependencyEvidence?: (task: Task) => DependencyMergeEvidence;
   pathExists?: (repoRelPath: string) => boolean;
   pathExistsAtBase?: (repoRelPath: string) => boolean;
+  /** W1-T10331: immutable facts an issuer VERIFIED for this task's `new_path_approval_ref`, prepared
+   *  before this synchronous decision. Absent, a referenced approval is refused, never assumed. */
+  newPathApproval?: NewPathApprovalFacts;
+  /** Epoch ms the decision is made at; defaults to the system clock. */
+  nowMs?: number;
 }
 
 /** Missing evidence is not an observed unmerged dependency; both still refuse admission. */
@@ -735,6 +743,9 @@ export function parseTasksFromYaml(
     if (e.dispatch_hold !== undefined && typeof e.dispatch_hold !== "boolean") {
       throw new PlanError(`task ${id}: dispatch_hold must be a boolean`);
     }
+    if (e.new_path_approval_ref !== undefined && (typeof e.new_path_approval_ref !== "string" || !/^[\w.:-]{1,128}$/.test(e.new_path_approval_ref))) {
+      throw new PlanError(`task ${id}: new_path_approval_ref must be an opaque 1-128 character [\\w.:-] reference`);
+    }
     const retirement = e.retirement as RetirementReason | undefined;
     if (retirement !== undefined && !RETIREMENT_REASONS.includes(retirement)) {
       throw new PlanError(`task ${id}: invalid retirement '${String(retirement)}' (must be ${RETIREMENT_REASONS.join("|")})`);
@@ -774,6 +785,7 @@ export function parseTasksFromYaml(
       priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
+      new_path_approval_ref: e.new_path_approval_ref as string | undefined,
       not_before: validateNotBefore(e.not_before, id),
       precondition: validatePrecondition(e.precondition, id),
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
@@ -1495,6 +1507,225 @@ export function assertRunnable(
   }
 }
 
+export const NEW_PATH_APPROVAL_PROTOCOL = "new-path-approval-v1";
+
+/** Explicit daemon-side trust binding for the one issuer allowed to answer a path lookup. */
+export interface NewPathApprovalIssuerBinding {
+  origin: string;
+  issuerId: string;
+  epoch: number;
+  policy: string;
+  repository: string;
+  instance: string;
+  audience: string;
+}
+
+/** What a trusted issuer reports about one operator confirmation, after verifying it. */
+export interface NewPathApprovalFacts {
+  protocol: string;
+  ref: string;
+  issuerId: string;
+  issuerEpoch: number;
+  policy: string;
+  taskId: string;
+  repo: string;
+  instance: string;
+  audience: string;
+  /** {@link taskIntentDigest} of the record the operator was shown. */
+  intentDigest: string;
+  /** The complete declared path set, in declaration order. */
+  declaredPaths: readonly string[];
+  /** The subset of {@link declaredPaths} the operator approved as new. */
+  approvedMissingPaths: readonly string[];
+  operator: string;
+  confirmation: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  revoked: boolean;
+}
+
+const verifiedNewPathApprovals = new WeakSet<object>();
+
+/**
+ * Register a response only after the configured issuer transport has authenticated it. The transport
+ * validates the explicit origin, current issuer epoch and policy before this function is reached.
+ * Raw objects, copied JSON and spread copies remain unsealed.
+ */
+function registerTransportVerifiedNewPathApproval(
+  facts: NewPathApprovalFacts,
+  binding: NewPathApprovalIssuerBinding,
+): NewPathApprovalFacts | undefined {
+  if (facts.protocol !== NEW_PATH_APPROVAL_PROTOCOL || facts.issuerId !== binding.issuerId ||
+    facts.issuerEpoch !== binding.epoch || facts.policy !== binding.policy || facts.repo !== binding.repository ||
+    facts.instance !== binding.instance || facts.audience !== binding.audience || facts.revoked !== false) return undefined;
+  if (typeof facts.ref !== "string" || facts.ref.length < 16 || facts.ref.length > 256 ||
+    typeof facts.taskId !== "string" || typeof facts.intentDigest !== "string" || !/^[a-f0-9]{64}$/.test(facts.intentDigest) ||
+    !Array.isArray(facts.declaredPaths) || !Array.isArray(facts.approvedMissingPaths) ||
+    facts.declaredPaths.some((p) => typeof p !== "string" || !isCanonicalRepoPath(p)) ||
+    facts.approvedMissingPaths.some((p) => typeof p !== "string" || !isCanonicalRepoPath(p) || !facts.declaredPaths.includes(p)) ||
+    facts.approvedMissingPaths.length === 0 || typeof facts.operator !== "string" || !facts.operator.startsWith("operator:") ||
+    typeof facts.confirmation !== "string" || facts.confirmation.length < 16 ||
+    !Number.isFinite(facts.issuedAtMs) || !Number.isFinite(facts.expiresAtMs) || facts.expiresAtMs <= facts.issuedAtMs) return undefined;
+  const sealed = Object.freeze({ ...facts, declaredPaths: Object.freeze([...facts.declaredPaths]),
+    approvedMissingPaths: Object.freeze([...facts.approvedMissingPaths]) });
+  verifiedNewPathApprovals.add(sealed);
+  return sealed;
+}
+
+const NEW_PATH_APPROVAL_RESPONSE_MAX_BYTES = 64 * 1024;
+const NEW_PATH_APPROVAL_FETCH_TIMEOUT_MS = 5_000;
+
+export type NewPathApprovalResolution =
+  | { state: "verified"; facts: NewPathApprovalFacts }
+  | { state: "unknown"; reason: string };
+
+export function validNewPathApprovalIssuerOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    return (url.protocol === "https:" || (url.protocol === "http:" && loopback)) && url.origin === value &&
+      url.username === "" && url.password === "" && url.pathname === "/" && url.search === "" && url.hash === "";
+  } catch {
+    // An unparseable origin is unusable; false makes the caller refuse that issuer binding.
+    return false;
+  }
+}
+
+async function boundedIssuerResponse(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) throw new Error("issuer response body is absent");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("issuer response exceeded byte bound");
+        throw new Error("issuer response exceeded byte bound");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total).toString("utf8");
+}
+
+/** Resolve one opaque ref from its explicitly configured HTTPS issuer; all failures stay UNKNOWN. */
+export async function resolveNewPathApprovalFacts(
+  task: Task,
+  binding: NewPathApprovalIssuerBinding,
+  token: string,
+  opts: { fetchImpl?: typeof fetch; signal?: AbortSignal; timeoutMs?: number; maxResponseBytes?: number } = {},
+): Promise<NewPathApprovalResolution> {
+  if (!task.new_path_approval_ref) return { state: "unknown", reason: "task has no new-path approval reference" };
+  if (!validNewPathApprovalIssuerOrigin(binding.origin) || token.trim() === "") {
+    return { state: "unknown", reason: "issuer binding or service credential is invalid" };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("new-path approval issuer timed out")), opts.timeoutMs ?? NEW_PATH_APPROVAL_FETCH_TIMEOUT_MS);
+  const cancel = () => controller.abort(opts.signal?.reason ?? new Error("new-path approval resolution cancelled"));
+  opts.signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    if (opts.signal?.aborted) cancel();
+    const response = await (opts.fetchImpl ?? fetch)(`${binding.origin}/v1/new-path-approval/resolve`, {
+      method: "POST", redirect: "error", signal: controller.signal,
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ ref: task.new_path_approval_ref, taskId: task.id }),
+    });
+    if (response.status !== 200 || response.redirected || new URL(response.url).origin !== binding.origin) {
+      return { state: "unknown", reason: `issuer returned ${response.status} or an unexpected response origin` };
+    }
+    const raw = await boundedIssuerResponse(response, opts.maxResponseBytes ?? NEW_PATH_APPROVAL_RESPONSE_MAX_BYTES);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { state: "unknown", reason: "issuer response is not an object" };
+    }
+    const facts = registerTransportVerifiedNewPathApproval(parsed as NewPathApprovalFacts, binding);
+    if (!facts || facts.taskId !== task.id || facts.ref !== task.new_path_approval_ref) {
+      return { state: "unknown", reason: "issuer facts do not match the configured binding and requested task" };
+    }
+    return { state: "verified", facts };
+  } catch (error) {
+    return { state: "unknown", reason: `issuer transport unavailable: ${String((error as Error)?.message ?? error)}` };
+  } finally {
+    clearTimeout(timeout);
+    opts.signal?.removeEventListener("abort", cancel);
+  }
+}
+
+/**
+ * Domain-separated digest of every field of the task an operator acts on (design, rationale,
+ * context, acceptance, files...), excluding only its own receipt reference, so the reference can
+ * name the approval without a cycle, the judge's ruling, which is recorded after approval, and the
+ * parse label `sourcePath`, which says where the text was read from, not what it says.
+ * Independent of {@link "./task-linter.js".taskRulingPin}, whose bytes are untouched.
+ */
+export function taskIntentDigest(task: Task): string {
+  const stable = (v: unknown): string => {
+    if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+    if (v !== null && typeof v === "object") {
+      const r = v as Record<string, unknown>;
+      return `{${Object.keys(r).filter((k) => r[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stable(r[k])}`).join(",")}}`;
+    }
+    return JSON.stringify(v) ?? "null";
+  };
+  const { new_path_approval_ref: _ref, risk_ruling: _ruling, sourcePath: _label, ...acted } = task;
+  return createHash("sha256").update(`remudero:${NEW_PATH_APPROVAL_PROTOCOL}:task-intent\0${stable(acted)}`).digest("hex");
+}
+
+/** A canonical repository-relative file path: no alias, traversal, glob, control byte or backslash. */
+export function isCanonicalRepoPath(path: string): boolean {
+  if (path.length === 0 || path.length > 512 || path.startsWith("/") || path.endsWith("/")) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f\\*?[\]{}!~]/.test(path)) return false;
+  return path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+/**
+ * THE one new-path decision, shared by machineShardFilingRefusal and lint-plan's admission: the
+ * declared paths an explicit approval admits as new, plus every reason a referenced approval was
+ * refused. No reference means no authority and no reason (legacy behaviour exactly). A reference
+ * with absent, unsealed, stale, drifted, expired, revoked or broadened facts admits nothing.
+ */
+export function newPathAdmission(task: Task, context: Pick<MachineFilingAdmissionContext, "newPathApproval" | "nowMs">): { admitted: ReadonlySet<string>; refusals: string[] } {
+  const none = new Set<string>();
+  const facts = context.newPathApproval;
+  if (task.new_path_approval_ref === undefined) {
+    return { admitted: none, refusals: facts === undefined ? [] : [`task ${task.id} was handed new-path approval facts but names no new_path_approval_ref`] };
+  }
+  const refuse = (why: string) => ({ admitted: none, refusals: [`task ${task.id} new-path approval ${task.new_path_approval_ref} refused (UNKNOWN until reconfirmed): ${why}`] });
+  if (facts === undefined) return refuse("no prepared verified facts");
+  if (!verifiedNewPathApprovals.has(facts)) return refuse("facts were not verified by a trusted issuer");
+  if (facts.protocol !== NEW_PATH_APPROVAL_PROTOCOL) return refuse(`unsupported protocol ${facts.protocol}`);
+  if (facts.ref !== task.new_path_approval_ref) return refuse("approval is for a different reference");
+  if (facts.taskId !== task.id) return refuse(`approval is for task ${facts.taskId}`);
+  if (facts.repo !== task.repo) return refuse(`approval is for repository ${facts.repo}`);
+  if (facts.intentDigest !== taskIntentDigest(task)) return refuse("the task changed since it was approved");
+  const declared = task.files ?? [];
+  if (facts.declaredPaths.length !== declared.length || facts.declaredPaths.some((p, i) => p !== declared[i])) {
+    return refuse("the declared path set differs from the approved one");
+  }
+  const approved = facts.approvedMissingPaths;
+  const seen = new Set<string>();
+  for (const p of approved) {
+    if (!isCanonicalRepoPath(p)) return refuse(`approved path is not canonical: ${JSON.stringify(p)}`);
+    if (!declared.includes(p)) return refuse(`approved path is not declared: ${p}`);
+    if (seen.has(p.toLowerCase())) return refuse(`approved path is duplicated: ${p}`);
+    seen.add(p.toLowerCase());
+  }
+  if (approved.length === 0) return refuse("no approved new path");
+  if (!Number.isFinite(facts.issuedAtMs) || !Number.isFinite(facts.expiresAtMs) || facts.operator === "" || facts.confirmation === "") {
+    return refuse("approval provenance is incomplete");
+  }
+  const now = context.nowMs ?? systemClock.now();
+  if (facts.revoked) return refuse("approval was revoked");
+  if (facts.issuedAtMs > now || facts.expiresAtMs <= now) return refuse("approval is not currently valid");
+  return { admitted: new Set(approved), refusals: [] };
+}
+
 export function missingDeclaredPaths(
   task: Task,
   facts: Pick<MachineFilingAdmissionContext, "pathExists" | "pathExistsAtBase">,
@@ -1557,8 +1788,10 @@ export function machineFilingAdmissionViolations(
     reasons.push(`task ${task.id} CI-learning scope must be its lessons file and optional matching golden criteria fixture: ${declared.join(", ")}`);
   }
   const newLessonAllowed = ciLearning && isParkedMachineProposal(task) && CI_LEARNING_LESSON_PATH.test(declared[0] ?? "");
+  const approvedNew = newPathAdmission(task, context);
+  reasons.push(...approvedNew.refusals);
   const missing = missingDeclaredPaths(task, context, (path) =>
-    (newTestAllowed && created(path)) || path === scoutNew || newLessonAllowed);
+    (newTestAllowed && created(path)) || path === scoutNew || newLessonAllowed || approvedNew.admitted.has(path));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

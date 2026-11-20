@@ -57,7 +57,7 @@ import {
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
-import { loadPlan } from "../src/lib/plan.ts";
+import { loadPlan, loadPlanAtRef } from "../src/lib/plan.ts";
 import { isInPlanScope } from "../src/lib/plan-scope.ts";
 import { lintTask } from "../src/lib/task-linter.ts";
 import { taskIdFromRunBranch } from "../src/lib/status.ts";
@@ -332,6 +332,77 @@ export function planTaskFilesResolver(root = REPO_ROOT) {
   }
 }
 
+/** @typedef {{outcome: "found", files: readonly string[] | undefined} | {outcome: "absent" | "unreadable"}} CanonicalTaskScope */
+
+/**
+ * Read scope from the same merge base as the path range. The checked-out plan
+ * can recognize an identity, but its files cannot authorize the PR.
+ * @param {{baseSha?: string, headSha?: string, root: string}} range
+ * @returns {(taskId: string) => CanonicalTaskScope}
+ */
+function canonicalTaskScopeResolver({ baseSha, headSha, root }) {
+  return (taskId) => {
+    const sha = /^[a-f0-9]{40}$/i;
+    if (!baseSha || !headSha || !sha.test(baseSha) || !sha.test(headSha)) return { outcome: "unreadable" };
+    let complete = true;
+    /** @param {string[]} args @param {string} [input] */
+    const git = (args, input) => {
+      try {
+        return execFileSync("git", args, {
+          cwd: root, encoding: "utf8", maxBuffer: 1 << 26, input, stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (error) {
+        // loadPlanAtRef tolerates a failed shard listing for its other callers.
+        // For scope enforcement a failed listing is missing evidence.
+        complete = false;
+        throw error;
+      }
+    };
+    try {
+      const ancestor = git(["merge-base", "--all", baseSha, headSha]).trim();
+      if (!sha.test(ancestor)) return { outcome: "unreadable" };
+      const task = loadPlanAtRef(root, "plan/tasks.yaml", ancestor, git).byId.get(taskId);
+      if (!complete) return { outcome: "unreadable" };
+      return task === undefined ? { outcome: "absent" } : { outcome: "found", files: task.files };
+    } catch {
+      // Object lookup and plan parse failures never authorize changed paths.
+      return { outcome: "unreadable" };
+    }
+  };
+}
+
+/**
+ * @param {string} taskId
+ * @param {CanonicalTaskScope} scope
+ * @param {readonly string[] | undefined} changedPaths
+ * @param {boolean} knownAtHead
+ */
+function canonicalScopeRefusal(taskId, scope, changedPaths, knownAtHead) {
+  if (scope.outcome !== "found" && !knownAtHead) return undefined;
+  if (scope.outcome !== "found" || scope.files === undefined || scope.files.length === 0) {
+    return {
+      ok: false,
+      defect: "canonical-task-scope-unreadable",
+      message: `Cannot verify ${taskId}'s declared files at the merge base. Resolve the committed task scope before retrying.`,
+    };
+  }
+  if (changedPaths === undefined || changedPaths.length === 0) {
+    return {
+      ok: false,
+      defect: "canonical-task-diff-unreadable",
+      message: `Cannot verify the complete changed-path range for ${taskId}.`,
+    };
+  }
+  const allowed = new Set(scope.files);
+  const undeclared = changedPaths.filter(path => !allowed.has(path));
+  if (undeclared.length === 0) return undefined;
+  return {
+    ok: false,
+    defect: "canonical-task-scope-exceeded",
+    message: `${taskId} changes paths outside its merge-base scope: ${undeclared.map(path => JSON.stringify(path)).join(", ")}. Merge a separate scope amendment before changing those paths.`,
+  };
+}
+
 /**
  * W1-T3149's additional author-time refusal. It applies only when the local range proves this is
  * a plan-only diff and the trailered task itself declares implementation paths.
@@ -553,9 +624,9 @@ export function bodyWithRecoveredIdentity(body, identity) {
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
  * `root` (W1-T3675): the checkout {@link bodyProofTargetMissing} stats a `grep:` target against —
  * real callers omit it and get {@link REPO_ROOT}; a test seeds a tmp dir instead.
- * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict, root?: string }} input
+ * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, canonicalScopeForId?: (taskId: string) => CanonicalTaskScope, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict, root?: string }} input
  */
-export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, rule15Verdict, root = REPO_ROOT }) {
+export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, canonicalScopeForId, rule15Verdict, root = REPO_ROOT }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -608,8 +679,11 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
   const result = acceptanceAuthorTimeCheck(judged, trailerResolves === undefined ? {} : { trailerResolves });
   // The shared predicate still uses the lightweight ID resolver. Only the reviewer's non-empty
   // criteria at this PR head can justify skipping the body's proof-shape check.
-  if (result.ok) return authorTimeProofShapeRefusal(judged, result, criteriaFromHeadPlan, root);
-  return { ...result, message: `${result.message} Task identity was read from ${identity.read}.` };
+  if (!result.ok) return { ...result, message: `${result.message} Task identity was read from ${identity.read}.` };
+  const proofShape = authorTimeProofShapeRefusal(judged, result, criteriaFromHeadPlan, root);
+  if (!proofShape.ok || creditedTaskId === undefined || canonicalScopeForId === undefined) return proofShape;
+  const scope = canonicalScopeForId(creditedTaskId);
+  return canonicalScopeRefusal(creditedTaskId, scope, changedPaths, trailerResolves?.(creditedTaskId) === true) ?? proofShape;
 }
 
 /**
@@ -765,6 +839,7 @@ export function main(argv, { root = REPO_ROOT } = {}) {
       changedPaths,
       taskFilesForId,
       taskAcceptanceForId: planTaskAcceptanceResolver(root),
+      canonicalScopeForId: canonicalTaskScopeResolver({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }),
       rule15Verdict: rule15SplitAtRange({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }),
       root,
     });

@@ -197,6 +197,8 @@ test("W1-T2847: the rung passes adhocLaneRoot and the LANE ceiling — not workt
   let sawRoot: string | undefined;
   let sawOpts: { maxAgeMs?: number } = {};
   await runAdhocLaneReapRung(cfg("/srv/rmd-root"), () => {}, {
+    // W1-T13789: the made-up root would be measured on `/`; a full disk keeps the unscaled ceiling.
+    diskHeadroom: () => ({ freeBytes: 1, totalBytes: 1 }),
     reap: ((r: string, o: typeof sawOpts) => {
       sawRoot = r;
       sawOpts = o;

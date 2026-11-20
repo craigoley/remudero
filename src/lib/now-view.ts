@@ -90,6 +90,7 @@ import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type BoardDeps, type GitHub, type LedgerIndex } from "./status.js";
+import { loadTargetPlanQuarantiningDuplicates } from "./drain.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin, threadPlanPinnedRef } from "./thread-plan.js";
@@ -823,6 +824,14 @@ export interface NowViewContext {
   switches?: { views: Record<string, ViewSwitchMode> };
 }
 
+
+/**
+ * W1-T13826: another instance's plan, read as its own daemon reads it. A task of a different repository (the ops
+ * catalog holds core tasks) may keep a depends_on id this plan does not hold; the instance's own tasks stay strict.
+ */
+export function nowInstancePlan(path: string, repo: string | undefined): Plan {
+  return loadTargetPlanQuarantiningDuplicates(path, repo ?? "").plan;
+}
 /** The instance checkout's plan: core's is serve's own; another's is its managed clone under `<root>/repos/<name>`. */
 export function nowPlanPath(instance: NowInstance): string | undefined {
   if (instance.planPath) return instance.planPath;
@@ -998,7 +1007,7 @@ export function createNowView(opts: NowViewOptions): {
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
-    return threadPlan(path);
+    return instance.name === core ? threadPlan(path) : nowInstancePlan(path, instance.repo);
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);

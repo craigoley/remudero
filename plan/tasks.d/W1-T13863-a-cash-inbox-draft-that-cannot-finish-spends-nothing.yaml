@@ -1,0 +1,73 @@
+- id: W1-T13863
+  title: "A cash inbox draft whose whole run cannot fit the model's window or today's cash allowance is not started, and each draft records its prompt size"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # moves an allowance or window refusal from mid-run to before the first paid request
+  origin: "operator-session#spend-per-merged-pr-2026-11-19"
+  plan_refs:
+    - W1-T4261
+    - W1-T2561
+    - W1-T3613
+  files:
+    - src/lib/inbox.ts
+    - src/lib/worker-provider.ts
+    - src/run-task.ts
+    - src/lib/ledger-steps.ts
+    - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
+    - "src/lib/worker.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "runDraftRung does not spawn a cash draft whose estimated whole-run input (prompt tokens times the lane's expected request count, plus the output ceiling) is above openWeightEffectiveWindow for the routed deployment, and logs inbox.draft_cash_skipped with reason window"
+      proof: "grep: W1-T13863 criterion 1: in test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts"
+    - claim: "runDraftRung does not spawn a cash draft whose estimated whole-run cost is above the cash allowance left today, and logs inbox.draft_cash_skipped with reason allowance and both dollar figures"
+      proof: "grep: W1-T13863 criterion 2: in test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts"
+    - claim: "A skipped draft writes no attempt key, so the proposal stays due and drafts on the next lane that can hold it; a skipped draft costs $0"
+      proof: "grep: W1-T13863 criterion 3: in test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts"
+    - claim: "invariant:no-paid-draft-that-cannot-finish — A draft that fits both is spawned exactly as before, and a subscription draft is never checked against the cash allowance"
+      kind: guard
+      proof: "grep: W1-T13863 criterion 4: in test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts"
+    - claim: "Every inbox.draft_synthesized row records prompt_chars and plan_index_chars, so the size of the plan index in each prompt can be measured"
+      proof: "grep: W1-T13863 criterion 5: in test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts"
+    - claim: "The daemon's draft batch passes the cash fit check to the draft rung"
+      proof: "grep: cashDraftFit( in src/run-task.ts"
+  rationale: |
+    WHY: inbox drafts are 89.5% of paid spend, and most of that money buys no draft.
+    OBSERVED (ledger union, 2026-11-05 to 2026-11-19): cash inbox draft rows cost $129.3. Successful drafts were
+    $58.22 (46 drafts, about $1.27 each). Drafts that failed after spending were $71.08 (55%): openweight_error
+    $50.05 over 57 rows ($40.41 of it with partial or unavailable token usage), and cash_allowance_exhausted $21.03
+    over 715 rows. One failed gpt-6-luna draft read 503,033 input tokens over 2 requests for 123 output tokens; one
+    haiku draft read 1,561,526 input tokens. Inbox input tokens: p90 1,068,558, max 35,340,158.
+    OBSERVED in code: reserveOpenWeightBudget (worker-provider.ts) reserves per request, not per run. The draft is
+    a tool loop, so request 1 is billed and a later request is refused with OpenWeightAllowanceExhaustedError, and the
+    row is labelled cash_allowance_exhausted with a cost. The context check (OpenWeightRequestTooLargeError) is also
+    per request, so a run whose second request outgrows the window fails after the first is billed.
+    WHY THE PROMPTS ARE LARGE (INFERRED from code, measured by criterion 5): inboxDraftPrompt (inbox.ts) pastes
+    planProjectionForDependsOn(currentPlanText), an index of every task in the plan (5,799 shard files on main today), into every
+    draft, and a relint redraft pastes the whole prompt again plus the failed fragment. 503,033 tokens over 2 requests
+    is about 250,000 tokens a request. Subscription drafts also Read plan/tasks.yaml through tools, which explains the
+    multi-million-token rows.
+  design: |
+    INVARIANT no-paid-draft-that-cannot-finish: a cash draft starts only when its estimated whole run fits the
+    routed deployment's effective window and the allowance left today; every other draft path is unchanged.
+    1. worker-provider.ts: export cashDraftFit({ deployment, promptChars, expectedRequests, squeezed }) that returns
+       { fits: true } or { fits: false, reason: "window" | "allowance", estimatedTokens, estimatedUsd, leftUsd }.
+       It reads openWeightEffectiveWindow, openWeightReservationUsd and the same allowance state
+       reserveOpenWeightBudget reads, and reserves nothing. No new cap: it applies the existing allowance and
+       window before the first request instead of during the run.
+    2. inbox.ts runDraftRung: DraftRungDeps gains an optional cashFit; before each cash spawn, call it with the
+       prompt's length and the lane's expected requests (the median request count of the lane's last observed
+       drafts, default 2). On fits false, log inbox.draft_cash_skipped, write no attempt key, and return the
+       proposal undrafted. Add prompt_chars and plan_index_chars to inbox.draft_synthesized.
+    3. run-task.ts draftProposalBatch passes cashDraftFit as cashFit. Declare inbox.draft_cash_skipped in
+       ledger-steps.ts.
+    Shrinking the plan index itself is a follow-up once criterion 5 has measured it.
+  falsifier: |
+    Remove the cashFit call: criterion 2's fixture spawns a draft past today's allowance and the test fails.
+  note: |
+    Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.

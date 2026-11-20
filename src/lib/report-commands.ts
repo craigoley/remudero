@@ -8,9 +8,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname as osHostname } from "node:os";
-import { dirname, join } from "node:path";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir, hostname as osHostname } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import {
   consoleAppUrl,
@@ -41,7 +41,7 @@ import {
   SUPERVISOR_LABEL,
 } from "./launchd.js";
 import { classifyRollupSupersession, type RollupCheckEntry } from "./sweep.js";
-import { resolveInstallRoot } from "./install-root.js";
+import { resolveInstallRoot, validateDeployStateRoot } from "./install-root.js";
 import {
   buildStatusBoard,
   buildStatusBoardAsync,
@@ -69,12 +69,14 @@ import {
   readDiskFreeBytes,
   readDiskTotalBytes,
   readGitLocks,
+  readHostPieces,
   readMemInfo,
   readWorkerProcesses,
   type WorkerProcessReading,
   readNvmrcVersion,
   readPauseAgeMs,
   refuseUnsupportedArgs,
+  type LaunchdServiceReading,
   type MemInfo,
   type ProviderCapacityReading,
   type WorktreeBaseRow,
@@ -543,6 +545,263 @@ function defaultIsWorktreeBaseAncestor(worktreePath: string, base: string, head:
   }
 }
 
+function readLaunchdPath(path: string): { state: "present"; resolved: string } | { state: "missing" | "unreadable" } {
+  try {
+    return { state: "present", resolved: realpathSync(path) };
+  } catch (error) {
+    // Only missing path components establish absence. Permission failures leave it unreadable.
+    const { absent, reason } = classifyReadFailure(error);
+    return { state: absent || reason === "ENOTDIR" ? "missing" : "unreadable" };
+  }
+}
+
+function launchdDigestCheckout(
+  output: string,
+  indent: string,
+  workingDirectory: string | undefined,
+  launcherCheckout: string,
+): string | null {
+  const args = launchdPrintBlock(output.split(/\r?\n/), indent, "arguments") ?? [];
+  const repoRootIndex = args.indexOf("--repo-root");
+  const explicitRepoRoot = repoRootIndex >= 0;
+  try {
+    if (explicitRepoRoot) {
+      const override = args[repoRootIndex + 1];
+      if (!override) return null;
+      const path = readLaunchdPath(resolve(workingDirectory ?? "/", override));
+      if (path.state !== "present") return null;
+      let gitRoot = path.resolved;
+      while (!existsSync(join(gitRoot, ".git"))) {
+        const parent = dirname(gitRoot);
+        if (parent === gitRoot) return path.resolved;
+        gitRoot = parent;
+      }
+      const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
+      return isAbsolute(root) ? realpathSync(root) : path.resolved;
+    }
+
+    const effectiveWorkingDirectory = workingDirectory ?? "/";
+    if (!isAbsolute(effectiveWorkingDirectory)) return null;
+    const cwd = readLaunchdPath(effectiveWorkingDirectory);
+    if (cwd.state !== "present") return null;
+    let gitRoot = cwd.resolved;
+    while (!existsSync(join(gitRoot, ".git"))) {
+      const parent = dirname(gitRoot);
+      if (parent === gitRoot) throw new Error("WorkingDirectory is outside Git");
+      gitRoot = parent;
+    }
+    const root = hostWorktreeGit(gitRoot, ["rev-parse", "--show-toplevel"], { timeout: 1_000 }).trim();
+    return isAbsolute(root) ? realpathSync(root) : null;
+  } catch (error) {
+    if (explicitRepoRoot) return null;
+    // The CLI falls back to its install checkout when its working directory is not inside Git.
+    void error;
+    return launcherCheckout;
+  }
+}
+
+function launchdSelfSyncAlreadyDone(output: string, indent: string): boolean {
+  // launchd's explicit job environment overrides the environment inherited when it was loaded.
+  // Preserve the inherited value only when the job did not set the key itself.
+  for (const name of ["environment", "inherited environment", "default environment"]) {
+    const entry = launchdPrintBlock(output.split(/\r?\n/), indent, name)
+      ?.find(line => line.startsWith("RMD_SELF_SYNC_DONE => "));
+    if (entry !== undefined) return entry.slice("RMD_SELF_SYNC_DONE => ".length) === "1";
+  }
+  return false;
+}
+
+function readLaunchdCheckoutBranch(checkout: string): string | null {
+  try {
+    return hostWorktreeGit(checkout, ["symbolic-ref", "--short", "-q", "HEAD"], { timeout: 1_000 }).trim() || null;
+  } catch (error) {
+    // Git uses status 1 for a detached HEAD. Other failures leave the branch unreadable.
+    return (error as { status?: number }).status === 1 ? "detached HEAD" : null;
+  }
+}
+
+function readLaunchdErrorLine(path: string | undefined): string {
+  if (!path || !isAbsolute(path)) return "";
+  try {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile()) return "";
+      let end = before.size;
+      if (end > 0) {
+        const last = Buffer.alloc(1);
+        if (readSync(fd, last, 0, 1, end - 1) !== 1) return "";
+        if (last[0] === 0x0a) {
+          end--;
+          if (end > 0) {
+            const prior = Buffer.alloc(1);
+            if (readSync(fd, prior, 0, 1, end - 1) !== 1) return "";
+            if (prior[0] === 0x0d) end--;
+          }
+        }
+      }
+      let start = 0;
+      for (let cursor = end; cursor > 0;) {
+        const offset = Math.max(0, cursor - 4096);
+        const chunk = Buffer.alloc(cursor - offset);
+        let read = 0;
+        while (read < chunk.length) {
+          const count = readSync(fd, chunk, read, chunk.length - read, offset + read);
+          if (count === 0) return "";
+          read += count;
+        }
+        const newline = chunk.lastIndexOf(0x0a);
+        if (newline >= 0) {
+          start = offset + newline + 1;
+          break;
+        }
+        cursor = offset;
+      }
+      const bytes = Buffer.alloc(Math.min(end - start, 16 * 1024));
+      let read = 0;
+      while (read < bytes.length) {
+        const count = readSync(fd, bytes, read, bytes.length - read, start + read);
+        if (count === 0) return "";
+        read += count;
+      }
+      const after = fstatSync(fd);
+      if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return "";
+      return bytes.toString("utf8").trim();
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    // Missing, unreadable or malformed final lines cannot supply a crash cause.
+    void error;
+    return "";
+  }
+}
+
+function launchdPrintBlock(lines: readonly string[], indent: string, name: string): string[] | undefined {
+  const start = lines.indexOf(`${indent}${name} = {`);
+  if (start < 0) return undefined;
+  const end = lines.indexOf(`${indent}}`, start + 1);
+  if (end < 0) return undefined;
+  const entries = lines.slice(start + 1, end);
+  const entryIndent = /^[\t ]+/.exec(entries[0] ?? "")?.[0];
+  if (entryIndent === undefined || entryIndent === indent || !entryIndent.startsWith(indent)) return undefined;
+  if (entries.some(line => !line.startsWith(entryIndent))) return undefined;
+  return entries.map(line => line.slice(entryIndent.length));
+}
+
+function readSupervisorCheckout(output: string, indent: string): string | null {
+  const lines = output.split(/\r?\n/);
+  const args = launchdPrintBlock(lines, indent, "arguments");
+  if (args?.[1] !== "deploy-run") return null;
+  const rest = args.slice(2);
+  if (unknownArgError("deploy-run", rest, ["--state-root", "--selected-registry-shadow", "--selected-registry-pin"],
+    ["--dry-run", "--image-drift-only"])) return null;
+  if (rest.includes("--state-root")) {
+    const root = flagValue(rest, "--state-root") ?? "";
+    return validateDeployStateRoot(root).ok ? resolveInstallRoot({ root }) : null;
+  }
+
+  const homeEntry = ["environment", "inherited environment", "default environment"]
+    .map(name => launchdPrintBlock(lines, indent, name)?.find(line => line.startsWith("HOME => ")))
+    .find(entry => entry !== undefined);
+  const home = homeEntry?.slice("HOME => ".length);
+  if (!home || !isAbsolute(home)) return null;
+  try {
+    // Read the job's existing config without invoking loadConfig's provisioning path.
+    const config = JSON.parse(readFileSync(join(home, ".config", "remudero", "config.json"), "utf8")) as {
+      root?: unknown;
+      installRoot?: unknown;
+    } | null;
+    if (!config || typeof config !== "object" || Array.isArray(config)) return null;
+    const { installRoot } = config;
+    const root = config.root == null || config.root === "" ? join(home, "Remudero") : config.root;
+    if (typeof root !== "string" || (installRoot !== undefined && typeof installRoot !== "string")) return null;
+    const checkout = resolveInstallRoot({ root, installRoot });
+    return isAbsolute(checkout) && !checkout.includes("\0") ? checkout : null;
+  } catch (error) {
+    // Missing or invalid job config leaves the checkout unreadable.
+    void error;
+    return null;
+  }
+}
+
+function parseLaunchdPrint(output: string, target: string) {
+  if (!output.trimStart().startsWith(`${target} = {`)) return undefined;
+  // Nested blocks also have fields such as state. Use the indentation of the job's fields.
+  const fields = new Map<string, string>();
+  const indent = /^[\t ]+(?=\S)/m.exec(output)?.[0];
+  if (!indent) return undefined;
+  for (const match of output.matchAll(/^([\t ]+)([a-z ]+) = ([^\r\n]+)\r?$/gm)) {
+    if (match[1] === indent) fields.set(match[2]!, match[3]!.trim());
+  }
+  const program = fields.get("program");
+  const runs = fields.get("runs") ?? "";
+  const state = fields.get("state");
+  const pidField = fields.get("pid");
+  const pid = pidField === undefined ? null : /^[1-9]\d*$/.test(pidField) ? Number(pidField) : NaN;
+  const exitField = fields.get("last exit code");
+  const exit = /^(-?\d+)(?::.*)?$/.exec(exitField ?? "");
+  const signal = fields.get("last terminating signal");
+  if (!program || !isAbsolute(program) || !/^\d+$/.test(runs) || !Number.isSafeInteger(Number(runs)) || !state
+    || (pid === null ? state === "running" : !Number.isSafeInteger(pid))
+    || (!exit && !signal && exitField !== "(never exited)")) return undefined;
+
+  return {
+    program, pid, starts: Number(runs), stderrPath: fields.get("stderr path"),
+    workingDirectory: fields.get("working directory"), indent,
+    lastExit: exit ? { code: Number(exit[1]) } : signal ? { signal } : null,
+  };
+}
+
+function readDoctorLaunchdServices(deps: DoctorDeps["launchd"] = {}): LaunchdServiceReading[] {
+  if ((deps.platform ?? process.platform) !== "darwin") return [];
+  const exec = deps.exec ?? ((cmd, args) => execFileSync(cmd, args, {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 1_000, killSignal: "SIGKILL",
+  }));
+  const readings: LaunchdServiceReading[] = [];
+  for (const label of [DAEMON_LABEL, SERVE_LABEL, SUPERVISOR_LABEL, DIGEST_LABEL]) {
+    const target = launchctlGuiTarget(realUid(), label);
+    let output: string;
+    try {
+      output = exec("launchctl", ["print", target]);
+    } catch (error) {
+      // Permission and domain failures leave state unreadable. Only an explicit missing job can be absent.
+      const stderr = String((error as { stderr?: string })?.stderr ?? "");
+      if (stderr.includes(`Could not find service "${label}"`)) {
+        const plist = launchdPlistPath(label, deps.home);
+        if (readLaunchdPath(plist).state === "missing") continue;
+        readings.push({ label, unreadableReason: `service not loaded; check ${plist}` });
+      } else {
+        readings.push({ label, unreadableReason: "launchctl print failed" });
+      }
+      continue;
+    }
+
+    const service = parseLaunchdPrint(output, target);
+    if (!service) {
+      readings.push({ label, unreadableReason: "unexpected launchctl print output" });
+      continue;
+    }
+
+    const { program, pid, starts, lastExit, stderrPath, workingDirectory } = service;
+    const programPath = readLaunchdPath(program);
+    const resolved = programPath.state === "present" ? programPath.resolved : undefined;
+    const usesCheckout = label === DIGEST_LABEL && resolved
+      && basename(resolved) === "rmd" && basename(dirname(resolved)) === "bin"
+      && !launchdSelfSyncAlreadyDone(output, service.indent);
+    const checkout = label === SUPERVISOR_LABEL
+      ? readSupervisorCheckout(output, service.indent)
+      : usesCheckout ? launchdDigestCheckout(output, service.indent, workingDirectory, dirname(dirname(resolved))) : undefined;
+    const selfSync = checkout === null ? "unreadable" as const
+      : checkout === undefined ? undefined : { checkout, branch: readLaunchdCheckoutBranch(checkout) };
+    readings.push({
+      label, target, program, pid, starts, lastExit, programState: programPath.state,
+      lastErrorLine: readLaunchdErrorLine(stderrPath), selfSync,
+    });
+  }
+  return readings;
+}
+
 /** Injectable seams for {@link doctorCommand} — every reader it drives, so the whole command is
  *  exercisable without a real /proc, a real ledger, or a live daemon. */
 export interface DoctorDeps extends ReportRepoContext {
@@ -582,6 +841,8 @@ export interface DoctorDeps extends ReportRepoContext {
   readProviderRoutingStatus?: typeof readProviderRoutingStatus;
   /** W1-T3728: presence only. Doctor never prints or persists the Azure Foundry key. */
   readCashKey?: () => string | undefined;
+  launchd?: { platform?: NodeJS.Platform; home?: string; exec?: typeof defaultLifecycleExec };
+  hostPieceExists?: (path: string) => boolean;
 }
 
 export function readCaptureSurfaceFireHistory(root: string): Array<Record<string, unknown>> {
@@ -674,6 +935,7 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
     ...(lockRead.unreadableReason === undefined ? {} : { locksUnreadableReason: lockRead.unreadableReason }),
     deadLocks: dead,
     gitLocks: (deps.readGitLocks ?? readGitLocks)(repoDir, nowMs),
+    launchdServices: readDoctorLaunchdServices(deps.launchd),
     // W1-T3628: a LIVE reading, not the literal 0 that stood here. The arm it feeds could not
     // return anything but OK while this was a constant, and read "0 worker process(es)" on a host
     // carrying two `npm ci` stuck 80 minutes during the 2026-09-16 outage.
@@ -707,6 +969,19 @@ export async function doctorCommand(rest: string[], deps: DoctorDeps = {}): Prom
       configured: config.workerProviders?.cashFallbackWhenBlocked === true && enabledWorkerProviders(config).includes("cash"),
       keyPresent: Boolean((deps.readCashKey ?? (() => process.env[OPENWEIGHT_API_KEY_ENV]))()),
     },
+    hostPieces: readHostPieces(
+      {
+        home: homedir(),
+        configHome: process.env.XDG_CONFIG_HOME || undefined,
+        stateRoot: root,
+        binDir: process.env.RMD_BIN_DIR || undefined,
+        fleetInstallDir: process.env.RMD_FLEET_INSTALL_DIR || config.installRoot,
+        cleanupPath: process.env.RMD_CLEANUP_PATH || undefined,
+        tmpSweepPath: process.env.RMD_TMP_SWEEP_PATH || undefined,
+      },
+      process.platform,
+      deps.hostPieceExists,
+    ),
   });
 
   const unverifiableLines = judged.unverifiable.map((u) => `${u.taskId}: unverifiable here (host ${u.host})`);

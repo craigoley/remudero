@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one function that builds the issue body; every field is still present and still parsed
+  risk: high  # Rule 19 span: widened to escalate, escalation-conversation, tick-read-worker by a scope amendment for #19695
   band_meaning: blast-radius
   origin: operator-session#plain-language-2026-11-10
   plan_refs:
@@ -15,6 +15,8 @@
   files:
     - src/lib/escalate.ts
     - test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts
+    - "src/lib/escalation-conversation.ts"
+    - "src/lib/tick-read-worker.ts"
   status: queued
   attempts: 0
   acceptance:

@@ -9,7 +9,7 @@
   risk: high  # Rule 19: one concern, which reaper owns an engine tree; no grace, arming, census, engine-retention or snapshot change
   band_meaning: span
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   origin: "filing agent 2026-10-26: found while filing W1-T10766 (#14598); measured read-only on the Azure host's core ledger rotations 10-13..10-26"
   plan_refs: [W1-T2847, W1-T2962, W1-T4065, W1-T9077, W1-T9738, W1-T10766, W1-T10086]
