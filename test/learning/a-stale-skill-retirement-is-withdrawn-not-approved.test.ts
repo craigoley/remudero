@@ -181,11 +181,11 @@ test("the gardener withdraws a stale staged retirement only from a complete ledg
     const action = { class: "skill-lifecycle" as const, target: SKILL, reason: "rarely used" };
 
     writeFileSync(join(stateDir, CORRUPT_ROTATION), "not gzip", "utf8");
-    stageSkillLifecycleForAction(stateDir, root, action);
+    stageSkillLifecycleForAction(stateDir, root, [action], () => {});
     assert.equal(loadProposalRegistry(registryPath).length, 1, "a partial ledger is not evidence either way");
 
     rmSync(join(stateDir, CORRUPT_ROTATION));
-    stageSkillLifecycleForAction(stateDir, root, action);
+    stageSkillLifecycleForAction(stateDir, root, [action], () => {});
     assert.deepEqual(loadProposalRegistry(registryPath), [], "the same pass over a complete read withdraws it");
     assert.equal(existsSync(join(root, ".claude", "skills", SKILL, "SKILL.md")), true, "withdrawal deletes nothing");
   } finally {
