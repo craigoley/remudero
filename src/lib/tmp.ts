@@ -156,15 +156,15 @@ export function removeOwnedTree(dir: string): { ok: true } | { ok: false; reason
     fs.rmSync(dir, { recursive: true, force: true });
     return { ok: true };
   } catch (error) {
-    const code = removalPermissionCode(dir, error);
-    if (code !== "EACCES" && code !== "EPERM") return { ok: false, reason: removalReason(dir, error) };
-  }
-  makeOwnedDirsWritable(dir);
-  try {
-    fs.rmSync(dir, { recursive: true, force: true });
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, reason: removalReason(dir, error) };
+    try {
+      const code = removalPermissionCode(dir, error);
+      if (code !== "EACCES" && code !== "EPERM") return { ok: false, reason: removalReason(dir, error) };
+      makeOwnedDirsWritable(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
+      return { ok: true };
+    } catch (repairError) {
+      return { ok: false, reason: removalReason(dir, repairError) };
+    }
   }
 }
 
@@ -178,19 +178,16 @@ function removalPermissionCode(dir: string, error: unknown): string | undefined 
 }
 
 function containsReadOnlyDirectory(dir: string): boolean {
-  let st: fs.Stats;
-  try {
-    st = fs.lstatSync(dir);
-  } catch {
-    return false;
-  }
-  if (!st.isDirectory()) return false;
-  if ((st.mode & 0o200) === 0) return true;
   let names: string[];
   try {
+    const st = fs.lstatSync(dir);
+    if (!st.isDirectory()) return false;
+    if ((st.mode & 0o200) === 0) return true;
     names = fs.readdirSync(dir);
-  } catch {
-    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false; // the entry ceased to be a directory
+    throw error;
   }
   return names.some((name) => containsReadOnlyDirectory(join(dir, name)));
 }

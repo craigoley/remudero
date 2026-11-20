@@ -88,6 +88,34 @@ test("W1-T13819 criterion 1: removeOwnedTree removes a directory that holds a re
   assert.deepEqual(removeOwnedTree(dir), { ok: true }, "a missing directory is ok");
 });
 
+test("W1-T13819: the macOS permission probe keeps the removal error for a vanished entry and reports other probe errors", (t) => {
+  const dir = makeTempDir("t13819-permission-probe");
+  const entry = join(dir, "entry");
+  mkdirSync(entry);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const rm = fs.rmSync;
+  const read = fs.readdirSync;
+  let probeCode = "ENOENT";
+  const removal = t.mock.method(fs, "rmSync", (path: fs.PathLike, options?: fs.RmOptions) => {
+    if (path === dir) throw Object.assign(new Error(), { code: "ENOTEMPTY", path });
+    return rm(path, options);
+  });
+  t.mock.method(fs, "readdirSync", (path: fs.PathLike) => {
+    if (path === entry) throw Object.assign(new Error(), { code: probeCode, path });
+    return read(path);
+  });
+  Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+  try {
+    assert.deepEqual(removeOwnedTree(dir), { ok: false, reason: `could not remove ${dir}: ENOTEMPTY` });
+    probeCode = "EIO";
+    assert.deepEqual(removeOwnedTree(dir), { ok: false, reason: `could not remove ${entry}: EIO` });
+    assert.equal(removal.mock.callCount(), 2, "neither probe result authorizes a removal retry");
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    t.mock.restoreAll();
+  }
+});
+
 test("W1-T13819 criterion 2: both spawners return the stdout of a child that leaves a read-only tree in its HOME, and the home is removed", async (t) => {
   const cwd = makeTempDir("t13819-c2");
   const homes: string[] = [];
