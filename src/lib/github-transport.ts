@@ -1252,7 +1252,7 @@ export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env
   return mode === "enforce" || mode === "wait" ? mode : "advisory";
 }
 
-/** Fresh invocation burst and default mode: CLI enforces/waits, daemon stays advisory.
+/** Fresh invocation burst and default mode: a CLI command waits, the daemon stays advisory.
  * Explicit env wins; restoring env and scope isolates sequential and nested invocations. */
 export async function withGhTransportFloorMode<T>(
   mode: "advisory" | "enforce" | "wait",
@@ -1274,9 +1274,11 @@ export async function withGhTransportFloorMode<T>(
   }
 }
 
-/** Run a standalone unattended command with the read floor explicitly enforced by default. */
+/** Run a standalone hand-run command (`rmd review`) whose first read WAITS for its turn by default.
+ * W1-T12058: enforce refused it whenever the fleet had read in the last 180 s, and a re-run only
+ * restarted the window. An explicit RMD_GH_TRANSPORT_FLOOR (enforce or advisory) still wins. */
 export async function withGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
-  return await withGhTransportFloorMode("enforce", fn, env);
+  return await withGhTransportFloorMode("wait", fn, env);
 }
 
 /**
