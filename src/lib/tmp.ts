@@ -176,9 +176,9 @@ function removalReason(dir: string, error: unknown): string {
 function makeOwnedDirsWritable(path: string | Buffer): void {
   let fd: number | undefined;
   try {
+    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const entry = fs.lstatSync(path, { bigint: true });
     if (!entry.isDirectory()) return;
-    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW, 0o700);
     const opened = fs.fstatSync(fd, { bigint: true });
     if (opened.dev !== entry.dev || opened.ino !== entry.ino) return;
     // Resolve every child relative to the held directory through procfs. Its
