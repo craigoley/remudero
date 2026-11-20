@@ -20479,9 +20479,11 @@ export function orderPendingReviews<T extends { pr: Pick<OpenPrView, "createdAt"
 export function orderPendingReviewsNeedsPersonLast<T extends { pr: Pick<OpenPrView, "createdAt" | "prNumber"> }>(
   jobs: readonly T[],
   needsPerson?: (pr: T["pr"]) => boolean,
+  queuedAt?: (pr: T["pr"]) => string | undefined,
 ): T[] {
+  // W1-T14073: the same eligibility key the light pass ranks on, so both passes pick the same first PR.
   const createdMs = (job: T): number | undefined => {
-    const raw = job.pr.createdAt;
+    const raw = queuedAt?.(job.pr) ?? job.pr.createdAt;
     if (raw === undefined) return undefined;
     const parsed = Date.parse(raw);
     return Number.isNaN(parsed) ? undefined : parsed;
@@ -22127,7 +22129,9 @@ export async function runSweep(
     return Number.isNaN(at) ? now : at;
   };
   const fullNeedsPerson = needsPersonPredicate(ledgerLines);
-  const fullReviewQueue = orderPendingReviewsNeedsPersonLast((fullReviewCandidates ?? []).map((candidate) => ({ pr: candidate })), fullNeedsPerson)
+  const fullQueuedAt = reviewInputQueuedAt(ledgerLines, now);
+  const fullReviewQueue = orderPendingReviewsNeedsPersonLast((fullReviewCandidates ?? []).map((candidate) => ({ pr: candidate })), fullNeedsPerson,
+    fullQueuedAt)
     .slice(0, fullReviews.planned).map(({ pr }) => ({ prNumber: pr.prNumber, sinceMs: waitSinceMs(pr, true) }));
   const fullRepairAdmission =
     fullRepairActiveWorkers === undefined || fullReviewQueueDepth === undefined || fullReviewLanes === undefined
@@ -27374,7 +27378,8 @@ export async function runSweep(
   // deferred the same oldest tail every pass.
   const overtakenReviews = fullRepairAdmission?.overtaken() ?? new Set<number>(); // W1-T9582
   const overtakenJobs = pendingReviews.filter((job) => overtakenReviews.has(job.pr.prNumber));
-  const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson);
+  const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson,
+    fullQueuedAt);
   type ReviewLane = { jobs: typeof orderedReviews; next: number; stop?: string; cls: ReviewLaneClass };
   const codeLane: ReviewLane = { jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr)), next: 0, cls: "review" };
   const planLane: ReviewLane = { jobs: orderedReviews.filter((job) => reviewsInPlanLane(job.pr)), next: 0, cls: "plan-review" };
@@ -28805,7 +28810,7 @@ async function runSweepLightPassCore(
   // ledger-read-intent: live — this fold reads the live file only, never rotations.
   const readLedger = deps.readLedger ?? readLiveLedgerRows;
   const selectionLedgerLines = readLedger(deps.ledgerPath);
-  const repushedQueuedAt = repushedHeadQueuedAt(selectionLedgerLines);
+  const queuedAt = reviewInputQueuedAt(selectionLedgerLines, now);
   const ownNumbers = new Set(openPrs.map((pr) => pr.prNumber));
   let queuePrs = deps.snapshotOpenPrs === undefined ? openPrs
     : [...openPrs, ...deps.snapshotOpenPrs.filter((pr) => !ownNumbers.has(pr.prNumber))];
@@ -28853,10 +28858,10 @@ async function runSweepLightPassCore(
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
-    undefined, repushedQueuedAt).planFilings.length, "light");
+    undefined, queuedAt).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
   const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
-    repushedQueuedAt);
+    queuedAt);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -28875,7 +28880,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson, repushedQueuedAt,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -29232,7 +29237,7 @@ async function runSweepLightPassCore(
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
       freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
         !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, repushedQueuedAt,
+      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -29666,7 +29671,7 @@ export function selectReviewAdmissions(
   reviewWidth: number = Math.max(1, policy.reviewLanes),
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
-  repushedQueuedAt?: ReadonlyMap<string, string>,
+  queuedAt?: ReviewQueuedAt,
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -29682,8 +29687,8 @@ export function selectReviewAdmissions(
     const ga = needsPerson?.(a) === true ? 1 : 0;
     const gb = needsPerson?.(b) === true ? 1 : 0;
     if (ga !== gb) return ga - gb;
-    const ka = Date.parse(repushedQueuedAt?.get(`${a.prNumber}@${a.headSha}`) ?? reviewAdmissionKey(a));
-    const kb = Date.parse(repushedQueuedAt?.get(`${b.prNumber}@${b.headSha}`) ?? reviewAdmissionKey(b));
+    const ka = Date.parse(queuedAt?.(a) ?? reviewAdmissionKey(a));
+    const kb = Date.parse(queuedAt?.(b) ?? reviewAdmissionKey(b));
     const aa = Number.isNaN(ka) ? -Infinity : now - ka;
     const ab = Number.isNaN(kb) ? -Infinity : now - kb;
     return ab !== aa ? ab - aa : a.prNumber - b.prNumber;
@@ -29697,16 +29702,27 @@ export function selectReviewAdmissions(
   return { spawning, planFilings };
 }
 
-/** W1-T12534: `<pr>@<head>` of a minted head to its first eligible time, else its mint time. */
-function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>): Map<string, string> {
+/** W1-T14073 — when one review input joined the queue, or undefined to keep its PR's createdAt. */
+export type ReviewQueuedAt = (pr: OpenPrView) => string | undefined;
+
+/** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
+ *  W1-T12534's absent-repush map, folded from the ledger view the pass already holds (no second scan). A head
+ *  absent-repush minted keeps W1-T12534's key (its first eligible ts, else its mint ts). A PR that was eligible at an
+ *  earlier head is keyed by the first `sweep.review_eligible` ts of its current review key (the key carries the head
+ *  sha, so a fix head is a new key), else `now`: this pass writes that key's first row. A PR's first head keeps its
+ *  createdAt (W1-T12534 criteria 2 and 3), which is never later than its first eligibility. */
+function reviewInputQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>>, now: number): ReviewQueuedAt {
+  const byKey = new Map<string, string>();
   const minted = new Map<string, string>();
   const eligible = new Map<string, string>();
+  const eligibleHeads = new Map<string, Set<string>>();
   const isTime = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
   const first = (values: Map<string, string>, key: string, ts: string): void => {
     if (!values.has(key)) values.set(key, ts);
   };
   for (const row of ledgerLines) {
     if (!isTime(row.ts)) continue;
+    if (row.step === "sweep.review_eligible" && typeof row.review_key === "string") first(byKey, row.review_key, row.ts);
     const head = row.step === "sweep.absent_repush" ? row.new_head
       : row.step === "sweep.review_eligible" ? row.head_sha : undefined;
     if (typeof head !== "string") continue;
@@ -29716,8 +29732,18 @@ function repushedHeadQueuedAt(ledgerLines: ReadonlyArray<Record<string, unknown>
       continue;
     }
     first(eligible, key, row.ts);
+    const heads = eligibleHeads.get(String(row.pr_number)) ?? new Set<string>();
+    eligibleHeads.set(String(row.pr_number), heads.add(head));
   }
-  return new Map([...minted].map(([key, ts]) => [key, eligible.get(key) ?? ts]));
+  const nowIso = clockFromMillisFn(() => now).iso();
+  return (pr) => {
+    const head = `${pr.prNumber}@${pr.headSha}`;
+    const mint = minted.get(head);
+    if (mint !== undefined) return eligible.get(head) ?? mint;
+    const heads = eligibleHeads.get(String(pr.prNumber));
+    const reentered = heads !== undefined && [...heads].some((h) => h !== pr.headSha);
+    return reentered ? byKey.get(reviewOutcomeKeyForPr(pr)) ?? nowIso : undefined;
+  };
 }
 
 /** Number of spawning review candidates before the adaptive admission cut. */
