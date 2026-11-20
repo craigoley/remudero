@@ -268,7 +268,8 @@ type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requ
 const keepEvidenceLine = (taskId: string) => (line: string) =>
   line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
 const runLedgerReader = promisify(execFile);
-const ledgerReaderLoader = import.meta.resolve("tsx");
+// Resolved on use, not at load: a CommonJS bundle of this module shims import.meta.url but not import.meta.resolve.
+const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
 const ledgerReaderEntry = fileURLToPath(import.meta.url);
 const ledgerReaderArg = "--read-product-plan-evidence";
 
@@ -631,7 +632,7 @@ export class ProductPlanOperationService {
           ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) })
             .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, read.rawLines) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.
-          : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader, ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
+          : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
             { signal: controller.signal, killSignal: "SIGKILL" })
             .then(({ stdout }): LedgerRead => JSON.parse(stdout) as LedgerRead),
       ]);
