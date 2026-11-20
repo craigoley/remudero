@@ -26,7 +26,7 @@
       kind: guard
       proof: "grep: W1-T14017 criterion 3: in test/inbox/a-task-files-landing-pr-reserves-under-the-branch-it-pushes.test.ts"
   rationale: |
-    OBSERVED 2026-11-20 on remudero-console #2737 (issue #2739): the console reservation ref for W1-T4308 names holder
+    OBSERVED 2026-11-20 on remudero-console #2737 (issue #2739): the console reservation ref for the PR's task id names holder
     branch=task-files-landing, while the landing PR head is task-files-landing-craigoley-remudero-console-default-<hash>.
     The reviewer refused it as "reserved by task-files-landing, not this PR — renumber", and a needs-human issue opened.
     - feedback-landing.ts `landingIdentity` scopes the branch only when a landing owner is set or the source repository
