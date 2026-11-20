@@ -6431,16 +6431,16 @@ async function spawnCodexWorkerInPrivateTemp(
       }
     }
     const room = CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES - stdoutBytes;
+    const observedAt = Date.now();
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
       // W1-T13868: the bytes still inside the budget are read after the limit's evidence is taken, so a complete
       // reroute line among them names the served model however the chunks happened to split.
-      if (room > 0) stdout.push(stdoutDecoder.write(chunk.subarray(0, room)), Date.now());
+      if (room > 0) stdout.push(stdoutDecoder.write(chunk.subarray(0, room)), observedAt);
       return;
     }
     const text = stdoutDecoder.write(chunk);
-    const observedAt = Date.now();
     stdout.push(text, observedAt);
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
