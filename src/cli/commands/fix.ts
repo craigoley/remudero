@@ -2336,7 +2336,7 @@ async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () =
 const OPS_CATALOG_SOURCE_LABEL = /^tasks(?:\.yaml|\.d\/[^/]+)$/;
 
 /** W1-T13958: `task` without a `sourcePath` the core head cannot hold. A core-catalog task's
- *  `plan/tasks.d` path is kept (invariant core-task-source-kept). */
+ *  core plan shard path is kept (invariant core-task-source-kept). */
 export function withoutOpsCatalogSource<T extends object>(task: T): T {
   const { sourcePath, catalog } = task as T & { sourcePath?: unknown; catalog?: unknown };
   const ops = catalog === "ops" || (typeof sourcePath === "string" && OPS_CATALOG_SOURCE_LABEL.test(sourcePath));
