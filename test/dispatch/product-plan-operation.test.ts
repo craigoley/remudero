@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
-import { realLedgerFs } from "#src/lib/ledger-union.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
@@ -38,7 +38,7 @@ class Target implements PlanTargetPort {
   runnerRegistered() { return this.runner; }
 }
 
-function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unreadable"; gateway?: boolean; bound?: boolean; envelope?: boolean } = {}) {
+function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unreadable"; gateway?: boolean; bound?: boolean; envelope?: boolean; accepted?: boolean } = {}) {
   const root = ownedFixtureDir(t, "product-plan-operation").dir;
   const store = new ProductIntentStore({ root });
   const saved = store.write(actor, { version: "product-intent-v1", requestId: "seed-product-00001", expectedRevision: 0,
@@ -61,6 +61,7 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
   const journalDirectory = join(root, "state", "products", "v1", "plan-operations");
   let release: (outcome: PlanHandoffOutcome) => void = () => {};
   const gateway = {
+    inFlight: over.accepted === undefined ? undefined : () => over.accepted!,
     async productPlan(call: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }) {
       // The durable record must already be on disk when the hand-off starts.
       const journaled = existsSync(journalDirectory) && readdirSync(journalDirectory).filter((name) => name.endsWith(".json")).some((name) => readFileSync(join(journalDirectory, name), "utf8").includes(call.operationId));
@@ -99,12 +100,12 @@ const ok = async (promise: ReturnType<ProductPlanOperationService["execute"]>) =
 const refused = async (promise: ReturnType<ProductPlanOperationService["execute"]>) => { const result = await promise; assert.equal(result.ok, false); return result.code; };
 const at = (offsetMs: number) => Date.parse(REQUESTED) + offsetMs;
 /** The ledger rows the maintained gateway and the native plan run write for one hand-off, shaped as their own writers shape them. */
-const nativeRun = (f: Fixture, operationId: string, extra: { exit?: boolean; pr?: string; pid?: number } = {}) => {
+const nativeRun = (f: Fixture, operationId: string, extra: { exit?: boolean; exitCode?: number; pr?: string; pid?: number } = {}) => {
   const pid = extra.pid ?? 4242;
   f.row(at(1_000), { run_id: "PANEL-1", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_started", origin: "ratify-gateway", verb: "plan", pid });
   f.row(at(2_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "plan.start", lane: "plan", actor_pid: pid, mode: "clarify", brief: f.calls.find((call) => call.operationId === operationId)?.brief });
   if (extra.pr) f.row(at(3_000), { run_id: "PLAN-clarify-1", task_id: "PLAN-clarify", step: "pr.opened", lane: "plan", actor_pid: pid, pr_url: extra.pr });
-  if (extra.exit) f.row(at(4_000), { run_id: "PANEL-2", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", origin: "ratify-gateway", verb: "plan", code: 0, signal: null });
+  if (extra.exit) f.row(at(4_000), { run_id: "PANEL-2", task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", origin: "ratify-gateway", verb: "plan", code: extra.exitCode ?? 0, signal: null });
 };
 const revisionOf = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.revision; };
 const evidenceIds = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.stageEvidence.map((item) => item.id); };
@@ -405,6 +406,7 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
   const f = fixture(t);
   const realRoot = repoRoot();
   const cli = join(f.root, "controlled-cli");
+  const finishPlan = join(cli, "finish-plan");
   mkdirSync(join(cli, "bin"), { recursive: true }); mkdirSync(join(cli, "src"));
   writeFileSync(join(cli, "package.json"), JSON.stringify({ type: "module" }));
   // Exact maintained launcher bytes and pinned toolchain, with a controlled entry fixture.
@@ -413,7 +415,9 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
   // The external planner is controlled at its argv/ledger protocol. The launcher, parser,
   // runtime PID and durable writer are real; this fixture invokes no planner or GitHub client.
   writeFileSync(join(cli, "src", "run-task.ts"), String.raw`
+    import { existsSync } from "node:fs";
     import { createRequire } from "node:module";
+    import { setTimeout } from "node:timers/promises";
     import { pathToFileURL } from "node:url";
     const require = createRequire(${JSON.stringify(join(realRoot, "package.json"))});
     const { parsePlanArgs } = await import(pathToFileURL(require.resolve("#src/lib/plan-architect.ts")).href);
@@ -422,6 +426,7 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
     if (args[0] !== "plan" || targetAt < 0) throw new Error("unexpected native gateway argv");
     const parsed = parsePlanArgs(args.slice(1, targetAt));
     if ("error" in parsed) throw new Error(parsed.error);
+    while (!existsSync(${JSON.stringify(finishPlan)})) await setTimeout(20);
     const run_id = "PLAN-" + parsed.mode + "-" + Date.now(), task_id = "PLAN-" + parsed.mode;
     appendLedger(${JSON.stringify(f.ledgerPath)}, { run_id, task_id, step: "plan.start", lane: "plan", mode: parsed.mode, brief: parsed.brief });
     appendLedger(${JSON.stringify(f.ledgerPath)}, { run_id, task_id, step: "pr.opened", lane: "plan", pr_url: ${JSON.stringify(PR_URL)} });
@@ -430,8 +435,7 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
     freshTree: async (action) => action({ path: cli, sha: "f".repeat(40) }) });
   const service = new ProductPlanOperationService({ root: f.root, store: f.store, provider: f.provider, target: f.target,
     bootstrapConfirmed, ledgerPath: f.ledgerPath, text: async () => "[]", checkout: () => f.checkout, runnerConfig, gateway });
-  const first = await ok(service.execute(actor, f.command()));
-  assert.equal(first.observation.state, "pending");
+  const first = await ok(service.execute(actor, f.command())).finally(() => writeFileSync(finishPlan, ""));
   // inFlight tracks the real detached child lifetime. No fixed sleep is a completion proof.
   const deadline = Date.now() + 60_000;
   while (gateway.inFlight(productPlanLedgerTaskId(first.observation.operationId))) {
@@ -447,6 +451,7 @@ test("W1-T10823: the real CLI launcher correlates the native plan brief across d
   const rows = readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const started = rows.find((row) => row.step === "ratify.cli_started"), native = rows.find((row) => row.step === "plan.start");
   assert.ok(native, JSON.stringify({ rows, childLogs: readdirSync(join(f.root, "logs")).map((name) => readFileSync(join(f.root, "logs", name), "utf8")) }));
+  assert.equal(first.observation.state, "pending");
   assert.notEqual(started.pid, native.actor_pid, "the maintained tsx launcher starts a different runtime PID");
   const again = await ok(service.execute(actor, f.command()));
   assert.equal(again.observation.state, "proposed");
@@ -628,26 +633,43 @@ const proposalLines = (f: Fixture, operationId: string): string[] => {
   ].map((row) => JSON.stringify(row));
 };
 
-test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
-  const f = fixture(t);
-  const first = await ok(f.service().execute(actor, f.command()));
-  const operationId = first.observation.operationId;
-  f.release("queued");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const path = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
-  const journal = JSON.parse(readFileSync(path, "utf8"));
-  // This is the stored shape from before the journal distinguished a refusal from a child exit.
-  journal.operations[operationId].handoff = { outcome: "refused", at: REQUESTED };
-  writeFileSync(path, JSON.stringify(journal));
+const journalFile = (f: Fixture) => join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
 
-  const evidence = reader(() => []);
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
+  const f = fixture(t, { accepted: false });
+  const initialRead = reader(() => []);
+  const first = await ok(f.service({ readLedgerLines: initialRead.read }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  f.release("refused");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(readFileSync(journalFile(f), "utf8")).operations[operationId].handoff,
+    { outcome: "refused", at: REQUESTED, beforeLaunch: true });
+
+  f.row(at(1_000), { step: "plan.start", brief: "an unrelated plan" });
+  const evidence = reader(() => { throw new Error("a confirmed refusal must skip the ledger"); });
   const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
   assert.equal(evidence.reads.length, 0);
   assert.equal(f.calls.length, 1);
 });
 
-test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 5_000 }, async (t) => {
+test("W1-T13875: a legacy refusal still recovers a proposal opened before a nonzero exit", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service({ readLedgerLines: reader(() => []).read }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const path = journalFile(f);
+  const journal = JSON.parse(readFileSync(path, "utf8"));
+  journal.operations[operationId].handoff = { outcome: "refused", at: REQUESTED };
+  writeFileSync(path, JSON.stringify(journal));
+  nativeRun(f, operationId, { pr: PR_URL, exit: true, exitCode: 1 });
+
+  const again = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state, again.observation.proposal],
+    [true, operationId, "proposed", PR_URL]);
+  assert.equal(f.calls.length, 1);
+});
+
+test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 15_000 }, async (t) => {
   const f = fixture(t);
   mkdirSync(join(f.root, "bin"));
   writeFileSync(join(f.root, "bin", "rmd"), `#!${process.execPath}\n` + String.raw`
@@ -697,16 +719,6 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "after-ledger-timeout" }).release();
 
   const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
-  const list = realLedgerFs.readdirSync;
-  const listing = t.mock.method(realLedgerFs, "readdirSync", (directory: string) => {
-    block();
-    return list(directory);
-  });
-  const delayedDefault = await ok(f.service({ gateway: false, ledgerReadBoundMs: 10 }).execute(actor, f.command()));
-  assert.equal(listing.mock.callCount(), 1, "the production reader performed its synchronous listing");
-  assert.equal(delayedDefault.observation.state, "unknown", "late directory work cannot report a stale target");
-  listing.mock.restore();
-
   const delayedProposal = reader(() => { block(); return proposalLines(f, first.observation.operationId); });
   const late = await ok(f.service({ readLedgerLines: delayedProposal.read, ledgerReadBoundMs: 10 }).execute(actor, f.command()));
   assert.equal(delayedProposal.reads.length, 1);
@@ -724,9 +736,93 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   assert.equal(ready.reads.length, 1, "late evidence was discarded and a new read could succeed");
 });
 
+async function duringLedgerListing<T>(f: Fixture, beforeReturn: string, work: () => Promise<T>): Promise<T> {
+  const preload = join(f.root, "ledger-listing-hook.mjs");
+  // Intercept the default reader's actual listing inside the child, after readdir captured the names.
+  writeFileSync(preload, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const readdir = fs.readdirSync;
+    let intercepted = false;
+    fs.readdirSync = (directory, ...args) => {
+      const names = readdir(directory, ...args);
+      if (!intercepted && directory === ${JSON.stringify(dirname(f.ledgerPath))}) {
+        intercepted = true;
+        ${beforeReturn}
+      }
+      return names;
+    };
+    syncBuiltinESMExports();
+    export function restore() {
+      fs.readdirSync = readdir;
+      syncBuiltinESMExports();
+    }
+  `);
+  const preloadUrl = pathToFileURL(preload).href;
+  const { restore } = await import(preloadUrl);
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = [previous, `--import=${preloadUrl}`].filter(Boolean).join(" ");
+  try { return await work(); }
+  finally {
+    restore();
+    if (previous === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previous;
+  }
+}
+
+test("W1-T13875: invariant:bounded-read releases the journal while the default reader's listing stalls", { timeout: 12_000 }, async (t) => {
+  const f = fixture(t);
+  const initial = await ok(f.service({ readLedgerLines: reader(() => []).read }).execute(actor, f.command()));
+  nativeRun(f, initial.observation.operationId, { pr: PR_URL, exit: true });
+  f.target.inspection.head = MOVED;
+  const listing = join(f.root, "listing-started");
+  const boundMs = 4_000;
+  const start = performance.now();
+  const delayed = await duringLedgerListing(f, `
+    fs.writeFileSync(${JSON.stringify(listing)}, "listing entered");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8_000);
+  `, () => ok(f.service({ gateway: false, ledgerReadBoundMs: boundMs }).execute(actor, f.command())));
+  const key = createHash("sha256").update(actor).digest("hex");
+  acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "while-listing-stalled" }).release();
+  const elapsed = performance.now() - start;
+  assert.equal(readFileSync(listing, "utf8"), "listing entered", "the deadline test reached the real listing");
+  assert.ok(elapsed < boundMs + 1_000, `released the lock after ${elapsed} ms while the listing was stalled`);
+  assert.equal(delayed.observation.state, "unknown");
+  assert.equal(delayed.observation.proposal, undefined);
+  assert.equal((await ok(f.service({ gateway: false }).execute(actor, f.command()))).observation.proposal, PR_URL,
+    "timing out leaves neither a proposal nor a terminal exit cached");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept after a rotation interrupts the first snapshot", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service({ readLedgerLines: reader(() => []).read }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  nativeRun(f, operationId, { pr: PR_URL });
+  const archive = join(dirname(f.ledgerPath), "ledger.2026-10-26T01-00-04-000Z.ndjson");
+  const exit = JSON.stringify({ ts: new Date(at(5_000)).toISOString(), task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 });
+  const service = f.service({ gateway: false });
+  const interrupted = await duringLedgerListing(f, `
+    fs.renameSync(${JSON.stringify(f.ledgerPath)}, ${JSON.stringify(archive)});
+    fs.writeFileSync(${JSON.stringify(f.ledgerPath)}, ${JSON.stringify(exit + "\n")});
+  `, () => ok(service.execute(actor, f.command())));
+
+  assert.ok(existsSync(archive), "the proposal moved into an archive that was absent in the first listing");
+  assert.equal(interrupted.observation.state, "unknown", "the exit alone is not a complete snapshot");
+  assert.equal(interrupted.observation.proposal, undefined);
+  assert.equal(JSON.parse(readFileSync(journalFile(f), "utf8")).operations[operationId].finalEvidence, undefined);
+  assert.equal(evidenceIds(f).filter((id) => id.endsWith(":refused")).length, 0);
+
+  const recovered = await ok(service.execute(actor, f.command()));
+  assert.deepEqual([recovered.observation.state, recovered.observation.proposal], ["proposed", PR_URL]);
+  const evidence = reader(() => []);
+  const restarted = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([restarted.observation.state, restarted.observation.proposal], ["proposed", PR_URL]);
+  assert.equal(evidence.reads.length, 0, "the recovered terminal evidence survives restart without another read");
+});
+
 test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
   const f = fixture(t);
-  const first = await ok(f.service().execute(actor, f.command()));
+  const first = await ok(f.service({ readLedgerLines: reader(() => []).read }).execute(actor, f.command()));
   const operationId = first.observation.operationId;
   let reads = 0;
   const evidence = reader(() => ++reads === 2 ? proposalLines(f, operationId) : []);

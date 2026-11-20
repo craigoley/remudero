@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
-  renameSync, unlinkSync, writeFileSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { readLedgerUnionRawLinesAsync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync, realLedgerFs } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -21,6 +21,7 @@ import type { ProductRepositoryProvider } from "./product-repository.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
 import { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } from "./review.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
@@ -230,7 +231,7 @@ export interface ProductPlanOperationOptions {
   isAlive?: (pid: number) => boolean;
   /** W1-T13875: overrides PRODUCT_PLAN_LEDGER_READ_BOUND_MS; a test seam for the bounded evidence read. */
   ledgerReadBoundMs?: number;
-  /** W1-T13875: the evidence reader; absent, readLedgerUnionRawLinesAsync over the ledger's state dir. */
+  /** W1-T13875: the evidence reader; absent, the ledger union is read in a child process. */
   readLedgerLines?: (stateDir: string, opts: { sinceTs: string; refuseIncomplete: true; keep: (line: string) => boolean }) =>
     Promise<{ ok: boolean; rawLines: readonly string[] }>;
   sync?: (fd: number) => void;
@@ -242,14 +243,15 @@ const finalEvidenceSchema = z.object({
   exited: z.boolean(), failed: z.boolean(), opened: z.string().optional(),
 }).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined);
 type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
-type LedgerRead = LedgerEvidence | "timed-out";
+type LedgerRead = LedgerEvidence | "unreadable";
+const noLedgerEvidence = { exited: false, failed: false };
 const recordSchema = z.object({
   operationId: hex64, productId: productIdSchema, revision, objectiveRevision: revision, briefDigest: hex64,
   repository: z.object({ id: revision, owner: z.string().min(1).max(64), name: z.string().min(1).max(128) }).strict(),
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  // Accept the former beforeLaunch marker when reopening an existing journal.
+  // Without beforeLaunch, a legacy refusal may also record a nonzero child exit.
   handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
   finalEvidence: finalEvidenceSchema.optional(),
 }).strict();
@@ -302,6 +304,71 @@ const processAlive = (pid: number) => {
     return errno(error, "EPERM");
   }
 };
+
+const keepLedgerEvidence = (taskId: string) => (line: string) =>
+  line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
+
+// The source URL also resolves from a bundled serve. Only the compact observation crosses back to serve.
+const READ_LEDGER_EVIDENCE = `
+  import { readFileSync } from "node:fs";
+  const { readProductPlanLedgerEvidence } = await import(process.argv[1]);
+  const { stateDir, record } = JSON.parse(readFileSync(0, "utf8"));
+  process.stdout.write(JSON.stringify(await readProductPlanLedgerEvidence(stateDir, record)));
+`;
+const ledgerChildArgs = ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", READ_LEDGER_EVIDENCE, import.meta.url];
+
+async function readLedgerEvidenceInChild(stateDir: string, record: Record_, bound: number): Promise<LedgerRead> {
+  const { stdout } = await execFileRouted(process.execPath, ledgerChildArgs,
+    { encoding: "utf8", input: JSON.stringify({ stateDir, record }), timeout: bound, killSignal: "SIGKILL" });
+  return JSON.parse(stdout) as LedgerRead;
+}
+
+/** Child entry. A rotation can publish another archive and replace live between the listing and the read. */
+export async function readProductPlanLedgerEvidence(stateDir: string, record: Record_): Promise<LedgerRead> {
+  const taskId = productPlanLedgerTaskId(record.operationId);
+  const live = ledgerLivePath(stateDir);
+  const before = statSync(live, { bigint: true, throwIfNoEntry: false });
+  const read = await readLedgerUnionRawLinesAsync(stateDir, {
+    sinceTs: record.requestedAt, refuseIncomplete: true, keep: keepLedgerEvidence(taskId),
+  });
+  if (!read.ok || read.liveFileRead !== (before !== undefined)) return "unreadable";
+  const after = statSync(live, { bigint: true, throwIfNoEntry: false });
+  const archives = ledgerRotationEntries(realLedgerFs.readdirSync(stateDir), stateDir);
+  if (before?.dev !== after?.dev || before?.ino !== after?.ino ||
+    archives.length !== read.archiveFiles.length || archives.some((archive, i) => archive.path !== read.archiveFiles[i])) return "unreadable";
+  return correlateLedger(record, taskId, read.rawLines);
+}
+
+/**
+ * Match the gateway's operation id, then the native plan's frozen brief and mode. The launcher PID is only a liveness
+ * hint. Ambiguous runs or pull requests outside the target never count as this proposal.
+ */
+function correlateLedger(record: Record_, taskId: string, rawLines: readonly string[]): LedgerEvidence {
+  const parsed = rawLines.flatMap((line): Array<Record<string, unknown>> => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
+  });
+  const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+  const rows = parsed.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
+  const mine = rows.filter((row) => row.task_id === taskId);
+  const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
+  const pid = started?.pid as number | undefined;
+  const exited = mine.some((row) => row.step === "ratify.cli_exited");
+  const failed = mine.some((row) => row.step === "ratify.handoff_failed");
+  const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
+    row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
+    typeof row.brief === "string" && digest(row.brief) === record.command.briefDigest && at(row) >= Date.parse(record.requestedAt));
+  const runs = new Map(candidates.map((row) => [row.run_id, row]));
+  // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
+  const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
+    (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
+      typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
+  if (conflictingStart) return { exited: false, failed: true };
+  const run = runs.size === 1 ? [...runs.values()][0] : undefined;
+  const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
+  const url = pull?.pr_url as string | undefined;
+  const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
+  return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
+}
 
 /**
  * Turns a saved, verified product brief into ONE native `rmd plan` run against the managed target checkout, through the
@@ -495,7 +562,8 @@ export class ProductPlanOperationService {
         const stored = journal.operations[record.operationId];
         if (!stored) return;
         // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
-        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso() };
+        const handoff = { outcome: outcome === "refused" && accepted === true ? "exited" as const : outcome, at: this.clock.iso(),
+          ...(outcome === "refused" && accepted === false ? { beforeLaunch: true as const } : {}) };
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
@@ -516,8 +584,8 @@ export class ProductPlanOperationService {
   /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
   private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerRead): ProductPlanObservation {
     let state: ProductPlanState = "unknown";
-    const proposal = seen === "timed-out" ? undefined : seen.opened;
-    if (seen !== "timed-out") {
+    const proposal = seen === "unreadable" ? undefined : seen.opened;
+    if (seen !== "unreadable") {
       if (proposal !== undefined) state = "proposed";
       else if (seen.exited) state = "refused";
       else if (seen.failed) state = "unknown";
@@ -537,7 +605,7 @@ export class ProductPlanOperationService {
   private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
     if (record.finalEvidence) return record.finalEvidence;
     const seen = await this.ledger(record);
-    if (seen !== "timed-out" && (seen.opened !== undefined || seen.exited || seen.failed)) {
+    if (seen !== "unreadable" && (seen.opened !== undefined || seen.exited || seen.failed)) {
       const { opened, exited, failed } = seen;
       journal.operations[record.operationId] = { ...record, finalEvidence: { opened, exited, failed } };
       this.commit(paths, journal);
@@ -545,63 +613,31 @@ export class ProductPlanOperationService {
     return seen;
   }
 
-  /**
-   * What the core ledger shows for THIS operation: the gateway's `ratify.cli_started` row (bound by the operation id it
-   * carries), the native `plan.start` whose complete brief and mode match the frozen command, and that run's own `pr.opened`.
-   * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
-   * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
-   */
   private async ledger(record: Record_): Promise<LedgerRead> {
-    const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && !this.inFlight(record.operationId))) return none;
+    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.inFlight(record.operationId))) {
+      return noLedgerEvidence;
+    }
     const taskId = productPlanLedgerTaskId(record.operationId);
+    const stateDir = resolve(dirname(ledgerPath));
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const read = await Promise.race([
-        new Promise<"timed-out">((resolve) => { timer = setTimeout(() => resolve("timed-out"), bound); }),
-        (this.options.readLedgerLines ?? readLedgerUnionRawLinesAsync)(dirname(ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
-          keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") }),
+      const seen = await Promise.race([
+        new Promise<"unreadable">((resolve) => { timer = setTimeout(() => resolve("unreadable"), bound); }),
+        this.options.readLedgerLines === undefined
+          ? readLedgerEvidenceInChild(stateDir, record, bound)
+          : this.options.readLedgerLines(stateDir, { sinceTs: record.requestedAt, refuseIncomplete: true, keep: keepLedgerEvidence(taskId) })
+            .then((read) => read.ok && performance.now() < deadline ? correlateLedger(record, taskId, read.rawLines) : "unreadable" as const),
       ]);
-      // The directory listing can delay the timer itself. Check elapsed time before using the result.
-      if (read === "timed-out" || performance.now() >= deadline) return "timed-out";
-      const seen = read.ok ? this.correlateLedger(record, taskId, read.rawLines) : none;
-      return performance.now() >= deadline ? "timed-out" : seen;
+      return performance.now() >= deadline ? "unreadable" : seen;
     } catch (error) {
-      if (performance.now() >= deadline) return "timed-out";
+      if (performance.now() >= deadline) return "unreadable";
       throw error;
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  private correlateLedger(record: Record_, taskId: string, rawLines: readonly string[]): LedgerEvidence {
-    const parsed = rawLines.flatMap((line): Array<Record<string, unknown>> => {
-      try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
-    });
-    const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
-    const rows = parsed.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
-    const mine = rows.filter((row) => row.task_id === taskId);
-    const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
-    const pid = started?.pid as number | undefined;
-    const exited = mine.some((row) => row.step === "ratify.cli_exited");
-    const failed = mine.some((row) => row.step === "ratify.handoff_failed");
-    const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
-      row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
-      typeof row.brief === "string" && digest(row.brief) === record.command.briefDigest && at(row) >= Date.parse(record.requestedAt));
-    const runs = new Map(candidates.map((row) => [row.run_id, row]));
-    // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
-    const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
-      (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
-        typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
-    if (conflictingStart) return { exited: false, failed: true };
-    const run = runs.size === 1 ? [...runs.values()][0] : undefined;
-    const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
-    const url = pull?.pr_url as string | undefined;
-    const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
-    return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
   }
 
   /** Terminal fates become the product's own supported stage evidence, once each. */
