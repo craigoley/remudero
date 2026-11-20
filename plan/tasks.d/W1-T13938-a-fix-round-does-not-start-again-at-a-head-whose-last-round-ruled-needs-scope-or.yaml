@@ -1,0 +1,61 @@
+- id: W1-T13938
+  title: A fix round does not start again at a head whose last round ruled NEEDS_SCOPE or FLAKE until the input that ruling waits for has changed (held follow-up)
+  repo: remudero
+  depends_on:
+    - W1-T13865
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  origin: operator-session#spend-per-merged-pr-2026-11-19
+  plan_refs:
+    - W1-T7096
+    - W1-T9502
+    - W1-T6465
+  files:
+    - src/lib/fix-progress-judge.ts
+    - src/lib/sweep.ts
+    - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
+  status: blocked
+  retirement: withdrawn  # duplicate held follow-up; W1-T13919 holds the same question
+  superseded_by: W1-T13919
+  attempts: 0
+  acceptance:
+    - claim: invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds
+      kind: guard
+      proof: "grep: W1-T13865 criterion 3: in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts"
+  rationale: |
+    FOLLOW-UP of W1-T13865, filed by the sweep (W1-T12709) from https://github.com/craigoley/remudero/pull/19767 at 004f62a8fabcc146dc799a5b0dea0b35730e6b5b: 1 of the task's 5 criteria need operator input; they move to a held follow-up task and the pull request merges on the rest.
+    FINDINGS of the pull request:
+    - invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds: proof executed and PASSED on the PR head (grep: W1-T13865 criterion 3: in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): The focused tests pass, but the production completion reader skips branch-required commit statuses. A fresh red remudero-review status leaves FLAKE held. An in-memory check also confirmed that an older merged amendment receipt without merged_at leaves NEEDS_SCOPE held because terminal reconciliation skips the already-recorded merge.
+    - The sweep stands the fix rung down with the hold as its stand_down_reason and spawns no fix worker; the existing NEEDS_DESIGN hold is unchanged: proof executed and PASSED on the PR head (grep: W1-T13865 criterion 4: in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): The focused tests pass for an unchanged sweep snapshot. An in-memory check confirmed that a conflicted sweep child can adopt a live head with an unchanged NEEDS_SCOPE ruling and invoke dispatchFix there. The hold was evaluated only for the original head, so the adopted head can start another round.
+    WHY: fix rounds that end without a change cost $49.50 of $95.09 fix spend (52%), 2026-11-05 to 2026-11-19.
+    OBSERVED (ledger union, fix.done rows): NEEDS_SCOPE 83 rows $10.37, NEEDS_DESIGN 82 rows $6.80, NOT_LANDED 74
+    rows $24.48, FLAKE 55 rows $6.82, BASE_RED 7 rows $0.53, unstated 5 rows $0.50. 53 rounds ($10.56) started at
+    a task and head whose earlier round had already ruled NEEDS_SCOPE ($7.24 after) or FLAKE ($3.33 after); none
+    followed NEEDS_DESIGN. fix.done records the head at the round's end, so this count is INFERRED to be close to,
+    not equal to, the rounds started at an unchanged input.
+    OBSERVED in code: the sweep (sweep.ts) holds the fix rung at a head whose round handed off NEEDS_DESIGN
+    (the fix.needs_design row). resolveFixProgress (fix-progress-judge.ts, W1-T9502) reuses only continue and
+    change-approach verdicts at an unchanged input. Nothing holds a head after a NEEDS_SCOPE or FLAKE round, so the
+    next sweep can pay for another round at the same input.
+  design: |
+    INVARIANT no-round-at-an-unchanged-ruling: a fix round never starts at a head and input whose last round's
+    ruling waits for a change that has not happened; every other path to a round is unchanged.
+    1. fix-progress-judge.ts: export priorRoundHold(ledger, { taskId, headSha, contractRevision, checkCompletions })
+       that reads the newest fix.done of the task at the head and returns { hold: "NEEDS_SCOPE" | "FLAKE", since }
+       or undefined. NEEDS_SCOPE releases on a merged scope amendment for the task (fix.scope_amendment or
+       pr.terminal merged for it) or a changed contract revision. FLAKE releases when any required check completes
+       on the head after the round's ts.
+    2. sweep.ts: next to the NEEDS_DESIGN hold, call priorRoundHold; on a hold, set standDownReason and break,
+       the same way the NEEDS_DESIGN hold does. No count or cap: the hold ends when its input changes.
+  falsifier: |
+    Remove the priorRoundHold call from the sweep: criterion 4's fixture spawns a second fix worker at the same head
+    after a FLAKE round and the test fails.
+  note: |
+    WITHDRAWN 2026-11-20 (operator session): W1-T13938 is a duplicate of W1-T13919. Both are held
+    follow-ups of W1-T13865 for the same criteria of https://github.com/craigoley/remudero/pull/19767, and
+    both ask the same question. The parked-pr remedy filed this copy again because the filing of W1-T13919
+    was recorded as refused, so no held id was on record. W1-T13944 fixes that cause. W1-T13919 keeps the
+    one question; this record keeps none.

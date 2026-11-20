@@ -14,6 +14,9 @@
     - src/lib/worker-provider.ts
     - src/lib/benchmark-run.ts
     - src/lib/worker.ts
+    - src/lib/review-findings.ts
+    - src/cli/commands/review.ts
+    - src/run-task.ts
     - test/every-provider-names-its-served-model-or-why-not.test.ts
   status: queued
   attempts: 0
@@ -33,6 +36,10 @@
     WorkerAbandonedError without it. That call is covered by the invariant too, so worker.ts joins files:. The
     change there throws the abort reason carrying the rung's served model, and spawnFailureDetail reads it
     through the error's cause.
+    AMENDED 2026-11-20 after #19801's seventh review. A Codex or GPT review that reports no served model
+    writes review.finding rows with served_model null and no reason. Those rows are written by
+    recordReviewFindings in src/lib/review-findings.ts, from provenance built in src/cli/commands/review.ts,
+    so both join files:. The change carries the reviewer's served_model_reason into each review.finding row.
   design: |
     Read the served model from the Codex and GPT response (the stream's model field or the final event) and
     write it as served_model on the call's ledger rows, the same way the Claude path does. When the response

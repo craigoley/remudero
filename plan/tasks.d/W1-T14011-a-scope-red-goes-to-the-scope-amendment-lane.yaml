@@ -1,0 +1,51 @@
+- id: W1-T14011
+  title: An acceptance-author-gate scope red goes to the scope-amendment rung instead of a body repair that cannot cure it
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # routes one gate refusal from the metadata lane to the existing scope-amendment rung
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T13952
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-scope-red-goes-to-the-scope-amendment-lane.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "metadataOnlyRed returns undefined for a PR whose only red is acceptance-author-gate refusing canonical-task-scope-exceeded, so the sweep does not send it to the title and body repair"
+      proof: "grep: W1-T14011 criterion 1: in test/sweep/a-scope-red-goes-to-the-scope-amendment-lane.test.ts"
+    - claim: "That PR is offered to the scope-amendment rung with exactly the paths the gate log names, and no BLOCKED clarification issue is opened for it"
+      proof: "grep: W1-T14011 criterion 2: in test/sweep/a-scope-red-goes-to-the-scope-amendment-lane.test.ts"
+    - claim: "invariant:body-reds-stay-metadata — an acceptance-author-gate red that a body edit can cure still goes to the metadata repair as today"
+      kind: guard
+      proof: "grep: W1-T14011 criterion 3: in test/sweep/a-scope-red-goes-to-the-scope-amendment-lane.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 on GitHub: #19651 (W1-T12169), #19786 (W1-T13864), #19776 (W1-T13878) and #19695 (W1-T12041)
+    were each red only on acceptance-author-gate "REFUSED (canonical-task-scope-exceeded)". Each got a BLOCKED
+    clarification issue (#19864, #19863, #19781, #19747) reading "metadata-only required checks acceptance-author-gate
+    need title/body repair: the body red has no deterministic acceptance repair; scope or proof amendment is required".
+    OBSERVED at origin/main ca83732bd:
+    - src/lib/sweep.ts `metadataOnlyRed` calls a red metadata-only when every red check is in METADATA_RED_CHECKS, and
+      acceptance-author-gate is one. Only `credited-test-path` (FILE_DEFECT_AUTHOR_GATE_RED) is carved out.
+    - So the PR goes to the metadata repair. src/run-task.ts returns noCure with "the body red has no deterministic
+      acceptance repair" when acceptanceGateBodyRepair finds no repair, and the sweep escalates.
+    - The gate log already names the out-of-scope paths. A scope amendment is what clears it, and the operator had to
+      file each one by hand.
+  design: |
+    INVARIANT body-reds-stay-metadata: only the canonical-task-scope-exceeded refusal changes route.
+    1. Beside FILE_DEFECT_AUTHOR_GATE_RED, match the acceptance-author-gate refusal `canonical-task-scope-exceeded` in
+       the failure's log tail, and return undefined from metadataOnlyRed for it.
+    2. Route that PR to the existing scope-amendment request (requestScopeAmendment in src/lib/proof-amendment.ts,
+       reached from the sweep's fix lane) with the quoted paths from the gate line. Read how the fix lane builds a
+       NEEDS_SCOPE request today and reuse it; do not add a second amendment writer.
+    3. Every refusal of that rung (plan path, instrument path, operator origin) keeps its own escalation.
+  falsifier: |
+    Remove the new match and criterion 1's fixture is sent to the metadata repair, and criterion 2 sees a BLOCKED issue.
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host.
