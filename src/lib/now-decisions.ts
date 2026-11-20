@@ -6,6 +6,7 @@
  * |---|---|---|
  * | `grill` | core's feedback entries parked `grilling` | `POST /v1/feedback {replyTo, text}` |
  * | `task_question` | core's `plan/questions.ndjson`: a QUESTION with no later answer for its task, on an open task | `POST /v1/questions/answer {taskId, answer}` |
+ * | `task_question` | a queued task's `needs_input` question with no answer (W1-T13940) | `POST /v1/questions/answer {taskId, answer}` |
  * | `manual_approval` | a board task whose open escalation is class MANUAL | `POST /v1/manual/approve {taskId, issueUrl}` |
  * | `escalation` | any other open escalation on the board | `POST /v1/escalation/mark-handled {taskId, issueUrl, class, disposition}` |
  *
@@ -23,6 +24,7 @@ import { ESCALATION_OPTION_ROUTES } from "./escalate.js";
 import { ESCALATION_DISPOSITIONS } from "./escalation-precision.js";
 import type { FeedbackEntry } from "./feedback.js";
 import { feedbackHasAnswer, feedbackQuestionContext } from "./human-gate.js";
+import type { Task } from "./plan.js";
 import type { WriteTier } from "./service.js";
 
 /** BACKSTOP: decisions carried per instance, bounding the body; the rest are counted in `decisionsMore`. */
@@ -117,6 +119,19 @@ export function taskQuestionDecisions(
     });
   }
   return out;
+}
+
+/** W1-T13940: each queued task held by a needs_input question that `answered` says has no answer. */
+export function heldTaskDecisions(instance: string, tasks: readonly Task[], answered: (taskId: string) => boolean): NowDecision[] {
+  return tasks.flatMap((task): NowDecision[] => {
+    if (task.needs_input === undefined || task.status !== "queued" || answered(task.id)) return [];
+    const { question, source_pr, asked_at } = task.needs_input;
+    return [{
+      id: `question:${task.id}:${asked_at}`, kind: "task_question", instance, taskId: task.id, title: firstLine(task.title, TITLE_CHARS) || task.id,
+      prompt: bounded(source_pr ? `${question} (source pull request: ${source_pr})` : question), ...(asked_at ? { askedAt: asked_at } : {}),
+      answer: { method: "POST", path: "/v1/questions/answer", tier: ESCALATION_OPTION_ROUTES["/v1/questions/answer"], fields: { taskId: task.id }, input: "text" },
+    }];
+  });
 }
 
 /** Each task's newest `escalation.issue_opened` row: its class and time, by task. */

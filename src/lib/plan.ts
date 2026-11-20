@@ -291,6 +291,20 @@ export function newestTaskAnswer(lines: Iterable<unknown>, taskId: string): stri
   return newest?.answer;
 }
 
+/** W1-T13940: the newest nonblank panel.question_answered ledger row for `taskId`, or undefined. */
+export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string): LedgerTaskAnswer | undefined {
+  let newest: LedgerTaskAnswer | undefined;
+  for (const value of rows) {
+    const row = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    if (row.step !== "panel.question_answered" || row.task_id !== taskId || typeof row.answer !== "string" || row.answer.trim() === "") continue;
+    const ts = typeof row.ts === "string" ? row.ts : "";
+    if (newest === undefined || ts >= newest.ts) newest = { ...row, ts, answer: row.answer };
+  }
+  return newest;
+}
+
+type LedgerTaskAnswer = Readonly<Record<string, unknown>> & { readonly ts: string; readonly answer: string };
+
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
 function needsInputRefusal(task: Task, inputAnswer?: TaskInputAnswer): string | undefined {
   if (task.needs_input === undefined) return undefined;

@@ -62,7 +62,6 @@ import {
   type FeedbackAgeRoot,
   type HumanGateCountSummary,
   type HumanGateObservation,
-  projectHeldTaskQuestionGates,
   type HumanGateProjection,
   type HumanGateSource,
   type OperatorItemProjection,
@@ -78,6 +77,7 @@ import {
   questionStorePath,
   readQuestionStore,
   taskQuestionDecisions,
+  heldTaskDecisions,
   type NowDecision,
   type QuestionStoreLine,
 } from "./now-decisions.js";
@@ -566,7 +566,7 @@ const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
 /** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
 function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
-  const query = db.prepare("SELECT max(ts) AS ts FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
+  const query = db.prepare("SELECT max(ts) AS ts FROM fact WHERE task_id = ? AND step = 'panel.question_answered' AND trim(coalesce(json_extract(body, '$.answer'), '')) <> ''");
   return (taskId) => {
     const ts = query.get(taskId)?.ts;
     return typeof ts === "string" ? ts : undefined;
@@ -1144,7 +1144,6 @@ export function createNowView(opts: NowViewOptions): {
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
-    let heldTaskGates: HumanGateObservation[] = [];
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
@@ -1178,9 +1177,11 @@ export function createNowView(opts: NowViewOptions): {
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
       else {
-        all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
-        // W1-T12715: a task held for a needs_input answer asks through the same source.
-        heldTaskGates = projectHeldTaskQuestionGates(plan?.tasks ?? [], (taskId) => newestTaskAnswer(store.lines, taskId), instance.repo);
+        const factAnswer = answeredByFact(db);
+        const questions = taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], factAnswer, snapshot.tasks);
+        const asking = new Set(questions.map((decision) => decision.taskId));
+        all.push(...questions, ...heldTaskDecisions(instance.name, plan?.tasks ?? [], (taskId) =>
+          asking.has(taskId) || newestTaskAnswer(store.lines, taskId) !== undefined || factAnswer(taskId) !== undefined));
       }
     }
     lap("feedback");
@@ -1196,7 +1197,7 @@ export function createNowView(opts: NowViewOptions): {
       // The legacy question reader skips malformed lines without attesting complete coverage.
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
-        gates: [...all.filter((decision) => decision.kind === "task_question").map(decisionGate), ...heldTaskGates] });
+        gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({

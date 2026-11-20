@@ -542,6 +542,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
+  "panel.question_answered", // W1-T13940: taskInputAnswerWithLedger releases a needs_input task from this row.
   "queue_judge.scorecard", // W1-T12551: the machine dispatch share reads the last completed queue-judge pass.
   "queue_judge.unavailable", // W1-T12551: and the unavailable passes after it.
   "daemon.in_flight_review_abandoned", // W1-T12229: restart-cycle recovery needs the pre-cancel review identity and age after rotation.

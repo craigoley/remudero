@@ -1,5 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
-import { newestTaskAnswer, type Task } from "./plan.js";
+import { newestLedgerTaskAnswer, newestTaskAnswer, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
@@ -4993,6 +4993,10 @@ export interface QuestionAnswerEntry {
    * `bearerTokenId`). */
   origin: string;
   contribution?: unknown;
+  answer_id?: string;
+  author_login?: string;
+  authority?: string;
+  source?: "ledger";
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -5012,11 +5016,15 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
 /** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
  * answers nothing, so a task with needs_input stays held. */
 export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  return newestTaskAnswer(questionStoreLines(repoRoot), taskId);
+}
+
+function questionStoreLines(repoRoot: string): unknown[] {
   let text: string;
   try {
     text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
   } catch {
-    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+    return []; // deliberate: an absent or unreadable store holds the task, the safe side.
   }
   const lines: unknown[] = [];
   for (const raw of text.split("\n")) {
@@ -5026,7 +5034,66 @@ export function taskInputAnswer(repoRoot: string, taskId: string): string | unde
       continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
     }
   }
-  return newestTaskAnswer(lines, taskId);
+  return lines;
+}
+
+/** W1-T13940: the answer reader every needs_input check uses. It also honours the shared ledger's
+ * panel.question_answered rows, which serve writes from any folder, and copies each honoured row into
+ * this store once, so ledger rotation cannot take the answer back. The ledger is read from where the
+ * last read stopped. */
+export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  let tail: { dev: number; ino: number; head: string; offset: number; rows: Map<string, unknown[]> } | undefined;
+  const ledgerRows = (taskId: string): readonly unknown[] => {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(ledgerPath, "r");
+      const stat = fs.fstatSync(fd);
+      const headBytes = Buffer.alloc(Math.min(256, stat.size));
+      fs.readSync(fd, headBytes, 0, headBytes.length, 0);
+      const head = headBytes.toString("latin1");
+      if (!tail || tail.dev !== stat.dev || tail.ino !== stat.ino || stat.size < tail.offset || !head.startsWith(tail.head)) {
+        tail = { dev: stat.dev, ino: stat.ino, head, offset: 0, rows: new Map() };
+      }
+      const fresh = Buffer.alloc(stat.size - tail.offset);
+      fs.readSync(fd, fresh, 0, fresh.length, tail.offset);
+      const end = fresh.lastIndexOf(10);
+      for (const raw of end < 0 ? [] : fresh.subarray(0, end).toString("utf8").split("\n")) {
+        if (!raw.includes('"panel.question_answered"')) continue;
+        try {
+          const row = JSON.parse(raw) as { task_id?: unknown };
+          if (typeof row.task_id === "string") tail.rows.set(row.task_id, [...(tail.rows.get(row.task_id) ?? []), row]);
+        } catch {
+          continue; // deliberate: a torn line is skipped, as every ledger reader does.
+        }
+      }
+      if (end >= 0) tail.offset += end + 1;
+      if (tail.head.length < 256) tail.head = head;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined; // deliberate: an unreadable ledger answers from the rows already read.
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    return tail?.rows.get(taskId) ?? [];
+  };
+  return (taskId) => {
+    const lines = questionStoreLines(repoRoot);
+    const row = newestLedgerTaskAnswer(ledgerRows(taskId), taskId);
+    if (row === undefined) return newestTaskAnswer(lines, taskId);
+    const origin = typeof row.origin === "string" ? row.origin : "ledger";
+    const answerId = typeof row.answer_id === "string" ? row.answer_id : undefined;
+    const copied = lines.some((value) => {
+      const line = typeof value === "object" && value !== null ? value as Partial<QuestionAnswerEntry> : {};
+      return line.task === taskId && typeof line.answer === "string" &&
+        ((answerId !== undefined && line.answer_id === answerId) || (line.origin === origin && line.answer === row.answer));
+    });
+    if (!copied) {
+      appendQuestionAnswer(repoRoot, { ts: row.ts, task: taskId, answer: row.answer, origin,
+        ...(answerId === undefined ? {} : { answer_id: answerId }),
+        ...(typeof row.author_login === "string" ? { author_login: row.author_login } : {}),
+        ...(typeof row.authority === "string" ? { authority: row.authority } : {}), source: "ledger" });
+    }
+    return newestTaskAnswer([...lines, { task: taskId, answer: row.answer, ts: row.ts }], taskId);
+  };
 }
 
 /** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */

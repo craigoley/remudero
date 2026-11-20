@@ -702,10 +702,12 @@ export function buildAnswerQuestionRoute(deps: PanelActionDeps): Route {
     tier: "low",
     handler: jsonAction(validateAnswerQuestion, (input, req, res) => {
       const origin = bearerTokenId(req);
-      const ts = new Date().toISOString();
-      const recordedToQuestionStore = appendQuestionAnswer(deps.root, { ts, task: input.taskId, answer: input.answer, origin });
+      const ts = (deps.clock ?? systemClock).iso();
+      const answerId = randomUUID();
+      const recordedToQuestionStore = appendQuestionAnswer(deps.root, { ts, task: input.taskId, answer: input.answer, origin, answer_id: answerId });
       ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
         answer: input.answer,
+        answer_id: answerId,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
       });
@@ -1065,11 +1067,17 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       const entry = recovered?.entry ?? captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
       const staged = recovered?.staged ?? queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
+      const answerId = randomUUID();
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),
         task: input.taskId,
         answer: input.text,
         origin,
+        answer_id: answerId,
+      });
+      // W1-T13940: the daemon reads this row; config.root's store is not its own.
+      ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
+        answer: input.text, answer_id: answerId, flows_to: "plan/questions.ndjson", recorded_to_question_store: recordedToQuestionStore,
       });
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
         thread_id: threadId,
