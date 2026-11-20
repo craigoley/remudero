@@ -5,7 +5,7 @@
 // fix samples had an RSS p90 of 835 MiB. The learner also read only the last 256 KiB of each store file, which in
 // state2.ndjson is mostly test-file rows (W1-T13842, docs/forensics/fix-peak-estimate-drivers.md).
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,7 +13,8 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import type { HostMemoryLedgerOptions } from "#src/lib/host-memory-ledger.js";
 import {
-  PEAK_TAIL_BYTES, classEstimate, classTypical, createTreePeakSampler, openLearnedReservation, readPeakSamples,
+  PEAK_COMPACT_BYTES, PEAK_TAIL_BYTES, classEstimate, classTypical, createTreePeakSampler, openLearnedReservation,
+  readPeakSamples, recordTestFilePeak,
   resetLearnedEstimateCacheForTests, type PeakStoreOptions,
 } from "#src/lib/host-memory-learning.js";
 import { createSweepFixAdmissionController, type OpenPrView } from "#src/lib/sweep.js";
@@ -134,17 +135,30 @@ test("W1-T13878 criterion 4: fix samples behind 256 KiB of test-file rows still 
   resetLearnedEstimateCacheForTests();
   try {
     let text = fixRows({ legacy: 0, concurrent: 12 });
-    const fileRow = row({ c: "test", p: 400, basis: "process-hwm", f: "test/some-file.test.ts" }, 0);
-    while (text.length < PEAK_TAIL_BYTES + 64 * 1024) text += fileRow;
+    text += row({ c: "fix", p: 6_000, basis: "legacy-hwm", why: "listing-incomplete" }, 0);
+    for (let i = 0; ; i++) {
+      const fileRow = row({ c: "test", p: 400, basis: "process-hwm", f: `test/file-${i}.test.ts` }, 0);
+      if (text.length + fileRow.length > PEAK_COMPACT_BYTES) break;
+      text += fileRow;
+    }
     mkdirSync(join(dir, "estimates"), { recursive: true });
-    writeFileSync(join(dir, "estimates", "state2.ndjson"), text);
-    const store: PeakStoreOptions = { location: () => ({ dir }), clock: fixedClock(NOW) };
-    assert.equal(readPeakSamples("fix", store).length, 12, "every retained fix sample is read");
+    const path = join(dir, "estimates", "state2.ndjson");
+    writeFileSync(path, text);
+    const store: PeakStoreOptions = { location: () => ({ dir }), instance: () => ({ name: "state2" }), clock: fixedClock(NOW) };
+    assert.ok(statSync(path).size > PEAK_TAIL_BYTES);
     const estimate = classEstimate("fix", store);
     assert.equal(estimate.samples, 12);
     assert.equal(estimate.basis, "concurrent-rss");
-    assert.ok(estimate.estimateMib < 1_000, `the estimate is learned, not the 2,048 prior: ${estimate.estimateMib}`);
-    assert.ok(readPeakSamples("test", store, true).length > 0, "test-file reads still see their rows");
+    assert.ok(estimate.estimateMib < 1_000);
+
+    const newestFile = `test/${"a".repeat(200)}.test.ts`;
+    assert.ok(statSync(path).size + Buffer.byteLength(row({ c: "test", p: 400, basis: "process-hwm", f: newestFile }, 0)) > PEAK_COMPACT_BYTES);
+    assert.equal(recordTestFilePeak(newestFile, 400, store), true);
+    resetLearnedEstimateCacheForTests();
+    assert.deepEqual(classEstimate("fix", store), estimate, "compaction retains every concurrent fix sample");
+    assert.equal(readPeakSamples("fix", store).find(s => s.measurementBasis === "legacy-hwm")?.unmeasuredReason, "listing-incomplete");
+    assert.ok(statSync(path).size <= PEAK_COMPACT_BYTES, "distinct test-file histories fit in the retained store");
+    assert.ok(readPeakSamples("test", store, true).some(s => s.testFile === newestFile), "the new test-file sample is retained");
   } finally {
     resetLearnedEstimateCacheForTests();
     rmSync(dir, { recursive: true, force: true });

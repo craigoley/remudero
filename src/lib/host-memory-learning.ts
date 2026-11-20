@@ -11,7 +11,8 @@
  *     largest sum seen is that tree's peak, stored with its age when last raised (W1-T9762: the class's time to peak).
  *     A tree never observed records nothing; it is never recorded as zero.
  * (2) STORE. One append-only NDJSON file per instance under `estimates/` in the shared ledger directory, so instances
- *     never write the same file. Reads are a bounded tail of each file. Compaction keeps the newest samples per class.
+ *     never write the same file. Fix reads the retained file and other readers take a bounded tail. Compaction keeps
+ *     the newest samples per class and uses the remaining byte budget for test-file histories.
  * (3) LEARN. The estimate is a decayed, weighted quantile of the class's peaks. The class default is a PRIOR, a
  *     pseudo-sample that never decays: with no samples the estimate IS the default (and says it is unmeasured); as fresh
  *     samples arrive they outweigh it; if samples stop arriving their weight decays and the prior regains its pull. The
@@ -298,6 +299,20 @@ const lineOf = (s: PeakSample): string =>
     ...(s.peakAgeMs !== undefined ? { ttp_ms: Math.round(s.peakAgeMs) } : {}),
     ...(s.unmeasuredReason ? { why: s.unmeasuredReason } : {}) })}\n`;
 
+function compactStore(text: string): string {
+  const rows = compactSamples(parseSamples(text), ESTIMATE_LEARNING.keepPerClass)
+    .map((sample) => ({ line: lineOf(sample), testFile: sample.testFile !== undefined }));
+  let bytesLeft = rows.reduce((budget, row) => row.testFile ? budget : budget - Buffer.byteLength(row.line), PEAK_COMPACT_BYTES);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (!row.testFile) continue;
+    const bytes = Buffer.byteLength(row.line);
+    if (bytes > bytesLeft) row.line = "";
+    else bytesLeft -= bytes;
+  }
+  return rows.map((row) => row.line).join("");
+}
+
 /** Record one measured tree peak for this instance. NEVER throws. */
 export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: PeakStoreOptions = {}, testFile?: string): boolean {
   try {
@@ -319,8 +334,8 @@ export function recordPeak(workerClass: WorkerClass, peakMib: number, opts: Peak
     cachedEstimates.delete(workerClass);
     const size = (opts.size ?? ((target: string) => statSync(target).size))(path);
     if (size > PEAK_COMPACT_BYTES) {
-      const kept = compactSamples(parseSamples((opts.readTail ?? readFileTail)(path, PEAK_COMPACT_BYTES)), ESTIMATE_LEARNING.keepPerClass);
-      (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content, { mode: 0o600 })))(path, kept.map(lineOf).join(""));
+      const text = (opts.readTail ?? readFileTail)(path, size);
+      (opts.rewrite ?? ((target: string, content: string) => void writeAtomic(target, content, { mode: 0o600 })))(path, compactStore(text));
     }
     return true;
   } catch (error) {
