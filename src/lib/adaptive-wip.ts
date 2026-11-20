@@ -54,6 +54,29 @@ export function adaptiveWipBound(inputs: AdaptiveWipInputs): number {
   return Math.min(Math.max(1, Math.floor(flowRoom * scale)), base * WIP_BOUND_BACKSTOP_MULTIPLE);
 }
 
+/** Each owned PR's latest `sweep.disposed` row, classed `parked`, or `ageing` once past its SLO; a PR with no row,
+ *  one that is moving, and one under its SLO yield nothing. */
+function* stuckOwnedClasses(
+  lines: ReadonlyArray<Record<string, unknown>>, ownedPrNumbers: readonly number[], nowMs: number,
+): Generator<"parked" | "ageing"> {
+  const owned = new Set(ownedPrNumbers);
+  const latest = new Map<number, Record<string, unknown>>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || !owned.has(line.pr_number)) continue;
+    latest.set(line.pr_number, line);
+  }
+  for (const row of latest.values()) {
+    const blocker = typeof row.blocker === "string" ? row.blocker : "";
+    const cls = Object.hasOwn(WIP_BLOCKER_CLASS, blocker) ? WIP_BLOCKER_CLASS[blocker as PrBlocker] : undefined;
+    if (cls === "parked") { yield cls; continue; }
+    if (cls !== "ageing") continue;
+    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    const ageAtRow = typeof row.blocker_age_ms === "number" ? row.blocker_age_ms : NaN;
+    if (!Number.isFinite(ts) || !Number.isFinite(ageAtRow)) continue;
+    if (ageAtRow + Math.max(0, nowMs - ts) >= BLOCKER_SLO_MS) yield cls;
+  }
+}
+
 /** How many of `ownedPrNumbers` are stuck, from each PR's latest `sweep.disposed` row. A PR with no
  *  disposition row counts as progressing, so an unread signal never frees a slot. */
 export function deriveStuckOwnedCount(
@@ -61,24 +84,39 @@ export function deriveStuckOwnedCount(
   ownedPrNumbers: readonly number[],
   nowMs: number,
 ): number {
-  const owned = new Set(ownedPrNumbers);
-  const latest = new Map<number, Record<string, unknown>>();
+  return [...stuckOwnedClasses(lines, ownedPrNumbers, nowMs)].length;
+}
+
+/** W1-T13990: the stuck owned PRs a fix lane can move, the `ageing` class past its SLO. A `parked` PR waits on a
+ *  person (an escalation, an operator hold, exhausted strikes), so the capacity focus frees cannot drain it. */
+export function deriveMovableStuckOwnedCount(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  ownedPrNumbers: readonly number[],
+  nowMs: number,
+): number {
+  return [...stuckOwnedClasses(lines, ownedPrNumbers, nowMs)].filter((cls) => cls === "ageing").length;
+}
+
+/** W1-T13990: the fix lane's admissions since a time. */
+export interface FixRoundAdmissions {
+  /** `fix.dispatch` rows: rounds the fix lane started. */
+  admitted: number;
+  /** `sweep.fix.dispatch_failed` rows: dispatches refused (memory, capacity, a checkout claim) or lost. */
+  refused: number;
+}
+/** Undefined when the fix lane's rows have not been read. */
+export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
+
+/** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
+export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
+  const admitted: number[] = [];
+  const refused: number[] = [];
   for (const line of lines) {
-    if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || !owned.has(line.pr_number)) continue;
-    latest.set(line.pr_number, line);
+    if (line.step !== "fix.dispatch" && line.step !== "sweep.fix.dispatch_failed") continue;
+    const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+    if (Number.isFinite(ts)) (line.step === "fix.dispatch" ? admitted : refused).push(ts);
   }
-  let stuck = 0;
-  for (const row of latest.values()) {
-    const blocker = typeof row.blocker === "string" ? row.blocker : "";
-    const cls = Object.hasOwn(WIP_BLOCKER_CLASS, blocker) ? WIP_BLOCKER_CLASS[blocker as PrBlocker] : undefined;
-    if (cls === "parked") { stuck++; continue; }
-    if (cls !== "ageing") continue;
-    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
-    const ageAtRow = typeof row.blocker_age_ms === "number" ? row.blocker_age_ms : NaN;
-    if (!Number.isFinite(ts) || !Number.isFinite(ageAtRow)) continue;
-    if (ageAtRow + Math.max(0, nowMs - ts) >= BLOCKER_SLO_MS) stuck++;
-  }
-  return stuck;
+  return (sinceMs) => ({ admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length });
 }
 
 /** MemAvailable / MemTotal from a /proc/meminfo-shaped file; throws when either line is absent. */
@@ -102,6 +140,8 @@ export interface AdaptiveQueueFlowInputs {
 
 export interface AdaptiveQueueFlow {
   stuckOwnedCount: number;
+  /** W1-T13990: the part of {@link stuckOwnedCount} a fix lane can move. Focus reads it; the WIP bound does not. */
+  movableStuckOwnedCount: number;
   headroomFraction: number | undefined;
   headroomUnread: boolean;
   /** Why the headroom read failed, when it did — ledgered, so an unscaled bound is never silent. */
@@ -122,8 +162,12 @@ export function assembleAdaptiveQueueFlow(inputs: AdaptiveQueueFlowInputs): Adap
   const stuckOwnedCount = inputs.ownedPrNumbers === undefined
     ? 0
     : deriveStuckOwnedCount(inputs.lines, inputs.ownedPrNumbers, inputs.nowMs);
+  const movableStuckOwnedCount = inputs.ownedPrNumbers === undefined
+    ? 0
+    : deriveMovableStuckOwnedCount(inputs.lines, inputs.ownedPrNumbers, inputs.nowMs);
   return {
     stuckOwnedCount,
+    movableStuckOwnedCount,
     headroomFraction,
     headroomUnread: headroomError !== undefined,
     ...(headroomError !== undefined ? { headroomError } : {}),

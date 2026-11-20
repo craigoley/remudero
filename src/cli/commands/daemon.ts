@@ -1679,8 +1679,10 @@ export async function daemonCommand(
   };
   const openPrCount = () => openPrOwnership().owned;
   // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
-  const queueGate = focusGateFor(queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure),
-    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now) });
+  // W1-T13990: the fix-round reader reads the governor gate's own ledger read, so a hold with no admitted round lifts.
+  const governorGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
+  const queueGate = focusGateFor(governorGate,
+    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now), readFixRounds: governorGate.readFixRounds });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never

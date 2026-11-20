@@ -232,7 +232,7 @@ import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
-import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { assembleAdaptiveQueueFlow, fixRoundReaderFor, readMemoryHeadroomFraction, type FixRoundReader } from "./lib/adaptive-wip.js";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -26148,10 +26148,12 @@ function queueGovernorGateFor(
   readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
+  let fixRounds: FixRoundReader | undefined;
   const gate = (): QueueGovernorResult | undefined => {
     admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
+    fixRounds = fixRoundReaderFor(lines);
     const nowMs = now();
     const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
     const adaptive = assembleAdaptiveQueueFlow({
@@ -26164,6 +26166,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
       stuckOwnedCount: adaptive.stuckOwnedCount,
+      movableStuckOwnedCount: adaptive.movableStuckOwnedCount,
       adaptiveBound: adaptive.adaptiveBound,
       headroomFraction: adaptive.headroomFraction,
     });
@@ -26191,12 +26194,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
-  return Object.assign(gate, { readAdmission: () => admission });
+  return Object.assign(gate, { readAdmission: () => admission, readFixRounds: (sinceMs: number) => fixRounds?.(sinceMs) });
 }
 
 /** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
  *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
-type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined; readFixRounds?: FixRoundReader };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection

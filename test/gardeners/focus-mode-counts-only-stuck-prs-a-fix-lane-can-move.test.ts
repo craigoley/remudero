@@ -1,0 +1,351 @@
+import assert from "node:assert/strict";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import * as adaptiveWip from "#src/lib/adaptive-wip.js";
+import * as focus from "#src/lib/focus-gardener.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
+import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { loadPlan } from "#src/lib/plan.js";
+import { DEFAULT_SWEEP_POLICY, checkQueueGovernor, logQueueGovernorDeferral, type QueueGovernorResult } from "#src/lib/sweep.js";
+import { withTempDir } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+
+const BASE = 10;
+const MIN = 60_000;
+const NOW = Date.parse("2026-11-20T07:00:00.000Z");
+const T0 = Date.parse("2026-11-20T01:12:13.000Z");
+
+type Reading = { stuck: number; movable?: number; open?: number; deferred?: boolean };
+type Rounds = { admitted: number; refused: number } | undefined;
+
+function governorReading(r: Reading): QueueGovernorResult {
+  return {
+    deferred: r.deferred ?? false, observedOpenCount: r.open ?? 29, wipLimit: 30, baseWipLimit: BASE,
+    stuckOwnedCount: r.stuck, ...(r.movable === undefined ? {} : { movableStuckOwnedCount: r.movable }),
+    tier: r.deferred ? "growing" : "under_limit",
+  };
+}
+
+function disposed(pr: number, blocker: string, ageMs: number, ts = new Date(NOW).toISOString()) {
+  return { ts, step: "sweep.disposed", pr_number: pr, blocker, blocker_age_ms: ageMs };
+}
+
+/** The 2026-11-20 shape: 12 parked (escalated or operator-hold), 4 ageing past the SLO, 2 ageing under it, 3 moving. */
+function incidentLines(): Array<Record<string, unknown>> {
+  const lines: Array<Record<string, unknown>> = [];
+  for (let pr = 1; pr <= 10; pr++) lines.push(disposed(pr, "escalated", 0));
+  lines.push(disposed(11, "operator-hold", 0), disposed(12, "operator-hold", 5 * MIN));
+  for (let pr = 13; pr <= 16; pr++) lines.push(disposed(pr, pr % 2 ? "own-red" : "review-failed", 50 * MIN));
+  lines.push(disposed(17, "own-red", 10 * MIN), disposed(18, "conflict", 20 * MIN));
+  lines.push(disposed(19, "awaiting-ci", 3 * 60 * MIN), disposed(20, "awaiting-review", 0), disposed(21, "armed-idle", 0));
+  return lines;
+}
+const OWNED = Array.from({ length: 21 }, (_, i) => i + 1);
+
+/** A queue gate whose next consultation admits or defers the reading it is given. */
+function harness(dir: string, opts: { readFixRounds?: (sinceMs: number) => Rounds; startMs?: number } = {}) {
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  let nowMs = opts.startMs ?? T0;
+  let next: QueueGovernorResult | undefined;
+  let admission: QueueGovernorResult | undefined;
+  const inner = Object.assign((): QueueGovernorResult | undefined => {
+    admission = next && !next.deferred ? next : undefined;
+    return next?.deferred ? next : undefined;
+  }, { readAdmission: () => admission });
+  const sinceAsked: number[] = [];
+  const gateOpts = {
+    stateDir: dir, log: (step: string, fields: Record<string, unknown>) => rows.push({ step, fields }),
+    clock: clockFromMillisFn(() => nowMs),
+    ...(opts.readFixRounds ? { readFixRounds: (sinceMs: number) => { sinceAsked.push(sinceMs); return opts.readFixRounds!(sinceMs); } } : {}),
+  };
+  const gate = focus.focusGateFor(inner, gateOpts as Parameters<typeof focus.focusGateFor>[1]);
+  return {
+    rows, gate, sinceAsked, now: () => nowMs,
+    consult: (r: Reading | undefined, advanceMs = 0) => { nowMs += advanceMs; next = r && governorReading(r); return gate(); },
+  };
+}
+
+/** A fake fix-lane ledger: the rounds admitted and refused at given times. */
+function fixLane() {
+  const admitted: number[] = [];
+  const refused: number[] = [];
+  return {
+    admit: (atMs: number) => admitted.push(atMs),
+    refuse: (atMs: number) => refused.push(atMs),
+    read: (sinceMs: number): Rounds => ({
+      admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length,
+    }),
+  };
+}
+
+/** Enter focus on a movable stack: one reading starts the dwell, the next completes it. */
+function enter(h: ReturnType<typeof harness>, stuck = 12, movable = 12) {
+  assert.equal(h.consult({ stuck, movable }), undefined);
+  assert.equal(h.consult({ stuck, movable }, focus.FOCUS_DWELL_MS)?.tier, "focus");
+  return h.now();
+}
+
+// ── criterion 1 ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T13990 criterion 1: decideFocus does not enter on 12 parked and 4 ageing stuck PRs against a base of 10", () => {
+  const reading = { stuckOwnedCount: 16, movableStuckOwnedCount: 4, observedOpenCount: 29, baseWipLimit: BASE };
+  const first = focus.decideFocus({ on: false }, reading, T0);
+  assert.deepEqual([first.on, first.changed, first.pendingSinceMs], [false, false, undefined],
+    "a stack of parked PRs never even starts the dwell");
+  const later = focus.decideFocus(first, reading, T0 + 3 * focus.FOCUS_DWELL_MS);
+  assert.deepEqual([later.on, later.changed], [false, false], "focus does not enter on PRs that wait on a person");
+  assert.match(later.reason, /\b4 movable stuck\b.*\b12 parked\b/);
+});
+
+test("W1-T13990 criterion 1: the focus gate holds no build, writes no FOCUS file and no row for a parked stack", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const h = harness(dir);
+    for (let i = 0; i < 8; i++) {
+      assert.equal(h.consult({ stuck: 16, movable: 4 }, i === 0 ? 0 : 10 * MIN), undefined, `consultation ${i} admits`);
+    }
+    assert.equal(h.gate.readAdmission()?.stuckOwnedCount, 16, "the admission still sizes the lanes on the full reading");
+    assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), false);
+    assert.deepEqual(h.rows, []);
+  });
+});
+
+test("W1-T13990 criterion 1: a hold leaves once the PRs a fix lane can move halve, though the parked ones remain", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const h = harness(dir);
+    enter(h);
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, 5 * MIN)?.tier, "focus", "the halved movable stack must hold for the dwell");
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, focus.FOCUS_DWELL_MS), undefined, "it leaves with 11 parked PRs still open");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP, focus.FOCUS_EXITED_STEP]);
+    assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), false);
+  });
+});
+
+test("W1-T13990 criterion 1: deriveMovableStuckOwnedCount counts the ageing class past its SLO only", () => {
+  const lines = incidentLines();
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount(lines, OWNED, NOW), 4);
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount(lines, OWNED, NOW + 30 * MIN), 5);
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount(lines, OWNED, NOW + 40 * MIN), 6,
+    "an ageing PR crosses its SLO as the clock runs, exactly as the full count reads it");
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount(lines, [1, 2, 13], NOW), 1, "only owned PRs count");
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount([...lines, disposed(13, "awaiting-ci", 0)], OWNED, NOW), 3,
+    "each PR's latest disposition decides");
+  assert.equal(adaptiveWip.deriveMovableStuckOwnedCount([{ step: "sweep.disposed", pr_number: 13, blocker: "own-red" }], OWNED, NOW), 0,
+    "a row with no age reads as progressing");
+  for (const blocker of Object.keys(adaptiveWip.WIP_BLOCKER_CLASS)) {
+    const cls = adaptiveWip.WIP_BLOCKER_CLASS[blocker as keyof typeof adaptiveWip.WIP_BLOCKER_CLASS];
+    assert.equal(adaptiveWip.deriveMovableStuckOwnedCount([disposed(1, blocker, 60 * MIN)], [1], NOW), cls === "ageing" ? 1 : 0, blocker);
+  }
+});
+
+test("W1-T13990 criterion 1: the adaptive flow and the governor carry the movable count beside the full one", () => {
+  const flow = adaptiveWip.assembleAdaptiveQueueFlow({
+    lines: incidentLines(), ownedPrNumbers: OWNED, nowMs: NOW, baseLimit: BASE, trailingMergedCount: 0, readHeadroom: () => 0.5,
+  });
+  assert.deepEqual([flow.stuckOwnedCount, flow.movableStuckOwnedCount], [16, 4]);
+  const unowned = adaptiveWip.assembleAdaptiveQueueFlow({
+    lines: incidentLines(), nowMs: NOW, baseLimit: BASE, trailingMergedCount: 0, readHeadroom: () => 0.5,
+  });
+  assert.deepEqual([unowned.stuckOwnedCount, unowned.movableStuckOwnedCount], [0, 0], "no ownership split reads as nothing stuck");
+  const result = checkQueueGovernor(29, DEFAULT_SWEEP_POLICY, { stuckOwnedCount: flow.stuckOwnedCount,
+    movableStuckOwnedCount: flow.movableStuckOwnedCount, adaptiveBound: flow.adaptiveBound });
+  assert.deepEqual([result.stuckOwnedCount, result.movableStuckOwnedCount], [16, 4]);
+  const clamped = checkQueueGovernor(3, DEFAULT_SWEEP_POLICY, { stuckOwnedCount: 16, movableStuckOwnedCount: 9 });
+  assert.deepEqual([clamped.stuckOwnedCount, clamped.movableStuckOwnedCount], [3, 3], "the movable count never exceeds the stuck count");
+  assert.equal("movableStuckOwnedCount" in checkQueueGovernor(29, DEFAULT_SWEEP_POLICY, { stuckOwnedCount: 16 }), false,
+    "a caller that passes no movable count gets no movable field");
+});
+
+// ── criterion 2 ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T13990 criterion 2: a dwell of focus in which every fix dispatch was refused releases it with one row", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    const on = enter(h);
+    lane.refuse(on + 5 * MIN);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 10 * MIN)?.tier, "focus", "one refusal never releases a hold");
+    lane.refuse(on + 12 * MIN);
+    lane.refuse(on + 25 * MIN);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 19 * MIN)?.tier, "focus", "the window is not yet a full dwell");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 1 * MIN), undefined, "a dwell with no admitted round releases the hold");
+    assert.equal(h.sinceAsked.at(-1), on, "the window read is the dwell that just ended");
+    assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), false);
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.equal(released[0].fields.cause, "fix_lane_refused");
+    assert.equal(released[0].fields.refused_count, 3);
+    assert.match(String(released[0].fields.reason), /no fix round was admitted in 30 minutes of focus \(3 refused\)/);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 1 * MIN), undefined, "re-entry waits a full dwell again");
+    assert.equal(h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP).length, 1, "the release is written once");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP, focus.FOCUS_RELEASED_STEP, focus.FOCUS_ENTERED_STEP]);
+  });
+});
+
+test("W1-T13990 criterion 2: an admitted round keeps the hold, and a dwell with no dispatch at all releases it as idle", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    const on = enter(h);
+    lane.refuse(on + 2 * MIN);
+    lane.admit(on + 20 * MIN);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus", "a round was admitted in the dwell");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 19 * MIN)?.tier, "focus", "the admitted round is still inside the window");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 2 * MIN), undefined, "a full dwell after the last admitted round releases");
+    const released = h.rows.find((r) => r.step === focus.FOCUS_RELEASED_STEP)!;
+    assert.deepEqual([released.fields.cause, released.fields.refused_count], ["fix_lane_idle", 0]);
+  });
+});
+
+test("W1-T13990 criterion 2: an unread fix lane, or no reader, never releases the hold", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const h = harness(dir, { readFixRounds: () => undefined });
+    enter(h);
+    for (let i = 0; i < 4; i++) assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP]);
+  });
+  await withTempDir("focus-movable", (dir) => {
+    const h = harness(dir);
+    enter(h);
+    for (let i = 0; i < 4; i++) assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus");
+  });
+});
+
+test("W1-T13990 criterion 2: a hold restored at boot is released after one dwell of this process with no admitted round", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    writeFileSync(join(dir, focus.FOCUS_FILE), JSON.stringify({ owner: focus.FOCUS_OWNER, since: "2026-11-19T22:00:00.000Z",
+      reason: "r", stuck_owned_count: 12, observed_open_count: 20, base_wip_limit: 10 }));
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    assert.equal(h.consult({ stuck: 12, movable: 12 })?.tier, "focus", "the restored hold stands at boot");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS - 1)?.tier, "focus");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 1), undefined);
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_RELEASED_STEP]);
+  });
+});
+
+test("W1-T13990 criterion 2: fixRoundReaderFor reads admitted and refused fix rounds since a time from the gate's ledger lines", () => {
+  const at = (m: number) => new Date(T0 + m * MIN).toISOString();
+  const read = adaptiveWip.fixRoundReaderFor([
+    { ts: at(-5), step: "fix.dispatch" }, { ts: at(1), step: "fix.dispatch" }, { ts: at(2), step: "sweep.fix.dispatch_failed" },
+    { ts: at(3), step: "sweep.fix.dispatch_failed" }, { ts: at(4), step: "fix.done" }, { ts: at(5), step: "fix.retrigger" },
+    { ts: "garbage", step: "fix.dispatch" }, { step: "sweep.fix.dispatch_failed" },
+  ]);
+  assert.deepEqual(read(T0), { admitted: 1, refused: 2 });
+  assert.deepEqual(read(T0 - 10 * MIN), { admitted: 2, refused: 2 });
+  assert.deepEqual(read(T0 + 10 * MIN), { admitted: 0, refused: 0 });
+});
+
+// ── criterion 3 ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T13990 criterion 3: the focus rows and the FOCUS flag carry the stuck count and the movable count", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    enter(h, 15, 11);
+    const flag = focus.readFocusFlag(dir) as unknown as Record<string, unknown>;
+    assert.deepEqual([flag.stuck_owned_count, flag.movable_stuck_owned_count], [15, 11]);
+    h.consult({ stuck: 15, movable: 11 }, focus.FOCUS_DWELL_MS);
+    h.consult({ stuck: 14, movable: 10 }, 1 * MIN);
+    assert.equal(h.consult({ stuck: 14, movable: 3 }, focus.FOCUS_DWELL_MS), undefined);
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP, focus.FOCUS_RELEASED_STEP]);
+    for (const row of h.rows) {
+      assert.equal(typeof row.fields.stuck_owned_count, "number", row.step);
+      assert.equal(typeof row.fields.movable_stuck_owned_count, "number", row.step);
+    }
+    assert.deepEqual([h.rows[0].fields.stuck_owned_count, h.rows[0].fields.movable_stuck_owned_count], [15, 11]);
+    assert.deepEqual([h.rows[1].fields.stuck_owned_count, h.rows[1].fields.movable_stuck_owned_count], [15, 11]);
+  });
+});
+
+test("W1-T13990 criterion 3: the governor's deferral row writes both counts", () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const result = checkQueueGovernor(29, DEFAULT_SWEEP_POLICY, { stuckOwnedCount: 16, movableStuckOwnedCount: 4, adaptiveBound: 5 });
+  assert.equal(result.deferred, true);
+  logQueueGovernorDeferral(result, (_path, line) => { rows.push(line); }, "ledger.ndjson", "RUN");
+  assert.deepEqual([rows[0].step, rows[0].stuck_owned_count, rows[0].movable_stuck_owned_count], ["dispatch_deferred_wip", 16, 4]);
+});
+
+function fixturePlan(dir: string) {
+  const path = join(dir, "tasks.yaml");
+  writeFileSync(path, ["A", "B"].map((id) =>
+    `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n  files: [src/${id}.ts]\n`,
+  ).join(""));
+  return loadPlan(path);
+}
+
+test("W1-T13990 criterion 3: a held daemon tick's queue governor row names how many of its stuck PRs wait on a person", async () => {
+  const held: QueueGovernorResult = { ...governorReading({ stuck: 16, movable: 4 }), deferred: true, tier: "focus" };
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  let reads = 0;
+  let sleeps = 0;
+  let nowMs = NOW;
+  await withTempDir("focus-movable-plan", (dir) => runDaemon(fixturePlan(dir), {
+    ...hostIndependentDaemonDeps(),
+    refreshMerged: () => () => false,
+    checkQueueGovernor: () => ++reads % 2 === 0 ? held : undefined,
+    runOne: async (id) => { assert.fail(`held task ${id} must not start`); },
+    now: () => new Date(nowMs),
+    sleep: async () => { sleeps++; nowMs += MIN; },
+    checkStop: () => sleeps >= 2 ? "fixture complete" : undefined,
+    log: (step, fields) => rows.push({ step, fields: fields ?? {} }),
+  } as DaemonDeps, { laneCount: 2 }));
+  const row = rows.find(({ step }) => step === "daemon.queue_governor")?.fields;
+  assert.ok(row, "the held tick writes its governor row");
+  assert.deepEqual([row.tier, row.stuck_owned_count, row.movable_stuck_owned_count], ["focus", 16, 4]);
+});
+
+// ── criterion 4 ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — ageing PRs past their SLO enter and leave exactly as on origin/main", async () => {
+  assert.equal(focus.FOCUS_DWELL_MS, 30 * MIN);
+  assert.deepEqual(focus.focusBounds(BASE), { enterAt: 10, exitAt: 5 });
+  const r = (n: number) => ({ stuckOwnedCount: n, movableStuckOwnedCount: n, observedOpenCount: 20, baseWipLimit: BASE });
+  assert.equal(focus.decideFocus({ on: false }, r(9), T0).pendingSinceMs, undefined, "9 never starts the dwell");
+  const pending = focus.decideFocus({ on: false }, r(10), T0);
+  assert.equal(pending.pendingSinceMs, T0);
+  assert.equal(focus.decideFocus(pending, r(10), T0 + focus.FOCUS_DWELL_MS - 1).on, false);
+  assert.deepEqual([focus.decideFocus(pending, r(10), T0 + focus.FOCUS_DWELL_MS).on, focus.decideFocus(pending, r(10), T0 + focus.FOCUS_DWELL_MS).changed], [true, true]);
+  for (const n of [6, 7, 8, 9]) assert.equal(focus.decideFocus({ on: true }, r(n), T0).pendingSinceMs, undefined, `${n} holds the state`);
+  const leaving = focus.decideFocus({ on: true }, r(5), T0);
+  assert.deepEqual([focus.decideFocus(leaving, r(5), T0 + focus.FOCUS_DWELL_MS).on, leaving.pendingSinceMs], [false, T0]);
+  const unwired = { stuckOwnedCount: 12, observedOpenCount: 20, baseWipLimit: BASE };
+  assert.equal(focus.decideFocus(focus.decideFocus({ on: false }, unwired, T0), unwired, T0 + focus.FOCUS_DWELL_MS).on, true,
+    "a reading with no movable count decides on the full count, as before");
+  await withTempDir("focus-movable", (dir) => {
+    const h = harness(dir, { readFixRounds: fixLane().read });
+    const ageing = { stuck: 10, movable: 10 };
+    assert.equal(h.consult(ageing), undefined);
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus", "ten ageing PRs past their SLO enter focus after the dwell");
+  });
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the WIP bound still subtracts parked and ageing PRs", () => {
+  const lines = incidentLines();
+  assert.equal(adaptiveWip.deriveStuckOwnedCount(lines, OWNED, NOW), 16, "parked and ageing past the SLO both count as stuck");
+  const flow = adaptiveWip.assembleAdaptiveQueueFlow({
+    lines, ownedPrNumbers: OWNED, nowMs: NOW, baseLimit: BASE, trailingMergedCount: 0, readHeadroom: () => 0.5,
+  });
+  const result = checkQueueGovernor(21, DEFAULT_SWEEP_POLICY, {
+    stuckOwnedCount: flow.stuckOwnedCount, movableStuckOwnedCount: flow.movableStuckOwnedCount, adaptiveBound: flow.adaptiveBound,
+  });
+  assert.deepEqual([flow.adaptiveBound, result.deferred, result.tier], [BASE, false, "under_limit"],
+    "21 owned less 16 stuck is under the bound of 10: the full count is subtracted, not the movable one");
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the FOCUS file's restore at boot and its release by hand are unchanged", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    writeFileSync(join(dir, focus.FOCUS_FILE), JSON.stringify({ owner: focus.FOCUS_OWNER, since: "2026-11-20T01:12:13.000Z",
+      reason: "r", stuck_owned_count: 12, observed_open_count: 20, base_wip_limit: 10 }));
+    const h = harness(dir, { readFixRounds: fixLane().read });
+    assert.equal(h.consult({ stuck: 9, movable: 9 })?.tier, "focus", "a restarted daemon reads its standing hold from the file");
+    rmSync(join(dir, focus.FOCUS_FILE));
+    assert.equal(h.consult({ stuck: 12, movable: 12 }), undefined, "removing the file by hand releases the hold");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_RELEASED_STEP]);
+    assert.match(String(h.rows[0].fields.reason), /FOCUS was removed while focus held/);
+    assert.equal(h.rows[0].fields.cause, undefined, "the hand release names no fix-lane cause");
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus", "re-entry waits a full dwell");
+  });
+});

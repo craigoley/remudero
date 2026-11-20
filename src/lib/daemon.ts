@@ -4807,6 +4807,7 @@ export async function runDaemon(
         trailing_opened_count: verdict.result.trailingOpenedCount,
         base_wip_limit: verdict.result.baseWipLimit ?? verdict.result.wipLimit,
         stuck_owned_count: verdict.result.stuckOwnedCount ?? 0,
+        ...(verdict.result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: verdict.result.movableStuckOwnedCount }),
         headroom_fraction: verdict.result.headroomFraction ?? null,
         poll_interval_ms: pollIntervalMs,
       });
