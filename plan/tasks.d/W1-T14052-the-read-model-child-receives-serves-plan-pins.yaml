@@ -18,7 +18,7 @@
     - src/lib/thread-plan.ts
     - src/lib/read-model-worker.ts
     - test/console-api/serve/the-read-model-child-receives-serves-plan-pins.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the read-model in child mode, a plan pin serve published before the child started, and one published while it runs, both reach the child's view threads: threadPlanPin answers the pinned ref, threadPlan answers the pinned commit's tasks rather than the working tree's, and the adoption row reaches serve's log"
