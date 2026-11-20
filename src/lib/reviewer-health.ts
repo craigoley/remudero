@@ -57,6 +57,10 @@ export const MAX_CLOSED_REVIEWER_INCIDENTS = 16;
 /** BACKSTOP: GitHub refuses an issue body longer than this. It is the platform's bound on how much of
  *  a model's latest FAILs a model-divergence incident can quote, not a tuning choice. */
 export const GITHUB_ISSUE_BODY_LIMIT = 65_536;
+/** W1-T13850 — room a model-divergence incident leaves in its body for the footers tryEscalateAsync appends
+ *  after rendering (the degraded-label note, the non-conforming-message note), so the body it DELIVERS stays
+ *  within {@link GITHUB_ISSUE_BODY_LIMIT}. Both footers are a few hundred characters; this is their ceiling. */
+export const ESCALATION_FOOTER_RESERVE = 4_096;
 /** review.ts's note on a criterion the reviewer downgraded though its proof passed; the clause follows it. */
 const SEMANTIC_DOWNGRADE_MARK = "(semantic downgrade):";
 
@@ -702,7 +706,7 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
     consequence: `Reviews keep running on ${incident.model} as routed, and its FAILs keep holding PRs.`,
   });
   let shown = [...fails];
-  while (shown.length > 0 && renderIssueBody(build(shown)).length > GITHUB_ISSUE_BODY_LIMIT) shown = shown.slice(1);
+  while (shown.length > 0 && renderIssueBody(build(shown)).length > GITHUB_ISSUE_BODY_LIMIT - ESCALATION_FOOTER_RESERVE) shown = shown.slice(1);
   return build(shown);
 }
 
@@ -1144,7 +1148,7 @@ export async function evaluateReviewerHealthNow(
   /** W1-T13850, observe-only: judge every evaluator model, ledger the judgment, open one incident per newly
    *  diverged model and close one whose interval overlaps its baseline again. It reads the counts and
    *  writes only `modelIncidents`: no route, verdict, sha judgment or reviewer-sha incident. */
-  const judgeModels = async (): Promise<void> => {
+  const judgeModels = async (state: ReviewerHealthState): Promise<void> => {
     const judged = judgeEvaluatorModels(state);
     log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged: judged.filter((j) => j.state === "diverged").map((j) => j.model) });
     for (const j of judged) {
@@ -1249,24 +1253,50 @@ export async function evaluateReviewerHealthNow(
   } else {
     await step(read.rows, input.originMainSha, true);
   }
-  // Observe-only: the model judgment's own failure (a ledger append, say) never reaches the sha decision, its
-  // persistence or the route below. It is ledgered, and when even that append fails it goes to stderr.
-  try {
-    await judgeModels();
-  } catch (error) {
-    // The caller still needs the SHA state and route if model judgment fails.
-    reportModelHealthFailure(error, log);
-  }
+  // Observe-only (W1-T13850): the SHA state is saved and the route decided BEFORE the model judgment runs, so a
+  // slow or failing model issue lookup never delays or changes either. `modelIncidents` is the judgment's own
+  // field: this save keeps the copy on disk, and the judgment below merges only that field back.
   state.cursor = read.cursor;
+  state.modelIncidents = loadReviewerHealthState(statePath).modelIncidents;
   saveReviewerHealthState(statePath, state);
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
-  if (incident === null) return { route: "normal", reason: "no open reviewer-regression incident", current };
-  if (incident.offending === null) return { route: "normal", reason: `incident ${incident.id} names no offending merge to revert`, current };
-  // Shadow the current reviewer only while its own sha has no judgment yet: judged regressed, it stops;
-  // returned to baseline, the incident has closed above.
-  return { route: "healed", incident, shadow: input.originMainSha !== null && current?.state !== "regressed",
-    withPr: state.operatorHeal?.withPr ?? null, current };
+  const decision: ReviewerHealthDecision = incident === null
+    ? { route: "normal", reason: "no open reviewer-regression incident", current }
+    : incident.offending === null
+      ? { route: "normal", reason: `incident ${incident.id} names no offending merge to revert`, current }
+      // Shadow the current reviewer only while its own sha has no judgment yet: judged regressed, it stops;
+      // returned to baseline, the incident has closed above.
+      : { route: "healed", incident, shadow: input.originMainSha !== null && current?.state !== "regressed",
+        withPr: state.operatorHeal?.withPr ?? null, current };
+  queueModelJudgment(statePath, async () => {
+    const models = loadReviewerHealthState(statePath);
+    await judgeModels(models);
+    const latest = loadReviewerHealthState(statePath);
+    latest.modelIncidents = models.modelIncidents;
+    saveReviewerHealthState(statePath, latest);
+  }, log);
+  return decision;
+}
+
+/** W1-T13850 — the model judgments of one state file, run one at a time AFTER their evaluation returned. */
+const modelJudgments = new Map<string, Promise<void>>();
+
+function queueModelJudgment(statePath: string, job: () => Promise<void>, log: ReviewerHealthLog): void {
+  const prior = modelJudgments.get(statePath) ?? Promise.resolve();
+  // The judgment's own failure (a ledger append, a lookup) is ledgered, and when even that append fails it goes to
+  // stderr; it never reaches the route already returned.
+  const run = prior.then(job).catch((error: unknown) => reportModelHealthFailure(error, log));
+  modelJudgments.set(statePath, run);
+  void run.finally(() => { if (modelJudgments.get(statePath) === run) modelJudgments.delete(statePath); });
+}
+
+/** Test seam and shutdown hook: wait until every queued model judgment of `statePath` has settled. */
+export async function settleReviewerModelJudgment(statePath: string): Promise<void> {
+  for (let pending = modelJudgments.get(statePath); pending !== undefined; pending = modelJudgments.get(statePath)) {
+    await pending;
+    if (modelJudgments.get(statePath) === pending) break;
+  }
 }
 
 /** The revert PR request for the main-repair lane: the outcome-mix evidence, not failing checks. */

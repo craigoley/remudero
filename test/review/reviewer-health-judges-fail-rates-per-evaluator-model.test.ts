@@ -95,12 +95,22 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
   const git: health.GitText = async () => { throw new Error("no git: no sha regresses here"); };
   const iso = { iso: () => new Date(clock).toISOString() };
   const input = (originMainSha: string | null) => ({ originMainSha, ...(readEvidence ? { readEvidence } : {}) });
-  const evaluate = (originMainSha: string | null) =>
-    health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
+  /** The model judgment runs after the route returns (observe-only); these wait for it, so a test reads its effects. */
+  const evaluate = async (originMainSha: string | null) => {
+    const decision = await health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
+    await health.settleReviewerModelJudgment(statePath);
+    return decision;
+  };
   /** The daemon's entry: any rejection of the evaluation routes normally. */
-  const evaluateOuter = (originMainSha: string | null) =>
-    health.evaluateReviewerHealth(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
-  return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, steps: (step: string) => logs.filter((l) => l.step === step) };
+  const evaluateOuter = async (originMainSha: string | null) => {
+    const decision = await health.evaluateReviewerHealth(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
+    await health.settleReviewerModelJudgment(statePath);
+    return decision;
+  };
+  /** The evaluation alone, as the daemon awaits it: the model judgment may still be running. */
+  const evaluateRouteOnly = (originMainSha: string | null) =>
+    health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
+  return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, evaluateRouteOnly, steps: (step: string) => logs.filter((l) => l.step === step) };
 }
 
 type ModelRow = Record<string, unknown> & { model: string };
@@ -677,4 +687,62 @@ test("W1-T13850 criterion 4: a filed task quotes only clauses in its verified pu
   assert.match(h.created[0]!.body, /the filed public clause/);
   assert.doesNotMatch(h.created[0]!.body, /PRIVATE/);
   assert.match(String(h.steps("reviewer.model_divergence_evidence_unavailable")[0]?.extra.error), /review evidence unavailable/);
+});
+
+test("W1-T13850 criterion 4: the body tryEscalateAsync delivers stays within the issue limit when a label cannot be provisioned", async (t) => {
+  // Review finding (11-20 19:55Z): 105 FAILs with 484-character clauses rendered 65,511 characters; with a
+  // needs-action label unprovisioned, tryEscalateAsync's degraded-label footer made the delivered body 65,670,
+  // a cap-enforcing gateway refused it, and no incident opened.
+  const h = harness(t);
+  const delivered: string[] = [];
+  h.issues.ensureLabel = async (label) => label === "needs-human";
+  h.issues.create = async (title, body) => {
+    delivered.push(body);
+    if (body.length > health.GITHUB_ISSUE_BODY_LIMIT) throw new Error(`body is too long (${body.length})`);
+    h.created.push({ title, body });
+    return `https://github.com/acme/remudero/issues/${h.created.length}`;
+  };
+  await h.evaluate(null);
+  const { rows, claudeShas } = elevenNineteen();
+  const solSha = fake("4e13dcf00");
+  const clause = (i: number) => `long clause ${i} `.padEnd(484, "x");
+  h.queue.push(...rows, ...Array.from({ length: 200 }, (_, i) => verdict(solSha, SOL, "failure", {
+    reasons: [`proof executed and PASSED on the PR head (grep: y) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): ${clause(i)}`],
+  })));
+  await h.evaluate(claudeShas.at(-1)!);
+  assert.equal(h.created.length, 1, "the incident opened");
+  assert.ok(delivered.every((body) => body.length <= health.GITHUB_ISSUE_BODY_LIMIT), `delivered ${delivered.map((b) => b.length).join(", ")}`);
+  assert.match(h.created[0]!.body, /Degraded: label\(s\)/, "the degraded-label footer is part of the delivered body");
+  // The rendered incident leaves room for every footer tryEscalateAsync may append, not only the one seen here.
+  const rendered = h.created[0]!.body.slice(0, h.created[0]!.body.indexOf("\n\n_Degraded:"));
+  assert.ok(rendered.length <= health.GITHUB_ISSUE_BODY_LIMIT - 4_096, `rendered ${rendered.length} leaves the footer reserve`);
+  assert.match(h.created[0]!.body, /long clause 199 /, "the newest FAIL is still quoted");
+});
+
+test("W1-T13850 criterion 5: invariant:observe-only — a slow model issue lookup delays neither the saved sha state nor the healed route", async (t) => {
+  // Review finding (11-20 19:55Z): with the same rows and an open sha incident, origin/main saved and returned
+  // healed, while the PR head withheld both until the model issue lookup finished.
+  const { rows, claudeShas } = elevenNineteen();
+  const control = harness(t);
+  const slow = harness(t);
+  const incident = writeHealedState(control.statePath);
+  writeHealedState(slow.statePath);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  slow.issues.listOpen = async () => { await gate; return []; };
+  control.queue.push(...rows);
+  slow.queue.push(...rows);
+  const expected = await control.evaluate(claudeShas.at(-1)!);
+  const decision = await slow.evaluateRouteOnly(claudeShas.at(-1)!);
+  assert.equal(expected.route, "healed");
+  assert.deepEqual(decision, expected, "the route returns while the model lookup is still pending");
+  const saved = health.loadReviewerHealthState(slow.statePath);
+  assert.equal(saved.incident?.id, incident.id, "the sha state was saved before the lookup finished");
+  assert.equal(Object.keys(saved.shas).length, 43);
+  assert.equal(slow.created.length, 0, "the lookup has not finished");
+  release();
+  await health.settleReviewerModelJudgment(slow.statePath);
+  assert.equal(slow.created.length, 1, "the model judgment completes after the route");
+  assert.equal(health.loadReviewerHealthState(slow.statePath).modelIncidents["gpt-6.2-sol"]?.issueUrl, "https://github.com/acme/remudero/issues/1");
+  assert.equal(health.loadReviewerHealthState(slow.statePath).incident?.id, incident.id, "the merge keeps the sha incident");
 });
