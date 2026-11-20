@@ -335,7 +335,7 @@ function readCompactionSnapshot(path: string, opts: PeakStoreOptions): string | 
     const size = suppliedSize ?? statSync(path).size;
     return size > PEAK_COMPACT_BYTES ? opts.readTail(path, size) : undefined;
   }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
   try {
     const file = fstatSync(fd);
     if (!file.isFile()) throw new Error("peak store is not a regular file");
