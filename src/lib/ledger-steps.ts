@@ -637,6 +637,15 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["recovered"],
   },
   {
+    step: "skills.lifecycle_judged",
+    meaning:
+      "A knowledge-gardener skill-lifecycle pass judged one offered, approved skill before updating the proposal " +
+      "registry. `status` and `basis` are its effectiveness verdict. The row carries the settle window and " +
+      "each arm's terminal runs, merged runs and cost per merged PR.",
+    writer: ["stageSkillLifecycleForAction"],
+    outcomes: ["RETIRE-CANDIDATE", "REVIEW-CANDIDATE", "INSUFFICIENT EVIDENCE"],
+  },
+  {
     step: "inbox.draft_cash_skipped",
     meaning:
       "A cash inbox draft was not started, because its estimated whole run was larger than the model's window " +
