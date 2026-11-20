@@ -821,6 +821,10 @@ export function creditsLaneRoom(status: ProviderRoutingStatus, nowMs: number): b
   const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
   const ageMs = Number.isFinite(observedMs) ? Math.max(0, nowMs - observedMs) : Number.POSITIVE_INFINITY;
   if (status.freshness !== "fresh" && !(status.freshness === "stale" && ageMs <= PROVIDER_ROUTING_READING_MAX_AGE_MS)) return false;
+  // The policy on the status is the newest one written (a not-probed write replaces only it), so a
+  // retained codex row whose provider the current policy cannot route carries nothing.
+  const routable = status.policy?.routableProviders ?? status.enabledProviders;
+  if (!routable?.includes("codex")) return false;
   const providers = status.providers ?? [];
   const ceiling = 100 - status.reservePercent;
   const subscriptionHeadroom = providers.some((row) => row.readable && row.creditsLane !== true && row.windows.length > 0 &&

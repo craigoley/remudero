@@ -2866,6 +2866,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined;
+      // W1-T13855: publish the blocked auction BEFORE any fallback spawn, so a reader of the routing status
+      // (the review widener's creditsLaneRoom) never keeps trusting the prior selection's credits lane.
+      const blockedAuction = error instanceof ProviderCapacityBlockedError;
+      if (blockedAuction) publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2911,7 +2915,6 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
-            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
             error.message += `; ${held}`;
             throw error;
           }
@@ -2938,10 +2941,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
-          // NO routing status is written here. The auction really did block, and there is no
-          // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
-          // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
-          // own status through the mount-affinity path.
+          // No "selected" status is written here: the auction really did block, and there is no
+          // ProviderSelection to report -- inventing one would be the fabricated telemetry this
+          // design refuses. The blocked status was published above, before any fallback.
           return await spawnWorker({
             ...args,
             mountProvider: "cash" as WorkerProviderId,
@@ -2983,7 +2985,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           refusal: overflowRefusal,
         }));
       }
-      publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+      if (!blockedAuction) publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
       throw error;
     }
     publishProviderRoutingStatus({ ...statusBase, state: "selected", capacities, selection, preferenceBypass });

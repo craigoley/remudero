@@ -12,6 +12,7 @@ import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 import type { UsageSnapshot } from "#src/lib/headroom.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import { loadPlan } from "#src/lib/plan.js";
+import { resolveProviderRoutingPolicy } from "#src/lib/provider-routing-policy.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 // Read off the namespace: at a base without the export a named import fails the whole file at LOAD,
 // which reads as "could not execute" rather than the red each criterion must show.
@@ -119,8 +120,9 @@ function codexResult(): WorkerResult {
 }
 
 /** The real spawnWorker with measured Claude capacity, real Codex carry, and counted cash spawns. */
-async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed = 99) {
-  const root = scratchRoot();
+async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed = 99,
+  status: { root: string; write: true } | undefined = undefined) {
+  const root = status?.root ?? scratchRoot();
   const assignments: WorkerSelectionAssignment[] = [];
   let cashSpawns = 0, codexSpawns = 0;
   try {
@@ -135,7 +137,7 @@ async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed =
         readCodex: async (_config, request) => account.read({ ...request }),
         spawnCodex: async () => { codexSpawns += 1; return codexResult(); },
         spawnOpenWeight: async () => { cashSpawns += 1; return { provider: "cash", text: "done", isError: false, subtype: "success" } as never; },
-        writeStatus: () => {},
+        writeStatus: status ? writeProviderRoutingStatus : () => {},
         now: () => account.state.now,
       },
       onSelectionAssignment: (assignment) => assignments.push(assignment),
@@ -148,7 +150,7 @@ async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed =
       })()) as never,
     } as SpawnWorkerArgs).catch((error: unknown) => error);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    if (!status) rmSync(root, { recursive: true, force: true });
   }
   return { assignments, cashSpawns, codexSpawns, decision: assignments.at(-1)?.routing.decision };
 }
@@ -719,4 +721,60 @@ test("W1-T13855 criterion 10: the credits lane lifts no memory, CPU or host-work
   assert.deepEqual(degraded(parked), degraded(plain));
   assert.equal(parked.spawned, 0);
   assert.equal(plain.spawned, 0);
+});
+
+test("W1-T13855 criterion 4: a lapsed credits row outside the current routing policy is not credits-lane room", (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const both = resolveProviderRoutingPolicy(root, { workerProviders: { enabled: ["claude", "codex"], reservePercent: 5 } });
+  const capacities = [claudeAt(95), creditsCodex()];
+  writeProviderRoutingStatus(root, { enabledProviders: ["claude", "codex"], reservePercent: 5, observedAtMs: START,
+    cacheValidMs: 60_000, policy: both, state: "selected", capacities, selection: selectWorkerProvider(capacities, 5, 0.5) });
+  assert.equal(routingStatus.creditsLaneRoom(readProviderRoutingStatus(root, { now: () => START }), START), true,
+    "control: the codex credits row counts while codex is routable");
+  // A restart into Claude-only: the not-probed write keeps the prior reading and replaces only the policy.
+  const claudeOnly = resolveProviderRoutingPolicy(root, { workerProviders: { enabled: ["claude"], reservePercent: 5 } });
+  assert.deepEqual(claudeOnly.routableProviders, ["claude"]);
+  writeProviderRoutingStatus(root, { enabledProviders: ["claude"], reservePercent: 5, observedAtMs: START + 120_000,
+    cacheValidMs: 60_000, policy: claudeOnly, state: "not-probed" });
+  const nowMs = START + 120_000;
+  const kept = readProviderRoutingStatus(root, { now: () => nowMs });
+  assert.equal(kept.providers?.find((row) => row.provider === "codex")?.creditsLane, true, "the lapsed codex row is retained");
+  assert.deepEqual(kept.policy?.routableProviders, ["claude"]);
+  assert.equal(routingStatus.creditsLaneRoom(kept, nowMs), false, "codex is not routable, so its credits carry nothing");
+  assert.deepEqual(widen(5, (at) => ({ ...kept, observedAt: new Date(at - 120_000).toISOString() })).map((d) => [d.reason, d.effectiveWidth]),
+    widen(5, (at) => ({ ...unflagged(kept), observedAt: new Date(at - 120_000).toISOString() })).map((d) => [d.reason, d.effectiveWidth]));
+});
+
+test("W1-T13855 criterion 6 (carryCodexCapacity reserve pass): a malformed unreset window still makes the carry unreadable", async (t) => {
+  const account = codexAccount(t);
+  account.state.extras = { primary: { usedPercent: "unknown", windowDurationMins: 10080, resetsAt: account.state.reset } };
+  account.state.buckets.codex = { limitId: "codex",
+    primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: BALANCE } };
+  await account.read();
+  assert.ok(readFileSync(account.lastGood, "utf8").includes("unknown"), "control: the last-good reading holds the malformed window");
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.readable, false, `a malformed window is unreadable, never dropped: ${carried.detail}`);
+  assert.match(carried.detail ?? "", /unreadable quota window/);
+  assert.equal(carried.carriedForward, undefined);
+});
+
+test("W1-T13855 criterion 7 (creditsLaneRoom from review-capacity): a cash fallback after credits ran out leaves no credits room", async (t) => {
+  const account = codexAccount(t);
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const first = await routeSpawn(account, 99, { root, write: true });
+  assert.equal(first.decision?.rule, "codex-credits", "control: the first spawn rides the credits lane");
+  assert.equal(routingStatus.creditsLaneRoom(readProviderRoutingStatus(root, { now: () => account.state.now }), account.state.now), true,
+    "control: the first spawn's status shows credits room");
+  account.state.now += 5_000;
+  account.state.balance = "0";
+  const second = await routeSpawn(account, 99, { root, write: true });
+  assert.equal(second.decision?.rule, "cash-fallback", "control: with no credits the auction falls to cash");
+  assert.equal(second.cashSpawns, 1);
+  const status = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.equal(routingStatus.creditsLaneRoom(status, account.state.now), false, "the newer auction refused codex");
+  assert.equal(reviewProviderObservation(status, account.state.now).creditsLane, undefined);
 });

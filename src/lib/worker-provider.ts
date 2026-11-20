@@ -2278,14 +2278,16 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
           typeof reset !== "number" || !Number.isFinite(reset) || reset * 1000 <= now) return null;
       const elapsed = current.readAt - (reset * 1000 - duration * 60_000);
+      // A malformed unreset window makes the whole reading unreadable, as before W1-T13855: only the
+      // reserve refusal below is per bucket, so a malformed window is never dropped in favour of a sibling.
       if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100 || elapsed < 0 || (elapsed === 0 && used > 0))
-        return "unreadable quota window";
+        throw new Error("unreadable quota window");
       let burn = elapsed > 0 ? used / elapsed : 0;
       if (previous && previous.readAt < current.readAt && old?.resetsAt === reset && old.windowDurationMins === duration &&
           typeof old.usedPercent === "number" && Number.isFinite(old.usedPercent) && old.usedPercent >= 0 && old.usedPercent <= used)
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
-      if (!Number.isFinite(projected)) return "unreadable quota window";
+      if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
       // A bucket past its reserve carries only on its own (or inherited) spendable credits. The generic bucket's
       // refusal makes only the models it meters unavailable: a model with its own headroom still carries on it.
       if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) return "projected burn reaches the reserve";
