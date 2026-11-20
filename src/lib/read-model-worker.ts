@@ -36,7 +36,7 @@ import { BOARD_CATALOG_WIRE_VERSION, createBoardCatalogParentBridge, createWorke
   isBoardCatalogReply, isBoardCatalogRequest, type BoardCatalogClient, type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
-import { planFilesIdentity, threadPlanPin } from "./thread-plan.js";
+import { acceptForwardedThreadPlan, forwardThreadPlans, planFilesIdentity, threadPlanPin, type PinPost } from "./thread-plan.js";
 import { createWorkstreamsView, WORKSTREAMS_VIEW_NAME } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, createActionsView } from "./actions-view.js";
 import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_EVICT_MS, type DemandBook } from "./view-demand.js";
@@ -137,6 +137,24 @@ function catalogReplyFromParent(msg: unknown): unknown {
   const shared = new SharedArrayBuffer(reply.buffer.byteLength);
   new Uint8Array(shared).set(reply.buffer);
   return { ...reply, buffer: shared };
+}
+
+/** W1-T14052: a plan pin as it crosses to the read-model child: its SharedArrayBuffer of blobs travels as bytes. */
+type PlanPinWire = { type: "plan_pin"; pin: PinPost["pin"]; gitMs?: number; text?: { bytes: Uint8Array; labels: string[]; ends: number[] } };
+
+function planPinForChild({ pin, text, gitMs }: PinPost): PlanPinWire {
+  return { type: "plan_pin", pin, ...(gitMs === undefined ? {} : { gitMs }),
+    ...(text ? { text: { bytes: Buffer.from(new Uint8Array(text.buffer)), labels: text.labels, ends: text.ends } } : {}) };
+}
+
+/** The child's side of {@link planPinForChild}, or undefined for any other message. */
+function planPinFromParent(msg: unknown): PinPost | undefined {
+  const wire = msg as Partial<PlanPinWire> | null;
+  if (wire?.type !== "plan_pin" || !wire.pin) return undefined;
+  if (!wire.text || !(wire.text.bytes instanceof Uint8Array)) return { pin: wire.pin, ...(wire.gitMs === undefined ? {} : { gitMs: wire.gitMs }) };
+  const buffer = new SharedArrayBuffer(wire.text.bytes.byteLength);
+  new Uint8Array(buffer).set(wire.text.bytes);
+  return { pin: wire.pin, text: { buffer, labels: wire.text.labels, ends: wire.text.ends }, ...(wire.gitMs === undefined ? {} : { gitMs: wire.gitMs }) };
 }
 
 /** W1-T13205: wrap a forked read-model child as a {@link ReadModelWorkerPort}. */
@@ -2658,6 +2676,8 @@ export function runReadModelProcessChild(): void {
     const listeners: Array<(msg: { type?: string }) => void> = [];
     process.on("message", (raw: unknown) => {
       const msg = catalogReplyFromParent(raw) as { type?: string; GH_TOKEN?: string | null };
+      const pinned = planPinFromParent(msg);
+      if (pinned) return void acceptForwardedThreadPlan(pinned, (step, extra) => send({ type: "log", step, extra: extra ?? {} }));
       if (msg?.type === "env") {
         if (typeof msg.GH_TOKEN === "string") process.env.GH_TOKEN = msg.GH_TOKEN;
         else delete process.env.GH_TOKEN;
@@ -3217,6 +3237,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   };
 
   let closeCatalogBridge = (): void => {};
+  // W1-T14052: a child process hears no BroadcastChannel; this stops forwarding serve's plan pins to the last one.
+  let stopPlanForward = (): void => {};
   const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
@@ -3286,6 +3308,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       signal = undefined;
       worker = spawned;
       sendToken();
+      stopPlanForward();
+      stopPlanForward = forwardThreadPlans((pinned) => {
+        if (worker === spawned && !stopping && !paused) spawned.postMessage(planPinForChild(pinned));
+      });
     } else {
       // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
       const thread = startWorker(import.meta.url, { name: threadName("readModel"), workerData: data, env: SHARE_ENV }, { override: opts.workerUrl });
@@ -3314,6 +3340,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
       catalogBridge.close();
+      if (worker === spawned) stopPlanForward();
       if (worker !== spawned || stopping) return;
       worker = undefined;
       deaths++;
@@ -3441,6 +3468,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     stop: () => {
       stopping = true;
       closeCatalogBridge();
+      stopPlanForward();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
@@ -3474,6 +3502,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       if (stopping || paused || !started) return false;
       paused = true;
       closeCatalogBridge();
+      stopPlanForward();
       stopSwitchWatch();
       clearTimeout(respawnTimer);
       const running = worker;
