@@ -266,3 +266,54 @@ test("W1-T13859 criterion 6: rmd restore reverses live operator declines and exp
   assert.deepEqual(readdirSync(skills), ["existing.md"]);
   assert.equal(readFileSync(join(skills, "existing.md"), "utf8"), "existing skill\n");
 });
+
+test("W1-T13859 criterion 6: rmd restore reopens live declines and expiries beside a malformed row in a readable archive", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-torn-archive-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const ledgerPath = ledgerLivePath(stateDir);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  const skills = join(root, ".claude", "skills");
+  mkdirSync(stateDir);
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(join(skills, "existing.md"), "existing skill\n");
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  assert.deepEqual(writeDaemonTargetRecord(stateDir, {
+    owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: root,
+  }), { written: true });
+
+  const expired = "skill-draft:expired";
+  const declined = "skill-draft:declined";
+  const clock = fixedClock(Date.parse("2026-11-19T12:00:00Z"));
+  t.mock.method(systemClock, "now", clock.now);
+  const markdown = "---\nname: proc\n---\n";
+  writeFileSync(registryPath, JSON.stringify({ proposals: [expired, declined].map((id) => ({
+    id, summary: markdown, evidenceAnchors: [], skillFile: { name: "proc", markdown },
+  })) }));
+  writeFileSync(inboxFirstSeenPath(stateDir), JSON.stringify({
+    backfill: "2026-10-13", answered: "2026-11-01", [expired]: "2026-11-01",
+  }));
+  appendLedger(ledgerPath, { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" });
+  const log = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra }, { expectedLiveVersion });
+  const expire = () => expireUnansweredSkillDrafts(registryPath, stateDir, log, clock);
+  assert.deepEqual(expire().expired, [expired]);
+  const config = { root } as never;
+  assert.equal(proposalVerdictCliCommand("decline", [declined, "--reason", "operator decline"], config), 0);
+  t.mock.method(systemClock, "now", () => clock.now() + 1000);
+  // One unrelated malformed row in an archive that gunzips cleanly; the live ledger is intact.
+  const malformed = join(stateDir, compactedArchiveName("2026-10-31T00:00:00Z"));
+  writeFileSync(malformed, gzipSync(`${JSON.stringify({ step: "unrelated", task_id: "other", ts: "2026-10-30T00:00:00Z" })}\n{"step":"unrel\n`));
+  const registry = readFileSync(registryPath);
+  for (const id of [declined, expired]) {
+    assert.equal(proposalVerdictCliCommand("restore", [id, "--reason", "keep open"], config), 0, `restore ${id}`);
+  }
+  assert.deepEqual(readLedgerLines(ledgerPath).filter((r) => r.step === "panel.proposal_restored").map((r) => r.task_id), [declined, expired]);
+  // Expiry still refuses the incomplete union, so the restored draft stays open.
+  assert.match(expire().reason, /incomplete ledger union: 0 unread file\(s\), 1 torn row\(s\)/);
+  rmSync(malformed);
+  assert.deepEqual(expire().expired, []);
+  assert.deepEqual(readFileSync(registryPath), registry);
+  assert.deepEqual(readdirSync(skills), ["existing.md"]);
+});
