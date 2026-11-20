@@ -14,7 +14,7 @@
  * cycle. TypeScript's structural typing means a real `ProceduralCandidate` satisfies this shape
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -24,7 +24,7 @@ import { withInflightLock } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { ledgerLivePath, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import {
   mineTranscriptWorkflows,
@@ -530,7 +530,9 @@ function closeSkillDraft(
     const at = clock.iso();
     const closeId = randomUUID();
     const step = "panel.proposal_declined";
-    log(step, { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason, skill_draft_close_id: closeId });
+    const skillSha256 = storedSkillSha256(entry);
+    log(step, { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason,
+      skill_draft_close_id: closeId, skill_draft_sha256: skillSha256 });
 
     // appendLedger can return after a short write. Confirm this attempt in the ledger, including rotations.
     const stateDir = dirname(registryPath);
@@ -538,7 +540,7 @@ function closeSkillDraft(
     const { rows } = readLedgerUnionRecordsSync(stateDir, {
       step, since: at, liveFirst: true, pattern: new RegExp(closeId),
       where: (row) => row.skill_draft_close_id === closeId && row.task_id === proposalId &&
-        row.origin === SKILL_WORKSHOP_ORIGIN && row.reason === reason,
+        row.origin === SKILL_WORKSHOP_ORIGIN && row.reason === reason && row.skill_draft_sha256 === skillSha256,
       satisfied: (steps) => steps.has(step),
     }, {
       ...realLedgerFs,
@@ -549,7 +551,7 @@ function closeSkillDraft(
       },
     });
     if (rows.length === 0) throw new Error(`could not confirm the workshop decline for ${proposalId} in the ledger`);
-    const skillDraftClose = { at, reason, skillSha256: storedSkillSha256(entry) };
+    const skillDraftClose = { at, reason, skillSha256 };
     return current.map((p) => p === entry ? { ...p, skillDraftClose } : p);
   }) !== null;
 }
@@ -1606,20 +1608,54 @@ export function withSkillDraftVerdictLock<T>(stateDir: string, proposalId: strin
 /** `bound` is in ms; `sample` counts the answered proposals it was measured over. */
 export type SkillDraftExpiryBound = { bound: number; sample: number } | { unmeasured: string };
 
-/** The longest first-seen-to-first-answer wait from the complete ledger. */
-export function skillDraftExpiryBound(stateDir: string): SkillDraftExpiryBound {
-  const union = readLedgerUnionRecordsSync(stateDir, { step: SKILL_DRAFT_ANSWER_STEPS, refuseIncomplete: true });
-  return measureSkillDraftWaits(readInboxFirstSeen(stateDir), union);
+type SkillDraftLedgerRows = LedgerUnionRecordRead["rows"];
+
+function readSkillDraftLedger(stateDir: string, step: readonly string[]): { rows: SkillDraftLedgerRows } | { unmeasured: string } {
+  const livePath = ledgerLivePath(stateDir);
+  const liveIdentity = () => statSync(livePath, { throwIfNoEntry: false });
+  try {
+    const before = liveIdentity();
+    let unterminated = 0;
+    const union = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete: true }, {
+      ...realLedgerFs,
+      readFileSync: (path) => {
+        const bytes = realLedgerFs.readFileSync(path);
+        if (path !== livePath || bytes.length === 0 || bytes[bytes.length - 1] === 0x0a) return bytes;
+        // A short write can leave valid JSON, but the next append would join the two rows.
+        unterminated = 1;
+        return bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1);
+      },
+    });
+    const torn = union.torn + unterminated;
+    if (!union.ok || torn > 0) {
+      return { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${torn} torn row(s)` };
+    }
+
+    // A rotation can publish a new archive after the union lists archives and before it reads live.
+    const archives = ledgerRotationEntries(realLedgerFs.readdirSync(stateDir), stateDir);
+    const after = liveIdentity();
+    if (before?.dev !== after?.dev || before?.ino !== after?.ino || archives.length !== union.archiveFiles.length ||
+        archives.some(({ path }, index) => path !== union.archiveFiles[index])) {
+      return { unmeasured: "incomplete ledger union: ledger rotated during read" };
+    }
+    return { rows: union.rows };
+  } catch (error) {
+    const reason = `incomplete ledger union: could not verify ledger files: ${String(error)}`;
+    return { unmeasured: reason };
+  }
 }
 
-function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, union: LedgerUnionRecordRead): SkillDraftExpiryBound {
-  if (!union.ok || union.torn > 0) {
-    return { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${union.torn} torn row(s)` };
-  }
+/** The longest first-seen-to-first-answer wait from the complete ledger. */
+export function skillDraftExpiryBound(stateDir: string): SkillDraftExpiryBound {
+  const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_ANSWER_STEPS);
+  return "unmeasured" in union ? union : measureSkillDraftWaits(readInboxFirstSeen(stateDir), union.rows);
+}
+
+function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, rows: SkillDraftLedgerRows): SkillDraftExpiryBound {
   // The earliest stamp is backfilled, and workshop declines would feed the bound back into itself.
   const earliest = Object.values(firstSeen).reduce((min, at) => Math.min(min, Date.parse(at)), Infinity);
   const firstAnswer = new Map<string, number>();
-  for (const row of union.rows) {
+  for (const row of rows) {
     if (typeof row.task_id !== "string" || typeof row.ts !== "string" || !SKILL_DRAFT_ANSWER_STEPS.includes(String(row.step))) continue;
     if (row.origin === SKILL_WORKSHOP_ORIGIN || firstSeen[row.task_id] === undefined) continue;
     const seenMs = Date.parse(firstSeen[row.task_id]!);
@@ -1632,6 +1668,14 @@ function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, uni
   let bound = 0;
   for (const [id, at] of firstAnswer) bound = Math.max(bound, at - Date.parse(firstSeen[id]!));
   return { bound, sample: firstAnswer.size };
+}
+
+/** Called after checking the current verdict. A restore can outlive a failed close-record write. */
+function hasSkillDraftExpiryReceipt(proposal: Proposal, rows: SkillDraftLedgerRows): boolean {
+  const skillSha256 = storedSkillSha256(proposal);
+  return rows.some((row) => row.task_id === proposal.id && row.step === "panel.proposal_declined" &&
+    row.origin === SKILL_WORKSHOP_ORIGIN && typeof row.reason === "string" && row.reason.startsWith("expired:") &&
+    row.skill_draft_sha256 === skillSha256);
 }
 
 /** One expiry pass: the ids it closed, and a line the retro prints. */
@@ -1670,13 +1714,16 @@ export function expireUnansweredSkillDrafts(
   clock: Pick<Clock, "iso" | "now">,
 ): SkillDraftExpiryPass {
   const firstSeen = readInboxFirstSeen(stateDir);
-  const readVerdicts = () => readLedgerUnionRecordsSync(stateDir, {
-    step: [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"], refuseIncomplete: true,
-  });
-  const union = readVerdicts();
-  let measured = measureSkillDraftWaits(firstSeen, union);
+  const readMeasuredLedger = () => {
+    const union = readSkillDraftLedger(stateDir, [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"]);
+    if ("unmeasured" in union) return union;
+    const measured = measureSkillDraftWaits(firstSeen, union.rows);
+    return "unmeasured" in measured ? measured : { ...measured, rows: union.rows };
+  };
+  let measured = readMeasuredLedger();
   if ("unmeasured" in measured) return { expired: [], reason: `no skill draft expires: ${measured.unmeasured}` };
-  const verdicts = ledgerProposalVerdicts(union.rows);
+  const rows = measured.rows;
+  const verdicts = ledgerProposalVerdicts(rows);
   const now = clock.now();
   const days = (ms: number): string => (ms / DAY_MS).toFixed(2);
   const expired: string[] = [];
@@ -1684,16 +1731,16 @@ export function expireUnansweredSkillDrafts(
     if (!proposal.id.startsWith(SKILL_DRAFT_ID_PREFIX) || !proposal.skillFile) continue;
     if (verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined || workshopClosedSkillDraft(proposal)) continue;
     const age = now - Date.parse(firstSeen[proposal.id] ?? "");
-    if (!(age > measured.bound)) continue;
+    if (!(age > measured.bound) || hasSkillDraftExpiryReceipt(proposal, rows)) continue;
     const closed = withSkillDraftVerdictLock(stateDir, proposal.id, () =>
       closeSkillDraft(registryPath, proposal.id, (entry) => {
         if (!entry.skillFile) return undefined;
         // Re-read under both locks. An answer may have landed since the pass began and extended the bound.
-        const current = readVerdicts();
-        measured = measureSkillDraftWaits(firstSeen, current);
+        measured = readMeasuredLedger();
         if ("unmeasured" in measured || age <= measured.bound) return undefined;
-        const currentVerdicts = ledgerProposalVerdicts(current.rows);
+        const currentVerdicts = ledgerProposalVerdicts(measured.rows);
         if (currentVerdicts.isRatified(entry.id) || currentVerdicts.isDeclined(entry.id) !== undefined) return undefined;
+        if (hasSkillDraftExpiryReceipt(entry, measured.rows)) return undefined;
         return `expired: unanswered for ${days(age)} days; the longest wait of any answered proposal is ` +
           `${days(measured.bound)} days (${measured.sample} answered)`;
       }, log, clock));

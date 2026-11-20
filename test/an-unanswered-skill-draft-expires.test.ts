@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { fixedClock } from "#src/lib/clock.js";
-import { ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
+import { applyProposalVerdict, ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
 import { appendLedger } from "#src/lib/ledger.js";
-import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
 import { inboxFirstSeenPath } from "#src/lib/panel-graph.js";
 import { expireUnansweredSkillDrafts, reportSkillDraftExpiry, skillDraftExpiryBound } from "#src/lib/skill-workshop.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -123,6 +123,69 @@ test("W1-T13859 criterion 1: the bound is the longest first-seen-to-first-answer
     assert.deepEqual(skillDraftExpiryBound(s.stateDir), {
       unmeasured: "incomplete ledger union: 0 unread file(s), 1 torn row(s)",
     });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 1: a rotation between listing and reading live cannot shrink the measured bound", (t) => {
+  const s = site();
+  try {
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({ backfill: BACKFILL, short: "2026-10-20", long: "2026-10-21" }));
+    row(s, "ratify.approved", "short", "2026-10-22T00:00:00.000Z");
+    const retained = readFileSync(s.ledgerPath);
+    row(s, "panel.proposal_declined", "long", "2026-11-05T00:00:00.000Z");
+    const measured = { bound: 15 * DAY, sample: 2 };
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
+
+    const list = realLedgerFs.readdirSync;
+    const rotate = t.mock.method(realLedgerFs, "readdirSync", (dir: string) => {
+      const names = list(dir);
+      writeFileSync(join(dir, "ledger.2026-11-18T00-00-00-000Z.ndjson.gz"), gzipSync(readFileSync(s.ledgerPath)));
+      writeFileSync(s.ledgerPath, retained);
+      return names;
+    }, { times: 1 });
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured: "incomplete ledger union: ledger rotated during read" });
+    assert.equal(rotate.mock.callCount(), 1);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), measured);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 1: a replaced live ledger invalidates the read even with identical archive names", (t) => {
+  const s = site();
+  try {
+    answered(s, {});
+    const list = realLedgerFs.readdirSync;
+    const replace = t.mock.method(realLedgerFs, "readdirSync", (dir: string) => {
+      const names = list(dir);
+      const replacement = join(dir, "replacement");
+      writeFileSync(replacement, readFileSync(s.ledgerPath));
+      renameSync(replacement, s.ledgerPath);
+      return names;
+    }, { times: 1 });
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured: "incomplete ledger union: ledger rotated during read" });
+    assert.equal(replace.mock.callCount(), 1);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 7.5 * DAY, sample: 2 });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: a failed archive inventory recheck leaves expiry unmeasured", (t) => {
+  const s = site();
+  try {
+    drafts(s);
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
+    const list = realLedgerFs.readdirSync;
+    let reads = 0;
+    t.mock.method(realLedgerFs, "readdirSync", (dir: string) => {
+      reads += 1;
+      if (reads === 2) throw new Error("could not list rotations");
+      return list(dir);
+    });
+    assert.deepEqual(pass(s), {
+      expired: [], reason: "no skill draft expires: incomplete ledger union: could not verify ledger files: Error: could not list rotations",
+    });
+    assert.equal(reads, 2);
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
   } finally { s.done(); }
 });
 
@@ -243,6 +306,22 @@ test("W1-T13859 criterion 4: expiry stops if an approval tears after its first r
   } finally { s.done(); }
 });
 
+test("W1-T13859 criterion 4: a valid JSON live tail without a newline leaves both stores unchanged and retro prints why", () => {
+  const s = site();
+  try {
+    drafts(s);
+    appendFileSync(s.ledgerPath, JSON.stringify({ step: "ratify.approved", task_id: "other", ts: clock.iso() }));
+    assert.equal(union(s).torn, 0, "the final object parses without its newline");
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.deepEqual(printed, ["skill drafts: no skill draft expires: incomplete ledger union: 0 unread file(s), 1 torn row(s)"]);
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+  } finally { s.done(); }
+});
+
 test("W1-T13859 criterion 5: the workshop's own expiry declines never enter the sample", () => {
   const s = site();
   try {
@@ -302,5 +381,45 @@ test("W1-T13859 criterion 6: invariant:approve-only-writes-skills an expiry writ
     assert.equal(declinesOf(s, "skill-draft:old").length, 1, "the restored draft is not closed again");
     assert.equal(ledgerProposalVerdicts(rows(s)).isDeclined("skill-draft:old"), undefined);
     assert.deepEqual(treeOf(join(s.root, ".claude")), tree);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 6: restoring after a failed registry write keeps that text open", (t) => {
+  const s = site();
+  try {
+    drafts(s);
+    const proposalId = "skill-draft:old";
+    const registry = readFileSync(s.registryPath);
+    const skills = join(s.root, ".claude", "skills");
+    mkdirSync(skills, { recursive: true });
+    writeFileSync(join(skills, "existing.md"), "existing skill\n");
+    const tree = treeOf(skills);
+    const rename = fs.renameSync;
+    const write = t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+      if (to === s.registryPath) throw new Error("registry rename failed");
+      return rename(from, to);
+    });
+    try {
+      assert.throws(() => pass(s), /registry rename failed/);
+    } finally { write.mock.restore(); }
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.equal(declinesOf(s, proposalId).length, 1);
+    assert.match(ledgerProposalVerdicts(rows(s)).isDeclined(proposalId) ?? "", /^expired:/);
+    assert.deepEqual(applyProposalVerdict("restore", { proposalId, reason: "still considering it" }, {
+      exists: true, classification: { proposalId, state: "declined", reasons: [] },
+    }, (step, id, reason) => row(s, step, id, "2026-11-19T13:00:00.000Z", { reason, origin: "rmd-cli" })), { ok: true });
+
+    assert.deepEqual(pass(s).expired, []);
+    assert.equal(declinesOf(s, proposalId).length, 1);
+    assert.equal(ledgerProposalVerdicts(rows(s)).isDeclined(proposalId), undefined);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    assert.deepEqual(treeOf(skills), tree);
+
+    const markdown = `${SKILL_MARKDOWN}\n- Verify the revised draft.\n`;
+    const revised = skillDraft(proposalId, { skillFile: { name: "skill-draft-old", markdown } });
+    writeFileSync(s.registryPath, JSON.stringify({ proposals: [revised] }));
+    assert.deepEqual(pass(s).expired, [proposalId]);
+    assert.deepEqual(declinesOf(s, proposalId).map((row) => row.skill_draft_sha256), [sha(SKILL_MARKDOWN), sha(markdown)]);
+    assert.deepEqual(treeOf(skills), tree);
   } finally { s.done(); }
 });
