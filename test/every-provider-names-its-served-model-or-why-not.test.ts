@@ -103,11 +103,12 @@ test("a Foundry Opus cash response records the model its message names, on succe
   assert.equal(truncated.servedModel, "claude-opus-5-5-20260920");
 });
 
-test("a multi-response cash attempt reports a model only when every response named the same one", () => {
+test("a multi-response cash attempt records the latest model a response named, and a reason only when none did", () => {
   assert.deepEqual(cashServedModel(["gpt-oss-120b", "gpt-oss-120b"]), { servedModel: "gpt-oss-120b" });
-  assert.deepEqual(cashServedModel(["gpt-oss-120b", "gpt-5-nano"]),
-    { servedModel: null, servedModelReason: `${CASH_SERVED_MODEL_REASONS.mixed}: gpt-5-nano, gpt-oss-120b` });
-  assert.deepEqual(cashServedModel(["gpt-oss-120b", undefined]),
+  // W1-T13868: a name the call received is never dropped because another response omitted or changed it.
+  assert.deepEqual(cashServedModel(["gpt-oss-120b", "gpt-5-nano"]), { servedModel: "gpt-5-nano" });
+  assert.deepEqual(cashServedModel(["gpt-oss-120b", undefined]), { servedModel: "gpt-oss-120b" });
+  assert.deepEqual(cashServedModel([undefined, undefined]),
     { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed });
   assert.deepEqual(cashServedModel([]), { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse });
   assert.equal(cashResponseModel("gpt-5-nano-2025-08-07"), "gpt-5-nano-2025-08-07");
@@ -209,10 +210,14 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.deepEqual(codexServedModel(["gpt-5.1", "gpt-5.2"]), { servedModel: "gpt-5.2" }, "the latest reported name wins");
   assert.deepEqual(codexServedModel([]), { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON });
 
-  // A GPT call over the OpenAI-compatible cash path names what its response named, or why not.
-  const gpt = await runCash(cashReply({ model: "gpt-6.2-sol-2026-10-01" }), "gpt-6.2-sol");
-  assert.equal(gpt.servedModel, "gpt-6.2-sol-2026-10-01");
-  const gptUnnamed = await runCash(cashReply({}), "gpt-6.2-sol");
+  // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
+  // so the recorded name comes from a real answer, not from an error result.
+  const gpt = await runCash(cashReply({ model: "gpt-5-nano-2025-08-07" }), "gpt-5-nano");
+  assert.equal(gpt.isError, false, gpt.stderr);
+  assert.equal(gpt.servedModel, "gpt-5-nano-2025-08-07");
+  assert.equal(workerLedgerFields(gpt as WorkerResult).served_model, "gpt-5-nano-2025-08-07");
+  const gptUnnamed = await runCash(cashReply({}), "gpt-5-nano");
+  assert.equal(gptUnnamed.isError, false, gptUnnamed.stderr);
   assert.equal(gptUnnamed.servedModel, null);
   assert.equal(gptUnnamed.servedModelReason, CASH_SERVED_MODEL_REASONS.unnamed);
 });

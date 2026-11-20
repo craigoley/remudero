@@ -5556,12 +5556,10 @@ export function cashResponseModel(model: unknown): string | undefined {
  */
 export function cashServedModel(named: readonly (string | undefined)[]): { servedModel: string | null; servedModelReason?: string } {
   if (named.length === 0) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse };
-  if (named.some((model) => model === undefined)) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed };
-  const distinct = [...new Set(named)].sort();
-  if (distinct.length > 1) {
-    return { servedModel: null, servedModelReason: `${CASH_SERVED_MODEL_REASONS.mixed}: ${distinct.join(", ")}` };
-  }
-  return { servedModel: distinct[0]! };
+  // W1-T13868: a call that received a model name records it, even when another response omitted or changed it. The
+  // latest named response wins: it produced the attempt's final answer. Never the requested deployment.
+  const latest = named.findLast((model) => model !== undefined);
+  return latest === undefined ? { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } : { servedModel: latest };
 }
 
 function openWeightResult(input: {
