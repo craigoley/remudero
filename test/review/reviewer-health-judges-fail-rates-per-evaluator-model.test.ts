@@ -17,6 +17,7 @@ import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
 import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
+import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 type Row = Record<string, unknown>;
@@ -145,6 +146,41 @@ test("W1-T13850 criterion 1: a posted verdict keeps its evaluator and state, and
   assert.deepEqual(health.judgeEvaluatorModels(loaded), []);
   health.ingestReviewerHealthRows(loaded, [verdict(sha, SOL, "failure")]);
   assert.deepEqual(health.evaluatorModelCounts(loaded, sha), { "gpt-6.2-sol": { provider: "codex", pass: 0, fail: 1 } });
+});
+
+test("deferred SHA attribution preserves both evaluator verdicts and pending holds", (t) => {
+  for (const attribution of ["daemon.boot", "review.ran_from_fresh_tree"]) {
+    const sha = fake(attribution);
+    const state = health.emptyReviewerHealthState();
+    const posted = verdict(sha, SOL, "failure", { reviewer_code_sha: undefined });
+    const held = verdict(sha, SOL, "failure", { reviewer_code_sha: undefined });
+    const heldUnit = `${held.pr_url}#${held.head_sha}`;
+    const firstHold = {
+      ...held, step: "review.semantic_incomplete", reason: DOWNGRADE_UNCLASSIFIED,
+      reviewer_outcome: "success", review_input_digest: "first-input",
+    };
+    if (attribution === "daemon.boot") {
+      health.ingestReviewerHealthRows(state, [{ step: attribution, host: posted.host, head_sha: sha }]);
+    }
+    health.ingestReviewerHealthRows(state, [firstHold, posted]);
+    const statePath = join(ownedFixtureDir(t, "reviewer-health-pending").dir, "reviewer-health.json");
+    health.saveReviewerHealthState(statePath, state);
+    const loaded = health.loadReviewerHealthState(statePath);
+    const attributionRows = attribution === "daemon.boot"
+      ? [{ step: attribution, host: posted.host, head_sha: sha }]
+      : [held, posted].map((row) => ({
+        step: attribution, host: row.host, origin_main_sha: sha, pr: String(row.pr_url).split("/").at(-1),
+      }));
+    health.ingestReviewerHealthRows(loaded, attributionRows);
+    assert.equal(loaded.shas[sha]!.units[heldUnit], "withheld-pending", attribution);
+    assert.deepEqual(health.shaCounts(loaded.shas[sha]!), { k: 0, n: 1 }, attribution);
+    assert.deepEqual(health.evaluatorModelCounts(loaded, sha), { [SOL.model]: { provider: SOL.provider, pass: 0, fail: 1 } });
+
+    health.ingestReviewerHealthRows(loaded, [{ ...firstHold, reviewer_code_sha: sha, ts: tick() }]);
+    assert.equal(loaded.shas[sha]!.units[heldUnit], "withheld-success", attribution);
+    assert.deepEqual(health.shaCounts(loaded.shas[sha]!), { k: 1, n: 2 }, attribution);
+    assert.deepEqual(health.evaluatorModelCounts(loaded, sha), { [SOL.model]: { provider: SOL.provider, pass: 0, fail: 1 } });
+  }
 });
 
 test("W1-T13850 criterion 2: the 11-19 counts read gpt-6.2-sol diverged and one reviewer.model_divergence row names it", async (t) => {

@@ -19,6 +19,8 @@
     - src/lib/host-memory-learning.ts
     - src/lib/sweep.ts
     - test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts
+    - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -68,5 +70,6 @@
     fallback label: criterion 2 fails. Drop the reason: criterion 3 fails. Read fix samples from the 256 KiB tail:
     criterion 4 fails. Drop the row field: criterion 5 fails.
   note: |
+    files: amendment 2026-11-20 (operator, approving the recommendation on the #19776 clarification): acceptance-author-gate refused #19776 as canonical-task-scope-exceeded for test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts, test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts; each is a change the build needs.
     The operator approved loosening the admission charge on 2026-11-19.
     Id reserved for run-unfiled-1795124491000 with ~/rmd-work/bin/reserve-id.sh.

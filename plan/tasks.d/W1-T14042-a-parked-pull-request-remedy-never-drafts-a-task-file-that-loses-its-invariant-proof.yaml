@@ -1,0 +1,121 @@
+- id: W1-T14042
+  title: "A parked pull request remedy never drafts a task file that loses its invariant proof: a split keeps each invariant criterion in its task, and a draft the plan lint refuses moves the ladder on in the same pass"
+  repo: remudero
+  depends_on:
+    - W1-T13944
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which remedy a parked pull request gets; a wrong choice closes a pull request or keeps it waiting
+  origin: "operator-session#split-refused-by-design-invariant-proof-2026-11-20"
+  plan_refs:
+    - W1-T12709
+    - W1-T11746
+    - W1-T12832
+    - W1-T13830
+    - W1-T13944
+  files:
+    - src/lib/parked-pr-remedy.ts
+    - test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts
+    - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
+    - test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts
+    - test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:invariant-proof-stays — parkedPrRemedy never names split-follow-up when an input criterion's claim maps an invariant (INVARIANT_CLAIM_RE); with the stall ladder spent it names close-and-rebuild. remedyStalledCriterion on a fixture shaped like W1-T13865 (an implement task with one INVARIANT line whose invariant: criterion stalled) lands one held rebuild whose design and acceptance equal the parent's, edits no parent task file, closes the pull request and writes one taken row"
+      kind: guard
+      proof: "grep: W1-T14042 criterion 1: in test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts"
+    - claim: "A split of a criterion that maps no invariant, from a task whose design has two INVARIANT lines (the W1-T13859 and W1-T13829 shape), keeps every INVARIANT line and every invariant: criterion in the parent; the held follow-up's design has no INVARIANT line and one NO-INVARIANTS line that names the parent; invariantSlugViolations, with requireDesignInvariantDeclaration set as the changed-task pass sets it, returns no violation for either drafted task"
+      proof: "grep: W1-T14042 criterion 2: in test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts"
+    - claim: "For an implement task whose design declares neither form (the W1-T10331 and W1-T12169 shape, filed before W1-T11746), the split's parent edit and held follow-up, and the close-and-rebuild's held rebuild, each carry one NO-INVARIANTS line that names the parent as filed before declared invariants; invariantSlugViolations returns no violation for each, and the parent's other criteria and design lines are unchanged"
+      proof: "grep: W1-T14042 criterion 3: in test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts"
+    - claim: "invariant:no-refused-draft — for a parent whose drafts still fail design-invariant-proof (the W1-T12270 shape: an INVARIANT line with no invariant: criterion), takeParkedPrRemedy reserves no id, calls landTaskFiles zero times, and writes one refused row with refusal_checks [design-invariant-proof] and its input_digest"
+      kind: guard
+      proof: "grep: W1-T14042 criterion 4: in test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts"
+    - claim: "invariant:a-verdict-moves-the-ladder — a remedy refused by a verdict on its own draft (the in-process lint, the W1-T13830 guard, or a landing that returns refusalChecks) is spent for that call: actOnParkedPr and remedyStalledCriterion each take the ladder's next remedy in the same call, ending in fix-on-pr or W1-T13361's one needs-human issue; a landing error with no refusalChecks returns the error and takes no next remedy, as on origin/main"
+      kind: guard
+      proof: "grep: W1-T14042 criterion 5: in test/sweep/a-split-keeps-the-invariant-proof-in-its-task.test.ts"
+    - claim: the remedy lints its drafted task files with the plan linter's invariant rule before it reserves an id
+      proof: "grep: invariantSlugViolations( in src/lib/parked-pr-remedy.ts"
+  rationale: |
+    WHY: the sweep's split-follow-up remedy has never landed. The rotated fleet ledgers (read-only,
+    ~/rmd-state2/state/ledger.*.ndjson.gz and ledger.ndjson) hold 1022 parked_pr.remedy rows from
+    2026-11-16T05:44Z to 2026-11-20T16:21Z. All 79 split-follow-up rows are refused; none is taken.
+    107 refused rows, from 2026-11-19T06:26Z to 2026-11-20T16:08Z, name design-invariant-proof:
+    - split-follow-up, 66 rows: W1-T10331 (#19605) 47, W1-T13865 (#19767) 15, W1-T13819 (#19699) 2,
+      W1-T13859 (#19830) 1, W1-T13829 (#19701) 1.
+    - close-and-rebuild, 41 rows: W1-T12041 (#19695) 26, W1-T12169 (#19651) 9, W1-T12270 (#19655) 6.
+    Each reason reads "the task files did not land: the plan preflight refused it: [lint-plan] ...
+    [design-invariant-proof]". The pull request then waits, and the next pass tries the same draft
+    again (#19767: 15 tries, the last at 16:05Z). This was one cause of the duplicate held follow-ups
+    that W1-T13944 fixes; its note leaves this cause out of scope.
+    OBSERVED in code (src/lib/parked-pr-remedy.ts heldTaskFiles, src/lib/task-linter.ts
+    invariantSlugViolations, src/run-task.ts requireDesignInvariantDeclaration):
+    1. The rule applies to a task that is new, whose design or criteria changed, or whose design
+       declares a form (designContractChanged || declaresDesignInvariant). A held task is new and a
+       split parent loses criteria, so the rule applies to every drafted file.
+    2. Moved criterion maps an invariant (W1-T13865 invariant:no-round-at-an-unchanged-ruling,
+       W1-T13829 invariant:one-line-per-shard): the parent keeps the INVARIANT line and loses its
+       claim, so "invariant X has no acceptance claim (missing)".
+    3. The held follow-up copies the parent's whole design, with every INVARIANT line, but carries
+       only the moved criteria (W1-T13859, W1-T13819, W1-T13829): the same "missing" refusal.
+    4. A parent filed before W1-T11746 declares neither form (W1-T10331, W1-T12169, W1-T12041 until
+       #19879 added NO-INVARIANTS at 15:54Z): both the held copy and the edited parent are refused with
+       "design declares neither". W1-T12270 declares an INVARIANT with no claim, so any copy is refused.
+    5. remedyStalledCriterion calls takeParkedPrRemedy alone, so a refused split there never reaches
+       the next remedy. actOnParkedPr moves on only when the W1-T13830 guard matches, and compaction
+       drops the refused rows that guard reads.
+  design: |
+    INVARIANT invariant-proof-stays: a split never moves an invariant: criterion out of its task and never removes an INVARIANT line from the parent; a task with a stalled invariant criterion is rebuilt whole or fixed on its pull request, so no pull request merges without its invariant proof.
+    INVARIANT no-refused-draft: the remedy reserves no id and lands nothing for a draft that the plan linter's invariant rule refuses.
+    INVARIANT a-verdict-moves-the-ladder: a remedy refused by a verdict on its own draft is spent for that call and the ladder's next remedy runs at once; a transient landing error is tried again on the next pass, as on origin/main.
+    CHOICE: keep the invariant proof with its task. Moving the INVARIANT line with the criterion
+    would let the parent merge without the proof its design promised. Asking the operator first would
+    leave the pull request waiting. So an invariant criterion that needs input makes the task a held
+    rebuild with its whole contract, and every other split keeps the parent valid.
+    1. parkedPrRemedy: split-follow-up applies only when no input criterion's claim matches
+       INVARIANT_CLAIM_RE (src/lib/task-linter.ts). Otherwise the ladder goes on as today
+       (close-and-rebuild when a criterion is ladder-spent, else fix-on-pr). No new remedy name.
+    2. heldTaskFiles, split: the parent keeps its design unchanged. The held follow-up's design is the
+       parent's with each line INVARIANT_DECL_RE or NO_INVARIANTS_RE matches removed, plus one line
+       "NO-INVARIANTS: this held follow-up of <parent> carries only criteria that map no invariant;
+       <parent> keeps its invariants and their proofs." When the parent declares neither form, both
+       the parent edit and the held follow-up gain one line "NO-INVARIANTS: <parent> was filed before
+       declared invariants (W1-T11746) and declares none; this edit only moves criteria."
+    3. heldTaskFiles, close-and-rebuild: the held rebuild keeps the parent's design and criteria.
+       When the parent declares neither form it gains the same filed-before line.
+    4. takeParkedPrRemedy: before host.reserveTaskId, draft the files with a placeholder id and run
+       invariantSlugViolations on each drafted task, with requireDesignInvariantDeclaration set by
+       designContractChanged(base, draft) || declaresDesignInvariant(draft), where base is the parent
+       task for the parent edit and undefined for a new held task, and taskRepoOwner from the target. On a violation, write one refused row (reason names the check and its first
+       message, refusal_checks ["design-invariant-proof"], input_digest) and return unchanged: true
+       with no reservation and no landing. Otherwise reserve and draft again with the real id.
+    5. actOnParkedPr: treat a landing that returned refusalChecks like an unchanged outcome: add the
+       remedy to spent and take parkedPrRemedy(facts, spent), or askPerson when none is left. A
+       landing error without refusalChecks keeps today's wait and retry.
+    6. remedyStalledCriterion: build its facts as today and call actOnParkedPr (not takeParkedPrRemedy),
+       returning that outcome. Its caller in src/lib/sweep.ts (near line 14317) reads only .reason, so
+       sweep.ts does not change.
+    7. Tests: the new file holds one test per criterion, titled "W1-T14042 criterion N: ...". Build
+       fixture shards inline with type: implement and a design, shaped like the real W1-T13865,
+       W1-T13859, W1-T10331 and W1-T12270 shards; do not read plan/ at run time. Run the three listed
+       remedy suites; their fixtures are implement tasks with no design, so they now get the
+       filed-before line. Change their expected text only where they compare whole drafted files.
+    No new cap, constant, env var or config key. Use test/helpers and load test/setup/tmp-hygiene.ts
+    if a test makes a temporary folder.
+  falsifier: |
+    At origin/main criterion 1's fixture names split-follow-up, and the drafted parent fails
+    invariantSlugViolations with "has no acceptance claim (missing)". Copy the parent's design into
+    the held follow-up unchanged: criterion 2 fails the same way on the held task. Skip the
+    filed-before line: criterion 3 fails with "design declares neither". Remove the in-process lint:
+    criterion 4's fixture reserves an id and calls landTaskFiles. Make actOnParkedPr return a wait
+    after a refusal with refusalChecks: criterion 5's call takes no next remedy.
+  note: |
+    Id reserved for run-unfiled-1795192332000 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-20. Filing only; not built. depends_on W1-T13944
+    because both change takeParkedPrRemedy (#19871 is open).
+    Not in scope: the shard-census refusals of W1-T10331's split (47 rows also name it); with this
+    task they move the ladder on instead of repeating. The linter's rule itself is unchanged.

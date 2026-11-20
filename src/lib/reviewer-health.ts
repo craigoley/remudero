@@ -38,6 +38,7 @@ import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger
 import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
 import { readReviewEvidenceRecord } from "./review-evidence-record.js";
+import { DOWNGRADE_UNCLASSIFIED } from "./review-outcome-class.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -84,8 +85,9 @@ export const REVIEWER_HEALTH_READ_STEPS: readonly string[] = [
   ...ATTRIBUTION_STEPS,
 ];
 
-/** posted; withheld after the reviewer ran (success) or failed (provider health); refused at setup. */
-export type ReviewerOutcomeClass = "posted" | "withheld-success" | "withheld-failure" | "setup-refused";
+/** posted; withheld after the reviewer ran (success) or failed (provider health); refused at setup;
+ *  withheld-pending: the first downgrade-unclassified hold for its head and input, which re-asks (W1-T13849). */
+export type ReviewerOutcomeClass = "posted" | "withheld-success" | "withheld-failure" | "setup-refused" | "withheld-pending";
 
 export interface ReviewerShaRecord {
   sha: string;
@@ -185,7 +187,10 @@ export interface ReviewerHealthState {
   pooled: { k: number; n: number; shas: number };
   bootHeads: Record<string, string>;
   /** Legacy rows with no reviewer_code_sha, waiting for their fresh-tree row or the next boot. */
-  pending: Record<string, Array<{ unit: string; cls: ReviewerOutcomeClass; reason: string | null; at: string } & VerdictFields>>;
+  pending: Record<string, Array<{ unit: string; cls: ReviewerOutcomeClass; reason: string | null; at: string; hold?: string } & VerdictFields>>;
+  /** `<unit>\u0000<input digest>` → the first downgrade-unclassified hold: its sha and row time. A later hold
+   *  on the same key is a second hold, which the review gate never writes while its ledger read works. */
+  holds: Record<string, { sha: string; at: string }>;
   incident: ReviewerIncident | null;
   closed: Array<ReviewerIncident & { closedAt: string }>;
   /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
@@ -204,7 +209,7 @@ export interface ReviewerHealthState {
 
 export function emptyReviewerHealthState(): ReviewerHealthState {
   return { version: REVIEWER_HEALTH_VERSION, seededAt: null, seq: 0, cursor: null, shas: {},
-    pooled: { k: 0, n: 0, shas: 0 }, bootHeads: {}, pending: {}, incident: null, closed: [],
+    pooled: { k: 0, n: 0, shas: 0 }, bootHeads: {}, pending: {}, holds: {}, incident: null, closed: [],
     operatorHeal: null, coverage: { rows: 0, unattributed: 0 }, pooledModelShas: {}, modelIncidents: {}, modelFails: {} };
 }
 
@@ -217,7 +222,7 @@ type VerdictFields = { evaluator?: ReviewerEvaluator; state?: string; decision?:
 
 type Classified =
   | ({ kind: "outcome"; sha?: string; unit: string; cls: ReviewerOutcomeClass; reason: string | null;
-    host: string; pr: string | null; at: string; healed: boolean } & VerdictFields)
+    host: string; pr: string | null; at: string; healed: boolean; hold?: string } & VerdictFields)
   | { kind: "boot"; host: string; sha: string }
   | { kind: "fresh-tree"; host: string; pr: string; sha: string };
 
@@ -278,6 +283,7 @@ export function classifyReviewerHealthRow(row: Record<string, unknown>): Classif
   let cls: ReviewerOutcomeClass;
   let reason: string | null = null;
   let verdict: VerdictFields = {};
+  let hold: string | undefined;
   if (step === "review.posted" || (shadow && step === REVIEWER_SHADOW_VERDICT_STEP)) {
     // Code PRs only, and only a judgment: a plan-only PR, a reused or replayed verdict judged nothing.
     if (row.plan_only === true || row.review_reused === true || row.review_discriminated === true
@@ -287,6 +293,10 @@ export function classifyReviewerHealthRow(row: Record<string, unknown>): Classif
   } else if (step === "review.semantic_incomplete") {
     cls = row.reviewer_outcome === "success" ? "withheld-success" : "withheld-failure";
     reason = str(row.reason) ?? null;
+    // W1-T13849's hold re-asks once per head and input: pending until its unit and digest are seen twice.
+    hold = cls === "withheld-success" && reason === DOWNGRADE_UNCLASSIFIED
+      ? str(row.review_input_digest) ?? str(row.review_decision_digest) : undefined;
+    if (hold !== undefined) cls = "withheld-pending";
   } else if (step === "review.semantic_setup_refused") {
     cls = "setup-refused";
     reason = str(row.reason) ?? null;
@@ -299,7 +309,8 @@ export function classifyReviewerHealthRow(row: Record<string, unknown>): Classif
   const provenance = row.reviewer_code_provenance as { codeSha?: unknown } | undefined;
   const sha = str(row.reviewer_code_sha) ?? str(provenance?.codeSha);
   return { kind: "outcome", ...(sha && SHA.test(sha) ? { sha } : {}), unit: `${prUrl}#${head}`, cls, reason, host,
-    pr: prNumberOf(row), at: str(row.ts) ?? "", healed: !shadow && str(row.incident_id) !== undefined, ...verdict };
+    pr: prNumberOf(row), at: str(row.ts) ?? "", healed: !shadow && str(row.incident_id) !== undefined,
+    ...(hold === undefined ? {} : { hold }), ...verdict };
 }
 
 const failChars = (f: EvaluatorModelFail): number => f.unit.length + f.at.length + f.clauses.reduce((sum, clause) => sum + clause.length, 0);
@@ -374,12 +385,21 @@ function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract
     // SHA ingestion still owns this PR head even if its model record is unreadable.
     reportModelHealthFailure(error, log);
   }
+  let cls = outcome.cls;
+  if (outcome.hold !== undefined) {
+    // The first hold per unit and digest is pending; another (not this row replayed) fails as any hold does.
+    const key = `${outcome.unit}\u0000${outcome.hold}`;
+    const first = state.holds[key];
+    if (first === undefined) state.holds[key] = { sha, at: outcome.at };
+    else if (first.sha !== sha || first.at !== outcome.at) cls = "withheld-success";
+  }
   const prior = rec.units[outcome.unit];
-  // A unit that ever posted at this sha is posted; otherwise its newest class stands.
-  if (prior === "posted") return;
-  rec.units[outcome.unit] = outcome.cls;
-  if (isFailure(outcome.cls) && prior === undefined) {
-    const reason = outcome.reason ?? outcome.cls;
+  // A unit that ever posted at this sha is posted; otherwise its newest class stands. A pending hold
+  // never displaces a class the unit already has.
+  if (prior === "posted" || (cls === "withheld-pending" && prior !== undefined)) return;
+  rec.units[outcome.unit] = cls;
+  if (isFailure(cls) && (prior === undefined || prior === "withheld-pending")) {
+    const reason = outcome.reason ?? cls;
     rec.reasons[reason] = (rec.reasons[reason] ?? 0) + 1;
     rec.firstFailHost ??= outcome.host;
   }
@@ -410,6 +430,7 @@ function pool(state: ReviewerHealthState, log?: ReviewerHealthLog): void {
       reportModelHealthFailure(error, log);
     }
     delete state.shas[rec.sha];
+    for (const [key, first] of Object.entries(state.holds)) if (first.sha === rec.sha) delete state.holds[key];
   }
 }
 
@@ -452,6 +473,7 @@ export function ingestReviewerHealthRows(state: ReviewerHealthState, rows: Itera
     // child exits) or the host's next boot says which code judged it.
     const key = `${c.host}\u0000${c.pr ?? ""}`;
     (state.pending[key] ??= []).push({ unit: c.unit, cls: c.cls, reason: c.reason, at: c.at,
+      ...(c.hold === undefined ? {} : { hold: c.hold }),
       ...(c.evaluator === undefined ? {} : { evaluator: c.evaluator }), ...(c.state === undefined ? {} : { state: c.state }),
       ...(c.decision === undefined ? {} : { decision: c.decision }),
       ...(c.clauses === undefined ? {} : { clauses: c.clauses }), ...(c.published ? { published: c.published } : {}),
@@ -474,11 +496,12 @@ export interface ReviewerShaJudgment {
 }
 
 /** k = units not posted though the reviewer ran or was refused by setup; n adds the posted units.
- *  Withheld after a reviewer FAILURE is provider health, not reviewer code: in neither. */
+ *  Withheld after a reviewer FAILURE is provider health, not reviewer code: in neither. A first
+ *  downgrade-unclassified hold has no outcome yet, its re-ask will: in neither. */
 export function shaCounts(rec: ReviewerShaRecord): { k: number; n: number } {
   let k = 0, n = 0;
   for (const cls of Object.values(rec.units)) {
-    if (cls === "withheld-failure") continue;
+    if (cls === "withheld-failure" || cls === "withheld-pending") continue;
     n += 1;
     if (isFailure(cls)) k += 1;
   }

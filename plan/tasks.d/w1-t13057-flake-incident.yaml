@@ -25,6 +25,14 @@
     CI runs: 43694578741, 43695189112, 43698652126, 43720899736, 43721249722.
     Retry outcomes: 5 recovered on retry, 0 also failed on retry.
     Evidence: test.flake_retry ledger rows, 5 read from the PR coverage-shard logs and 0 from fix-round reroutes the PR's diff cannot reach.
+    2026-11-19 (operator thread, OBSERVED): red again in coverage-shard 1/12 on #19690 at c2d008191. Run alone on
+    Node 24.22.3 with --experimental-test-coverage it failed 1 of 2 runs at origin/main b063db84f and passes
+    without coverage, so the failure is coverage-only: the 192 MiB child OOMs while V8 coverage is collected.
+    INFERRED: it may relate to W1-T13685 (#19411), which moved the analytics fold onto a worker thread; it passed
+    under coverage before that change. Likely fixes, in the W1-T13853 pattern: run this heap-bound child without
+    NODE_V8_COVERAGE (coverage of a child under a hard heap bound measures the instrumentation, not the fold),
+    or find what W1-T13685 added to the resident set. Do NOT raise the 192 MiB bound: that loosens the guard and
+    needs the operator's yes.
   risk_ruling:
     verdict: "low"
     action: proceed

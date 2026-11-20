@@ -1,0 +1,49 @@
+- id: W1-T13958
+  title: A fix round's in-round review of an ops-catalog task reads the promised follow-ups the way the lane review does
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # the in-round review stops posting cannot-evaluate for ops-catalog tasks; core tasks are unchanged
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T3557
+    - W1-T13949
+  files:
+    - src/cli/commands/fix.ts
+    - test/fix-lane/an-ops-task-in-round-review-reads-no-core-task-source.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The fix rung's reviewTask for an ops-catalog task carries no sourcePath that the promised follow-up reader would read from the core head, so its in-round review posts no cannot-evaluate promise source unavailable verdict"
+      proof: "grep: W1-T13958 criterion 1: in test/fix-lane/an-ops-task-in-round-review-reads-no-core-task-source.test.ts"
+    - claim: "invariant:core-task-source-kept — a core-catalog task's reviewTask keeps its plan/tasks.d sourcePath, so its promised follow-ups are still read at the head"
+      kind: guard
+      proof: "grep: W1-T13958 criterion 2: in test/fix-lane/an-ops-task-in-round-review-reads-no-core-task-source.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core, 48 h): 8 review.posted rows of state pending with cannotEvaluate and
+    reason "promise source unavailable: Error: promise task source path is unavailable", on 5 PRs: #19691
+    (W1-T13785, 3 rows), #19721 (W1-T13850), #19728 (W1-T13855), #19569 (W1-T13681), #19362 (W1-T13446). All
+    but #19362 came from fix workers. They opened MANUAL issues titled "proof runner cannot load test files"
+    (#19843, #19815) and, on #19691/#19721, hid a delivered FAIL (W1-T13949).
+    OBSERVED in code (tree 21e72e991): the ops catalog labels its blobs "tasks.yaml" and "tasks.d/<file>"
+    (src/lib/ops-catalog-source.ts), and that label becomes Task.sourcePath (src/lib/plan.ts). The promised
+    follow-up reader in src/lib/review.ts requires the path to end in plan/tasks.d/<file>.yaml and throws when a
+    sourcePath is set but does not match. The fix rung builds reviewTask with Object.assign({}, opts.task, ...)
+    (src/cli/commands/fix.ts), keeping that sourcePath. The lane review passes a fresh contract literal with no
+    sourcePath (src/cli/commands/review.ts), so its reader returns empty and every lane row on these PRs has
+    promisedFollowUpObservation=null.
+  design: |
+    INVARIANT core-task-source-kept: only an ops-catalog task loses the core-head source read.
+    1. In fix.ts where reviewTask is built from the resolved contract, drop sourcePath when the task's catalog is
+       ops (the core head checkout never holds an ops shard), matching the lane review.
+    2. Fixture: an ops task with sourcePath "tasks.d/W1-T13785-x.yaml" reaches runReview with no sourcePath; a core
+       task with "plan/tasks.d/W1-T1-x.yaml" keeps it.
+  falsifier: |
+    Without the change criterion 1's fixture hands runReview a task whose sourcePath is "tasks.d/...".
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.
