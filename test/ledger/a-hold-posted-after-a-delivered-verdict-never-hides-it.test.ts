@@ -52,6 +52,8 @@ function fixture(t: TestContext, view: Partial<OpenPrView> = {}) {
       decision_verdict: { state: "failure", summary: "remudero-review: FAIL — 2 of 4 criteria unmet", criteria: UNMET_VIEW } }),
     success: (ts: string) => row("review.posted", ts, `review-PR${PR}-1795164527950`, { state: "success", unmet_criteria: [], reasons: [],
       decision_verdict: { state: "success", summary: "remudero-review: PASS", criteria: [] } }),
+    raw: (ts: string, over: Record<string, unknown>) => row("review.posted", ts, `review-PR${PR}-1795164600000`, over),
+    restored: (regressionKey: string) => row(REVIEW_STATUS_RESTORED_STEP, at("11:46:00"), "restorer", { regression_key: regressionKey }),
     /** The fix worker's in-round review: a pending cannot-evaluate hold on the same head and input. */
     hold: (ts: string) => row("review.posted", ts, `work-fix-dispatch-${TASK}-1795160780513-6cd0`, { state: "pending", decision_verdict: {
       state: "pending", cannotEvaluate: true, summary: "remudero-review: cannot-evaluate — promise source unavailable",
@@ -107,11 +109,44 @@ test("W1-T13949 criterion 2: the restore and the settle read the newest full ver
   const decision = deliveredKeyReviewDecision(f.pr, true, f.lines(), KEY);
   assert.equal(decision.dedups, false);
 
+  // The settle reads the same row: before the one restore it waits, and once that restore is spent it settles on the failure.
   const spent = fixture(t);
   spent.seed.failure(at("08:53:11"));
   spent.seed.hold(at("08:55:02"));
-  const settledBefore = pendingViewSettledFromDeliveredFailure(spent.pr, true, spent.lines(), KEY);
-  assert.equal(settledBefore, undefined, "a pending stamped after the verdict keeps the one restore first");
+  assert.equal(pendingViewSettledFromDeliveredFailure(spent.pr, true, spent.lines(), KEY), undefined,
+    "a pending stamped after the verdict keeps the one restore first");
+  spent.seed.restored(`${KEY}|${spent.pr.reviewPendingSince}`);
+  const settled = pendingViewSettledFromDeliveredFailure(spent.pr, true, spent.lines(), KEY);
+  assert.ok(settled, "the spent restore settles the view on the delivered failure");
+  assert.equal(settled.basis, "restore-spent");
+  assert.equal(settled.deliveredAt, at("08:53:11"));
+  assert.equal(settled.view.reviewState, "failure");
+  assert.deepEqual(settled.view.unmetCriteria.map(c => c.claim), [UNMET]);
+
+  // A hold posted with a terminal state, and a row whose state and verdict disagree, are not verdicts either: both are looked past.
+  for (const [label, over] of [
+    ["a terminal cannot-evaluate hold", { state: "failure", decision_verdict: { state: "failure", cannotEvaluate: true, criteria: [] } }],
+    ["a row whose state and verdict disagree", { state: "success", decision_verdict: { state: "failure", criteria: [] } }],
+  ] as const) {
+    const later = fixture(t);
+    later.seed.failure(at("08:53:11"));
+    later.seed.raw(at("08:55:02"), over);
+    const found = restorableDeliveredVerdict(later.pr, later.lines(), KEY);
+    assert.ok("row" in found && found.row.ts === at("08:53:11"), `${label} never hides the failure: ${JSON.stringify(found)}`);
+    later.seed.restored(`${KEY}|${later.pr.reviewPendingSince}`);
+    assert.equal(pendingViewSettledFromDeliveredFailure(later.pr, true, later.lines(), KEY)?.deliveredAt, at("08:53:11"), label);
+  }
+});
+
+test("W1-T13949 criterion 2: a plain pending row after the verdict is a review in flight, not a hold, so nothing older is restored over it", t => {
+  // W1-T11847: a reviewer-code advance posts a plain pending row and admits ONE review of the same head and input. Restoring
+  // the older verdict over it would re-post a verdict the running review is about to replace, and the sweep would admit again.
+  const f = fixture(t);
+  f.seed.failure(at("08:53:11"));
+  f.seed.raw(at("08:55:02"), { state: "pending", decision_verdict: { state: "pending", criteria: [] } });
+  assert.deepEqual(restorableDeliveredVerdict(f.pr, f.lines(), KEY), { refusal: "the delivered verdict is not a full success or failure" });
+  f.seed.restored(`${KEY}|${f.pr.reviewPendingSince}`);
+  assert.equal(pendingViewSettledFromDeliveredFailure(f.pr, true, f.lines(), KEY), undefined, "a review in flight is not settled");
 });
 
 test("W1-T13949 criterion 3: a hold after a delivered success restores the success; a hold with no full verdict before it keeps today's refusal", t => {
@@ -120,6 +155,11 @@ test("W1-T13949 criterion 3: a hold after a delivered success restores the succe
   success.seed.hold(at("08:55:02"));
   const restorable = restorableDeliveredVerdict(success.pr, success.lines(), KEY);
   assert.ok("row" in restorable && restorable.row.state === "success", JSON.stringify(restorable));
+  const terminalHold = fixture(t);
+  terminalHold.seed.success(at("08:53:11"));
+  terminalHold.seed.raw(at("08:55:02"), { state: "success", decision_verdict: { state: "success", cannotEvaluate: true, criteria: [] } });
+  const pastTerminal = restorableDeliveredVerdict(terminalHold.pr, terminalHold.lines(), KEY);
+  assert.ok("row" in pastTerminal && pastTerminal.row.ts === at("08:53:11"), `a terminal hold never hides the success: ${JSON.stringify(pastTerminal)}`);
 
   const holdOnly = fixture(t);
   holdOnly.seed.hold(at("08:55:02"));
