@@ -767,9 +767,16 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
       censored: 0, unavailable: 0, reasons: {} });
     const totals = joined.verifiedTaskOutcome as Exclude<typeof joined.verifiedTaskOutcome, string>;
     assert.equal(totals.coverage.completed, 3, "the cohort-level join is unchanged");
+    // A cached pass without case files reports what a fresh one does: no row or total keeps the earlier join.
+    const cached = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
+    assert.equal(cached.cohorts.length, 2);
+    for (const cohort of cached.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal(cached.verifiedTaskOutcome, "unavailable-no-github-verification-join", "no total survives from the earlier join");
     rmSync(join(stateDir, "benchmark-cohort-checkpoint.json"), { force: true });
     const unjoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
     assert.equal(unjoined.cohorts.length, 2);
     for (const cohort of unjoined.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.deepEqual(cached.modelDrift, unjoined.modelDrift, "cached and fresh passes agree without case files");
+    assert.deepEqual(cached.selfForecastCalibration, unjoined.selfForecastCalibration);
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

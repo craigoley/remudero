@@ -839,9 +839,11 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
 
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  if (!caseFiles) return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, [], undefined, cutoff) };
+  // W1-T13867: a cached pass without case files reports exactly what a fresh one does, so no row says the join is
+  // unavailable while the snapshot keeps totals from an earlier pass that had one.
   const assignments = cohortAssignments(sources, faults);
-  return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff), verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
+  return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff),
+    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) : "unavailable-no-github-verification-join",
     modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
     selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
