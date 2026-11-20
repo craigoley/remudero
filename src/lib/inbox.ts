@@ -1987,6 +1987,7 @@ export interface DraftSpawnContext {
   /** Read the whole-run fit after routing, before the selected cash adapter runs. */
   cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
   paidCashDeployments?: readonly string[];
+  cashRetry?: { prompt: string; avoidModels: readonly string[] };
   onCashFallback?: (deployment: string, result: WorkerResult) => void;
 }
 
@@ -2040,7 +2041,7 @@ export type DraftRungOutcome =
    *  decides whether a {@link DraftAttemptCache} key is written, and keying a refusal retires work that never ran.
    *  Why: the 267-of-353 measurement — docs/forensics/inbox.md. */
   | { proposalId: string; ok: false; error: string; refused?: { matched: string; resetsAtMs?: number };
-      cashResume?: DraftCashResume; snapshot?: InboxDraftSnapshot };
+      cashDeferred?: true; cashResume?: DraftCashResume; snapshot?: InboxDraftSnapshot };
 
 export interface InboxDraftSnapshot {
   repository: string;
@@ -2533,7 +2534,7 @@ function draftModelFields(worker?: DraftWorkerResult, requestedModel?: string | 
 
 const CASH_DRAFT_REQUEST_HISTORY: number[] = [];
 
-/** The median request count of this process's last 20 cash drafts; 2 before any is observed. */
+/** The median request count of this process's last 20 cash draft attempts; 2 before any is observed. */
 function expectedCashDraftRequests(): number {
   if (CASH_DRAFT_REQUEST_HISTORY.length === 0) return 2;
   const sorted = [...CASH_DRAFT_REQUEST_HISTORY].sort((a, b) => a - b);
@@ -2569,51 +2570,72 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       const generation = snapshot?.generation;
       const saved = cashFit ? deps.cashResumes?.[proposal.id] : undefined;
       const resume = saved?.generation === generation ? saved : undefined;
-      let dirty = resume?.relint;
-      let prompt = dirty ? `${initialPrompt}\n\n${dirty.prompt}` : initialPrompt;
+      let dirty: DraftRelint | undefined;
+      let prompt = initialPrompt;
       let parsed: ReturnType<typeof parseDraftedCandidate> = null;
       let violations: DraftLintViolation[] = [];
       // cc71f2 SELF-LINT: draft, lint, and on a blocking violation redraft with the failures in hand, bounded, so a
       // fired proposal reaches READY without an operator cleanup pass.
       // W1-T4864: a dirty relint walks the LADDER instead of re-rolling the same model.
-      const avoidModels = [...(resume?.avoidModels ?? [])];
-      let hasPaidCashWork = resume !== undefined;
+      let avoidModels: string[] = [];
+      let hasPaidCashWork = false;
       let attempts = 0;
-      for (let attempt = resume?.attempt ?? 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
+      for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         lastWorker = undefined;
         lastRequestedModel = null;
-        const expectedRequests = expectedCashDraftRequests();
-        const paidDeployments = new Set(attempt === resume?.attempt ? resume.paidDeployments : []);
+        const retry = attempt === 1 ? resume : undefined;
+        const cashAttempt = retry?.attempt ?? attempt;
+        const cashDirty = retry ? retry.relint : dirty;
+        const cashPrompt = retry && cashDirty ? `${initialPrompt}\n\n${cashDirty.prompt}` : prompt;
+        const cashAvoidModels = retry ? [...retry.avoidModels] : avoidModels;
+        const paidDeployments = [...(retry?.paidDeployments ?? [])];
+        const logCashSkip = (skipped: Extract<CashDraftFit, { fits: false }>, expectedRequests: number) => {
+          deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt: cashAttempt, reason: skipped.reason, deployment: skipped.deployment,
+            estimated_tokens: skipped.estimatedTokens, window_tokens: skipped.reason === "window" ? skipped.windowTokens ?? null : null,
+            estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
+            left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
+            prompt_chars: cashPrompt.length, plan_index_chars: planIndexChars });
+        };
         let worker: DraftWorkerResult;
         try {
           worker = await withGuardrailAttempt("relint-used", attempt, () =>
             deps.spawn(proposal, prompt, { attempt, avoidModels: [...avoidModels],
               onRequestedModel: model => { lastRequestedModel = model; },
-              ...(cashFit ? { cashFit: input => cashFit({ ...input, expectedRequests }),
+              ...(cashFit ? { cashFit: input => {
+                  const expectedRequests = expectedCashDraftRequests();
+                  const fit = cashFit({ ...input, expectedRequests });
+                  if (!fit.fits) logCashSkip(fit, expectedRequests);
+                  return fit;
+                }, paidCashDeployments: paidDeployments,
                 onCashFallback: (deployment, result) => {
-                  if (draftHasPaidCashWork(result)) paidDeployments.add(deployment);
+                  if (result.provider === "cash") observeCashDraftRequests(result);
+                  if (draftHasPaidCashWork(result) && !paidDeployments.includes(deployment)) paidDeployments.push(deployment);
                 } } : {}),
-              ...(paidDeployments.size > 0 ? { paidCashDeployments: [...paidDeployments] } : {}) }));
+              ...(retry ? { cashRetry: { prompt: cashPrompt, avoidModels: cashAvoidModels } } : {}) }));
         } catch (error) {
           let skipped: Extract<CashDraftFit, { fits: false }>;
           if (error instanceof CashDraftSkippedError) skipped = error.fit;
           else if (cashFit && error instanceof OpenWeightRequestTooLargeError) {
+            const expectedRequests = expectedCashDraftRequests();
             skipped = { fits: false, reason: "window", deployment: null,
               estimatedTokens: error.estimatedTokens * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS };
+            logCashSkip(skipped, expectedRequests);
           } else throw error;
-          deps.log("inbox.draft_cash_skipped", { proposal_id: proposal.id, attempt, reason: skipped.reason, deployment: skipped.deployment,
-            estimated_tokens: skipped.estimatedTokens, window_tokens: skipped.reason === "window" ? skipped.windowTokens ?? null : null,
-            estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
-            left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
-            prompt_chars: prompt.length, plan_index_chars: planIndexChars });
           return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
-            refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` },
-            ...(generation && (hasPaidCashWork || paidDeployments.size > 0)
-              ? { cashResume: { generation, attempt, paidDeployments: [...paidDeployments], avoidModels, relint: dirty } } : {}) };
+            refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` }, cashDeferred: true,
+            ...(generation && (retry || hasPaidCashWork || paidDeployments.length > 0)
+              ? { cashResume: { generation, attempt: cashAttempt, paidDeployments, avoidModels: cashAvoidModels, relint: cashDirty } } : {}) };
+        }
+        if (retry && worker.provider === "cash") {
+          attempt = cashAttempt;
+          dirty = cashDirty;
+          prompt = cashPrompt;
+          avoidModels = cashAvoidModels;
+          hasPaidCashWork = true;
         }
         attempts = attempt;
         lastWorker = worker;
-        hasPaidCashWork ||= draftHasPaidCashWork(worker) || paidDeployments.size > 0;
+        hasPaidCashWork ||= draftHasPaidCashWork(worker) || paidDeployments.length > 0;
         if (cashFit && worker.provider === "cash") observeCashDraftRequests(worker);
         if (dirty) {
           // NAME THE FALL-THROUGH, with the model that actually answered — a spawn that ignored `avoidModels` shows up
@@ -2740,7 +2762,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       const error = String((e as Error)?.message ?? e);
       deps.log("inbox.draft_error", { proposal_id: proposal.id, ...draftModelFields(lastWorker, lastRequestedModel), error });
       return { proposalId: proposal.id, ok: false, error,
-        ...(e instanceof CashDraftResumeBlockedError ? { refused: { matched: e.message } } : {}) };
+        ...(e instanceof CashDraftResumeBlockedError ? { refused: { matched: e.message }, cashDeferred: true } : {}) };
     }
   };
 

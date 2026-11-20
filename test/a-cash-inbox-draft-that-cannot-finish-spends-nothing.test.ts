@@ -39,6 +39,8 @@ type FixtureOptions = {
   cap: NonNullable<Config["dailyCapUsd"]>;
   proposal?: Proposal;
   deployments: string[];
+  only?: string[];
+  statsUnavailable?: boolean;
   allowCodex?: boolean;
   unpinnedMount?: boolean;
   blockedAuction?: boolean;
@@ -47,6 +49,8 @@ type FixtureOptions = {
   relintDeployment?: string;
   root?: string;
   resume?: boolean;
+  proposals?: Proposal[];
+  polls?: number;
 };
 
 /** Exercise the real batch, router and ladder, replacing the external provider boundaries. */
@@ -83,6 +87,7 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
   const transports: string[] = [];
   const cashPostures: (boolean | undefined)[] = [];
   const prompts: string[] = [];
+  const subscriptionPrompts: string[] = [];
   let auctionReads = 0;
   let draft = 0;
   const providerRouting: SpawnWorkerArgs["providerRouting"] = {
@@ -92,7 +97,11 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
       return { provider: "codex", readable: true, model: "gpt-6-luna",
         windows: [{ name: "weekly", usedPercent: opts.blockedAuction ? 100 : 10 }] };
     },
-    spawnCodex: async () => { transports.push("codex"); return worker({ provider: "codex", servedModel: "gpt-6-luna" }); },
+    spawnCodex: async args => {
+      transports.push("codex");
+      subscriptionPrompts.push(args.prompt);
+      return worker({ provider: "codex", servedModel: "gpt-6-luna" });
+    },
     spawnOpenWeight: async (args, _config, selection) => {
       const first = transports.length === 0;
       transports.push(selection.model);
@@ -113,31 +122,41 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
   const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
   const rawSpawn: typeof spawnWorker = args => {
     if (!args.draftRouting) return spawnWorker(args);
-    prompts.push(withWorkspaceCleanup(args.prompt));
+    prompts.push(withWorkspaceCleanup(args.promptFor?.({ provider: "cash", harnessOwnsGit: false }) ?? args.prompt));
     const deployment = opts.deployments[draft++];
     const stats = draftStatsFromRows([{ step: "draft.routing.outcome", lane: "inbox-draft", deployment,
       outcome: "clean", clean: true, draft_cost_usd: 0.000001 }], "inbox-draft");
+    const models = (draft > 1 || opts.resume) && opts.relintDeployment ? [opts.relintDeployment] : opts.only;
     return spawnWorker({ ...args,
-      ...((draft > 1 || opts.resume) && opts.relintDeployment ? {
-        routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: "fixture relint deployment", models: [opts.relintDeployment] },
+      ...(models ? {
+        routingTrial: { id: "inbox-bakeoff", arm: "cash", reason: "fixture deployments", models },
       } : {}),
-      draftRouting: { ...args.draftRouting, random: () => 0.5, readStats: () => stats } });
+      draftRouting: { ...args.draftRouting, random: () => 0.5, readStats: () => {
+        if (opts.statsUnavailable) throw new Error("fixture stats unavailable");
+        return stats;
+      } } });
   };
   const runBatch = (due: Proposal[], cashResumes?: DraftCashResumes) =>
     draftProposalBatch(due, config, "acme", "remudero", "cash-fit", log, rawSpawn, providerRouting, mount, cashResumes);
   let outcomes: DraftRungOutcome[] | undefined;
-  if (opts.resume) {
+  const batches: string[][] = [];
+  if (opts.proposals) {
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: opts.proposals }));
+  }
+  if (opts.resume || opts.proposals) {
     const hook = buildInboxDraftHook("acme", "remudero", config, "cash-fit", log,
       async (due, _config, _owner, _repo, _runId, _log, _spawn, _routing, _mount, cashResumes) => {
+        batches.push(due.map(proposal => proposal.id));
         outcomes = await runBatch(due, cashResumes);
         return outcomes;
       }, undefined, () => undefined);
-    await hook();
+    for (let poll = 0; poll < (opts.polls ?? 1); poll++) await hook();
   } else {
     outcomes = await runBatch([draftedProposal]);
   }
   assert.ok(outcomes, JSON.stringify(rows));
-  return { config, rows, transports, prompts, outcomes, auctionReads, cashPostures, proposal: draftedProposal };
+  return { config, rows, transports, prompts, subscriptionPrompts, outcomes, batches, auctionReads, cashPostures, proposal: draftedProposal };
 }
 
 function skipRow(rows: Row[]) {
@@ -167,7 +186,7 @@ function readBatchState(run: Awaited<ReturnType<typeof productionBatch>>) {
 test("W1-T13863 criterion 1: the cash draft is held to the deployment selected by the real router", async t => {
   const big = { ...proposal, summary: "x".repeat(300_000) };
   const run = await productionBatch(t, { cap: 1000, proposal: big, deployments: ["gpt-oss-120b"],
-    unpinnedMount: true, blockedAuction: true });
+    only: ["gpt-oss-120b"], unpinnedMount: true, blockedAuction: true });
   assert.equal(run.auctionReads, 1);
   assert.deepEqual(run.transports, []);
   assert.equal(run.outcomes[0].ok, false);
@@ -182,6 +201,7 @@ test("W1-T13863 criterion 1: the cash draft is held to the deployment selected b
     promptChars: run.prompts[0].length, atIso: AT }), { fits: true });
 
   const ladder = await productionBatch(t, { cap: 1000, proposal: big, deployments: ["gpt-6-luna"],
+    only: ["gpt-6-luna", "gpt-oss-120b"],
     cashResult: worker({ text: "missing the fragment markers", costUsd: 0.001 }) });
   assert.deepEqual(ladder.transports, ["gpt-6-luna"]);
   assert.equal(ladder.outcomes[0].ok, false);
@@ -208,7 +228,8 @@ test("W1-T13863 criterion 1: the cash draft is held to the deployment selected b
 });
 
 test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allowance figures", async t => {
-  const run = await productionBatch(t, { cap: 1, leaveUsd: 0.03, proposal: costProposal, deployments: ["claude-haiku-5-5"] });
+  const run = await productionBatch(t, { cap: 1, leaveUsd: 0.03, proposal: costProposal, deployments: ["claude-haiku-5-5"],
+    only: ["claude-haiku-5-5"] });
   assert.deepEqual(run.transports, []);
   assert.equal(run.outcomes[0].ok, false);
   assert.equal(run.rows.find(row => row.step === "draft.routing.choice")?.deployment, "claude-haiku-5-5");
@@ -223,7 +244,7 @@ test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allow
 
   const cap = { normal: 0.001, squeezed: 0.01 };
   const fallback = await productionBatch(t, { cap, proposal: costProposal, deployments: ["gpt-5-nano"],
-    unpinnedMount: true, blockedAuction: true });
+    only: ["gpt-5-nano"], unpinnedMount: true, blockedAuction: true });
   assert.equal(fallback.auctionReads, 1);
   assert.deepEqual(fallback.transports, []);
   assert.equal(fallback.outcomes[0].ok, false);
@@ -237,6 +258,7 @@ test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allow
   assert.throws(() => readFileSync(openWeightAllowancePath(fallback.config)), { code: "ENOENT" });
 
   const ladder = await productionBatch(t, { cap: 0.02, proposal: costProposal, deployments: ["gpt-6-luna"],
+    only: ["gpt-6-luna", "gpt-oss-120b"],
     cashResult: worker({ text: "missing the fragment markers" }) });
   assert.deepEqual(ladder.transports, ["gpt-6-luna"]);
   assert.equal(ladder.outcomes[0].ok, false);
@@ -250,7 +272,8 @@ test("W1-T13863 criterion 2: normal cash and squeezed fallback report both allow
 });
 
 test("W1-T13863 criterion 3: a skipped draft stays due, costs zero and can draft on a subscription", async t => {
-  const held = await productionBatch(t, { cap: 0.02, proposal: costProposal, deployments: ["claude-haiku-5-5"], allowCodex: true });
+  const held = await productionBatch(t, { cap: 0.02, proposal: costProposal, deployments: ["claude-haiku-5-5"],
+    only: ["claude-haiku-5-5"], allowCodex: true });
   assert.deepEqual(held.transports, []);
   assert.equal(held.auctionReads, 0);
   assert.equal(skipRow(held.rows).attempt, 1);
@@ -269,6 +292,23 @@ test("W1-T13863 criterion 3: a skipped draft stays due, costs zero and can draft
   assert.equal(next.outcomes[0].ok, true, JSON.stringify(next.rows));
   assert.equal(next.rows.find(row => row.step === "inbox.draft_synthesized")?.provider, "codex");
   assert.throws(() => readFileSync(openWeightAllowancePath(next.config)), { code: "ENOENT" });
+});
+
+test("W1-T13863 criterion 3: an allowance skip walks the unchanged row-order ladder to a fitting deployment", async t => {
+  const run = await productionBatch(t, { cap: 1, leaveUsd: 0.02, proposal: costProposal,
+    deployments: [], statsUnavailable: true, cashResult: worker({ costUsd: 0.001 }) });
+  assert.deepEqual(run.rows.filter(row => row.step === "draft.routing.choice").map(row => [row.deployment, row.reason]), [
+    ["gpt-oss-120b", "stats-read-failed-row-order"], ["gpt-5-nano", "cash-draft-fit"],
+  ]);
+  const skipped = skipRow(run.rows);
+  assert.equal(skipped.reason, "allowance");
+  assert.equal(skipped.deployment, "gpt-oss-120b");
+  assert.deepEqual(run.transports, ["gpt-5-nano"]);
+  assert.equal(run.outcomes[0].ok, true);
+  const allowance = readOpenWeightAllowance(run.config, { deployments: ["gpt-oss-120b", "gpt-5-nano"], atIso: AT });
+  assert.equal(allowance.attemptsToday, 2); // The seed reservation and the one fitting transport.
+  assert.deepEqual(allowance.settledToday, { "gpt-5-nano": { attempts: 1, settledUsd: 0.001 } });
+  assert.deepEqual(commitBatch(run).due, []);
 });
 
 test("W1-T13863 criterion 3: a refused relint resumes after the paid synthesis without replaying it", async t => {
@@ -328,6 +368,38 @@ test("W1-T13863 criterion 4: a fitting nano route and subscription routing retai
   assert.equal(excluded.rows.some(row => row.step === "inbox.draft_cash_skipped"), false);
 });
 
+test("W1-T13863 criterion 4: a subscription retry starts with the original prompt and attempt after a cash relint skip", async t => {
+  const held = await productionBatch(t, { cap: 0.02, proposal: costProposal,
+    deployments: ["gpt-5-nano", "claude-haiku-5-5"], cashResult: worker({ text: dirty, costUsd: 0.001 }) });
+  assert.deepEqual(held.transports, ["gpt-5-nano"]);
+  assert.equal(skipRow(held.rows).attempt, 2);
+  assert.deepEqual(commitBatch(held).attempts, {});
+  assert.equal(readDraftCashResumes(join(held.config.root, "state"))[costProposal.id]?.attempt, 2);
+  const subscription = await productionBatch(t, { cap: 0.001, root: held.config.root, resume: true,
+    proposal: costProposal, deployments: [], allowCodex: true, unpinnedMount: true });
+  assert.deepEqual(subscription.transports, ["codex"]);
+  assert.equal(subscription.subscriptionPrompts[0] === held.prompts[0], true);
+  assert.equal(subscription.rows.find(row => row.step === "inbox.draft_synthesized")?.attempt, 1);
+  assert.equal(subscription.rows.some(row => row.step === "inbox.draft_cash_skipped" || row.step === "inbox.draft_fellthrough"), false);
+  assert.deepEqual(readBatchState(subscription).due, []);
+});
+
+test("W1-T13863 criterion 4: three oversized proposals release the next daemon batch's slots", async t => {
+  const oversized = [1, 2, 3].map(n => ({ ...proposal, id: `P${n}`, summary: "x".repeat(2_050_000) }));
+  const fitting = { ...proposal, id: "P4" };
+  const proposals = [...oversized, fitting];
+  const run = await productionBatch(t, { cap: 1, deployments: [], statsUnavailable: true, proposals, polls: 3 });
+  assert.deepEqual(run.batches, [["P1", "P2", "P3"], ["P4", "P1", "P2"], ["P3", "P1", "P2"]]);
+  assert.deepEqual(run.transports, ["gpt-oss-120b"]);
+  const stateDir = join(run.config.root, "state");
+  const attempts = JSON.parse(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8"));
+  const drafts = JSON.parse(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8"));
+  assert.deepEqual(Object.keys(attempts), [fitting.id]);
+  assert.deepEqual(Object.keys(drafts), [fitting.id]);
+  assert.deepEqual(draftsDueOnDaemon(proposals, drafts, attempts).map(item => item.id), ["P1", "P2", "P3"]);
+  assert.throws(() => readFileSync(openWeightAllowancePath(run.config)), { code: "ENOENT" });
+});
+
 test("a subscription batch returns per-proposal projection failures for an empty plan", async () => {
   const rows: Row[] = [];
   const outcomes = await runDraftRung([proposal, { ...proposal, id: "P2" }], "", {
@@ -363,21 +435,58 @@ test("W1-T13863 criterion 5: every draft_synthesized row records prompt_chars an
   for (const row of synthesized) assert.equal(row.plan_index_chars, planProjectionForDependsOn(PLAN).length);
 });
 
-test("cash history averages the middle observations, rounds up and excludes subscription requests", async () => {
-  const expected: number[] = [];
-  async function observe(requests: number, provider: "cash" | "codex") {
-    await runDraftRung([proposal], PLAN, {
-      cashFit: input => { expected.push(input.expectedRequests); return { fits: true }; },
-      spawn: async (_proposal, prompt, ctx) => {
-        if (provider === "cash") ctx?.cashFit?.({ deployment: "gpt-oss-120b", promptChars: prompt.length, atIso: AT });
-        return worker({ provider, requestEfforts: [{ ...cashRequestEffort("{}", "chat-completions"), requests }] });
-      },
-      log: () => {},
-    }, "history");
-  }
-  await observe(1, "cash");
-  await observe(4, "cash");
-  await observe(11, "codex");
-  await observe(6, "cash");
-  assert.deepEqual(expected, [2, 1, 3]);
+test("a paid four-request fallback contributes to the median after its successor is skipped", async t => {
+  const seedProposal = { ...proposal, summary: "x".repeat(300_000) };
+  const seed = await productionBatch(t, { cap: 1000, proposal: seedProposal, deployments: ["gpt-6-luna"],
+    only: ["gpt-6-luna", "gpt-oss-120b"],
+    cashResult: worker({ text: "missing the fragment markers", costUsd: 0.001,
+      requestEfforts: [{ ...cashRequestEffort("{}", "chat-completions"), requests: 4 }] }) });
+  assert.deepEqual(seed.transports, ["gpt-6-luna"]);
+  assert.equal(seed.outcomes[0].ok, false);
+  assert.equal(skipRow(seed.rows).deployment, "gpt-oss-120b");
+  const overhead = Buffer.byteLength(seed.prompts[0]) - seedProposal.summary.length;
+
+  await t.test("W1-T13863 criterion 1: the observed four requests put oss above its window on the next draft", async t => {
+    const next = await productionBatch(t, { cap: 1000, only: ["gpt-oss-120b"], deployments: [],
+      proposal: { ...proposal, summary: "x".repeat(155_792 - overhead) } });
+    assert.deepEqual(next.transports, []);
+    assert.equal(next.outcomes[0].ok, false);
+    const skipped = skipRow(next.rows);
+    assert.equal(skipped.reason, "window");
+    assert.equal(skipped.expected_requests, 4);
+    assert.equal(skipped.estimated_tokens, 163_792);
+    assert.equal(skipped.window_tokens, 131_072);
+  });
+
+  await t.test("W1-T13863 criterion 2: the observed four requests put nano above the remaining allowance", async t => {
+    const next = await productionBatch(t, { cap: 1, leaveUsd: 0.0178185, only: ["gpt-5-nano"], deployments: [],
+      proposal: { ...proposal, summary: "x".repeat(54_790 - overhead) } });
+    assert.deepEqual(next.transports, []);
+    assert.equal(next.outcomes[0].ok, false);
+    const skipped = skipRow(next.rows);
+    assert.equal(skipped.reason, "allowance");
+    assert.equal(skipped.expected_requests, 4);
+    assert.equal(skipped.estimated_usd, 0.023758);
+    assert.ok(Math.abs(Number(skipped.left_usd) - 0.0178185) < 1e-12);
+    assert.equal(readOpenWeightAllowance(next.config, { deployments: ["gpt-5-nano"], atIso: AT }).attemptsToday, 1);
+  });
+
+  await t.test("cash history averages the middle observations, rounds up and excludes subscription requests", async () => {
+    const expected: number[] = [];
+    async function observe(requests: number, provider: "cash" | "codex") {
+      await runDraftRung([proposal], PLAN, {
+        cashFit: input => { expected.push(input.expectedRequests); return { fits: true }; },
+        spawn: async (_proposal, prompt, ctx) => {
+          if (provider === "cash") ctx?.cashFit?.({ deployment: "gpt-oss-120b", promptChars: prompt.length, atIso: AT });
+          return worker({ provider, requestEfforts: [{ ...cashRequestEffort("{}", "chat-completions"), requests }] });
+        },
+        log: () => {},
+      }, "history");
+    }
+    await observe(1, "cash");
+    await observe(11, "codex");
+    await observe(6, "cash");
+    assert.deepEqual(expected, [4, 3]);
+  });
+  assert.equal(skipRow(seed.rows).expected_requests, 4);
 });

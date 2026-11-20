@@ -1344,6 +1344,7 @@ export interface SpawnWorkerArgs {
     random?: () => number;
     cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
     paidCashDeployments?: readonly string[];
+    cashAvoidModels?: readonly string[];
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -1351,7 +1352,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall" | "cash-draft-fit";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -2364,8 +2365,7 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 /** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
- * on failed output contracts (W1-T4067). Whole-run fit gates each draft deployment and
- * its refusal ends the walk so the draft rung can record it.
+ * on failed output contracts (W1-T4067) or a draft's whole-run fit refusal.
  * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
  * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
  * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
@@ -2374,7 +2374,7 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall" | "cash-draft-fit"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
@@ -2406,13 +2406,14 @@ export async function runOpenWeightWalkingLadder(
       }
       return result;
     } catch (err) {
-      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
+      const skippedDraft = err instanceof CashDraftSkippedError;
+      if (!skippedDraft && !(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
       // NAME THE FALL-THROUGH. A silent downgrade would make a run that landed on rung 3
       // indistinguishable from one that led there, and the point of this walk is that the record
       // can say which deployments were unusable and why.
-      console.error(JSON.stringify({
+      if (!skippedDraft) console.error(JSON.stringify({
         event: "worker.openweight.rung_refused",
         deployment: model,
         reason: err.message.slice(0, 200),
@@ -2421,7 +2422,7 @@ export async function runOpenWeightWalkingLadder(
         of: rungs.length,
       }));
       if (next) {
-        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "unsupported-response-format" }); }
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: skippedDraft ? "cash-draft-fit" : "unsupported-response-format" }); }
         catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
       }
       if (!next) break;
@@ -2629,6 +2630,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
   const paidCashDeployments = args.draftRouting?.paidCashDeployments ?? [];
+  const cashAvoidModels = args.draftRouting?.cashAvoidModels ?? args.avoidModels ?? [];
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
@@ -2891,7 +2893,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         const sonnetEnv = args.env ?? process.env;
         const canTrySonnet = requestedCapability === "balanced" &&
           !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-        const avoided = args.avoidModels ?? [];
+        const avoided = cashAvoidModels;
         if (refusal === undefined && (!checkDraftFit || avoided.length > 0 || paidCashDeployments.length > 0)) {
           let models: string[];
           try { models = plainCashModels(); }
@@ -3190,7 +3192,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     );
     const unpaid = [openWeight.model, ...openWeight.alternatives]
       .filter(model => !paidCashDeployments.includes(model));
-    const remaining = unpaid.filter(model => !(args.avoidModels ?? []).includes(model));
+    const remaining = unpaid.filter(model => !cashAvoidModels.includes(model));
     const avoidExhausted = remaining.length === 0;
     const eligible = avoidExhausted ? unpaid : remaining;
     if (eligible.length > 0) openWeight = { ...openWeight, model: eligible[0]!, alternatives: eligible.slice(1) };
@@ -3287,7 +3289,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             },
           });
           cashController.signal.throwIfAborted();
-          const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: args.prompt.length,
+          const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: executionPrompt.length,
             promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
             atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
           if (fit && !fit.fits) throw new CashDraftSkippedError(fit);

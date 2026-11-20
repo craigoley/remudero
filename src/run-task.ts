@@ -1105,6 +1105,7 @@ import {
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
   captureInboxDraftSnapshot,
+  inboxDraftGeneration,
   commitInboxDraftOutcomes,
   readDraftCashResumes,
   parseDraftedCandidate,
@@ -1118,6 +1119,7 @@ import {
   type DraftCashResumes,
   type DraftSelectionContext,
   type DraftRungOutcome,
+  type DraftSpawnContext,
   type DraftWorkerResult,
   type EvidenceAnchor,
   type BatchApproveResult,
@@ -37504,13 +37506,16 @@ export function buildInboxDraftSpawnArgs(args: {
   draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
   cashFit?: NonNullable<SpawnWorkerArgs["draftRouting"]>["cashFit"];
   paidCashDeployments?: readonly string[];
+  cashRetry?: DraftSpawnContext["cashRetry"];
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
+  const cashRetry = args.cashRetry;
   return {
     // The one worktree below is shared by every draft lane, so enforce the read-only tool
     // surface at the spawn boundary rather than asking the worker to respect prose.
     ...buildInboxDraftWorkerArgs({ ...args, maxBudgetUsd: DEFAULT_BUDGET_USD, tools: INBOX_DRAFT_WORKER_TOOLS }),
+    ...(cashRetry ? { promptFor: ({ provider }) => provider === "cash" ? cashRetry.prompt : args.prompt } : {}),
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
     ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
@@ -37520,6 +37525,7 @@ export function buildInboxDraftSpawnArgs(args: {
       readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
       cashFit: args.cashFit,
       paidCashDeployments: args.paidCashDeployments,
+      cashAvoidModels: cashRetry?.avoidModels,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37683,6 +37689,7 @@ export async function draftProposalBatch(
             draftRoutingReadStats: routingStats.readStats,
             cashFit: ctx?.cashFit,
             paidCashDeployments: ctx?.paidCashDeployments,
+            cashRetry: ctx?.cashRetry,
             avoidModels: ctx?.avoidModels,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
@@ -37943,6 +37950,8 @@ export function buildInboxDraftHook(
       : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
+  const cashDeferred = new Map<string, { generation: string; batch: number }>();
+  let draftBatchNumber = 0;
   const anchorGrepCache = createAnchorGrepCache();
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
@@ -38027,7 +38036,14 @@ export function buildInboxDraftHook(
       // The ordinary cadence never selects a saved improvement: only its daemon-owned handoff names it here.
       const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
         : proposals.filter(proposal => proposal.id === onlyProposalId);
-      const due = draftsDueOnDaemon(population, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
+      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
+      const eligibleIds = new Set(eligible.map(proposal => proposal.id));
+      for (const id of cashDeferred.keys()) if (!eligibleIds.has(id)) cashDeferred.delete(id);
+      // Keep fit refusals due, behind fresh work and in least-recently-refused order.
+      const due = eligible.map(proposal => {
+        const deferred = cashDeferred.get(proposal.id);
+        return { proposal, batch: deferred && deferred.generation === inboxDraftGeneration(proposal) ? deferred.batch : 0 };
+      }).sort((a, b) => a.batch - b.batch).slice(0, DAEMON_DRAFT_BATCH_CAP).map(({ proposal }) => proposal);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -38037,7 +38053,6 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -38186,6 +38201,14 @@ export function buildInboxDraftHook(
       // and persist completion before publication. Never spread an old whole-cache snapshot
       // over unrelated writes or mark newer direction attempted when an older worker finishes.
       commitInboxDraftOutcomes({ stateDir: join(inboxRoot, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
+      draftBatchNumber++;
+      for (const outcome of outcomes) {
+        if (!outcome.ok && outcome.cashDeferred && outcome.snapshot) {
+          cashDeferred.set(outcome.proposalId, { generation: outcome.snapshot.generation, batch: draftBatchNumber });
+        } else {
+          cashDeferred.delete(outcome.proposalId);
+        }
+      }
       } finally { storeLock?.release(); }
       } finally {
         draftLock.release();
