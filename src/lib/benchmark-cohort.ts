@@ -217,13 +217,20 @@ function checkpointPath(stateDir: string): string {
   return join(stateDir, "benchmark-cohort-index.json");
 }
 
-function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
+/** `seen.identity` becomes the identity of the index this read returns: the file it read, or the one its migration
+ * published. A later rewrite publishes only while that index is still the one on disk. */
+function readCheckpoint(stateDir: string, io: CheckpointIO, seen?: { identity: string | null }): Checkpoint {
   const legacy = join(stateDir, "benchmark-cohort-v1.json");
   const destination = checkpointPath(stateDir);
   const path = existsSync(destination) ? destination : legacy;
   let parsed: { version?: string; sources?: unknown; baselineSources?: unknown; sourceFaults?: unknown; lastGood?: unknown };
   try {
-    const encoded = readFileSync(path);
+    const fd = openSync(path, "r");
+    let encoded: Buffer;
+    try {
+      if (seen && path === destination) seen.identity = identityOf(fstatSync(fd, { bigint: true }));
+      encoded = readFileSync(fd);
+    } finally { closeSync(fd); }
     io.checkpointReadBytes += encoded.length;
     parsed = object(JSON.parse(encoded.toString())) ?? {};
   } catch (error) {
@@ -243,6 +250,7 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
         ...(validLastGood(parsed.lastGood, lastGoodSources, parsed.sourceFaults ?? [], parsed.baselineSources !== undefined)
           ? { lastGood: parsed.lastGood } : {}) };
       writeCheckpoint(stateDir, checkpoint, io);
+      if (seen) seen.identity = publishedIdentities.get(io) ?? null;
       unlinkSync(legacy);
       return checkpoint;
     }
@@ -309,11 +317,45 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
       ? { lastGood: parsed.lastGood } : {}) };
 }
 
-/** The published index's file identity, or null when none exists. A publish renames a new file into place, so any
- * publish between two reads changes the inode. */
+/** A file's identity. A publish renames a new file into place, so every publish changes it; a rename keeps the inode
+ * and the mtime, so the identity of a temporary file is the identity of the index it becomes. */
+function identityOf(stat: { ino: bigint; size: bigint; mtimeNs: bigint }): string {
+  return `${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+}
+
+/** The published index's identity, or null when none exists. */
 function indexIdentity(stateDir: string): string | null {
   const stat = statSync(checkpointPath(stateDir), { bigint: true, throwIfNoEntry: false });
-  return stat ? `${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : null;
+  return stat ? identityOf(stat) : null;
+}
+
+/** The identity of the index each pass's writes last published, keyed by that pass's IO tally. */
+const publishedIdentities = new WeakMap<CheckpointIO, string>();
+const INDEX_LOCK_STALE_MS = 5_000;
+const lockSleeper = new Int32Array(new SharedArrayBuffer(4));
+
+/** Every publication (identity check, rename, segment retirement) runs under one lock file, so to every other writer a
+ * rewrite's identity check and its rename are one step. A rewrite yields to a held lock and publishes nothing; a
+ * rebuild waits, and breaks a lock older than INDEX_LOCK_STALE_MS, which only a writer that died holding it leaves. */
+function withIndexLock<T>(stateDir: string, yieldIfHeld: boolean, publish: () => T): T | undefined {
+  const lock = `${checkpointPath(stateDir)}.lock`;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try { fd = openSync(lock, "wx"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "EEXIST") throw error;
+      const held = statSync(lock, { throwIfNoEntry: false });
+      if (held !== undefined && systemClock.now() - held.mtimeMs > INDEX_LOCK_STALE_MS) { unlinkSync(lock); continue; }
+      if (yieldIfHeld) return undefined;
+      Atomics.wait(lockSleeper, 0, 0, 2);
+    }
+  }
+  const mine = fstatSync(fd).ino;
+  try { return publish(); } finally {
+    // Release only this writer's own lock, never one another writer took after breaking a stale one.
+    if (statSync(lock, { throwIfNoEntry: false })?.ino === mine) unlinkSync(lock);
+    closeSync(fd);
+  }
 }
 
 function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number;
@@ -365,23 +407,26 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: Checkpoin
   const encoded = JSON.stringify({ ...checkpoint, version: "benchmark-cohort-segments-v2", sources, baselineSources });
   const destination = checkpointPath(stateDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
   try {
     writeFileSync(temporary, encoded);
-    // A newer index from another pass wins: this pass's rewrite of an older one is dropped, never published over it.
-    if (expected && indexIdentity(stateDir) !== expected.identity) return undefined;
-    io.checkpointWrittenBytes += Buffer.byteLength(encoded);
-    renameSync(temporary, destination);
+    const published = withIndexLock(stateDir, expected !== undefined, () => {
+      // A newer index from another pass wins: this pass's rewrite of an older one is dropped, never published over it.
+      if (expected && indexIdentity(stateDir) !== expected.identity) return false;
+      const identity = identityOf(statSync(temporary, { bigint: true }));
+      io.checkpointWrittenBytes += Buffer.byteLength(encoded);
+      renameSync(temporary, destination);
+      publishedIdentities.set(io, identity);
+      // A rewrite names exactly the segments it read and retires none.
+      if (!expected) for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
+        if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
+          unlinkSync(join(stateDir, entry.name));
+      }
+      // Measured under the lock, before another writer can retire a segment this index names.
+      return Buffer.byteLength(encoded) + [...retained].reduce((sum, segment) => sum + statSync(join(stateDir, segment)).size, 0);
+    });
+    return published === false ? undefined : published;
   } finally { if (existsSync(temporary)) unlinkSync(temporary); }
-  const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
-  // A rewrite names exactly the segments it read and retires none. If another pass retired one between the identity
-  // check and the rename, readCheckpoint omits that source and rescans it; the size counts only the bytes on disk.
-  if (expected) return [...retained].reduce((sum, segment) =>
-    sum + (statSync(join(stateDir, segment), { throwIfNoEntry: false })?.size ?? 0), Buffer.byteLength(encoded));
-  for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
-    if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
-      unlinkSync(join(stateDir, entry.name));
-  }
-  return Buffer.byteLength(encoded) + [...retained].reduce((sum, segment) => sum + statSync(join(stateDir, segment)).size, 0);
 }
 
 async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: number): Promise<{ full: string; prefix?: string }> {
@@ -1070,9 +1115,8 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   io: CheckpointIO): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
-  // Taken before the read, so any publish after it, including readCheckpoint's own migration, voids a rewrite.
-  const readIdentity = { identity: indexIdentity(stateDir) };
-  const checkpoint = readCheckpoint(stateDir, io);
+  const readIdentity: { identity: string | null } = { identity: null };
+  const checkpoint = readCheckpoint(stateDir, io, readIdentity);
   // A pass that stops before joining leaves no earlier join on disk; the rewrite yields to a newer index.
   const unjoinOnDisk = (): number | undefined => hasJoin(checkpoint.lastGood)
     ? writeCheckpoint(stateDir, { ...checkpoint, lastGood: withoutJoin(checkpoint.lastGood!) }, io, readIdentity) : undefined;

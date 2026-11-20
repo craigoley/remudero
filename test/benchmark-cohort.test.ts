@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -822,6 +822,42 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
       "the newer index stays published");
     assert.equal(existsSync(concurrentSegment), true, "the newer index's segment is not retired");
     assert.equal(yielded.checkpointBytes, undefined, "no write is claimed for a rewrite that yielded");
+    // A writer mid-publication holds the index lock; a rewrite yields to it rather than racing its rename.
+    const lockPath = `${indexPath}.lock`;
+    const atLock = readFileSync(indexPath, "utf8");
+    const locked = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, onBeforeLiveCacheVerify: () => writeFileSync(lockPath, "") });
+    assert.equal(locked.scannedSources, 0, "positive control: this pass is a cache hit");
+    assert.equal(locked.checkpointBytes, undefined, "a rewrite that met a held lock publishes nothing");
+    assert.equal(readFileSync(indexPath, "utf8"), atLock, "the index is untouched");
+    assert.equal(existsSync(lockPath), true, "a held lock is never taken from its writer");
+    unlinkSync(lockPath);
+    // A v1 index migrates during the read; the cache hit after it still publishes its rows to the migrated index.
+    const current = JSON.parse(readFileSync(indexPath, "utf8")) as { sources: { segment: string; segmentBytes: number }[];
+      lastGood: { version: string; cohorts: BenchmarkCohort[] } };
+    const expand = ({ segment, segmentBytes, segmentSha256: _hash, rowCount: _count, ...metadata }:
+      { segment: string; segmentBytes: number; segmentSha256?: string; rowCount?: number }) => {
+      const encoded = readFileSync(join(stateDir, segment)).subarray(0, segmentBytes).toString();
+      return { ...metadata, rows: encoded.trim() ? encoded.trimEnd().split("\n").map((line) => JSON.parse(line) as unknown) : [] };
+    };
+    const v1 = { version: current.lastGood.version, sources: current.sources.map(expand),
+      lastGood: { ...current.lastGood, cohorts: current.lastGood.cohorts.map(({ verifiedOutcome: _outcome, ...cohort }) => cohort) } };
+    for (const name of readdirSync(stateDir).filter((entry) => entry.startsWith("benchmark-cohort-"))) unlinkSync(join(stateDir, name));
+    writeFileSync(join(stateDir, "benchmark-cohort-v1.json"), JSON.stringify(v1));
+    const migrated = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(migrated.scannedSources, 0, "positive control: the migration rescans nothing");
+    assert.equal(existsSync(join(stateDir, "benchmark-cohort-v1.json")), false, "positive control: the v1 index migrated");
+    assert.deepEqual(migrated.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), joinedOnDisk);
+    assert.deepEqual(onDisk(), joinedOnDisk, "the migrated index holds the rows the pass reported");
+    // A lock left by a writer that died holding it is broken once stale, after the rebuild waits for it.
+    writeFileSync(lockPath, "");
+    const nearlyStale = (Date.now() - 4_970) / 1000;
+    utimesSync(lockPath, nearlyStale, nearlyStale);
+    rmSync(indexPath);
+    const rebuilt = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(rebuilt.state, "complete");
+    assert.ok(rebuilt.scannedSources > 0, "positive control: this pass rebuilds");
+    assert.equal(existsSync(lockPath), false, "the stale lock was broken and this writer released its own");
+    assert.deepEqual(onDisk(), joinedOnDisk);
     // A pass that stops before joining, here because the live ledger vanished, names the unavailable reason in its
     // rows and total, and leaves no earlier join on disk.
     assert.deepEqual(onDisk(), joinedOnDisk, "positive control: the index on disk still holds the earlier join");
