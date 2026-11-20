@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import fs, { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock } from "#src/lib/clock.js";
-import { realWriteAtomicIo } from "#src/lib/fs-race-safe.js";
+import { realWriteAtomicIo, writeAtomic } from "#src/lib/fs-race-safe.js";
 import { applyProposalVerdict, ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
 import { registryThreadItems } from "#src/lib/inbox-responder.js";
-import { appendLedger, ledgerRotationLockPath, rotateLedger } from "#src/lib/ledger.js";
+import { appendLedger, compactedArchiveName, ledgerRotationLockPath, rotateLedger } from "#src/lib/ledger.js";
+import { ledgerCompactCommand } from "#src/lib/ledger-compact.js";
 import { readLedgerUnionRecordsSync, realLedgerFs } from "#src/lib/ledger-union.js";
 import { inboxFirstSeenPath } from "#src/lib/panel-graph.js";
 import { expireUnansweredSkillDrafts, reportSkillDraftExpiry, skillDraftExpiryBound } from "#src/lib/skill-workshop.js";
@@ -95,6 +96,182 @@ function drafts(s: Site) {
 const rows = (s: Site) => [...readLedgerLines(s.ledgerPath)];
 const declinesOf = (s: Site, id: string) => rows(s).filter((r) => r.step === "panel.proposal_declined" && r.task_id === id);
 const pass = (s: Site) => expireUnansweredSkillDrafts(s.registryPath, s.stateDir, retroLog(s), clock);
+
+function writeArchive(s: Site, stamp: string, entries: Record<string, unknown>[]): string {
+  const path = join(s.stateDir, compactedArchiveName(stamp));
+  writeFileSync(path, gzipSync(entries.map((entry) => JSON.stringify(entry) + "\n").join("")));
+  return path;
+}
+
+function publishCompactedArchives(s: Site, maxSources: number): string[] {
+  const removals: string[] = [];
+  const errors: string[] = [];
+  const result = ledgerCompactCommand(["--older-than", "0", "--max-sources", String(maxSources)], {
+    stateDir: s.stateDir,
+    clock,
+    fs: {
+      readdirSync, readFileSync, existsSync, writeAtomic, gzipSync, gunzipSync,
+      rmSync: (path) => removals.push(path),
+    },
+    error: (message) => errors.push(message),
+    out: () => {},
+  });
+  assert.equal(result, 0, errors.join("\n"));
+  return removals;
+}
+
+function compactionAnswers(s: Site) {
+  writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({
+    backfill: BACKFILL, short: "2026-11-03T01:00:00Z", long: "2026-10-20T12:00:00Z",
+    "skill-draft:middle": "2026-11-09T12:00:00Z", "skill-draft:old": "2026-11-01T12:00:00Z",
+  }));
+  writeFileSync(s.registryPath, JSON.stringify({ proposals: [skillDraft("skill-draft:middle"), skillDraft("skill-draft:old")] }));
+  writeFileSync(s.ledgerPath, "");
+  const short = { step: "ratify.approved", task_id: "short", ts: "2026-11-05T01:00:00Z" };
+  const long = { step: "panel.proposal_declined", task_id: "long", ts: "2026-11-05T00:00:00Z" };
+  const marker = { step: "skill.staged", task_id: "RETRO", ts: "2026-11-06T00:00:00Z" };
+  const earlier = writeArchive(s, short.ts, [short]);
+  const superseded = writeArchive(s, "2026-11-05T00:30:00Z", []);
+  const later = writeArchive(s, marker.ts, [marker]);
+  const publishAnswer = () => writeArchive(s, marker.ts, [long, marker]);
+  return { earlier, later, superseded, publishAnswer };
+}
+
+function compactAfterReadingEarlier(
+  t: TestContext,
+  s: Site,
+  archives: ReturnType<typeof compactionAnswers>,
+) {
+  const read = realLedgerFs.readFileSync;
+  const archiveNames = () => readdirSync(s.stateDir).filter((name) => name.endsWith(".ndjson.gz")).sort();
+  const names = archiveNames();
+  const before = [archives.earlier, archives.later, s.ledgerPath].map((path) => statSync(path).ino);
+  let replaced = false;
+  t.mock.method(realLedgerFs, "readFileSync", (path: string) => {
+    const bytes = read(path);
+    if (path === archives.earlier && !replaced) {
+      assert.deepEqual(publishCompactedArchives(s, 3), [archives.superseded]);
+      assert.deepEqual(archiveNames(), names);
+      assert.notEqual(statSync(archives.earlier).ino, before[0]);
+      assert.notEqual(statSync(archives.later).ino, before[1]);
+      assert.equal(statSync(s.ledgerPath).ino, before[2]);
+      assert.doesNotMatch(gunzipSync(bytes).toString(), /"task_id":"long"/);
+      assert.doesNotMatch(gunzipSync(read(archives.later)).toString(), /"task_id":"long"/);
+      replaced = true;
+    }
+    return bytes;
+  });
+  return () => assert.equal(replaced, true, "compaction replaced both archives during the read");
+}
+
+test("W1-T13859 criterion 1: same-name archive compaction cannot shrink the sampled wait", (t) => {
+  const s = site();
+  try {
+    const archives = compactionAnswers(s);
+    archives.publishAnswer();
+    const complete = { bound: 15.5 * DAY, sample: 2 };
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
+    const verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+    const raced = skillDraftExpiryBound(s.stateDir);
+    verifyCompaction();
+    rmSync(archives.superseded);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), complete);
+    assert.deepEqual(raced, { unmeasured: "incomplete ledger union: ledger archives changed during read" });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 2: expiry waits for a complete compaction read and closes only the draft past the true bound", (t) => {
+  const s = site();
+  try {
+    const archives = compactionAnswers(s);
+    archives.publishAnswer();
+    const registry = readFileSync(s.registryPath);
+    const verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+    const raced = pass(s);
+    verifyCompaction();
+    assert.deepEqual(raced, { expired: [], reason: "no skill draft expires: incomplete ledger union: ledger archives changed during read" });
+    assert.deepEqual(rows(s), []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    rmSync(archives.superseded);
+
+    assert.deepEqual(pass(s).expired, ["skill-draft:old"]);
+    assert.deepEqual(pass(s).expired, []);
+    const reason = "expired: unanswered for 18.00 days; the longest wait of any answered proposal is 15.50 days (2 answered)";
+    assert.deepEqual(rows(s).map(({ step, task_id, origin, reason }) => ({ step, task_id, origin, reason })), [
+      { step: "panel.proposal_declined", task_id: "skill-draft:old", origin: "skill-workshop", reason },
+    ]);
+    assert.deepEqual(loadProposalRegistry(s.registryPath).map(({ id, skillDraftClose }) => [id, skillDraftClose?.reason]), [
+      ["skill-draft:middle", undefined], ["skill-draft:old", reason],
+    ]);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: same-name compaction during the locked reread stops expiry and retro prints why", (t) => {
+  const s = site();
+  try {
+    const archives = compactionAnswers(s);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 2 * DAY, sample: 1 });
+    const registry = readFileSync(s.registryPath);
+    const printed: string[] = [];
+    let verifyCompaction: (() => void) | undefined;
+    const racingClock = { ...clock, now: () => {
+      archives.publishAnswer();
+      assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 15.5 * DAY, sample: 2 });
+      verifyCompaction = compactAfterReadingEarlier(t, s, archives);
+      return NOW;
+    } };
+    reportSkillDraftExpiry(
+      () => expireUnansweredSkillDrafts(s.registryPath, s.stateDir, retroLog(s), racingClock),
+      retroLog(s), (message) => printed.push(message),
+    );
+    assert.ok(verifyCompaction);
+    verifyCompaction();
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 15.5 * DAY, sample: 2 });
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: ledger archives changed during read"]);
+    assert.deepEqual(rows(s), []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+  } finally { s.done(); }
+});
+
+for (const phase of ["initial read", "locked reread"]) {
+  test(`W1-T13859 criterion 3: an older restore in a later archive cannot clear a newer decline at the ${phase}`, () => {
+    const s = site();
+    try {
+      const id = "skill-draft:old";
+      const restore = { step: "panel.proposal_restored", task_id: id, ts: "2026-11-15T02:00:00Z", origin: "rmd-cli" };
+      const decline = { step: "panel.proposal_declined", task_id: id, ts: "2026-11-15T04:00:00Z", origin: "rmd-cli", reason: "operator declined again" };
+      const marker = { step: "skill.staged", task_id: "RETRO", ts: "2026-11-15T12:00:00Z" };
+      const firstSource = writeArchive(s, "2026-11-16T03:00:00Z", [restore]);
+      const secondSource = writeArchive(s, "2026-11-16T12:00:00Z", [marker]);
+      const draftRegistry = JSON.stringify({ proposals: [skillDraft(id)] });
+      writeFileSync(s.registryPath, draftRegistry);
+      writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({
+        backfill: BACKFILL, short: "2026-11-03T00:00:00Z", [id]: "2026-11-01T12:00:00Z",
+      }));
+      row(s, "ratify.approved", "short", "2026-11-05T00:00:00Z");
+      const ledger = readFileSync(s.ledgerPath);
+      const installDecline = () => {
+        writeArchive(s, "2026-11-15T01:00:00Z", [decline]);
+        const removals = publishCompactedArchives(s, 2);
+        assert.deepEqual(removals, [firstSource, secondSource]);
+        for (const path of removals) rmSync(path);
+        const verdictsInFileOrder = readLedgerUnionRecordsSync(s.stateDir, {
+          step: ["panel.proposal_declined", "panel.proposal_restored"], refuseIncomplete: true,
+        });
+        assert.equal(verdictsInFileOrder.ok, true);
+        assert.deepEqual(verdictsInFileOrder.rows.map((r) => r.ts), [decline.ts, restore.ts]);
+      };
+      if (phase === "initial read") installDecline();
+      const racingClock = phase === "initial read" ? clock : { ...clock, now: () => {
+        installDecline();
+        return NOW;
+      } };
+      assert.deepEqual(expireUnansweredSkillDrafts(s.registryPath, s.stateDir, retroLog(s), racingClock).expired, []);
+      assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+      assert.equal(readFileSync(s.registryPath, "utf8"), draftRegistry);
+    } finally { s.done(); }
+  });
+}
 
 function treeOf(dir: string): string[] {
   if (!existsSync(dir)) return [];
