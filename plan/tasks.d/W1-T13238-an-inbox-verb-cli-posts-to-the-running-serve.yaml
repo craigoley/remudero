@@ -17,6 +17,7 @@
     - src/run-task.ts
     - test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts
     - "src/lib/config-schema.ts"
+    - "src/lib/inbox-cli-serve.ts"
   status: queued
   attempts: 0
   acceptance:
