@@ -236,7 +236,7 @@ export interface ProductPlanOperationOptions {
   /** W1-T13875: overrides PRODUCT_PLAN_LEDGER_READ_BOUND_MS; a test seam for the bounded evidence read. */
   ledgerReadBoundMs?: number;
   /** W1-T13875: test seam for the evidence reader. */
-  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; untilTs?: string; refuseIncomplete: true; keep: (line: string) => boolean }) =>
+  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; untilMs?: number; refuseIncomplete: true; keep: (line: string) => boolean }) =>
     Promise<{ ok: boolean; rawLines: readonly string[] }>;
   sync?: (fd: number) => void;
 }
@@ -272,7 +272,7 @@ const keptSchema = z.object({
 type Kept = z.infer<typeof keptSchema>;
 interface Paths { directory: string; state: string; kept: string; ownerKey: string }
 
-type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilTs?: string };
+type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilMs?: number };
 const keepEvidenceLine = (taskId: string) => (line: string) =>
   line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
 const runLedgerReader = promisify(execFile);
@@ -292,7 +292,7 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
   for (;;) {
     const before = liveIdentity();
     const read = await readLedgerUnionRawLinesAsync(stateDir, {
-      sinceTs: subject.requestedAt, ...(subject.untilTs !== undefined ? { untilTs: subject.untilTs } : {}), refuseIncomplete: true,
+      sinceTs: subject.requestedAt, ...(subject.untilMs !== undefined ? { untilMs: subject.untilMs } : {}), refuseIncomplete: true,
       keep: keepEvidenceLine(taskId),
     });
     if (read.unread.includes(stateDir)) return "unread";
@@ -317,7 +317,7 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   // Only rows inside the operation's window: from its request, and for a legacy refusal up to that refusal.
   const from = Date.parse(record.requestedAt);
-  const until = record.untilTs === undefined ? Number.POSITIVE_INFINITY : Date.parse(record.untilTs);
+  const until = record.untilMs ?? Number.POSITIVE_INFINITY;
   const rows = parsed.filter((row) => at(row) >= from && at(row) <= until).sort((a, b) => at(a) - at(b));
   const mine = rows.filter((row) => row.task_id === taskId);
   const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
@@ -662,7 +662,7 @@ export class ProductPlanOperationService {
     const refused = record.handoff?.outcome === "refused" && !this.inFlight(record.operationId);
     if (ledgerPath === undefined || (refused && record.handoff?.beforeLaunch === true)) return none;
     // A legacy refusal can be a nonzero exit after a proposal opened: read only its request-to-refusal window.
-    const untilTs = refused ? new Date(Date.parse(record.handoff!.at) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS).toISOString() : undefined;
+    const untilMs = refused ? Date.parse(record.handoff!.at) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS : undefined;
     const taskId = productPlanLedgerTaskId(record.operationId);
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
@@ -671,12 +671,12 @@ export class ProductPlanOperationService {
     try {
       const { operationId, mode, repository, requestedAt } = record;
       const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest,
-        ...(untilTs !== undefined ? { untilTs } : {}) };
+        ...(untilMs !== undefined ? { untilMs } : {}) };
       const stateDir = dirname(ledgerPath);
       const seen = await Promise.race([
         new Promise<"unread">((resolve) => { timer = setTimeout(() => resolve("unread"), bound); }),
         this.options.readLedgerLines
-          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilTs !== undefined ? { untilTs } : {}), refuseIncomplete: true,
+          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilMs !== undefined ? { untilMs } : {}), refuseIncomplete: true,
             keep: keepEvidenceLine(taskId) })
             .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, read.rawLines) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.

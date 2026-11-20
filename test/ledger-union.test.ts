@@ -446,7 +446,7 @@ test("strict incremental ledger reads cannot reuse an empty corpus signature aft
   assert.equal(read(dir).ok, best.ok, "best-effort behavior remains available");
 });
 
-test("W1-T13875: untilTs skips rotations and the live file whose rows all postdate it", async () => {
+test("W1-T13875: untilMs skips rotations and the live file whose rows all postdate it", async () => {
   const dir = tmpStateDir();
   try {
     writeFileSync(join(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), `${row("first")}\n`);
@@ -454,14 +454,14 @@ test("W1-T13875: untilTs skips rotations and the live file whose rows all postda
     writeFileSync(join(dir, "ledger.2026-01-03T00-00-00-000Z.ndjson"), `${row("after", "run.start", "2026-01-02T12:00:00.000Z")}\n`);
     writeFileSync(join(dir, LEDGER_FILENAME), `${row("live", "run.start", "2026-01-03T12:00:00.000Z")}\n`);
     const markers = (read: { rawLines: readonly string[] }) => read.rawLines.map((line) => (JSON.parse(line) as { marker: string }).marker);
-    const windowed = await readLedgerUnionRawLinesAsync(dir, { untilTs: "2026-01-01T18:00:00.000Z", refuseIncomplete: true });
+    const windowed = await readLedgerUnionRawLinesAsync(dir, { untilMs: Date.parse("2026-01-01T18:00:00.000Z"), refuseIncomplete: true });
     assert.equal(windowed.ok, true);
     assert.deepEqual(markers(windowed), ["first", "inside"], "the rotation cut after the bound is its last read");
     assert.deepEqual(markers(await readLedgerUnionRawLinesAsync(dir, {})), ["first", "inside", "after", "live"]);
     const noRotation = tmpStateDir();
     try {
       writeFileSync(join(noRotation, LEDGER_FILENAME), `${row("live")}\n`);
-      assert.deepEqual(markers(await readLedgerUnionRawLinesAsync(noRotation, { untilTs: "2025-01-01T00:00:00.000Z" })), ["live"],
+      assert.deepEqual(markers(await readLedgerUnionRawLinesAsync(noRotation, { untilMs: Date.parse("2025-01-01T00:00:00.000Z") })), ["live"],
         "with no rotation cut after the bound, the live file is read");
     } finally { rmSync(noRotation, { recursive: true, force: true }); }
   } finally {

@@ -842,9 +842,9 @@ export async function readLedgerUnionRecords(
 }
 
 export interface LedgerUnionRawReadOptions extends LedgerUnionOptions {
-  /** W1-T13875: skip each rotation whose previous cut is later than this instant (all its rows are later), and the live
+  /** W1-T13875: skip each rotation whose previous cut is later than this instant (epoch ms) (all its rows are later), and the live
    *  file once any rotation was cut later. Rows are NOT filtered; a caller that needs an exact window filters rows too. */
-  untilTs?: string;
+  untilMs?: number;
   order?: "oldest-first" | "newest-first";
   liveFirst?: boolean;
   maxRotations?: number;
@@ -886,9 +886,9 @@ function orderedEntries(rotations: LedgerCorpusEntry[], opts: LedgerUnionRawRead
   return opts.maxRotations === undefined ? windowed : windowed.slice(0, opts.maxRotations);
 }
 
-/** The rotations (and whether the live file) hold only rows after `untilTs`. An unstamped rotation skips nothing. */
-function afterUntil(rotations: readonly LedgerCorpusEntry[], untilTs: string | undefined): { rotations: Set<string>; live: boolean } {
-  const until = untilTs === undefined ? Number.NaN : Date.parse(untilTs);
+/** The rotations (and whether the live file) hold only rows after `untilMs`. An unstamped rotation skips nothing. */
+function afterUntil(rotations: readonly LedgerCorpusEntry[], untilMs: number | undefined): { rotations: Set<string>; live: boolean } {
+  const until = untilMs ?? Number.NaN;
   const stamped = rotations.map((entry) => ({ entry, ms: stampMsOf(entry) })).sort((a, b) => a.ms - b.ms);
   if (Number.isNaN(until) || stamped.some(({ ms }) => Number.isNaN(ms))) return { rotations: new Set(), live: false };
   const later = stamped.filter((_, index) => index > 0 && stamped[index - 1]!.ms > until).map(({ entry }) => entry.path);
@@ -1035,7 +1035,7 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
-  const after = afterUntil(rotations, opts.untilTs);
+  const after = afterUntil(rotations, opts.untilMs);
   const { rawLines, scan } = rawLineCollector(opts);
   let filesRead = 0;
 

@@ -678,14 +678,14 @@ test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a 
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
   seedLegacyRefusal(f, operationId); // the saved Nov 3 refusal: written before refusals said whether anything ran
-  const windows: Array<{ sinceTs: string; untilTs?: string }> = [];
+  const windows: Array<{ sinceTs: string; untilMs?: number }> = [];
   const evidence = reader(() => []);
-  const read: typeof evidence.read = (stateDir, opts) => { windows.push({ sinceTs: opts.sinceTs, untilTs: opts.untilTs }); return evidence.read(stateDir, opts); };
+  const read: typeof evidence.read = (stateDir, opts) => { windows.push({ sinceTs: opts.sinceTs, untilMs: opts.untilMs }); return evidence.read(stateDir, opts); };
   for (let resume = 0; resume < 3; resume++) {
     const again = await ok(f.service({ gateway: false, readLedgerLines: read }).execute(actor, f.command()));
     assert.deepEqual([again.observation.operationId, again.observation.state], [operationId, "refused"]);
   }
-  assert.deepEqual(windows, [{ sinceTs: REQUESTED, untilTs: new Date(Date.parse(REQUESTED) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS).toISOString() }],
+  assert.deepEqual(windows, [{ sinceTs: REQUESTED, untilMs: Date.parse(REQUESTED) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS }],
     "one read, of the request-to-refusal window only; later resumes read nothing");
 });
 
