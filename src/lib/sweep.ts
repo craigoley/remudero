@@ -2957,10 +2957,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         checks = snapshot?.checks ?? [];
         return JSON.stringify(snapshot);
       });
-    if (protection.kind === "unreadable") return undefined;
+    // Active rulesets that apply to the branch require checks too, beside (or instead of) classic protection.
+    let rules: { type?: string; parameters?: { required_status_checks?: { context?: unknown; integration_id?: unknown }[] } }[] | undefined;
+    try {
+      const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}?per_page=100`,
+        "--paginate", "--slurp"], { fresh: true }) as unknown;
+      rules = Array.isArray(pages) ? pages.flat() as typeof rules : undefined;
+      if (rules === undefined) throw new Error("unparseable rules payload");
+    } catch (error) {
+      log("sweep.prior_round_hold.rulesets_unreadable", { branch, error: String(error) });
+    }
+    // Each readable source names checks that are required; an unreadable one names none, so it releases nothing.
+    if (protection.kind === "unreadable" && rules === undefined) return undefined;
     const required = new Map<string, number | null>();
+    const require = (name: string, pin: number | null) => {
+      const prior = required.get(name);
+      required.set(name, prior === null || pin === null ? null : prior ?? pin);
+    };
     if (protection.kind === "contexts") for (const name of protection.contexts) required.set(name, null);
     for (const check of checks) required.set(check.context, check.app_id);
+    for (const rule of rules ?? []) {
+      if (rule?.type !== "required_status_checks") continue;
+      for (const check of rule.parameters?.required_status_checks ?? []) {
+        if (typeof check?.context !== "string" || check.context.length === 0) continue;
+        require(check.context, typeof check.integration_id === "number" ? check.integration_id : null);
+      }
+    }
     return required;
   };
   const readCiGateRollup = async (pr: OpenPrView, read = readJsonImpl): Promise<RollupCheckEntry[] | undefined> => {
@@ -26655,9 +26677,6 @@ export async function runSweep(
                   scripts: ratchetScripts,
                 });
               }
-              // W1-T13865: the prior-round hold stops only the paid rounds below (judge and fix worker); the retries
-              // above and the worker-free repairs before this line still run, and a retry's completion releases FLAKE.
-              if (standDownForPriorRound(roundHold)) break;
               if (staleProofs && !proofRepairActive && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
                 reason = `stale-proof red on ${staleProofs.proofs.map((p) => p.proof).join("; ")} — the plan-shard flag is spent or unwired, so no worker is dispatched`;
                 const flagEscalated = ledgerLines.some((line) =>
@@ -26679,6 +26698,12 @@ export async function runSweep(
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
               // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
+              // W1-T13865: the prior-round hold stops a round that would spawn a fix worker, before its judge is paid.
+              // The retries, worker-free repairs, stale-proof escalation and plan-shard repair keep their own paths:
+              // the plan-only route below is the same evidence `planRepairEvidence` dispatches without a worker.
+              const planOnlyRoute = deps.dispatchPlanOnlyRepair !== undefined && !proofRepairActive &&
+                (planShardRepairDue ? proofDiscrimination : staleProofs) !== undefined;
+              if (!planOnlyRoute && standDownForPriorRound(roundHold)) break;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               const stall = planShardRepairDue || proofRepairFlagRung ? undefined : await takeStallRemedy(pr, ledgerLines, policy, deps);
               if (stall?.kind === "hold") {

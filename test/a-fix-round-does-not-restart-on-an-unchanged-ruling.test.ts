@@ -25,6 +25,10 @@ const PR_URL = "https://github.com/o/remudero/pull/13865";
 const AMENDMENT_URL = "https://github.com/o/plan/pull/900";
 // The completion reader takes required checks from the PR's own base branch, read from the PR.
 const PR_READ = "repos/o/remudero/pulls/13865";
+// The proof-discrimination log of a stale proof: it passes at the PR head and at its merge base alike.
+const STALE_PROOF = "grep: export function renderViews in src/lib/views.ts";
+const STALE_LOG = ["proof-discrimination: FAIL — 1 proof(s) pass at both PR head and merge base (abc123):",
+  `  proof: ${STALE_PROOF}`, "  head hits: 1; base hits: 1"].join("\n");
 type Row = Record<string, unknown>;
 
 const round = (outcome: string, over: Row = {}): Row[] => [
@@ -327,6 +331,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci", "ci-gate"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return {
           contexts: ["ci-gate"], checks: [{ context: "ci-gate", app_id: 15368 }],
@@ -369,6 +374,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["ci-gate"] };
         if (endpoint.includes(`/commits/${HEAD}/check-runs`)) {
@@ -415,6 +421,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["lint-plan"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["ci-gate"] };
         if (endpoint.includes(`/commits/${HEAD}/statuses?`)) return [[]];
@@ -444,6 +451,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["lint-plan"],
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) throw new Error("branch protection unavailable");
         assert.match(endpoint, new RegExp(`/commits/${HEAD}/check-runs\\?`));
@@ -556,6 +564,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return {
           contexts: ["remudero-review", "ci-gate", "security-merge-policy"],
@@ -640,6 +649,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: [], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint === "repos/o/plan/pulls/901") throw new Error("HTTP 502");
         if (endpoint === "repos/o/plan/pulls/902") return {};
@@ -675,6 +685,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return {
           contexts: ["remudero-review"], checks: [{ context: "remudero-review", app_id: 2001 }],
@@ -764,6 +775,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "main" } };
         if (endpoint.endsWith("/protection/required_status_checks")) return {
           contexts: ["remudero-review"], checks: [{ context: "remudero-review", app_id: null }],
@@ -822,6 +834,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "release/1.0" } };
         if (endpoint.endsWith("/protection/required_status_checks")) {
           protections.push(endpoint);
@@ -850,6 +863,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
       ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
       readJsonImpl: async (args) => {
         const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
         if (endpoint === PR_READ) return { base: { ref: "release/1.0" } };
         if (endpoint.endsWith("/protection/required_status_checks")) {
           return endpoint.includes("/branches/main/") ? { contexts: ["main-only"] } : { contexts: ["release-gate"] };
@@ -877,5 +891,59 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.deepEqual(repaired, [[name]], "the deterministic repair ran");
     assert.equal(rows.filter(row => row.step === "sweep.ratchet_repaired").length, 1);
     assert.equal(f.state.dispatched, 0, "no fix worker");
+  });
+
+  test("W1-T13865 criterion 3: a fresh red check an active branch ruleset requires releases FLAKE", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    const logged: string[] = [];
+    // The reader keeps one protection read per base branch, so each answer gets its own effects.
+    const reader = (rulesetsReadable: boolean) => buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT,
+      config: { root: "/unused/prior-round-hold" } as Config, ledgerPath: f.deps.ledgerPath, runId: f.deps.runId,
+      plan: { tasks: [], byId: new Map() }, log: step => { logged.push(step); }, ciGateRequired: ["ci"], restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint === PR_READ) return { base: { ref: "main" } };
+        // Classic protection is absent: the branch is protected by a ruleset alone.
+        if (endpoint.endsWith("/protection/required_status_checks")) throw new Error("HTTP 404: Branch not protected");
+        if (endpoint.startsWith("repos/o/remudero/rules/branches/main?")) {
+          if (!rulesetsReadable) throw new Error("HTTP 502");
+          return [[{ type: "pull_request", parameters: {} },
+            { type: "required_status_checks", parameters: { required_status_checks: [{ context: "ruleset-gate" }] } }]];
+        }
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return [{ check_runs: [
+          { name: "ruleset-gate", status: "completed", conclusion: "failure", completed_at: at(1_000) }] }];
+        if (endpoint.includes(`/commits/${HEAD}/statuses?`)) return [[]];
+        assert.fail(`unexpected check read ${endpoint}`);
+      },
+    }).readRequiredCheckCompletions!;
+    assert.deepEqual(await reader(false)(pr()), [], "with neither source readable, the completion is not known to be required");
+    assert.ok(logged.includes("sweep.prior_round_hold.rulesets_unreadable"));
+    const readable = reader(true);
+    assert.deepEqual(await readable(pr()), [{ name: "ruleset-gate", completedAt: at(1_000) }]);
+    f.deps.readRequiredCheckCompletions = readable;
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the ruleset's own requirement completed red after the round");
+  });
+
+  test("W1-T13865 criterion 4: a held head still takes the worker-free stale-proof plan flag or its escalation", async () => {
+    const stale = pr({ body: `Summary\n\nRemudero-Task: ${TASK}\n`, redRequiredChecks: ["proof-discrimination"],
+      ciFailures: [{ name: "proof-discrimination", logTail: STALE_LOG, conclusion: "FAILURE" }] });
+    const flagged: unknown[] = [];
+    const notMetadata: SweepDeps["repairMetadata"] = () => ({ repaired: false, notMetadata: true, reason: "no deterministic acceptance repair" });
+    const wired = fixture(swept(round("FLAKE")));
+    wired.deps.repairMetadata = notMetadata;
+    wired.deps.dispatchPlanOnlyRepair = (_pr, evidence) => { flagged.push(evidence); return true; };
+    await runSweep([stale], wired.deps);
+    assert.equal(flagged.length, 1, "the plan flag ran at the held head");
+    assert.equal(wired.state.dispatched, 0, "no fix worker");
+
+    const unwiredRows = swept(round("FLAKE"));
+    const unwired = fixture(unwiredRows);
+    unwired.deps.repairMetadata = notMetadata;
+    await runSweep([stale], unwired.deps);
+    assert.equal(unwired.state.escalated, 1, "the flag's escalation fallback ran at the held head");
+    assert.equal(unwired.state.dispatched, 0, "no fix worker");
+    assert.equal(lastDisposed(unwiredRows).stale_proof_escalated, true);
   });
 });
