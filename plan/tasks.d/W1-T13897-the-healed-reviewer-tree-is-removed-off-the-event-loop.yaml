@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # Rule 19 sizing: the reviewer self-heal's tree lifecycle (review throughput)
+  risk: high # Rule 19 sizing: run-task (the reviewer self-heal route) and worker (worktree removal)
   origin: "operator-session#serve-oom-2026-11-16"
   plan_refs:
     - W1-T10269
