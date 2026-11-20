@@ -1,0 +1,52 @@
+- id: W1-T13905
+  title: "The board keeps each run's newest fact time in memory, so a run activity row no longer scans a task's whole fact history"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # how the board decides a run activity stand-in; which stand-ins it holds is unchanged
+  origin: "operator-session#now-view-serve-2026-11-17"
+  plan_refs:
+    - W1-T9436
+    - W1-T13840
+  files:
+    - src/lib/board-projection.ts
+    - test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "After the cold load, ingesting run activity rows runs no per-run MAX(ts_ms) read of the fact store"
+      proof: "grep: W1-T13905 criterion 1 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
+    - claim: "invariant:same-stand-ins — a board extended by new facts and run activity holds the stand-ins a fresh cold load of the same store holds"
+      kind: guard
+      proof: "grep: W1-T13905 criterion 2 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
+    - claim: "A fact row dropped under the board rebuilds the newest fact times in one grouped read, and the stand-ins then equal a fresh cold load's"
+      proof: "grep: W1-T13905 criterion 3 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
+    - claim: "The step cache reset rebuilds the map"
+      proof: "grep: newestFactMs = readNewestFactMs() in src/lib/board-projection.ts"
+  rationale: |
+    WHY: the now view still cannot serve core. MEASURED on the Azure host 2026-11-20 01:33-02:07Z in shadow mode, with
+    W1-T13840 live: core's board stage took 2.4 to 6.2 s of CPU every build (about one build every 10 s). PROFILED on
+    the Mac by replaying 6,000 live core ledger rows into a copy of core.v1.sqlite in 60 chunks: steady builds took
+    1.4 to 4.6 s, and 84% of the time was ingestActivity -> newestFactMsOf -> newestStoredFactMs, the runNewestFact
+    statement. Its only usable index is fact_task (task_id, seq), so a DAEMON run's MAX(ts_ms) reads all 706,926 DAEMON
+    fact rows: 1.7 s for one lookup on the copy. The board already builds this map exactly during its cold load
+    (bulkNewestFactMs, every fact row since seq 0) and dropped it after (W1-T9436). The store holds 159,476 task/run
+    pairs. With the map kept, replaying 4,000 newer live rows in 40 chunks: steady builds took a median 391 ms of CPU
+    (p90 530 ms, max 797 ms), board stage median 40 ms.
+  design: |
+    INVARIANT same-stand-ins: an extended board holds the same run activity stand-ins as a fresh cold load of the same
+    store.
+    1. bulkNewestFactMs becomes newestFactMs: filled by the ingest from seq 0 as before, and kept after the cold load.
+       newestFactMsOf reads only the map.
+    2. checkStepCache, when it finds the store dropped a cached step's row or went behind, rebuilds the map with one
+       GROUP BY task_id, run_id read under the same filters as runNewestFact (unread steps excluded, task_id and run_id
+       text). runNewestFact stays for the byTaskSteps read as of an older seq.
+  falsifier: |
+    Answer newestFactMsOf from runNewestFact again: criterion 1 fails. Drop the rebuild in checkStepCache: criterion 3
+    fails (no grouped read after the drop).
+  note: |
+    Id reserved for run-unfiled-1795140380379 with ~/rmd-work/bin/reserve-id.sh.

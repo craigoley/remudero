@@ -109,6 +109,7 @@ export interface Proposal {
   skillFile?: SkillFilePayload;
   skillFileStagedAt?: string;
   skillEval?: SkillEvalRecord;
+  skillDraftClose?: { at: string; reason: string; skillSha256: string };
 }
 
 export interface SkillEvalRecord {
