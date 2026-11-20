@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
+import { RmdError } from "./errors.js";
 import type { InboxClassification } from "./inbox.js";
 import { isAgeOnlyInboxInformation, type InboxOwnershipEvidence } from "./inbox-owner.js";
 import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
@@ -169,7 +170,11 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
  *  refuseInformationalProposal); restated so the in-process command answers the same without importing serve's routes. */
 export const INBOX_INFORMATIONAL_ONLY_DETAIL = "This age observation is readable information, not an operator decision or work request.";
 
-class InformationalVerdictRefused extends Error {}
+class InformationalVerdictRefused extends RmdError {
+  constructor() {
+    super("inbox", 1, INBOX_INFORMATIONAL_ONLY_DETAIL);
+  }
+}
 
 /**
  * W1-T13238 invariant:same-answer-either-path: `rmd decline` and `rmd restore` in-process, with serve's route's guard.
@@ -191,7 +196,7 @@ export function proposalVerdictInProcess(
     }, record);
   } catch (error) {
     if (!(error instanceof InformationalVerdictRefused)) throw error;
-    console.error(`rmd ${kind}: ${INBOX_INFORMATIONAL_ONLY_DETAIL}`);
-    return 1;
+    console.error(`rmd ${kind}: ${error.message}`);
+    return error.exitCode;
   }
 }
