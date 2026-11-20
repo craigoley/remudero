@@ -5,7 +5,8 @@
     - W1-T12509
   priority: 0
   type: implement
-  verify: human  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
+  # 2026-11-18 operator session: this task edits the author gate (scripts/preflight-author.mjs), so the operator reviews its diff before it ships
+  verify: human
   principles:
     tdd: strict
   risk: high # changes what the hand route treats as the gate; a check that leaves the author path must have a required CI job
@@ -106,3 +107,11 @@
     from), W1-T12165 (blocked), W1-T13551 (ops, Linux-only census readers).
     Id W1-T12511 reserved for run-unfiled-1794582098000 with ~/rmd-work/bin/reserve-id.sh.
     Depends on W1-T12509: the doctrine names the merge-time verdict as part of the gate only once it counts every gate it can.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it changes merge, deploy or branch-protection policy (\"required checks\") — irreversible or privileged work goes to a person"
+    judged_at: "2026-11-19T01:10:21.748Z"
+    pin: "c3fda3cd526a1fc4e184bb938ebc4b44d8951bf009f38d6357416dd953764064"

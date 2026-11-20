@@ -7917,7 +7917,8 @@ export async function runDaemon(
     // relaunch into the same reading every poll. So this is an in-process idle state, identical in shape
     // to "nothing runnable" below. The usage read happens fresh every tick, so a real reset is picked up
     // automatically with no wake-at-reset timer. The ceiling itself is time-aware.
-    if (deps.readUsage) {
+    // W1-T13837: with the governor off the reading is telemetry only, so it shares the in-flight sampler's cadence.
+    if (deps.readUsage && (headroomEnabled || daemonClock.now() - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS)) {
       // The authoritative per-tick read stamps the shared sampler, so an in-flight ticker starting straight
       // after it waits out the full staleness bound instead of re-probing seconds later. Stamped before
       // the guard below because an unreadable read is still an attempt (W1-T2565).
