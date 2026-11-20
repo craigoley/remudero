@@ -1422,8 +1422,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
     const reason = moved ? "deleted" : Number(sql.maxSeq.get()?.seq ?? 0) < lastSeq ? "behind" : undefined;
     if (!reason) return;
-    dropStepCache();
     newestFactMs = readNewestFactMs();
+    // The rebuilt times can admit previously suppressed activity. Replay the store's one row per run.
+    for (const row of activityRows.values()) withdraw(row);
+    taskActivitySeq.clear();
+    activitySeq = 0;
+    if (!bulkOpen) ingestActivity();
+    compact();
+    dropStepCache();
     stepReads.resets[reason]++;
   }
 

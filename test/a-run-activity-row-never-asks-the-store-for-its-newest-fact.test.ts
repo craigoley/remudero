@@ -121,15 +121,14 @@ test("W1-T13905 criterion 3: a fact row dropped under the board rebuilds the new
   const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
   const board = w.caughtUp(w.board(counted.db));
   board.index(board.rows()).byStep.get(FACT); // the step cache holds FACT, so a dropped FACT row is noticed
+  const r2 = `W1-T1|r2@${at(T0 + 1_300_000)}`;
+  assert.ok(!standIns(board).includes(r2), "r2's newest fact suppresses its activity at the same time");
   assert.equal(counted.count.grouped, 0);
   const newest = w.raw.prepare(`SELECT MAX(seq) AS seq FROM fact WHERE step = ? AND task_id = 'W1-T1' AND run_id = 'r2'`).get(FACT)!;
-  w.raw.prepare("DELETE FROM fact WHERE seq = ?").run(newest.seq);
+  assert.equal(w.raw.prepare("DELETE FROM fact WHERE seq = ?").run(newest.seq).changes, 1);
   board.index(board.rows());
   assert.equal(counted.count.grouped, 1, "one grouped read after the drop");
-  // r2's only fact is gone, so its activity now stands in, as a fresh cold load sees it.
-  w.append([activity(T0 + 5_000_000, "W1-T1", "r2")]);
-  w.caughtUp(board);
   const fresh = standIns(w.caughtUp(w.board()));
+  assert.ok(fresh.includes(r2), "the existing run activity now stands in on a cold load");
   assert.deepEqual(standIns(board), fresh);
-  assert.ok(fresh.includes(`W1-T1|r2@${at(T0 + 5_000_000)}`));
 });
