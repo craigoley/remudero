@@ -10,8 +10,10 @@ import type { Config } from "#src/lib/config.js";
 import { gardenPassDue } from "#src/lib/gardener.js";
 import { loadProposalRegistry, updateProposalRegistryAsync } from "#src/lib/inbox.js";
 import { knowledgeGardenSpec, runGardenPass, skillLifecycleCandidates, skillUsagePath, type GardenWorkspace } from "#src/lib/knowledge-gardener.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
 import {
+  SKILL_EFFECTIVENESS_LEDGER_STEPS,
   buildSkillEffectivenessReport,
   skillLifecycleProposalId,
   skillWithheldForRun,
@@ -118,8 +120,8 @@ test("W1-T13860 criterion 1: a closed or long-waiting handed-off run counts as n
   }
 });
 
-test("W1-T13860 criterion 2: each arm carries its costed runs, run plus fix-round cost, and cost per merged PR", () => {
-  const report = buildSkillEffectivenessReport([
+test("W1-T13860 criterion 2: each arm carries its costed runs, run plus fix-round cost, and cost per merged PR", (scope) => {
+  const { dir } = writeLedger([
     selection("a", true), verdict("a", "handed_off", { pr_url: `${PR}11`, total_cost_usd: 2, notional_cost_usd: 3 }),
     merge(11),
     // Fix rounds name the PR they repair by repair_pr_url, as the fix lane writes them.
@@ -127,14 +129,24 @@ test("W1-T13860 criterion 2: each arm carries its costed runs, run plus fix-roun
     { step: "fix.done", run_id: "DAEMON-2", repair_pr_url: `${PR}11`, total_cost_usd: 0, notional_cost_usd: 0.25 },
     selection("b", true), verdict("b", "no_diff", { total_cost_usd: 1 }),
     selection("c", true), verdict("c", "handed_off", { pr_url: `${PR}13` }), merge(13),
+    { step: "fix.done", pr_url: `${PR}13`, total_cost_usd: 100 },
     selection("d", false), verdict("d", "failed", { total_cost_usd: 4 }),
-  ], SKILL);
-  assert.equal(report.selected.costed_runs, 2, "a run with no cost field is left out of the cost comparison");
-  assert.equal(report.selected.merged_runs, 2, "but not out of the merge counts");
-  assert.equal(report.selected.cost_usd, 3 + 0.5 + 0.25 + 1);
-  assert.equal(report.selected.cost_per_merged_pr, 4.75);
-  assert.equal(report.control.costed_runs, 1);
-  assert.equal(report.control.cost_usd, 4);
+    selection("e", true), verdict("e", "handed_off", { ts: iso(T0), pr_url: `${PR}15`, total_cost_usd: 2 }),
+    { step: "fix.done", pr_url: `${PR}15`, total_cost_usd: 0.5 },
+    selection("f", false), verdict("f", "blocked_ci", { ts: iso(T0), pr_url: `${PR}16`, total_cost_usd: 5, notional_cost_usd: 6 }),
+    { step: "fix.done", repair_pr_url: `${PR}16`, notional_cost_usd: 1 },
+  ], { scope });
+  const { ok, rows } = readLedgerUnionRecordsSync(dir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  assert.ok(ok);
+  const report = buildSkillEffectivenessReport(rows, SKILL);
+  assert.equal(report.selected.pending_merge_runs, 1);
+  assert.equal(report.control.pending_merge_runs, 1);
+  assert.equal(report.selected.costed_runs, 3, "the priced pending run counts and the unpriced merge does not");
+  assert.equal(report.selected.merged_runs, 2, "the unpriced merge still counts toward shipment");
+  assert.equal(report.selected.cost_usd, 3 + 0.5 + 0.25 + 1 + 2 + 0.5);
+  assert.equal(report.selected.cost_per_merged_pr, 7.25);
+  assert.equal(report.control.costed_runs, 2);
+  assert.equal(report.control.cost_usd, 4 + 6 + 1);
   assert.equal(report.control.cost_per_merged_pr, null, "no merged costed run");
 });
 
@@ -154,6 +166,24 @@ test("W1-T13860 criterion 3: an offered arm that costs more per merged PR at one
   assert.deepEqual(buildSkillEffectivenessReport([...rows].reverse(), SKILL), report, "in any order");
 });
 
+test("W1-T13860 criterion 3: a priced pending shipment counts toward the bootstrap horizon", (scope) => {
+  const { dir } = writeLedger([
+    ...pricedArm("sel", true, 9, 9, () => 5, 1000),
+    selection("sel-pending", true), verdict("sel-pending", "blocked_ci", { ts: iso(T0), pr_url: `${PR}1009`, total_cost_usd: 5 }),
+    ...pricedArm("ctl", false, 10, 8, () => 1, 2000),
+  ], { scope });
+  const { ok, rows } = readLedgerUnionRecordsSync(dir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  assert.ok(ok);
+  const report = buildSkillEffectivenessReport(rows, SKILL);
+  assert.equal(report.selected.pending_merge_runs, 1);
+  assert.equal(report.status, "RETIRE-CANDIDATE");
+  assert.equal(report.basis, "costs-more-than-it-saves");
+  assert.equal(report.selected.costed_runs, report.horizon);
+  assert.equal(report.control.costed_runs, report.horizon);
+  assert.ok(report.cost_difference_lower_bound_usd !== null && report.cost_difference_lower_bound_usd > 0);
+  assert.deepEqual(buildSkillEffectivenessReport([...rows].reverse(), SKILL), report);
+});
+
 test("W1-T13860 criterion 4: a skill that merges more at a cost not confidently higher is never retired on cost", () => {
   // The proof-preflight shape: more merges, cost per merged PR a little higher, intervals wide.
   const shape = buildSkillEffectivenessReport([
@@ -164,6 +194,28 @@ test("W1-T13860 criterion 4: a skill that merges more at a cost not confidently 
   assert.ok(shape.cost_difference_lower_bound_usd !== null && shape.cost_difference_lower_bound_usd <= 0);
   assert.equal(shape.status, "REVIEW-CANDIDATE");
   assert.equal(shape.basis, "favorable-comparison");
+});
+
+test("W1-T13860 criterion 4: pending control spend prevents a false cost retirement", (scope) => {
+  const { dir } = writeLedger([
+    ...pricedArm("sel", true, 20, 20, () => 5, 1000),
+    ...pricedArm("ctl", false, 20, 10, () => 1, 2000).filter((row) => row.state !== "closed"),
+    ...Array.from({ length: 10 }, (_, i) => ({ step: "fix.done", pr_url: `${PR}${2010 + i}`, total_cost_usd: 2.5 })),
+  ], { scope });
+  const { ok, rows } = readLedgerUnionRecordsSync(dir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+  assert.ok(ok);
+  const report = buildSkillEffectivenessReport(rows, SKILL);
+  assert.equal(report.selected.merged_runs, 20);
+  assert.equal(report.control.merged_runs, 10);
+  assert.equal(report.control.pending_merge_runs, 10);
+  assert.ok(report.cost_difference_lower_bound_usd !== null && report.cost_difference_lower_bound_usd <= 0);
+  assert.equal(report.selected.cost_per_merged_pr, 5);
+  assert.equal(report.control.cost_per_merged_pr, 4.5);
+  assert.equal(report.status, "INSUFFICIENT EVIDENCE");
+  assert.equal(report.basis, "pending-shipment");
+  const beforeFixRounds = buildSkillEffectivenessReport(rows.filter((row) => row.step !== "fix.done"), SKILL);
+  assert.ok(beforeFixRounds.cost_difference_lower_bound_usd !== null && beforeFixRounds.cost_difference_lower_bound_usd > 0);
+  assert.equal(beforeFixRounds.basis, "costs-more-than-it-saves");
 });
 
 test("W1-T13860 criterion 4: either arm missing a priced merge leaves the cost comparison unavailable", () => {

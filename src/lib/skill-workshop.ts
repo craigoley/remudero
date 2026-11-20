@@ -960,7 +960,7 @@ export interface SkillEffectivenessCohort {
 export interface SkillEffectivenessArm extends SkillEffectivenessCohort {
   /** Handed-off runs settled as not merged: the PR closed, or the run waited longer than the settle window. */
   not_merged_runs: number;
-  /** Resolved terminal runs with a recorded cost; a still-pending run is left out of the cost comparison. */
+  /** Terminal runs with a recorded verdict cost, including runs whose shipment is pending. */
   costed_runs: number;
   /** The costed runs' verdict cost plus the cost of each fix round on the run's PR. */
   cost_usd: number;
@@ -1196,10 +1196,9 @@ export function buildSkillEffectivenessReport(
       cohort.outcomes[outcome] = (cohort.outcomes[outcome] ?? 0) + 1;
       if (outcome === "merged") cohort.merged_runs++;
       if (outcome === "not_merged") cohort.not_merged_runs++;
-      const pending = PENDING_VERDICTS.includes(outcome);
-      if (pending) cohort.pending_merge_runs++;
+      if (PENDING_VERDICTS.includes(outcome)) cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
-      if (!pending && cost !== undefined) samples.push({ runId, cost, merged: outcome === "merged" });
+      if (cost !== undefined) samples.push({ runId, cost, merged: outcome === "merged" });
     }
     // Summed in run order, so the same rows in any order give the same figures.
     samples.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
