@@ -45,7 +45,7 @@ import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldForRun } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
@@ -2332,6 +2332,19 @@ async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () =
   }
 }
 
+/** W1-T13958: the ops catalog's blob labels ("tasks.yaml", "tasks.d/<file>") — never a core path. */
+const OPS_CATALOG_SOURCE_LABEL = /^tasks(?:\.yaml|\.d\/[^/]+)$/;
+
+/** W1-T13958: `task` without a `sourcePath` the core head cannot hold. A core-catalog task's
+ *  core plan shard path is kept (invariant core-task-source-kept). */
+export function withoutOpsCatalogSource<T extends object>(task: T): T {
+  const { sourcePath, catalog } = task as T & { sourcePath?: unknown; catalog?: unknown };
+  const ops = catalog === "ops" || (typeof sourcePath === "string" && OPS_CATALOG_SOURCE_LABEL.test(sourcePath));
+  if (!ops || sourcePath === undefined) return task;
+  const { sourcePath: _opsSourcePath, ...withoutSource } = task as T & { sourcePath?: unknown };
+  return withoutSource as T;
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
@@ -2755,12 +2768,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   };
   // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
   // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  const stagedRetirements = typeof opts.config.root === "string"
+    ? stagedSkillRetirements(join(opts.config.root, "state", "inbox-proposals.json")) : new Set<string>();
   const fixSkillSelection = observeSkillSelection(
     loadInjectableSkills(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills")),
     SKILL_FIX_TASK_TYPE,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     opts.task.files,
-    (skillName) => skillWithheldForRun(opts.runId, skillName),
+    (skillName) => skillWithheldUnderRetirement(opts.runId, skillName, stagedRetirements),
   );
   let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
@@ -5749,6 +5764,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         source: resolvedContract.source,
       });
     }
+    // W1-T13958: an ops-catalog task's `sourcePath` labels an ops blob ("tasks.d/<file>"); the core
+    // head checkout never holds it, so the promised follow-up reader would throw and post
+    // cannot-evaluate over the real verdict. Drop it, as the lane review's fresh contract does —
+    // on EVERY path: the sweep and `rmd fix` resolve the contract before the rung and wire no
+    // `resolveTaskContractAtHead`, so the marker is the resolved catalog, the task's own, or the
+    // ops label shape that ops-catalog-source.ts gives `Task.sourcePath`.
+    reviewTask = withoutOpsCatalogSource(reviewTask);
     review = await deps.runReview({
       owner: opts.reviewBase.owner,
       repo: opts.reviewBase.repo,

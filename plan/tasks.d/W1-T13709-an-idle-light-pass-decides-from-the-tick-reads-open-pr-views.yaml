@@ -86,4 +86,5 @@
     a served list: criterion 3 must fail. Serve the refill read: criterion 4 must fail. Restore and require all to pass.
   note: |
     Id reserved for run-unfiled-1795023528000 with ~/rmd-work/bin/reserve-id.sh.
+    reservation hand-off: run-unfiled-1795023528000 -> run-unfiled-1795040091000
     A test must build its gh answers with test/helpers/gh-shim.ts and load test/setup/tmp-hygiene.ts.

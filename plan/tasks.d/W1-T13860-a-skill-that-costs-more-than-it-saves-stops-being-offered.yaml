@@ -1,0 +1,123 @@
+- id: W1-T13860
+  title: "The skill lifecycle judges each injected skill by its cost per merged pull request, and a skill that costs more than it saves stops being offered"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: one judge (skill-workshop.ts), its gardener caller, the two prompt call sites that read it, and six existing suites
+  origin: "operator-session#skill-token-cost-2026-11-19"
+  plan_refs:
+    - W1-T3379
+    - W1-T3413
+    - W1-T4114
+    - W1-T10764
+  files:
+    - src/lib/skill-workshop.ts
+    - src/lib/knowledge-gardener.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/cli/commands/fix.ts
+    - src/lib/ledger-steps.ts
+    - test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts
+    - test/skill-lifecycle.test.ts
+    - test/a-skill-is-withheld-on-a-seeded-share-of-runs.test.ts
+    - test/the-knowledge-gardener-tends-rules-and-skills.test.ts
+    - test/the-fix-lane-is-offered-its-skills-under-seeded-withholding.test.ts
+    - test/learning/a-stale-skill-retirement-is-withdrawn-not-approved.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "the new test file passes"
+      proof: "unit test: test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "A handed-off run whose PR has a closed pr.terminal row, or that has waited longer than the settle window, counts as not merged; without enough merged runs or without timestamps it stays pending"
+      proof: "grep: W1-T13860 criterion 1: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "Each arm of the report carries its costed runs, its cost (run plus fix rounds on the run's PR) and its cost per merged PR"
+      proof: "grep: W1-T13860 criterion 2: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "A skill whose offered arm costs more per merged PR than its control, at one-sided 95%, is RETIRE-CANDIDATE with basis costs-more-than-it-saves, and the same rows give the same verdict every time"
+      proof: "grep: W1-T13860 criterion 3: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "A skill whose offered arm merges more at a cost per merged PR that is not confidently higher (the proof-preflight shape) is never a retire candidate on cost"
+      proof: "grep: W1-T13860 criterion 4: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "A skill-lifecycle pass judges every approved injectable skill that was offered, not only the use-rate candidates, and writes one skills.lifecycle_judged row per skill"
+      proof: "grep: W1-T13860 criterion 5: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "invariant:offer-follows-evidence — a skill with a staged skill-retirement proposal is offered only on the seeded share of runs; withdrawing the proposal restores normal offering"
+      proof: "grep: W1-T13860 criterion 6: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "A skill removed from .claude/skills is never offered and never judged, even when skills-usage.json still holds its counts"
+      proof: "grep: W1-T13860 criterion 7: in test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts"
+    - claim: "The implement lane reads the staged retirements when it selects skills"
+      proof: "grep: stagedSkillRetirements( in src/cli/commands/run-task-verb.ts"
+    - claim: "The fix lane reads the staged retirements when it selects skills"
+      proof: "grep: stagedSkillRetirements( in src/cli/commands/fix.ts"
+  rationale: |
+    WHY: a lifecycle for injected skills exists, but it has never retired or stopped offering a skill, and
+    it never looks at cost. OBSERVED on the fleet ledger (Azure host, read-only, 2026-11-19):
+    - Offer cost. Each offer puts "## skill: <name>" and the SKILL.md body into the implement prompt
+      (renderSkillsPart). prompt.manifest shows the skills part at 627 bytes for proof-preflight alone.
+      Body sizes: proof-preflight 627 chars, ci-state-forensics 1,991 chars; estimated at 4 chars per
+      token, about 157 and 498 tokens per offer, read again on each model turn (Claude implement runs:
+      median 14 turns). Offers per day over 2026-11-05..19: proof-preflight 23.1, ci-state-forensics 21.7.
+    - Benefit. Both skills are withheld on a seeded 25% of eligible implement runs, so the arms are
+      randomized. 2026-10-20..11-19, proof-preflight: merged 52.9% of 756 offered runs against 43.2% of
+      229 withheld (p=0.01); notional run plus fix-round cost per merged PR 3.17 against 2.86 USD (95%
+      bootstrap interval of the difference -0.47 to +1.03); about 4,100 more output tokens per run (interval
+      +547 to +7,560). Since 2026-11-05 the merge difference is 47.1% against 43.8% (p=0.56).
+      ci-state-forensics: merged 51.5% against 48.2% (p=0.37); cost per merged PR 2.98 against 3.51 USD
+      (interval -1.39 to +0.29); workers named it used in 13 of 538 reports.
+    - Why nothing acts. The knowledge gardener acted on skill-lifecycle in 332 of 926 passes since
+      2026-10-02, and its use-rate rule (retireCandidates) does name ci-state-forensics. But
+      stageSkillLifecycleForAction then asks buildSkillEffectivenessReport, which judges merge share only.
+      Its answer for both skills is INSUFFICIENT EVIDENCE, basis pending-shipment: 224 of 946 offered and
+      78 of 299 control ci-state-forensics runs are handed_off or blocked_ci with no merge row, so the
+      best-case and worst-case merge bounds always overlap. A PR closed without merging, or a task done
+      by a later run's PR, never resolves. The refusal is silent (no ledger row), so nothing in
+      inbox-proposals.json carries a skill-lifecycle: id, and a RETIRE-CANDIDATE would only stage an
+      inbox proposal: offering continues until a person approves the deletion.
+    - The retired implement-clean-single-strike-8aa4458e was last offered on 2026-09-26 and deleted by
+      #7837 on 2026-09-29. Its 115 offers in skills-usage.json are an old cumulative count that is never
+      pruned, not live offers.
+  design: |
+    src/lib/skill-workshop.ts, buildSkillEffectivenessReport:
+    1. Settle. A run whose terminal verdict is handed_off or blocked_ci resolves to not_merged when its PR
+       has a pr.terminal row with state closed, or when the latest row timestamp in the input is later
+       than the run's verdict timestamp plus the settle window. The settle window is the 95th percentile of
+       (merge row ts - verdict ts) over the runs in the same input that did merge. With fewer than
+       SKILL_EFFECTIVENESS_HORIZON merged runs, or a row without a timestamp, the run stays pending, so the
+       existing pending-shipment tests keep their meaning. not_merged is neither merged, pending nor harm.
+       The report carries settle_window_ms (null when not derived).
+    2. Cost. Add fix.done to SKILL_EFFECTIVENESS_LEDGER_STEPS. A run's cost is its verdict row's
+       notional_cost_usd, else total_cost_usd, plus the same field of each fix.done row whose pr_url is the
+       run's PR. A run with neither field is left out of the cost comparison, not out of the merge counts.
+       Each cohort gains costed_runs, cost_usd and cost_per_merged_pr (null with no merged costed run).
+    3. Judge. After the existing harm rule and before the merge-bound rules: when both arms have at least
+       SKILL_EFFECTIVENESS_HORIZON costed terminal runs, a seeded bootstrap of runs within each arm (seed
+       from the skill name, a fixed number of draws as retireCertainties uses) gives the one-sided 95% lower
+       bound of (offered cost per merged PR - control cost per merged PR). A bound above zero is
+       RETIRE-CANDIDATE, basis costs-more-than-it-saves. A skill that merges more for a cost that is not
+       confidently higher is never retired on cost. The existing rules are otherwise unchanged.
+    src/lib/knowledge-gardener.ts:
+    4. skillLifecycleCandidates returns every approved injectable skill that skills-usage.json shows offered
+       at least once (the report decides; the use-rate posterior no longer gates it), and never a name
+       missing from the approved tree. stageSkillLifecycleForAction takes the pass's log and writes one
+       skills.lifecycle_judged row per skill: skill, status, basis, settle_window_ms, and for each arm its
+       terminal runs, merged runs and cost_per_merged_pr. Register the step in src/lib/ledger-steps.ts.
+    Offering (src/lib/skill-workshop.ts plus both call sites):
+    5. Export stagedSkillRetirements(registryPath): the skill names with a staged skill-retirement
+       lifecycleAction in inbox-proposals.json (an unreadable registry reads as none). run-task-verb.ts and
+       fix.ts read it from join(config.root, "state", "inbox-proposals.json") and pass a withhold function
+       that, for a staged name, withholds on every run where skillWithheldForRun is false. The arms flip, so
+       evidence keeps accruing and the existing withdraw path restores normal offering when the evidence
+       turns. Deleting the file still goes through rmd approve (Rule 15).
+    INVARIANT offer-follows-evidence: a skill stops being offered only on a recorded RETIRE-CANDIDATE
+    report, and a withdrawn proposal restores the seeded share.
+    Tests drive buildSkillEffectivenessReport, runGardenPass or knowledgeGardenSpec, and observeSkillSelection
+    through the two lanes' own selection code with nothing injected in place of the new code. Build ledgers
+    with test/helpers/ledger-fixture.ts. Import through #src/* and #test/*.
+    BUILD FOUND (2026-11-19): design step 2 adds fix.done to SKILL_EFFECTIVENESS_LEDGER_STEPS, so
+    test/a-staged-skill-reaches-the-worker-prompt.test.ts updates its expected step filter by one literal.
+  falsifier: |
+    Remove the settle step: criterion 1 fails (the closed PR stays pending). Return INSUFFICIENT EVIDENCE
+    where the cost rule decides: criterion 3 fails. Drop the stagedSkillRetirements read in
+    run-task-verb.ts: criterion 6 fails (the staged skill is offered on 75% of runs).

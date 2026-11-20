@@ -18,22 +18,29 @@
   files:
     - src/lib/read-model-worker.ts
     - src/lib/now-view.ts
+    - src/lib/views.ts
+    - src/lib/view-events.ts
     - test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts
     - test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts
     - test/a-read-of-one-instance-paces-only-that-instance.test.ts
+    - test/view-etags-are-deterministic.test.ts
+    - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
+    - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "A read-paced unit that no reader has read for the unread window is not built again until a read arrives. Its `read_model.view_builds` row counts no build for it"
+    - claim: "A read-paced unit whose view serves, and that no reader has read for the unread window, is not built again until a read arrives. The window is computed from the cost after its floor. Its `read_model.view_builds` row counts no build for it"
       proof: "grep: W1-T12270 criterion 1 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
     - claim: "A read of a view that takes the unit as a source counts as a read of the unit. The `now` view is read through the needs-you view and through `/v1/status` and `/v1/recent`"
       proof: "grep: W1-T12270 criterion 2 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
-    - claim: "The first read after a stop starts a build at once. The answer to that read never shows a body from before the stop as current: it waits for the build up to a stated limit, or it states the age of the body"
+    - claim: "The first read after a stop starts a build at once. The answer to that read never shows a body from before the stop as current, even to a conditional GET that sends the pre-stop ETag: it waits for the build up to a stated limit, or it states the age of the body"
       proof: "grep: W1-T12270 criterion 3 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
-    - claim: "A reader that stays connected keeps the unit on its usual cadence, and a view that is not read-paced is built as today"
+    - claim: "A connected event-stream subscriber of the view counts as a reader while it stays connected, even when no new body is delivered, and keeps the unit on its usual cadence. A view that is not read-paced is built as today, and a delivered event never changes its idle floor (invariant:unpaced-views-unchanged)"
       proof: "grep: W1-T12270 criterion 4 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
-    - claim: "The production view set, through `readModelLaneViews` and `createReadModelTicker` with nothing injected in place of the rule, stops the `now` unit of an instance that nobody reads"
+    - claim: "The production view set, through `readModelLaneViews` and `createReadModelTicker` with nothing injected in place of the rule, stops the `now` unit of an instance that nobody reads once the view serves. A `want` message from the catalog bridge builds only the unit it names, so it never starts a build of another instance's stopped unit"
       proof: "grep: W1-T12270 criterion 5 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
+    - claim: "While the view's shadow readiness is not ready, its read-paced units keep building at their largest stretch with no reader connected, so shadow qualification collects fresh samples unattended. The stop applies from the first build after readiness reads ready"
+      proof: "grep: W1-T12270 criterion 6 in test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts"
   rationale: |
     MEASURED on the Azure host in the serve research of 2026-11-10: the `now` view took 1,614 s of 2,371 s of measured view-build time. Serve used 1 to 2.8 cores while few readers were connected.
     - The `now` view measures on every build: it runs `git`, runs `gh api rate_limit`, reads free disk and reads files. Its inputs are not ledger rows, so the unchanged-input skip cannot skip it.
@@ -51,7 +58,22 @@
     - The answer to the first read after a stop must not show the old body as current. Read how serve answers a read of a unit with no fresh body today and use that path. State the limit of the wait in the code as a bound with its reason.
     - The `read_model.view_builds` row keeps its fields. A stopped unit has no calls in the window.
     Before the build, list every reader of the `now` view under `src/` that is not an HTTP read: a daemon, an alert, a gate, a badge. If one needs a fresh body with no reader connected, stop and report it; do not build around it.
+    PRECONDITION, operator decision of 2026-11-20 (coordinator, under the operator's standing rule to take the recommendation): the shadow readiness gate counts as a reader. The first build of #19655 stopped and reported that unattended shadow qualification needs fresh `now` bodies with no Console reader. So the stop applies only to a view whose shadow readiness reads ready. Read readiness through the worker's existing shadow state; do not add a second readiness source.
+    Review of #19655 at 7fd0801 found four gaps. Each is now a stated criterion. Build fresh from main; do not resume that branch.
+    - Criterion 1: the cost has a 250 ms floor, so a test fixture with a lower cost must assert the window from the floored cost.
+    - Criterion 3: a conditional GET with the pre-stop ETag got 304 with no body or age. The idle marker changes source metadata that the ETag excludes.
+    - Criterion 4: an event-stream subscriber with an unchanged ETag noted no read for 100 s, and delivered events cleared the idle floor of a view that is not read-paced.
+    - Criterion 5: the `want` handler calls `ticker.buildNow(view)`, which builds every owned unit of the view and bypasses the stop.
+    `src/lib/views.ts` and `src/lib/view-events.ts` are listed because the GET route and the event stream must note reads; #19655 changed both and the acceptance-author gate refused it as out of scope.
+    INVARIANT unpaced-views-unchanged: a view that is not read-paced keeps today's build schedule and idle floor; only read-paced units can stop.
     The two listed tests assert the doubling and the read that restores the cadence. Change only the assertions that say an unread unit keeps building at the largest stretch.
     NOT IN SCOPE: what the `now` view measures, the cost of one build, and the heavy lane.
   falsifier: |
-    Keep building at the largest stretch and criteria 1 and 5 must fail. Ignore a read of the needs-you view and criterion 2 must fail. Answer the first read with the old body as current and criterion 3 must fail. Stop a unit that a connected reader reads and criterion 4 must fail. Restore and require all five to pass.
+    Keep building at the largest stretch and criteria 1 and 5 must fail. Ignore a read of the needs-you view and criterion 2 must fail. Answer the first read with the old body as current and criterion 3 must fail. Stop a unit that a connected reader reads and criterion 4 must fail. Stop a unit while its view's shadow readiness is not ready and criterion 6 must fail. Restore and require all six to pass.
+  note: |
+    files: amendment 2026-11-19: the stop rule moves three suites the first build did not list.
+    test/view-etags-are-deterministic.test.ts never read its views, so the stopped now view's idle republish posted a
+    body; it now notes reads. test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts (W1-T11933 criterion 3)
+    asserted the now view holds at its stretch bound; it now asserts the stop. Both were red on #19655 at 728d1e152.
+    The is-not-rebuilt suite's restamp fixture view is read-paced and unread across its 10-minute jump, so it stops
+    and makes 6 calls, not 7; red at 728d1e152 merged with origin/main, green on origin/main alone.

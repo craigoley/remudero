@@ -128,23 +128,23 @@ test("W1-T13709 criterion 1: idle and drain scoped passes serve a fresh error-fr
   const published = generation(STARTED_AT + 10, [view("tick-head")]);
   const serve = servedOpenPrViews(() => published, () => STARTED_AT);
   for (const scope of [IDLE, DRAIN]) {
-    const served = serve(scope);
+    const served = serve(scope, "pass");
     assert.ok(served);
     assert.equal(served.servedReadStartedAtMs, published.publishedAtMs);
     assert.deepEqual(await served, [view("tick-head")]);
   }
-  assert.equal(serve(undefined), undefined, "a no-scope refill continues to read its own views");
+  assert.equal(serve(undefined, "refill"), undefined, "a refill read continues to read its own views");
 });
 
 test("W1-T13709 criterion 2: stale, errored, or pre-tick generations are not served", () => {
   for (const candidate of [undefined, generation(STARTED_AT - 1, [view("old")]), generation(STARTED_AT + 1, [view("error")], "open PR read failed")]) {
     const serve = servedOpenPrViews(() => candidate, () => STARTED_AT);
-    assert.equal(serve(IDLE), undefined);
+    assert.equal(serve(IDLE, "pass"), undefined);
   }
   const tooOld = generation(STARTED_AT + 1, [view("too-old")]);
   const fresh = freshReadGeneration(tooOld, { consumer: "sweep_light", clock: { now: () => STARTED_AT + TICK_READ_MAX_AGE_MS + 2,
     date: () => new Date(STARTED_AT + TICK_READ_MAX_AGE_MS + 2), iso: () => new Date(STARTED_AT + TICK_READ_MAX_AGE_MS + 2).toISOString() } });
-  assert.equal(servedOpenPrViews(() => fresh, () => STARTED_AT)(IDLE), undefined);
+  assert.equal(servedOpenPrViews(() => fresh, () => STARTED_AT)(IDLE, "pass"), undefined);
 });
 
 test("W1-T13709 criterion 2: a generation whose read started before the last good list is ignored", async () => {
@@ -190,8 +190,8 @@ test("W1-T13709 criterion 2: a stale served generation uses the hook's own read 
 test("W1-T13709 criterion 4: boot retains the tick-read rule and refill has no served scope", async () => {
   const published = generation(STARTED_AT + 1, [view("boot-head")]);
   const serve = servedOpenPrViews(() => published, () => STARTED_AT);
-  assert.deepEqual(await serve(BOOT), [view("boot-head")]);
-  assert.equal(serve(undefined), undefined);
+  assert.deepEqual(await serve(BOOT, "pass"), [view("boot-head")]);
+  assert.equal(serve(BOOT, "refill"), undefined);
 });
 
 test("W1-T13709 criterion 3: the act-time guard returns the moved head and stands down when it cannot read it", async () => {

@@ -11,11 +11,13 @@
   band_meaning: blast-radius
   origin: operator-session#github-connections-2026-11-10
   files:
+    - src/lib/config-schema.ts
     - src/lib/host-pieces.ts
     - src/lib/doctor.ts
     - test/doctor-names-each-host-piece-that-is-missing.test.ts
     - "src/lib/report-commands.ts"
-  status: queued
+    - test/env-var-registry.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "One list names each host piece with its path, what installs it and what fails without it: the dependency tool, the broker unit and launcher, the field-trials script, each scheduled job's script, and a GitHub login"

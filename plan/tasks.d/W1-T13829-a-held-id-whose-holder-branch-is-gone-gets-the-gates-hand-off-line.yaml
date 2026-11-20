@@ -1,0 +1,87 @@
+- id: W1-T13829
+  title: "A plan-only PR refused by task-id-existence for an id held by a branch that never reached origin gets the gate's own printed hand-off line, once per head: #19604 sat red 5 h on that refusal while two fix-on-pr remedies changed nothing"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it pushes a plan note to a pull request head and hands a reservation from one branch to another; it must never act while the holder could still file
+  origin: "operator-session#fleet-follow-ups-2026-11-19"
+  plan_refs:
+    - W1-T3640
+    - W1-T3648
+    - W1-T6026
+    - W1-T5349
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts
+    - scripts/task-id-existence-check.mjs
+    - test/a-reservation-names-its-holder.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:only-the-gates-line — decidePlanRepair returns a hand-off decision only when a failing log's `HELD by a different reservation holder` section prints, for every held id, the remedy line `reservation hand-off: <holder> -> <filer>` with filer equal to the PR's head ref; an ALREADY DECLARED or ALREADY CLAIMED by another OPEN PR section, or a held id with no printed line, gets no hand-off decision"
+      proof: "grep: W1-T13829 criterion 1 in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "invariant:holder-is-abandoned — the hand-off is pushed only when the holder branch has no head on origin, no open PR has it as head ref, and the reservation's started_at is older than RESERVATION_PUSH_GRACE_MS, the same proof of abandonment W1-T6026's reclaim requires; a younger reservation or a holder branch that exists stands down with a reason naming which test failed"
+      proof: "grep: W1-T13829 criterion 2 in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "invariant:one-line-per-shard — the repair adds the printed line as its own new line in the note of each shard file the log names for the id (adding a block-scalar note when the shard has none, keeping existing note text), changes nothing else, and pushes one commit with a lease on the head the sweep observed; the plan still parses and the gate's matcher accepts the line"
+      proof: "grep: W1-T13829 criterion 3 in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "invariant:once-per-head — a sweep.plan_repair row with signature held-task-id-handoff at this head stops a second attempt at the same head, and a failed push is ledgered once and not retried at that head"
+      proof: "grep: W1-T13829 criterion 4 in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "the plan repair path calls the new hand-off repair"
+      proof: "grep: handOffHeldPlanPrIds( in src/lib/sweep.ts"
+  rationale: |
+    WHY: a filing PR stayed red for hours on a refusal whose exact cure the gate itself prints.
+    #19604 (head run-unfiled-1795065953000, opened 2026-11-19 05:32:43Z) added three shards whose ids were
+    reserved for branch run-unfiled-1795065820000 (refs/rmd-id/W1-T13787 records `holder
+    branch=run-unfiled-1795065820000 ... started_at=2026-11-19T05:24:07.232Z`). That branch has no head on
+    origin. task-id-existence refused the ids as "HELD by a different reservation holder" and printed the
+    remedy line for each one.
+    WHAT THE FLEET DID (ledger): the sweep classed it "plan-only PR is red on task-id-existence — the
+    code-fix lane cannot stage outside a plan filing, so no fix is dispatched; the plan violation needs a
+    plan repair". The parked-PR remedy fix-on-pr was taken twice at head bc2b0c6 (06:10:18Z and earlier
+    05:44:24Z) and "left the head, the body and the red checks unchanged". No plan round row and no fix
+    worker row exist for the PR. A needs-human issue opened at 06:14:03Z. The PR stayed red until a hand
+    commit added the three `reservation hand-off: run-unfiled-1795065820000 -> run-unfiled-1795065953000`
+    lines at 11:13:50Z; it merged at 11:35:05Z.
+    WHY THE EXISTING RUNG DID NOT ACT: decidePlanRepair's held-task-id rung renumbers, and only on a fleet
+    machine-lane head with a fleet author. A hand filing is neither. Renumbering a hand filing would also
+    change ids the author may have quoted elsewhere; the hand-off keeps them.
+    SCALE: 82 commits on origin/main since 2026-11-05 add a `reservation hand-off:` line under plan/tasks.d.
+    SAFETY: the reservation guard stops two filers using one id. W1-T6026 already lets any reserver take
+    over a holder whose branch is absent past RESERVATION_PUSH_GRACE_MS (2 h). Handing off under the same
+    proof is no weaker than that reclaim. On #19604 it would have acted near 07:24Z, not 11:13Z.
+  design: |
+    INVARIANT only-the-gates-line: the repair writes only the hand-off line task-id-existence printed, for this PR's own head as filer.
+    INVARIANT holder-is-abandoned: no hand-off while the holder branch exists, heads an open PR, or its reservation is younger than RESERVATION_PUSH_GRACE_MS.
+    INVARIANT one-line-per-shard: the edit adds one note line per named shard and nothing else.
+    INVARIANT once-per-head: at most one hand-off attempt per PR head.
+    1. PlanRepairDecision gains `{ signature: "held-task-id-handoff"; action: "handoff"; check:
+       "task-id-existence"; handoffs: { id; holder; filer; files: string[] }[] }`. A parser beside
+       heldTaskIdsFromCiFailures reads the HELD section's `<id> -- ...`, its `<file>:<line>` lines and the
+       printed `reservation hand-off: X -> Y` line (scripts/task-id-existence-check.mjs prints it alone on its
+       line, W1-T3648).
+    2. decidePlanRepair returns it, before the fleet-lane renumber rung, for any plan-only head whose
+       parsed filer equals pr.headRefName, when no `${head}@held-task-id-handoff` key is in history.
+       The renumber rung for fleet lanes keeps its order after it only when this rung does not apply.
+    3. repairPlanPr's real wiring gets a `handoff` branch, handOffHeldPlanPrIds: for each holder, read
+       `git ls-remote --heads origin <holder>` (empty required), the open-PR list's head refs (no match
+       required), and the reservation ref's holder line started_at (older than RESERVATION_PUSH_GRACE_MS,
+       read with the sweep's clock). Any failed or unreadable test returns outcome "stood-down" with the
+       reason. Else cut a worktree of the PR head as renumberPlanPrIds does, add the line to each named
+       shard's note with the yaml Document API, commit "chore(plan): record the reservation hand-off for
+       <ids>" and push with a lease on pr.headSha. The outcome row is the existing sweep.plan_repair row.
+    4. No new constant, env var or config key. src/lib/sweep.ts has a comment cap
+       (test/sweep/compress-src-lib-sweep-ts.test.ts). Re-run the existing plan-repair suites in test/sweep/.
+  note: |
+    files: amendment 2026-11-20, operator grant (Craig 14:30Z, approving the recommendation on #19856): the fix round on #19701
+    at ae4602406 found that the gate prints the standalone hand-off remedy only for a `branch=unknown` holder, so a named holder
+    gets a refusal with no pasteable line, though the gate already accepts a matching note. scripts/task-id-existence-check.mjs
+    prints that existing remedy for a named holder too; what the gate accepts does not change.
+    test/a-reservation-names-its-holder.test.ts pins exactly one remedy block and now pins one per handable holder.
+  falsifier: |
+    At origin/main criterion 1 fails: decidePlanRepair returns undefined for a hand filing's held id.
+    Drop the age test: criterion 2's 30-minute-old reservation gets a push. Write the line into an existing
+    note's first line: criterion 3's gate matcher refuses it.

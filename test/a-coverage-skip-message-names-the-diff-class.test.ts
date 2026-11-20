@@ -15,6 +15,7 @@
  * and the first test fails.
  */
 import assert from "node:assert/strict";
+import { withoutCheckoutRetryPair } from "#test/helpers/checkout-retry-pair.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -126,7 +127,8 @@ const GUARD_EXPECTATION: Record<string, string[]> = {
 
 test("W1-T5844: the coverage steps' if: and skip-branch conditions are byte-unchanged", () => {
   for (const job of ["coverage-ratchet", "coverage-ratchet-required"]) {
-    assert.deepEqual(jobs[job]!.steps.filter((s) => s.if !== undefined).map((s) => s.name), [], `${job}: no step carries an if:`);
+    // W1-T13825: the checkout retry pair is the one admitted step if:; skipping it never skips the job.
+    assert.deepEqual(withoutCheckoutRetryPair(`ci.yml:${job}`, jobs[job]!.steps).filter((s) => s.if !== undefined).map((s) => s.name), [], `${job}: no step carries an if:`);
   }
   for (const { job, name } of COVERAGE_STEPS) {
     const lines = step(job, name).run!.split("\n").map((l) => l.trim());

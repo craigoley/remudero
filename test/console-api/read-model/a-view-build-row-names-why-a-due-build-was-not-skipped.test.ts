@@ -5,6 +5,7 @@ import { test, type TestContext } from "node:test";
 import type { ReadModelDb } from "#src/lib/read-model-db.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
 import {
+  READ_MODEL_STATUS_GENERATION_HOLD_MS,
   createReadModelTicker, ledgerSource, READ_MODEL_READ_HOT_MS, readModelLaneViews, readModelSwitchesPath,
   type ReadModelView, type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
@@ -217,10 +218,11 @@ test("W1-T11974 criterion 5: the production read-model view ledgers its reasons 
   f.tick();
   f.tick();
   f.append("run.start");
-  f.tick();
+  // W1-T13836: status declares its inputs; the moved generation is an input once its hold has passed.
+  f.tick(READ_MODEL_STATUS_GENERATION_HOLD_MS);
   const row = f.row();
   assert.equal(row.view, "read-model");
-  assert.deepEqual(row.not_skipped, { no_previous: 1, generation: 1 });
-  assert.equal(row.skipped, 2);
+  assert.deepEqual(row.not_skipped, { no_previous: 1, audit: 1, inputs: 1 }, "the first skip candidate of a declared view is audited");
+  assert.equal(row.skipped, 1);
   assert.equal(row.calls, 4);
 });

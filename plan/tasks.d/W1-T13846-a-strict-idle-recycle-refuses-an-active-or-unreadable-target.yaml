@@ -1,0 +1,56 @@
+- id: W1-T13846
+  title: A strict-idle recycle refuses an active or unreadable target
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator:core-strict-idle-recycle"
+  plan_refs: [W1-T12939, W1-T8136]
+  files:
+    - deploy/recycle-container.sh
+    - src/lib/daemon.ts
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/sweep.ts
+    - test/daemon/strict-idle-recycle.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: A strict-idle recycle leaves the old container running when work is active or the process or lock census is unreadable.
+      proof: "unit test: strict idle recycle refuses active or unreadable work"
+    - claim: Strict mode refuses new work while fenced and accepts only the same request and daemon generation's fresh and complete drain acknowledgement.
+      proof: "unit test: strict idle recycle binds the drain to the current fenced daemon"
+    - claim: A complete and uncontested idle result reaches the normal scoped replacement once.
+      proof: "unit test: strict idle recycle admits only the verified idle target"
+    - claim: "invariant:default-recycle Default recycle and foreign owner STOP and PAUSE remain supported. A strict refusal releases only the exact hold its request wrote."
+      proof: "unit test: strict idle recycle preserves normal routes and owner holds"
+  rationale: |
+    Core's update was held under the operator's no-worker-interruption rule. The normal deploy
+    supervisor has a documented force ceiling, and the existing scoped recycler can pass an aged
+    lane-less worker. Its worker pipeline can also convert an unreadable process command to an
+    empty list. Independently observed busy Core had two in-flight lane locks and three recognized
+    worker process matches. A point-time empty snapshot alone cannot prove that later worker
+    admissions are fenced. W1-T12939 already reports a pause census and drain episode.
+  design: |
+    Add an explicit single-instance strict option to the existing recycler, under its normal
+    ownership lock. Use the existing pause census and garden and judge evidence. Bind the fence and
+    positive drain acknowledgement to its request, target container and daemon generation. Permit
+    already admitted work to settle, while refusing fresh implementation, review, fix, and
+    maintenance admissions under this fence. An older daemon without the acknowledgement refuses.
+    At the replacement seam reread the exact hold, target identity, fresh drain and successful
+    independent process and lock evidence. Refuse changed owner, reopened or partial evidence,
+    unknown reads and any live worker or cadence child, regardless of age. Strict mode bypasses
+    neither normal image validation nor ownership and never uses the stalled or aged-worker
+    exception. A bounded timeout leaves the outgoing container running.
+    Use the actual shell and daemon paths in disposable fixtures with forbidden-effect traps.
+    If a required admission point is outside the approved paths, stop for an ordinary scope
+    amendment before editing it. This task authorizes no deployment or initial bootstrap.
+    INVARIANT default-recycle: When strict mode is absent, normal outcomes and existing operator overrides remain unchanged. The strict option never overwrites or releases a foreign STOP or PAUSE.
+  falsifier: |
+    Remove the final strict guard: active or unreadable fixtures must reach the forbidden stop
+    seam and fail. Accept a reopened receipt from a replaced generation: the fence-binding test
+    fails. Restore the guards and the same measured idle fixture reaches replacement once.
+  note: "Reserved normally on run-unfiled-1795045997726. Implementation waits for plan merge, current scope and ordinary ownership checks. No worker interruption, image release or cutover."

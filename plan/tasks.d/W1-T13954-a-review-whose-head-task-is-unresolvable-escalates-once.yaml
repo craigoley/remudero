@@ -1,0 +1,42 @@
+- id: W1-T13954
+  title: A review whose derived head task shard does not resolve reads the task at the base or escalates once, never loops
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: medium # a review that refused setup forever now judges with the base's task or raises one escalation
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T9955
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-review-whose-head-task-is-unresolvable-escalates-once.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "When the branch-derived task's shard is absent at the head but present at the merge base, the review reads risk and budget_usd from the base shard and proceeds"
+      proof: "grep: W1-T13954 criterion 1: in test/review/a-review-whose-head-task-is-unresolvable-escalates-once.test.ts"
+    - claim: "When the shard resolves at neither, the review posts a failure status naming the task id and the missing fields, once per head"
+      proof: "grep: W1-T13954 criterion 2: in test/review/a-review-whose-head-task-is-unresolvable-escalates-once.test.ts"
+    - claim: "invariant:resolved-task-unchanged — a head whose task shard resolves is reviewed exactly as today"
+      kind: guard
+      proof: "grep: W1-T13954 criterion 3: in test/review/a-review-whose-head-task-is-unresolvable-escalates-once.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core): #19566 (branch run-W1-T12438-*, a Codex hand PR, CI green since
+    2026-11-19 15:23Z) has 72 review.semantic_setup_refused rows with reason head-task-metadata-unavailable and no
+    remudero-review status at all; the sweep disposition reads blocked-ambiguous "review setup refused 3 times ...
+    not re-admitted until the head, body or reviewer code changes". The review (src/cli/commands/review.ts,
+    "head-task-metadata-unavailable") exits 2 with no status, so GitHub shows nothing and nothing escalates.
+  design: |
+    INVARIANT resolved-task-unchanged: a head whose task shard resolves at the head is reviewed exactly as today.
+    1. When the derived task id's shard is missing at the head, read it from the merge base before refusing.
+    2. Missing at both: post a failure status "task <id> shard unresolvable at head and base: missing <fields>",
+       once per head, so the fix or refile lane sees a red it can act on.
+  falsifier: |
+    Without the base read criterion 1's fixture logs head-task-metadata-unavailable and posts nothing.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.

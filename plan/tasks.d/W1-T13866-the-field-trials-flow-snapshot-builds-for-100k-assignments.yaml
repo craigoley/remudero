@@ -1,0 +1,37 @@
+- id: W1-T13866
+  title: The field trials flow snapshot builds for 100k assignments without a stack overflow
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: operator-request#field-trials-2026-11-19
+  plan_refs: [W1-T11119]
+  files:
+    - src/lib/field-trials-flow.ts
+    - test/field-trials-flow.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    buildFieldTrialsFlowSnapshot (src/lib/field-trials-flow.ts) now throws RangeError: Maximum call stack size
+    exceeded at about 62k assignments, so the field trials refresh fails. The builder spreads whole unit arrays
+    into push calls (units.repair.push(...repairUnits(...)), units.adoption.push(...), transitions.push(...),
+    units.learning.push(...), units.guardrails.push(...)); a spread argument list past the engine's argument
+    limit overflows the stack. Find the exact throwing site first (it may also be another spread or recursion).
+  design: |
+    Replace every argument-spread of an unbounded array in buildFieldTrialsFlowSnapshot and its helpers with
+    an append that does not pass the array as arguments (a loop, or concatenation into a new array). Keep the
+    snapshot's content and order identical.
+
+    INVARIANT field-trials-flow-scale: buildFieldTrialsFlowSnapshot returns the same snapshot for any input size, with no argument-spread of an unbounded array.
+  acceptance:
+    - claim: invariant:field-trials-flow-scale — a flow snapshot built from 100k synthetic assignments completes and matches the units a small input produces per assignment
+      proof: 'unit test: test/field-trials-flow.test.ts'
+      kind: guard
+    - claim: the test that proves it is named for W1-T13866 criterion 1
+      proof: 'grep: W1-T13866 criterion 1 in test/field-trials-flow.test.ts'
+  falsifier: |
+    Restore one push(...units) spread of an unbounded array: the 100k test must throw RangeError again.

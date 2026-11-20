@@ -23,7 +23,7 @@
     - test/console-api/serve/product-routes.test.ts
     - test/route-wiring.test.ts
     - test/console-token-refresh.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: >-
     After W1-T11196 the operator can inspect the exact bytes. The supported first-run bootstrap

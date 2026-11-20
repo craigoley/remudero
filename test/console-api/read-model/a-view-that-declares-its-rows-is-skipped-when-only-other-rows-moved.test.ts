@@ -375,9 +375,8 @@ test("W1-T11975 criterion 2: all four declarations skip unrelated diagnostics an
   const generation = f.contexts.get("agent")!.sourceStore!.meta("generation");
   f.append("run.start"); f.tick();
   assert.notEqual(f.contexts.get("agent")!.sourceStore!.meta("generation"), generation);
-  for (const name of ["agent", "analytics", "nav-badge"]) assert.equal(f.counts.get(name), before.get(name), `${name} also ignores a generation-moving unread row`);
-  assert.equal(f.counts.get("instances"), before.get("instances")! + 1,
-    "instances reads generation in inboxCapabilityEvidence and must rebuild when that field moves");
+  // W1-T13835: instances no longer publishes the projector generation, so it skips this row too.
+  for (const name of DECLARED) assert.equal(f.counts.get(name), before.get(name), `${name} also ignores a generation-moving unread row`);
   const analytics = f.originals.get("analytics")!;
   f.snapshot.asOf = new Date(f.start + 1).toISOString();
   const bodies = analyticsSourceBodies(f.snapshot, "owner/core");
@@ -419,8 +418,10 @@ test("W1-T11975 criterion 3: relevant rows, home snapshots and files change fing
   changed("instances", () => { writeFileSync(f.hostPath, "instances:\n"); });
   changed("instances", () => { appendFileSync(f.repoPath, "# registry observation changed\n"); });
   changed("instances", () => { writeFileSync(join(f.dir, "inbox-proposals.json"), "{}"); });
-  changed("instances", () => { f.tick(1); f.append("daemon.tick"); f.tick(); });
+  // W1-T13873: a heartbeat with the instance up is no longer an instances input (see "W1-T13873 liveness"); the
+  // analytics case still needs the clock a second on, so its snapshot as_of moves.
   changed("analytics", () => {
+    f.tick(1_000);
     f.snapshot.asOf = f.iso();
     f.snapshot.consoleV1.metrics[0] = { key: "runs.completed", class: "observed", value: 42 };
     assert.equal(f.ticker.acceptSnapshot({ instance: "core", ok: true, asOf: f.iso(), bodies: analyticsSourceBodies(f.snapshot, "owner/core") }), true);
@@ -428,6 +429,23 @@ test("W1-T11975 criterion 3: relevant rows, home snapshots and files change fing
   changed("agent", () => {
     assert.equal(f.ticker.acceptSnapshot({ instance: "console", ok: false, names: ["signals"], error: "home source failed", atMs: f.start + 2 }), true);
   });
+});
+
+test("W1-T13873 liveness: a heartbeat that brings a down instance back up changes the instances fingerprint and equals a full build", t => {
+  const f = production(t);
+  f.tick(INSTANCE_LIVENESS_BOUND_MS + 1);
+  f.build("instances");
+  const down = f.output.get("instances")![0].data as InstancesData;
+  assert.ok(down.instances.filter(entry => entry.served).every(entry => entry.liveness.state === "down"), "positive control: every served instance is down");
+  const before = f.counts.get("instances")!;
+  const fingerprint = f.fingerprint("instances");
+  f.append("daemon.tick"); f.append("daemon.tick", {}, "console"); f.tick();
+  assert.notEqual(f.fingerprint("instances"), fingerprint, "W1-T13873 liveness: a beat that changes liveness is an input");
+  f.build("instances");
+  assert.equal(f.counts.get("instances"), before + 1, "instances rebuilds");
+  const up = f.output.get("instances")![0].data as InstancesData;
+  assert.ok(up.instances.filter(entry => entry.served).every(entry => entry.liveness.state === "up"), "every served instance is up again");
+  f.equalFullBuild("instances");
 });
 
 test("W1-T11975 criterion 5: a skipped instances body crosses the liveness bound without a new row", t => {
@@ -633,4 +651,47 @@ test("W1-T11975 criterion 7: an instance mismatch leaves the other instance's au
   assert.ok(Number(core.skipped) > Number(console.skipped));
   assert.equal((core.not_skipped as Record<string, number>).mismatch, undefined);
   assert.ok((console.not_skipped as Record<string, number>).mismatch > 0);
+});
+
+test("W1-T13835 criterion 1: a row that moves only the projector generation leaves the instances body skipped and equal to a full build", t => {
+  const f = production(t);
+  const before = f.counts.get("instances");
+  const fingerprint = f.fingerprint("instances");
+  const generation = f.contexts.get("instances")!.instances.map(({ state }) => state.generation);
+  f.append("run.start"); f.tick();
+  assert.notDeepEqual(f.contexts.get("instances")!.instances.map(({ state }) => state.generation), generation, "positive control: the row moved a generation");
+  assert.equal(f.fingerprint("instances"), fingerprint, "the generation is not an input");
+  f.build("instances");
+  assert.equal(f.counts.get("instances"), before, "instances is skipped");
+  const data = f.output.get("instances")![0].data as InstancesData;
+  assert.ok(data.instances.every(entry => entry.inboxCapabilityEvidence === undefined || !Object.hasOwn(entry.inboxCapabilityEvidence, "generation")),
+    "no entry publishes the per-pass generation");
+  f.equalFullBuild("instances");
+});
+
+test("W1-T13873 criterion 1: a daemon heartbeat that keeps every instance up leaves the instances body skipped, restamped and equal to a full build", t => {
+  const f = production(t);
+  const beats = () => f.contexts.get("instances")!.instances.map(({ db }) =>
+    (db?.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get() as { last_ms: number } | undefined)?.last_ms);
+  const before = f.counts.get("instances");
+  const fingerprint = f.fingerprint("instances");
+  const beat = beats();
+  f.tick(1_000); f.append("daemon.tick"); f.append("daemon.tick", {}, "console"); f.tick();
+  assert.notDeepEqual(beats(), beat, "positive control: the rows moved every instance's heartbeat");
+  assert.equal(f.fingerprint("instances"), fingerprint, "W1-T13873 heartbeat: a beat that keeps liveness up is not an input");
+  f.build("instances");
+  assert.equal(f.counts.get("instances"), before, "instances is skipped");
+  f.tick();
+  const restamped = f.messages.flatMap(m => m.type === "sources" ? m.bodies ?? [] : []).filter(b => b.view === "instances").at(-1);
+  const core = restamped?.sources.find(source => source.name === "ledger:core");
+  assert.equal(core?.asOf, fixedClock(beats()[0]!).iso(), "the skip restamps the ledger source at the new heartbeat");
+  const data = f.output.get("instances")![0].data as InstancesData;
+  assert.ok(data.instances.filter(entry => entry.served).every(entry => entry.liveness.state === "up"), "every served instance is still up");
+  const view = f.originals.get("instances")!;
+  const declaration = view.inputsFingerprint;
+  view.inputsFingerprint = () => undefined;
+  f.build("instances");
+  view.inputsFingerprint = declaration;
+  assert.equal(f.counts.get("instances"), before! + 1, "positive control: the skip-disabled build ran");
+  assert.deepEqual(f.output.get("instances")![0].data, data, "the skipped body's data equals the skip-disabled build");
 });

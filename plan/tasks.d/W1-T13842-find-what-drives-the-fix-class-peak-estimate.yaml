@@ -1,0 +1,62 @@
+- id: W1-T13842
+  title: "Find what drives the fix class's learned peak estimate to 3.5 times its typical, before any change to how fix admission charges it"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: recon
+  verify: auto
+  risk: high  # Rule 19 span: widened to docs-index, fix-peak-estimate-drivers by a scope amendment for #19772
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T9679
+    - W1-T9498
+  files:
+    - docs/forensics/fix-peak-estimate-drivers.md
+    - "docs/docs-index.json"
+  # refusal-amendment (W1-T13842, run work-fix-dispatch-W1-T13842-1795182583240-3bf4@52721a1d99ec5e151f8368d48b08d6ebe88fe151, 2026-11-20T15:51:12.297Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The shared store no longer contains the fleet inputs needed to enumerate and replay the 13:07 UTC row at 7,154 MiB p90 and 2,048 MiB p50.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The report lists the fix-class peak samples behind a learned estimate it reproduces: their count, each sample's time, basis and value, the five largest with their task, PR and time, and the p50 and p90 the learner computes from them"
+      proof: "grep: ## Fix peak samples in docs/forensics/fix-peak-estimate-drivers.md"
+    - claim: "The report says whether the p90 is driven by a few outliers, is sample-starved, or reflects a real fix-tree peak, with OBSERVED and INFERRED labels"
+      proof: "grep: ## Verdict in docs/forensics/fix-peak-estimate-drivers.md"
+    - claim: "The report recommends one remedy task, or none, and says whether that remedy loosens the admission charge, which needs the operator's explicit yes"
+      proof: "grep: ## Recommended remedy in docs/forensics/fix-peak-estimate-drivers.md"
+  rationale: |
+    OBSERVED on the host, 2026-11-19 13:07:33Z (sweep.fix_capacity, PR #19655, full surface): budget 8, active 8,
+    reservations 0, headroom_mib 3684 (pressure available 6756 over floor 3072, binding host, tier host-short),
+    fix_estimate_mib 7154 (measured), fix_typical_mib 2048, admission_rung none, fixes_refused 1, blocked since
+    12:54:30Z. The fix for #19655 was refused on every sweep until about 13:53Z, when headroom rose.
+    OBSERVED in code: createSweepFixAdmissionController (src/lib/sweep.ts) admits a fix at its p90 estimate
+    ("fits"), or one fix at its typical when no fix tree is live ("typical", W1-T9679). A live fix tree closes the
+    typical rung on purpose: the host already holds one fix's tail. That is the same rule the lane governor uses
+    since #19563 (each tree its typical plus one shared tail). Under that rule the 13:07 refusal is correct for its
+    numbers: typical 2048 plus tail 5106 exceeds headroom 3684, and even available 6756 is below the 7154 estimate.
+    So the cost is the size of the learned estimate, not the charge rule. A fix p90 of 7154 MiB against a typical
+    of 2048 MiB is a 3.5x tail. W1-T9679 measured the fix p90 at 3196 and typical at 478 on 2026-10-15.
+  design: |
+    RECON, no code change. Read the shared peak store (host-memory-learning.ts storeDir, PEAK_STORE_SUBDIR
+    "estimates") on the Azure host, read-only, and the learner's inputs to classEstimate("fix") and
+    classTypical("fix"): every fix sample with its peak, measurement basis, time and the task and PR it came from.
+    Recompute the learner's p50 and p90 from those samples (learnEstimate with ESTIMATE_LEARNING) and check that they
+    match a sweep.fix_capacity row whose input samples are still in the store; the 13:07:33Z row (7154 and 2048) qualifies
+    only while its samples remain, and the report says so when compaction has removed them. Name the five largest samples and what those fix runs did (for example a full
+    suite run inside the fix tree). Say whether the tail is a few outliers, too few samples, or a real peak, and
+    what it means for host headroom. Write the report to docs/forensics/fix-peak-estimate-drivers.md with
+    "## Fix peak samples", "## Verdict" and "## Recommended remedy" headings, each claim labeled OBSERVED or INFERRED.
+    NO-INVARIANTS: a read-only investigation that writes one report and changes no behavior.
+  falsifier: |
+    A report without the three headings fails its proofs. A verdict that does not reproduce the learner's p90
+    from the listed samples is not evidence and must say so.
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795097467578
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.
+    AMENDED (2026-11-20): the design matched the report against the 13:07:33Z sweep.fix_capacity row. Its samples are
+    gone: the peak store compacts each instance file at 1 MiB, and state2.ndjson's oldest fix row is now from
+    2026-11-19 14:44:42Z, so no report can list or replay them. The design now asks for a row whose samples are still
+    in the store, and criterion 1 says what the list holds (time, basis and value for every sample; task and PR for
+    the five largest, since the store records no task or PR and many samples have no fix run to join).

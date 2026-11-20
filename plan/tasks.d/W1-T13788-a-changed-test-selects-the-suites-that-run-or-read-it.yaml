@@ -18,7 +18,7 @@
     - src/lib/affected-suites.ts
     - scripts/diff-class.mjs
     - test/a-changed-test-selects-the-suites-that-run-or-read-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On the real tree, the test-only run for a change to test/a-gate-run-leaves-the-tracked-tree-clean.test.ts (diff-class testOnlyRun, the list the PR lane ran for #19469) includes test/infra/gate-probe-native-evidence.test.ts, which runs that file as a child with spawnSync"

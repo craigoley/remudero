@@ -635,8 +635,9 @@ function sourceTime(gate: HumanGate): number {
   return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
 }
 
-function compareGates(a: HumanGate, b: HumanGate): number {
-  const times = sourceTime(a) - sourceTime(b);
+/** W1-T13876: `timeA`/`timeB` let a sort parse each gate's openedAt once instead of on every comparison. */
+function compareGates(a: HumanGate, b: HumanGate, timeA = sourceTime(a), timeB = sourceTime(b)): number {
+  const times = timeA - timeB;
   if (!Number.isNaN(times) && times !== 0) return times;
   return compareText(a.key, b.key) || compareText(JSON.stringify(a), JSON.stringify(b));
 }
@@ -664,7 +665,8 @@ export function projectHumanGates(input: readonly HumanGateSource[]): HumanGateP
       if (!previous || compareGates(gate, previous) < 0) unique.set(identity, gate);
     }
   }
-  const gates = [...unique.values()].sort(compareGates);
+  const gates = [...unique.values()].map((gate) => ({ gate, time: sourceTime(gate) }))
+    .sort((a, b) => compareGates(a.gate, b.gate, a.time, b.time)).map(({ gate }) => gate);
   const complete = sources.every((source) => source.state === "complete");
   const count = (n: number): HumanGateCount => complete ? { count: n } : { atLeast: n };
   const inbox = gates.filter((gate) => gate.ownerSurface === "inbox");

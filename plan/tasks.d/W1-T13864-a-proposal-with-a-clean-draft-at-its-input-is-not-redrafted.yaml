@@ -1,0 +1,78 @@
+- id: W1-T13864
+  title: "A proposal that already has a lint-clean draft at its current input is not drafted again, even after a lane change, a cache prune or a restart"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # removes repeat draft spawns; a changed input or a reframe still drafts
+  origin: "operator-session#spend-per-merged-pr-2026-11-19"
+  plan_refs:
+    - W1-T4261
+    - W1-T2564
+    - W1-T4864
+  files:
+    - src/lib/inbox.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts # the daemon draft hook passes its ledger rows to draftsDueOnDaemon
+    - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
+    - "src/lib/ledger.ts"
+    - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Every inbox.draft_synthesized and inbox.drafted row records draft_input_key: the proposal's anchor fingerprint and reframe count, without the lane identity"
+      proof: "grep: W1-T13864 criterion 1: in test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts"
+    - claim: "draftsDueOnDaemon leaves out a proposal whose newest inbox.drafted row is lint_clean at the proposal's current draft_input_key, when the drafts cache has lost that draft"
+      proof: "grep: W1-T13864 criterion 2: in test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts"
+    - claim: "A change of the drafting lane's deployment or effort does not make a proposal due when its cached draft is lint-clean at its current draft_input_key"
+      proof: "grep: W1-T13864 criterion 3: in test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts"
+    - claim: "invariant:one-clean-draft-per-input — A proposal whose anchors changed, or that got a new reframe round, is still drafted"
+      kind: guard
+      proof: "grep: W1-T13864 criterion 4: in test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts"
+    - claim: "The relint loop inside one run is unchanged: a dirty attempt still redrafts up to MAX_DRAFT_LINT_ATTEMPTS"
+      proof: "grep: W1-T13864 criterion 5: in test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts"
+    - claim: "The daemon's due selection reads the ledger's clean-draft rows"
+      proof: "grep: cleanDraftInputKeys( in src/lib/inbox.ts"
+  rationale: |
+    WHY: the inbox draft lane is 66% of all produced spend ($2,258.5 of $3,400.75 subscription notional,
+    2026-11-05 to 2026-11-19), and part of it drafts proposals again.
+    OBSERVED (ledger union): 101 draft rows, $152.04 ($3.90 paid), came after an earlier row for the same proposal
+    with subtype success. That count includes relint retries inside one run, where a worker success failed the
+    plan lint, so it is an upper bound for this task's waste.
+    UNVERIFIED: counting every second-or-later draft row of a proposal gave $2,160 (63.5% of all spend), and an
+    averaged count gave $247. The gap is probably $0 Codex first drafts followed by Claude redrafts. The recheck was
+    not run. Criterion 1's draft_input_key makes the true number countable.
+    OBSERVED in code (inbox.ts): proposalsNeedingDraft skips a proposal only while the drafts cache holds a draft
+    with the same anchor fingerprint. draftAttemptKey includes the lane's deployment and effort, so a lane change
+    makes every uncached proposal due again ("old lanes become due once"). pruneOrphanedDraftsAsync and
+    evictRefusalPoisonedKeys can remove cache and attempt entries, and the ledger is never asked whether a clean
+    draft at the same input already exists.
+  design: |
+    INVARIANT one-clean-draft-per-input: at most one lint-clean draft is paid for per proposal and draft input
+    (anchor fingerprint plus reframe count); a new input always drafts.
+    1. inbox.ts: draftInputKey(proposal) = anchorFingerprint plus reframe count. Write it as draft_input_key on
+       inbox.draft_synthesized and inbox.drafted rows.
+    2. cleanDraftInputKeys(ledgerRows) maps proposal id to the draft_input_key of its newest lint_clean
+       inbox.drafted row. draftsDueOnDaemon takes it and leaves out a proposal whose current draftInputKey is in it,
+       whether or not the cache or the attempt key still holds that draft. A missing cache entry for such a proposal
+       is logged once as inbox.draft_cache_missing (declared in ledger-steps.ts) and is not redrafted.
+    3. The lane identity stays in draftAttemptKey for failed attempts only; a clean draft is never redone for a lane
+       change. The manual rmd inbox force path is unchanged.
+  falsifier: |
+    Drop the cleanDraftInputKeys filter: criterion 2's fixture, with an empty cache and a clean ledger row, drafts
+    the proposal again and the test fails.
+  note: |
+    files: amendment 2026-11-20 (operator, approving the recommendation on the #19786 clarification): acceptance-author-gate refused #19786 as canonical-task-scope-exceeded for test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts; each is a change the build needs.
+    Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.
+    AMENDED (2026-11-19): cleanDraftInputKeys needs the daemon's ledger rows, and only the daemon draft hook,
+    buildInboxDraftHook in src/run-task.ts, holds them (it calls readLedgerLines(ledgerPath) and then
+    draftsDueOnDaemon). src/run-task.ts joins files; the build adds one field, draftLedgerRows: ledgerLines,
+    to the draftSelection object there.
+    AMENDED (2026-11-20): test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts joins files. Its
+    readiness-failure test broke readiness by making the ledger path a directory. The daemon draft hook now reads
+    the ledger for clean draft receipts, so that fixture breaks the receipt read as well. The test now injects a
+    failing main-commit read, writes a real ledger with one clean inbox.drafted row, and asserts that the new
+    proposal is still drafted while the clean one is not.

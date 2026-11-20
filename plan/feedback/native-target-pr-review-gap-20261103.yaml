@@ -11,9 +11,9 @@ raw: >-
   enrolled in .remudero/managed-repos.json and has no row in
   .remudero/daemon-instances.yaml, so nativeTargetAdmission
   (src/lib/product-build.ts) reads it as "native". The native path runs one
-  bounded job per console Build kick (W1-T10799). No daemon reviews a PR on
-  that repository that the fleet did not open, so remudero-review is never
-  posted on an operator PR there.
+  bounded job per console Build kick (W1-T10799). No daemon reviews a PR on that
+  repository that the fleet did not open, so remudero-review is never posted on
+  an operator PR there.
 
   OBSERVED. The manual remedy exists: rmd review <pr> --repo owner/name
   (resolveReviewTarget, src/cli/commands/review.ts) posts remudero-review on a
@@ -30,10 +30,11 @@ raw: >-
   wreckterra-shadow-cell-20261103, onboarding-is-a-code-edit-20261103.
 attachments: []
 origin: cli
-status: new
+status: grilling
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: operator-direction:native-target-pr-review-gap:20261103
 thread_id: null
+answered_by: null

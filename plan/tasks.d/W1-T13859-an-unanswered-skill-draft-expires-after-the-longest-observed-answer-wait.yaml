@@ -1,0 +1,80 @@
+- id: W1-T13859
+  title: "An unanswered skill draft expires once it has waited longer than any answered proposal waited"
+  repo: remudero
+  depends_on: [ W1-T13858 ]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: { tdd: strict }
+  budget_usd: 12.00
+  risk: high # Rule 19 sizing: one concern (expiry of unanswered skill drafts) in skill-workshop.ts, its retro call in run-task.ts and the first-seen reader in panel-graph.ts; the close is a reversible ledger decline
+  band_meaning: span
+  origin: "operator-session#skill-drafts-never-wait-2026-11-19"
+  plan_refs: [ W1-T13858, W1-T8825, W1-T2766 ]
+  files:
+    - src/lib/skill-workshop.ts
+    - src/lib/ledger.ts # amended 2026-11-20: exports tryAcquireRotationLock for the compactor and the expiry reader
+    - src/lib/ledger-compact-worker.ts # amended 2026-11-20: the worker's parent thread holds the lock, so an ended worker cannot leave it held
+    - src/run-task.ts
+    - src/lib/panel-graph.ts
+    - test/an-unanswered-skill-draft-expires.test.ts
+    - src/lib/ledger-compact.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "expireUnansweredSkillDrafts closes, once, a staged skill draft with no ratify or decline row whose first-seen age is greater than the bound. It writes one panel.proposal_declined row with origin skill-workshop and a reason that starts with 'expired:' and states the age, the bound and the sample size. A second pass writes no row."
+      proof: "grep: W1-T13859 criterion 2: in test/an-unanswered-skill-draft-expires.test.ts"
+    - claim: "A draft younger than the bound, a draft already approved or declined, and a draft the workshop already closed are not changed and get no row."
+      proof: "grep: W1-T13859 criterion 3: in test/an-unanswered-skill-draft-expires.test.ts"
+    - claim: "When the ledger union is incomplete, or the sample is empty, no draft closes and no ledger row is written. The pass returns a reason that the retro prints."
+      proof: "grep: W1-T13859 criterion 4: in test/an-unanswered-skill-draft-expires.test.ts"
+    - claim: "The workshop's own expiry declines never enter the sample. A fixture where an expiry decline would be the longest wait gets the same bound with and without that row."
+      proof: "grep: W1-T13859 criterion 5: in test/an-unanswered-skill-draft-expires.test.ts"
+    - claim: "invariant:approve-only-writes-skills An expiry writes nothing under .claude/skills/, and a panel.proposal_restored row after the expiry leaves the draft open on later passes."
+      proof: "grep: W1-T13859 criterion 6: in test/an-unanswered-skill-draft-expires.test.ts"
+    - claim: "The retro calls the expiry after it stages skill drafts."
+      proof: "grep: expireUnansweredSkillDrafts( in src/run-task.ts"
+  rationale: |
+    OBSERVED on the Azure host, 2026-11-19. No time limit exists for any Inbox proposal. A proposal leaves
+    the open set only through an answer: ratify.approved, panel.proposal_declined (by the operator, the
+    fleet lane or the Inbox responder), or a retirement backed by proof (a merged task, a finding that is
+    gone, a successor). A skill draft has no task to merge, so only the operator can answer it. Two
+    implement drafts have waited since September. The first-seen store dates them 2026-10-13, which is
+    when the store started (1,197 ids carry that same backfill stamp). The ledger has skill.staged rows
+    for 88d9945f from 2026-09-25 and for 84a7cc07 from 2026-09-30.
+
+    The bound must come from data, not a fixed number. Over the first-seen store and the full ledger,
+    excluding the backfill stamp, 775 proposals were answered after they were first seen. The longest
+    wait was 32.62 days (a follow-up approved by the fleet on 2026-11-16). The longest wait for an
+    operator answer was 0.8 days (5 proposals, 4 of them console tests). On that data, a draft first seen
+    more than 32.62 days ago has waited longer than any proposal that was answered.
+
+    MOVED to W1-T14047 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19830 merges on the rest.
+  design: |
+    1. Add skillDraftExpiryBound(stateDir) in skill-workshop.ts. Read the first-seen store
+       (inboxFirstSeenPath in panel-graph.ts; export its reader if a second reader is needed and check the
+       import with depcruise) and the ledger union through readLedgerUnionRecordsSync with steps
+       ratify.approved and panel.proposal_declined and refuseIncomplete. For each id, the wait is from its
+       first-seen time to its first answer at or after that time. Leave out ids stamped with the store's
+       earliest time (their true age is unknown) and rows with origin skill-workshop (so expiries never
+       feed the bound). The bound is the largest wait. Return {bound, sample} or {unmeasured: reason}.
+    2. Add expireUnansweredSkillDrafts(registryPath, stateDir, log, clock). For each skill-draft
+       proposal with a skill file: skip it when the ledger has ratify.approved or a decline that is not
+       restored (ledgerProposalVerdicts), or when the workshop's close record from W1-T13858 matches its
+       stored text. Otherwise, when now minus first-seen is greater than the bound, close it with the
+       W1-T13858 close and the reason "expired: unanswered for <age> days; the longest wait of any
+       answered proposal is <bound> days (<n> answered)".
+    3. Call it in the retro in src/run-task.ts right after stageSkillDrafts. It is best-effort like that
+       call: a throw is logged as skill.expire_failed and never fails the retro.
+    4. No fixed number. The bound changes as answers arrive. With no measurable sample, nothing expires.
+    INVARIANT approve-only-writes-skills: An expiry writes only the ledger decline and the registry close record. Nothing writes under .claude/skills/ except `rmd approve`, and `rmd restore` reopens an expired draft.
+  falsifier: |
+    Count the workshop's own expiry rows in the sample: criterion 5's bound grows and the test fails.
+    Drop the first-seen backfill filter: the sample takes in 1,197 ids with unknown ages. Replace the
+    derived bound with a constant: criterion 1's fixture, whose longest wait is not that constant, fails.
+  note: |
+    Filed from the 2026-11-19 skill-draft analysis. Builds on the close step of W1-T13858.
+    files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): review of #19830 at 15:05Z reproduced a read that
+    runs between two archive writes of ledgerCompactCommand and sees stable identities but missing rows (bound 16.50 to
+    2.00 days). The compactor holds no lock across its write loop, so the reader cannot detect it; the build must hold
+    the rotation lock across that loop in src/lib/ledger-compact.ts.

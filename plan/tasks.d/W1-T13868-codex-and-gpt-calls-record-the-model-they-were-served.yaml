@@ -1,0 +1,56 @@
+- id: W1-T13868
+  title: Codex and GPT worker calls record the model they were served
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#field-trials-2026-11-19
+  files:
+    - src/lib/worker-provider.ts
+    - src/lib/benchmark-run.ts
+    - src/lib/worker.ts
+    - src/lib/review-findings.ts
+    - src/cli/commands/review.ts
+    - src/run-task.ts
+    - test/every-provider-names-its-served-model-or-why-not.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The benchmark cohort counts servedModelObserved only when a call row carries served_model
+    (src/lib/benchmark-cohort.ts). Claude calls report it; Codex and GPT calls (for example routed gpt-6.2-sol
+    reviews, whose review.finding rows show served_model null) do not, so field trials cannot tell which model
+    actually answered. RECON first: find where the Codex and OpenAI responses expose the served model and why it
+    is dropped.
+    AMENDED 2026-11-20 after #19801's fourth review. A Codex spawn that hits its clock bound or output limit
+    throws instead of returning a result. Its worker.attempt row (worker_failure spawn-threw-before-result)
+    is written by spawnFailureDetail in src/lib/benchmark-run.ts, so a reroute the stream had already named
+    never reached that row. The invariant covers that call too, and benchmark-run.ts is its only writer, so it
+    joins files:. The change there copies a served model, or its named reason, that the thrown error carries.
+    AMENDED 2026-11-20 after #19801's fifth review. spawnWorker's cash path (src/lib/worker.ts) discards a rung
+    the clock-bound watchdog cut short, after that rung's first reply named its model, and throws
+    WorkerAbandonedError without it. That call is covered by the invariant too, so worker.ts joins files:. The
+    change there throws the abort reason carrying the rung's served model, and spawnFailureDetail reads it
+    through the error's cause.
+    AMENDED 2026-11-20 after #19801's seventh review. A Codex or GPT review that reports no served model
+    writes review.finding rows with served_model null and no reason. Those rows are written by
+    recordReviewFindings in src/lib/review-findings.ts, from provenance built in src/cli/commands/review.ts,
+    so both join files:. The change carries the reviewer's served_model_reason into each review.finding row.
+  design: |
+    Read the served model from the Codex and GPT response (the stream's model field or the final event) and
+    write it as served_model on the call's ledger rows, the same way the Claude path does. When the response
+    names no model, write the existing named "not reported" reason, never the requested model.
+
+    INVARIANT served-model-observed: a Codex or GPT call that receives a model name records it as served_model; one that receives none records why.
+  acceptance:
+    - claim: invariant:served-model-observed — a Codex call and a GPT call each record the served model from the response, or the named reason when none is reported
+      proof: 'unit test: test/every-provider-names-its-served-model-or-why-not.test.ts'
+      kind: guard
+    - claim: the test that proves it is named for W1-T13868 criterion 1
+      proof: 'grep: W1-T13868 criterion 1 in test/every-provider-names-its-served-model-or-why-not.test.ts'
+  falsifier: |
+    Drop the served-model read for Codex: the test must fail because served_model is null with no reason.

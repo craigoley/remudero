@@ -19,8 +19,7 @@ import { dirname } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { accountUsageBody, type AccountUsageDeps, type AccountUsageSnapshot } from "./account-usage.js";
 import type { WorkerProviderId } from "./config.js";
-import { readDiskFreeBytes } from "./daemon-health.js";
-import { ghJsonAsync } from "./github-transport.js";
+import { readDiskFreeBytes, readGhRateLimitRemainingAsync } from "./daemon-health.js";
 import { createLatestMeasurementReader, type LatestMeasurementRowsResult } from "./measurement-cadence.js";
 import { controlStatusBody, type ControlStatusDeps, type FleetControlStatus } from "./panel-actions.js";
 import { resolveProviderRoutingPolicy } from "./provider-routing-policy.js";
@@ -131,11 +130,8 @@ export function hostFileParts(deps: HostRouteReads): Pick<HostViewData, "control
   };
 }
 
-/** `gh api rate_limit`'s REST core `remaining`, read without blocking; `undefined` when it does not answer a number. */
-export async function readGhRateLimitRemainingAsync(json: (args: string[]) => Promise<unknown> = ghJsonAsync): Promise<number | undefined> {
-  const remaining = ((await json(["api", "rate_limit"])) as { resources?: { core?: { remaining?: unknown } } } | undefined)?.resources?.core?.remaining;
-  return typeof remaining === "number" ? remaining : undefined;
-}
+// W1-T13833: the non-blocking rate-limit read lives beside its blocking twin, which /v1/daemon-health now also avoids.
+export { readGhRateLimitRemainingAsync };
 
 export interface HostViewOptions {
   /** Absent, the view has no inputs and builds no body. */

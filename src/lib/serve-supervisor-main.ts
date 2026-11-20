@@ -57,6 +57,8 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
     handoffEnabled: handoffSwitch(env, gensDir),
     spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
     spaceFromBoot: true,
+    // W1-T13277: between generations, serve's port answers 503 with the restarting state, not a refused connection.
+    restartingAnswer: true,
     log,
   });
   const onSignal = opts.onSignal ?? ((signal, handler) => void process.once(signal, handler));

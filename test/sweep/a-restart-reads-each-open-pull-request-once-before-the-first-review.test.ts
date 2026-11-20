@@ -179,15 +179,17 @@ test("W1-T12236 criterion 2: with no tick read, or one older than the tick, the 
   } finally { await f.cleanup(); }
 });
 
-test("W1-T12236 criterion 3: a refill with no scope reads its own views", async () => {
+test("W1-T12236 criterion 3: a refill reads its own views", async () => {
   const f = fixture();
   try {
     const gh = f.useShim("head-live");
     const served = servedOpenPrViews(() => generation(TICK_STARTED_AT_MS + 5, [view("head-tick")]), () => TICK_STARTED_AT_MS);
+    assert.equal(served(undefined, "refill"), undefined, "the refill read is not served");
+    // W1-T13831: a pass with no scope now decides from the fresh tick read; its refill still reads its own views.
     await f.hook(served)(undefined);
-    assert.ok(listReads(gh, f.repo) >= 1, "the no-scope refill read its own views");
-    assert.equal(f.posted.some((post) => post.headSha === "head-tick"), false);
-    assert.equal(f.timing()[0]?.views_source, "own_read");
+    await f.settle();
+    assert.equal(f.timing()[0]?.views_source, "tick_read");
+    assert.ok(listReads(gh, f.repo) >= 1, "the refill read its own views");
   } finally { await f.cleanup(); }
 });
 
@@ -243,7 +245,7 @@ test("W1-T13709 criterion 2: a generation older than the last good list is not s
     await f.settle();
     // This generation started long before the own read the first pass kept as its last good list.
     published = generation(TICK_STARTED_AT_MS + 5, [view("head-tick")]);
-    assert.ok(port(IDLE), "the generation is offered to the pass");
+    assert.ok(port(IDLE, "pass"), "the generation is offered to the pass");
     await run(IDLE);
     await f.settle();
     assert.deepEqual(f.timing().map((row) => row.views_source), ["own_read", "own_read"]);
