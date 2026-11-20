@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
-import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
+import { INBOX_CLI_REPLY_HEADER, INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
 
 /** serve.ts's DEFAULT_SERVE_PORT and serviceTokensPath, restated so this CLI stays out of serve's import cycle. */
 export const INBOX_CLI_DEFAULT_SERVE_PORT = 4317;
@@ -21,14 +21,12 @@ export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
 export interface InboxCliServeTarget { url: string; token: string }
 
 /**
- * W1-T13238: the running serve this host's CLI can post to: 127.0.0.1 on config serve.port, else
- * {@link INBOX_CLI_DEFAULT_SERVE_PORT}, the port `rmd serve` itself binds when no --port is given (resolveServePort), with
- * the write token from state/service-tokens.json. Only reads the token file: a CLI never mints tokens. The token is never
- * printed.
+ * The local write endpoint uses the launcher override, the configured port, or serve's default.
+ * The CLI only reads the existing write token, and keeps it out of diagnostics.
  */
 export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">): InboxCliServeTarget | { reason: string } {
-  const port = String(config.serve?.port ?? INBOX_CLI_DEFAULT_SERVE_PORT);
-  if (!/^\d{1,5}$/.test(port)) return { reason: `config serve.port ${JSON.stringify(port)} is not a port` };
+  const port = Number(process.env.RMD_SERVE_PORT || config.serve?.port || INBOX_CLI_DEFAULT_SERVE_PORT);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return { reason: "serve port must be an integer 1-65535" };
   let write: unknown;
   try {
     write = (JSON.parse(readFileSync(inboxCliTokensPath(config.root), "utf8")) as { write?: unknown }).write;
@@ -54,7 +52,7 @@ export function serveFirstInboxActions(target: InboxCliServeTarget, inProcess: (
   const connectMs = opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS;
   const entries = INBOX_VERBS.map((spec) => [spec.name, async (body: unknown, actor: Parameters<InboxVerbActions[InboxVerbName]>[1],
     respond: Parameters<InboxVerbActions[InboxVerbName]>[2]) => {
-    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs);
+    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs, spec.name === "reply");
     if ("unreachable" in answer) {
       warn(`rmd ${spec.name}: no serve answered at ${target.url} (${answer.unreachable}); running in-process`);
       return inProcess()[spec.name](body, actor, respond);
@@ -65,13 +63,13 @@ export function serveFirstInboxActions(target: InboxCliServeTarget, inProcess: (
   return Object.fromEntries(entries) as unknown as InboxVerbActions;
 }
 
-function postInboxVerb(url: string, token: string, body: unknown, connectMs: number):
+function postInboxVerb(url: string, token: string, body: unknown, connectMs: number, cliReply = false):
   Promise<{ status: number; body: unknown } | { unreachable: string } | { failed: string }> {
   const payload = Buffer.from(JSON.stringify(body));
   return new Promise((resolve) => {
     let connected = false;
     const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", "content-length": payload.length,
-      authorization: `Bearer ${token}` } }, (res) => {
+      authorization: `Bearer ${token}`, ...(cliReply ? { [INBOX_CLI_REPLY_HEADER]: "1" } : {}) } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("error", (error) => resolve({ failed: error.message }));
