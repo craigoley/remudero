@@ -28,6 +28,7 @@ import { formatReservationAnchorMessage, taskIdReservationRef } from "#src/lib/t
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = Record<string, unknown>;
 
@@ -112,6 +113,11 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
   seed.git("commit", "--quiet", "-m", "chore: seed fixture");
   seed.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
   const repo = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "one-held-checkout" });
+  if (opts.realReservation === true) {
+    // The production reservation spawns commit-tree outside the fixture's Git wrapper.
+    repo.git("config", "--local", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+    repo.git("config", "--local", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
+  }
   if (opts.mainExtra !== undefined) {
     const rel = `plan/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
     writeFileSync(join(seed.dir, rel), opts.mainExtra.text);
@@ -171,7 +177,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
 
 /** The remedy module loaded again, as a restarted daemon loads it: a new claim token, so the old holder is gone. */
 async function restartedRemedy(): Promise<typeof import("#src/lib/parked-pr-remedy.js")> {
-  const url = pathToFileURL(join(import.meta.dirname, "..", "..", "src", "lib", "parked-pr-remedy.ts"));
+  const url = pathToFileURL(join(REPO_ROOT, "src", "lib", "parked-pr-remedy.ts"));
   url.search = `?restart=${Date.now()}`;
   return import(url.href) as Promise<typeof import("#src/lib/parked-pr-remedy.js")>;
 }

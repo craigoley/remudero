@@ -205,7 +205,12 @@ function readClaimRecord(path: string): ClaimRecord | "absent" | "torn" {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
     throw error;
   }
-  try { return JSON.parse(text) as ClaimRecord; } catch { return "torn"; }
+  try {
+    return JSON.parse(text) as ClaimRecord;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return "torn";
+  }
 }
 
 function pushesOf(record: ClaimRecord | "absent" | "torn"): ReservationPush[] {
