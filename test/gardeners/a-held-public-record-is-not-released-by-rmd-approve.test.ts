@@ -41,7 +41,7 @@ const planOf = (text: string, label: string): Plan => {
 };
 
 /** A state directory naming the ops repository, and that repository's read-only routes over a text a test may change. */
-function opsCatalog(t: TestContext, initial: string) {
+function opsCatalog(t: TestContext, initial: string, branch = "main") {
   let text = initial;
   let blobUnreadable = false;
   const root = mkdtempSync(join(tmpdir(), "rmd-held-public-"));
@@ -52,8 +52,8 @@ function opsCatalog(t: TestContext, initial: string) {
     const commit = sha1(text), tree = sha1(commit + "root"), plan = sha1(commit + "plan");
     const blob = sha1(`blob ${Buffer.byteLength(text)}\0${text}`);
     const base = `repos/${REPOSITORY}`;
-    if (path === base) return { id: 42, full_name: REPOSITORY, default_branch: "main" };
-    if (path === `${base}/git/ref/heads/main`) return { object: { type: "commit", sha: commit } };
+    if (path === base) return { id: 42, full_name: REPOSITORY, default_branch: branch };
+    if (path === `${base}/git/ref/heads/${branch}`) return { object: { type: "commit", sha: commit } };
     if (path === `${base}/git/commits/${commit}`) return { sha: commit, tree: { sha: tree } };
     if (path === `${base}/git/trees/${tree}`) return { sha: tree, truncated: false, tree: [{ path: "plan", sha: plan, type: "tree", mode: "040000" }] };
     if (path === `${base}/git/trees/${plan}`) return { sha: plan, truncated: false, tree: [{ path: "tasks.yaml", sha: blob, type: "blob", mode: "100644" }] };
@@ -61,7 +61,7 @@ function opsCatalog(t: TestContext, initial: string) {
     if (blobUnreadable) throw new Error("fixture ops blob unavailable");
     return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
   };
-  return { stateDir, api, lookup: { stateDir, api }, set: (next: string) => { text = next; },
+  return { stateDir, api, lookup: { stateDir, api }, set: (next: string) => { text = next; }, commit: () => sha1(text),
     setBlobUnreadable: (unreadable: boolean) => { blobUnreadable = unreadable; },
     read: () => readOpsCatalogSnapshotAsync({ repository: REPOSITORY }, api) };
 }
@@ -123,8 +123,8 @@ function publicMain(t: TestContext, text: string) {
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
-async function refusalFixture(t: TestContext) {
-  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"));
+async function refusalFixture(t: TestContext, opsBranch = "main") {
+  const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"), opsBranch);
   const main = publicMain(t, PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record"));
   main.publish(PUBLIC_TEXT);
   const rows: Row[] = [];
@@ -211,17 +211,45 @@ test("W1-T13785 criterion 4: a failed ops blob read leaves the new ref pending f
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
-test("W1-T13785 criterion 4: a public replay can proceed while an unrelated public-to-ops edge remains held", async t => {
+test("W1-T13785 criterion 4: the ops clearing event follows the catalog's default branch, so a hold cleared on trunk re-runs the release once", async t => {
+  const { fx, main, rows, ports, pass, approved } = await refusalFixture(t, "trunk");
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item);
+  const readOpsStamp = ports.eventStamps["ops-main"]!;
+  assert.equal(await readOpsStamp(), fx.commit(), "the stamp is the trunk commit the catalog read binds");
+  await pass();
+  assert.deepEqual(approved, [], "an unchanged cause re-runs nothing");
+
+  fx.set(record("OPS-GOOD"));
+  assert.equal(await readOpsStamp(), fx.commit(), "removing the duplicate on trunk moves the stamp");
+  const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
+  assert.deepEqual(await ports.probe(item), { present: false, digest: publicRecordDigest(current) });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }], "one replay on the trunk clearing event");
+  assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.events), [["ops-main"]]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+});
+
+test("W1-T13785 criterion 4: a public replay waits while an unrelated public-to-ops edge remains, as origin/main's strict loader refuses that plan, and runs once it is gone", async t => {
   const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
   main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
   fx.set(record("OPS-GOOD"));
   const [item] = scanStuckState(rows).open;
   assert.ok(item);
   const current = (await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true })).plan.byId.get("PUB-2")!;
-  assert.deepEqual(await ports.probe(item), { present: false, digest: publicRecordDigest(current) });
+  const digest = publicRecordDigest(current);
+  assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "public-replay-plan-invalid" });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [], "no replay while origin/main's approve would refuse the plan");
+
+  main.publish(PUBLIC_TEXT);
+  assert.deepEqual(await ports.probe(item), { present: false, digest });
   await pass();
   await pass();
   assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
 test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only edit or switching the destination off", async t => {
@@ -290,7 +318,8 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
     ...productionStuckStatePorts({
       stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
       api: path => {
-        if (catalogUnavailable && path === `repos/${REPOSITORY}`) {
+        // The commit route only the catalog read opens: the stamp reads the repository and its default branch's ref.
+        if (catalogUnavailable && path.startsWith(`repos/${REPOSITORY}/git/commits/`)) {
           failedReads++;
           throw new Error("ops repository unavailable");
         }

@@ -27,7 +27,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
-import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
+import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, loadLocalReleasePlan, publicReleaseDependencyError, readReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
@@ -483,11 +483,10 @@ export async function readApproveRelease(
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
   if (release?.outcome !== "held") {
-    const opsPlan = lookup.opsSnapshot?.outcome === "ok" &&
-      planDestinationRepository(lookup.stateDir).outcome === "named" ? lookup.opsSnapshot.plan : undefined;
-    const localError = publicReleaseDependencyError(localPlan, opsPlan);
+    // Only a held record answers from a plan with an unresolved dependency; any other release refuses as origin/main does.
+    const localError = publicReleaseDependencyError(localPlan);
     if (localError) throw localError;
-    if (publicPlan && publicReleaseDependencyError(publicPlan, opsPlan)) {
+    if (publicPlan && publicReleaseDependencyError(publicPlan)) {
       // Match the strict ref loader's working-tree fallback for an unresolved public dependency.
       release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
     }
@@ -542,7 +541,7 @@ function resolvePublicReplay(taskId: string, plan: Plan, read: OpsRead): TaskRel
     const hold = composition.held.get(taskId);
     if (hold !== undefined) return { outcome: "held", hold };
   }
-  if (publicReleaseDependencyError(plan, read.outcome === "ok" ? read.plan : undefined)) {
+  if (publicReleaseDependencyError(plan)) {
     return { outcome: "unreadable", reason: "public-replay-plan-invalid" };
   }
   return { outcome: "found", catalog: "public", plan };
@@ -553,8 +552,10 @@ export async function opsMainCommit(stateDir: string, api: OpsCatalogApi): Promi
   const destination = planDestinationRepository(stateDir);
   if (destination.outcome !== "named") return undefined;
   try {
-    const ref = await api(`repos/${destination.owner}/${destination.repo}/git/ref/heads/main`) as { object?: { sha?: unknown } };
-    return str(ref?.object?.sha);
+    // W1-T13785: the catalog read binds the repository's default branch, so that branch's movement is the event.
+    const repo = `repos/${destination.owner}/${destination.repo}`;
+    const branch = str((await api(repo) as { default_branch?: unknown } | undefined)?.default_branch);
+    return branch === undefined ? undefined : await readBranchSha(api, repo, branch);
   } catch (error) {
     // An unread ref is no event: the item keeps its last stamp and is probed when the ref next answers.
     void error;

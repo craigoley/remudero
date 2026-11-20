@@ -849,19 +849,18 @@ test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved depe
   }
 });
 
-test("W1-T13785 criterion 2: a readable reverse edge holds its own record while a sound public neighbour keeps the local pin", async t => {
-  const everything = everythingSaid(t);
-  const sound = shardText(DEPENDANT_ID);
-  const boot = dependingOn(PUBLIC_ID, OPS_ID) + sound;
+test("W1-T13785 criterion 2: a readable reverse edge holds its own record, and a sound public neighbour in that plan is refused by the strict loader as on origin/main", async t => {
+  everythingSaid(t);
+  const boot = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID);
   const main = boot.replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
-  const localRecord = parseTasksFromYaml(sound, "local.yaml")[0]!;
+  const error = { name: "PlanError", message: `task ${PUBLIC_ID}: depends_on unknown task '${OPS_ID}'` };
   for (const mode of MODES) {
-    const host = hostWithSecondCatalog(t), from = everything.length;
-    const { code } = await approveIn(mode, t, host, boot, DEPENDANT_ID, main);
-    assert.equal(code, 0, `${mode}: ${everything.slice(from).join("\n")}`);
-    assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(localRecord)], mode);
-    assert.equal(host.durableRecords()[DEPENDANT_ID]?.pin, pinBeforeThisTask(localRecord), mode);
-    assert.equal(host.releaseRows(PUBLIC_ID).length, 0, mode);
+    const host = hostWithSecondCatalog(t);
+    writeFileSync(host.planPath, boot);
+    assert.throws(() => loadPlan(host.planPath), error, "control: origin/main's approve loads this plan strictly and refuses it");
+    await assert.rejects(approveIn(mode, t, host, boot, DEPENDANT_ID, main), error, mode);
+    assert.ok(host.calls.length > 0, `${mode}: the readable ops catalog is read`);
+    assert.equal(host.wroteAnything(), false, `${mode}: no release, refusal row or durable record`);
   }
 });
 

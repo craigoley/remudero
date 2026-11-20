@@ -227,19 +227,18 @@ async function readReleaseComposition(publicPlan: Plan, sources: TaskLookupOptio
   return composeSecondaryPlan(publicPlan, snapshot.plan);
 }
 
-/** Check deferred public dependencies. A verified composition handles edges to ops IDs as per-record holds. */
-export function publicReleaseDependencyError(plan: Plan, opsPlan?: Plan): PlanError | undefined {
-  let composition: SecondaryComposition | undefined;
+/**
+ * W1-T13785: the strict public loader's dependency check over a plan read with deferred dependencies. Deferring lets a
+ * record the composition holds reach its held answer. Any other release from such a plan refuses with the error
+ * origin/main's strict loader raises, so a sound public neighbour of a public-to-ops edge is not released.
+ */
+export function publicReleaseDependencyError(plan: Plan): PlanError | undefined {
   for (const task of plan.tasks) {
     for (const dependency of task.depends_on) {
-      if (plan.byId.has(dependency)) continue;
-      if (opsPlan !== undefined) {
-        composition ??= composeSecondaryPlan(plan, opsPlan);
-        if (composition.outcome === "ok" && composition.held.has(task.id) && opsPlan.byId.has(dependency)) continue;
-      }
-      return new PlanError(`task ${task.id}: depends_on unknown task '${dependency}'`);
+      if (!plan.byId.has(dependency)) return new PlanError(`task ${task.id}: depends_on unknown task '${dependency}'`);
     }
   }
+  return undefined;
 }
 
 /** Which public plan a release composed against: the checkout's origin/main, or its working tree and why. */
