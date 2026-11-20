@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { Config } from "#src/lib/config.js";
+import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { HEADROOM_SAMPLE_MAX_AGE_MS, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 import type { UsageSnapshot } from "#src/lib/headroom.js";
@@ -380,6 +381,14 @@ const OVER_CEILING: UsageSnapshot = { billingMode: "subscription",
   weekly: [{ label: "all models", percentUsed: 99, resetsAt: "2026-07-28T04:00:00.000Z" }] };
 const DAEMON_NOW = Date.parse("2026-07-20T22:00:00.000Z");
 
+function daemonHostPins() {
+  return {
+    memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
+    heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
+    bootCheckoutBlocked: "",
+  };
+}
+
 async function governedTick(t: test.TestContext, reader: DaemonDeps["readProviderRoutingStatus"], usage: UsageSnapshot | "unreadable" = OVER_CEILING) {
   const dir = scratchRoot();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -387,6 +396,7 @@ async function governedTick(t: test.TestContext, reader: DaemonDeps["readProvide
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let spawned = 0, sleeps = 0;
   const summary = await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
+    ...daemonHostPins(),
     refreshMerged: () => () => false,
     runOne: async (id) => { spawned += 1; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
     readUsage: () => (usage === "unreadable" ? undefined : usage),
@@ -437,6 +447,7 @@ test("W1-T13855 criterion 5: an over-ceiling Claude reading beside a fresh credi
   let nowMs = DAEMON_NOW, sleeps = 0, release: (() => void) | undefined;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
+    ...daemonHostPins(),
     refreshMerged: () => () => false,
     runOne: async (id) => { await gate; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
     sweepLight: async () => {},
