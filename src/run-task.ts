@@ -637,7 +637,7 @@ import {
 import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
-import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
+import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
@@ -2061,28 +2061,47 @@ export function buildFreshTreeReviewRunner(
   const prepared = new Map<string, string>();
   return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
+    const review = (tree: string) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+    // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
+    // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
+    let ownTree = false;
+    const reviewInOwnTree = () => { ownTree = true; return inPerAttemptTree(repoDir, deps, "reviewer", sha, review); };
     try {
       let worktree = prepared.get(sha);
       if (worktree === undefined) {
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
+        try {
+          worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
+        } catch (err) {
+          // Often another child's cut that is still checking out (the cut race); nothing is cached.
+          if (!(err instanceof UnprovenFreshTreeError)) throw err;
+          return await reviewInOwnTree();
+        }
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
       const reviewerTree = worktree;
+      let started = false;
       const run = async () => {
+        started = true;
         if (freshTreeInspector(deps)(repoDir, reviewerTree, sha) !== "reusable") {
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+        return review(reviewerTree);
       };
-      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
+      try {
+        return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
+      } catch (err) {
+        // A live review in another process holds the shared tree and this action never ran.
+        if (started || !(err instanceof ReviewerWorktreeLeasedError)) throw err;
+        return await reviewInOwnTree();
+      }
     } catch (err) {
-      prepared.delete(sha);
+      if (!ownTree) prepared.delete(sha);
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
       // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
@@ -2116,6 +2135,11 @@ function perAttemptTreePath(deps: FreshTreeTools, prefix: string, sha: string): 
   return `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}-${process.pid}-${randomUUID().slice(0, 8)}`;
 }
 
+/** The stable tree is registered but not proven an exact clean detached checkout of the sha. */
+class UnprovenFreshTreeError extends RmdError {
+  constructor(message: string) { super("git", GENERIC_EXIT_CODE, message); }
+}
+
 function makeTreeRunnable(repoDir: string, deps: FreshTreeTools, prefix: string, worktree: string): void {
   if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
     throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
@@ -2130,7 +2154,7 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
   const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
   const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
   if (existing === "unsafe") {
-    throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
+    throw new UnprovenFreshTreeError(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
   }
   if (existing === "absent" && pathOccupied(worktree)) {
     const sibling = perAttemptTreePath(deps, prefix, sha);
@@ -2150,7 +2174,28 @@ function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: s
   try {
     (deps.removeWorktree ?? worktreeRemove)(repoDir, worktree);
   } catch (error) {
-    process.stderr.write(`freshOriginMainTreeRunner: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+    process.stderr.write(`fresh origin/main tree: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+  }
+}
+
+/** Cut `<prefix>-<sha12>-<pid>-<random>` at `sha`, lease it, prove it an exact clean detached checkout, run `action`
+ *  there, and remove the tree once `action` settles. Only a path whose add succeeded is removed (W1-T9065, W1-T14066). */
+async function inPerAttemptTree<T>(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string,
+  action: (path: string) => Promise<T>): Promise<T> {
+  let cut: string | undefined;
+  try {
+    const path = perAttemptTreePath(deps, prefix, sha);
+    deps.addWorktree(repoDir, path, sha);
+    cut = path;
+    makeTreeRunnable(repoDir, deps, prefix, path);
+    return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
+      if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
+        throw new Error(`${prefix} worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
+      }
+      return action(path);
+    });
+  } finally {
+    if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
   }
 }
 
@@ -2172,23 +2217,11 @@ export function freshOriginMainTreeRunner(
   deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
 ): RatifyCliTree["freshTree"] {
   return async (action) => {
-    let cut: string | undefined;
     try {
       const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
-      const path = perAttemptTreePath(deps, "approve", sha);
-      deps.addWorktree(repoDir, path, sha);
-      cut = path; // only a path whose add succeeded is ever removed: this attempt made it
-      makeTreeRunnable(repoDir, deps, "approve", path);
-      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
-        if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
-          throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
-        }
-        return action({ path, sha });
-      });
+      return await inPerAttemptTree(repoDir, deps, "approve", sha, (path) => action({ path, sha }));
     } catch (err) {
       throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
-    } finally {
-      if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
     }
   };
 }
