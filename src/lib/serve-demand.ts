@@ -49,6 +49,8 @@ export function createServeDemand(options: ServeDemandOptions) {
   let namedFamilies = 0;
   /** W1-T13602: each view's answers this window, by `<status> <code>`, and how many were stale; capped like families. */
   let views = new Map<string, ViewTally>();
+  /** W1-T13832: the swap probe's own answers, kept apart so the client tally stays what clients saw. */
+  let probeViews = new Map<string, ViewTally>();
   let stopTimer: (() => void) | undefined;
 
   function record(family: string, status: number, elapsed: number, aborted: boolean, at = now()): void {
@@ -76,11 +78,12 @@ export function createServeDemand(options: ServeDemandOptions) {
   }
 
   /** W1-T13602: one view read's final answer (a GET or one batch entry), counted under the same window as {@link record}. */
-  function recordView(view: string, status: number, code: string, stale: boolean, at = now()): void {
+  function recordView(view: string, status: number, code: string, stale: boolean, at = now(), source: "client" | "swap-probe" = "client"): void {
     flush(at);
-    if (view !== "other" && !views.has(view) && [...views.keys()].filter(name => name !== "other").length >= SERVE_DEMAND_FAMILY_CAP) view = "other";
-    let tally = views.get(view);
-    if (!tally) { tally = { n: 0, stale: 0, codes: {} }; views.set(view, tally); }
+    const tallies = source === "swap-probe" ? probeViews : views;
+    if (view !== "other" && !tallies.has(view) && [...tallies.keys()].filter(name => name !== "other").length >= SERVE_DEMAND_FAMILY_CAP) view = "other";
+    let tally = tallies.get(view);
+    if (!tally) { tally = { n: 0, stale: 0, codes: {} }; tallies.set(view, tally); }
     tally.n++;
     if (stale) tally.stale++;
     const answer = `${status} ${code}`;
@@ -90,7 +93,7 @@ export function createServeDemand(options: ServeDemandOptions) {
   function flush(at = now()): void {
     if (at < windowStart + SERVE_DEMAND_WINDOW_MS) return;
     const windowEnd = windowStart + SERVE_DEMAND_WINDOW_MS;
-    if (families.size > 0 || views.size > 0) {
+    if (families.size > 0 || views.size > 0 || probeViews.size > 0) {
       const row = {
         run_id: "serve", task_id: "", step: "serve.demand", windowStart, windowEnd,
         families: Object.fromEntries([...families].map(([family, tally]) => {
@@ -98,6 +101,7 @@ export function createServeDemand(options: ServeDemandOptions) {
           return [family, { ...counts, p50: percentile(tally, 0.5), p95: percentile(tally, 0.95) }];
         })),
         ...(views.size > 0 ? { views: Object.fromEntries(views) } : {}),
+        ...(probeViews.size > 0 ? { views_probe: Object.fromEntries(probeViews) } : {}),
       };
       try {
         appendLedger(options.ledgerPath, row);
@@ -112,7 +116,7 @@ export function createServeDemand(options: ServeDemandOptions) {
         }
       }
     }
-    families = new Map(); namedFamilies = 0; views = new Map();
+    families = new Map(); namedFamilies = 0; views = new Map(); probeViews = new Map();
     windowStart += Math.floor((at - windowStart) / SERVE_DEMAND_WINDOW_MS) * SERVE_DEMAND_WINDOW_MS;
   }
 

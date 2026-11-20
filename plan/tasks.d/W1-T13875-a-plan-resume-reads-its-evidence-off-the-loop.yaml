@@ -1,0 +1,50 @@
+- id: W1-T13875
+  title: "A product plan resume reads its operation's ledger evidence off serve's loop, within a bound, and never for a refused hand-off, so \"Resume saved plan\" stops freezing serve while every archive since the plan's request is read under the journal lock"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # what a plan operation's state reads as while its evidence is unread: unknown, never refused or proposed
+  band_meaning: span
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T10823
+    - W1-T13719
+    - W1-T11394
+  files:
+    - src/lib/product-plan-operation.ts
+    - test/dispatch/product-plan-operation.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A resume of a refused hand-off reads no ledger evidence and answers refused"
+      proof: "grep: W1-T13875: a resume of a refused hand-off reads no ledger evidence in test/dispatch/product-plan-operation.test.ts"
+    - claim: "invariant:bounded-read — an evidence read past its bound answers unknown (never refused or proposed) and releases the journal lock"
+      kind: guard
+      proof: "grep: W1-T13875: invariant:bounded-read in test/dispatch/product-plan-operation.test.ts"
+    - claim: "A proposal's evidence is read once and kept for later resumes"
+      proof: "grep: W1-T13875: a proposal's evidence is read once and kept in test/dispatch/product-plan-operation.test.ts"
+  rationale: |
+    WHY: Wreckterra planning is blocked. On 2026-11-19 at 20:09Z the Console's "Resume saved plan command" (POST
+    /api/console/products) froze serve: it took the plan-operation lock, then wrote nothing until the supervisor flagged
+    it active_wedged at 20:12Z and killed it. The Console got 503s, and every retry is a whole-Console outage.
+    CAUSE (read on origin/main): ProductPlanOperationService.ledger() calls readLedgerUnionRecordsSync with sinceTs set to
+    the record's requestedAt, on serve's main loop, inside the journal lock. The Wreckterra operation was requested on
+    2026-11-03 and its hand-off was refused that minute, so each resume read every ledger archive since (204 archives;
+    the state dir is 21 GB), although a refused hand-off started nothing the ledger could show.
+  design: |
+    NOT W1-T11394: that task adds requirement coverage to an observation; this one only bounds how its ledger evidence is read.
+    INVARIANT bounded-read: an operation's evidence read takes at most PRODUCT_PLAN_LEDGER_READ_BOUND_MS (15 s), and a
+    read past it answers no evidence (state unknown), so the journal lock is released.
+    1. ledger() is async: no read for a refused hand-off that is not in flight; otherwise readLedgerUnionRawLinesAsync
+       (it yields between slices) raced with the bound.
+    2. Final evidence (a proposal, an exit or a failure) is kept per operation, so it is read once.
+    3. propose reads each record's evidence once and derives every observation from it (observeWith).
+  falsifier: |
+    A refused resume still reads: criterion 1 fails. An unbounded read: criterion 2 fails. Final evidence read again:
+    criterion 3 fails.
+  note: |
+    Id reserved for run-unfiled-1795121052863 with ~/rmd-work/bin/reserve-id.sh.

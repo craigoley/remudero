@@ -91,8 +91,12 @@ test("W1-T4283: the fully_executed_proof step passes unchanged", () => {
   const draft = rendered("fully_executed_proof");
   assert.ok(draft.markdown.includes(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`));
   assert.deepEqual(scanSkillDraft(draft, ALLOWLIST), { ok: true });
+  // W1-T13858: the per-line check passes the line, and the whole-draft check refuses a draft with no other step.
   const registry = join(mkdtempSync(join(tmpdir(), "rmd-test-actionable-proof-")), "proposals.json");
-  assert.equal(stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" }).staged, true);
+  const staged = stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" });
+  assert.equal(staged.refused, true);
+  assert.match(staged.reason ?? "", /^outcome-only:/);
+  assert.equal(existsSync(registry), false);
 });
 
 test("W1-T4283: a refused draft names the offending step verbatim with offendingLine and reason", () => {

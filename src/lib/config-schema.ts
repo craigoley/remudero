@@ -112,6 +112,16 @@ export interface Config {
       stepUpWindowMinutes?: number;
       requireStepUp?: boolean;
     };
+      /** Explicit issuer trust binding for the opt-in new-path approval protocol. Absent disables issuer routes and lookup I/O. */
+      newPathApprovalIssuer?: {
+        origin: string;
+        issuerId: string;
+        epoch: number;
+        policy: string;
+        repository: string;
+        instance: string;
+        audience: string;
+      };
   };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
@@ -433,6 +443,18 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
           configField("requireStepUp", "boolean", true, false, "config.json", "When true, high tier needs a recent verified factor; off, sign-in is the only gate.", booleanShape),
         ],
       }),
+      configField("newPathApprovalIssuer", "object", true, undefined, "config.json", "Explicit issuer trust binding for opt-in new-path approval (W1-T10331).", {
+        kind: "object",
+        fields: [
+          configField("origin", "string", false, undefined, "config.json", "Issuer HTTPS origin; never derived from consoleUrl or task data.", stringShape),
+          configField("issuerId", "string", false, undefined, "config.json", "Stable identity of the trusted issuer implementation.", stringShape),
+          configField("epoch", "number", false, undefined, "config.json", "Current issuer epoch; changing it invalidates existing approvals.", numberShape),
+          configField("policy", "string", false, undefined, "config.json", "Current versioned issuer policy identifier.", stringShape),
+          configField("repository", "string", false, undefined, "config.json", "Exact repository served by this issuer.", stringShape),
+          configField("instance", "string", false, undefined, "config.json", "Exact daemon instance served by this issuer.", stringShape),
+          configField("audience", "string", false, undefined, "config.json", "Exact issuer response audience.", stringShape),
+        ],
+      }),
     ],
   }),
   configField("relay", "object", true, undefined, "config.json", "Outbound relay connection settings.", {
@@ -557,6 +579,10 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_TASK_PRECONDITION_READ", "Set to 1 on a task precondition read subprocess so a nested precondition check refuses as recursive-read instead of spawning again.", ["src/lib/plan.ts"]),
   envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),
   envEntry("RMD_WORKER_HOME_DIR", "Maps one config root to the directory holding its worker homes as <root>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/config.ts"]),
+  envEntry("RMD_BIN_DIR", "Overrides the installed host command directory checked by rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_FLEET_INSTALL_DIR", "Overrides the fleet install checkout used to check and restore host cron scripts in rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_CLEANUP_PATH", "Overrides the installed six-hour cleanup script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_TMP_SWEEP_PATH", "Overrides the installed temporary sweep script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
 ];
 
 function configField(

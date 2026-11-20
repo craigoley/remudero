@@ -32,6 +32,7 @@ import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reserva
 import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
+import { reconcileShardStatus } from "./plan-reconcile.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -1008,9 +1009,9 @@ function* stageBranchPending(
   return { refused, carry };
 }
 
-function* blobAt(net: LandingNet, rev: string, path: string): Generator<LandingAsk, string | undefined, AskReply> {
+function* blobAt(net: LandingNet, rev: string, path: string, mode: "-p" | "blob" = "-p"): Generator<LandingAsk, string | undefined, AskReply> {
   try {
-    return yield* net.git(["cat-file", "-p", `${rev}:${path}`]);
+    return yield* net.git(["cat-file", mode, `${rev}:${path}`]);
   } catch {
     // Absent or unreadable: the template proof stands, and the preflight judges it by name.
     return undefined;
@@ -1686,6 +1687,8 @@ export interface LandContentInput {
   /** Repo-relative, forward-slash path this content belongs at. */
   relPath: string;
   content: string;
+  /** W1-T13816: when set, each tree build stages `edit` of main's current blob, never `content`; undefined refuses the path. */
+  edit?: (current: string) => string | undefined;
 }
 
 /**
@@ -1730,16 +1733,34 @@ function* landContentSteps(
   try {
     scratchDir = mkdtempSync(join(tmpdir(), `rmd-${kind.branch}-`));
     const env = { ...process.env, GIT_INDEX_FILE: join(scratchDir, "index") };
+    const editPaths = new Set(inputs.filter(({ edit }) => edit !== undefined).map(({ relPath }) => relPath));
+    const pendingCheck = join(scratchDir, "pending-status");
 
     const buildTree = function* (mainSha: string): Generator<LandingAsk, LandingTreeBuild, AskReply> {
       const pending = yield* readBranchPending(net, kind);
       if (!pending.ok) throw new Error(pending.reason);
+      const mainRef = editPaths.size > 0 ? mainSha : "origin/main";
 
       // Always start from fresh origin/main, never a possibly-stale pending branch — unrelated
       // content landed on main since must not be silently reverted by this force-push.
-      yield* net.git(["read-tree", "origin/main"], { env });
+      yield* net.git(["read-tree", mainRef], { env });
 
       // W1-T191/W1-T3560: carry earlier unmerged calls forward; content-only writes have no disk retry.
+      if (kind.family === "plan-reconcile" && editPaths.size > 0) {
+        for (const [path, pendingBlob] of pending.tipBlobs) {
+          if (!pending.own.has(path)) continue;
+          // Current edits own their paths. Earlier flips can carry only if their exact bytes match main's edit.
+          if (!editPaths.has(path)) {
+            const current = yield* blobAt(net, mainSha, path, "blob");
+            const statusEdit = current === undefined ? undefined : reconcileShardStatus(current, path, () => true).text;
+            if (statusEdit !== undefined) {
+              writeFileSync(pendingCheck, statusEdit);
+              if ((yield* net.git(["hash-object", pendingCheck], { env })).trim() === pendingBlob) continue;
+            }
+          }
+          pending.tipBlobs.delete(path);
+        }
+      }
       const carried = pending.tipSha ? yield* stageBranchPending(net, root, kind, pending, env, scratchDir as string) : undefined;
 
       const unlanded: string[] = [];
@@ -1747,17 +1768,28 @@ function* landContentSteps(
       // Decision/ruling shards have no lifecycle; see `isFeedbackRecordPath`.
       const refused: FeedbackRefusal[] = [...(carried?.refused ?? [])];
       let i = 0;
-      for (const { relPath, content: inputContent } of inputs) {
-        const gateRefusal = destinationGateRefusal(opts, relPath, inputContent);
-        if (gateRefusal) { refused.push(gateRefusal); continue; }
+      for (const { relPath, content: inputContent, edit } of inputs) {
         let content = inputContent;
+        if (edit) {
+          const current = yield* blobAt(net, mainSha, relPath, "blob");
+          const edited = current === undefined ? undefined : edit(current);
+          if (edited === undefined) {
+            refused.push({ path: relPath, reason: current === undefined
+              ? `main no longer has ${relPath}, so its edit was not applied`
+              : `main's current copy of ${relPath} no longer takes its edit (${reconcileShardStatus(current, relPath, () => true).skipped ?? "edit declined"})` });
+            continue;
+          }
+          content = edited;
+        }
+        const gateRefusal = destinationGateRefusal(opts, relPath, content);
+        if (gateRefusal) { refused.push(gateRefusal); continue; }
         // A scratch tmp file, never inside root — hash-object just needs a path to read from.
         const tmpFile = join(scratchDir as string, `content-${i++}`);
         writeFileSync(tmpFile, content);
         let blobSha = (yield* net.git(["hash-object", "-w", tmpFile], { env })).trim();
-        let mainSha: string | null;
-        try { mainSha = (yield* net.git(["rev-parse", `origin/main:${relPath}`])).trim(); }
-        catch { /* Preserve pending staging when main is unreadable; publication evidence is rechecked separately. */ mainSha = null; }
+        let mainBlob: string | null;
+        try { mainBlob = (yield* net.git(["rev-parse", `${mainRef}:${relPath}`])).trim(); }
+        catch { /* Preserve pending staging when main is unreadable; publication evidence is rechecked separately. */ mainBlob = null; }
         let remoteSha: string | null;
         try {
           remoteSha = (yield* net.git(["rev-parse", `:${relPath}`], { env })).trim();
@@ -1769,11 +1801,11 @@ function* landContentSteps(
           if (invalid) { refused.push({ path: relPath, reason: invalid }); continue; }
         }
         if (remoteSha === blobSha) {
-          if (mainSha !== blobSha) unlanded.push(relPath);
+          if (mainBlob !== blobSha) unlanded.push(relPath);
           continue;
         }
-        if (remoteSha !== null && remoteSha !== mainSha && isFeedbackRecordPath(kind, relPath)
-          && !(yield* hasFeedbackLineage(net, remoteSha))) remoteSha = mainSha;
+        if (remoteSha !== null && remoteSha !== mainBlob && isFeedbackRecordPath(kind, relPath)
+          && !(yield* hasFeedbackLineage(net, remoteSha))) remoteSha = mainBlob;
         if (remoteSha !== null && isFeedbackRecordPath(kind, relPath)) {
           const decision = yield* decideFeedbackStage(net, remoteSha, content);
           if (decision.kind === "refuse") {

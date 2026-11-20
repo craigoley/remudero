@@ -14,15 +14,17 @@ import { parse as parseYaml } from "yaml";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-type Step = { uses?: string; env?: Record<string, string>; with?: Record<string, unknown> };
+type Step = { id?: string; uses?: string; env?: Record<string, string>; with?: Record<string, unknown> };
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 
 const CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const LANES = ["ci", "coverage-ratchet"] as const;
 const checkoutOf = (job: string) => {
   const doc = parseYaml(readFileSync(join(REPO_ROOT, ".github/workflows/ci.yml"), "utf8")) as Workflow;
-  const steps = (doc.jobs[job]?.steps ?? []).filter((s) => (s.uses ?? "").startsWith("actions/checkout@"));
-  assert.equal(steps.length, 1, `${job} has exactly one checkout step`);
+  // W1-T13825 added a retry checkout after this one; the bounded first checkout carries id "checkout".
+  const steps = (doc.jobs[job]?.steps ?? []).filter((s) => s.id === "checkout");
+  assert.equal(steps.length, 1, `${job} has exactly one first checkout step`);
+  assert.ok((steps[0]!.uses ?? "").startsWith("actions/checkout@"), `${job}'s first checkout is actions/checkout`);
   return steps[0]!;
 };
 

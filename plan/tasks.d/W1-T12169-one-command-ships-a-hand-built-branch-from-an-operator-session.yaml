@@ -18,6 +18,11 @@
     - src/lib/hand-ship.ts
     - src/run-task.ts
     - test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts
+    - docs/cli-reference.md
+    - src/lib/authority.ts
+    - src/lib/git-push.ts
+    - src/lib/github-transport.ts
+    - src/lib/worktree-git.ts
   status: queued
   attempts: 0
   acceptance:
@@ -50,6 +55,7 @@
   falsifier: |
     Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Restore and require all to pass.
   note: |
+    files: amendment 2026-11-20 (operator, approving the recommendation on the #19651 clarification): acceptance-author-gate refused #19651 as canonical-task-scope-exceeded for docs/cli-reference.md, src/lib/authority.ts, src/lib/git-push.ts, src/lib/github-transport.ts, src/lib/worktree-git.ts; each is a change the build needs.
     On a remote host the command runs the same preflight over ssh, in a worktree it brings there as a git bundle. The two scripts do this today.
     Findings from the hand lane on the Mac agent account, added 2026-11-11. The command must keep each of them.
     - One preflight at a time, in a fixed order. Three preflights at once starved the shared test slot: the static phase of each one counts as non-test load for the others. Observed: `wait_bound_exceeded` after 2,700 s with "non-test load 38 leave 0 of 8 usable core(s)".

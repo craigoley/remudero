@@ -1,0 +1,43 @@
+- id: W1-T13867
+  title: The benchmark cohort index joins the verified task outcome to each worker call
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: operator-request#field-trials-2026-11-19
+  files:
+    - src/lib/benchmark-cohort.ts
+    - test/benchmark-cohort.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The field trials work needs each worker call in the benchmark cohort index to carry the verified outcome of
+    the task it worked on (merged, reverted, refused, and so on), so a model's calls can be scored by result,
+    not only by cost. src/lib/benchmark-cohort.ts already computes joinVerifiedTaskOutcomes at the cohort level
+    (verifiedTaskOutcome, with "unavailable-no-github-verification-join" when no case files are joined), but the
+    per-call index rows do not carry it. RECON first: confirm which index rows lack the join and why.
+    AMENDED 2026-11-20 by operator decision on #19791. RECON found the index has no per-call rows: each row is a
+    cohort (day, task class, provider, model, harness revision) that counts its calls. Writing one row per call
+    would grow the index with every call and break the W1-T9911 small-index guard, and would put private
+    per-call ids in it. The operator chose per-cohort outcome counts instead: each cohort row says how many of
+    its calls ended completed, ended without completion, censored or unavailable, and why. That is enough to
+    score each model by result. The invariant id is unchanged; its wording now names cohort rows.
+  design: |
+    For each cohort row in the index, join each of its calls to its task's verified outcome, from the same
+    case-file join the cohort already uses, at the same as-of cutoff, and keep the counts by outcome and the
+    reasons on that row. When the join is unavailable, write the existing named unavailable reason, never a
+    guessed outcome. A cached pass reports what a fresh one does. Do not change cohort-level totals.
+
+    INVARIANT cohort-call-outcome: every cohort row in the index accounts for each of its calls by verified outcome, or names the reason the join is unavailable.
+  acceptance:
+    - claim: invariant:cohort-call-outcome — each cohort row in the index counts its calls by their tasks' verified outcomes, with the reason for each call not completed, or names the unavailable reason when no verification join exists
+      proof: 'unit test: test/benchmark-cohort.test.ts'
+      kind: guard
+    - claim: the test that proves it is named for W1-T13867 criterion 1
+      proof: 'grep: W1-T13867 criterion 1 in test/benchmark-cohort.test.ts'
+  falsifier: |
+    Remove the per-call join: the test must fail because a cohort row has no outcome counts and no reason.

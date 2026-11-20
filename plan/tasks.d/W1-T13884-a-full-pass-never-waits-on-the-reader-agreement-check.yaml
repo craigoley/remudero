@@ -1,0 +1,50 @@
+- id: W1-T13884
+  title: "A full pass never waits on the reader agreement check"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: the full sweep's prelude ordering (daemon merge and review throughput)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T4841
+    - W1-T9981
+    - W1-T13880
+  files:
+    - src/lib/sweep.ts
+    - test/review/a-full-pass-never-waits-on-the-reader-agreement-check.test.ts
+    - test/two-readers-of-one-fact-must-agree.test.ts
+    - "src/cli/commands/sweep.ts"
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A full pass finishes while its reader agreement check is still running, and the check's findings are logged when it settles"
+      proof: "grep: W1-T13884 criterion 1 in test/review/a-full-pass-never-waits-on-the-reader-agreement-check.test.ts"
+    - claim: "invariant:one-check-in-flight — a due pass never starts a second reader agreement check while one is in flight"
+      proof: "grep: W1-T13884 invariant in test/review/a-full-pass-never-waits-on-the-reader-agreement-check.test.ts"
+  rationale: |
+    WHY: on the host core ledger (OBSERVED 2026-11-19, 11 reader.agreement rows since 12:00Z) each check scanned
+    about 2.0M lines twice and kept 5 rows per reader, with heap after 1.66-2.52 GB, and its duration_ms ran from
+    45,746 to 2,407,529 at a flat input size. runSweep in src/lib/sweep.ts awaits checkReaderAgreement inline every
+    15 min (READER_AGREEMENT_INTERVAL_MS), so the pass waits that long before it disposes, reviews or merges
+    anything. Pid 148's last full prelude (00:03:32Z, 2026-11-20) spent 3,082,328 ms in its reader_agreement stage
+    of a 67 min pass, and no core PR merged from 23:25Z until the daemon recycled at 00:16Z. The check's corpus
+    readers already yield the loop between slices (W1-T13549, W1-T11506); the cost is that the pass waits for a
+    diagnostic whose result no later step of the pass reads.
+  design: |
+    sweep.ts: the due check is started and not awaited. A module map holds the check in flight per ledger path, and
+    a pass starts none while one is in flight, so a check longer than the interval is never doubled. Findings are
+    logged as reader.disagreement and a failure as reader.agreement.unavailable when it settles, as before.
+    settleReaderAgreement(ledgerPath) lets a test (or a caller that needs the result) await it. The interval, the
+    dry-run and light-pass exclusions, and checkReaderAgreement itself are unchanged. The two W1-T4841 sweep tests
+    now await settleReaderAgreement before reading the rows.
+    INVARIANT one-check-in-flight: at most one reader agreement check runs per ledger.
+  falsifier: |
+    Await the check inside runSweep again: criterion 1 fails (the pass is held while the check is) and the invariant
+    test fails. Drop the in-flight guard: the invariant test fails (a second check starts).
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795134349234
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

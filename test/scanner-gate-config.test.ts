@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { withoutCheckoutRetryPair } from "#test/helpers/checkout-retry-pair.js";
 
 // ── W1-T211: "every security scanner is advisory" — the OSV scan must actually gate ─────────
 //
@@ -114,7 +115,8 @@ test("scanner-gate-config: no job ci-gate REQUIRED depends on is configured cont
 
       const jobLevelCoE = job?.["continue-on-error"] === true;
       const steps: any[] = Array.isArray(job?.steps) ? job.steps : [];
-      const stepLevelCoE = steps.some((s) => s && s["continue-on-error"] === true);
+      // W1-T13825: a bounded first checkout whose retry fails the job is the one admitted step-level shape.
+      const stepLevelCoE = withoutCheckoutRetryPair(`${file}:${jobId}`, steps).some((s) => s && s["continue-on-error"] === true);
 
       // REVIEW-RATIFIED SCOPE WIDENING (W1-T4401): the upstream reusable workflow's
       // checkout/result-file symlink vulnerability requires exposing its two scanner steps here.

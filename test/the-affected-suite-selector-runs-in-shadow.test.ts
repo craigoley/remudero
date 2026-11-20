@@ -171,6 +171,40 @@ test("W1-T6924: the now-view rederivation suite is selected for each recorded mi
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });
 
+for (const changed of [
+  "src/lib/issue-revalidation-garden.ts",
+  "src/lib/ledger-steps.ts",
+  "src/lib/spend-rows.ts",
+  "test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts",
+  "test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts",
+]) {
+  test(`W1-T10535: the lifetime-history backstop suite is selected for ${changed}`, () => {
+    const suite = "test/triage/lifetime-history-keeps-the-approved-identity-backstop.test.ts";
+    const files = new Map([...Object.entries(TREE), [suite, ""], [changed, ""]]);
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    assert.ok(!selectAffectedSuites(["src/a.ts"], { files, pathReaders: [] }).suites.includes(suite));
+    files.delete(suite);
+    assert.ok(!selectAffectedSuites([changed], { files, pathReaders: [] }).suites.includes(suite));
+  });
+}
+
+for (const changed of [
+  "src/lib/sweep.ts",
+  "test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts",
+]) {
+  test(`W1-T10546: the infrastructure re-run suite is selected for ${changed}`, () => {
+    const suite = "test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts";
+    const files = new Map([...Object.entries(TREE), [suite, ""], [changed, ""]]);
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+  });
+}
+
 test("W1-T9511: the env-name suite is selected for each recorded miss edge", () => {
   const suite = "test/every-env-name-a-source-file-reads-is-registered.test.ts";
   const edges = [

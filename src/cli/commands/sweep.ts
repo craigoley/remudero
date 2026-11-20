@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
+import { settleReaderAgreement } from "../../lib/sweep.js";
 import { appendLedger, deriveLedgerActor } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
@@ -860,6 +861,10 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
     root: repo === self.repo ? repoRoot : join(config.root, "repos", repo),
   });
 
+  // W1-T13884: the pass started the reader agreement check and went on; every rung above ran beside it. This
+  // process exits next, so it waits here, last, for the check to log its findings (#19789 review).
+  await settleReaderAgreement(ledgerPath);
+
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
       renderSweepSummary(summary) +
@@ -1268,8 +1273,9 @@ export function buildSweepLightHook(
   planAccessor?: () => Plan,
   mainHealthRung?: () => Promise<void>,
   io: {
-    /** W1-T12236: undefined leaves the hook on its own read. */
-    openPrViews?: (scope?: LightPassScope) => (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined;
+    /** W1-T12236: undefined leaves the hook on its own read. W1-T13831: `read` names the pass's read or a refill. */
+    openPrViews?: (scope?: LightPassScope, read?: "pass" | "refill") =>
+      (Promise<OpenPrView[]> & { servedReadStartedAtMs?: number }) | undefined;
     effects?: (deps: Parameters<SweepCommandHost["buildSweepEffects"]>[0]) => SweepDeps;
     readCompare?: (args: string[]) => Promise<unknown>;
     clock?: Pick<Clock, "now">;
@@ -1322,11 +1328,12 @@ export function buildSweepLightHook(
     const finishTiming = () => {
       if (timingWritten) return;
       timingWritten = true;
-      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(), views_source: viewsSource, views_age_ms: viewsAgeMs });
+      log("sweep_light.pre_review_timing", { run_id: runId, ...timing.finish(), views_source: viewsSource, views_age_ms: viewsAgeMs,
+        pass_scope: scope?.scope ?? "ordinary" });
     };
     try {
       await timing.run(async () => {
-      // W1-T12236: only the first read passes the scope; a refill read reads its own views.
+      // W1-T12236 / W1-T13831: only the pass's first read may be served; a refill read reads its own views.
       const ownViews = async () => {
         const views = await buildOpenPrViewsAsync(owner, repo, ledgerPath, {
           ciGateSource, log,
@@ -1344,8 +1351,8 @@ export function buildSweepLightHook(
         return views;
       };
       // W1-T12755: a failed or slow read decides from the last good list (a refill read too).
-      const readViews = async (passScope?: LightPassScope, initial = false) => {
-        const served = io.openPrViews?.(passScope);
+      const readViews = async (kind: "pass" | "refill", passScope?: LightPassScope, initial = false) => {
+        const served = io.openPrViews?.(passScope, kind);
         const read = await openPrList.read(served, ownViews, { boot: passScope?.scope === "boot" },
           initial ? (source) => { viewsSource = source; } : undefined);
         // The row and the act-time guards follow the list the pass decided from, not the list it was offered.
@@ -1355,7 +1362,7 @@ export function buildSweepLightHook(
         }
         return read;
       };
-      const first = await timing.run(() => timing.measure("open_pr_views", () => readViews(scope, true)));
+      const first = await timing.run(() => timing.measure("open_pr_views", () => readViews("pass", scope, true)));
       const openPrs = first.views;
       // A served list is older than the pass: a pass of any scope but boot acts on it as on the last good list.
       const onLastGoodList = first.fallback || (first.source === "tick_read" && scope?.scope !== "boot");
@@ -1425,7 +1432,7 @@ export function buildSweepLightHook(
           readOpenPrsForRefill: async () => {
             const owned = new Set(restPrs.map((pr) => pr.prNumber));
             const snapshot = new Set(openPrs.map((pr) => pr.prNumber));
-            return (await readViews()).views.filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
+            return (await readViews("refill")).views.filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
           },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,

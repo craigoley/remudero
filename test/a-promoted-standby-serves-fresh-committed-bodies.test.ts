@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import {
+  READ_MODEL_STATUS_GENERATION_HOLD_MS,
   READ_MODEL_LEDGER_STALE_MS,
   committedTickTimes,
   createReadModelTicker,
@@ -74,7 +75,8 @@ test("bodies reloaded at promote carry the active generation's last commit", (t)
   assert.ok(booted, "the standby warm-loaded the committed body at boot");
 
   appendFileSync(join(active.ledgerDir, "ledger.ndjson"), rowLines(3, T0, "after-boot"));
-  active.advance(1_000);
+  // W1-T13836: status shows a moved generation once its hold has passed.
+  active.advance(READ_MODEL_STATUS_GENERATION_HOLD_MS);
   active.tickUntilNewBody();
   const latest = statusBodies(active.messages).pop()!;
   assert.notEqual(latest.etag, booted.etag, "the active generation moved on after the standby booted");

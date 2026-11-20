@@ -1,0 +1,236 @@
+- id: W1-T13857
+  title: The skill miner drafts command sequences that recur across runs, not the outcome a run reached
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high  # Rule 19 SPAN: one concern, the skill miner, across the miner, the workshop and the tests that pin its drafts
+  band_meaning: span
+  origin: operator-request#skill-workshop-real-routines-2026-11-19
+  plan_refs: [W1-T2766, W1-T4668, W1-T10727]
+  files:
+    - src/lib/workflow-mining.ts
+    - src/lib/skill-workshop.ts
+    - test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts
+    - test/fixtures/recurring-procedure-skills/census-pass-before-commit.md
+    - test/fixtures/recurring-procedure-skills/plan-amendment-filing.md
+    - test/fixtures/recurring-procedure-skills/coverage-shard-fix.md
+    - test/workflows-are-mined-from-run-transcripts.test.ts
+    - test/a-retro-drafts-skills-from-transcripts.test.ts
+    - test/skill-workshop.test.ts
+    - test/skill-workshop-actionable-step-text.test.ts
+    - test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts
+    - test/one-procedure-is-one-skill-proposal.test.ts
+    - test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+    - test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 53fc266d9 (2026-11-19). Measured read-only over the fleet ledger on the Azure host
+    (206 ledger files, 11,377,940 rows; 5,764 runs, 1,351 merged).
+
+    WHAT THE WORKSHOP DRAFTS TODAY. `mineProceduralCandidates` (src/lib/retro.ts) groups merged runs by two
+    outcome signals, `clean_single_strike` and `fully_executed_proof`. `renderSkillDraft`
+    (src/lib/skill-workshop.ts) turns each group into a SKILL.md whose Procedure is the signal's own text. On
+    today's ledger it renders 5 drafts (implement 652 and 580 runs, recon 24 and 4, diagnose 12). All 5 have
+    the same one Procedure line: "Execute every acceptance criterion as a real, observed proof". That line is
+    an outcome, not a step. It passes the scanner's outcome check only because the check compares words, and
+    the line adds "real", "never", "let", "stand" and "run".
+
+    WHY THE TRANSCRIPT MINER ADDS NOTHING. `mineTranscriptWorkflows` (src/lib/workflow-mining.ts) keeps a
+    step only when EVERY clean run of a task type took it and NO repaired run did. Its step unit is the bare
+    tool name (`toolStepsForRun`: `Bash`, `Read`, `Edit`). Today it returns 0 workflows over 850 merged runs
+    with tool rows (implement: 399 clean, 426 repaired). W1-T10727 measured the same with tool signatures on
+    2026-10-26 and was withdrawn: no step separates clean runs from repaired runs. Clean against repaired
+    is the wrong question for a skill. A skill saves the work a run repeats, whether or not the run later
+    needed a fix.
+
+    WHAT DOES RECUR. Since 2026-10-13 each tool row carries `tool_signature` (`Bash:<program> [<subcommand>]`
+    or `<file tool>:<path>`). 1,106 runs carry 59,077 signed rows. Most rows are reads (`Bash:sed` 8,274,
+    `Bash:grep` 5,641, `Bash:cat` 4,500, `Bash:rg` 4,041), so adjacent n-grams are only read noise. With reads
+    left out, project commands recur across many runs, in a stable order:
+    - `npm run comment-load-signal` in 530 runs (325 merged), `rmd census-membership` 219,
+      `npm run source-size-ratchet` 223, `npm run typecheck` 200, `npm run test:tier:check` 167,
+      `node scripts/coverage-session-blanking-check.mjs` 110, `node scripts/census-precheck.mjs` 55.
+    - Ordered pairs (first before second, in distinct runs): comment-load-signal then typecheck 138,
+      then source-size-ratchet 126, then test:tier:check 117, then coverage-session-blanking-check 98;
+      `git add` then `git commit` 110.
+    - Runs that ran `npm run comment-load-signal` have a median of 70 tool calls and 21,758 output tokens.
+      The median over all runs with tool rows is 37 calls and 12,723 output tokens.
+    Each run finds this census set again by itself. That is the work a skill should save.
+
+    THE GAP IN FIX ROUNDS. 3,971 `fix.dispatch` rows name their failing check: rule-checks 333, coverage
+    shards 1,348 in total over the 8 shards, coverage-ratchet 230 (184 of them "diff-coverage: BLOCKED"),
+    pre-push census-precheck 61. Fix-round workers write no `worker.activity` tool rows (0 of the runs with
+    tool rows are fix rounds), so no miner can see their steps yet. This task does not change that. The
+    coverage-shard fixture below is written by hand from the hand-lane rules and the fix rows.
+
+    THE SKILLS THAT WORK ARE STEP LISTS. `skills-usage.json`: `proof-preflight` offered 1,417 and used 1,373;
+    `ci-state-forensics` offered 1,395 and used 55; the one workshop skill ever landed,
+    `implement-clean-single-strike-8aa4458e`, offered 115 and used 8. proof-preflight names an action in
+    every step.
+  design: |
+    1. workflow-mining.ts: add `mineRecurringProcedures(runs, records, opts)`. It is pure, like the rest of
+       the module.
+       - Steps come from `procedureStepsForRun` (the normalized signature, or the bare tool name on a row
+         with no signature).
+       - A LOOK step is a read, not an action: every `Read:`, `Grep`, `Glob` and `<outside>` step, and every
+         `Bash:` step whose program or program and subcommand is in a data table `LOOK_STEPS` (at least sed,
+         grep, cat, rg, tail, head, ls, wc, find, awk, jq, echo, printf, ps, pgrep, sleep, for, until, while,
+         timeout, python3, node with no script, and `git` show, status, log, diff, grep, rev-parse, remote,
+         ls-files, ls-tree, rev-list, cat-file, merge-base, blame, config). Every other step is an ACTION
+         step. A new look command is a new table row, not new code.
+       - A procedure is an ordered list of two or more action steps: each step comes after the one before it
+         in the run, and need not be next to it. Its recurrence is the number of distinct runs that hold it
+         in that order. Grow procedures from ordered pairs and extend a procedure by one later step while
+         its recurrence stays at or above `opts.minRuns` (default 2). Keep a procedure only when no longer
+         procedure with the same recurrence contains it.
+       - A procedure is returned only when its runs belong to at least `opts.minTaskIds` (default 2)
+         distinct task ids. One task repeated is one anecdote.
+       - Each procedure carries `steps`, `recurrence`, `runIds`, `taskIds`, `medianSpannedCalls` (tool
+         calls from its first step to its last step in a run, both included), `medianOutputTokensPerCall`
+         (a run's `outputTokens` divided by its tool-call rows, over the runs with `outputTokens` above 0;
+         `null` when none has it), `estimatedTokensPerRun` (spanned calls times tokens per call, or `null`)
+         and `score`. `score` is `recurrence * medianSpannedCalls * (medianOutputTokensPerCall ?? 1)`.
+       - The result is sorted by `score`, highest first, then by `steps` joined, so it is deterministic.
+       - Add `outputTokens?: number` to `TranscriptRun`. retro.ts's `RunSummary` already has it.
+    2. skill-workshop.ts: `renderSkillDraft(candidate, transcripts)` calls `mineRecurringProcedures` over the
+       transcript runs that are in the candidate's `runIds`, and drafts the highest-scored procedure.
+       - Each step renders as an action line: a `Bash:` step as "- Run `<command>`", `Edit:<path>` as
+         "- Change `<path>`", `Write:<path>` as "- Create `<path>`". No line names a tool (`Bash`, `Edit`,
+         `Write`), because the scanner refuses a tool name outside the worker allowlist.
+       - The name comes from the procedure, not the signal: the slug of the first two action steps, then
+         the first 8 characters of the procedure key.
+       - Evidence lists the recurrence, the task ids, `medianSpannedCalls`, `estimatedTokensPerRun` (or
+         "tokens: not measured") and the score, then the `[src: run#...]` lines as today.
+       - A candidate with no recurring action procedure gets no draft (`undefined`). The signal text is
+         never drafted as a Procedure step again.
+       - `mineTranscriptWorkflows`, `renderTranscriptWorkflowSteps` and `toolStepsForRun` lose their only
+         production caller. Delete them, and move each still-valid case of
+         test/workflows-are-mined-from-run-transcripts.test.ts to the new miner (for example, a row with no
+         signature falls back to its bare tool name).
+    3. skill-workshop.ts: `scanSkillDraft` refuses a Procedure bullet that is not an action. An action
+       bullet starts with a verb from a data table `SKILL_ACTION_VERBS` (at least Run, Rerun, Change,
+       Create, Add, Delete, Commit, Push, Fetch, Merge, Open, Reserve, Claim, Copy) and holds at least one
+       backticked command or path. The refusal names the line, with a reason that starts `not-an-action`.
+       The existing outcome check stays.
+    4. Fixtures: write the three drafts below to test/fixtures/recurring-procedure-skills/ exactly as given,
+       with the evidence counts as of 2026-11-19. They are test fixtures and the operator's candidates. They
+       are never written under .claude/skills/. Rule 15 is unchanged: a draft reaches the operator only as an
+       Inbox proposal, and only `rmd approve` writes the skill.
+
+    INVARIANT action-only-procedure: every Procedure step of a drafted skill is an action from a command or file step that recurs across at least two runs of at least two tasks; no draft carries a signal's outcome text as a step.
+    INVARIANT rule-15-unchanged: the workshop still stages drafts only as Inbox proposals and writes nothing under .claude/skills/.
+
+    New tests go in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts. Import through
+    `#src/*` and `#test/*`. Build ledgers with test/helpers/ledger-fixture.ts. One test per criterion, titled
+    exactly as the proofs below. Tests that restore an env var delete it when it was unset; a fixture git repo
+    uses `git init -b main`.
+
+    FIXTURE census-pass-before-commit.md:
+      ---
+      name: census-pass-before-commit
+      description: Run the census and ratchet checks in one pass before a commit, in the order merged runs ran them.
+      applies-to: implement
+      ---
+
+      ## Procedure
+
+      - Run `git add <each new or changed path>` before any check. The checks count tracked files only.
+      - Run `npm run comment-load-signal`.
+      - Run `npm run source-size-ratchet`.
+      - Run `npm run test:tier:check`.
+      - Run `node scripts/coverage-session-blanking-check.mjs`.
+      - Run `npm run typecheck`.
+      - Run `git commit`, then run `node --import tsx scripts/census-precheck.mjs --base origin/main` and confirm it prints `census-precheck: OK`.
+
+      Boundaries: do not raise a baseline or a cap to pass a check. Do not skip a check that failed. Fix the count it names.
+
+      ## Evidence
+
+      - `npm run comment-load-signal` ran in 530 runs (325 merged). Then `npm run typecheck` in 138 runs, `npm run source-size-ratchet` in 126, `npm run test:tier:check` in 117.
+      - Runs with this census median 70 tool calls and 21,758 output tokens; all runs with tool rows median 37 and 12,723.
+
+    FIXTURE plan-amendment-filing.md:
+      ---
+      name: plan-amendment-filing
+      description: Amend a task file so a build can change a file outside its scope, with a proof the review accepts.
+      applies-to: implement, fix
+      ---
+
+      ## Procedure
+
+      - Run `git worktree add <dir> -b plan-amend-W1-T<n>-<ms> origin/main` for a separate worktree.
+      - Change only `plan/tasks.d/W1-T<n>-<slug>.yaml`: add each missing path to `files`, or settle the design.
+      - Add an `INVARIANT <slug>: <statement>` or a `NO-INVARIANTS: <reason>` line to `design`.
+      - Add a `reservation hand-off: <from branch> -> <to branch>` line to `note` when the filing branch does not hold the id reservation.
+      - Run `npm run lint-plan:fast` and confirm it reports 0 failing.
+      - Commit with the subject `chore(plan): amend W1-T<n> <what changed>`.
+      - Add an `Acceptance:` block to the pull request body with `grep: <text> in plan/tasks.d/<file>`, where `<text>` is on a non-comment line the amendment adds and is missing on `origin/main`.
+      - Run `./bin/rmd check-acceptance <body file>`.
+
+      Boundaries: when the task's own filing pull request is still open, add the `files` entries on that branch and do not open an amendment. Do not change any file but the task file.
+
+      ## Evidence
+
+      - Fleet fix rounds wrote 659 `fix.scope_amendment` and 299 `fix.scope_needed` rows.
+      - The Azure hand lane cut 66 amendment branches and 63 amendment bodies; its ship logs record 23 waits for an amendment to merge.
+
+    FIXTURE coverage-shard-fix.md:
+      ---
+      name: coverage-shard-fix
+      description: Repair a red coverage shard or diff-coverage check by covering each listed line, or show that the failure is the host's.
+      applies-to: fix
+      ---
+
+      ## Procedure
+
+      - Open the failing check's log and copy each `<file>:<line>` under `diff-coverage: BLOCKED`, or each `not ok` test title.
+      - Run `git diff origin/main...HEAD -- <file>` for each listed file to see the lines the change adds.
+      - Run `rmd test-place <test path>` to choose the test folder.
+      - Add a test that drives each listed line through its production entry path.
+      - Run `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <test file>`.
+      - Run `npm run diff-coverage:local -- <test files>` and confirm it lists no line.
+      - Rerun each failing test file alone with the same command when the log lists `not ok` titles and no blocked line. When each passes alone on the same head, report a host flake with both results and change no file.
+
+      Boundaries: add a `diff-cov: process-boundary` directive only for a real process boundary (docs/review-gate.md). Do not delete or skip a test. In a test git repo, run `git init -b main`. To restore an env var that was unset, delete it.
+
+      ## Evidence
+
+      - 3,971 `fix.dispatch` rows: coverage shards 1,348 failures over 8 shards, coverage-ratchet 230 (184 "diff-coverage: BLOCKED"), rule-checks 333, pre-push census-precheck 61.
+      - The Azure hand-lane triage logged 14 preflight attempts as host flakes (green alone) and 10 as real failures (red alone).
+  acceptance:
+    - claim: the new test file passes
+      proof: 'unit test: test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: an ordered command sequence that recurs in runs of two or more tasks is returned, and one that recurs only within one task is not
+      proof: 'grep: W1-T13857 criterion 2: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: look steps (file reads, searches and the LOOK_STEPS shell commands) never appear in a returned procedure, and a run of only look steps yields none
+      proof: 'grep: W1-T13857 criterion 3: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: procedures are sorted by score, the recurrence times the median spanned calls times the median output tokens per call, and a sequence in more runs outranks one with the same span
+      proof: 'grep: W1-T13857 criterion 4: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: renderSkillDraft drafts the top procedure as Run and Change lines that name no tool, and returns undefined for a candidate with no recurring action procedure
+      proof: 'grep: W1-T13857 criterion 5: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: invariant:action-only-procedure — scanSkillDraft refuses a Procedure bullet with no action verb or no backticked command or path, with a reason that starts not-an-action, and refuses the fully_executed_proof signal line
+      proof: 'grep: W1-T13857 criterion 6: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+      kind: guard
+    - claim: the three fixtures in test/fixtures/recurring-procedure-skills/ pass scanSkillDraft
+      proof: 'grep: W1-T13857 criterion 7: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+    - claim: invariant:rule-15-unchanged — through retro's buildGather, a fixture ledger whose runs of two tasks repeat npm run comment-load-signal then npm run typecheck yields a draft that names both commands in that order, staged only as a proposal and with no file under .claude/skills/
+      proof: 'grep: W1-T13857 criterion 8: in test/learning/the-skill-miner-drafts-recurring-command-sequences.test.ts'
+      kind: guard
+    - claim: the workshop calls the recurring miner
+      proof: 'grep: mineRecurringProcedures( in src/lib/skill-workshop.ts'
+  falsifier: |
+    Make renderSkillDraft fall back to the signal text when no procedure recurs: criterion 5 fails. Drop the
+    LOOK_STEPS filter: criterion 3 fails, because `Bash:sed > Bash:grep` becomes the top procedure. Remove the
+    action check from scanSkillDraft: criterion 6 fails on the fully_executed_proof line.
+  note: |
+    W1-T13858 and W1-T13859 (filed on 2026-11-19 in a separate filing) also change src/lib/skill-workshop.ts
+    and test/skill-workshop.test.ts. Build this task after they merge, on top of them. W1-T13858's whole-draft
+    outcome refusal and this task's action check work together: a draft is refused when either applies.
+    Follow-up, not in this task: fix-round workers write no worker.activity tool rows, so no fix-round
+    procedure can be mined. A later task should ledger them the way implement runs do.

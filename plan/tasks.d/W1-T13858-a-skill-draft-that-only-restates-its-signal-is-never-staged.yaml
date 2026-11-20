@@ -1,0 +1,96 @@
+- id: W1-T13858
+  title: "A skill draft that only restates its signal is never staged, a staged one that fails the scan closes itself, and a no-op re-stage writes no row"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high # Rule 19 sizing: one concern (which skill drafts stay open) in skill-workshop.ts and one registry field in inbox.ts; the other suites only update fixtures that stage a one-line draft
+  band_meaning: span
+  origin: "operator-session#skill-drafts-never-wait-2026-11-19"
+  plan_refs: [W1-T2766, W1-T4283, W1-T4270, W1-T4338]
+  files:
+    - src/lib/skill-workshop.ts
+    - src/lib/inbox.ts
+    - test/a-signal-only-skill-draft-is-never-staged.test.ts
+    - test/skill-workshop.test.ts
+    - test/skill-workshop-actionable-step-text.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+    - test/a-staged-skill-draft-is-evaluated-on-tasks-merged-after-it.test.ts
+    - test/legacy-skill-stamp-scanned-text.test.ts
+    - test/skill-draft-ratification.test.ts
+    - test/a-skill-draft-approval-only-ever-writes-the-skill.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "stageSkillDraft refuses a draft whose every Procedure step is a signal-table step (a PROCEDURAL_STEP_TEXT line), including a draft whose only step is the fully_executed_proof line. The reason starts with 'outcome-only:' and the registry is not written."
+      proof: "grep: W1-T13858 criterion 1: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+    - claim: "A draft that has the fully_executed_proof line and at least one transcript-mined step is staged as before, so the W1-T4283 per-line check still passes that line."
+      proof: "grep: W1-T13858 criterion 2: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+    - claim: "When the scan refuses a draft whose procedure id is already staged and not yet closed by the workshop, stageSkillDrafts closes it once: one panel.proposal_declined row for that proposal id with origin skill-workshop and a reason that starts with 'withdrawn:' and names the refusal. The proposal then classifies as declined. A second pass over the same draft writes no second row."
+      proof: "grep: W1-T13858 criterion 3: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+    - claim: "A stageSkillDrafts pass whose draft is already staged and unchanged writes no skill.staged row and does not write the registry. A refusal with no staged proposal to close writes no row. A pass that stages, refreshes, backfills or stamps still writes its skill.staged row."
+      proof: "grep: W1-T13858 criterion 4: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+    - claim: "A draft the operator restored after a workshop close is not closed again by the workshop while its stored text is the same."
+      proof: "grep: W1-T13858 criterion 5: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+    - claim: "invariant:approve-only-writes-skills A close writes nothing under .claude/skills/: the test repository's .claude/skills tree is the same before and after the pass."
+      proof: "grep: W1-T13858 criterion 6: in test/a-signal-only-skill-draft-is-never-staged.test.ts"
+  rationale: |
+    OBSERVED on the Azure host, 2026-11-19. Four skill drafts classify READY in the Inbox:
+    skill-draft:88d9945faf4c75d3 (implement-clean-single-strike-fully-exec-88d9945f),
+    skill-draft:84a7cc07e1ad07c6 (implement-fully-executed-proof-84a7cc07),
+    skill-draft:a6051794254ce0ec (diagnose) and skill-draft:c88835e723d6a34d (recon). Each one has the
+    same Procedure: one line, the fully_executed_proof text from the signal table ("Execute every
+    acceptance criterion as a real, observed proof ..."). Only the evidence list differs. None has a
+    held-out eval, so `rmd approve` refuses each of them (skill-eval-gate.ts) until the operator pays for
+    `rmd skill-eval --confirm-spend`.
+
+    The workshop refused these drafts once. #7833 (2026-09-29) added a whole-draft check: "outcome-only:
+    every Procedure step restates the signal the runs were mined on, so the draft names no step a worker
+    could take". The ledger has that refusal for both implement drafts on 2026-09-30, and for 88d9945f again on 2026-10-03.
+    #8973 (W1-T4283, 2026-10-04) replaced it with a per-line word check. The fully_executed_proof line has
+    words its outcome text lacks ("real", "never", "let", "stand", "run"), so the check passes it. On
+    2026-10-14 the workshop replaced the stored text with the scanned one-line draft, and the drafts were
+    READY again. The comment in renderSkillDraft still says that with no mined steps "the scanner still
+    refuses an outcome-only procedure". It does not.
+
+    A refusal also never touched a draft that was already staged. stageSkillDraft returns early on a
+    refused scan, so a staged proposal stays READY after the workshop's own scan turns against it.
+
+    The only workshop skill ever approved (#7090, 2026-09-25) was outcome-only. It was offered 115 times
+    and used 8 times (skills-usage.json). The merged share of implement runs was 36% before it and 37%
+    after it. It was retired on 2026-09-29 (#7837).
+
+    Each retro pass also writes a skill.staged row for every draft, even when nothing changed. The two
+    implement drafts have 87 and 93 rows that say only "already staged", on 31 days from 2026-10-04 to
+    2026-11-19.
+  design: |
+    1. In stageSkillDraft, before the registry write, refuse a draft when its Procedure has steps and
+       every step is a signal-table line (`- ` + a PROCEDURAL_STEP_TEXT value). This is the #7833 check,
+       restored next to the W1-T4283 per-line check. Keep the per-line check unchanged. The reason
+       starts with "outcome-only:".
+    2. Close on refusal. When the scan refuses a draft and the registry holds a proposal with the same
+       procedure id that the workshop has not closed, stageSkillDrafts appends one
+       `panel.proposal_declined` row for that id through its existing log, with origin `skill-workshop`
+       and the reason "withdrawn: <refusal>". It then records the close on the registry entry, through
+       updateProposalRegistry: the time, the reason and the sha256 of the stored skill text. Write the
+       decline row first and the record second. A crash between them can repeat one row once, but it can
+       never leave a draft that is recorded as closed and still open. The entry stays in the registry, as
+       declined entries do today. A close on an entry whose recorded sha256 matches the stored text is a
+       no-op, so an operator restore (`panel.proposal_restored`) is never undone for the same text.
+    3. No repeated row. stageSkillDrafts writes a `skill.staged` row only when the registry changed
+       (staged, refreshed, backfilled, stamped, legacyReplaced) or a close happened. An "already staged"
+       result with no change, and a refusal with nothing to close, write no row.
+    4. Rule 15 is unchanged. A close writes only the registry and the ledger. Only `rmd approve` writes
+       under .claude/skills/.
+    5. Update the existing suites whose fixtures stage a one-line fully_executed_proof draft and expect
+       it staged. Give each fixture a transcript-mined step, or assert the refusal.
+    INVARIANT approve-only-writes-skills: Nothing in this change writes under .claude/skills/. A closed draft is declined in the ledger and stays in the registry, and `rmd restore` reopens it.
+  falsifier: |
+    Remove the whole-draft check: criterion 1's one-line fully_executed_proof draft is staged and the
+    test fails. Skip the close record: criterion 3's second pass writes a second decline row and the
+    test fails. Restore both, and the four drafts listed in the rationale would be withdrawn on the next
+    retro pass.
+  note: "Filed from the 2026-11-19 skill-draft analysis. W1-T13859 adds the time-based expiry and reuses the close from design step 2."

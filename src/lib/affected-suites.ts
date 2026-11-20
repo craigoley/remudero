@@ -681,6 +681,18 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
     const unreadableCommitRange = suitePath("test/an-unreadable-commit-range-is-not-an-empty-emitter-pass.test.ts");
     if (input.files.has(unreadableCommitRange)) pathReaders.push(unreadableCommitRange);
   }
+  // W1-T10535: coverage run 40034558634 (PR #13845) recorded a floor miss on the lifetime-history backstop.
+  const lifetimeHistoryBackstop = suitePath("test/triage/lifetime-history-keeps-the-approved-identity-backstop.test.ts");
+  const lifetimeHistoryEdges = [
+    "src/lib/issue-revalidation-garden.ts",
+    "src/lib/ledger-steps.ts",
+    "src/lib/spend-rows.ts",
+    suitePath("test/a-gardener-spend-read-requires-the-exact-parent-pass.test.ts"),
+    suitePath("test/the-issue-revalidation-garden-re-judges-every-open-issue.test.ts"),
+  ];
+  if (input.files.has(lifetimeHistoryBackstop) && files.some((f) => lifetimeHistoryEdges.includes(f))) {
+    pathReaders.push(lifetimeHistoryBackstop);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
@@ -852,6 +864,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   ];
   if (input.files.has(envNames) && files.some((f) => envNamesEdges.includes(f))) {
     pathReaders.push(envNames);
+  }
+  // W1-T10546: recorded miss on coverage run 40056042457, PR #13876.
+  const infrastructureRerun = suitePath("test/a-plan-only-pr-red-only-on-a-ci-infrastructure-step-is-re-run.test.ts");
+  const infrastructureRerunEdges = [
+    "src/lib/sweep.ts",
+    suitePath("test/a-stalled-pr-stage-is-named-by-the-reason-it-kept-repeating.test.ts"),
+  ];
+  if (input.files.has(infrastructureRerun) && files.some((f) => infrastructureRerunEdges.includes(f))) {
+    pathReaders.push(infrastructureRerun);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

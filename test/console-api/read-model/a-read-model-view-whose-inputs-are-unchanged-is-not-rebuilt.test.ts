@@ -6,7 +6,7 @@ import type { ReadModelDb } from "#src/lib/read-model-db.js";
 import { publishThreadPlan } from "#src/lib/thread-plan.js";
 import { createDemandBook } from "#src/lib/view-demand.js";
 import {
-  createReadModelTicker, ledgerSource, READ_MODEL_READ_HOT_MS, readModelLaneViews, readModelSwitchesPath,
+  createReadModelTicker, ledgerSource, READ_MODEL_READ_HOT_MS, READ_MODEL_STATUS_GENERATION_HOLD_MS, readModelLaneViews, readModelSwitchesPath,
   type ReadModelView, type ReadModelWorkerMessage,
 } from "#src/lib/read-model-worker.js";
 import { closeReadModelFixture, readModelFixtureDir } from "#test/helpers/read-model-fixture.js";
@@ -96,6 +96,8 @@ function fixture(t: TestContext, names = ["core"], production = false) {
 test("test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts", t => {
   const f = fixture(t, ["core", "console"], true);
   f.tick();
+  // W1-T13836: status declares its inputs, so its first skip candidate is audited (READ_MODEL_SKIP_AUDIT_EVERY).
+  f.tick();
   const built = f.body();
   assert.equal(built.view, "read-model", "exercise the production lane registration");
   assert.deepEqual(built.body.data, { instances: ["core", "console"].map(instance => ({
@@ -105,19 +107,19 @@ test("test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-i
     f.append("core", "read_model.slow_view");
     f.tick();
   }
-  assert.equal(f.count(), 1, "unchanged production inputs bypass materialize, even with diagnostic rows");
+  assert.equal(f.count(), 2, "unchanged production inputs bypass materialize after the audit, even with diagnostic rows");
   assert.equal(f.body(), built, "the body, ETag and generatedAt survive reuse");
   const refreshed = f.messages.flatMap(m => m.type === "sources" ? m.bodies ?? [] : []).at(-1);
   assert.ok(refreshed);
   assert.deepEqual(refreshed.sources.map(s => [s.name, s.asOf, s.state, s.lagMs]), [
-    ["ledger:core", "2026-11-02T12:00:05.100Z", "fresh", 0], ["ledger:console", "2026-11-02T12:00:00.000Z", "fresh", 0],
+    ["ledger:core", "2026-11-02T12:00:06.200Z", "fresh", 0], ["ledger:console", "2026-11-02T12:00:00.000Z", "fresh", 0],
   ], "sources are restamped at the latest projector check, each as of its projector head");
   f.tick(600_000);
   const row = f.messages.find(m => m.type === "log" && m.step === "read_model.view_builds" && m.extra.view === "read-model");
   assert.ok(row?.type === "log");
-  assert.equal(row.extra.builds, 1);
+  assert.equal(row.extra.builds, 2);
   assert.equal(row.extra.skipped, 6);
-  assert.equal(row.extra.calls, 7);
+  assert.equal(row.extra.calls, 8);
   assertSourceRestamping(t);
 });
 
@@ -144,31 +146,35 @@ test("production status rebuilds for every declared input and for quarantine cha
   const f = fixture(t, ["core"], true);
   f.tick();
   f.tick();
-  assert.equal(f.count(), 1);
+  assert.equal(f.count(), 2, "the cold build and the first skip candidate's audit");
+  const db = f.stores.get("core")!;
+  const shown = db.meta("generation");
   f.append();
   f.tick();
-  assert.equal(f.count(), 2, "a contributing ledger row moves the store generation");
+  assert.notEqual(db.meta("generation"), shown, "positive control: a contributing ledger row moves the store generation");
+  assert.equal(f.count(), 2, "W1-T13836: inside the hold a generation-only move is not a rebuild");
+  f.tick(READ_MODEL_STATUS_GENERATION_HOLD_MS);
+  assert.equal(f.count(), 3, "past the hold the moved generation is shown");
   writeFileSync(f.planPath, "tasks: []\n# changed production plan\n");
   f.tick();
-  assert.equal(f.count(), 3);
+  assert.equal(f.count(), 4, "a plan move is a declared input part");
   f.switches("on");
   f.tick(5_000);
-  assert.equal(f.count(), 4);
+  assert.equal(f.count(), 5, "a switches move is a declared input part");
   const future = f.now() + 3_600_000;
-  const db = f.stores.get("core")!;
   const generation = db.meta("generation");
   f.append("core", "read_model.slow_view", future);
   f.tick();
-  assert.equal(f.count(), 5, "the read-as-of for quarantined rows moved");
+  assert.equal(f.count(), 6, "a quarantined row moves the quarantine count");
   assert.equal(db.meta("generation"), generation, "quarantined diagnostics do not move generation");
   f.append("core", "read_model.materialize_deferred", future);
   f.tick();
-  assert.equal(f.count(), 6, "a second quarantined row at the same as-of must invalidate");
+  assert.equal(f.count(), 7, "a second quarantined row at the same as-of must invalidate");
   assert.equal(db.meta("generation"), generation);
   assert.deepEqual(f.body().body.data, { instances: [{ instance: "core", generation: Number(generation), lease: "held", quarantined: 2 }] });
   assert.equal(f.body().body.sources[0].asOf, iso(future));
   f.tick();
-  assert.equal(f.count(), 6, "the new production body can be reused");
+  assert.equal(f.count(), 7, "the new production body can be reused");
 });
 
 test("production status includes observed state in its digest and rebuilds unhealthy inputs", t => {
@@ -179,25 +185,26 @@ test("production status includes observed state in its digest and rebuilds unhea
   const state = message.instances[0];
   const build = () => f.ticker.buildNow("read-model");
   build();
-  assert.equal(f.count(), 1);
+  build();
+  assert.equal(f.count(), 2, "the cold build and the first skip candidate's audit");
   f.ticker.observe([{ ...state, generation: state.generation + 1 }]);
   build();
-  assert.equal(f.count(), 2, "observed generation can move before the store changes");
+  assert.equal(f.count(), 2, "W1-T13836: an observed generation move alone is held");
   f.ticker.observe([{ ...state, heldBy: "observer" }]);
   build();
-  assert.equal(f.count(), 3);
+  assert.equal(f.count(), 3, "a holder change rebuilds at once");
   assert.deepEqual(f.body().body.data, { instances: [{ instance: "core", generation: state.generation, lease: "held", heldBy: "observer", quarantined: 0 }] });
   f.ticker.observe([{ ...state, reason: "projection failed", failures: 1 }]);
   build();
   build();
-  assert.equal(f.count(), 5, "failed projection cannot certify reuse");
+  assert.equal(f.count(), 5, "failed projection cannot certify reuse, so each build while failed materializes");
   assert.equal(f.body().body.stale, true);
   assert.match(f.body().body.sources[0].reason!, /projection failed/);
   f.ticker.observe([state]);
   build();
   build();
   build();
-  assert.equal(f.count(), 7, "after restoring fresh sources the status can be reused again");
+  assert.equal(f.count(), 6, "after restoring fresh sources one build republishes, then the status can be reused again");
 });
 
 // W1-T11127 criterion 2: changed, cold, failed, unready and unreadable inputs still build; pacing survives.
@@ -329,4 +336,49 @@ test("W1-T11127 criterion 2: a cold instance builds independently and an unread 
   f.ticker.read("/v1/views/digest?instance=core");
   f.tick(1);
   assert.equal(f.count(), 3, "a read restores the unstretched due time");
+});
+
+type StatusRow = { generation: number; heldBy?: string; quarantined: number };
+const statusRow = (entry: { body: { data: unknown } }): StatusRow => (entry.body.data as { instances: StatusRow[] }).instances[0]!;
+
+test("W1-T13836 criterion 1: a generation-only move inside the hold is skipped, and past the hold the status shows the moved generation", t => {
+  const f = fixture(t, ["core"], true);
+  f.tick();
+  f.tick();
+  assert.equal(f.count(), 2, "the cold build and the first skip candidate's audit");
+  const db = f.stores.get("core")!;
+  const shown = Number(db.meta("generation"));
+  for (let i = 0; i < 8; i++) {
+    f.append();
+    f.tick();
+  }
+  assert.ok(Number(db.meta("generation")) > shown, "positive control: contributing rows moved the store generation");
+  assert.equal(f.count(), 2, "eight generation-only moves inside the hold are not rebuilds");
+  assert.equal(statusRow(f.body()).generation, shown, "the held generation is still the one shown");
+  f.tick(READ_MODEL_STATUS_GENERATION_HOLD_MS);
+  assert.equal(f.count(), 3, "past the hold one build shows the moved generation");
+  assert.equal(statusRow(f.body()).generation, Number(db.meta("generation")));
+});
+
+test("W1-T13836 criterion 2: lease holder and quarantine changes inside the hold rebuild at once", t => {
+  const f = fixture(t, ["core"], true);
+  f.tick();
+  const message = f.messages.filter(m => m.type === "state").at(-1);
+  assert.ok(message?.type === "state");
+  const state = message.instances[0];
+  const build = () => f.ticker.buildNow("read-model");
+  build();
+  build();
+  assert.equal(f.count(), 2, "the cold build and the first skip candidate's audit");
+  f.ticker.observe([{ ...state, generation: state.generation + 1, heldBy: "observer" }]);
+  build();
+  assert.equal(f.count(), 3, "a holder change rebuilds inside the hold even when the generation moved with it");
+  assert.equal(statusRow(f.body()).heldBy, "observer");
+  f.ticker.observe([{ ...state, generation: state.generation + 1 }]);
+  build();
+  assert.equal(f.count(), 4, "the holder clearing rebuilds at once");
+  f.append("core", "read_model.slow_view", f.now() + 3_600_000);
+  f.tick();
+  assert.equal(f.count(), 5, "a quarantined row rebuilds at once");
+  assert.equal(statusRow(f.body()).quarantined, 1);
 });
