@@ -5,6 +5,7 @@ import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { fixedClock } from "#src/lib/clock.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
@@ -15,7 +16,6 @@ import {
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
 import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
-import { assertWallClockBound } from "#test/helpers/wall-clock-bound.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const actor = "clerk:alice";
@@ -648,18 +648,27 @@ test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async
 test("W1-T13875: invariant:bounded-read — an evidence read past its bound answers unknown and releases the journal", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
-  for (const line of proposalLines(f, first.observation.operationId)) f.row(Date.parse(JSON.parse(line).ts), JSON.parse(line));
-  const make = (lines: () => string[] | "never") => new ProductPlanOperationService({
+  const boundMs = 50;
+  const make = (readLedgerLines: EvidenceReader) => new ProductPlanOperationService({
     root: f.root, store: f.store, provider: f.provider, target: f.target, bootstrapConfirmed, ledgerPath: f.ledgerPath, checkout: () => f.checkout, runnerConfig,
     text: async () => JSON.stringify([{ name: "WRECK-T1-first.yaml" }]), clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => false,
-    ledgerReadBoundMs: 50, readLedgerLines: reader(lines).read,
+    ledgerReadBoundMs: boundMs, readLedgerLines,
   });
-  const started = performance.now();
-  const stuck = await ok(make(() => "never").execute(actor, f.command()));
-  assert.equal(stuck.observation.state, "unknown", "no evidence within the bound reads as unknown, never as refused or proposed");
-  assertWallClockBound(performance.now() - started, 5_000, "the resume answered at its bound");
+  const blocked = reader(() => "never");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const resumed = ok(make(blocked.read).execute(actor, f.command()));
+  await nextTurn();
+  assert.equal(blocked.reads.length, 1, "the resume has started its evidence read");
+
+  t.mock.timers.tick(boundMs - 1);
+  assert.equal(await Promise.race([resumed, nextTurn()]), undefined, "the resume waits until its bound");
+  t.mock.timers.tick(1);
+  const result = await Promise.race([resumed, nextTurn()]);
+  assert.equal(result?.observation.state, "unknown", "the resume answers unknown at its bound");
+
   // The journal lock was released: a second service resumes the same operation at once.
-  const next = await ok(make(() => proposalLines(f, first.observation.operationId)).execute(actor, f.command()));
+  const available = reader(() => proposalLines(f, first.observation.operationId));
+  const next = await ok(make(available.read).execute(actor, f.command()));
   assert.equal(next.observation.state, "proposed");
 });
 
