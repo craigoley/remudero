@@ -1665,7 +1665,7 @@ function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, row
   const firstAnswer = new Map<string, number>();
   for (const row of rows) {
     if (typeof row.task_id !== "string" || typeof row.ts !== "string" || !SKILL_DRAFT_ANSWER_STEPS.includes(String(row.step))) continue;
-    if (row.origin === SKILL_WORKSHOP_ORIGIN || firstSeen[row.task_id] === undefined) continue;
+    if (row.origin === SKILL_WORKSHOP_ORIGIN || !Object.hasOwn(firstSeen, row.task_id)) continue;
     const seenMs = Date.parse(firstSeen[row.task_id]!);
     const at = Date.parse(row.ts);
     if (seenMs === earliest || !Number.isFinite(at) || at < seenMs) continue;

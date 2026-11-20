@@ -128,6 +128,20 @@ test("W1-T13859 criterion 1: the bound is the longest first-seen-to-first-answer
   } finally { s.done(); }
 });
 
+test("W1-T13859 criterion 1: a constructor decline counts only with a stored first-seen timestamp", () => {
+  const s = site();
+  try {
+    const firstSeen = { backfill: BACKFILL, approved: "2026-10-20T00:00:00.000Z" };
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify(firstSeen));
+    row(s, "ratify.approved", "approved", "2026-10-23T00:00:00.000Z");
+    row(s, "panel.proposal_declined", "constructor", "2026-11-05T00:00:00.000Z");
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 3 * DAY, sample: 1 });
+
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({ ...firstSeen, constructor: "2026-11-01T00:00:00.000Z" }));
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 4 * DAY, sample: 2 });
+  } finally { s.done(); }
+});
+
 test("W1-T13859 criterion 1: a rotation between listing and reading live cannot shrink the measured bound", (t) => {
   const s = site();
   try {
@@ -294,10 +308,11 @@ test("W1-T13859 criterion 4: a failed archive inventory recheck leaves expiry un
   } finally { s.done(); }
 });
 
-test("W1-T13859 criterion 2: an old unanswered draft closes once as expired, with its age, the bound and the sample", () => {
+test("W1-T13859 criterion 2: an old unanswered draft closes once as expired despite an unmatched constructor decline", () => {
   const s = site();
   try {
     drafts(s);
+    row(s, "panel.proposal_declined", "constructor", "2026-11-10T00:00:00.000Z");
     const first = pass(s);
     assert.deepEqual(first.expired, ["skill-draft:old"]);
     const declined = declinesOf(s, "skill-draft:old");
@@ -361,30 +376,47 @@ test("W1-T13859 criterion 3: the daemon's inbox responder only receives operator
   } finally { s.done(); }
 });
 
-test("W1-T13859 criterion 4: an incomplete ledger union or an empty sample closes nothing and returns a reason", () => {
+test("W1-T13859 criterion 4: an unreadable archive blocks expiry and retro prints the incomplete-union reason", () => {
   const s = site();
   try {
     drafts(s);
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 7.5 * DAY, sample: 4 });
+    row(s, "panel.proposal_declined", "constructor", "2026-11-10T00:00:00.000Z");
     writeFileSync(join(s.stateDir, "ledger.2026-10-01T00-00-00-000Z.ndjson.gz"), "not gzip");
-    const registry = readFileSync(s.registryPath, "utf8");
-    const before = rows(s).length;
-    const r = pass(s);
-    assert.equal(r.expired.length, 0);
-    assert.match(r.reason, /^no skill draft expires: .*incomplete ledger union/);
-    assert.equal(rows(s).length, before);
-    assert.equal(readFileSync(s.registryPath, "utf8"), registry);
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
+    const unmeasured = "incomplete ledger union: 1 unread file(s), 0 torn row(s)";
+    const reason = `no skill draft expires: ${unmeasured}`;
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured });
+    assert.deepEqual(pass(s), { expired: [], reason });
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.deepEqual(printed, [`skill drafts: ${reason}`]);
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
   } finally { s.done(); }
+});
 
-  const e = site();
+test("W1-T13859 criterion 4: an unmatched constructor decline leaves zero measured waits and retro prints why", () => {
+  const s = site();
   try {
-    writeFileSync(inboxFirstSeenPath(e.stateDir), JSON.stringify({ "skill-draft:old": BACKFILL, "skill-draft:new": "2026-10-20T00:00:00.000Z" }));
-    writeFileSync(e.registryPath, JSON.stringify({ proposals: [skillDraft("skill-draft:old"), skillDraft("skill-draft:new")] }));
-    row(e, "ratify.approved", "unrelated", "2026-11-01T00:00:00.000Z");
-    const r = pass(e);
-    assert.equal(r.expired.length, 0);
-    assert.match(r.reason, /^no skill draft expires: no answered proposal has a measured wait/);
-    assert.equal(declinesOf(e, "skill-draft:old").length + declinesOf(e, "skill-draft:new").length, 0);
-  } finally { e.done(); }
+    const id = "skill-draft:old";
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({ backfill: BACKFILL, [id]: "2026-10-20T00:00:00.000Z" }));
+    writeFileSync(s.registryPath, JSON.stringify({ proposals: [skillDraft(id)] }));
+    row(s, "ratify.approved", "unrelated", "2026-11-01T00:00:00.000Z");
+    row(s, "panel.proposal_declined", "constructor", "2026-11-10T00:00:00.000Z");
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
+    const unmeasured = "no answered proposal has a measured wait";
+    const reason = `no skill draft expires: ${unmeasured}`;
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.deepEqual(printed, [`skill drafts: ${reason}`]);
+    assert.deepEqual(pass(s), { expired: [], reason });
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { unmeasured });
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+  } finally { s.done(); }
 });
 
 test("W1-T13859 criterion 4: a torn approval in a readable ledger leaves both stores unchanged and retro prints why", () => {
