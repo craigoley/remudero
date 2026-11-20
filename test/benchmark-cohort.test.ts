@@ -762,8 +762,8 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
     for (const cohort of joined.cohorts) {
       assert.notEqual(typeof cohort.verifiedOutcome, "string", "case files were joined, so no row may name the no-join reason");
       const outcome = cohort.verifiedOutcome as Exclude<typeof cohort.verifiedOutcome, string>;
-      assert.equal(outcome.assignments, cohort.assignments, "every call in the row is accounted for");
-      assert.equal(outcome.completed + outcome.endedWithoutCompletion + outcome.censored + outcome.unavailable, cohort.assignments);
+      assert.equal(outcome.assignments, cohort.joinedAttempts, "every call in the row is accounted for, and only calls");
+      assert.equal(outcome.completed + outcome.endedWithoutCompletion + outcome.censored + outcome.unavailable, outcome.assignments);
     }
     const luna = byModel["gpt-luna"]!.verifiedOutcome as Exclude<BenchmarkCohort["verifiedOutcome"], string>;
     assert.equal(luna.completed, 1); assert.equal(luna.censored, 1); assert.equal(luna.unavailable, 2);
@@ -771,26 +771,40 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
       "each call not completed names why");
     assert.ok(luna.reasons["closed-unmerged-unadjudicated"] === 1, "a closed PR names its reason");
     assert.equal(luna.reasons["open-at-cutoff"], 1, "a censored call names why it is not completed");
-    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 3, completed: 2, endedWithoutCompletion: 0,
-      censored: 0, unavailable: 1, reasons: { "no-worker-call": 1 } }, "an assignment with no worker call is never a completed call");
+    assert.equal(byModel["claude-opus"]!.assignments, 3, "positive control: the row holds the assignment that made no call");
+    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 2, completed: 2, endedWithoutCompletion: 0,
+      censored: 0, unavailable: 0, reasons: {} }, "an assignment with no worker call is not a call, so no outcome counts it");
     agrees(joined, "joined");
     const totals = joined.verifiedTaskOutcome as Exclude<typeof joined.verifiedTaskOutcome, string>;
     assert.equal(totals.coverage.completed, 4, "the cohort-level join is unchanged: it counts assignments, the no-call one included");
-    // A cached pass without case files keeps its cohort-level totals unchanged, and each row agrees with them: it keeps
-    // the outcome the same earlier join gave it, never the unavailable reason beside a retained joined total.
-    const cached = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
-    assert.deepEqual(cached.verifiedTaskOutcome, joined.verifiedTaskOutcome, "cohort-level totals do not change");
-    assert.deepEqual(cached.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
-    agrees(cached, "cached without case files");
-    rmSync(join(stateDir, "benchmark-cohort-index.json"), { force: true }); // a fresh pass, with no cached snapshot
+    // The joined pass left its rows in the index on disk. A later pass reads that index (scannedSources 0).
+    const indexPath = join(stateDir, "benchmark-cohort-index.json");
+    const onDisk = (): unknown => (JSON.parse(readFileSync(indexPath, "utf8")) as { lastGood: { cohorts: BenchmarkCohort[] } })
+      .lastGood.cohorts.map((cohort) => cohort.verifiedOutcome);
+    assert.deepEqual(onDisk(), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    // A cached pass reports what a fresh pass with the same case files and cutoff reports, rows and totals alike.
+    // Without case files that is the unavailable reason: the earlier join is never reported as this pass's own.
+    const cached = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff });
+    assert.equal(cached.scannedSources, 0, "positive control: this pass is a cache hit");
+    rmSync(indexPath, { force: true }); // a fresh pass, with no cached snapshot
     const unjoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
     assert.equal(unjoined.cohorts.length, 2);
     for (const cohort of unjoined.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
     assert.equal(unjoined.verifiedTaskOutcome, "unavailable-no-github-verification-join", "a fresh pass with no case files joins nothing");
     agrees(unjoined, "fresh without case files");
-    // A cached pass WITH case files over an index written without them joins its rows exactly as a fresh joined pass does.
-    const rejoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles })).snapshot;
-    assert.deepEqual(rejoined.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
-    agrees(rejoined, "cached with case files");
+    assert.deepEqual(cached.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), unjoined.cohorts.map((cohort) => cohort.verifiedOutcome),
+      "cached and fresh rows agree without case files");
+    assert.deepEqual(cached.snapshot.verifiedTaskOutcome, unjoined.verifiedTaskOutcome, "cached and fresh totals agree without case files");
+    agrees(cached.snapshot, "cached without case files");
+    // A cached pass WITH case files over an index written without them reports what the fresh joined pass did, and
+    // publishes those rows to the index on disk.
+    const rejoined = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(rejoined.scannedSources, 0, "positive control: this pass is a cache hit");
+    assert.deepEqual(rejoined.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    assert.deepEqual(rejoined.snapshot.verifiedTaskOutcome, joined.verifiedTaskOutcome);
+    assert.deepEqual(onDisk(), joined.cohorts.map((cohort) => cohort.verifiedOutcome), "the cache hit publishes its rows");
+    agrees(rejoined.snapshot, "cached with case files");
+    const again = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(again.checkpointBytes, undefined, "an unchanged cache hit writes nothing");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });

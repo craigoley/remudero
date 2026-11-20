@@ -62,8 +62,9 @@ export interface BenchmarkCohort {
   verifiedOutcome: CohortVerifiedOutcome | typeof NO_VERIFICATION_JOIN;
 }
 
-/** W1-T13867: one cohort's share of the W1-T4608 join. assignments = completed + endedWithoutCompletion + censored +
- * unavailable, and `reasons` names every assignment neither completed nor censored, as in BenchmarkVerifiedOutcome. */
+/** W1-T13867: one cohort's share of the W1-T4608 join, over its worker calls: an assignment that reached no worker
+ * call is not a call and is not counted. assignments = completed + endedWithoutCompletion + censored + unavailable,
+ * and `reasons` names every counted call not completed, as in BenchmarkVerifiedOutcome. */
 export interface CohortVerifiedOutcome {
   assignments: number;
   completed: number;
@@ -814,15 +815,6 @@ function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAss
     coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
 }
 
-/** A cached row's outcome counts, read back from a checkpoint: an object whose counts are whole numbers. */
-function isCohortVerifiedOutcome(value: unknown): value is CohortVerifiedOutcome {
-  if (value === null || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  return ["assignments", "completed", "endedWithoutCompletion", "censored", "unavailable"]
-    .every((key) => Number.isInteger(row[key]) && (row[key] as number) >= 0)
-    && row.reasons !== null && typeof row.reasons === "object";
-}
-
 /** W1-T13867: give every cohort row its calls' verified outcomes, joined one assignment at a time against its task's
  * case files at `cutoff`. Without case files every row names the join's unavailable reason, never a guessed outcome. */
 function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOutcome">[], assignments: CohortAssignment[],
@@ -831,15 +823,11 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
   const byTask = caseFilesByTask(caseFiles);
   const tallies = new Map<string, CohortVerifiedOutcome>();
   for (const assignment of assignments) {
+    // An assignment that never reached a worker call is not a call, so no row counts it.
+    if (!assignment.attempted) continue;
     const tally = tallies.get(assignment.cohortKey)
       ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} };
     tallies.set(assignment.cohortKey, tally);
-    // An assignment that never reached a worker call is not a call, so it never counts as a completed one.
-    if (!assignment.attempted) {
-      tally.assignments += 1; tally.unavailable += 1;
-      tally.reasons["no-worker-call"] = (tally.reasons["no-worker-call"] ?? 0) + 1;
-      continue;
-    }
     const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
     tally.assignments += coverage.assignments;
     tally.completed += coverage.completed;
@@ -856,17 +844,12 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
 
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  // W1-T13867: a cached pass without case files keeps the cohort-level totals it already had (unchanged from before this
-  // task). Each row agrees with them: where the snapshot keeps an earlier join, a row keeps the outcome that same join
-  // gave it; only a row with no such outcome names the unavailable reason.
-  if (!caseFiles) {
-    const retained = typeof snapshot.verifiedTaskOutcome !== "string";
-    return { ...snapshot, cohorts: snapshot.cohorts.map((cohort) => ({ ...cohort,
-      verifiedOutcome: retained && isCohortVerifiedOutcome(cohort.verifiedOutcome) ? cohort.verifiedOutcome : NO_VERIFICATION_JOIN })) };
-  }
+  // W1-T13867: a cached pass reports what a fresh pass with the same case files and cutoff reports, rows and totals
+  // alike (buildSnapshot computes these same fields the same way). Without case files it names the unavailable
+  // reason: an earlier pass's join was made at that pass's cutoff, and is never reported as this one's.
   const assignments = cohortAssignments(sources, faults);
   return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff),
-    verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
+    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) : NO_VERIFICATION_JOIN,
     modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
     selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
@@ -1094,9 +1077,18 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     && checkpoint.sources.length + faults.size === current.length) {
     const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0
       ? { ...checkpoint.lastGood, state: "unavailable" as const } : checkpoint.lastGood;
-    return { state: faults.size === 0 ? "complete" : checkpoint.lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
-      snapshot: withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
-        opts.nowIso ?? systemClock.iso()), scannedSources: 0, pendingSources: 0 };
+    const snapshot = withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
+      opts.nowIso ?? systemClock.iso());
+    // W1-T13867: the index left on disk holds the rows this pass reports, as a fresh pass's would.
+    const overlay = { cohorts: snapshot.cohorts, verifiedTaskOutcome: snapshot.verifiedTaskOutcome,
+      modelDrift: snapshot.modelDrift, selfForecastCalibration: snapshot.selfForecastCalibration };
+    const lastGood = checkpoint.lastGood;
+    // Only a change in the rows or the totals is written, so a repeated pass at a later cutoff stays a read.
+    const checkpointBytes = JSON.stringify([overlay.cohorts, overlay.verifiedTaskOutcome])
+      === JSON.stringify([lastGood.cohorts, lastGood.verifiedTaskOutcome]) ? undefined
+      : writeCheckpoint(stateDir, { ...checkpoint, lastGood: { ...lastGood, ...overlay } }, io);
+    return { state: faults.size === 0 ? "complete" : lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
+      snapshot, scannedSources: 0, pendingSources: 0, ...(checkpointBytes === undefined ? {} : { checkpointBytes }) };
   }
   if (!checkpoint.baselineSources && checkpoint.sources.length > 0
     && (checkpoint.lastGood || checkpoint.sources.some((source) => !current.some((entry) => entry.name === source.name)))) {
@@ -1366,7 +1358,9 @@ export async function runBenchmarkVerifiedOverlayPass(
     }
     const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed as TaskCaseFile[] });
     console.log(JSON.stringify({ event: "benchmark_cohort.verified_overlay", state: result.state,
-      verified_task_outcome: result.snapshot.verifiedTaskOutcome }));
+      verified_task_outcome: result.snapshot.verifiedTaskOutcome,
+      // W1-T13867: each cohort row's own outcome counts, so the analyst can score each model by result.
+      cohorts: result.snapshot.cohorts.map((cohort) => ({ dimensions: cohort.dimensions, verified_outcome: cohort.verifiedOutcome })) }));
     return 0;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
