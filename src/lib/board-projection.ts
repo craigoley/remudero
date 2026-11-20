@@ -609,14 +609,18 @@ const windowRules = (window: BoardRetentionWindow, reader: string): BoardRetenti
   }] : []),
 ];
 
+const TASK_ACTIVITY_RETENTION: readonly BoardRetentionRule[] = [
+  { reader: "lastActivityByTask (board.ts): each task's newest row", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row) => taskKey(row) },
+  { reader: "changedActivityByTask (now-view.ts): each task's newest row, sweep repeats excluded", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row, f) => (f.repeat ? undefined : taskKey(row)) },
+];
+
 /**
  * W1-T9436: the rows the now view walks outside the derive, per reader (the census in the task's rationale (b)).
  * Ingest keeps a row while some rule holds it and drops it once every rule that held it is superseded, so `rows()`
  * holds what these readers read and nothing else. A reader of a step no rule names fails the census test.
  */
 export const BOARD_ROW_RETENTION: readonly BoardRetentionRule[] = [
-  { reader: "lastActivityByTask (board.ts): each task's newest row", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row) => taskKey(row) },
-  { reader: "changedActivityByTask (now-view.ts): each task's newest row, sweep repeats excluded", steps: "*", fields: ["task_id", "ts"], kind: "newest", key: (row, f) => (f.repeat ? undefined : taskKey(row)) },
+  ...TASK_ACTIVITY_RETENTION,
   { reader: "rawBlockedPrCandidates (status-board.ts): each PR's newest disposition", steps: ["sweep.disposed"], fields: ["pr_number", "disposition", "task_id", "reason", "pr_url", "ts"], kind: "newest", key: (row) => (row.step === "sweep.disposed" ? prKey(row) : undefined) },
   { reader: "nowActions (now-view.ts): each PR's newest disposition change", steps: ["sweep.disposed"], fields: ["pr_number", "disposition", "ts"], kind: "newest", key: (row, f) => (row.step === "sweep.disposed" && !f.repeat ? prKey(row) : undefined) },
   {
@@ -907,8 +911,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const sentinel: Row = {};
   const rows: Row[] = [sentinel];
   const rowOrder: Ord[] = [[Number.NEGATIVE_INFINITY, 0, 0]];
+  type KeptRow = { ord: Ord; bytes: number; holds: number; standIn?: { key: string; worker: boolean } };
   /** Each kept row's order, its source-text length, and how many rules hold it (W1-T9436). */
-  const kept = new Map<Row, { ord: Ord; bytes: number; holds: number; standIn?: { key: string; worker: boolean } }>();
+  const kept = new Map<Row, KeptRow>();
   /** Rows every holder released since the last compaction; `rows` drops them at the end of the ingest. */
   const dropped = new Set<Row>();
   // W1-T6253: every in-place change to `rows` (or the sentinel's ts) is a new generation, so an index held for the
@@ -944,8 +949,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const taskActivitySeq = new Map<string, number>();
   let activitySeq = 0;
   let activitySql: ReadModelStatement | undefined;
-  let tiedActivitySql: ReadModelStatement | undefined;
-  const tiedActivity = new Map<string, Set<number>>();
+  let restoreActivitySql: ReadModelStatement | undefined;
+  const withdrawnActivity = new Map<string, Ord>();
   const taskWorkerSeq = new Map<string, number>();
   let workerSeq = 0;
   let workerSql: ReadModelStatement | undefined;
@@ -960,7 +965,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     one: new Map<string, Held1>(),
     all: new Map<string, { window?: number; rows: Set<Row> }>(),
     runs: new Map<string, { anchor?: Held1; members: Held1[] }>(),
+    fallback: TASK_ACTIVITY_RETENTION.includes(rule) ? new Map<string, Held1 & { bytes: number }>() : undefined,
   }));
+  const taskActivityState = ruleState.filter((state) => state.fallback !== undefined);
   /** The readers' "now": each windowed rule keeps from its day or week. Set by the first update, and never moved back. */
   let readerNowMs: number | undefined;
   const retainFrom = (): number => readerNowMs ?? clock.now();
@@ -1050,7 +1057,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   /** The rules that take `row` now, and the rows each one lets go for it; the row is kept when any rule takes it. */
-  function offer(row: Row, ord: Ord, facts: BoardRowFacts): number {
+  function offer(row: Row, ord: Ord, facts: BoardRowFacts, bytes: number): number {
     if (keepAll) return 1;
     let holds = 0;
     const let_go: Row[] = [];
@@ -1091,6 +1098,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
           holds++;
         }
       } else {
+        // The latest fact or worker can reclaim this slot if a fact suppresses the run activity ahead of it.
+        if (state.fallback && !(facts.standIn && row.step === BOARD_RUN_ACTIVITY_STEP)) {
+          const prior = state.fallback.get(key);
+          if (!prior || ordCompare(ord, prior.ord) > 0) state.fallback.set(key, { row, ord, bytes });
+        }
         const was = state.one.get(key);
         const takes = !was || (rule.kind === "newest" ? ordCompare(ord, was.ord) > 0 : ordCompare(ord, was.ord) < 0);
         if (!takes) continue;
@@ -1148,7 +1160,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function standIn(standing: Map<string, Row>, key: string, { row, key: ord }: TaskBucketEntry, bytes: number): void {
     noteParsedTs(row.ts);
     latestTsMs = Math.max(latestTsMs, ord[0]);
-    if (offer(row, ord, { standIn: true, repeat: false }) === 0) return;
+    if (offer(row, ord, { standIn: true, repeat: false }, bytes) === 0) return;
     if (keepAll) kept.set(row, { ord, bytes: 0, holds: 1 });
     kept.get(row)!.standIn = { key, worker: standing === workerRows };
     place(row, ord, bytes, false);
@@ -1199,20 +1211,48 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
   }
 
-  /** A fact tied with the activity it suppresses can leave another run's activity at that instant as the task's newest. */
-  function restoreTiedActivity(): void {
-    if (tiedActivity.size === 0) return;
-    tiedActivitySql ??= db.prepare("SELECT run_id, ts, ts_ms, seq FROM run_activity WHERE task_id = ? AND ts_ms = ? AND seq <= ? ORDER BY seq");
-    for (const [taskId, times] of tiedActivity) {
-      for (const ms of times) {
-        for (const r of tiedActivitySql.iterate(taskId, ms, activitySeq)) {
-          const key = taskRunKey(taskId, String(r.run_id));
+  /** Restores the task's newest rows when a fact suppresses a stand-in that held a task slot. */
+  function restoreTaskActivity(): void {
+    for (const [taskId, withdrawn] of withdrawnActivity) {
+      const canTake = (state: (typeof taskActivityState)[number], ord: Ord): boolean => {
+        const was = state.one.get(taskId);
+        return !was || ordCompare(ord, was.ord) > 0;
+      };
+      for (const state of taskActivityState) {
+        const fallback = state.fallback!.get(taskId);
+        if (!fallback || !canTake(state, fallback.ord)) continue;
+        const { row, ord, bytes } = fallback;
+        const retained = kept.get(row);
+        if (retained) retained.holds++;
+        else {
+          const held: KeptRow = { ord, bytes: 0, holds: 1 };
+          if (ord[1] === 1) {
+            const key = taskRunKey(taskId, String(row.run_id));
+            held.standIn = { key, worker: true };
+            workerRows.set(key, row);
+          }
+          kept.set(row, held);
+          place(row, ord, bytes, false);
+        }
+        const was = state.one.get(taskId);
+        state.one.set(taskId, fallback);
+        if (was) release(was.row);
+      }
+      // Previously rejected activities sort below the one withdrawn. A winner at or above it needs no replay.
+      if (!taskActivityState.some((state) => canTake(state, withdrawn))) continue;
+      restoreActivitySql ??= db.prepare("SELECT run_id, ts, ts_ms, seq FROM run_activity WHERE task_id = ? AND seq <= ? ORDER BY ts_ms DESC, seq DESC");
+      for (const r of restoreActivitySql.iterate(taskId, activitySeq)) {
+        const runId = String(r.run_id);
+        if (Number(r.ts_ms) <= newestFactMsOf(taskId, runId)) continue;
+        if (taskActivityState.some((state) => canTake(state, activityEntry(r, taskId).key))) {
+          const key = taskRunKey(taskId, runId);
           withdraw(activityRows.get(key));
           offerActivity(r, taskId, key);
         }
+        break;
       }
     }
-    tiedActivity.clear();
+    withdrawnActivity.clear();
   }
 
   /** Each run whose newest row of any step is newer than its newest fact row gets one row at that time, in time order; true when one moved. */
@@ -1302,21 +1342,21 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         const key = taskRunKey(row.task_id, row.run_id);
         newestFactMs.set(key, Math.max(newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
         const standing = activityRows.get(key);
-        if (standing) {
-          const standingMs = kept.get(standing)!.ord[0];
-          if (standingMs === tsMs) {
-            const times = tiedActivity.get(row.task_id) ?? new Set<number>();
-            times.add(tsMs);
-            tiedActivity.set(row.task_id, times);
+        const standingOrd = standing && kept.get(standing)!.ord;
+        if (standing && standingOrd && standingOrd[0] <= tsMs) {
+          const taskId = row.task_id;
+          if (taskActivityState.some((state) => state.one.get(taskId)?.row === standing)) {
+            const prior = withdrawnActivity.get(taskId);
+            if (!prior || ordCompare(standingOrd, prior) > 0) withdrawnActivity.set(taskId, standingOrd);
           }
-          if (standingMs <= tsMs) withdraw(standing);
+          withdraw(standing);
         }
       }
       const ord: Ord = [tsMs, 0, seq];
       const repeat = keepAll ? false : sweepRepeatOf(row, ord);
-      if (offer(row, ord, { standIn: false, repeat }) > 0) {
+      if (!keepAll && row.step === "sweep.disposed" && typeof row.pr_number === "number") SWEEP_REPEATS.set(row, repeat);
+      if (offer(row, ord, { standIn: false, repeat }, body.length) > 0) {
         if (keepAll) kept.set(row, { ord, bytes: 0, holds: 1 });
-        else if (row.step === "sweep.disposed" && typeof row.pr_number === "number") SWEEP_REPEATS.set(row, repeat);
         if (bulk) outOfOrder ||= ordCompare(ord, rowOrder[rows.length - 1]!) < 0;
         place(row, ord, body.length, bulk);
       }
@@ -1347,7 +1387,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       touched();
     }
     const workers = ingestWorkers();
-    restoreTiedActivity();
+    if (withdrawnActivity.size > 0) {
+      compact();
+      restoreTaskActivity();
+    }
     const activity = ingestActivity();
     compact();
     if (activity || workers || fresh > 0) pending = true;
@@ -1444,11 +1487,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       state.one.clear();
       state.all.clear();
       state.runs.clear();
+      state.fallback?.clear();
     }
     lastDisposition.clear();
     activityRows.clear();
     workerRows.clear();
-    tiedActivity.clear();
+    withdrawnActivity.clear();
     taskActivitySeq.clear();
     taskWorkerSeq.clear();
     taskCount.clear();

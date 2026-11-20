@@ -11,9 +11,10 @@ import { test } from "node:test";
 import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type Row } from "#src/lib/board-projection.js";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { changedActivityByTask } from "#src/lib/now-view.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
-import type { GitHub } from "#src/lib/status.js";
+import { WORKER_ACTIVITY_STAND_IN_STEP, type GitHub } from "#src/lib/status.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
 const T0 = Date.parse("2026-11-20T00:00:00.000Z");
@@ -141,6 +142,31 @@ test("W1-T13905 criterion 2: tied activity keeps cold-load precedence across fac
   const fresh = standIns(w.caughtUp(w.board()));
   assert.deepEqual(fresh, [`W1-T1|backup@${at(OLD)}`]);
   assert.deepEqual(standIns(board), fresh, "a tied fact from the winning run lets the other activity stand in");
+});
+
+test("W1-T13905 criterion 2: strictly newer sweep repeats restore the best remaining changed activity", (t) => {
+  const ids = ["W1-T1", "W1-T2", "W1-T3"];
+  const disposition = (ms: number, id: string, pr: number): Row => ({
+    ts: at(ms), step: "sweep.disposed", task_id: id, pr_number: pr, disposition: "waiting", host: "h1",
+  });
+  const w = world(t, [
+    ...ids.flatMap((id, i) => [disposition(OLD, id, i + 1), activity(OLD + 1_000, id, "backup"), activity(OLD + 3_000, id, "winner")]),
+    { ts: at(OLD + 2_000), step: FACT, task_id: "W1-T2", host: "h1" },
+    { ts: at(OLD + 2_000), step: "worker.activity", task_id: "W1-T3", run_id: "worker", event_kind: "working", host: "h1" },
+    fact(OLD + 2_000, "W1-T3", "worker"),
+  ]);
+  const counted = counting(w.raw, { perRun: /SELECT MAX\(ts_ms\) AS ms FROM fact WHERE task_id = \? AND run_id = \?/ });
+  const board = w.caughtUp(w.board(counted.db));
+  assert.deepEqual(standIns(board), ids.map((id) => `${id}|winner@${at(OLD + 3_000)}`));
+
+  w.append(ids.map((id, i) => ({ ...disposition(OLD + 4_000, id, i + 1), run_id: "winner" })));
+  w.caughtUp(board);
+  const fresh = w.caughtUp(w.board());
+  assert.deepEqual(standIns(fresh), [`W1-T1|backup@${at(OLD + 1_000)}`]);
+  assert.deepEqual(standIns(board), standIns(fresh));
+  assert.deepEqual(changedActivityByTask(board.rows()), changedActivityByTask(fresh.rows()));
+  assert.ok(board.rows().some((r) => r.step === WORKER_ACTIVITY_STAND_IN_STEP && r.task_id === "W1-T3"));
+  assert.equal(counted.count.perRun, 0, "recovery uses the in-memory fact times");
 });
 
 test("W1-T13905 criterion 2: a fact appended after a detected rewind can reuse a sequence", (t) => {
