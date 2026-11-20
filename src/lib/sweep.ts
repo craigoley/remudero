@@ -129,7 +129,7 @@ import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuard
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle } from "./inflight-lock.js";
-import { reclaimStaleLock } from "./fs-race-safe.js";
+import { reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
 import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
@@ -1082,7 +1082,7 @@ function terminalUncreditableHeadKey(prNumber: number, headSha: string): string 
 function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordRead | undefined {
   const stateDir = dirname(ledgerPath);
   const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
-  const history = reader.current(stateDir);
+  const history = reader.current(stateDir, { publishSnapshot: true });
   if (!history.ok) return undefined;
   try {
     for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
@@ -31373,7 +31373,8 @@ export const ESCALATION_TRIAGE_EVIDENCE_SLICE: EscalationTriageSlice = {
  * only the live bytes written since (a rotation no call has loaded yet is read inline, as the union reads it).
  */
 export type EscalationTriageHistoryReader = ((stateDir: string) => Promise<LedgerUnionRecordRead>) & {
-  current(stateDir: string): LedgerUnionRecordRead;
+  /** Synchronous callers can publish the reduced rotations for a fresh process before returning. */
+  current(stateDir: string, opts?: { publishSnapshot?: boolean }): LedgerUnionRecordRead;
   /** W1-T9710: the last union pass's loop reads, parsed lines and seeded rotations. */
   lastPass(): IncrementalUnionPass;
   /** W1-T10046: the last call's off-loop load: the rotations it loaded, and how many a durable digest answered. */
@@ -31390,6 +31391,8 @@ export interface EscalationTriageHistoryLoad {
 interface TriageSliceSnapshotRotation {
   name: string; size: number; mtimeMs: number; key?: string; read: LedgerRotationRecords;
 }
+
+type TriageSliceRotationRead = { key: string; read: LedgerRotationRecords };
 
 function validTriageSnapshotRotation(value: unknown): value is TriageSliceSnapshotRotation {
   if (!value || typeof value !== "object") return false;
@@ -31447,13 +31450,14 @@ export function createEscalationTriageHistoryReader(
   const pattern = rawPattern ?? new RegExp(steps.map((step) => step.replaceAll(".", "\\.")).join("|"));
   const statKey = (path: string): string => rotationStatKey(stat(path), slice.strictFileIdentity);
   let loaded = new Map<string, string>();
-  const kept = new Map<string, { key: string; read: LedgerRotationRecords }>();
-  const snapshotTried = new Set<string>();
+  const kept = new Map<string, TriageSliceRotationRead>();
+  const snapshotKeys = new Map<string, ReadonlyMap<string, string>>();
   const snapshotPath = (stateDir: string): string => join(stateDir, "cache", "rotation-slices",
     `${encodeURIComponent(identity.holder).replaceAll(".", "%2E")}.json`);
   const seedSnapshot = (stateDir: string): void => {
-    if (!slice.sharedSnapshot || snapshotTried.has(stateDir)) return;
-    snapshotTried.add(stateDir);
+    if (!slice.sharedSnapshot || snapshotKeys.has(stateDir)) return;
+    const seededKeys = new Map<string, string>();
+    snapshotKeys.set(stateDir, seededKeys);
     try {
       const snapshot = JSON.parse(counted(snapshotPath(stateDir), () => fsDeps.readFileSync(snapshotPath(stateDir))).toString("utf8"));
       if (snapshot?.schema !== 1 || snapshot.holder !== identity.holder || snapshot.reducerVersion !== durableDigest.reducerVersion ||
@@ -31475,6 +31479,7 @@ export function createEscalationTriageHistoryReader(
         union.seed(path, key, entry.read);
         loaded.set(path, key);
         kept.set(path, { key, read: entry.read });
+        seededKeys.set(path, key);
         lastLoad.snapshotHit = true;
       }
     } catch (error) {
@@ -31482,23 +31487,45 @@ export function createEscalationTriageHistoryReader(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") lastLoad.snapshotError = reason;
     }
   };
+  const snapshotContents = (stats: ReadonlyMap<string, string>, parts: ReadonlyMap<string, TriageSliceRotationRead>): string | undefined => {
+    const rotations: TriageSliceSnapshotRotation[] = [];
+    for (const [archive, key] of stats) {
+      const hit = parts.get(archive);
+      if (hit?.key !== key || statKey(archive) !== key) return undefined;
+      const [size, mtimeMs] = key.split(":").map(Number);
+      rotations.push({ name: basename(archive), size: size!, mtimeMs: mtimeMs!, read: hit.read,
+        ...(slice.strictFileIdentity ? { key } : {}) });
+    }
+    return JSON.stringify({ schema: 1, holder: identity.holder, reducerVersion: durableDigest.reducerVersion, rotations });
+  };
+  const publishCurrentSnapshot = (stateDir: string, parts: ReadonlyMap<string, TriageSliceRotationRead>): void => {
+    if (parts.size === 0) return;
+    const prior = snapshotKeys.get(stateDir);
+    const stats = new Map([...parts].map(([archive, { key }]) => [archive, key]));
+    if (prior?.size === stats.size && [...stats].every(([archive, key]) => prior.get(archive) === key)) return;
+    try {
+      const content = snapshotContents(stats, parts);
+      if (content === undefined) return;
+      const path = snapshotPath(stateDir);
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      writeAtomic(path, content, { mode: 0o600 });
+      snapshotKeys.set(stateDir, stats);
+    } catch (error) {
+      const reason = String(error);
+      lastLoad.snapshotError = reason;
+    }
+  };
   const writeSnapshot = async (stateDir: string, stats: Map<string, string>): Promise<void> => {
     if (!slice.sharedSnapshot) return;
     const path = snapshotPath(stateDir);
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
-      const rotations: TriageSliceSnapshotRotation[] = [];
-      for (const [archive, key] of stats) {
-        const hit = kept.get(archive);
-        if (hit?.key !== key || statKey(archive) !== key) return;
-        const [size, mtimeMs] = key.split(":").map(Number);
-        rotations.push({ name: basename(archive), size: size!, mtimeMs: mtimeMs!, read: hit.read,
-          ...(slice.strictFileIdentity ? { key } : {}) });
-      }
+      const content = snapshotContents(stats, kept);
+      if (content === undefined) return;
       await fs.promises.mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      await fs.promises.writeFile(temp, JSON.stringify({ schema: 1, holder: identity.holder,
-        reducerVersion: durableDigest.reducerVersion, rotations }), { flag: "wx", mode: 0o600, flush: true });
+      await fs.promises.writeFile(temp, content, { flag: "wx", mode: 0o600, flush: true });
       await fs.promises.rename(temp, path);
+      snapshotKeys.set(stateDir, stats);
     } catch (error) {
       const reason = String(error);
       lastLoad.snapshotError = reason;
@@ -31511,7 +31538,7 @@ export function createEscalationTriageHistoryReader(
     }
   };
   const strictUnread = new Set<string>();
-  const current = (stateDir: string): LedgerUnionRecordRead => {
+  const current = (stateDir: string, opts: { publishSnapshot?: boolean } = {}): LedgerUnionRecordRead => {
     seedSnapshot(stateDir);
     if (strictUnread.size > 0) {
       // Do not let the permissive sync fallback write a clean digest under the strict identity.
@@ -31519,7 +31546,8 @@ export function createEscalationTriageHistoryReader(
       return { stateDir, archiveFiles, archiveCount: archiveFiles.length, liveFileRead: false,
         unread: [...strictUnread], unclassified: [], ok: false, rows: [], torn: 0, filesRead: 0 };
     }
-    return union(stateDir, { step: steps, refuseIncomplete: true });
+    return union(stateDir, { step: steps, refuseIncomplete: true,
+      onKeptRotations: opts.publishSnapshot && slice.sharedSnapshot ? (parts) => publishCurrentSnapshot(stateDir, parts) : undefined });
   };
   const load = async (stateDir: string): Promise<{ entries: LedgerCorpusEntry[]; stats: Map<string, string>; fresh: number }> => {
     lastLoad = { rotations: 0, digestHits: 0, digestMisses: 0, bytesRead: 0, rotationsRead: 0, snapshotHit: false };

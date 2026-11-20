@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import fs, { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -122,18 +122,40 @@ function buildInNewProcess(root: string, ledgerPath: string, expectedReason = st
   return JSON.parse(child.stdout) as BuildObservation;
 }
 
+function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidates {
+  return candidates.filter(({ prNumber, headSha }) => {
+    const headRows = rows.filter((row) => row.pr_number === prNumber && row.head_sha === headSha);
+    return headRows.some((row) => row.step === terminalStep && row.reason === "not_a_run_branch" && row.terminal === true)
+      && headRows.some((row) => row.step === escalatedStep);
+  });
+}
+
 if (process.argv[2] === childFlag) {
   process.stdout.write(JSON.stringify(observeBuild(process.argv[3]!, process.argv[4]!, process.argv[5])));
 } else {
-  test("W1-T12271 criterion 1: a fresh sweep process decompresses no previously read rotations", (t) => {
-    const { root, path } = fixture(t);
-    const first = observeBuild(root, path);
+  test("W1-T12271 criterion 1: a fresh sweep process reuses the shared snapshot without rotation digests", (t) => {
+    const { root, dir, path } = fixture(t);
+    const first = buildInNewProcess(root, path);
     assert.equal(first.gunzips, 2, "a cold build decompresses both rotations");
     assert.deepEqual(first.stoodDown, candidates.slice(0, 3));
 
+    rmSync(join(dir, "cache", "rotation-digests"), { recursive: true, force: true });
     const second = buildInNewProcess(root, path);
     assert.equal(second.gunzips, 0);
     assert.deepEqual(second.stoodDown, first.stoodDown);
+  });
+
+  test("a failed snapshot write preserves the terminal heads and the next build can publish", (t) => {
+    const { root, dir, path } = fixture(t);
+    const snapshotDir = join(dir, "cache", "rotation-slices");
+    mkdirSync(join(dir, "cache"));
+    writeFileSync(snapshotDir, "");
+    assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 3) });
+
+    unlinkSync(snapshotDir);
+    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
+    rmSync(join(dir, "cache", "rotation-digests"), { recursive: true, force: true });
+    assert.deepEqual(buildInNewProcess(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
   });
 
   test("W1-T12271 criterion 2: sweep stand-down and retry decisions match the ledger union", async (t) => {
@@ -142,11 +164,7 @@ if (process.argv[2] === childFlag) {
     assert.equal(union.ok, true);
     assert.equal(union.archiveCount, 2);
     const rows = parseLedger(union.matches.join("\n"));
-    const expected = candidates.filter(({ prNumber, headSha }) => {
-      const headRows = rows.filter((row) => row.pr_number === prNumber && row.head_sha === headSha);
-      return headRows.some((row) => row.step === terminalStep && row.reason === "not_a_run_branch" && row.terminal === true)
-        && headRows.some((row) => row.step === escalatedStep);
-    });
+    const expected = unionStandDowns(rows);
     assert.deepEqual(expected, candidates.slice(0, 3));
     assert.deepEqual(observeBuild(root, path).stoodDown, expected);
 
@@ -168,6 +186,29 @@ if (process.argv[2] === childFlag) {
       await dispatchFix({ ...retry, checksState: "red" } as OpenPrView, { unmetCriteria: [] });
     }
     assert.deepEqual(issueBodies.map((body) => /^\*\*Cause:\*\* (.+)$/m.exec(body)?.[1]), expectedCauses);
+  });
+
+  test("W1-T12271 criterion 2: a same-size edit before the cached live tail matches the ledger union", (t) => {
+    const { root, dir, path } = fixture(t);
+    const live = readFileSync(path, "utf8");
+    const escalation = JSON.stringify(escalated(4));
+    writeFileSync(path, `${'{"step":"ignored"}'.padEnd(escalation.length)}\n${live}`);
+    utimesSync(path, 1, 1);
+    const before = statSync(path);
+    assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
+
+    writeFileSync(path, `${escalation}\n${live}`);
+    utimesSync(path, 2, 2);
+    const after = statSync(path);
+    assert.deepEqual([after.ino, after.size], [before.ino, before.size]);
+    assert.ok(Buffer.byteLength(live) > 64);
+
+    const union = resolveLedgerUnion(dir, legacyPattern);
+    assert.equal(union.ok, true);
+    assert.equal(union.archiveCount, 2);
+    const expected = unionStandDowns(parseLedger(union.matches.join("\n")));
+    assert.deepEqual(expected, candidates.slice(0, 4));
+    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: expected });
   });
 
   test("W1-T12271 criterion 3: a cold build holds dispatch while a rotation is unreadable", (t) => {

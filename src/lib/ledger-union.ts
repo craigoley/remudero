@@ -1991,8 +1991,14 @@ interface IncrementalReadPart {
   size: MemoSize;
 }
 
+type IncrementalUnionReadOptions = LedgerUnionRecordReadOptions & {
+  onKeptRotations?: (rotations: ReadonlyMap<string, { key: string; read: LedgerRotationRecords }>) => void;
+};
+
 interface IncrementalLiveState extends IncrementalReadPart {
   ino: number;
+  fileSize: number;
+  strictKey?: string;
   /** End of the last complete line read; a line still being written is re-read on the next call. */
   committed: number;
   anchor: Buffer;
@@ -2022,7 +2028,7 @@ function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
  *  - a rotation is parsed at most once, reduced to the wanted steps, and kept in memory and as a durable
  *    {@link ledgerRotationDigests} digest, so a restarted process reads digests rather than archives;
  *  - the live file is read from where the last call stopped, while its inode holds and the bytes just before
- *    that point are unchanged; anything else re-reads it from the start.
+ *    that point are unchanged. A strict read also restarts if the file changed without growing.
  * The union itself (order, replay dedupe, `ok` and `unread`) is still {@link readLedgerUnionRecordsSync}'s.
  * Only `step`, `refuseIncomplete` and `requireArchives` are cached; any other option reads uncached. The
  * returned `rows` array is frozen and shared between calls: a caller must not mutate it or its rows.
@@ -2032,7 +2038,7 @@ export function createIncrementalLedgerUnion(
   opts: { holder: string; reducerVersion: string; rawPattern?: RegExp;
     project?: (row: Record<string, unknown>) => Record<string, unknown>; strictFileIdentity?: boolean },
   baseFs: LedgerGrepFsDeps = realLedgerFs,
-): ((stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead) & IncrementalLedgerUnionHandle {
+): ((stateDir: string, readOpts?: IncrementalUnionReadOptions) => LedgerUnionRecordRead) & IncrementalLedgerUnionHandle {
   // W1-T9710: every byte a pass reads, digests and inline rotations included, is counted for `lastPass`.
   let pass: IncrementalUnionPass = { readBytes: 0, parsedLines: 0, seededRotations: 0 };
   const counted = (buf: Buffer): Buffer => ((pass.readBytes += buf.length), buf);
@@ -2062,7 +2068,7 @@ export function createIncrementalLedgerUnion(
   });
   const project = opts.project ?? ((row: Record<string, unknown>) => row);
   const projectLine = opts.rawPattern === undefined ? undefined : ledgerRawLineProjection(project);
-  const reader = (stateDir: string, readOpts: LedgerUnionRecordReadOptions = {}): LedgerUnionRecordRead => {
+  const reader = (stateDir: string, readOpts: IncrementalUnionReadOptions = {}): LedgerUnionRecordRead => {
     pass = { readBytes: 0, parsedLines: 0, seededRotations: 0 };
     try {
       return readOnce(stateDir, readOpts);
@@ -2070,8 +2076,8 @@ export function createIncrementalLedgerUnion(
       seeds.clear();
     }
   };
-  const readOnce = (stateDir: string, readOpts: LedgerUnionRecordReadOptions): LedgerUnionRecordRead => {
-    const { step, refuseIncomplete, requireArchives, ...rest } = readOpts;
+  const readOnce = (stateDir: string, readOpts: IncrementalUnionReadOptions): LedgerUnionRecordRead => {
+    const { step, refuseIncomplete, requireArchives, onKeptRotations, ...rest } = readOpts;
     if (step === undefined || Object.values(rest).some((value) => value !== undefined)) {
       return readLedgerUnionRecordsSync(stateDir, readOpts, fsDeps);
     }
@@ -2081,6 +2087,10 @@ export function createIncrementalLedgerUnion(
     const candidate = new RegExp([...steps.map((name) => JSON.stringify(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "^[^{]", "[^}]$"].join("|"));
     const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
+    const finish = (result: LedgerUnionRecordRead): LedgerUnionRecordRead => {
+      if (result.ok && state.rotations.size === result.archiveCount) onKeptRotations?.(state.rotations);
+      return result;
+    };
     const pendingSizes: Array<() => void> = [];
     const extraSizes: MemoSize[] = [];
     const partSize = (read: LedgerRotationRecords, prior?: MemoSize, lastOnly = false): MemoSize => {
@@ -2117,7 +2127,7 @@ export function createIncrementalLedgerUnion(
     const signature = JSON.stringify([unclassified, auxiliary, rotations.map((entry) => [entry.path, keys.get(entry.path) ?? null]), liveKey ?? null]);
     const cacheable = !(refuseIncomplete && directoryUnread) && liveKey !== undefined &&
       (!opts.strictFileIdentity || keys.size === rotations.length);
-    if (cacheable && state.last?.signature === signature) return state.last.result;
+    if (cacheable && state.last?.signature === signature) return finish(state.last.result);
     if (liveKey === "absent") state.live = undefined;
 
     const reduce = (rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
@@ -2167,7 +2177,10 @@ export function createIncrementalLedgerUnion(
     };
     const liveRecords = (path: string): LedgerRotationRecords => {
       const stat = statSync(path);
-      const prior = state.live !== undefined && state.live.ino === stat.ino && stat.size >= state.live.committed ? state.live : undefined;
+      const strictKey = opts.strictFileIdentity ? rotationStatKey(stat, true) : undefined;
+      const previous = state.live;
+      const prior = previous?.ino === stat.ino && stat.size >= previous.committed &&
+        (stat.size > previous.fileSize || previous.strictKey === strictKey) ? previous : undefined;
       let start = prior ? prior.committed - prior.anchor.length : 0;
       let buf = readRange(path, start, stat.size);
       let base = prior;
@@ -2184,7 +2197,8 @@ export function createIncrementalLedgerUnion(
         : added;
       const committed = (base ? base.committed : 0) + complete.length;
       const anchorFrom = Math.max(0, committed - LIVE_ANCHOR_BYTES) - start;
-      state.live = { ino: stat.ino, committed, anchor: Buffer.from(buf.subarray(Math.max(0, anchorFrom), committed - start)), read,
+      state.live = { ino: stat.ino, fileSize: stat.size, strictKey, committed,
+        anchor: Buffer.from(buf.subarray(Math.max(0, anchorFrom), committed - start)), read,
         size: partSize(added, base?.size) };
       // A final line with no newline yet is read, exactly as a whole-file read reads it, but never committed.
       const fragment = scan(body.subarray(complete.length));
@@ -2213,7 +2227,7 @@ export function createIncrementalLedgerUnion(
     // not turn a successful read into an unread archive. Only new parts/tails are visited here.
     for (const measure of pendingSizes) measure();
     states.set(stateKey, state);
-    return result;
+    return finish(result);
   };
   const sized = Object.assign(reader, {
     size: states.size,
