@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
-import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
+import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
 
 /** serve.ts's DEFAULT_SERVE_PORT and serviceTokensPath, restated so this CLI stays out of serve's import cycle. */
 export const INBOX_CLI_DEFAULT_SERVE_PORT = 4317;
@@ -21,13 +21,14 @@ export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
 export interface InboxCliServeTarget { url: string; token: string }
 
 /**
- * W1-T13238: the running serve this host's CLI can post to: 127.0.0.1 on RMD_SERVE_PORT, else config serve.port, else
- * {@link INBOX_CLI_DEFAULT_SERVE_PORT}, with the write token from state/service-tokens.json. Only reads the token file: a CLI
- * never mints tokens. The token is never printed.
+ * W1-T13238: the running serve this host's CLI can post to: 127.0.0.1 on config serve.port, else
+ * {@link INBOX_CLI_DEFAULT_SERVE_PORT}, the port `rmd serve` itself binds when no --port is given (resolveServePort), with
+ * the write token from state/service-tokens.json. Only reads the token file: a CLI never mints tokens. The token is never
+ * printed.
  */
-export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">, env: NodeJS.ProcessEnv = process.env): InboxCliServeTarget | { reason: string } {
-  const port = env.RMD_SERVE_PORT?.trim() || String(config.serve?.port ?? INBOX_CLI_DEFAULT_SERVE_PORT);
-  if (!/^\d{1,5}$/.test(port)) return { reason: `RMD_SERVE_PORT ${JSON.stringify(port)} is not a port` };
+export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">): InboxCliServeTarget | { reason: string } {
+  const port = String(config.serve?.port ?? INBOX_CLI_DEFAULT_SERVE_PORT);
+  if (!/^\d{1,5}$/.test(port)) return { reason: `config serve.port ${JSON.stringify(port)} is not a port` };
   let write: unknown;
   try {
     write = (JSON.parse(readFileSync(inboxCliTokensPath(config.root), "utf8")) as { write?: unknown }).write;
@@ -99,11 +100,47 @@ function postInboxVerb(url: string, token: string, body: unknown, connectMs: num
 
 /** W1-T13238: one CLI verb, serve first; build in-process actions only if the verb falls back. */
 export function inboxVerbViaServe(name: InboxVerbName, args: string[], config: Pick<Config, "root" | "serve">,
-  inProcess: () => InboxVerbActions, env: NodeJS.ProcessEnv = process.env): Promise<number> {
-  const target = inboxCliServeTarget(config, env);
+  inProcess: () => InboxVerbActions): Promise<number> {
+  const target = inboxCliServeTarget(config);
   if ("reason" in target) {
     console.error(`rmd ${name}: ${target.reason}; running in-process`);
     return inboxVerbCommand(name, args, inProcess());
   }
   return inboxVerbCommand(name, args, serveFirstInboxActions(target, inProcess));
+}
+
+/** W1-T13238: the receipt `rmd decline` and `rmd restore` print once the verdict is recorded (proposalVerdictCommand's). */
+export function proposalVerdictReceipt(kind: "decline" | "restore", proposalId: string): string {
+  return kind === "decline"
+    ? `rmd decline: ${proposalId} DECLINED — take it back with ${PROPOSAL_VERDICT_SYNTAX.restore.replace("<proposalId>", proposalId)}`
+    : `rmd restore: ${proposalId} RESTORED — it is back in the inbox and classifies as it would have before the decline`;
+}
+
+/**
+ * W1-T13238: `rmd decline` and `rmd restore`, serve first. The verdict posts to the running serve's route, and the CLI
+ * prints exactly what the in-process command prints: the receipt on success, the route's detail on a refusal. Arguments
+ * the route would not take, no serve target or no serve answering the connect run `inProcess`, which validates and acts.
+ */
+export async function proposalVerdictViaServe(kind: "decline" | "restore", rest: string[], config: Pick<Config, "root" | "serve">,
+  inProcess: () => number, opts: { connectMs?: number } = {}): Promise<number> {
+  const proposalId = rest[0];
+  const reason = rest.length === 3 && rest[1] === "--reason" ? rest[2] : undefined;
+  // Anything but `<id> --reason <text>` is the in-process command's to refuse with its own usage line.
+  if (!proposalId || proposalId.startsWith("--") || reason === undefined || reason.trim() === "") return inProcess();
+  const target = inboxCliServeTarget(config);
+  if ("reason" in target) {
+    console.error(`rmd ${kind}: ${target.reason}; running in-process`);
+    return inProcess();
+  }
+  const spec = INBOX_VERBS.find((verb) => verb.name === kind)!;
+  const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, { proposalId, reason }, opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS);
+  if ("unreachable" in answer) {
+    console.error(`rmd ${kind}: no serve answered at ${target.url} (${answer.unreachable}); running in-process`);
+    return inProcess();
+  }
+  if ("failed" in answer) { console.error(`rmd ${kind}: serve request failed: ${answer.failed}`); return 1; }
+  if (answer.status >= 200 && answer.status < 300) { console.log(proposalVerdictReceipt(kind, proposalId)); return 0; }
+  const detail = (answer.body as { detail?: unknown; error?: unknown } | undefined)?.detail ?? (answer.body as { error?: unknown } | undefined)?.error;
+  console.error(`rmd ${kind}: ${typeof detail === "string" ? detail : `serve answered ${answer.status}`}`);
+  return 1;
 }

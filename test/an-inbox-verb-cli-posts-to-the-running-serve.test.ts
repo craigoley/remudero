@@ -13,7 +13,9 @@ import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
 import type { Config } from "#src/lib/config.js";
-import { inboxCliServeTarget, inboxVerbViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
+import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
+import { applyProposalVerdict } from "#src/lib/inbox.js";
+import { proposalVerdictCommand } from "#src/lib/inbox-verdict-command.js";
 
 type Ctx = { after: (fn: () => void | Promise<void>) => void; mock: { method: typeof import("node:test").mock.method } };
 const TOKEN = "ab".repeat(32);
@@ -81,7 +83,7 @@ test("W1-T13238 criterion 1: rmd archive posts to the running serve's write rout
   const actions = fakeActions();
   const { port, seen } = await serve(t, actions);
   const config = { root: root(t), serve: { port } } as unknown as Config;
-  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }, {}));
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
   assert.equal(result.code, 0);
   assert.deepEqual(result.out, [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })]);
   assert.deepEqual(result.err, [], "no in-process fallback was taken");
@@ -101,22 +103,26 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
 
   // No token: the target says why, and the CLI never mints one.
   const bare = root(t, null);
-  const target = inboxCliServeTarget({ root: bare } as unknown as Config, {});
+  const target = inboxCliServeTarget({ root: bare } as unknown as Config);
   assert.ok("reason" in target && /no serve write token/.test(target.reason));
   const fallback = await captured(t, () => inboxVerbViaServe("snooze", ["P3", "--wake"],
-    { root: bare } as unknown as Config, () => fakeActions(), {}));
+    { root: bare } as unknown as Config, () => fakeActions()));
   assert.equal(fallback.code, 0);
   assert.deepEqual(fallback.out, [JSON.stringify({ ok: true, verb: "snooze", proposalId: "P3" })]);
   assert.deepEqual(fallback.err, ["rmd snooze: no serve write token (ENOENT); running in-process"]);
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
-  assert.deepEqual(inboxCliServeTarget({ root: root(t), serve: { port: 9 } } as unknown as Config, { RMD_SERVE_PORT: "4400" }),
-    { url: "http://127.0.0.1:4400", token: TOKEN }, "RMD_SERVE_PORT wins over config");
+  // The CLI dials the port `rmd serve` binds: config serve.port, else the default; no CLI-only override can point it elsewhere.
+  const prior = process.env.RMD_SERVE_PORT;
+  process.env.RMD_SERVE_PORT = "4400";
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  assert.deepEqual(inboxCliServeTarget({ root: root(t), serve: { port: 9 } } as unknown as Config), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget({ root: root(t) } as unknown as Config), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
   const config = { root: root(t, null) };
   const local = fakeActions();
-  const result = await captured(t, () => inboxVerbViaServe("archive", ["refused"], config, () => local, {}));
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["refused"], config, () => local));
 
   assert.deepEqual(result, {
     code: 1,
@@ -175,4 +181,42 @@ test("W1-T13238: the CLI's restated serve port and token path match serve's own"
   const serve = await import("#src/lib/serve.js");
   assert.equal(INBOX_CLI_DEFAULT_SERVE_PORT, serve.DEFAULT_SERVE_PORT);
   assert.equal(serve.serviceTokensPath("/r"), join("/r", "state", "service-tokens.json"));
+});
+
+/** The production verdict for one proposal, as both serve's route and the in-process command decide it. */
+const verdictFind = (id: string) => id === "P1" ? { exists: true, classification: { proposalId: "P1", state: "ready" } as never }
+  : id === "Pd" ? { exists: true, classification: { proposalId: "Pd", state: "declined", declinedReason: "duplicate" } as never } : { exists: false };
+
+/** A serve stand-in for the verdict routes, answering as panel-graph.ts's route does from applyProposalVerdict. */
+async function verdictServe(t: Ctx) {
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { proposalId: string; reason: string };
+      const kind = req.url === "/v1/inbox/decline" ? "decline" : "restore";
+      const outcome = applyProposalVerdict(kind, input, verdictFind(input.proposalId), () => {});
+      const [status, body] = outcome.ok ? [200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) }]
+        : [outcome.status, { error: outcome.error, detail: outcome.detail }];
+      res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return (server.address() as AddressInfo).port;
+}
+
+test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same through serve as the in-process command", async (t) => {
+  const port = await verdictServe(t);
+  const config = { root: root(t), serve: { port } } as unknown as Config;
+  for (const [kind, id] of [["decline", "P1"], ["decline", "Pd"], ["decline", "Pgone"], ["restore", "Pd"], ["restore", "P1"]] as const) {
+    const args = [id, "--reason", "duplicate"];
+    const local = await captured(t, async () => proposalVerdictCommand(kind, args, verdictFind, () => {}));
+    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, () => { throw new Error("must not run in-process"); }));
+    assert.deepEqual(remote, local, `${kind} ${id}`);
+  }
+  // Arguments the route would not take are the in-process command's to refuse, with its own usage line.
+  let ran = 0;
+  assert.equal(await proposalVerdictViaServe("decline", ["P1"], config, () => { ran++; return 2; }), 2);
+  assert.equal(ran, 1);
 });

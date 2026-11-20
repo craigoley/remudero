@@ -570,7 +570,6 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN_FILE", "Names the read-only mounted file holding serve's incident ingest token when RMD_SERVE_INGEST_TOKEN is unset.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
-  envEntry("RMD_SERVE_PORT", "Overrides the loopback serve port used by the Inbox verb CLI.", ["src/lib/inbox-cli-serve.ts"]),
   envEntry("RMD_SERVE_READ_DEADLINE", "Defaults to shadow, which records late reads. Set to enforce to serve the committed body or return a retryable 503 at the deadline.", ["src/lib/serve-read-deadline.ts"]),
   envEntry("RMD_SERVE_READ_DEADLINE_MS", "Sets the serve read deadline in milliseconds. Defaults to 4000 when unset or invalid.", ["src/lib/serve-read-deadline.ts"]),
   envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
