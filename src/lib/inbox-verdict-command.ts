@@ -6,11 +6,14 @@
  * so what refuses and what is recorded is one decision, not two copies of it.
  */
 import { flagValue, unknownArgError } from "./cli-args.js";
-import { applyProposalVerdict, type InboxClassification, type ProposalVerdictKind } from "./inbox.js";
+import { isAgeOnlyInboxInformation } from "./inbox-owner.js";
+import { applyProposalVerdict, type InboxClassification, type Proposal, type ProposalVerdictKind } from "./inbox.js";
 import type { WriteTier } from "./service.js";
 
 export type InboxVerbName = "approve" | "decline" | "restore" | "reframe" | "reply" | "archive" | "snooze" | "keep";
-export type InboxVerbActor = { origin: string; operator?: string };
+export const INBOX_CLI_ORIGIN = "rmd-cli";
+export const INBOX_CLI_REPLY_HEADER = "x-remudero-inbox-cli";
+export type InboxVerbActor = { origin: string; operator?: string; replyIntentOrigin?: string };
 export type InboxVerbRespond = (status: number, body: unknown, headers?: Record<string, string>) => void;
 export type InboxVerbAction = (body: unknown, actor: InboxVerbActor, respond: InboxVerbRespond) => void | Promise<void>;
 export type InboxVerbActions = Record<InboxVerbName, InboxVerbAction>;
@@ -105,7 +108,7 @@ export async function inboxVerbCommand(name: InboxVerbName, args: string[], acti
   error ??= validateInboxVerbArguments(spec, body);
   if (error) { console.error(`rmd ${name}: ${error} — usage: ${spec.syntax}`); return 2; }
   let code = 1;
-  await spec.perform(actions, body, { origin: "rmd-cli" }, (status, result) => {
+  await spec.perform(actions, body, { origin: INBOX_CLI_ORIGIN }, (status, result) => {
     code = status < 400 ? 0 : status === 400 ? 2 : 1;
     (code === 0 ? console.log : console.error)(JSON.stringify(result));
   });
@@ -117,6 +120,16 @@ export const PROPOSAL_VERDICT_SYNTAX: Record<ProposalVerdictKind, string> = {
   restore: 'rmd restore <proposalId> --reason "<text>"',
 };
 
+export function informationalProposalRefusal(proposals: readonly Proposal[], classifications: readonly InboxClassification[], proposalId: string): string | undefined {
+  const matches = proposals.filter(proposal => proposal.id === proposalId);
+  const classified = classifications.filter(item => item.proposalId === proposalId);
+  if (matches.length !== 1 || classified.length !== 1) return undefined;
+  const requiresReview = classified[0]!.retirement?.state === "restored_for_review";
+  if (isAgeOnlyInboxInformation({ ...matches[0]!, requiresReview })) {
+    return "This age observation is readable information, not an operator decision or work request.";
+  }
+}
+
 /**
  * Exit 0 recorded, 1 refused (unknown, ratified, or already in the asked-for state), 2 a usage error. `find` classifies
  * one proposal live, as `rmd approve` would, with the ledger's declines applied; `record` appends the verdict's row.
@@ -124,7 +137,7 @@ export const PROPOSAL_VERDICT_SYNTAX: Record<ProposalVerdictKind, string> = {
 export function proposalVerdictCommand(
   kind: ProposalVerdictKind,
   rest: string[],
-  find: (proposalId: string) => { exists: boolean; classification?: InboxClassification },
+  find: (proposalId: string) => { exists: boolean; classification?: InboxClassification; refusal?: string },
   record: (step: string, proposalId: string, reason: string) => void,
 ): number {
   const proposalId = rest[0];
@@ -134,7 +147,12 @@ export function proposalVerdictCommand(
     console.error(`${badArg ?? `rmd ${kind}: a proposal id and a non-empty --reason are required`} — usage: ${PROPOSAL_VERDICT_SYNTAX[kind]}`);
     return 2;
   }
-  const outcome = applyProposalVerdict(kind, { proposalId, reason }, find(proposalId), record);
+  const found = find(proposalId);
+  if (found.refusal !== undefined) {
+    console.error(`rmd ${kind}: ${found.refusal}`);
+    return 1;
+  }
+  const outcome = applyProposalVerdict(kind, { proposalId, reason }, found, record);
   if (!outcome.ok) {
     console.error(`rmd ${kind}: ${outcome.detail}`);
     return 1;
