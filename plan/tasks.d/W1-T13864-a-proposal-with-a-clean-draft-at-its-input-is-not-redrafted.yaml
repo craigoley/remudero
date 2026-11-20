@@ -19,6 +19,7 @@
     - src/run-task.ts # the daemon draft hook passes its ledger rows to draftsDueOnDaemon
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
     - "src/lib/ledger.ts"
+    - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -69,3 +70,8 @@
     buildInboxDraftHook in src/run-task.ts, holds them (it calls readLedgerLines(ledgerPath) and then
     draftsDueOnDaemon). src/run-task.ts joins files; the build adds one field, draftLedgerRows: ledgerLines,
     to the draftSelection object there.
+    AMENDED (2026-11-20): test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts joins files. Its
+    readiness-failure test broke readiness by making the ledger path a directory. The daemon draft hook now reads
+    the ledger for clean draft receipts, so that fixture breaks the receipt read as well. The test now injects a
+    failing main-commit read, writes a real ledger with one clean inbox.drafted row, and asserts that the new
+    proposal is still drafted while the clean one is not.
