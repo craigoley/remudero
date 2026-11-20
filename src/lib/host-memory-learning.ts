@@ -300,7 +300,18 @@ const lineOf = (s: PeakSample): string =>
     ...(s.unmeasuredReason ? { why: s.unmeasuredReason } : {}) })}\n`;
 
 function compactStore(text: string): string {
-  const rows = compactSamples(parseSamples(text), ESTIMATE_LEARNING.keepPerClass)
+  // Only fix can recover rows outside the former compaction tail. Match readFileTail's byte and whole-line boundary.
+  const input = Buffer.from(text);
+  let tailStart = 0;
+  if (input.length > PEAK_COMPACT_BYTES) {
+    const newline = input.indexOf("\n", input.length - PEAK_COMPACT_BYTES);
+    tailStart = newline === -1 ? input.length : newline + 1;
+  }
+  const samples = [
+    ...parseSamples(input.toString("utf8", 0, tailStart)).filter(s => CONCURRENT_FIRST_CLASSES.has(s.workerClass)),
+    ...parseSamples(input.toString("utf8", tailStart)),
+  ];
+  const rows = compactSamples(samples, ESTIMATE_LEARNING.keepPerClass)
     .map((sample) => ({ line: lineOf(sample), testFile: sample.testFile !== undefined }));
   let bytesLeft = rows.reduce((budget, row) => row.testFile ? budget : budget - Buffer.byteLength(row.line), PEAK_COMPACT_BYTES);
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -749,10 +760,14 @@ export function createTreePeakSampler(overrides: Partial<TreeSamplerPorts> = {})
       let listing: ProcessListing;
       try {
         listing = ports.listProcesses();
-        if (!listing.complete) { for (const entry of tracked.values()) unmeasure(entry, "listing-incomplete"); return; }
       } catch (error) {
         for (const entry of tracked.values()) unmeasure(entry, "listing-failed");
         void error; // A later good sample cannot certify the tree's missing interval.
+        return;
+      }
+      if (!listing.complete) {
+        const reason = listing.reason?.startsWith("proc unreadable:") ? "listing-failed" : "listing-incomplete";
+        for (const entry of tracked.values()) unmeasure(entry, reason);
         return;
       }
       const startOf = new Map(listing.rows.map((row) => [row.pid, row.start]));

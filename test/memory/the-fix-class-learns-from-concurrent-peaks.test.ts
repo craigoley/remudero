@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
-import type { HostMemoryLedgerOptions } from "#src/lib/host-memory-ledger.js";
+import { DEFAULT_ESTIMATE_MIB, DEFAULT_WALK_LIMITS, defaultListProcesses, type HostMemoryLedgerOptions } from "#src/lib/host-memory-ledger.js";
 import {
   PEAK_COMPACT_BYTES, PEAK_TAIL_BYTES, classEstimate, classTypical, createTreePeakSampler, openLearnedReservation,
   readPeakSamples, recordTestFilePeak,
@@ -101,31 +101,78 @@ test("W1-T13878 criterion 2: legacy-hwm sums are a labelled fallback for the fix
   } finally { resetLearnedEstimateCacheForTests(); }
 });
 
-test("W1-T13878 criterion 3: a legacy-hwm row recorded at release names why the tree went unmeasured", () => {
-  for (const fault of ["member-rss-missing", "listing-incomplete"] as const) {
+test("W1-T13878 criterion 2: compaction preserves the former input tail for other classes", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}other-class-peaks-`));
+  resetLearnedEstimateCacheForTests();
+  try {
+    const older = row({ c: "garden", p: 300, basis: "concurrent-rss", legacy_p: 1_800 }, 0).repeat(12);
+    const filler = row({ c: "test", p: 400, basis: "process-hwm", f: "test/測定.test.ts" }, 0);
+    const recent = row({ c: "garden", p: 200, basis: "concurrent-rss", legacy_p: 900 }, 0);
+    const padding = filler.repeat(Math.ceil(PEAK_COMPACT_BYTES / Buffer.byteLength(filler)));
+    mkdirSync(join(dir, "estimates"));
+    const path = join(dir, "estimates", "state2.ndjson");
+    writeFileSync(path, older + padding + recent);
+    const store = { location: () => ({ dir }), instance: () => ({ name: "state2" }), clock: fixedClock(NOW) };
+    const prior = classEstimate("garden", store);
+    assert.deepEqual(prior, { estimateMib: DEFAULT_ESTIMATE_MIB.garden, samples: 1 });
+
+    assert.equal(recordTestFilePeak("test/new.test.ts", 401, store), true);
+    assert.ok(statSync(path).size < PEAK_TAIL_BYTES, "the rewritten file fits in the garden read tail");
     resetLearnedEstimateCacheForTests();
-    let complete = fault !== "listing-incomplete";
-    const sampler = createTreePeakSampler({
-      listProcesses: () => ({ complete, rows: [{ pid: 10, parent: 1, start: "proc:10" }] }),
-      readFile: (path) => {
-        if (path.endsWith("/stat")) return `10 (node) S 1 ${"0 ".repeat(17)}10 0 0`;
-        if (path.endsWith("/cmdline")) return "node\0worker.js\0";
-        return fault === "member-rss-missing" ? "VmHWM:\t409600 kB\n" : "VmRSS:\t204800 kB\nVmHWM:\t409600 kB\n";
-      },
-      setTimer: () => undefined, clearTimer: () => undefined,
+    assert.deepEqual(readPeakSamples("garden", store).map(s => s.legacyPeakMib), [900]);
+    assert.deepEqual(classEstimate("garden", store), prior);
+  } finally {
+    resetLearnedEstimateCacheForTests();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T13878 criterion 3: a legacy-hwm row recorded at release names why the tree went unmeasured", async (t) => {
+  const faults = ["member-rss-missing", "member-status-unreadable", "listing-incomplete", "listing-failed"] as const;
+  for (const fault of faults) {
+    await t.test(fault, () => {
+      resetLearnedEstimateCacheForTests();
+      let currentFault: typeof faults[number] | undefined;
+      let runnerAlive = true;
+      const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+      const readProc = (path: string) => {
+        const runner = path.startsWith("/proc/11/");
+        if (path.endsWith("/stat")) return `10 (node) S ${runner ? 10 : 1} ${"0 ".repeat(17)}10 0 0`;
+        if (path.endsWith("/cmdline")) return runner ? "node\0--test\0" : "node\0worker.js\0";
+        if (currentFault === "member-status-unreadable") throw denied;
+        return currentFault === "member-rss-missing" ? "VmHWM:\t409600 kB\n" : "VmRSS:\t204800 kB\nVmHWM:\t409600 kB\n";
+      };
+      const sampler = createTreePeakSampler({
+        listProcesses: () => defaultListProcesses(
+          currentFault === "listing-incomplete" ? { ...DEFAULT_WALK_LIMITS, maxEntries: 1 } : DEFAULT_WALK_LIMITS,
+          fixedClock(NOW),
+          readProc,
+          () => {
+            if (currentFault === "listing-failed") throw denied;
+            return runnerAlive ? ["10", "11"] : ["10"];
+          },
+        ),
+        readFile: readProc, setTimer: () => undefined, clearTimer: () => undefined,
+      });
+      const { store, text } = memoryStore();
+      const reservation = openLearnedReservation({ workerClass: "fix" }, { ledger: ledger(), store, sampler });
+      reservation.bindRoot(10);
+      currentFault = fault;
+      sampler.sampleNow();
+      currentFault = fault === "member-rss-missing" ? "member-status-unreadable" : "member-rss-missing";
+      sampler.sampleNow();
+      currentFault = undefined;
+      runnerAlive = false;
+      reservation.releaseOccupancy();
+      for (const workerClass of ["fix", "test"] as const) {
+        const samples = readPeakSamples(workerClass, store);
+        assert.equal(samples.length, 1, workerClass);
+        assert.equal(samples[0]!.measurementBasis, "legacy-hwm", workerClass);
+        assert.equal(samples[0]!.peakMib, 400, workerClass);
+        assert.equal(samples[0]!.unmeasuredReason, fault, `${workerClass} row keeps the first reason`);
+      }
+      assert.equal(text().match(new RegExp(`"why":"${fault}"`, "g"))?.length, 2, "both rows store the reason");
     });
-    const { store, text } = memoryStore();
-    const reservation = openLearnedReservation({ workerClass: "fix" }, { ledger: ledger(), store, sampler });
-    reservation.bindRoot(10);
-    complete = true;
-    sampler.sampleNow();
-    reservation.releaseOccupancy();
-    const samples = readPeakSamples("fix", store);
-    assert.equal(samples.length, 1, fault);
-    assert.equal(samples[0]!.measurementBasis, "legacy-hwm", fault);
-    assert.equal(samples[0]!.peakMib, 400, fault);
-    assert.equal(samples[0]!.unmeasuredReason, fault, "the row names why its concurrent peak is missing");
-    assert.match(text(), new RegExp(`"why":"${fault}"`), "the reason is stored on the row");
   }
   resetLearnedEstimateCacheForTests();
 });
