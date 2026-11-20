@@ -30,6 +30,7 @@ import { execFileRouted } from "./spawn-helper.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { hostname } from "node:os";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
@@ -128,7 +129,8 @@ import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-saf
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle } from "./inflight-lock.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle, type InflightLockInfo } from "./inflight-lock.js";
+import { sameHost } from "./host-identity.js";
 import { reclaimStaleLock } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
@@ -2511,6 +2513,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMainChangedPaths",
   "readOpenEscalations",
   "reconcilePrimaryShadowAlert",
+  "deferToLiveFixRound", // W1-T13991
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2698,6 +2701,7 @@ export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
+  | "deferToLiveFixRound"
   | "fixProgressJudge"
   | "readHostedProofResults"
   | "reproduceFailingTestsOnMain"
@@ -3311,6 +3315,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     } } : {}),
   });
   return {
+    // W1-T13991: a caller that wires no branch-claim key takes no branch claims, so it has no live round to defer to.
+    deferToLiveFixRound: deps.fixBranchClaimKeyImpl === undefined ? undefined : (pr, lines) => deferToLiveFixRound(pr, lines, {
+      inflightDir, stateRoot: config.root, claimKeyFor: (branch) => fixBranchClaimKey(owner, repo, branch), nowMs: nowMsImpl(),
+      boundMs: spawnWallClockBoundMs, isPidAlive: defaultIsPidAlive, hostname: hostname() }),
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
@@ -4425,8 +4433,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
       let branchClaim: FixRoundBranchClaim | undefined;
-      const roundEnded = (claimRunId: string): boolean => fixRoundClaimEnded(ledgerPath, claimRunId);
+      // W1-T13991: a holder waiting on CI for this head, live on this host, has not ended; a conflict round reads as before.
+      let roundClaimKey: string | undefined;
+      const liveProbe = (holder: InflightLockInfo | null | undefined): FixRoundLiveProbe | undefined =>
+        !holder || evidence.mergeConflict !== undefined ? undefined : { headSha: pr.headSha, holder, nowMs: nowMsImpl(),
+          boundMs: spawnWallClockBoundMs, isPidAlive: defaultIsPidAlive, hostname: hostname() };
+      const roundEnded = (claimRunId: string, holder?: InflightLockInfo): boolean => fixRoundClaimEnded(ledgerPath, claimRunId,
+        liveProbe(holder ?? (roundClaimKey === undefined ? undefined : readInflightLock(inflightDir, roundClaimKey))));
       let recycleTaskId: string | undefined;
+      let liveHandoff: FixRoundHandoff | undefined;
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
       // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
@@ -4631,7 +4646,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               expectedRemoteSha: pr.headSha,
               observedRemoteSha: headRef.headRefOid,
               inflightDir,
-              claimKey: fixBranchClaimKey(owner, repo, realBranch),
+              claimKey: (roundClaimKey = fixBranchClaimKey(owner, repo, realBranch)),
               claimRoundEnded: roundEnded,
               idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
             });
@@ -5015,6 +5030,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
         // the sweep is level-triggered, so the next pass simply retries it.
         const claimKey = fixBranchClaimKey(owner, repo, realBranch);
+        roundClaimKey = claimKey;
         try {
           const taken = acquireFixRoundClaim(inflightDir, claimKey, fixRoundClaimId(runId, pr.prNumber, nowMsImpl()), roundEnded);
           if (taken.endedRunId) {
@@ -5025,14 +5041,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               holder_run_id: taken.endedRunId,
             });
           }
-          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it.
-          branchClaim = fixRoundBranchClaim(taken.handle, () => reclaimFixRoundBranch({
+          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it. W1-T13991: and held through its CI wait.
+          const retakeAs = (claimRunId: string) => reclaimFixRoundBranch({
             inflightDir,
             claimKey,
-            claimRunId: fixRoundClaimId(runId, pr.prNumber, nowMsImpl()),
+            claimRunId,
             roundEnded,
             ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
-          }));
+          });
+          branchClaim = fixRoundBranchClaim(taken.handle, () => retakeAs(fixRoundClaimId(runId, pr.prNumber, nowMsImpl())), retakeAs);
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
@@ -5193,6 +5210,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // the function), so a SHIPS-UNWIRED marker on a PR this rung fixes is FLAGGED rather
           // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
+          liveRoundHandoff: (): LiveRoundHandoff | undefined => {
+            const handed = liveHandoff;
+            liveHandoff = undefined;
+            if (handed === undefined) return undefined;
+            const review = handed.failure === "check" ? undefined : buildFixRungDispatchArgs({ task, runId, prUrl: pr.prUrl, branch: realBranch,
+              worktreePath, mount: fixMount, settingsFile, config, budgetUsd, strikeCap, evidence: { unmetCriteria: handed.unmet_criteria },
+              pr: { ...pr, headSha: handed.head_sha, reviewSummary: undefined },
+              reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount } }).initialReview;
+            return { headSha: handed.head_sha, failure: handed.failure, ...(review ? { review } : {}) };
+          },
           deps: {
             fixProgressJudge: evidence.progressJudge ?? effectsProgressJudge,
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
@@ -5219,10 +5246,23 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ),
             waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
               onPhase?.("ci-wait");
+              // W1-T13991: a hand-off the sweep wrote for the claim this wait holds ends the wait at its next poll.
+              const handoffSignal = new Error("the sweep handed this round a new failure on its head");
+              const sleep = async (ms: number): Promise<void> => {
+                const handed = readFixRoundHandoff(fixRoundHandoffPath(config.root, claimKey));
+                if (handed !== undefined && handed.claim_run_id === branchClaim?.id()) {
+                  liveHandoff = handed;
+                  throw handoffSignal;
+                }
+                await delay(ms);
+              };
               try {
-                const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
+                const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root), sleep });
                 if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
                 return ci;
+              } catch (error) {
+                if (error !== handoffSignal || liveHandoff === undefined) throw error;
+                return { state: "timeout", sha: liveHandoff.head_sha };
               } finally {
                 onPhase?.("worker");
               }
@@ -5371,6 +5411,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
         }
         if (worktreePath) removeRunLock(worktreePath);
+        const handoffAt = roundClaimKey === undefined ? undefined : fixRoundHandoffPath(config.root, roundClaimKey);
+        if (handoffAt !== undefined && readFixRoundHandoff(handoffAt)?.round_run_id === runId) fs.rmSync(handoffAt, { force: true });
         // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
         // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
         // never strands the claim past this round's own dispatch.
@@ -14645,9 +14687,123 @@ export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number):
 }
 
 /** W1-T5955 — true once the round holding `claimRunId` wrote its `fix.done`. A rotated row reads false;
- *  a thrown round needs no row, its `finally` releases the claim. */
-export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
-  return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+ *  a thrown round needs no row, its `finally` releases the claim. W1-T13991: a holder `live` reads as
+ *  waiting on CI for the PR's head ({@link fixRoundIsLiveOnHead}) has not ended. */
+export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string, live?: FixRoundLiveProbe): boolean {
+  const lines = readLedgerLines(ledgerPath); // ledger-read-intent: live
+  if (!lines.some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId)) return false;
+  return live === undefined || live.holder.run_id !== claimRunId || !fixRoundIsLiveOnHead(lines, live);
+}
+
+/** W1-T13991 — what reads a branch claim's holder as a round still waiting on CI for a head. */
+export interface FixRoundLiveProbe {
+  /** The PR head a new round would be dispatched on. */
+  headSha: string;
+  holder: Pick<InflightLockInfo, "pid" | "run_id"> & { host?: string };
+  nowMs: number;
+  /** The round's own spawn bound: a CI wait older than this reads ended. */
+  boundMs: number;
+  isPidAlive: (pid: number) => boolean;
+  hostname: string;
+}
+
+/**
+ * W1-T13991 — true when the claim's holder pushed `headSha` itself (the newest `fix.done` naming the claim),
+ * then wrote `run.awaiting_external` from the same run, has written nothing since that ends the wait, and is
+ * alive on this host within its spawn bound. Any doubt reads false, which is origin/main's reading.
+ */
+export function fixRoundIsLiveOnHead(lines: ReadonlyArray<Record<string, unknown>>, probe: FixRoundLiveProbe): boolean {
+  const done = lines.findLast((row) => row.step === "fix.done" && row.branch_claim_run_id === probe.holder.run_id);
+  if (typeof done?.run_id !== "string" || typeof done.ts !== "string" || done.pushed_head_sha !== probe.headSha) return false;
+  let waitTs: string | undefined;
+  for (const row of lines) {
+    if (row.run_id !== done.run_id || typeof row.ts !== "string" || row.ts < done.ts) continue;
+    if (row.step === "run.awaiting_external") waitTs ??= row.ts;
+    else if (waitTs !== undefined && (row.step === "fix.ci_not_green" || row.step === "fix.stood_down" ||
+      row.step === "fix.review" || row.step === "fix.dispatch" || row.step === "fix.done" || row.step === "fix.exhausted" ||
+      row.step === "sweep.fix.error" || row.step === "run.freshness_handoff")) return false;
+  }
+  const waitedMs = waitTs === undefined ? NaN : probe.nowMs - Date.parse(waitTs);
+  if (!(waitedMs <= probe.boundMs) || probe.holder.host === undefined || !sameHost(probe.holder.host, probe.hostname)) return false;
+  return probe.isPidAlive(probe.holder.pid);
+}
+
+/** W1-T13991 — the new failure the sweep hands the live round on its own head, one file per branch claim. */
+export interface FixRoundHandoff {
+  claim_run_id: string;
+  round_run_id: string;
+  head_sha: string;
+  failure: "check" | "review";
+  unmet_criteria: CriterionVerdict[];
+  ts: string;
+}
+
+/** W1-T13991 — what the round's next strike starts on: a red check it re-reads, or the failing review it was handed. */
+export interface LiveRoundHandoff {
+  headSha: string;
+  failure: "check" | "review";
+  review?: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+}
+
+export function fixRoundHandoffPath(stateRoot: string, claimKey: string): string {
+  return join(stateRoot, "state", "fix-round-handoff", `${claimKey}.json`);
+}
+
+/** The hand-off at `path`, or `undefined` when there is none or it does not parse as one. */
+export function readFixRoundHandoff(path: string): FixRoundHandoff | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let parsed: Partial<FixRoundHandoff> | null;
+  try {
+    parsed = JSON.parse(raw) as Partial<FixRoundHandoff> | null;
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+  return typeof parsed?.claim_run_id === "string" && typeof parsed.head_sha === "string" &&
+    (parsed.failure === "check" || parsed.failure === "review") && Array.isArray(parsed.unmet_criteria)
+    ? parsed as FixRoundHandoff : undefined;
+}
+
+/** W1-T13991 — the live round a new dispatch on `pr`'s head defers to, handing it the failure once per head. */
+export interface LiveFixRoundDeferral {
+  liveRoundRunId: string;
+  claimRunId: string;
+  failure: "check" | "review";
+  /** True only on the pass that wrote the hand-off. */
+  handedOff: boolean;
+}
+
+export function deferToLiveFixRound(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  io: { inflightDir: string; stateRoot: string; claimKeyFor: (branch: string) => string; nowMs: number; boundMs: number;
+    isPidAlive: (pid: number) => boolean; hostname: string },
+): LiveFixRoundDeferral | undefined {
+  if (!pr.headRefName || pr.mergeState === "dirty") return undefined;
+  const claimKey = io.claimKeyFor(pr.headRefName);
+  const holder = readInflightLock(io.inflightDir, claimKey);
+  if (!holder || !fixRoundIsLiveOnHead(lines, { headSha: pr.headSha, holder, nowMs: io.nowMs, boundMs: io.boundMs,
+    isPidAlive: io.isPidAlive, hostname: io.hostname })) return undefined;
+  const liveRoundRunId = String(lines.findLast((row) => row.step === "fix.done" && row.branch_claim_run_id === holder.run_id)?.run_id);
+  const failure = (pr.ciFailures?.length ?? 0) > 0 || (pr.redRequiredChecks?.length ?? 0) > 0 ? "check" : "review";
+  const path = fixRoundHandoffPath(io.stateRoot, claimKey);
+  const prior = readFixRoundHandoff(path);
+  const handedOff = (failure === "check" || pr.unmetCriteria.length > 0) &&
+    !(prior?.claim_run_id === holder.run_id && prior.head_sha === pr.headSha && prior.failure === failure);
+  if (handedOff) {
+    const handoff: FixRoundHandoff = { claim_run_id: holder.run_id, round_run_id: liveRoundRunId, head_sha: pr.headSha, failure,
+      unmet_criteria: failure === "review" ? pr.unmetCriteria : [], ts: clockFromMillisFn(() => io.nowMs).iso() };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(`${path}.tmp`, JSON.stringify(handoff));
+    fs.renameSync(`${path}.tmp`, path);
+  }
+  return { liveRoundRunId, claimRunId: holder.run_id, failure, handedOff };
 }
 
 /** W1-T7719: nearest-rank p95 of live-ledger claim-to-end spans. W1-T7998: with no history it is
@@ -14742,13 +14898,13 @@ export function acquireFixRoundClaim(
   inflightDir: string,
   claimKey: string,
   claimRunId: string,
-  roundEnded: (claimRunId: string) => boolean,
+  roundEnded: (claimRunId: string, holder?: InflightLockInfo) => boolean,
 ): { handle: InflightLockHandle; endedRunId?: string } {
   let endedRunId: string | undefined;
   const cleared = reclaimStaleLock(inflightLockPath(inflightDir, claimKey), {
     parseHolder: parseInflightLockInfo,
     isStale: (held) => {
-      if (roundEnded(held.run_id)) endedRunId = held.run_id;
+      if (roundEnded(held.run_id, held)) endedRunId = held.run_id;
       return endedRunId !== undefined;
     },
   });
@@ -14762,7 +14918,7 @@ export function reclaimFixRoundBranch(opts: {
   inflightDir: string;
   claimKey: string;
   claimRunId: string;
-  roundEnded: (claimRunId: string) => boolean;
+  roundEnded: (claimRunId: string, holder?: InflightLockInfo) => boolean;
   ownsWorktree: () => boolean;
 }): InflightLockHandle | string {
   let owns: boolean;
@@ -14789,14 +14945,20 @@ export interface FixRoundBranchClaim {
   last(): InflightLockHandle;
   /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
   verify?(): string | undefined;
+  /** W1-T13991: re-take the claim the last `fix.done` released, under that id, for the CI wait; a string is why not. */
+  holdForWait?(): string | undefined;
 }
 
-export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
+/** W1-T13991: `retakeAs` re-takes a claim under a given id; without it no claim is held through a CI wait. */
+export function fixRoundBranchClaim(
+  first: InflightLockHandle, retake: () => InflightLockHandle | string, retakeAs?: (claimRunId: string) => InflightLockHandle | string,
+): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
   let verificationRequired = false;
-  const verify = () => {
-    verificationRequired = true;
+  let releasedId: string | undefined;
+  let heldForWait = false;
+  const identity = () => {
     if (!held) return "branch claim is not held";
     try {
       const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -14817,14 +14979,34 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
       return reason;
     }
   };
+  const verify = () => {
+    verificationRequired = true;
+    return identity();
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
       // A refresh that verified ownership must not later unlink an unknown or replacement holder.
       if (!verificationRequired || verify() === undefined) held?.release();
+      releasedId = held?.info.run_id ?? releasedId;
       held = undefined;
+      heldForWait = false;
     },
+    ...(retakeAs === undefined ? {} : { holdForWait: () => {
+      if (held || releasedId === undefined) return held ? undefined : "no released claim to hold";
+      const next = retakeAs(releasedId);
+      if (typeof next === "string") return next;
+      held = last = next;
+      heldForWait = true;
+      return undefined;
+    } }),
     reacquire: () => {
+      // W1-T13991: a claim held through the wait is handed back after it; a replacement holder is never unlinked.
+      if (held && heldForWait) {
+        if (identity() === undefined) held.release();
+        held = undefined;
+        heldForWait = false;
+      }
       if (held) return undefined;
       const next = retake();
       if (typeof next === "string") return next;
@@ -16297,6 +16479,9 @@ export interface SweepDeps {
   claimFixAdmission?: (pr: OpenPrView) =>
     | { admitted: true; release?: () => void }
     | { admitted: false; reason: string };
+  /** W1-T13991 — the live fix round already waiting on CI for this PR's head, which takes its new failure
+   *  instead of a second round. Read under the fix-dispatch claim, before any fix admission. */
+  deferToLiveFixRound?: (pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>) => LiveFixRoundDeferral | undefined;
   /** W1-T3202 — identifies the one shared host-budget controller that admitted this pass's
    *  detached repairs. Full sweeps build it inside {@link runSweep}; light sweeps share one across
    *  their per-PR calls. Omission preserves every direct/test caller's previous behavior. */
@@ -23103,6 +23288,13 @@ export async function runSweep(
     // caller wrote before this instant is counted here even though this pass's own `ledgerLines`,
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
+    const live = deps.deferToLiveFixRound?.(pr, freshLines);
+    if (live !== undefined) {
+      inFlightFixKeys.delete(fixKey);
+      if (live.handedOff) log("sweep.fix.deferred_to_live_round", { pr_number: pr.prNumber, head_sha: pr.headSha, task_id: fixTaskId,
+        live_round_run_id: live.liveRoundRunId, claim_run_id: live.claimRunId, failure: live.failure });
+      return { ok: false, reason: `deferred to the live fix round ${live.liveRoundRunId} waiting on CI for ${pr.headSha}` };
+    }
     const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
     // repeated refusal, was never ruled by the progress judge — refuse it here exactly as before; a PR

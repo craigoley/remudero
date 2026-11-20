@@ -55,7 +55,7 @@ import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWE
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
-import { pendingQualityGateNames } from "../../lib/sweep.js";
+import { pendingQualityGateNames, type LiveRoundHandoff } from "../../lib/sweep.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
@@ -2341,6 +2341,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   prBodySha256?: string;
   /** W1-T12710: a stronger-worker round's earlier rounds on its stalled criterion: diff summary and outcome each. */
   failedApproaches?: readonly string[];
+  /** W1-T13991: the new failure the sweep handed this round while it waited on CI for its own push, taken once per wait. */
+  liveRoundHandoff?: () => LiveRoundHandoff | undefined;
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -5464,11 +5466,25 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       },
     );
 
-    const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+    // W1-T13991: the wait holds the claim fix.done released once it is recorded, so a new failure on this head comes here.
+    const waited = await deps.waitForCiGreen(opts.prUrl, (step, extra) => {
+      deps.log(step, extra);
+      if (step === "run.awaiting_external") deps.branchClaim?.holdForWait?.();
+    });
+    const resumed = opts.liveRoundHandoff?.();
+    if (resumed) deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: resumed.headSha, failure: resumed.failure });
+    const ci: CiGateOutcome | "green" | "red" | "timeout" = resumed?.failure === "check" ? { state: "red", sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return claimLostAfterCi;
+    if (resumed?.review) {
+      currentPinnedSha = currentPrHeadSha = rungOwnHeadSha = resumed.headSha;
+      review = resumed.review;
+      noReviewYet = false;
+      currentMergeConflict = undefined;
+      continue;
+    }
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
