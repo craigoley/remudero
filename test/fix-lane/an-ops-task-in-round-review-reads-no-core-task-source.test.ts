@@ -20,7 +20,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import type { Mount } from "#src/lib/mounts.js";
-import type { ReviewVerdict } from "#src/lib/review.js";
+import { observePromisedFollowUps, type ReviewVerdict } from "#src/lib/review.js";
 import type { CatalogTaskContract } from "#src/lib/task-lookup.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -69,8 +69,15 @@ function issueStore(): IssueGateway {
   return { create: () => "https://github.com/acme/remudero/issues/1", listOpen: (): OpenIssue[] => [], comment: () => {} };
 }
 
-/** Drive ONE strike of the real fix rung and return the `task` it handed `deps.runReview`. */
-async function reviewedTaskFor(taskId: string, sourcePath: string, catalog: "public" | "ops"): Promise<Record<string, unknown>> {
+/** Drive ONE strike of the real fix rung and return the `task` it handed `deps.runReview`. With
+ *  `viaResolver: false` the deps match production's sweep and `rmd fix`: the contract is resolved
+ *  before the rung, and no `resolveTaskContractAtHead` is wired. */
+async function reviewedTaskFor(
+  taskId: string,
+  sourcePath: string,
+  catalog: "public" | "ops",
+  viaResolver = true,
+): Promise<Record<string, unknown>> {
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t13958-`));
   let reviewed: Record<string, unknown> | undefined;
   try {
@@ -110,7 +117,7 @@ async function reviewedTaskFor(taskId: string, sourcePath: string, catalog: "pub
         say: () => {},
         account: (r) => r,
         fetchPrBody: async () => `## Summary\n\nfixture body.\n\nRemudero-Task: ${taskId}\n`,
-        resolveTaskContractAtHead: () => contract,
+        ...(viaResolver ? { resolveTaskContractAtHead: () => contract } : {}),
       },
     });
   } finally {
@@ -125,6 +132,21 @@ test("W1-T13958 criterion 1: an ops-catalog task reaches the in-round review wit
   assert.equal(task.catalog, "ops");
   assert.equal("sourcePath" in task, false, `an ops blob label must not reach the core-head follow-up reader: ${String(task.sourcePath)}`);
   assert.deepEqual(task.files, ["src/x.ts"], "the head-resolved contract still reaches the reviewer");
+});
+
+test("W1-T13958 criterion 1: on the production path (no head resolver wired) an ops task reaches the review with no sourcePath", async () => {
+  const task = await reviewedTaskFor("W1-T13785", "tasks.d/W1-T13785-x.yaml", "ops", false);
+  assert.equal("sourcePath" in task, false, `the sweep and rmd fix wire no resolver, yet the ops label must not leak: ${String(task.sourcePath)}`);
+  // The reader the in-round review runs: fed the task the rung handed over, it is not unknown.
+  const observed = await observePromisedFollowUps({ diff: "", headSha: "sha-1", task: task as { id: string; sourcePath?: string } });
+  assert.equal(observed.state, "complete", `no promise source unavailable verdict: ${JSON.stringify(observed)}`);
+  const monolith = await reviewedTaskFor("W1-T13786", "tasks.yaml", "ops", false);
+  assert.equal("sourcePath" in monolith, false, "the ops monolith label is an ops blob too");
+});
+
+test("W1-T13958 criterion 2: on the production path (no head resolver wired) a core task keeps its plan/tasks.d sourcePath", async () => {
+  const task = await reviewedTaskFor("W1-T1", "plan/tasks.d/W1-T1-x.yaml", "public", false);
+  assert.equal(task.sourcePath, "plan/tasks.d/W1-T1-x.yaml", "a core task's promised follow-ups are still read at the head");
 });
 
 test("W1-T13958 criterion 2: a core-catalog task keeps its plan/tasks.d sourcePath for the in-round review", async () => {
