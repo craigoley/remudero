@@ -136,6 +136,9 @@ test("W1-T13888 criterion 1: a latched exit stops waiting for the pass at the dr
   assert.equal(abandoned?.pre_exit_pass, "awaited_in_flight");
   assert.equal(abandoned?.max_drain_wait_ms, limitMs);
   assert.equal(h.row("daemon.sweep.abandoned"), undefined, "the full-pass bound did not end the wait");
+  const phases = h.row("daemon.freshness_exit")?.phases_ms as Record<string, unknown> | undefined;
+  assert.equal(phases?.pre_exit_pass, 20, "the abandoned pass is recorded once, at the limit");
+  assert.equal(h.row("daemon.freshness_drain.completed")?.pass_overlap_ms, 20, "and the drain reports its overlap to the limit");
 });
 
 test("W1-T13888 criterion 2: an unlatched exit stops waiting for the pass at the drain deadline", async (t) => {

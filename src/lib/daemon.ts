@@ -6024,7 +6024,11 @@ export async function runDaemon(
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
-  type ExitPass = { kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number };
+  type ExitPass = {
+    kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number;
+    /** Records pre_exit_pass once: when the pass settles, or at its limit when the exit goes without it (#19797 review). */
+    record?: () => void;
+  };
   /** W1-T13888: the exit waits for an in-flight pass until its limit, `maxDrainWaitMs` after the latch or the exit,
    *  then goes without it. The pass ends between pull requests only at its own checkpoints, and on 2026-11-20 one
    *  stuck inside its prelude held a requested restart for 2,350,250 ms (4 of 53 exits in 7 days passed 30 min). */
@@ -6035,6 +6039,7 @@ export async function runDaemon(
     const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit]);
     clearTimeout(timer);
     if (outcome === "limit") {
+      pass.record?.();
       log("daemon.freshness_pre_exit_pass_abandoned", { pre_exit_pass: pass.kind, max_drain_wait_ms: freshnessMaxDrainWaitMs,
         limit_at: fixedClock(pass.limitAtMs).iso() });
     }
@@ -6241,6 +6246,7 @@ export async function runDaemon(
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
       if (pass.overlapped) pass.overlapMs = freshnessPhases.pre_exit_pass;
     };
+    pass.record = recordPass;
     pass.settled = Promise.resolve(pendingPass).then(recordPass);
     if (!pass.overlapped) { await passWithinLimit(pass); recordPass(); }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
