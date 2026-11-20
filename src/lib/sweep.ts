@@ -10,7 +10,8 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
   runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHoldForSweep, PRIOR_ROUND_HOLD_FIELD,
+  scopeAmendmentsWithoutMergeTime,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
@@ -2448,6 +2449,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
   "readRequiredCheckCompletions",
+  "readAmendmentMergedAt",
   "liveCiRunForHead",
   "refreshCiRunForHead",
   "reaggregateCiGate",
@@ -2749,6 +2751,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readCiGateRollup"
   | "readCiGateRequired"
   | "readRequiredCheckCompletions"
+  | "readAmendmentMergedAt"
   | "readPrHeadDiff"
   | "readPlanLaneCapacity"
   | "liveCiRunForHead"
@@ -2975,12 +2978,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const required = new Set([...requiredChecks, ...(branchChecks?.keys() ?? [])]);
     if (required.size === 0) return [];
     let runs: { name: string; completedAt: string }[];
+    // A pinned requirement's App, as its check runs name it: a commit status carries its creator, not an App id.
+    const appBots = new Map<number, string>();
+    const botAppIds = new Map<string, number | undefined>();
+    const appIdOfBot = async (login: string): Promise<number | undefined> => {
+      for (const [id, bot] of appBots) if (bot === login) return id;
+      const slug = /^(.+)\[bot\]$/.exec(login)?.[1];
+      if (slug === undefined) return undefined;
+      if (!botAppIds.has(login)) {
+        try {
+          const app = await readJsonImpl(["api", `apps/${slug}`]) as { id?: unknown } | undefined;
+          botAppIds.set(login, typeof app?.id === "number" ? app.id : undefined);
+        } catch (error) {
+          log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "status-app", error: String(error) });
+          botAppIds.set(login, undefined);
+        }
+      }
+      return botAppIds.get(login);
+    };
     try {
       // Match ci-gate's paginated check-runs read. Any completed attempt can release this hold.
       const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/check-runs?per_page=100&filter=all`,
         "--paginate", "--slurp"], { fresh: true }) as { check_runs: {
-          name: string; status: string; completed_at: string | null; app?: { id?: number } | null;
+          name: string; status: string; completed_at: string | null; app?: { id?: number; slug?: string } | null;
         }[] }[];
+      for (const run of pages.flatMap(page => page.check_runs)) {
+        if (typeof run.app?.id === "number" && typeof run.app.slug === "string") appBots.set(run.app.id, `${run.app.slug}[bot]`.toLowerCase());
+      }
       runs = pages.flatMap(page => page.check_runs.flatMap(run => {
         const pin = branchChecks?.get(run.name);
         return required.has(run.name) && run.status === "completed" && typeof run.completed_at === "string" &&
@@ -2990,20 +3014,39 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
       return [];
     }
-    // Branch protection also requires commit statuses (remudero-review). A status meets only a requirement pinned to no App.
-    const statusContexts = new Set([...(branchChecks ?? [])].flatMap(([name, pin]) => pin == null || pin === -1 ? [name] : []));
+    // Branch protection also requires commit statuses (remudero-review). A status meets a requirement pinned to no App,
+    // or one pinned to the App whose bot created it.
+    const statusContexts = new Map([...(branchChecks ?? [])].map(([name, pin]) => [name, pin]));
     if (statusContexts.size === 0) return runs;
     try {
       const statuses = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/statuses?per_page=100`,
-        "--paginate", "--slurp"], { fresh: true }) as { context: string; state: string; created_at?: string; updated_at?: string }[][]).flat();
-      return [...runs, ...statuses.flatMap(status => {
+        "--paginate", "--slurp"], { fresh: true }) as { context: string; state: string; created_at?: string; updated_at?: string;
+          creator?: { login?: string } | null }[][]).flat();
+      const completed: { name: string; completedAt: string }[] = [...runs];
+      for (const status of statuses) {
         const completedAt = status.updated_at ?? status.created_at;
-        return statusContexts.has(status.context) && status.state !== "pending" && typeof completedAt === "string"
-          ? [{ name: status.context, completedAt }] : [];
-      })];
+        if (!statusContexts.has(status.context) || status.state === "pending" || typeof completedAt !== "string") continue;
+        const pin = statusContexts.get(status.context);
+        const creator = status.creator?.login?.toLowerCase();
+        if (pin == null || pin === -1 || (creator !== undefined && await appIdOfBot(creator) === pin)) {
+          completed.push({ name: status.context, completedAt });
+        }
+      }
+      return completed;
     } catch (error) {
       log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "statuses", error: String(error) });
       return runs;
+    }
+  };
+  const readAmendmentMergedAt = async (url: string): Promise<string | null | undefined> => {
+    const ref = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)$/i.exec(url.trim());
+    if (!ref) return undefined;
+    try {
+      const view = await readJsonImpl(["api", `repos/${ref[1]}/${ref[2]}/pulls/${ref[3]}`], { fresh: true }) as { merged_at?: unknown } | undefined;
+      return typeof view?.merged_at === "string" ? view.merged_at : view?.merged_at === null ? null : undefined;
+    } catch (error) {
+      log("sweep.prior_round_hold.amendment_unreadable", { amendment_url: url, error: String(error) });
+      return undefined;
     }
   };
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
@@ -3361,10 +3404,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const union = await readSweepRepairHistory(ledgerPath);
     if (!union.ok) return undefined;
     const rows = union.rows;
-    const facts = { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha, ...contractRevisionFor(pr) };
-    const held = priorRoundHold(rows, facts);
+    const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, ...contractRevisionFor(pr) };
+    const held = priorRoundHoldForSweep(rows, facts);
+    if (held?.hold === "NEEDS_SCOPE") {
+      return priorRoundHoldForSweep(rows, { ...facts, amendmentMergedAt: await amendmentMergeTimes(rows, facts.taskId, readAmendmentMergedAt) });
+    }
     if (held?.hold !== "FLAKE") return held;
-    return priorRoundHold(rows, { ...facts, checkCompletions: await readRequiredCheckCompletions(pr) });
+    return priorRoundHoldForSweep(rows, { ...facts, checkCompletions: await readRequiredCheckCompletions(pr) });
   };
   // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
   // carry the landing too, so it never runs a real child against the checkout the test runs in.
@@ -4062,6 +4108,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     readCiGateRollup,
     readRequiredCheckCompletions,
+    readAmendmentMergedAt,
 
     // W1-T2300 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job: the SAME per-job Actions
     // route `requeueCheck` above already uses (`actions/jobs/{job_id}/rerun`, NEVER
@@ -15748,6 +15795,18 @@ export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | unde
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
 
 const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
+/** W1-T13865: live merge times for the task's amendment PRs that no pr.terminal row dates; unreadable ones are left out. */
+async function amendmentMergeTimes(rows: readonly Record<string, unknown>[], taskId: string | undefined,
+  read: (url: string) => Promise<string | null | undefined>): Promise<Map<string, string | null>> {
+  const times = new Map<string, string | null>();
+  for (const url of scopeAmendmentsWithoutMergeTime(rows, taskId)) {
+    const key = prUrlKey(url)?.toLowerCase();
+    const mergedAt = await read(url);
+    if (key !== undefined && mergedAt !== undefined) times.set(key, mergedAt);
+  }
+  return times;
+}
+
 /** A conflicted child's live head: dispatchFix reads the prior-round hold there, since the sweep judged another head. */
 const childAdoptedFixHeads = new WeakSet<OpenPrView>();
 
@@ -16455,6 +16514,8 @@ export interface SweepDeps {
   readCiGateRequired?: () => readonly string[];
   /** Terminal completions required by branch protection or ci-gate for this exact head. */
   readRequiredCheckCompletions?: (pr: OpenPrView) => Promise<readonly { name: string; completedAt: string }[]>;
+  /** W1-T13865: an amendment PR's live merge time; null when unmerged, undefined when unreadable. */
+  readAmendmentMergedAt?: (url: string) => Promise<string | null | undefined>;
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
@@ -22398,15 +22459,20 @@ export async function runSweep(
       const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
       priorRoundHistory = archived === undefined ? ledgerLines : [...archived, ...ledgerLines];
     }
-    const facts = { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha,
+    const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha,
       get contractRevision() {
         return pr.taskId === undefined ? undefined : readWitnessContractRevision(pr.taskId);
       },
     };
-    const held = priorRoundHold(priorRoundHistory, facts);
+    const held = priorRoundHoldForSweep(priorRoundHistory, facts);
+    if (held?.hold === "NEEDS_SCOPE" && deps.readAmendmentMergedAt !== undefined) {
+      const amendmentMergedAt = await amendmentMergeTimes(priorRoundHistory, facts.taskId, deps.readAmendmentMergedAt);
+      return priorRoundHoldForSweep(priorRoundHistory, { taskId: facts.taskId, prNumber: pr.prNumber, headSha: facts.headSha,
+        contractRevision: facts.contractRevision, amendmentMergedAt });
+    }
     if (held?.hold !== "FLAKE" || deps.readRequiredCheckCompletions === undefined) return held;
     const checkCompletions = await deps.readRequiredCheckCompletions(pr);
-    return priorRoundHold(priorRoundHistory, { taskId: facts.taskId, headSha: facts.headSha, checkCompletions });
+    return priorRoundHoldForSweep(priorRoundHistory, { taskId: facts.taskId, prNumber: pr.prNumber, headSha: facts.headSha, checkCompletions });
   };
   const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
     ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}) });
