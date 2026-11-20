@@ -8908,11 +8908,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
   const options = asyncFixRungOptions(opts, hostWorktreeGitAsync);
-  const host = fixCommandHost();
+  const { host, restore } = prepareScopeAmendmentReads(options, fixCommandHost());
+  return runFixRungFromModule(options, host).finally(restore);
+}
+
+function prepareScopeAmendmentReads(options: Parameters<typeof runFixRung>[0], host: FixCommandHost) {
   const { deps, taskId } = options;
   const { fetchPrBody, scopeAmendmentPortsIo } = deps;
   if (deps.scopeAmendmentWritePorts || scopeAmendmentPortsIo?.findShardFn || /^PR-\d+$/.test(taskId)) {
-    return runFixRungFromModule(options, host);
+    return { host };
   }
 
   type Shard = Awaited<ReturnType<typeof findScopeAmendmentBaseShard>>;
@@ -8940,12 +8944,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     },
   };
   if (fetchPrBody) deps.fetchPrBody = readBodyWithScopeBase;
-  try {
-    return await runFixRungFromModule(options, fetchPrBody ? host : { ...host, fetchPrBodyViaGh: readBodyWithScopeBase });
-  } finally {
-    deps.fetchPrBody = fetchPrBody;
-    deps.scopeAmendmentPortsIo = scopeAmendmentPortsIo;
-  }
+  return {
+    host: fetchPrBody ? host : { ...host, fetchPrBodyViaGh: readBodyWithScopeBase },
+    restore: () => {
+      deps.fetchPrBody = fetchPrBody;
+      deps.scopeAmendmentPortsIo = scopeAmendmentPortsIo;
+    },
+  };
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
