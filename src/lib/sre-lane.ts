@@ -81,6 +81,8 @@ export interface IncidentLedgerEvent {
   sha?: string;
   /** Which registry instance this row came from — surfaced in the filed evidence. */
   instance: string;
+  /** W1-T14005: the {@link interventionKey} an intervention row was routed under; {@link aggregateIncidents} counts each once. */
+  interventionKey?: string;
 }
 
 /** One `incident.event`/`incident.sampled` ledger row (loosely typed like the rest of this repo's
@@ -100,7 +102,8 @@ export function incidentEventFromLedgerRow(row: Record<string, unknown>, instanc
   const message = typeof row.message === "string" ? row.message : undefined;
   const route = typeof row.route === "string" ? row.route : undefined;
   const sha = typeof row.sha === "string" ? row.sha : undefined;
-  return { fingerprint, ts, kind, name, message, route, sha, instance };
+  const key = typeof row.intervention_key === "string" ? { interventionKey: row.intervention_key } : {};
+  return { fingerprint, ts, kind, name, message, route, sha, instance, ...key };
 }
 
 /** One reported in-app frame — mirrors {@link import("./incident-events.js").IncidentEventFrame}
@@ -120,7 +123,9 @@ export interface MergedPrFiles {
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
 
-/** Group `events` by fingerprint and reduce each group to its {@link IncidentEvidence}. Pure. */
+/** Group `events` by fingerprint and reduce each group to its {@link IncidentEvidence}. Pure.
+ *  W1-T14005: an event carrying an intervention key counts once, at its first routing, so a repeat routing never moves
+ *  the count, the span or the burn; an event with no key counts by itself, as before. */
 export function aggregateIncidents(events: readonly IncidentLedgerEvent[]): IncidentEvidence[] {
   const byFingerprint = new Map<string, IncidentLedgerEvent[]>();
   for (const event of events) {
@@ -130,7 +135,13 @@ export function aggregateIncidents(events: readonly IncidentLedgerEvent[]): Inci
   }
   const out: IncidentEvidence[] = [];
   for (const [fingerprint, rows] of byFingerprint) {
-    const sorted = [...rows].sort((a, b) => a.ts - b.ts);
+    const counted = new Set<string>();
+    const sorted = [...rows].sort((a, b) => a.ts - b.ts).filter((e) => {
+      if (e.interventionKey === undefined) return true;
+      if (counted.has(e.interventionKey)) return false;
+      counted.add(e.interventionKey);
+      return true;
+    });
     const firstSeenMs = sorted[0].ts;
     const lastSeenMs = sorted[sorted.length - 1].ts;
     const spanHours = Math.max(1, (lastSeenMs - firstSeenMs) / HOUR_MS);
@@ -699,6 +710,45 @@ function interventionMemoryPath(stateDir: string): string {
   return join(stateDir, "operator-interventions.json");
 }
 
+/** The latest finite instant among `values`; NaN when none is. */
+function latestMs(...values: Array<number | undefined>): number {
+  const finite = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  return finite.length ? Math.max(...finite) : Number.NaN;
+}
+
+const keyAtMs = (key: string) => Date.parse(key.slice(key.lastIndexOf("|") + 1));
+
+/**
+ * W1-T14005: the routing memory, each routed key with the latest instant a row that carried it was stamped at: the
+ * later of that row's ledger `ts` and its intervention's `at`. A memory written before this holds bare keys, which
+ * recorded only their `at`. Absent, it is empty; unparseable or malformed, it throws.
+ */
+function readInterventionMemory(path: string): Map<string, number> {
+  const memory = new Map<string, number>();
+  if (!existsSync(path)) return memory;
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { routed?: unknown };
+  if (parsed.routed !== undefined && !Array.isArray(parsed.routed)) throw new Error(`Invalid operator-intervention memory: ${path}`);
+  for (const entry of (parsed.routed ?? []) as unknown[]) {
+    const record = typeof entry === "object" && entry !== null ? entry as { key?: unknown; seen?: unknown } : undefined;
+    const key = typeof entry === "string" ? entry : typeof record?.key === "string" ? record.key : undefined;
+    if (key === undefined) throw new Error(`Invalid operator-intervention memory: ${path}`);
+    memory.set(key, latestMs(memory.get(key), typeof record?.seen === "string" ? Date.parse(record.seen) : undefined, keyAtMs(key)));
+  }
+  return memory;
+}
+
+/**
+ * W1-T14005: the routed keys a pass keeps — each one whose carrying row can still be read, by the union's own `since`
+ * rule (a row stamped before `sinceMs` is not read). The bound is the read window itself: a key outlives no row that
+ * could route it again, and nothing older stays. The fix-lane gardener records a PR-surface intervention after the hand
+ * action, so a row read by its `ts` can carry an `at` already outside the window; pruned by `at` alone, its key was
+ * dropped on every pass and routed again on every pass. MEASURED on the core ledger, 2026-11-19 12:17Z to 11-20 14:25Z:
+ * 130,837 intervention incident.event rows over 1,149 passes for 142 distinct messages, each routed on every pass.
+ */
+function interventionMemoryKeep(memory: ReadonlyMap<string, number>, sinceMs: number): Map<string, number> {
+  return new Map([...memory].filter(([, seenMs]) => seenMs >= sinceMs));
+}
+
 /**
  * Derive the control-surface interventions from the ledger, write each new one as an `operator.intervention` row,
  * and route every intervention (control and the PR-surface rows the fix-lane gardener wrote) as ONE
@@ -728,32 +778,39 @@ export async function routeOperatorInterventions(input: FleetFlowInput): Promise
     else appendLedger(join(input.stateDir, LEDGER_FILENAME), line, { clock: fixedClock(input.nowMs) });
   };
   const all = new Map<string, OperatorInterventionRow>();
+  // W1-T14005: the latest ledger `ts` this pass read each key's row at, which is what decides whether it is read again.
+  const carried = new Map<string, number>();
   for (const row of rows) {
     const read = interventionFromLedgerRow(row);
-    if (read) all.set(interventionKey(read), read);
+    if (!read) continue;
+    const key = interventionKey(read);
+    all.set(key, read);
+    carried.set(key, latestMs(carried.get(key), typeof row.ts === "string" ? Date.parse(row.ts) : undefined));
   }
   const path = interventionMemoryPath(input.stateDir);
-  const memory = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as { routed?: string[] }) : {};
-  if (memory.routed !== undefined && !Array.isArray(memory.routed)) throw new Error(`Invalid operator-intervention memory: ${path}`);
-  const routed = new Set(memory.routed ?? []);
+  const memory = readInterventionMemory(path);
   // A row already in the ledger, or already routed, is never written a second time (a reader that lags the
   // pass's own writes must not mint it again).
-  const recorded = new Set([...all.keys(), ...routed]);
+  const recorded = new Set([...all.keys(), ...memory.keys()]);
   for (const derived of deriveControlInterventions(rows.filter((r) => r.step !== OPERATOR_INTERVENTION_STEP))) {
     const key = interventionKey(derived);
-    if (!recorded.has(key)) write(interventionLedgerLine(derived));
+    if (!recorded.has(key)) {
+      write(interventionLedgerLine(derived));
+      carried.set(key, latestMs(carried.get(key), input.nowMs));
+    }
     all.set(key, derived);
   }
   const events: LedgerLine[] = [];
   for (const [key, row] of [...all].sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at))) {
-    if (routed.has(key) || !(Date.parse(row.at) <= input.nowMs)) continue;
-    const event = interventionIncidentEvent(row, input.nowMs);
+    if (memory.has(key) || !(Date.parse(row.at) <= input.nowMs)) continue;
+    // The key rides on the event, so the lane's evidence counts this intervention once however often it is routed.
+    const event: LedgerLine = { ...interventionIncidentEvent(row, input.nowMs), intervention_key: key };
     write(event);
     events.push(event);
-    routed.add(key);
+    memory.set(key, Number.NaN);
   }
-  // Keep only keys still inside the window: an older intervention is no longer re-read, so it cannot be re-routed.
-  const live = [...routed].filter((key) => Date.parse(key.slice(key.lastIndexOf("|") + 1)) > sinceMs);
-  writeAtomic(path, JSON.stringify({ routed: live }) + "\n");
+  for (const [key, seenMs] of memory) memory.set(key, latestMs(seenMs, carried.get(key), keyAtMs(key)));
+  const keep = interventionMemoryKeep(memory, sinceMs);
+  writeAtomic(path, JSON.stringify({ routed: [...keep].map(([key, seenMs]) => ({ key, seen: fixedClock(seenMs).iso() })) }) + "\n");
   return events;
 }
