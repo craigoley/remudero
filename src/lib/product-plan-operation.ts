@@ -26,8 +26,6 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
 /** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
-type LedgerEvidence = { pid?: number; exited: boolean; failed: boolean; opened?: string };
-type LedgerRead = LedgerEvidence | "timed-out";
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
 
@@ -240,13 +238,20 @@ export interface ProductPlanOperationOptions {
 
 const hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 const modeSchema = z.enum(["create", "clarify"]);
+const finalEvidenceSchema = z.object({
+  exited: z.boolean(), failed: z.boolean(), opened: z.string().optional(),
+}).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined);
+type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
+type LedgerRead = LedgerEvidence | "timed-out";
 const recordSchema = z.object({
   operationId: hex64, productId: productIdSchema, revision, objectiveRevision: revision, briefDigest: hex64,
   repository: z.object({ id: revision, owner: z.string().min(1).max(64), name: z.string().min(1).max(128) }).strict(),
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
+  // Accept the former beforeLaunch marker when reopening an existing journal.
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
+  finalEvidence: finalEvidenceSchema.optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
 const journalSchema = z.object({
@@ -301,15 +306,13 @@ const processAlive = (pid: number) => {
 /**
  * Turns a saved, verified product brief into ONE native `rmd plan` run against the managed target checkout, through the
  * maintained gateway port and never a launcher of its own. The operation is journaled (private, fsynced) BEFORE the hand-off;
- * every later request, reload or restart reads the same record and the correlated ledger rows, never a branch name.
+ * later requests read the same record and its correlated evidence, which the journal keeps once final.
  */
 export class ProductPlanOperationService {
   private readonly store: ProductIntentStore;
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
-  /** W1-T13875: each operation's ledger evidence once it is final (a proposal, an exit or a failure): never read again. */
-  private readonly settledEvidence = new Map<string, LedgerEvidence>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -398,7 +401,7 @@ export class ProductPlanOperationService {
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
       let reusable = journal.operations[operationId];
       for (const entry of reusable ? [] : sameBrief) {
-        const seen = await this.ledger(entry);
+        const seen = await this.readEvidence(paths, journal, entry);
         const state = this.observeWith(entry, product, head, seen).state;
         if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
           reusable = entry;
@@ -444,7 +447,7 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const seen = selectedEvidence ?? await this.ledger(record);
+    const seen = selectedEvidence ?? await this.readEvidence(paths, journal, record);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };
@@ -491,8 +494,8 @@ export class ProductPlanOperationService {
         const journal = this.readJournal(paths);
         const stored = journal.operations[record.operationId];
         if (!stored) return;
-        const beforeLaunch = outcome === "refused" && accepted === false ? true as const : undefined;
-        const handoff = { outcome, at: this.clock.iso(), beforeLaunch };
+        // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
+        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso() };
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
@@ -506,6 +509,10 @@ export class ProductPlanOperationService {
     void started.then((result) => finished(result.outcome), () => finished("unknown"));
   }
 
+  private inFlight(operationId: string): boolean {
+    return this.flying.has(operationId) || this.options.gateway?.inFlight?.(productPlanLedgerTaskId(operationId)) === true;
+  }
+
   /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
   private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerRead): ProductPlanObservation {
     let state: ProductPlanState = "unknown";
@@ -515,7 +522,7 @@ export class ProductPlanOperationService {
       else if (seen.exited) state = "refused";
       else if (seen.failed) state = "unknown";
       else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
-      else if (this.flying.has(record.operationId)) state = "pending";
+      else if (this.inFlight(record.operationId)) state = "pending";
       else if (record.handoff?.outcome === "refused") state = "refused";
       // A late proposal is historical evidence for its frozen brief, never for a newer objective.
       if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
@@ -527,6 +534,17 @@ export class ProductPlanOperationService {
       requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
+  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
+    if (record.finalEvidence) return record.finalEvidence;
+    const seen = await this.ledger(record);
+    if (seen !== "timed-out" && (seen.opened !== undefined || seen.exited || seen.failed)) {
+      const { opened, exited, failed } = seen;
+      journal.operations[record.operationId] = { ...record, finalEvidence: { opened, exited, failed } };
+      this.commit(paths, journal);
+    }
+    return seen;
+  }
+
   /**
    * What the core ledger shows for THIS operation: the gateway's `ratify.cli_started` row (bound by the operation id it
    * carries), the native `plan.start` whose complete brief and mode match the frozen command, and that run's own `pr.opened`.
@@ -535,24 +553,32 @@ export class ProductPlanOperationService {
    */
   private async ledger(record: Record_): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
-    if (this.options.ledgerPath === undefined) return none;
-    // Older refusals can be child exits. Only a confirmed pre-launch refusal can skip the read.
-    if (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.flying.has(record.operationId)) return none;
-    const settled = this.settledEvidence.get(record.operationId);
-    if (settled) return settled;
+    const ledgerPath = this.options.ledgerPath;
+    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && !this.inFlight(record.operationId))) return none;
     const taskId = productPlanLedgerTaskId(record.operationId);
-    // W1-T13875: the read yields between slices, and an evidence read past its bound answers "no evidence" (state unknown),
-    // so a record from weeks ago never holds serve's loop, or the journal lock, while every archive since is read.
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
+    const deadline = performance.now() + bound;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const read = await Promise.race([
-      (this.options.readLedgerLines ?? readLedgerUnionRawLinesAsync)(dirname(this.options.ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
-        keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") }),
-      new Promise<"timed-out">((resolve) => { timer = setTimeout(() => resolve("timed-out"), bound); }),
-    ]).finally(() => clearTimeout(timer));
-    if (read === "timed-out") return read;
-    if (!read.ok) return none;
-    const parsed = read.rawLines.flatMap((line): Array<Record<string, unknown>> => {
+    try {
+      const read = await Promise.race([
+        new Promise<"timed-out">((resolve) => { timer = setTimeout(() => resolve("timed-out"), bound); }),
+        (this.options.readLedgerLines ?? readLedgerUnionRawLinesAsync)(dirname(ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
+          keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") }),
+      ]);
+      // The directory listing can delay the timer itself. Check elapsed time before using the result.
+      if (read === "timed-out" || performance.now() >= deadline) return "timed-out";
+      const seen = read.ok ? this.correlateLedger(record, taskId, read.rawLines) : none;
+      return performance.now() >= deadline ? "timed-out" : seen;
+    } catch (error) {
+      if (performance.now() >= deadline) return "timed-out";
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private correlateLedger(record: Record_, taskId: string, rawLines: readonly string[]): LedgerEvidence {
+    const parsed = rawLines.flatMap((line): Array<Record<string, unknown>> => {
       try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
     });
     const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
@@ -570,18 +596,12 @@ export class ProductPlanOperationService {
     const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
       (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
         typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
-    if (conflictingStart) return this.settle_(record, { ...(pid !== undefined ? { pid } : {}), exited: false, failed: true });
+    if (conflictingStart) return { exited: false, failed: true };
     const run = runs.size === 1 ? [...runs.values()][0] : undefined;
     const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
     const url = pull?.pr_url as string | undefined;
     const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
-    return this.settle_(record, { ...(pid !== undefined ? { pid } : {}), exited: exited && runs.size < 2, failed: failed || runs.size > 1, ...(own ? { opened: url } : {}) });
-  }
-
-  /** W1-T13875: keeps evidence that can no longer change (a proposal, an exit or a failure), so it is read once. */
-  private settle_(record: Record_, seen: LedgerEvidence): LedgerEvidence {
-    if (seen.opened !== undefined || seen.exited || seen.failed) this.settledEvidence.set(record.operationId, seen);
-    return seen;
+    return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
   }
 
   /** Terminal fates become the product's own supported stage evidence, once each. */
