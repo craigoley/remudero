@@ -24,7 +24,7 @@
     - test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts
     - test/serve-supervisor.test.ts
     - test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A completed swap writes one serve.swap_probe row with the sha, the generation, the trigger and each served view's status, code and stale"
