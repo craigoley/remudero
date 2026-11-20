@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type Row } from "#src/lib/board-projection.js";
+import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type BoardProjectionOptions, type Row } from "#src/lib/board-projection.js";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { changedActivityByTask } from "#src/lib/now-view.js";
@@ -71,9 +71,9 @@ function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
     for (let i = 0; i < 50; i++) projector.tick();
   };
   append(rows);
-  const board = (db: ReadModelDb = raw, onIngest?: (rows: readonly Row[]) => void): BoardProjection => createBoardProjection({
+  const board = (db: ReadModelDb = raw, options: Pick<BoardProjectionOptions, "onIngest" | "log"> = {}): BoardProjection => createBoardProjection({
     db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1",
-    readCreditStore: () => ({}), readCreditOverrideFile: () => "", onIngest,
+    readCreditStore: () => ({}), readCreditOverrideFile: () => "", ...options,
   });
   const caughtUp = (b: BoardProjection): BoardProjection => { while (!b.update({ force: true }).caughtUp); return b; };
   return { raw, append, board, caughtUp };
@@ -82,6 +82,11 @@ function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
 /** The board's run activity stand-ins, as task|run@ts, sorted. */
 const standIns = (b: BoardProjection): string[] =>
   b.rows().filter((r) => r.step === BOARD_RUN_ACTIVITY_STEP).map((r) => `${String(r.task_id)}|${String(r.run_id)}@${String(r.ts)}`).sort();
+
+function indexedActivity(index: ReturnType<BoardProjection["index"]>): unknown[] {
+  assert.ok(index.byTaskSteps);
+  return index.byTaskSteps.get("W1-T1", [BOARD_RUN_ACTIVITY_STEP]).map((r) => r.run_id);
+}
 
 const seed = (): Row[] => [
   ...Array.from({ length: 400 }, (_, i) => fact(T0 + i * 1_000, "DAEMON", `DAEMON-${i % 4}`)),
@@ -97,15 +102,25 @@ test("W1-T13905 criterion 1: after the cold load, ingesting run activity asks th
   w.append([activity(T0 + 2_000_000, "DAEMON", "DAEMON-1"), activity(T0 + 2_000_500, "DAEMON", "DAEMON-9"),
     fact(T0 + 2_001_000, "W1-T1", "r3"), activity(T0 + 2_002_000, "W1-T1", "r3"), fact(T0 + 2_003_000, "W1-T1", "r1")]);
   w.caughtUp(board);
-  const activityAt = (index: typeof earlier) => {
-    assert.ok(index.byTaskSteps);
-    return index.byTaskSteps.get("W1-T1", [BOARD_RUN_ACTIVITY_STEP]).map((r) => r.run_id);
-  };
-  assert.deepEqual(activityAt(board.index(board.rows())), ["r3"]);
-  assert.equal(counted.count.perRun, 0, "no per-run MAX(ts_ms) read");
-  assert.ok(activityAt(earlier).includes("r1"), "the older index still compares activity against facts at its own sequence");
+  assert.equal(counted.count.perRun, 0, "ingest runs no per-run MAX(ts_ms) read");
+  assert.ok(indexedActivity(earlier).includes("r1"), "the older index still compares activity against facts at its own sequence");
   assert.ok(counted.count.perRun! > 0, "the SQL counter sees the older fact lookup");
+  assert.deepEqual(indexedActivity(board.index(board.rows())), ["r3"]);
   assert.ok(standIns(board).includes(`DAEMON|DAEMON-1@${at(T0 + 2_000_000)}`), "the run activity still stands in");
+});
+
+test("W1-T13905 criterion 1: the current activity index sees a deletion below the tail in an uncached step", (t) => {
+  const uncached = { ...fact(T0 + 2_000, "W1-T1", "target"), step: "panel.test" };
+  const w = world(t, [activity(T0 + 1_000, "W1-T1", "target"), uncached, fact(T0 + 3_000, "W1-T2", "tail")]);
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+  const board = w.caughtUp(w.board(counted.db));
+  assert.deepEqual(indexedActivity(board.index(board.rows())), [], "the fact initially suppresses the activity");
+
+  assert.equal(w.raw.prepare("DELETE FROM fact WHERE step = ?").run(uncached.step).changes, 1);
+  const fresh = w.caughtUp(w.board());
+  assert.deepEqual(indexedActivity(fresh.index(fresh.rows())), ["target"]);
+  assert.deepEqual(indexedActivity(board.index(board.rows())), ["target"]);
+  assert.equal(counted.count.grouped, 0, "a deletion in this step did not reset the cache");
 });
 
 test("W1-T13905 criterion 2: invariant:same-stand-ins — an extended board holds the run activity stand-ins a fresh cold load holds", (t) => {
@@ -176,7 +191,7 @@ test("W1-T13905 criterion 2: a fact appended after a detected rewind can reuse a
   ]);
   const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
   const delivered: Row[] = [];
-  const board = w.caughtUp(w.board(counted.db, (rows) => delivered.push(...rows)));
+  const board = w.caughtUp(w.board(counted.db, { onIngest: (rows) => delivered.push(...rows) }));
   board.index(board.rows()).byStep.get(FACT);
   const max = (): number => Number(w.raw.prepare("SELECT MAX(seq) AS seq FROM fact").get()?.seq);
   const previous = max();
@@ -196,20 +211,25 @@ test("W1-T13905 criterion 2: a fact appended after a detected rewind can reuse a
 });
 
 test("W1-T13905 criterion 3: a fact row dropped under the board rebuilds the newest fact times in one grouped read", (t) => {
-  const w = world(t, seed());
+  const w = world(t, [...seed(), { ts: at(T0 + 1_400_000), step: "daemon.boot", host: "h1" }]);
   const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
-  const board = w.caughtUp(w.board(counted.db));
+  const logged: Array<Record<string, unknown>> = [];
+  const board = w.caughtUp(w.board(counted.db, { log: (_step, extra) => logged.push(extra) }));
   board.index(board.rows()).byStep.get(FACT); // the step cache holds FACT, so a dropped FACT row is noticed
   const r2 = `W1-T1|r2@${at(T0 + 1_300_000)}`;
   assert.ok(!standIns(board).includes(r2), "r2's newest fact suppresses its activity at the same time");
   assert.equal(counted.count.grouped, 0);
   const newest = w.raw.prepare(`SELECT MAX(seq) AS seq FROM fact WHERE step = ? AND task_id = 'W1-T1' AND run_id = 'r2'`).get(FACT)!;
   assert.equal(w.raw.prepare("DELETE FROM fact WHERE seq = ?").run(newest.seq).changes, 1);
-  board.index(board.rows());
+  w.append([{ ts: at(T0 + 1_500_000), step: "daemon.boot", host: "h1" }]);
+  const update = board.update({ force: true });
   assert.equal(counted.count.grouped, 1, "one grouped read after the drop");
   const fresh = standIns(w.caughtUp(w.board()));
   assert.ok(fresh.includes(r2), "the existing run activity now stands in on a cold load");
   assert.deepEqual(standIns(board), fresh);
+  assert.deepEqual(update.crossTask, { rows: 1, rederived: 0, reused: 1 }, "only the fresh boot counts in the update");
+  board.oracle();
+  assert.deepEqual(logged.at(-1)?.cross_task, update.crossTask, "the oracle reports the same cross-task total");
 });
 
 test("W1-T13905 criterion 3: removing a cached task-only fact restores an older stand-in", (t) => {
@@ -231,5 +251,27 @@ test("W1-T13905 criterion 3: removing a cached task-only fact restores an older 
   assert.equal(counted.count.grouped, 1, "one grouped read after the deletion below the tail");
   const fresh = standIns(w.caughtUp(w.board()));
   assert.deepEqual(fresh, [`W1-T1|older@${at(OLD)}`]);
+  assert.deepEqual(standIns(board), fresh);
+});
+
+test("W1-T13905 criterion 4: an audit reset rebuilds the map when a cached fact changes run at the same sequence", (t) => {
+  const w = world(t, [
+    activity(OLD, "W1-T1", "original"), activity(OLD, "W1-T1", "replacement"), fact(OLD, "W1-T1", "original"),
+  ]);
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+  const board = w.caughtUp(w.board(counted.db));
+  board.index(board.rows()).byStep.get(FACT);
+  assert.deepEqual(standIns(board), [`W1-T1|replacement@${at(OLD)}`]);
+
+  const replace = w.raw.prepare("UPDATE fact SET run_id = ?, body = json_set(body, '$.run_id', ?) WHERE step = ?");
+  assert.equal(replace.run("replacement", "replacement", FACT).changes, 1);
+  assert.equal(board.index(board.rows()).byStep.get(FACT)?.[0]?.run_id, "original", "the step digest still matches");
+  assert.equal(counted.count.grouped, 0);
+  board.oracle();
+
+  assert.equal(counted.count.grouped, 1, "the audit reset uses one grouped read");
+  assert.equal(board.index(board.rows()).byStep.get(FACT)?.[0]?.run_id, "replacement");
+  const fresh = standIns(w.caughtUp(w.board()));
+  assert.deepEqual(fresh, [`W1-T1|original@${at(OLD)}`]);
   assert.deepEqual(standIns(board), fresh);
 });

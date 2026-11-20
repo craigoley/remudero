@@ -1360,7 +1360,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         if (bulk) outOfOrder ||= ordCompare(ord, rowOrder[rows.length - 1]!) < 0;
         place(row, ord, body.length, bulk);
       }
-      if (boardDirtForRow(row, rules).all) noteCrossRow(row, seq);
+      if (boardDirtForRow(row, rules).all) {
+        noteCrossRow(row, seq);
+        if (replayThrough === undefined && lastDeriveAt !== undefined) crossRowsPending++;
+      }
       const named = boardDirtForRow(row, { alias: rules.alias, crossTask: false });
       for (const id of named.all ? [] : named.tasks) {
         taskCount.set(id, (taskCount.get(id) ?? 0) + 1);
@@ -1402,7 +1405,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function noteCrossRow(row: Row, seq: number): void {
     crossCount++;
     crossSeq = seq;
-    if (lastDeriveAt !== undefined) crossRowsPending++;
     const step = String(row.step);
     if (BOARD_CROSS_TASK_STEPS.has(step)) {
       const held = crossSteps.get(step);
@@ -1463,7 +1465,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { filing, reviewed, rows, bytes };
   }
 
-  function dropStepCache(): void {
+  function resetStepCache(through: number): void {
+    newestFactMs = readNewestFactMs();
     stepCache.clear();
     auditedSteps.clear();
     stepPending.clear();
@@ -1474,6 +1477,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     taskCache.clear();
     taskCacheHeld = 0;
     cacheStrings?.clear();
+    replayRetention(through);
   }
 
   /** Rebuilds fact-derived retention before workers and activity can compete for the same task slots. */
@@ -1505,7 +1509,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     bulkOutOfOrder = false;
     touched();
     ingest(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, through);
-    crossRowsPending = 0;
     pending = true;
   }
 
@@ -1524,10 +1527,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const maxSeq = Number(sql.maxSeq.get()?.seq ?? 0);
     const reason = moved ? "deleted" : maxSeq < lastSeq ? "behind" : undefined;
     if (!reason) return;
-    const through = Math.min(lastSeq, maxSeq);
-    newestFactMs = readNewestFactMs();
-    dropStepCache();
-    replayRetention(through);
+    resetStepCache(Math.min(lastSeq, maxSeq));
     stepReads.resets[reason]++;
   }
 
@@ -1694,7 +1694,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     taskReads = countedTasks;
     if (mismatches.length > 0) {
-      dropStepCache();
+      resetStepCache(lastSeq);
       stepReads.resets.audit++;
     }
     const found = stepReads.resets;
@@ -1814,8 +1814,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (wantedSteps.includes(BOARD_RUN_ACTIVITY_STEP) && runSql.activity) {
         for (const r of db.prepare("SELECT task_id, run_id, ts, ts_ms, seq FROM run_activity").iterate()) {
           const [taskId, runId] = [String(r.task_id), String(r.run_id)];
-          const newest = cached && upTo === lastSeq ? newestFactMsOf(taskId, runId) : newestStoredFactMs(taskId, runId, upTo);
-          if (Number(r.ts_ms) > newest) add(activityEntry(r, taskId));
+          // A fact in an uncached step can disappear below upTo without resetting the ingest's map.
+          if (Number(r.ts_ms) > newestStoredFactMs(taskId, runId, upTo)) add(activityEntry(r, taskId));
         }
       }
       const tasks = new Map<string, Row[]>();
