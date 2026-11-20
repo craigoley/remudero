@@ -31,6 +31,7 @@
     - test/now-view.test.ts
     - test/the-needs-you-view-is-a-view-of-views.test.ts
     - test/the-operator-reaches-the-fleet-over-mcp.test.ts
+    - "src/lib/instance-gateway.ts"
   status: queued
   attempts: 0
   acceptance:
