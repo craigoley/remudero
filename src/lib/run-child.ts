@@ -8,12 +8,14 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
+import { setPriority as osSetPriority } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, engineChildEntryArgv, type EngineChildLaunch } from "./child-entry-argv.js";
 import { systemClock } from "./clock.js";
+import { GARDEN_CHILD_NICENESS } from "./garden-registry.js";
 import { childHeapPolicyArgs } from "./daemon-memory-policy.js";
 import { type EnginePinOptions, type EngineRef, type EngineRefreshLag, listEngines, newestCurrentEngine, type NewestEngineOptions, pinEngineForRun, refreshEngineFromCodeTree } from "./engine-tree.js";
 import { childEntryStoreRoot } from "./child-entry-store.js";
@@ -703,6 +705,78 @@ export interface SpawnRunChildPorts {
   /** `false` leaves the poll as the only reader of the status file. */
   watch?: boolean;
   abort?: Omit<AbortRunChildPorts, "knownPid" | "probe" | "log">;
+  /** W1-T13968: the run child's priority seams; default the real renice and IO class change ({@link lowerRunChildPriority}). */
+  priority?: RunChildPriorityPorts;
+}
+
+/** W1-T13968: noted once per refusal kind ("nice" | "ionice") when the host will not lower a run child's priority. */
+export const RUN_CHILD_PRIORITY_DEGRADED_STEP = "run_child.priority_degraded";
+/** The ionice binaries a test child's wrapper looks for (test-slot.ts lowPriorityCommand), in its order. */
+const RUN_CHILD_IONICE_PATHS = ["/usr/bin/ionice", "/bin/ionice"] as const;
+/** A test child's IO class (test-slot.ts lowPriorityCommand): best-effort, lowest level. Never the idle class a garden takes,
+ *  which can starve a suite into its own timeouts, and a run child runs suites. */
+const RUN_CHILD_IONICE_CLASS = ["-c", "2", "-n", "7"] as const;
+/** The refusal kinds this daemon has already noted, so a host that refuses writes one row per kind, not one per spawn. */
+const notedPriorityRefusals = new Set<string>();
+
+export interface RunChildPriorityPorts {
+  /** Default `os.setPriority`. */
+  setPriority?: (pid: number, niceness: number) => void;
+  /** The ionice binary, or `null` for none; default the first of the test child's paths that exists. */
+  ionice?: string | null;
+  exists?: (path: string) => boolean;
+  /** Runs ionice; default {@link execFileRouted} with a 5 s timeout. */
+  runIonice?: (file: string, args: readonly string[]) => Promise<unknown>;
+  /** Whether the pid still runs; default a signal-0 probe. */
+  alive?: (pid: number) => boolean;
+  /** The refusal kinds already noted; default this process's set. */
+  noted?: Set<string>;
+}
+
+const noSuchProcess = (error: unknown): boolean => {
+  const e = error as { code?: unknown; info?: { code?: unknown } } | null;
+  return e?.code === "ESRCH" || e?.info?.code === "ESRCH";
+};
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !noSuchProcess(error); // EPERM: it runs, under another user.
+  }
+}
+
+/**
+ * W1-T13968: lowers a run child the daemon just started to a garden child's niceness ({@link GARDEN_CHILD_NICENESS}) and a test
+ * child's IO class, so the builds, fixes and reviews it starts never compete with the daemon's one-threaded loop on equal terms.
+ * Its descendants (worker CLIs, git, tests) inherit both, and a test child's own `nice -n` still lowers it further, relative to
+ * this. Nice, not a cap: an idle CPU is still the child's. NEVER throws and never delays the spawn: the IO class change runs
+ * beside it, and a refusal is logged once per kind as {@link RUN_CHILD_PRIORITY_DEGRADED_STEP}. A child already gone is no refusal.
+ */
+export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPriorityPorts = {}): Promise<void> {
+  const noted = opts.noted ?? notedPriorityRefusals;
+  const refused = (how: "nice" | "ionice", error: unknown): void => {
+    if (noted.has(how)) return;
+    noted.add(how);
+    log(RUN_CHILD_PRIORITY_DEGRADED_STEP, { how, error: reasonOf(error), child_pid: pid });
+  };
+  try {
+    (opts.setPriority ?? osSetPriority)(pid, GARDEN_CHILD_NICENESS);
+  } catch (error) {
+    // A child already gone cannot be reniced, and that is not the host refusing; any other error is noted once.
+    if (!noSuchProcess(error)) refused("nice", error);
+  }
+  const exists = opts.exists ?? existsSync;
+  const ionice = opts.ionice === undefined ? RUN_CHILD_IONICE_PATHS.find((path) => exists(path)) : opts.ionice;
+  if (ionice === undefined || ionice === null) return Promise.resolve();
+  const run = opts.runIonice ?? ((file, args) => execFileRouted(file, args, { encoding: "utf8", timeout: 5_000 }));
+  return new Promise<unknown>((resolve) => { resolve(run(ionice, [...RUN_CHILD_IONICE_CLASS, "-p", String(pid)])); }).then(
+    () => undefined,
+    (error: unknown) => {
+      if ((opts.alive ?? pidAlive)(pid)) refused("ionice", error);
+    },
+  );
 }
 
 export interface RunChildHandle {
@@ -961,6 +1035,7 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
       stderrFd, ...(offer ? { offerPipe: true as const } : {}),
     });
     if (child.pid === undefined) throw new Error("the run child has no pid (spawn failed)");
+    void lowerRunChildPriority(child.pid, log, ports.priority);
     reservation.bindRoot(child.pid);
     if (offer) offerOpsCatalogBlobs(child, offer, { task_id: input.taskId, run_id: runId }, log);
   } catch (error) {
