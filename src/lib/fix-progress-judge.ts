@@ -713,7 +713,9 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
 }
 
 /** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too. */
-export interface PriorRoundHold { hold: "NEEDS_SCOPE" | "FLAKE"; since: string; roundId?: string; contractRevision?: string; reason: string }
+export interface PriorRoundHold { hold: "NEEDS_SCOPE" | "FLAKE"; since: string; roundId?: string; contractRevision?: string; reason: string;
+  /** A merged-amendment receipt newer than the ruling that no merge time dates: it releases nothing (fail closed). */
+  undatedAmendmentReceipt?: true }
 export const PRIOR_ROUND_HOLD_FIELD = "prior_round_hold";
 export interface PriorRoundFacts {
   taskId: string | undefined; headSha: string; contractRevision?: string;
@@ -783,6 +785,7 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
     if (after(mergedAt)) return undefined;
     mergeTimes.set(key, mergedAt);
   }
+  let undated = false;
   if (amendments.some(row => {
     const outcome = row.outcome ?? row.kind ?? row.state;
     if (outcome !== "merged" && outcome !== "amendment_merged") return false;
@@ -794,7 +797,14 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
       if (candidates.length === 1) key = candidates[0];
     }
     const known = key === undefined ? undefined : mergeTimes.get(key);
-    return known === "" ? false : after(known ?? row.merged_at ?? row.ts);
+    if (known === "") return false;
+    // Only a merge time dates a merge: a receipt's own ts is when it was adopted, at any time after the merge.
+    const mergedAt = known ?? (validTs(row.merged_at) ? row.merged_at : undefined);
+    if (mergedAt === undefined) {
+      if (after(row.ts)) undated = true;
+      return false;
+    }
+    return after(mergedAt);
   })) return undefined;
   const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
     row.task_id === facts.taskId && row.head_sha === facts.headSha &&
@@ -810,7 +820,9 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
   if (standingOn !== undefined && currentRevision !== undefined && standingOn !== currentRevision) return undefined;
   return { hold: "NEEDS_SCOPE", since, roundId, ...(standingOn !== undefined ? { contractRevision: standingOn } : {}),
     reason: `the last fix round at ${head} ruled NEEDS_SCOPE at ${since}; no scope amendment has merged and the task ` +
-      "contract is unchanged since — no fix round until one changes" };
+      "contract is unchanged since — no fix round until one changes" + (undated ? "; a merged-amendment receipt newer than the " +
+      "ruling carries no merge time and none was read live, so it releases nothing" : ""),
+    ...(undated ? { undatedAmendmentReceipt: true as const } : {}) };
 }
 
 /** W1-T12710: the remedies a stalled criterion gets, in this order. */

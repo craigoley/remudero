@@ -2947,13 +2947,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
   });
   const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
-  let branchRequiredChecks: Promise<ReadonlyMap<string, number | null> | undefined> | undefined;
-  const readBranchRequiredChecks = async () => {
-    if (deps.readRequiredContextsImpl) {
-      return new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null]));
-    }
+  // W1-T13865: keyed by the PR's own base branch; a requirement only another branch's protection names releases nothing.
+  const branchRequiredChecks = new Map<string, Promise<ReadonlyMap<string, number | null> | undefined>>();
+  const readBranchRequiredChecks = async (branch: string) => {
     let checks: readonly { context: string; app_id: number | null }[] = [];
-    const protection = await readRequiredStatusCheckContextsAsync(owner, repo, "main",
+    const protection = await readRequiredStatusCheckContextsAsync(owner, repo, encodeURIComponent(branch),
       async args => {
         const snapshot = await readJsonImpl(args) as { checks?: typeof checks } | undefined;
         checks = snapshot?.checks ?? [];
@@ -2973,8 +2971,31 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       return undefined;
     }
   };
+  /** The protection of the PR's own base branch, read fresh from the PR: undefined when the PR or its protection is
+   *  unreadable, so only ci-gate's own required list can release a hold. */
+  const readPrBaseRequiredChecks = async (pr: OpenPrView): Promise<ReadonlyMap<string, number | null> | undefined> => {
+    if (deps.readRequiredContextsImpl) {
+      return new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null]));
+    }
+    let base: string | undefined;
+    try {
+      const view = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`], { fresh: true }) as
+        { base?: { ref?: unknown } } | undefined;
+      base = typeof view?.base?.ref === "string" && view.base.ref.length > 0 ? view.base.ref : undefined;
+    } catch (error) {
+      log("sweep.prior_round_hold.base_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
+      return undefined;
+    }
+    if (base === undefined) {
+      log("sweep.prior_round_hold.base_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: "no base ref" });
+      return undefined;
+    }
+    let read = branchRequiredChecks.get(base);
+    if (read === undefined) branchRequiredChecks.set(base, read = readBranchRequiredChecks(base));
+    return await read;
+  };
   const readRequiredCheckCompletions = async (pr: OpenPrView): Promise<{ name: string; completedAt: string }[]> => {
-    const branchChecks = await (branchRequiredChecks ??= readBranchRequiredChecks());
+    const branchChecks = await readPrBaseRequiredChecks(pr);
     const required = new Set([...requiredChecks, ...(branchChecks?.keys() ?? [])]);
     if (required.size === 0) return [];
     let runs: { name: string; completedAt: string }[];
@@ -22489,7 +22510,8 @@ export async function runSweep(
         readCheckCompletions: readCompletions === undefined ? undefined : () => readCompletions(pr) });
   };
   const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
-    ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}) });
+    ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}),
+    ...(hold.undatedAmendmentReceipt ? { prior_round_hold_undated_amendment: true } : {}) });
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -26409,8 +26431,6 @@ export async function runSweep(
                   break;
                 }
               }
-              // A required job retry can produce the completion a FLAKE hold needs to release.
-              if (standDownForPriorRound(roundHold)) break;
               const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
                 ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
               if (logHolds.length > 0) { acted = false; standDownReason = `${logHolds.join("; ")} — no fix strike`; break; }
@@ -26514,7 +26534,7 @@ export async function runSweep(
                   const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                     row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
                   if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
-                  if (!await askProgress()) break;
+                  if (standDownForPriorRound(roundHold) || !await askProgress()) break;
                 } else {
                   acted = false;
                   standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
@@ -26527,7 +26547,7 @@ export async function runSweep(
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
               if (deps.fixProgressJudge && proofRepairRoute && proofRepairState && !proofRepairActive) {
                 progressParkedReason = `proof-repair-refusals: proof-repair refused ${proofRepairState.refusals} times at this head`;
-                if (!await askProgress()) break;
+                if (standDownForPriorRound(roundHold) || !await askProgress()) break;
                 proofRepairActive = true;
               }
               const fixEvidence: FixDispatchEvidence = proofRepairActive
@@ -26635,6 +26655,9 @@ export async function runSweep(
                   scripts: ratchetScripts,
                 });
               }
+              // W1-T13865: the prior-round hold stops only the paid rounds below (judge and fix worker); the retries
+              // above and the worker-free repairs before this line still run, and a retry's completion releases FLAKE.
+              if (standDownForPriorRound(roundHold)) break;
               if (staleProofs && !proofRepairActive && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
                 reason = `stale-proof red on ${staleProofs.proofs.map((p) => p.proof).join("; ")} — the plan-shard flag is spent or unwired, so no worker is dispatched`;
                 const flagEscalated = ledgerLines.some((line) =>
