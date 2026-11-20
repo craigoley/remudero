@@ -3315,9 +3315,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
     fixDispatchCauseProbe: async (cause) => fixDispatchMemoryCause(cause)
-      ? fixAdmissionCauseProbe({ hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget, readActiveWorkers: () => activeWorkerCount(),
-        readPressure: () => productionFixPressure(policy.memoryFloorMib, ledgerPath, classEstimate("fix").estimateMib),
-        readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(config.root) })
+      ? fixAdmissionCauseProbe(sweepFixAdmissionReaders({ ledgerPath }, policy, "probe"))
       : fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
@@ -16044,7 +16042,7 @@ function* fixDispatchHoldAtHeadSteps(
   const nextRetryMs = Math.min(8.64e15, probe === "present" ? nowMs + cadence : failureAt + backoffMs);
   const nextRetryAt = clockFromMillisFn(() => nextRetryMs).iso();
   const escalationKey = `${pr.prNumber}@${pr.headSha}:${cause}`;
-  const escalated = lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
+  const escalated = !memoryCause && lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
   if (probe === "unprobed" && nowMs >= nextRetryMs && (progress.verdict !== "escalate" || memoryCause)) return undefined;
   const decline = isOwnerClaimDecline(last);
   const staged = Array.isArray(last.staged_paths) ? `, staged ${last.staged_paths.map(String).join(", ")}` : "";
@@ -20038,12 +20036,12 @@ function readFixHostPressureOnce(
 }
 
 /** The production fix pressure: the host and this container, live work from its reservations; `unitMib` sizes "fits". */
-export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number): FixHostPressure {
+export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number, reclaim = true): FixHostPressure {
   return readFixHostPressure(floorMib, undefined, {
     unitMib,
     read: () => readContainerMemoryHeadroom(),
     ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
-    reclaim: installedSlackReclaim,
+    reclaim: reclaim ? installedSlackReclaim : undefined,
   });
 }
 
@@ -20125,16 +20123,31 @@ export function productionFixAdmissionResidents(
 
 /** W1-T9498: the learned estimates and live residency the PRODUCTION pressure path charges with. A caller that injects
  *  its own pressure reading (a test) charges the class defaults with no residency read. */
-export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">): {
+export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">,
+  live = deps.fixProgressJudge !== undefined): {
   readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   readTypical?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   readResidents?: () => FixAdmissionResidents;
 } {
-  if (deps.readFixPressure || !deps.fixProgressJudge) return {};
+  if (deps.readFixPressure || !live) return {};
   return {
     readEstimate: (workerClass) => classEstimate(workerClass),
     readTypical: (workerClass) => classTypical(workerClass),
     readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
+  };
+}
+
+function sweepFixAdmissionReaders(
+  deps: Parameters<typeof productionFixAdmissionReaders>[0] & Pick<SweepDeps, "readActiveWorkerCount">,
+  policy: SweepPolicy, mode: "pass" | "probe" = "pass",
+) {
+  const live = mode === "probe" || deps.fixProgressJudge !== undefined;
+  return {
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+    readActiveWorkers: live || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
+    readPressure: deps.readFixPressure ?? (live ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath,
+      classEstimate("fix").estimateMib, mode === "pass") : undefined),
+    ...productionFixAdmissionReaders(deps, live),
   };
 }
 
@@ -20368,13 +20381,14 @@ export function createSweepFixAdmissionController(input: {
 
 /** W1-T13869: "clear" when the run child's fix admission (full surface, queue depth 1, no review reserved) would admit
  *  one fix on these readings now, else "present". It builds the same controller and claims nothing. */
-export function fixAdmissionCauseProbe(readers: { hostWorkerBudget: number } & Required<Pick<
+export function fixAdmissionCauseProbe(readers: Pick<
   Parameters<typeof createSweepFixAdmissionController>[0],
-  "readPressure" | "readActiveWorkers" | "readEstimate" | "readTypical" | "readResidents">>): "clear" | "present" {
+  "hostWorkerBudget" | "readPressure" | "readActiveWorkers" | "readEstimate" | "readTypical" | "readResidents">): "clear" | "present" {
   try {
     const controller = createSweepFixAdmissionController({ ...readers, surface: "full", queueDepth: 1,
-      activeWorkers: readers.readActiveWorkers(), reviewReservations: 0 });
-    return controller.snapshot().fixAdmissionsAvailable > 0 ? "clear" : "present";
+      activeWorkers: 0, reviewReservations: 0 });
+    const snapshot = controller.snapshot();
+    return snapshot.pressure && snapshot.fixAdmissionsAvailable > 0 ? "clear" : "present";
   } catch (error) {
     void error; // An unreadable reading does not prove that memory freed, so the cause stays present.
     return "present";
@@ -22079,19 +22093,20 @@ export async function runSweep(
       : createSweepFixAdmissionController({
           surface: "full",
           queueDepth: fullReviewQueueDepth,
-          hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+          ...sweepFixAdmissionReaders(deps, policy),
           activeWorkers: fullRepairActiveWorkers,
-          readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
-            ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
           reviewReservations: fullReviews.planned,
           readReviewReservations: () =>
             (fullReviews.pulling ? Math.max(fullReviews.planned, fullReviews.started) : fullReviews.started) - fullReviews.settled,
-          ...productionFixAdmissionReaders(deps),
           log,
           reviewQueue: fullReviewQueue,
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
+  if (fullRepairAdmission && fullRepairAdmission.snapshot().fixAdmissionsAvailable > 0) {
+    for (const [prNumber, hold] of dispatchCauseHolds) {
+      if (hold && fixDispatchMemoryCause(String(hold.fields.cause))) dispatchCauseHolds.delete(prNumber);
+    }
+  }
   const fixCapacityReleases = new Map<number, () => void>();
   const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
@@ -28942,14 +28957,10 @@ async function runSweepLightPassCore(
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+    ...sweepFixAdmissionReaders(deps, policy),
     activeWorkers,
-    readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
-      ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
     reviewReservations: unsettledSpawning,
     readReviewReservations: () => unsettledSpawning,
-    ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
   const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
