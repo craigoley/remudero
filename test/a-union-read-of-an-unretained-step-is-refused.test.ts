@@ -111,6 +111,18 @@ function readHistory() { return createEscalationTriageHistoryReader({ slice: SAM
   ]);
 });
 
+test("the census reports a runtime raw pattern on a named triage slice as unresolved", () => {
+  const file = "src/lib/slice-reader.ts";
+  const source = `const SAMPLE_SLICE: EscalationTriageSlice = {
+  rawPattern: buildPatternAtRuntime(),
+};
+function readHistory() { return createEscalationTriageHistoryReader({ slice: SAMPLE_SLICE }); }
+`;
+  assert.deepEqual(censusFindings([file], () => source, new Map()), [
+    { file, arg: "SAMPLE_SLICE", unresolved: true, steps: [] },
+  ]);
+});
+
 // ── it refuses a NEW contradiction ──────────────────────────────────────────────────────────────
 
 const FAKE_LEDGER = `

@@ -1881,15 +1881,15 @@ export interface LedgerRotationDigestCounts {
  * format as the async memo's durable digests (cache/rotation-digests/<holder>/<rotation>.json). A later read
  * decompresses only a rotation it has not seen; a damaged, foreign or stale digest is re-parsed and replaced.
  *
- * The rotation is parsed here in full, never through the union's `parse`, whose `pattern` and replay-skip
- * would make the digest depend on that one read's options. `reduce` must keep every row the union read's
+ * The rotation uses the holder's optional `rawPattern` here. The union's `parse` would apply one read's
+ * filters and replay-skip to the digest. `reduce` must keep every row the union read's
  * own filters (`step`, `since`) would keep from that rotation; it may drop the rest. Bump `reducerVersion`
  * whenever `reduce` changes.
  */
 export function ledgerRotationDigests(
   stateDir: string,
   reduce: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>,
-  opts: { holder: string; reducerVersion: string },
+  opts: { holder: string; reducerVersion: string; rawPattern?: RegExp },
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): { rotationRecords: LedgerRotationHook; counts: () => LedgerRotationDigestCounts } {
   if (!opts.holder || !opts.reducerVersion) throw new Error("rotation digests require a holder and reducer version");
@@ -1933,7 +1933,7 @@ export function ledgerRotationDigests(
     const buf = fsDeps.readFileSync(entry.path);
     const rows: Array<Record<string, unknown>> = [];
     const tornLines: string[] = [];
-    const torn = scanLedgerBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, undefined, (row) => rows.push(row), 0,
+    const torn = scanLedgerBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, opts.rawPattern, (row) => rows.push(row), 0,
       Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
     const read: LedgerRotationRecords = { rows: reduce(rows), torn, tornLines };
     counts.parsed += 1;
@@ -2013,7 +2013,8 @@ function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
  * `project` declares the fields this consumer reads; change `reducerVersion` whenever it changes.
  */
 export function createIncrementalLedgerUnion(
-  opts: { holder: string; reducerVersion: string; project?: (row: Record<string, unknown>) => Record<string, unknown> },
+  opts: { holder: string; reducerVersion: string; rawPattern?: RegExp;
+    project?: (row: Record<string, unknown>) => Record<string, unknown> },
   baseFs: LedgerGrepFsDeps = realLedgerFs,
 ): ((stateDir: string, readOpts?: LedgerUnionRecordReadOptions) => LedgerUnionRecordRead) & IncrementalLedgerUnionHandle {
   // W1-T9710: every byte a pass reads, digests and inline rotations included, is counted for `lastPass`.
@@ -2125,7 +2126,9 @@ export function createIncrementalLedgerUnion(
         pass.seededRotations += 1;
         return seeded.read;
       }
-      digests ??= ledgerRotationDigests(stateDir, reduce, { holder: opts.holder, reducerVersion: `${opts.reducerVersion}:${steps.join(",")}` }, fsDeps);
+      digests ??= ledgerRotationDigests(stateDir, reduce, {
+        holder: opts.holder, reducerVersion: `${opts.reducerVersion}:${steps.join(",")}`, rawPattern: opts.rawPattern,
+      }, fsDeps);
       const read = digests.rotationRecords(entry, parse);
       kept.set(entry.path, { key, read, size: partSize(read) });
       return read;
@@ -2134,7 +2137,7 @@ export function createIncrementalLedgerUnion(
     const scan = (buf: Buffer): LedgerRotationRecords => {
       const rows: Array<Record<string, unknown>> = [];
       const tornLines: string[] = [];
-      const torn = scanLedgerBuffer(buf, candidate, (row) => {
+      const torn = scanLedgerBuffer(buf, opts.rawPattern ?? candidate, (row) => {
         pass.parsedLines += 1;
         if (stepMatches(row, steps)) rows.push(project(row));
       }, 0, Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
@@ -2171,7 +2174,7 @@ export function createIncrementalLedgerUnion(
 
     const tornLines: string[] = [];
     const result = readLedgerUnionRecordsSync(stateDir, { step, refuseIncomplete, requireArchives, rotationRecords, liveRecords,
-      onTorn: (line) => void tornLines.push(line) }, fsDeps);
+      pattern: opts.rawPattern, onTorn: (line) => void tornLines.push(line) }, fsDeps);
     // W1-T13185: a caller that judges what each torn line could have been reads them here, with no second read.
     Object.defineProperty(result, "tornLines", { value: tornLines, enumerable: false });
     Object.freeze(result.rows);

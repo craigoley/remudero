@@ -1031,7 +1031,7 @@ const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
   rawPattern: /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/,
   sharedSnapshot: true,
-  version: "2",
+  version: "3",
   project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
     ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
   }),
@@ -1073,61 +1073,40 @@ interface TerminalUncreditableHead {
   escalated: boolean;
 }
 
-/**
- * W1-T2723 — process-lifetime index of terminal, head-SHA-keyed fix-rung declines. The first
- * lookup after a daemon boot reconstructs it from archive∪live ledger history; later sweep-effect
- * instances reuse the compact map and update it synchronously when they emit a new terminal row.
- * Rotation is therefore harmless without decompressing the full corpus on every poll.
- */
-const terminalUncreditableHeadsByLedger = new Map<string, Map<string, TerminalUncreditableHead>>();
-
 function terminalUncreditableHeadKey(prNumber: number, headSha: string): string {
   return `${prNumber}:${headSha}`;
 }
 
-function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncreditableHead> {
+function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordRead | undefined {
   const stateDir = dirname(ledgerPath);
   const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
   let history = reader.current(stateDir);
-  let rows = history.rows;
   const livePath = ledgerLivePath(stateDir);
-  if (history.archiveCount === 0) {
-    // A caller may pass a non-default live path. Preserve the legacy raw-line predicate there too.
-    const matches = new Set<string>();
-    try {
-      const pattern = TERMINAL_UNCREDITABLE_HISTORY_SLICE.rawPattern!;
-      for (const line of readFileSync(ledgerPath, "utf8").split(/\r?\n/)) {
-        if (!pattern.test(line)) continue;
-        try { matches.add(JSON.stringify(JSON.parse(line))); }
-        catch { /* malformed rows never become terminal heads */ }
-      }
-    } catch { /* readLedgerLines below retains the legacy unread-live answer */ }
-    rows = readLedgerLines(ledgerPath).filter((row) => matches.has(JSON.stringify(row))); // ledger-read-intent: live
-  } else if (history.unread.length === 1 && history.unread[0] === livePath) {
+  if (history.archiveCount > 0 && history.unread.length === 1 && history.unread[0] === livePath) {
     // The legacy union accepts complete rotations when only the live read fails. Retry through their cached slices.
     history = createEscalationTriageHistoryReader({
       slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE,
       fs: { ...realLedgerFs, existsSync: (path) => path !== livePath && realLedgerFs.existsSync(path) },
     }).current(stateDir);
-    rows = history.rows;
   }
-  // Preserve the legacy answer for unread history. The union returned no terminal rows when any
-  // rotation was unread; discard any cached projection rather than treating it as complete.
-  let historyReadable = history.ok;
-  if (historyReadable && history.archiveCount > 0) {
-    try {
-      for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
-    } catch {
-      // A failed archive access means the cached slice cannot be trusted as a complete history.
-      historyReadable = false;
-    }
+  if (!history.ok) return undefined;
+  try {
+    for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
+  } catch {
+    // A digest may still match the rotation's stat key after read permission is lost.
+    return undefined;
   }
-  if (!historyReadable) {
-    // Keep the last complete answer when a previously readable rotation becomes unreadable. This
-    // preserves known terminal heads without turning unknown history into a stand-down for every PR.
-    return terminalUncreditableHeadsByLedger.get(ledgerPath) ?? new Map<string, TerminalUncreditableHead>();
-  }
+  return history;
+}
+
+function terminalUncreditableHeads(ledgerPath: string, history: LedgerUnionRecordRead | undefined): Map<string, TerminalUncreditableHead> {
   const terminals = new Map<string, TerminalUncreditableHead>();
+  if (history === undefined) return terminals;
+  let rows = history.rows;
+  if (history.archiveCount === 0 && ledgerPath !== ledgerLivePath(history.stateDir)) {
+    // Without rotations the caller may supply a different live file.
+    rows = readLedgerLines(ledgerPath, undefined, undefined, (line) => TERMINAL_UNCREDITABLE_HISTORY_SLICE.rawPattern!.test(line)); // ledger-read-intent: live
+  }
   for (const row of rows) {
     if (
       row.step !== TERMINAL_UNCREDITABLE_HEAD_STEP ||
@@ -1161,7 +1140,6 @@ function terminalUncreditableHeads(ledgerPath: string): Map<string, TerminalUncr
     const terminal = terminals.get(terminalUncreditableHeadKey(row.pr_number, row.head_sha));
     if (terminal) terminal.escalated = true;
   }
-  terminalUncreditableHeadsByLedger.set(ledgerPath, terminals);
   return terminals;
 }
 
@@ -3016,7 +2994,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
   };
-  const terminalHeads = terminalUncreditableHeads(ledgerPath);
+  const terminalHistory = readTerminalUncreditableHistory(ledgerPath);
+  const terminalHeads = terminalUncreditableHeads(ledgerPath, terminalHistory);
+  const terminalHistoryHold = terminalHistory === undefined ? "terminal uncreditable head history is unreadable" : undefined;
   const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     if (terminal.escalated) return;
     // W1-T3168: the ownership fact alone is not an ask. A foreign head on a PR that is not stuck
@@ -4450,6 +4430,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
+      if (terminalHistoryHold) return { roundNotRun: true, reason: terminalHistoryHold };
       await observePr(pr, "repair");
       let worktreePath = "";
       let keepWorktree = false;
@@ -5426,13 +5407,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
-    // dispatch surface invokes `dispatchFix`. Reads the SAME process-lifetime `terminalHeads`
-    // map (above) `dispatchFix`'s own `priorTerminal?.escalated` early-return already consults —
-    // no second cache, no fresh GitHub read. Declines only the exact `PR@head SHA` whose
-    // escalation was already delivered; a cached entry that has not yet delivered (or was never
-    // cached at all) returns `undefined` and the ordinary dispatch path — including the failed-
-    // delivery retry — runs unchanged.
+    // dispatch surface invokes `dispatchFix`. Both share the history hold and the same head index.
     terminalFixStandDown: (pr) => {
+      if (terminalHistoryHold) return terminalHistoryHold;
       const terminal = terminalHeads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
       // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to
@@ -16445,11 +16422,9 @@ export interface SweepDeps {
   /** W1-T2752 — a SYNCHRONOUS, READ-ONLY admission read consulted immediately before
    *  `blocked-fixable` and `conflicted` invoke {@link dispatchFix}, never a replacement for either
    *  surface's own live-state/claim checks. `buildSweepEffects` supplies it from the SAME
-   *  `terminalUncreditableHeads` cache W1-T2723's `dispatchFix` already consults internally — no
-   *  second cache, no GitHub read here. Returns a stable, explicit stand-down reason ONLY when the
-   *  exact `PR@head SHA` entry is present AND its escalation was already delivered; returns
-   *  `undefined` for every other case, including a cached entry whose delivery failed (design (iv)
-   *  — that one must still reach `dispatchFix` so the existing retry-on-failed-delivery path runs).
+   *  terminal-head index W1-T2723's `dispatchFix` consults internally. Returns a stand-down reason
+   *  when rotation history is unreadable or the exact `PR@head SHA` was already escalated.
+   *  An undelivered escalation in complete history still reaches `dispatchFix` for retry.
    *  A caller that omits this dep (every existing test/fixture) sees dispatch behave byte-for-byte
    *  as before. */
   terminalFixStandDown?: (pr: OpenPrView) => string | undefined;
@@ -31467,26 +31442,10 @@ export function createEscalationTriageHistoryReader(
     lastLoad.bytesRead += buf.length;
     return buf;
   };
-  const union = createIncrementalLedgerUnion(identity, { ...fsDeps,
-    readFileSync: (path) => counted(path, () => maskNonmatchingLiveRows(path, fsDeps.readFileSync(path))),
-    readRangeSync: (path, start, end) => counted(path, () => maskNonmatchingLiveRows(path,
-      (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end))),
+  const union = createIncrementalLedgerUnion({ ...identity, rawPattern }, { ...fsDeps,
+    readFileSync: (path) => counted(path, () => fsDeps.readFileSync(path)),
+    readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
   });
-  const liveStepAlternation = steps.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  const liveStepPattern = rawPattern && new RegExp(`"step"\\s*:\\s*(?:${liveStepAlternation})`);
-  function maskNonmatchingLiveRows(path: string, input: Buffer): Buffer {
-    if (!rawPattern || !liveStepPattern || path !== ledgerLivePath(dirname(path))) return input;
-    const output = Buffer.from(input);
-    let start = 0;
-    while (start < input.length) {
-      const newline = input.indexOf(0x0a, start);
-      const end = newline < 0 ? input.length : newline;
-      const line = input.toString("utf8", start, end);
-      if (liveStepPattern.test(line) && !rawPattern.test(line)) output.fill(0x20, start, end);
-      start = end + 1;
-    }
-    return output;
-  }
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
   // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
@@ -31594,7 +31553,7 @@ export function createEscalationTriageHistoryReader(
     }
     if (fresh.length > 0) {
       const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
-        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? { requireObjects: true } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
+        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? { requireObjects: true, pattern: rawPattern } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       if (slice.sharedSnapshot) {
         for (const entry of fresh) {
