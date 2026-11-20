@@ -364,6 +364,9 @@ test("Core public plan criteria: binds identity, destination, criteria, and sour
   assert.equal(f.sourceReads.length, 0, "a Core binding reads no private catalog");
   const pinned = f.rows.find(row => row.step === "core_criteria.pinned"); assert.ok(pinned, "the run pinned Core's criteria");
   assert.equal(pinned.source_commit, f.coreCommit); assert.equal(pinned.target, `craigoley/${CORE_TARGET}`);
+  const creates = f.publicWrites.filter(write => /^api (?:-X|--method) POST /.test(write));
+  assert.equal(creates.length, 1, "the run creates a single PR");
+  assert.match(creates[0]!, new RegExp(`^api (?:-X|--method) POST repos/craigoley/${CORE_TARGET}/pulls `));
   assert.ok(f.bodies.length > 0, "the opener wrote a body"); assert.deepEqual(parseAcceptanceBlock(f.bodies.at(-1)!), criteria);
   assert.match(f.bodies.at(-1)!, new RegExp(`Remudero-Task: ${ID}`));
   const bound = bindCanonicalCoreCriteria(ID, TITLE, `craigoley/${CORE_TARGET}`, f.coreCommit, criteria);
