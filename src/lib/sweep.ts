@@ -6643,13 +6643,17 @@ export function restorableDeliveredVerdict(
 ): { row: Record<string, unknown>; regressionKey: string } | { refusal: string } {
   if (pr.reviewState !== "pending") return { refusal: "GitHub's status is not pending" };
   if (pr.reviewInputDigest === undefined) return { refusal: "the review input digest is unread" };
-  const taskId = reviewOutcomeTaskIdFor(pr);
-  const row = lines.findLast(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
-    r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
-  if (row === undefined) return { refusal: "no delivered verdict of this head and input is on the ledger" };
-  const verdict = row.decision_verdict as ReviewVerdict | undefined;
-  if ((row.state !== "success" && row.state !== "failure") || verdict?.state !== row.state || verdict.cannotEvaluate === true) {
-    return { refusal: "the delivered verdict is not a full success or failure" };
+  const posted = postedRowsForInput(pr, lines);
+  if (posted.length === 0) return { refusal: "no delivered verdict of this head and input is on the ledger" };
+  // W1-T13949: a cannot-evaluate hold posted AFTER a full verdict of the same input (a fix worker's in-round review) judged
+  // nothing, so it never hides that verdict; the newest full verdict is the one restored.
+  const row = newestFullVerdictRow(posted);
+  if (row === undefined) return { refusal: "the delivered verdict is not a full success or failure" };
+  // W1-T11847: a requeue after the verdict (its reviewer code advanced) admitted a fresh review that owns this pending status, so
+  // the stale verdict is never restored over it. A plain pending row is otherwise a claim, not an outcome (W1-T11929).
+  const at = lines.indexOf(row);
+  if (lines.slice(at + 1).some(r => reviewerCodeAdvanceNames(r, pr.prUrl, pr.headSha))) {
+    return { refusal: "the delivered verdict was requeued for a reviewer-code advance; the fresh review owns the status" };
   }
   const regressionKey = `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`;
   if (lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey)) {
@@ -6667,6 +6671,25 @@ function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<str
   const taskId = reviewOutcomeTaskIdFor(pr);
   return lines.filter(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
     r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
+}
+
+/** W1-T13949 — the newest `review.posted` row of an input that is a full success or failure verdict. Walking newest first:
+ *  - a row flagged cannotEvaluate, of any state, is a hold that judged nothing, so it is looked past;
+ *  - a row whose state and verdict disagree is not a verdict, so it is looked past too;
+ *  - a plain pending row is a claim, never an outcome (W1-T11929), so it is looked past as well. A review admitted by a
+ *    reviewer-code requeue is protected by restorableDeliveredVerdict's requeue refusal instead (W1-T11847).
+ *  OBSERVED 2026-11-20 on #19691 and #19721: a lane FAIL was delivered, a fix worker's in-round review then posted a
+ *  cannot-evaluate pending for the same head and input two minutes later, and every release path read that hold as the
+ *  newest row, so no review or fix ran again. */
+function newestFullVerdictRow(posted: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
+  for (let i = posted.length - 1; i >= 0; i--) {
+    const row = posted[i]!;
+    const verdict = row.decision_verdict as ReviewVerdict | undefined;
+    if (verdict?.cannotEvaluate === true) continue;
+    if (row.state === "pending") continue;
+    if ((row.state === "success" || row.state === "failure") && verdict?.state === row.state) return row;
+  }
+  return undefined;
 }
 
 /** W1-T12994 — a `review.posted` row of state pending is a cannot-evaluate HOLD: it folds as delivered, yet nothing was judged.
@@ -6751,7 +6774,7 @@ function deliveredFailureView(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): { view: OpenPrView; row: Record<string, unknown> } | undefined {
-  const row = postedRowsForInput(pr, lines).at(-1);
+  const row = newestFullVerdictRow(postedRowsForInput(pr, lines));
   const verdict = row?.decision_verdict as ReviewVerdict | undefined;
   if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
   if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
