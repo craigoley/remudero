@@ -6649,6 +6649,12 @@ export function restorableDeliveredVerdict(
   // nothing, so it never hides that verdict; the newest full verdict is the one restored.
   const row = newestFullVerdictRow(posted);
   if (row === undefined) return { refusal: "the delivered verdict is not a full success or failure" };
+  // W1-T11847: a requeue after the verdict (its reviewer code advanced) admitted a fresh review that owns this pending status, so
+  // the stale verdict is never restored over it. A plain pending row is otherwise a claim, not an outcome (W1-T11929).
+  const at = lines.indexOf(row);
+  if (lines.slice(at + 1).some(r => reviewerCodeAdvanceNames(r, pr.prUrl, pr.headSha))) {
+    return { refusal: "the delivered verdict was requeued for a reviewer-code advance; the fresh review owns the status" };
+  }
   const regressionKey = `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`;
   if (lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey)) {
     return { refusal: "this regression was already restored once" };
@@ -6670,8 +6676,8 @@ function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<str
 /** W1-T13949 — the newest `review.posted` row of an input that is a full success or failure verdict. Walking newest first:
  *  - a row flagged cannotEvaluate, of any state, is a hold that judged nothing, so it is looked past;
  *  - a row whose state and verdict disagree is not a verdict, so it is looked past too;
- *  - a plain pending row (no cannotEvaluate) is an admitted review still judging. It is the newest outcome of the input, so
- *    nothing older is restored over it (W1-T11847: restoring would re-post the old verdict over the review in flight).
+ *  - a plain pending row is a claim, never an outcome (W1-T11929), so it is looked past as well. A review admitted by a
+ *    reviewer-code requeue is protected by restorableDeliveredVerdict's requeue refusal instead (W1-T11847).
  *  OBSERVED 2026-11-20 on #19691 and #19721: a lane FAIL was delivered, a fix worker's in-round review then posted a
  *  cannot-evaluate pending for the same head and input two minutes later, and every release path read that hold as the
  *  newest row, so no review or fix ran again. */
@@ -6680,7 +6686,7 @@ function newestFullVerdictRow(posted: ReadonlyArray<Record<string, unknown>>): R
     const row = posted[i]!;
     const verdict = row.decision_verdict as ReviewVerdict | undefined;
     if (verdict?.cannotEvaluate === true) continue;
-    if (row.state === "pending") return undefined;
+    if (row.state === "pending") continue;
     if ((row.state === "success" || row.state === "failure") && verdict?.state === row.state) return row;
   }
   return undefined;

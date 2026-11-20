@@ -20,6 +20,7 @@ import {
   DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, deliveredKeyReviewDecision, pendingViewSettledFromDeliveredFailure,
   readLiveLedgerRows, restorableDeliveredVerdict, runSweep, type OpenPrView, type ReviewDispatchMode, type SweepDeps,
 } from "#src/lib/sweep.js";
+import { REVIEWER_CODE_ADVANCED, REVIEW_REQUEUED_STEP } from "#src/lib/review.js";
 
 const at = (clock: string): string => `2026-11-20T${clock}.000Z`;
 const TASK = "W1-T13785";
@@ -53,6 +54,7 @@ function fixture(t: TestContext, view: Partial<OpenPrView> = {}) {
     success: (ts: string) => row("review.posted", ts, `review-PR${PR}-1795164527950`, { state: "success", unmet_criteria: [], reasons: [],
       decision_verdict: { state: "success", summary: "remudero-review: PASS", criteria: [] } }),
     raw: (ts: string, over: Record<string, unknown>) => row("review.posted", ts, `review-PR${PR}-1795164600000`, over),
+    requeue: (ts: string) => row(REVIEW_REQUEUED_STEP, ts, "sweep-requeue", { reason: REVIEWER_CODE_ADVANCED }),
     restored: (regressionKey: string) => row(REVIEW_STATUS_RESTORED_STEP, at("11:46:00"), "restorer", { regression_key: regressionKey }),
     /** The fix worker's in-round review: a pending cannot-evaluate hold on the same head and input. */
     hold: (ts: string) => row("review.posted", ts, `work-fix-dispatch-${TASK}-1795160780513-6cd0`, { state: "pending", decision_verdict: {
@@ -138,15 +140,25 @@ test("W1-T13949 criterion 2: the restore and the settle read the newest full ver
   }
 });
 
-test("W1-T13949 criterion 2: a plain pending row after the verdict is a review in flight, not a hold, so nothing older is restored over it", t => {
-  // W1-T11847: a reviewer-code advance posts a plain pending row and admits ONE review of the same head and input. Restoring
-  // the older verdict over it would re-post a verdict the running review is about to replace, and the sweep would admit again.
+test("W1-T13949 criterion 2: a plain pending row after the verdict is a claim, never an outcome, so the restore and the settle read past it", t => {
   const f = fixture(t);
   f.seed.failure(at("08:53:11"));
   f.seed.raw(at("08:55:02"), { state: "pending", decision_verdict: { state: "pending", criteria: [] } });
-  assert.deepEqual(restorableDeliveredVerdict(f.pr, f.lines(), KEY), { refusal: "the delivered verdict is not a full success or failure" });
+  const restorable = restorableDeliveredVerdict(f.pr, f.lines(), KEY);
+  assert.ok("row" in restorable && restorable.row.ts === at("08:53:11"), `a plain pending row never hides the failure: ${JSON.stringify(restorable)}`);
   f.seed.restored(`${KEY}|${f.pr.reviewPendingSince}`);
-  assert.equal(pendingViewSettledFromDeliveredFailure(f.pr, true, f.lines(), KEY), undefined, "a review in flight is not settled");
+  assert.notEqual(pendingViewSettledFromDeliveredFailure(f.pr, true, f.lines(), KEY), undefined, "the spent restore settles on the failure");
+});
+
+test("W1-T13949 criterion 2: a reviewer-code requeue after the verdict keeps the fresh review's pending, so the stale verdict is never restored", t => {
+  // W1-T11847: the requeue posted pending and admitted ONE review of the same head and input; restoring the stale verdict over
+  // it would re-post what that review is about to replace.
+  const f = fixture(t);
+  f.seed.success(at("08:53:11"));
+  f.seed.requeue(at("08:54:00"));
+  f.seed.raw(at("08:55:02"), { state: "pending", decision_verdict: { state: "pending", criteria: [] } });
+  assert.deepEqual(restorableDeliveredVerdict(f.pr, f.lines(), KEY),
+    { refusal: "the delivered verdict was requeued for a reviewer-code advance; the fresh review owns the status" });
 });
 
 test("W1-T13949 criterion 3: a hold after a delivered success restores the success; a hold with no full verdict before it keeps today's refusal", t => {
@@ -160,6 +172,13 @@ test("W1-T13949 criterion 3: a hold after a delivered success restores the succe
   terminalHold.seed.raw(at("08:55:02"), { state: "success", decision_verdict: { state: "success", cannotEvaluate: true, criteria: [] } });
   const pastTerminal = restorableDeliveredVerdict(terminalHold.pr, terminalHold.lines(), KEY);
   assert.ok("row" in pastTerminal && pastTerminal.row.ts === at("08:53:11"), `a terminal hold never hides the success: ${JSON.stringify(pastTerminal)}`);
+
+  const pendingThenHold = fixture(t);
+  pendingThenHold.seed.success(at("08:53:11"));
+  pendingThenHold.seed.raw(at("08:54:30"), { state: "pending", decision_verdict: { state: "pending", criteria: [] } });
+  pendingThenHold.seed.hold(at("08:55:02"));
+  const pastBoth = restorableDeliveredVerdict(pendingThenHold.pr, pendingThenHold.lines(), KEY);
+  assert.ok("row" in pastBoth && pastBoth.row.state === "success", `a plain pending row and a hold never hide the success: ${JSON.stringify(pastBoth)}`);
 
   const holdOnly = fixture(t);
   holdOnly.seed.hold(at("08:55:02"));
