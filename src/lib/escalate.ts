@@ -1297,7 +1297,7 @@ export function taskSemanticRevision(task: {
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** Prefer the trailing producer fields to similarly labelled lines in the issue's prose. */
-function machineFields(body = ""): string | undefined {
+export function escalationMachineFields(body = ""): string | undefined {
   if (/^\*\*Class:\*\* [^\n]*\n\*\*Task:\*\* /.test(body)) return undefined;
   const marker = `\n\n${MACHINE_FIELDS_HEADING}\n`;
   const start = body.lastIndexOf(marker);
@@ -1310,18 +1310,18 @@ function machineFields(body = ""): string | undefined {
  *  with `escalate()`'s dedup. Exported because the fix rung's pre-strike gate must be STRICTER:
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
-  return HEAD_SHA_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return HEAD_SHA_LINE_RE.exec(escalationMachineFields(body) ?? body ?? "")?.[1];
 }
 
 export function escalationIssueCause(body: string | undefined): string | undefined {
   const normalized = normalizeCandidateBody(body ?? "");
-  return CAUSE_LINE_RE.exec(machineFields(normalized) ?? normalized)?.[1];
+  return CAUSE_LINE_RE.exec(escalationMachineFields(normalized) ?? normalized)?.[1];
 }
 
 /** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
  *  SAME {@link TASK_LINE_RE} dedup matches on, so lib/escalation-answers.ts reuses one parser. */
 export function escalationTaskId(body: string | undefined): string | undefined {
-  return TASK_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return TASK_LINE_RE.exec(escalationMachineFields(body) ?? body ?? "")?.[1];
 }
 
 /** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).
@@ -1330,7 +1330,7 @@ export function escalationTaskId(body: string | undefined): string | undefined {
  *  rung's pre-strike gate can compare a candidate's RECORDED contract against the CURRENT one it
  *  is about to strike against. */
 export function escalationContractRevision(body: string | undefined): string | undefined {
-  return CONTRACT_REVISION_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return CONTRACT_REVISION_LINE_RE.exec(escalationMachineFields(body) ?? body ?? "")?.[1];
 }
 
 /** Does an OPTIONAL composite-key dimension veto a dedup match? Only when BOTH sides carry a value
@@ -1343,13 +1343,13 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
 function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined, body: string): boolean {
   const raw = unboundedEscalationTitle(e);
   if (title === raw) return true;
-  const fields = machineFields(body) ?? body;
+  const fields = escalationMachineFields(body) ?? body;
   return title === escalationIssueTitle(e) && fields.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
 /** Only the producer's machine fields (the header in legacy issues) can replace a clipped title. */
 function candidatePrRef(title: string | undefined, body: string): string | undefined {
-  const header = machineFields(body) ?? body.split("\n\n", 1)[0]!;
+  const header = escalationMachineFields(body) ?? body.split("\n\n", 1)[0]!;
   const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
   if (line) {
     let summary: unknown;
@@ -1486,7 +1486,7 @@ export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   return open.find((issue) => {
     const body = normalizeCandidateBody(issue.body ?? "");
-    const fields = machineFields(body) ?? body;
+    const fields = escalationMachineFields(body) ?? body;
     if (TASK_LINE_RE.exec(fields)?.[1] !== e.taskId) return false;
     const candidateCause = CAUSE_LINE_RE.exec(fields)?.[1];
     if (prRef) {
@@ -1683,7 +1683,7 @@ function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIss
   const newIssueRef = issueRefFromUrl(newIssueUrl);
   for (const issue of open) {
     const body = normalizeCandidateBody(issue.body ?? "");
-    const fields = machineFields(body) ?? body;
+    const fields = escalationMachineFields(body) ?? body;
     if (TASK_LINE_RE.exec(fields)?.[1] !== e.taskId) continue;
     if (candidatePrRef(issue.title, body) !== prRef) continue;
     const candidateHead = HEAD_SHA_LINE_RE.exec(fields)?.[1];
