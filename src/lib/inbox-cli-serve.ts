@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
-import { INBOX_CLI_REPLY_HEADER, INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
+import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
 
 /** serve.ts's DEFAULT_SERVE_PORT and serviceTokensPath, restated so this CLI stays out of serve's import cycle. */
 export const INBOX_CLI_DEFAULT_SERVE_PORT = 4317;
@@ -52,7 +52,7 @@ export function serveFirstInboxActions(target: InboxCliServeTarget, inProcess: (
   const connectMs = opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS;
   const entries = INBOX_VERBS.map((spec) => [spec.name, async (body: unknown, actor: Parameters<InboxVerbActions[InboxVerbName]>[1],
     respond: Parameters<InboxVerbActions[InboxVerbName]>[2]) => {
-    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs, spec.name === "reply");
+    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs);
     if ("unreachable" in answer) {
       warn(`rmd ${spec.name}: no serve answered at ${target.url} (${answer.unreachable}); running in-process`);
       return inProcess()[spec.name](body, actor, respond);
@@ -63,13 +63,13 @@ export function serveFirstInboxActions(target: InboxCliServeTarget, inProcess: (
   return Object.fromEntries(entries) as unknown as InboxVerbActions;
 }
 
-function postInboxVerb(url: string, token: string, body: unknown, connectMs: number, cliReply = false):
+function postInboxVerb(url: string, token: string, body: unknown, connectMs: number):
   Promise<{ status: number; body: unknown } | { unreachable: string } | { failed: string }> {
   const payload = Buffer.from(JSON.stringify(body));
   return new Promise((resolve) => {
     let connected = false;
     const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", "content-length": payload.length,
-      authorization: `Bearer ${token}`, ...(cliReply ? { [INBOX_CLI_REPLY_HEADER]: "1" } : {}) } }, (res) => {
+      authorization: `Bearer ${token}` } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("error", (error) => resolve({ failed: error.message }));

@@ -111,12 +111,21 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   assert.deepEqual(fallback.out, [JSON.stringify({ ok: true, verb: "snooze", proposalId: "P3" })]);
   assert.deepEqual(fallback.err, ["rmd snooze: no serve write token (ENOENT); running in-process"]);
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
-  // The CLI dials the port `rmd serve` binds: config serve.port, else the default; no CLI-only override can point it elsewhere.
+});
+
+test("W1-T13238: the CLI prefers RMD_SERVE_PORT, then the configured port, then serve's default", (t) => {
   const prior = process.env.RMD_SERVE_PORT;
-  process.env.RMD_SERVE_PORT = "4400";
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
-  assert.deepEqual(inboxCliServeTarget({ root: root(t), serve: { port: 9 } } as unknown as Config), { url: "http://127.0.0.1:9", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget({ root: root(t) } as unknown as Config), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
+  const base = { root: root(t) };
+  const configured = { ...base, serve: { port: 9 } };
+
+  process.env.RMD_SERVE_PORT = "4400";
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:4400", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN });
+
+  delete process.env.RMD_SERVE_PORT;
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
