@@ -1,6 +1,6 @@
 import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -505,33 +505,27 @@ function* prePushGateSteps(
   const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
   const env = prePushGateEnv();
   // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
-  if (required) {
-    delete env.RMD_PREPUSH_GATES;
-    Object.assign(env, operatorGithubAuthEnv());
-  }
+  if (required) delete env.RMD_PREPUSH_GATES;
   return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
 
-/** A required gate runs from an operator session, where the open-PR body check must read the stored body with the
- *  operator's own `gh` login: the throwaway HOME would otherwise hide it, and the check would report UNCHECKED. */
-function operatorGithubAuthEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"] as const) if (base[key]) env[key] = base[key];
-  env.GH_CONFIG_DIR = base.GH_CONFIG_DIR || (base.XDG_CONFIG_HOME ? join(base.XDG_CONFIG_HOME, "gh") : join(base.HOME || homedir(), ".config", "gh"));
-  return env;
-}
-
 /** The open-PR body check's lines for a body it could not judge: UNCHECKED, unreadable, or not run at all. */
 const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|open-pr-body-proof-precheck could not read this push|open-pr-body-proof-precheck\.mjs absent|open-pr-body-proof-precheck: SKIP -- the pushed tree could not be read here/;
 
-/** A required gate never reads an unjudged open-PR body check as a pass: the push is refused, and the reason says why. */
+/** The check's line for a proof the push newly falsifies. On a cached body the check only reports it. */
+const FALSIFIED_BODY_PROOF = /open-pr-body-proof-precheck: this push NEWLY FALSIFIES/;
+
+/** A required gate never reads an unjudged open-PR body check as a pass, and never pushes a newly falsified body
+ *  proof: its caller wrote the cached body from a read made just before the push, so that body is the stored one. */
 function requiredGateOutcome(outcome: HookOutcome): HookOutcome {
   if (outcome.refused) return outcome;
   const text = `${String(outcome.out.stdout ?? "")}\n${String(outcome.out.stderr ?? "")}`;
-  if (!UNCHECKED_BODY_CHECK.test(text)) return outcome;
-  const reason = "the open PR's stored body could not be read, so its open-PR body proofs were not checked";
+  const reason = UNCHECKED_BODY_CHECK.test(text)
+    ? "the open PR's stored body could not be read, so its open-PR body proofs were not checked"
+    : FALSIFIED_BODY_PROOF.test(text) ? "this push newly falsifies a proof in the open PR's stored body" : undefined;
+  if (reason === undefined) return outcome;
   return { refused: true, err: { ...outcome.out, stderr: `${String(outcome.out.stderr ?? "")}${reason}\n`, reason } };
 }
 

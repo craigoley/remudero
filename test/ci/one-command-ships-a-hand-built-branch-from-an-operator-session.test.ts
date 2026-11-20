@@ -624,7 +624,7 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   repo.git("config", "--local", "core.hooksPath", "");
   const gate = harnessGate(t, 'cat > /dev/null; echo pass >> "$MARK"');
   const requests: string[][] = [];
-  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
@@ -642,7 +642,7 @@ test("an operator checkout with Git's default hooks still runs every pre-push ch
   const gate = harnessGate(t, '[ "${RMD_PREPUSH_GATES:-}" = "0" ] && exit 0\ncat > /dev/null; echo refused >> "$MARK"; exit 1');
   process.env.RMD_PREPUSH_GATES = "0";
   const requests: string[][] = [];
-  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)));
@@ -822,48 +822,92 @@ test("W1-T12169 criterion 3: a failing it inside a describe is isolated on head 
   }
 });
 
-test("W1-T12169 criterion 4: an update push whose open-PR body check cannot read the stored body is refused", async (t) => {
+test("W1-T12169 criterion 4: an update push is judged against the stored body its parent reads, and refused when it cannot be read", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
-  const base = seedHandBranch(repo);
+  seedHandBranch(repo);
+  writeFileSync(join(repo.dir, "example.ts"), "body marker\n");
+  repo.git("add", "example.ts");
+  repo.git("commit", "-m", "the old tip carries the body proof's text");
+  const oldTip = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, "example.ts"), "reworded\n");
+  repo.git("commit", "-am", "the pushed head rewords it");
   // The production open-PR body check, run as the harness hook runs it for an update of an existing branch.
   const precheck = [shellQuote(process.execPath), "--import", shellQuote(join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs")),
-    shellQuote(join(REPO_ROOT, "scripts/open-pr-body-proof-precheck.mjs")), "--head-ref", branch, "--old-sha", base,
+    shellQuote(join(REPO_ROOT, "scripts/open-pr-body-proof-precheck.mjs")), "--head-ref", branch, "--old-sha", oldTip,
     '--new-sha "$sha"', '--remote-url "$2"'].join(" ");
   const gate = harnessGate(t, [
-    'read -r _ sha _ _; echo ran >> "$MARK"',
-    `${precheck}; rc=$?`,
+    'read -r _ sha _ _',
+    `out=$(${precheck} 2>&1); rc=$?`,
+    'printf "%s\\n" "$out" >> "$MARK"',
+    'printf "%s\\n" "$out" >&2',
     '[ "$rc" -eq 2 ] && echo "pre-push: open-pr-body-proof-precheck could not read this push — not blocking on an unreadable check" >&2',
     '[ "$rc" -eq 1 ] && exit 1',
     "exit 0",
   ].join("\n"));
-  // The operator's gh login is passed to the hook, and this gh answers as one whose login cannot read the PR.
-  const ghConfig = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-gh-`));
-  const ghBin = join(ghConfig, "bin");
-  mkdirSync(ghBin);
-  writeFileSync(join(ghBin, "gh"), `#!/bin/sh\necho "$GH_CONFIG_DIR" >> '${join(ghConfig, "seen")}'\n` +
-    'echo "To get started with GitHub CLI, please run:  gh auth login" >&2\nexit 4\n');
+  // No network: the hook's own GitHub read fails, as it does with no credential, and the cached body is used.
+  const ghBin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-gh-`));
+  writeFileSync(join(ghBin, "gh"), '#!/bin/sh\necho "To get started with GitHub CLI, please run:  gh auth login" >&2\nexit 4\n');
   chmodSync(join(ghBin, "gh"), 0o755);
-  const saved = { config: process.env.GH_CONFIG_DIR, token: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, path: process.env.PATH };
-  process.env.GH_CONFIG_DIR = ghConfig;
-  process.env.PATH = `${ghBin}:${process.env.PATH ?? ""}`;
-  delete process.env.GH_TOKEN;
-  delete process.env.GITHUB_TOKEN;
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${ghBin}:${savedPath ?? ""}`;
   t.after(() => {
-    for (const [key, value] of [["GH_CONFIG_DIR", saved.config], ["GH_TOKEN", saved.token], ["GITHUB_TOKEN", saved.github],
-      ["PATH", saved.path]] as const) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-    rmSync(ghConfig, { recursive: true, force: true });
+    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    rmSync(ghBin, { recursive: true, force: true });
   });
   const requests: string[][] = [];
-  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const reads: string[][] = [];
+  let stored: string | Error = "Acceptance:\n- Ignored files | grep: node_modules in .gitignore\n";
+  const defaults = handShipEffects(() => 0, async (args) => {
+    reads.push(args);
+    if (stored instanceof Error) throw stored;
+    return [{ number: 7, body: stored }];
+  }, async (_cwd, args) => { requests.push([...args]); return ""; });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
-  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /open-PR body proofs were not checked/);
-  assert.equal(readFileSync(gate, "utf8"), "ran\n", "the production body check ran in the gate");
-  assert.equal(readFileSync(join(ghConfig, "seen"), "utf8"), `${ghConfig}\n`, "the body check read GitHub with the operator's gh login");
-  assert.deepEqual(requests, [], "an unchecked body proof stops the push");
+  const checks = () => readFileSync(gate, "utf8");
+
+  await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.match(checks(), /OK -- 1 body proofs \(cached body\)/, "the check judged the body the parent read");
+  assert.equal(requests.length, 1, "a body proof that still holds lets the push go");
+  assert.deepEqual(reads.at(-1), ["api", `repos/example/repo/pulls?state=open&head=example%3A${branch}`]);
+
+  stored = "Acceptance:\n- Marker | grep: body marker in example.ts\n";
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /newly falsifies a proof in the open PR's stored body/);
+  assert.match(checks(), /NEWLY FALSIFIES 1 proof/);
+  assert.equal(requests.length, 1, "a newly falsified body proof stops the push");
+
+  const before = checks();
+  stored = new Error("GitHub unreachable");
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stored body could not be read before the push \(GitHub unreachable\)/);
+  assert.equal(checks(), before, "an unread body refuses the push before the gate runs");
+  assert.equal(requests.length, 1);
+});
+
+test("W1-T12169 criterion 4: a required pre-push gate's hook gets no GitHub token or gh login", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const gate = harnessGate(t, 'cat > /dev/null; env > "$MARK"');
+  const saved = { token: process.env.GH_TOKEN, github: process.env.GITHUB_TOKEN, config: process.env.GH_CONFIG_DIR };
+  process.env.GH_TOKEN = "hand-ship-test-token";
+  process.env.GITHUB_TOKEN = "hand-ship-test-token";
+  process.env.GH_CONFIG_DIR = f.root;
+  t.after(() => {
+    for (const [key, value] of [["GH_TOKEN", saved.token], ["GITHUB_TOKEN", saved.github], ["GH_CONFIG_DIR", saved.config]] as const) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  await withLiveWritesAllowed(() => defaults.push(source, run));
+  const env = readFileSync(gate, "utf8");
+  assert.match(env, /^HOME=/m, "the hook ran and recorded its environment");
+  assert.doesNotMatch(env, /^(GH_TOKEN|GITHUB_TOKEN|GH_CONFIG_DIR)=/m);
+  assert.doesNotMatch(env, /hand-ship-test-token/);
+  assert.equal(requests.length, 1);
 });
 
 test("W1-T12169 criterion 5: a stop during the pre-push gate settles only after the hook's whole process group is gone", async (t) => {
@@ -873,7 +917,7 @@ test("W1-T12169 criterion 5: a stop during the pre-push gate settles only after 
   const pidFile = join(f.root, "hook-member.pid");
   harnessGate(t, `cat > /dev/null; echo started >> "$MARK"; sh -c 'trap "" TERM; echo $$ > ${shellQuote(pidFile)}; exec sleep 60' & wait`);
   const requests: string[][] = [];
-  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
   const controller = new AbortController();
   const run = { dir: f.root, signal: controller.signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
@@ -888,6 +932,8 @@ test("W1-T12169 criterion 5: a stop during the pre-push gate settles only after 
   assert.deepEqual(requests, [], "a stopped gate never pushes");
 });
 
+async function noOpenPull(): Promise<unknown> { return []; }
+
 function shellQuote(word: string): string { return "'" + word.replaceAll("'", "'\\''") + "'"; }
 
 test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or overflows its output refuses the push", async (t) => {
@@ -896,7 +942,7 @@ test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or over
   seedHandBranch(repo);
   const mark = harnessGate(t, 'cat > /dev/null; head -c 67108865 /dev/zero; echo overflowed >> "$MARK"');
   const requests: string[][] = [];
-  const defaults = handShipEffects(() => 0, undefined, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
   // The refusal writes the gate's output through; keep 64 MiB of it out of the TAP stream.

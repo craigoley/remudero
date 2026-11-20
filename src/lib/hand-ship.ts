@@ -756,6 +756,33 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
 }
 
 interface PullResponse { number: number; html_url: string; body: string }
+
+/** The required pre-push gate's open-PR body check runs with no GitHub credential, so it reads the body its
+ *  clone caches: `cacheFile` in scripts/open-pr-body-proof-precheck.mjs, under the Git common directory. This
+ *  process has the operator's login, reads the stored body fresh just before the push, and writes that cache. A
+ *  branch with no open PR has no stored body proofs, which an empty body states. A body this cannot read refuses
+ *  the push: the gate would otherwise report it UNCHECKED. */
+async function cacheStoredBody(source: ShipSource, run: ShipRun,
+  github: (args: string[], fresh?: true, signal?: AbortSignal) => Promise<unknown>): Promise<void> {
+  const { owner, path } = pullEndpoint(source);
+  const query = new URLSearchParams({ state: "open", head: `${owner}:${source.branch}` });
+  let pulls: unknown;
+  try {
+    pulls = await github(["api", `${path}?${query}`], true, run.signal);
+  } catch (error) {
+    run.signal.throwIfAborted();
+    throw new Error(`the open PR's stored body could not be read before the push (${(error as Error).message})`);
+  }
+  run.signal.throwIfAborted();
+  const open = Array.isArray(pulls) ? pulls as Partial<PullResponse>[] : undefined;
+  if (!open || open.length > 1 || open.some((pull) => typeof (pull.body ?? "") !== "string")) {
+    throw new Error("the open PR's stored body could not be read before the push (GitHub did not name at most one open PR)");
+  }
+  const common = resolve(source.root, await gitAt(run, source.root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+  const cache = join(common, "rmd-open-pr-body", `${encodeURIComponent(source.branch)}.json`);
+  mkdirSync(dirname(cache), { recursive: true });
+  writeFileSync(cache, JSON.stringify({ body: open[0]?.body ?? "", readAt: systemClock.iso() }));
+}
 const pullEndpoint = (source: ShipSource) => {
   const { owner, repo } = githubRepo(source.origin);
   return { owner, path: `repos/${owner}/${repo}/pulls` };
@@ -777,6 +804,7 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
       if (current.head !== source.head || current.branch !== source.branch || current.origin !== source.origin) {
         throw new Error("source branch, head or origin changed during verification");
       }
+      await cacheStoredBody(source, run, github);
       const execute = worktreePushExecAsync(source.root, { prGates: true, requireGate: true, signal: run.signal, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
