@@ -18,7 +18,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -584,8 +584,11 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
 function thrownServedModel(error: unknown, depth = 0): Record<string, string | null> {
   if (error === null || typeof error !== "object" || depth > 4) return {};
   // A wrapper such as WorkerAbandonedError keeps the provider's own error as its `cause`.
-  if (!("servedModel" in error)) return thrownServedModel((error as { cause?: unknown }).cause, depth + 1);
-  const { servedModel, servedModelReason } = error as { servedModel?: unknown; servedModelReason?: unknown };
+  // The side table holds the observation even for a frozen error; an own property is the older shape.
+  const observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined = observedServedModelOf(error)
+    ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
+  if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, depth + 1);
+  const { servedModel, servedModelReason } = observed;
   if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
   return typeof servedModelReason === "string" && servedModelReason.length > 0
     ? { served_model: null, served_model_reason: servedModelReason.slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS) } : {};

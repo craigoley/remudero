@@ -236,12 +236,16 @@ async function runCleanupFailedCodex(items: Record<string, unknown>[]): Promise<
 
 /** A cash call routed through production `spawnWorker` whose adapter returns `result` only once the clock-bound watchdog
  * has aborted it: the reply that named a model came back, and a later turn stalled past the bound. */
-async function runAbandonedCash(result: Partial<WorkerResult>): Promise<unknown> {
+async function runAbandonedCash(result: Partial<WorkerResult>, callerReason?: Error): Promise<unknown> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-abandoned-"));
+  // `callerReason`: the CALLER's own signal aborts with this error instead of the clock-bound watchdog.
+  const caller = new AbortController();
+  if (callerReason !== undefined) setTimeout(() => caller.abort(callerReason), 5);
   try {
     await spawnWorker({ cwd: root, settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"),
       permissionMode: "bypassPermissions", prompt: "bounded worker", model: "sonnet", effort: "low", maxTurns: 4,
-      mountProvider: "cash", cashSqueezed: true, clockBound: { boundMs: 25, pollMs: 5 },
+      mountProvider: "cash", cashSqueezed: true, clockBound: { boundMs: callerReason === undefined ? 25 : 60_000, pollMs: 5 },
+      ...(callerReason === undefined ? {} : { signal: caller.signal }),
       config: { root, dailyCapUsd: 25, workerProviders: { enabled: ["cash"], cashEndpoint: "https://openai.example.test/" } } as Config,
       providerRouting: { spawnOpenWeight: (args: { signal?: AbortSignal }) => new Promise((resolve) => {
         args.signal?.addEventListener("abort", () => resolve({ isError: true, subtype: "error_during_execution", text: "",
@@ -382,6 +386,11 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
     servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed }), true);
   assert.equal(abandonedUnnamed.served_model, null);
   assert.equal(abandonedUnnamed.served_model_reason, CASH_SERVED_MODEL_REASONS.unnamed);
+  // A caller that cancels with a FROZEN error keeps that exact error, and the failed-attempt row still records the model.
+  const frozen = Object.freeze(new Error("caller cancelled"));
+  const cancelled = await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" }, frozen);
+  assert.equal(cancelled, frozen, "the caller's own error is thrown unchanged");
+  assert.equal(spawnFailureDetail(cancelled, true).served_model, "gpt-5-nano-2025-08-07");
 
   // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
   // so the recorded name comes from a real answer, not from an error result.

@@ -2299,12 +2299,25 @@ export function codexServedModel(reroutes: readonly string[]): { servedModel: st
   return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
+const observedServedModels = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
+
 /** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
  * on the error, so the failed attempt's row records it like a returned result's row does. */
 export function withObservedServedModel<E extends Error>(error: E,
   observed: { servedModel: string | null; servedModelReason?: string }): E & { servedModel: string | null; servedModelReason?: string } {
-  return Object.assign(error, { servedModel: observed.servedModel,
-    ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) });
+  const record = { servedModel: observed.servedModel,
+    ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) };
+  // The side table is the record of truth: it holds even for a frozen or sealed error (a caller's abort reason), which
+  // keeps its identity and is thrown unchanged. The property copy is only a convenience for readers of the error.
+  observedServedModels.set(error, record);
+  if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);
+  return error as E & { servedModel: string | null; servedModelReason?: string };
+}
+
+
+/** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value. */
+export function observedServedModelOf(error: unknown): { servedModel: string | null; servedModelReason?: string } | undefined {
+  return error !== null && typeof error === "object" ? observedServedModels.get(error) : undefined;
 }
 
 interface CodexJsonEvent {
@@ -6555,7 +6568,7 @@ async function spawnCodexWorkerInPrivateTemp(
     };
   } catch (error) {
     // W1-T13868: ANY failure after the stream named a model carries it (or the named reason) to the failed-attempt row.
-    if (error instanceof Error && !("servedModel" in error)) withObservedServedModel(error, stdout.observedServedModel());
+    if (error instanceof Error && observedServedModelOf(error) === undefined) withObservedServedModel(error, stdout.observedServedModel());
     throw error;
   } finally {
     // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
