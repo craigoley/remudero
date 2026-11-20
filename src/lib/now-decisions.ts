@@ -128,10 +128,12 @@ export function heldTaskDecisions(instance: string, tasks: readonly Task[], answ
   return tasks.flatMap((task): NowDecision[] => {
     if (task.needs_input === undefined || task.status !== "queued" || answered(task.id)) return [];
     const { question, source_pr, asked_at } = task.needs_input;
-    const prompt = privateIds?.has(task.id) ? "This private task waits for your answer; its question is in the private plan." : source_pr ? `${question} (source pull request: ${source_pr})` : question;
+    // An ops task's id and time name no private field: its asked_at stays in the private plan too.
+    const priv = privateIds?.has(task.id) === true;
+    const prompt = priv ? "This private task waits for your answer; its question is in the private plan." : source_pr ? `${question} (source pull request: ${source_pr})` : question;
     return [{
-      id: `question:${task.id}:${asked_at}`, kind: "task_question", instance, taskId: task.id, title: firstLine(task.title, TITLE_CHARS) || task.id,
-      prompt: bounded(prompt), ...(asked_at ? { askedAt: asked_at } : {}),
+      id: priv ? `question:${task.id}` : `question:${task.id}:${asked_at}`, kind: "task_question", instance, taskId: task.id,
+      title: firstLine(task.title, TITLE_CHARS) || task.id, prompt: bounded(prompt), ...(asked_at && !priv ? { askedAt: asked_at } : {}),
       answer: { method: "POST", path: instanceAnswerPath(instance, isCore, "/v1/questions/answer"), tier: ESCALATION_OPTION_ROUTES["/v1/questions/answer"],
         fields: { taskId: task.id }, input: "text" },
     }];

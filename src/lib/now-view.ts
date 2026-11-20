@@ -83,7 +83,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { newestTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
+import { answerText, newestTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -566,12 +566,12 @@ const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
 /** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
 function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
-  // The blank test runs in JS, as the daemon's newestLedgerTaskAnswer does: SQLite trim() strips spaces only.
-  const query = db.prepare("SELECT ts, json_extract(body, '$.answer') AS answer FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
+  // The daemon's answerText decides; SQLite would return an array answer as its JSON text, so only a text answer is read.
+  const query = db.prepare("SELECT ts, CASE json_type(body, '$.answer') WHEN 'text' THEN json_extract(body, '$.answer') END AS answer FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
   return (taskId) => {
     let newest: string | undefined;
     for (const row of query.all(taskId) as Array<{ ts?: unknown; answer?: unknown }>) {
-      if (typeof row.ts === "string" && typeof row.answer === "string" && row.answer.trim() !== "" && (newest === undefined || row.ts > newest)) newest = row.ts;
+      if (typeof row.ts === "string" && answerText(row.answer) !== undefined && (newest === undefined || row.ts > newest)) newest = row.ts;
     }
     return newest;
   };

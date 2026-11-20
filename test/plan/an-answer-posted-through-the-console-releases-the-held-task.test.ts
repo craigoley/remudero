@@ -376,7 +376,9 @@ test("W1-T13940 criterion 3: a held task from the ops catalog is listed from the
   const before = box.needsYou();
   assert.equal(before.held.length, 1, "the Inbox lists the held ops task");
   const [decision] = before.held;
-  assert.equal(decision.id, `question:${TASK}:${ASKED_AT}`);
+  assert.equal(decision.id, `question:${TASK}`, "the id carries no private field");
+  assert.equal(decision.askedAt, undefined, "nor does the decision carry the private asked_at");
+  assert.equal(JSON.stringify(before.composed).includes(ASKED_AT), false, "the published view never holds the private asked_at");
   assert.equal(decision.title, "a held fixture task");
   assert.equal(decision.prompt.includes(QUESTION) || decision.prompt.includes("#18449"), false, "the private question stays private");
   assert.deepEqual(decision.answer, { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
@@ -422,4 +424,65 @@ test("W1-T13940 criterion 3: a secondary instance's held task, answered through 
   const after = box.needsYou();
   assert.equal(after.held.length, 0, "the secondary view no longer lists it");
   assert.equal(after.gates.length, 0);
+});
+
+test("W1-T13940 criterion 3: past the decisions cap, the needs-you count says how many held tasks the list leaves out", async (t) => {
+  const ids = Array.from({ length: 51 }, (_, i) => `W1-T9${String(1000 + i)}`);
+  const many: Plan = loadPlanFromYaml(ids.map((id, i) => `- id: ${id}
+  title: "held fixture ${i}"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  origin: architect
+  files: [src/lib/plan.ts]
+  needs_input:
+    question: "question ${i}?"
+    asked_at: "2026-11-14T20:${String(i).padStart(2, "0")}:00Z"
+`).join(""), "plan/tasks.d/W1-T91000-many.yaml");
+  const box = inbox(t, "core", { readPlan: many });
+  const { composed, gates } = box.needsYou();
+  const listed = composed.decisions.filter((d) => d.kind === "task_question");
+  assert.equal(gates.length, 51, "every held task is a gate");
+  assert.equal(listed.length, 50, "the list keeps its cap");
+  // The core store reader attests no malformed-line completeness, so core's count is a lower bound (`atLeast`).
+  assert.deepEqual(composed.needsYou.inbox, { atLeast: 51 });
+  assert.deepEqual(composed.needsYou.display, { shown: 50, more: { atLeast: 1 } }, "the count names the one the list leaves out");
+  assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.atLeast ?? 0), gates.length, "the count and the list agree");
+  assert.equal(composed.instances.find((i) => i.instance === "core")?.counts?.decisionsMore, 1, "the instance says one more decision exists");
+});
+
+test("W1-T13940 criterion 4: an array answer row counts as no answer in both the dispatch check and the Inbox", async (t) => {
+  for (const answer of [[], ["  "], ["Use 5 passes."], { text: "Use 5 passes." }]) {
+    const box = inbox(t);
+    const daemonRoot = tempDir(t, "daemon");
+    appendFileSync(box.ledgerPath, `${JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer })}\n`);
+    assert.ok(refusal(daemonRoot, box.ledgerPath) !== undefined, `${JSON.stringify(answer)}: the dispatch check still holds the task`);
+    assert.equal(box.needsYou().held.length, 1, `${JSON.stringify(answer)}: the Inbox still lists it`);
+  }
+});
+
+test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer is the store's answer once the ledger row is gone", (t) => {
+  const daemonRoot = tempDir(t, "daemon");
+  const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
+  const at = (ms: number) => new Date(T0 + ms).toISOString();
+  const row = (ms: number, answer: string, origin: string, extra: Record<string, unknown> = {}) =>
+    appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(ms), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin, answer, ...extra })}\n`);
+  const read = () => taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
+  row(0, "Use 3 passes.", "tok", { answer_id: "a-1" });
+  assert.equal(read(), "Use 3 passes.");
+  // The daemon's own GitHub reply: its store line and its ledger row, as readEscalationAnswers writes them.
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  appendFileSync(join(daemonRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: at(1000), task: TASK, answer: "Use 5 passes.", origin: "issue#501:comment:9001" })}\n`);
+  row(1000, "Use 5 passes.", "issue#501:comment:9001");
+  assert.equal(read(), "Use 5 passes.", "control: the newer GitHub answer wins");
+  row(2000, "Use 3 passes.", "tok", { answer_id: "a-2" });
+  assert.equal(read(), "Use 3 passes.", "the repeated route answer is newest");
+  writeFileSync(ledgerPath, "");
+  assert.equal(read(), "Use 3 passes.", "the store kept the newest answer after the ledger row is gone");
+  const lines = storeLines(daemonRoot).length;
+  read();
+  assert.equal(storeLines(daemonRoot).length, lines, "a later read copies nothing");
 });

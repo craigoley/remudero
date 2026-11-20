@@ -279,14 +279,20 @@ function readNeedsInput(value: unknown): TaskNeedsInput | undefined {
     ...(typeof e.source_pr === "string" || typeof e.source_pr === "number" ? { source_pr: String(e.source_pr) } : {}) };
 }
 
+/** W1-T13940: the one answer rule every reader shares: a string with a non-space character, else no answer. */
+export function answerText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 /** W1-T12715: the newest answer among question-store lines for `taskId`, or undefined. */
 export function newestTaskAnswer(lines: Iterable<unknown>, taskId: string): string | undefined {
   let newest: { ts: string; answer: string } | undefined;
   for (const value of lines) {
     const line = typeof value === "object" && value !== null ? value as { task?: unknown; answer?: unknown; ts?: unknown } : {};
-    if (line.task !== taskId || typeof line.answer !== "string" || line.answer.trim() === "") continue;
+    const answer = answerText(line.answer);
+    if (line.task !== taskId || answer === undefined) continue;
     const ts = typeof line.ts === "string" ? line.ts : "";
-    if (newest === undefined || ts >= newest.ts) newest = { ts, answer: line.answer };
+    if (newest === undefined || ts >= newest.ts) newest = { ts, answer };
   }
   return newest?.answer;
 }
@@ -296,9 +302,10 @@ export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string):
   let newest: LedgerTaskAnswer | undefined;
   for (const value of rows) {
     const row = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
-    if (row.step !== "panel.question_answered" || row.task_id !== taskId || typeof row.answer !== "string" || row.answer.trim() === "") continue;
+    const answer = answerText(row.answer);
+    if (row.step !== "panel.question_answered" || row.task_id !== taskId || answer === undefined) continue;
     const ts = typeof row.ts === "string" ? row.ts : "";
-    if (newest === undefined || ts >= newest.ts) newest = { ...row, ts, answer: row.answer };
+    if (newest === undefined || ts >= newest.ts) newest = { ...row, ts, answer };
   }
   return newest;
 }
