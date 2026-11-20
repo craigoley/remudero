@@ -214,6 +214,39 @@ test("W1-T13829 criterion 2: a reservation moved during fetch cannot be proved o
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+for (const phase of ["before worktree setup", "before push"]) {
+  test(`W1-T13829 criterion 2: a holder published during reservation fetch ${phase} stops the hand-off`, async (t) => {
+    const otherHolder = "run-unfiled-1795065830000";
+    const f = fixture(t, {
+      startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000,
+      holders: [HOLDER, HOLDER, otherHolder],
+    });
+    const lastRef = taskIdReservationRef(IDS[2]!);
+    const logTail = heldLog(IDS.map((id, i) => {
+      const holder = id === IDS[2] ? otherHolder : HOLDER;
+      return { id, file: SHARDS[i]!, holder, handoff: `reservation hand-off: ${holder} -> ${FILER}` };
+    }));
+    let cut = false;
+    let committed = false;
+    let published = false;
+    const pr = planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] });
+    const out = await handOff(f, pr, async (cwd, args) => {
+      const result = await hostWorktreeGitAsync(cwd, args);
+      if (args[0] === "commit") committed = true;
+      if (args[0] === "fetch" && args.at(-1) === lastRef && committed === (phase === "before push") && !published) {
+        f.remote.git("update-ref", `refs/heads/${HOLDER}`, "refs/heads/main");
+        published = true;
+      }
+      return result;
+    }, (step) => { if (step === "worktree.add") cut = true; });
+    assert.equal(published, true, "the first holder appeared while reading a different holder's reservation");
+    assert.deepEqual(out, { outcome: "stood-down", reason: `holder branch ${HOLDER} of ${IDS[0]} is on origin` });
+    assert.equal(cut, phase === "before push");
+    assert.equal(committed, phase === "before push");
+    assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+  });
+}
+
 test("W1-T13829 criterion 2: a holder published during worktree setup stops the hand-off before commit", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
   const writes: string[] = [];
@@ -302,6 +335,32 @@ test("W1-T13829 criterion 3: a literal note keeps its header, indentation and tr
   const [task] = parseYaml(after) as Array<Record<string, unknown>>;
   assert.equal(task!.note, `filed by hand\n\n\n${handoffLine}\n`);
   assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
+test("W1-T13829 criterion 3: empty block scalar notes keep the blank lines after their headers", async (t) => {
+  const notes = [
+    { header: "  note: |\n", blank: "\n", indent: "    ", suffix: "\n" },
+    { header: "  note: |4- # keep this comment\n", blank: "      \n\n", indent: "      ", suffix: "" },
+    { header: "  note: > # keep this comment\n", blank: "\n\n", indent: "    ", suffix: "\n" },
+  ];
+  const texts = SHARD_TEXTS.map((text, i) => {
+    const { header, blank } = notes[i]!;
+    return text.replace("  note: filed by hand\n", "").replace("  status: queued", `${header}${blank}  status: queued`);
+  });
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts });
+  const out = await handOff(f, planPr({ headSha: f.headSha }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  const loadAt = (sha: string) => loadPlanAtRef(f.remote.dir, "plan/tasks.yaml", sha).byId;
+  const before = loadAt(f.headSha);
+  const after = loadAt(out.newHeadSha!);
+  for (const [i, { header, blank, indent, suffix }] of notes.entries()) {
+    const id = IDS[i]!;
+    const edited = f.remote.git("show", `${out.newHeadSha}:${SHARDS[i]}`) + "\n";
+    assert.equal(before.get(id)?.note, "", "the original block scalar is valid and empty");
+    assert.equal(edited, texts[i]!.replace(header + blank, `${header}${indent}${handoffLine}\n${blank}`));
+    assert.equal(after.get(id)?.note, handoffLine + suffix);
+    assert.equal(shardNoteRecordsReservationHandoff(edited, HOLDER, FILER), true);
+  }
 });
 
 test("W1-T13829 criterion 3: folded notes keep their headers and wrapping when the remedy gets its own line", async (t) => {

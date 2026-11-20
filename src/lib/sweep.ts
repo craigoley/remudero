@@ -11882,6 +11882,8 @@ export async function handOffHeldPlanPrIds(
   }
   let cut = false;
   try {
+    const beforeCut = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforeCut !== undefined) return { outcome: "stood-down", reason: beforeCut };
     await worktreeAddAsync(repoDir, wt, basename(wt), `origin/${branch}`, { log: deps.log });
     cut = true;
     const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
@@ -11916,29 +11918,13 @@ export async function handOffHeldPlanPrIds(
   }
 }
 
-/** The first abandonment test a holder fails, named; an unreadable fact stands down too. */
+/** Fetch all reservations before checking live holders, and stand down on unreadable facts. */
 async function handoffStandDown(
   handoffs: readonly HeldIdHandoff[], repoDir: string, git: (cwd: string, args: string[]) => Promise<string>,
   deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
 ): Promise<string | undefined> {
   try {
-    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
-      const rows = await deps.readJson(args);
-      if (!Array.isArray(rows)) throw new Error("the open pull request page is unreadable");
-      for (const row of rows) {
-        if (typeof row?.head?.ref !== "string" || !/^\S+$/.test(row.head.ref)) {
-          throw new Error(`open PR #${row?.number ?? "unknown"} has an unreadable head ref`);
-        }
-      }
-      return rows;
-    }, undefined, "open");
-    if (open.truncated) return "the open pull request list is incomplete";
     for (const { id, holder } of handoffs) {
-      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
-        return `holder branch ${holder} of ${id} is on origin`;
-      }
-      const openPr = open.rows.find((row) => row.headRefName === holder);
-      if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
       const ref = taskIdReservationRef(id);
       const readSha = async () => (await git(repoDir, ["ls-remote", "--refs", "origin", ref]))
         .split("\n").map((row) => row.split("\t")).find(([, name]) => name === ref)?.[0] ?? "";
@@ -11952,6 +11938,24 @@ async function handoffStandDown(
       if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
       if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
         return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
+      }
+    }
+    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
+      const rows = await deps.readJson(args);
+      if (!Array.isArray(rows)) throw new Error("the open pull request page is unreadable");
+      for (const row of rows) {
+        if (typeof row?.head?.ref !== "string" || !/^\S+$/.test(row.head.ref)) {
+          throw new Error(`open PR #${row?.number ?? "unknown"} has an unreadable head ref`);
+        }
+      }
+      return rows;
+    }, undefined, "open");
+    if (open.truncated) return "the open pull request list is incomplete";
+    for (const { id, holder } of handoffs) {
+      const openPr = open.rows.find((row) => row.headRefName === holder);
+      if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
+      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
+        return `holder branch ${holder} of ${id} is on origin`;
       }
     }
     return undefined;
@@ -11986,6 +11990,7 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const body = joined.split("\n").map((l) => (l ? `${pad}  ${l}` : "")).join(eol);
   const folded = isScalar(note) && note.type === "BLOCK_FOLDED";
+  const emptyBlock = prior === "" && (folded || (isScalar(note) && note.type === "BLOCK_LITERAL"));
   let expected = `${joined}\n`;
   let next: string;
   if (isScalar(note) && note.range) {
@@ -11999,7 +12004,9 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
       // More-indented text in a folded block retains the preceding line break.
       const extra = folded && contentIndent !== undefined ? " " : "";
       if (indicators.includes("-")) expected = joined;
-      next = `${text.slice(0, end)}${text[end - 1] === "\n" ? "" : eol}${indent}${extra}${line}${eol}${text.slice(end)}`;
+      const headerEnd = block.indexOf("\n");
+      const at = emptyBlock && headerEnd >= 0 ? start + headerEnd + 1 : end;
+      next = `${text.slice(0, at)}${text[at - 1] === "\n" ? "" : eol}${indent}${extra}${line}${eol}${text.slice(at)}`;
     } else {
       const at = text.indexOf("\n", end);
       const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "").replace(/^#/, " #");
@@ -12016,7 +12023,7 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
   }
   const after = parseDocument(next);
   const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
-  const noteMatches = (value: unknown) => folded
+  const noteMatches = (value: unknown) => folded || emptyBlock
     ? typeof value === "string" && value.startsWith(prefix) && value.slice(prefix.length).trim() === line
     : value === expected;
   const same = Array.isArray(rows) && rows.length === before.length && rows.every((row, i) => row?.id === id
