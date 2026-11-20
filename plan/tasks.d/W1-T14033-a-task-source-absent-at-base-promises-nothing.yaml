@@ -1,0 +1,48 @@
+- id: W1-T14033
+  title: A task source that is absent at the reviewed repository's base promises nothing, so review never reads cannot-evaluate for it
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 8.00
+  risk: medium # which promised follow-ups review reads; a wrong skip would drop a real promise
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T13958
+  files:
+    - src/lib/review.ts
+    - test/review/a-task-source-absent-at-base-promises-nothing.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "observePromisedFollowUps for a task whose plan/tasks.d source path is absent at the pinned base returns state complete with no promise from that source, never state unknown"
+      proof: "grep: W1-T14033 criterion 1: in test/review/a-task-source-absent-at-base-promises-nothing.test.ts"
+    - claim: "A git read of the base that fails for any other reason still returns state unknown with its reason"
+      proof: "grep: W1-T14033 criterion 2: in test/review/a-task-source-absent-at-base-promises-nothing.test.ts"
+    - claim: "invariant:present-source-still-read — a task source present at the base is still read, and its promised follow-ups are returned as today"
+      kind: guard
+      proof: "grep: W1-T14033 criterion 3: in test/review/a-task-source-absent-at-base-promises-nothing.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20: remudero-sandbox #16 and #17 (wipe-test subject wt-sbx-9) read remudero-review
+    "cannot-evaluate — promise source unavailable: Error: Command failed: git -C …/worktrees/run-wt-sbx-9-…" on every
+    review, so neither PR could ever pass. #16 was closed as superseded by #17. On the host the failing read is
+    `git show <base>:plan/tasks.d/wt-sbx-9.yaml`: remudero-sandbox has no plan/tasks.d at all (contents API 404).
+    - src/lib/review.ts `observePromisedFollowUps` reads the task's blob at the pinned base with `git show` whenever the
+      task's sourcePath names plan/tasks.d, and any thrown read becomes `state: "unknown"`, which review posts as
+      cannot-evaluate.
+    - A path that does not exist at the base holds no promise at the base, so "unknown" there is a false claim.
+    W1-T13958 covers a different shape (an ops-catalog sourcePath that names no plan/tasks.d path at all).
+  design: |
+    INVARIANT present-source-still-read: a task source present at the base is read exactly as today.
+    1. Before `git show <base>:<taskPath>`, list the path at the base with `git ls-tree --name-only <base> -- <taskPath>`,
+       the same way the ADR paths are listed. When it is absent, add no promise from it and go on.
+    2. Every other read failure keeps returning `state: "unknown"` with its reason.
+    3. Tests inject `runGit`: one fake whose ls-tree returns nothing for the task path (criterion 1), one that throws a
+       non-absence error (criterion 2), and one where the source is present with a promise (criterion 3).
+  falsifier: |
+    At origin/main criterion 1 fails: the fake's `git show` of the absent path throws and the observation reads unknown.
+  note: |
+    Id reserved for run-unfiled-1795196000000 with rmd next-task-id on the host.

@@ -16,6 +16,7 @@
     - src/run-task.ts
     - src/lib/panel-graph.ts
     - test/an-unanswered-skill-draft-expires.test.ts
+    - src/lib/ledger-compact.ts
   status: queued
   attempts: 0
   acceptance:
@@ -69,4 +70,9 @@
     Count the workshop's own expiry rows in the sample: criterion 5's bound grows and the test fails.
     Drop the first-seen backfill filter: the sample takes in 1,197 ids with unknown ages. Replace the
     derived bound with a constant: criterion 1's fixture, whose longest wait is not that constant, fails.
-  note: "Filed from the 2026-11-19 skill-draft analysis. Builds on the close step of W1-T13858."
+  note: |
+    Filed from the 2026-11-19 skill-draft analysis. Builds on the close step of W1-T13858.
+    files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): review of #19830 at 15:05Z reproduced a read that
+    runs between two archive writes of ledgerCompactCommand and sees stable identities but missing rows (bound 16.50 to
+    2.00 days). The compactor holds no lock across its write loop, so the reader cannot detect it; the build must hold
+    the rotation lock across that loop in src/lib/ledger-compact.ts.
