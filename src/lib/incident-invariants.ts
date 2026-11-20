@@ -147,7 +147,7 @@ export const RUNTIME_LOOP_LAG_STEP = "runtime.loop_lag";
 // loop is fine."
 export const LOOP_LAG_P99_BOUND_MS = 500;
 /**
- * W1-T13203: one stall this long is an incident even when p99 stays low. The histogram behind p99 holds one sample
+ * PRIMARY CONTROL (W1-T13203): one stall this long is an incident even when p99 stays low. The histogram holds one sample
  * per loop turn, so serve's 887,447 ms freeze on 2026-11-16 (runtime.loop_lag 14:39:37Z: p99Ms 108.6) was one sample.
  */
 export const LOOP_LAG_MAX_STALL_BOUND_MS = 30_000;
