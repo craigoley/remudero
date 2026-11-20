@@ -11,6 +11,7 @@ import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerA
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { recordReviewFindings } from "#src/lib/review-findings.js";
+import { recordBenchmarkWorkerAttempt } from "#src/run-task.js";
 import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_REROUTE_RE,
@@ -140,7 +141,7 @@ test("a multi-response cash attempt records the latest model a response named, a
 });
 
 /** `turnItems` land in the first turn only; later turns carry just a message, as a turn codex did not reroute does. */
-function codexProcess(turnItems: Record<string, unknown>[] = [], turns = 1) {
+function codexProcess(turnItems: Record<string, unknown>[] = [], turns = 1, finalModel?: string) {
   const stdout = new PassThrough();
   const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
   setImmediate(() => {
@@ -150,7 +151,8 @@ function codexProcess(turnItems: Record<string, unknown>[] = [], turns = 1) {
         { type: "turn.started" },
         ...(turn === 0 ? turnItems : []).map((item) => ({ type: "item.completed", item })),
         { type: "item.completed", item: { type: "agent_message", text: "done" } },
-        { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } },
+        { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 },
+          ...(finalModel !== undefined && turn === turns - 1 ? { model: finalModel } : {}) },
       ]).flat(),
     ]) stdout.write(`${JSON.stringify(event)}\n`);
     stdout.end();
@@ -159,13 +161,13 @@ function codexProcess(turnItems: Record<string, unknown>[] = [], turns = 1) {
   return process;
 }
 
-async function runCodex(turnItems: Record<string, unknown>[] = [], turns = 1): Promise<WorkerResult> {
+async function runCodex(turnItems: Record<string, unknown>[] = [], turns = 1, finalModel?: string): Promise<WorkerResult> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-"));
   try {
     return await spawnCodexWorker({
       workerHome: join(root, "home"), cwd: process.cwd(), prompt: "review",
       settingsFile: join(process.cwd(), "settings", "worker.json"), tools: ["Read", "Grep", "Glob", "Bash"],
-      containment: { spawn: () => ({ process: codexProcess(turnItems, turns) as never, pid: 31_337 }), teardown: () => {} },
+      containment: { spawn: () => ({ process: codexProcess(turnItems, turns, finalModel) as never, pid: 31_337 }), teardown: () => {} },
     }, {
       claudeBin: "/unused/claude", root,
       workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
@@ -258,12 +260,16 @@ async function runAbandonedCash(result: Partial<WorkerResult>, callerReason?: Er
 
 /** Two cash calls through the production receipt wrapper, cancelled by ONE caller signal with ONE frozen error. Each
  *  rung names its own model. Returns the two calls' errors and the spawn-threw worker.attempt rows they wrote. */
-async function runSharedSignalCash(models: readonly string[]): Promise<{ errors: unknown[]; rows: Record<string, unknown>[] }> {
+async function runSharedSignalCash(models: readonly string[], lane: "benchmark" | "dispatch" = "benchmark"): Promise<{ errors: unknown[]; rows: Record<string, unknown>[] }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-shared-signal-"));
   const shared = Object.freeze(new Error("caller cancelled every call"));
   const caller = new AbortController();
   setTimeout(() => caller.abort(shared), 5);
-  const spawn = benchmarkNonDispatchSpawn("served-model-shared-signal", spawnWorker);
+  // `dispatch`: the run-task dispatch lane's own receipt writer, which logs through its caller's `log`.
+  const dispatchRows: Record<string, unknown>[] = [];
+  const spawn: typeof spawnWorker = lane === "benchmark" ? benchmarkNonDispatchSpawn("served-model-shared-signal", spawnWorker)
+    : (args) => recordBenchmarkWorkerAttempt(() => spawnWorker(args), (step, fields) => dispatchRows.push({ step, ...fields }),
+      () => undefined, () => {});
   try {
     const errors = await Promise.all(models.map(async (servedModel, index) => {
       const cwd = join(root, `call-${index}`);
@@ -282,7 +288,7 @@ async function runSharedSignalCash(models: readonly string[]): Promise<{ errors:
       } catch (error) { return error; }
     }));
     const path = join(root, "state", "ledger.ndjson");
-    const rows = (existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+    const rows = (lane === "dispatch" ? dispatchRows : existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>) : [])
       .filter((row) => row.step === "worker.attempt" && row.worker_failure === "spawn-threw-before-result");
     return { errors, rows };
@@ -345,6 +351,11 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   const twoTurns = await runCodex([reroute], 2);
   assert.equal(twoTurns.servedModel, "gpt-5.2");
   assert.equal(twoTurns.servedModelReason, undefined);
+  // An event that itself carries a model id (codex 0.152.0 streams none) names what served the call: the latest name wins.
+  const finalNamed = await runCodex([], 1, "gpt-5.3-codex");
+  assert.equal(finalNamed.servedModel, "gpt-5.3-codex");
+  assert.equal(finalNamed.servedModelReason, undefined);
+  assert.equal((await runCodex([reroute], 1, "gpt-5.3-codex")).servedModel, "gpt-5.3-codex", "the final event is the latest name");
   assert.deepEqual(codexServedModel(["gpt-5.1", "gpt-5.2"]), { servedModel: "gpt-5.2" }, "the latest reported name wins");
   assert.deepEqual(codexServedModel([]), { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON });
 
@@ -430,6 +441,11 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.ok(Object.isFrozen(sharedSignal.errors[0]), String(sharedSignal.errors[0]));
   assert.deepEqual(sharedSignal.rows.map((row) => row.served_model).sort(), ["gpt-5-nano-2025-08-07", "gpt-6.2-sol-2026-10-01"],
     "each call's failed-attempt row names the model its own rung reported");
+  // The dispatch lane writes its own spawn-threw row (recordBenchmarkWorkerAttempt): each call keeps its own model there too.
+  const dispatched = await runSharedSignalCash(["gpt-5-nano-2025-08-07", "gpt-6.2-sol-2026-10-01"], "dispatch");
+  assert.equal(dispatched.errors[0], dispatched.errors[1], "both dispatch calls throw the caller's one error, unchanged");
+  assert.deepEqual(dispatched.rows.map((row) => row.served_model).sort(), ["gpt-5-nano-2025-08-07", "gpt-6.2-sol-2026-10-01"],
+    "each dispatch call's failed-attempt row names the model its own rung reported");
 
   // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
   // so the recorded name comes from a real answer, not from an error result.

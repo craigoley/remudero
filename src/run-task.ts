@@ -2929,7 +2929,7 @@ import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
 } from "./lib/quiet-worker-watchdog.js";
-import { codexHarnessCommits, isCodexWorkerOutputLimitError, type CodexHarnessCommit } from "./lib/worker-provider.js";
+import { codexHarnessCommits, isCodexWorkerOutputLimitError, observeServedModelsPerCall, type CodexHarnessCommit } from "./lib/worker-provider.js";
 import { aliasRewriteFields, mergeHeadPresent, rewriteAddedTestImports, type AddedTestAliasRewrite, type TestAliasRewriter } from "./lib/added-test-alias-rewrite.js";
 import { enrichWorkerStreamEvent } from "./lib/worker-telemetry.js";
 import { toolStepSignature } from "./lib/tool-step-signature.js";
@@ -10793,6 +10793,9 @@ export function recordBenchmarkWorkerAttempt(
   selected: () => { id: string } | undefined,
   stopPolling: () => void,
 ): Promise<WorkerResult> {
+  // W1-T13868: this call's own served-model observations. Two calls cancelled by one signal throw ONE error, so
+  // an error-keyed record shared by every call would let the second overwrite the first's model.
+  const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
   const failed = (error: unknown): void => {
     try {
       const assignment = selected();
@@ -10800,13 +10803,13 @@ export function recordBenchmarkWorkerAttempt(
         ...attemptAssignmentJoin(assignment?.id, true),
         success: false,
         worker_failure: "spawn-threw-before-result",
-        ...spawnFailureDetail(error, assignment !== undefined),
+        ...spawnFailureDetail(error, assignment !== undefined, servedModelObservations),
       });
     } catch { /* preserve the original worker error */ }
   };
   let workerCall: Promise<WorkerResult>;
   try {
-    workerCall = call();
+    workerCall = observeServedModelsPerCall(servedModelObservations, call);
   } catch (error) {
     failed(error);
     stopPolling();

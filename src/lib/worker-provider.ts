@@ -2339,6 +2339,8 @@ export function observedServedModelOf(error: unknown,
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
+  /** Not streamed by codex 0.152.0; read when present (W1-T13868). */
+  model?: unknown;
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
   item?: {
@@ -2766,6 +2768,10 @@ class CodexJsonlAccumulator {
       const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
       if (to !== undefined && this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(to);
     }
+    // W1-T13868: codex 0.152.0 streams no model id on any event, but an event that does carry one (a later CLI, a
+    // proxy) names the model that served it, in stream order with the reroutes: the latest name is recorded.
+    const eventModel = cashResponseModel(event.model);
+    if (eventModel !== undefined && this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(eventModel);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
