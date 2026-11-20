@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import fs, { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
@@ -402,13 +402,69 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   return false;
 }
 
-/** The one syscall {@link defaultGetProcessStartTime} makes, injectable so a test can drive its
- *  parsing/error handling without a real subprocess (mirrors {@link FsRaceSyscalls}). */
+/** The syscalls {@link defaultGetProcessStartTime} makes, injectable so a test can drive its
+ *  parsing/error handling without a real subprocess or a real /proc (mirrors {@link FsRaceSyscalls}). */
 export interface ProcessStartTimeSyscalls {
   execFileSync: typeof execFileSync;
+  /** W1-T11457: the platform the /proc reader keys on. Absent ⇒ the `ps` path, so a parse-only seam
+   *  (inbox.ts hands over `ps` stdout it already holds) never reads /proc. */
+  platform?: NodeJS.Platform;
+  /** W1-T11457: reads one procfs file whole. Absent ⇒ `fs.readFileSync`, looked up at each call. */
+  readFileSync?: (path: string) => Buffer;
 }
 
-const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync };
+const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync, platform: process.platform };
+
+/** The aux-vector entry in which the kernel hands every process its CLK_TCK (what `getconf CLK_TCK` returns). */
+const AT_CLKTCK = 17n;
+/** W1-T11457: CLK_TCK per seam, kept once read; a failed read is retried on the next call. */
+const clockTicksBySeam = new WeakMap<ProcessStartTimeSyscalls, number>();
+
+/** CLK_TCK from `/proc/self/auxv`, or `undefined`. Read as 64-bit little-endian word pairs: a 32-bit or
+ *  big-endian vector never shows type 17 beside a nonzero rate there, so it reads `undefined` and takes ps. */
+function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, read: (path: string) => Buffer): number | undefined {
+  const cached = clockTicksBySeam.get(sysImpl);
+  if (cached !== undefined) return cached;
+  const auxv = read("/proc/self/auxv");
+  for (let at = 0; at + 16 <= auxv.length; at += 16) {
+    const type = auxv.readBigUInt64LE(at);
+    if (type === 0n) break; // AT_NULL ends the vector
+    if (type !== AT_CLKTCK) continue;
+    const hz = Number(auxv.readBigUInt64LE(at + 8));
+    if (hz <= 0) return undefined;
+    clockTicksBySeam.set(sysImpl, hz);
+    return hz;
+  }
+  return undefined;
+}
+
+/** W1-T11457: a pid's start from /proc with no child process: `/proc/stat`'s btime plus `/proc/<pid>/stat`'s
+ *  start ticks (field 22) over CLK_TCK. `null` for a pid with no stat file, as ps answers; `undefined` for any
+ *  other read or parse failure, which takes the ps path. btime is whole seconds, so this sits up to 1 s before
+ *  the true start and never after ps's answer: it never calls a holder stale that ps would call live. */
+function procStartTimeMs(pid: number, sysImpl: ProcessStartTimeSyscalls): number | null | undefined {
+  const read = sysImpl.readFileSync ?? fs.readFileSync;
+  let btimeSec: number;
+  let hz: number | undefined;
+  try {
+    btimeSec = Number(/^btime (\d+)$/m.exec(read("/proc/stat").toString("utf8"))?.[1]);
+    hz = clockTicksPerSecond(sysImpl, read);
+  } catch {
+    return undefined; // procfs unreadable here; ps still answers
+  }
+  if (!Number.isFinite(btimeSec) || hz === undefined) return undefined;
+  let stat: string;
+  try {
+    stat = read(`/proc/${pid}/stat`).toString("utf8");
+  } catch (err) {
+    // No stat file is no such pid, the answer ps gives; any other failure asks ps.
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+  }
+  // comm (field 2) is parenthesised and may hold spaces and ") (", so fields count from after the LAST ")".
+  const close = stat.lastIndexOf(")");
+  const startTicks = close < 0 ? NaN : Number(stat.slice(close + 1).trim().split(/\s+/)[19]);
+  return Number.isFinite(startTicks) ? btimeSec * 1000 + (startTicks * 1000) / hz : undefined;
+}
 
 /** `ps -o etime=`'s `[[DD-]HH:]MM:SS` elapsed-time format, in ms — or `null` for anything that
  *  doesn't match (never thrown: an unrecognized shape is indeterminate, not an error). */
@@ -422,8 +478,9 @@ function parseEtimeToMs(etime: string): number | null {
   return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
 }
 
-/** Default {@link IsHolderStaleOpts.getProcessStartTime}: shells to `ps -o etime=`, the one
- *  process-age mechanism both this repo's platforms (BSD `ps` on macOS, GNU `ps` in CI) support.
+/** Default {@link IsHolderStaleOpts.getProcessStartTime}. On Linux it reads /proc (W1-T11457: each `ps`
+ *  forked the multi-GB daemon on its event loop); elsewhere, or when /proc fails, it shells to `ps -o etime=`,
+ *  the one process-age mechanism both this repo's platforms (BSD `ps` on macOS, GNU `ps` in CI) support.
  *  Returns `null` — indeterminate, NOT "dead" — for a pid `ps` can't find or output it can't
  *  parse; {@link isHolderStale} already treats `null` as no evidence either way.
  *  Why: why elapsed time was chosen over wall-clock start time — docs/forensics/fs-race-safe.md#defaultgetprocessstarttime. */
@@ -431,6 +488,10 @@ export function defaultGetProcessStartTime(
   pid: number,
   sysImpl: ProcessStartTimeSyscalls = defaultProcessStartTimeSyscalls,
 ): number | null {
+  if (sysImpl.platform === "linux") {
+    const fromProc = procStartTimeMs(pid, sysImpl);
+    if (fromProc !== undefined) return fromProc;
+  }
   let raw: string;
   try {
     raw = sysImpl.execFileSync("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }) as string;
