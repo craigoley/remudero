@@ -19,7 +19,7 @@
     - test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts
     - test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts
     - test/sweep/a-restart-reads-each-open-pull-request-once-before-the-first-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A light pass called with no scope (the in-flight ticker's pass and the interphase ordinary pass in src/lib/daemon.ts), given a tick-read generation that freshReadGeneration serves, that holds no openPrError, and whose read started after the read of the last good list, decides from those views: the hook makes no GitHub read for its open pull request list and writes views_source tick_read on sweep_light.pre_review_timing"

@@ -17,7 +17,7 @@
     - src/lib/ledger.ts
     - src/lib/serve.ts
     - test/a-serve-append-leaves-rotation-to-the-daemon.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "After setLedgerRotationRole(\"backstop-only\"), an appendLedger that takes the live file past LEDGER_ROTATION_CEILING_BYTES does not rotate, and one that takes it past LEDGER_ROTATION_CEILING_BYTES x LEDGER_ROTATION_BACKSTOP_MULTIPLIER does"

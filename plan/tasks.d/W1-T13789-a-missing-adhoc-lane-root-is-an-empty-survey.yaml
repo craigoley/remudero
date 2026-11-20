@@ -18,7 +18,7 @@
     - test/a-missing-adhoc-lane-root-is-an-empty-survey.test.ts
     - test/the-lane-reaper-says-why-it-keeps.test.ts
     - test/adhoc-lane-reap.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:missing-root-is-empty — runAdhocLaneReapRung with a config whose <root>/lanes does not exist logs no adhoc_lane.reap.enumeration_error and no adhoc_lane.reap.headroom_error, and its adhoc_lane.reap.census row has no error field and an empty kept_by_reason and reaped count 0"
