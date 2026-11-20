@@ -454,24 +454,30 @@ const MOVED_FROM_VALUE_RE = /^[ \t]+moved_from: remudero@([0-9a-f]{40})\n?$/;
 /**
  * Added ids that are a VERIFIED MOVE from the public catalog (`rmd move-task`'s copy step): every file
  * declaring the id carries exactly one `moved_from: remudero@<sha>` line, and with that line removed equals,
- * byte for byte, the file at the same path in the public code root at `<sha>`. Such a copy adds no new claim
- * on the reservation: the public record already passed the holder check under its own filer, so the copy's
- * mover branch is not a rival holder. Anything short of that proof (no code root, no line, two lines, a
- * commit or path the code root cannot read, one changed byte) is not a move and keeps the holder check.
- * Read-only: `git cat-file` in the code root, never a fetch.
+ * byte for byte, the file at the same path in a commit reachable from the code root's `refs/remotes/origin/main`.
+ * That public record already passed the holder check under its own filer. Without proof of the public
+ * commit and matching file, the copy keeps the holder check. All Git reads are local to the code root.
  */
 export function verifiedMoveIds(addedIds, occurrencesById, cwd, codeRoot, runGit = git) {
   const moved = new Map();
   if (codeRoot === undefined) return moved;
+  const gitOpts = { cwd: codeRoot, env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" } };
+  let publicMain;
   for (const id of addedIds) {
     const files = occurrenceFiles(occurrencesById.get(id) ?? []);
     let source;
     const verified = files.length > 0 && files.every((file) => {
-      const text = readFileSync(join(cwd, file), "utf8");
+      const text = readFileSync(join(cwd, file), "latin1");
       const lines = text.match(MOVED_FROM_LINE_RE) ?? [];
       const sha = lines.length === 1 ? MOVED_FROM_VALUE_RE.exec(lines[0])?.[1] : undefined;
       if (sha === undefined) return false;
-      const original = runGit(["cat-file", "blob", `${sha}:${file}`], { cwd: codeRoot });
+      publicMain ??= runGit(["show-ref", "--verify", "--hash", "refs/remotes/origin/main"], gitOpts);
+      if (publicMain.error || publicMain.status !== 0) return false;
+      const type = runGit(["cat-file", "-t", sha], gitOpts);
+      if (type.error || type.status !== 0 || type.stdout.trim() !== "commit") return false;
+      const ancestry = runGit(["merge-base", "--is-ancestor", sha, publicMain.stdout.trim()], gitOpts);
+      if (ancestry.error || ancestry.status !== 0) return false;
+      const original = runGit(["cat-file", "blob", `${sha}:${file}`], { ...gitOpts, encoding: "latin1" });
       source = sha;
       return !original.error && original.status === 0 && original.stdout === text.replace(MOVED_FROM_LINE_RE, "");
     });

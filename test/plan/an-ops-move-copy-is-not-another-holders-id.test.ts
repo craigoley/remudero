@@ -36,7 +36,7 @@ function world(t: TestContext, opts: { cites?: string; edit?: (copy: string) => 
   put(join(code.dir, PATH), original);
   code.git("add", "--all"); code.git("commit", "-qm", "public catalog");
   const publicCommit = code.git("rev-parse", "HEAD");
-  code.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T940");
+  code.git("push", "--quiet", "origin", "main", "HEAD:refs/rmd-id/W1-T940");
   const anchor = code.git("commit-tree", "HEAD^{tree}", "-m", formatReservationAnchorMessage({ branch: "public-filer", startedAt: new Date().toISOString() }));
   code.git("push", "--quiet", "origin", `${anchor}:refs/rmd-id/${MOVED}`);
   put(join(ops.dir, "plan/tasks.yaml"), "[]\n");
@@ -97,12 +97,36 @@ test("an ops record that is not byte for byte the public record keeps the holder
 test("verifiedMoveIds proves a move only with a code root, one moved_from line and a readable public original", (t) => {
   const w = world(t);
   const occurrences = new Map([[MOVED, [{ file: PATH, line: 1 }]]]);
-  assert.deepEqual([...gate.verifiedMoveIds([MOVED], occurrences, w.ops.dir, w.code.dir)], [[MOVED, w.publicCommit]]);
+  const verify = () => gate.verifiedMoveIds([MOVED], occurrences, w.ops.dir, w.code.dir);
+  const original = record("W1-T940");
+  const withSource = (...shas: string[]) => original.replace(`- id: ${MOVED}\n`,
+    `- id: ${MOVED}\n${shas.map(sha => `  moved_from: remudero@${sha}\n`).join("")}`);
+  const writeCopy = (...shas: string[]) => put(join(w.ops.dir, PATH), withSource(...shas));
+
+  w.code.git("commit", "--allow-empty", "-qm", "advance public main");
+  w.code.git("push", "--quiet", "origin", "main");
+  assert.deepEqual([...verify()], [[MOVED, w.publicCommit]], "a historical public commit still proves the move");
   assert.equal(gate.verifiedMoveIds([MOVED], occurrences, w.ops.dir, undefined).size, 0, "no code root: no move");
   assert.equal(gate.verifiedMoveIds([MOVED], new Map(), w.ops.dir, w.code.dir).size, 0, "no declaring file: no move");
-  const missing = "0".repeat(40);
-  put(join(w.ops.dir, PATH), record("W1-T940").replace(`- id: ${MOVED}\n`, `- id: ${MOVED}\n  moved_from: remudero@${missing}\n`));
-  assert.equal(gate.verifiedMoveIds([MOVED], occurrences, w.ops.dir, w.code.dir).size, 0, "an unreadable public commit: no move");
-  put(join(w.ops.dir, PATH), record("W1-T940").replace(`- id: ${MOVED}\n`, `- id: ${MOVED}\n  moved_from: remudero@${w.publicCommit}\n  moved_from: remudero@${w.publicCommit}\n`));
-  assert.equal(gate.verifiedMoveIds([MOVED], occurrences, w.ops.dir, w.code.dir).size, 0, "two moved_from lines: no move");
+
+  w.code.git("commit", "--allow-empty", "-qm", "unpublished local commit");
+  w.code.git("tag", "-am", "tag of the public record", "public-record", w.publicCommit);
+  const cases: [string, string[]][] = [
+    ["no moved_from line", []],
+    ["two moved_from lines", [w.publicCommit, w.publicCommit]],
+    ["unreadable commit", ["0".repeat(40)]],
+    ["public commit without the original path", [w.code.git("rev-parse", `${w.publicCommit}^`)]],
+    ["tree with matching bytes", [w.code.git("rev-parse", `${w.publicCommit}^{tree}`)]],
+    ["annotated tag of a public commit", [w.code.git("rev-parse", "refs/tags/public-record")]],
+    ["unpublished commit with matching bytes", [w.code.git("rev-parse", "HEAD")]],
+  ];
+  for (const [reason, shas] of cases) {
+    writeCopy(...shas);
+    assert.equal(verify().size, 0, reason);
+  }
+
+  w.code.git("branch", "refs/remotes/origin/main", "HEAD");
+  w.code.git("update-ref", "-d", "refs/remotes/origin/main");
+  writeCopy(w.publicCommit);
+  assert.equal(verify().size, 0, "missing public tracking ref despite a similarly named local branch");
 });
