@@ -4,11 +4,14 @@
 // `rmd authority` verb that prints it is read-only (no network, no gh/git spawn).
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
+  AUTHORITY_GATE_KINDS,
   AUTHORITY_TABLE,
   authorityLedgerPattern,
   authorityTableIds,
@@ -20,6 +23,8 @@ import {
 import { authorityCommand } from "#src/run-task.js";
 import type { LedgerUnionResult } from "#src/lib/ledger-grep.js";
 import type { Policy } from "#src/lib/policy.js";
+import type { AuthorityCaller, AuthorityReportRow, AuthorityRow } from "#src/lib/authority.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function fakeLedger(matches: string[], ok = true): LedgerUnionResult {
   return {
@@ -49,8 +54,8 @@ test("AUTHORITY_TABLE rows are non-empty and ids are unique", () => {
     assert.ok(row.note.length > 0, `${row.id}: note must not be empty`);
     assert.ok(Array.isArray(row.ledgerSteps), `${row.id}: ledgerSteps must be an array (possibly empty)`);
     assert.ok(
-      ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always"].includes(row.gate),
-      `${row.id}: gate must be one of the five closed kinds, got ${row.gate}`,
+      ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always", "host-switch"].includes(row.gate),
+      `${row.id}: gate must be one of the six closed kinds, got ${row.gate}`,
     );
   }
 });
@@ -330,5 +335,141 @@ test("authorityCommand is read-only: with PATH emptied and the REAL (non-injecte
   } finally {
     process.env.PATH = savedPath;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T13773: child-process callers, the host-switch gate, and every other row as before ───
+
+/** The table's self-check over callers: every violation, by row, so a fixture can show each one fires. */
+function callerViolations(rows: readonly AuthorityRow[], trackedSrc: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const check = (where: string, gate: string) => {
+    if (!(AUTHORITY_GATE_KINDS as readonly string[]).includes(gate)) out.push(`${where}: gate ${gate} is outside the closed vocabulary`);
+  };
+  for (const row of rows) {
+    check(row.id, row.gate);
+    if (!trackedSrc.has(row.module)) out.push(`${row.id}: module ${row.module} is not a tracked src file`);
+    for (const caller of row.callers ?? []) {
+      const where = `${row.id} caller ${caller.module}`;
+      check(where, caller.gate);
+      if (!trackedSrc.has(caller.module)) out.push(`${where}: module is not a tracked src file`);
+      for (const field of ["symbol", "verb"] as const) if (!caller[field]) out.push(`${where}: ${field} must not be empty`);
+      if (!Array.isArray(caller.ledgerSteps)) out.push(`${where}: ledgerSteps must be an array`);
+      if (caller.gate === "host-switch" && !caller.hostSwitch) out.push(`${where}: a host-switch caller must name its switch`);
+    }
+  }
+  return out;
+}
+
+test("W1-T13773 criterion 3: the closed gate vocabulary adds host-switch, whose callers require a switch and tracked source module", () => {
+  const moveRow = AUTHORITY_TABLE.find((r) => r.id === "push-plan-move-branch")!;
+  const janitor: AuthorityCaller = moveRow.callers![0]!;
+  const directory = dirname(janitor.module);
+  const modules = AUTHORITY_TABLE.flatMap((row) => [row.module, ...(row.callers ?? []).map((caller) => caller.module)]);
+  const moduleSpecs = [...new Set([...modules, directory])]
+    .filter((path) => path.startsWith("src/") && !path.split("/").includes(".."))
+    .map((path) => `:(literal)${path}`);
+  const trackedSrc = new Set(execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "--", ...moduleSpecs], { encoding: "utf8" })
+    .split("\0").filter(Boolean));
+  assert.deepEqual([...AUTHORITY_GATE_KINDS], ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always", "host-switch"]);
+  assert.deepEqual(callerViolations(AUTHORITY_TABLE, trackedSrc), []);
+  const hostSwitched = AUTHORITY_TABLE.flatMap((r) => (r.callers ?? []).filter((c) => c.gate === "host-switch"));
+  assert.deepEqual(
+    hostSwitched.map((caller) => caller.module),
+    ["src/lib/plan-task-move-janitor.ts", "src/lib/plan-task-move-janitor.ts"],
+    "both and only the two plan-move rows must list the janitor as a host-switch caller",
+  );
+  for (const id of ["push-plan-move-branch", "open-plan-move-pr"]) {
+    const row = AUTHORITY_TABLE.find((candidate) => candidate.id === id)!;
+    assert.equal(row.callers?.[0]?.gate, "host-switch", `${id} must carry its host-switch caller entry`);
+    assert.match(row.callers?.[0]?.hostSwitch ?? "", /^state\/plan-destination\.json move_public_tasks\b/);
+  }
+  // FALSIFIERS: the self-check is not silent on a broken caller.
+  const withCaller = (caller: AuthorityCaller): AuthorityRow[] => [{ ...moveRow, callers: [caller] }];
+  const { hostSwitch: _dropped, ...noSwitch } = janitor;
+  assert.deepEqual(callerViolations(withCaller(noSwitch), trackedSrc), [
+    "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: a host-switch caller must name its switch",
+  ]);
+  assert.ok(statSync(join(REPO_ROOT, directory)).isDirectory());
+  assert.deepEqual(callerViolations(withCaller({ ...janitor, module: directory }), trackedSrc), [
+    "push-plan-move-branch caller src/lib: module is not a tracked src file",
+  ]);
+  assert.deepEqual(callerViolations(withCaller({ ...janitor, gate: "daemon-flag" as AuthorityCaller["gate"] }), trackedSrc), [
+    "push-plan-move-branch caller src/lib/plan-task-move-janitor.ts: gate daemon-flag is outside the closed vocabulary",
+  ]);
+});
+
+/**
+ * Every caller-free row from origin/main (9d8ab9f996): a sha256 prefix over the report's JSON
+ * row and its `rmd authority` line. An intentional change to this report updates the pin.
+ */
+const ROWS_AS_BEFORE: Record<string, string> = {
+  "create-product-repository": "c75665ea4e8925f0",
+  "propose-product-runner-config": "f4add31d2e9f816e",
+  "restore-checkpoint-branch": "3369093791eeb635",
+  "arm-auto-merge-at-open": "a928e813caacaa3a",
+  "arm-auto-merge-ledger-gated": "b229b5dc18d856a9",
+  "disarm-auto-merge": "e69e3f29e544d3a8",
+  "arm-direct-merge-fallback": "5794a2ceb0b9625b",
+  "light-pass-merge-at-list-head": "4f95a6f046e220c8",
+  "update-branch-on-arm": "6673e76d3d6c3477",
+  "open-task-pr": "e0dbb69158f4b5ba",
+  "open-ratification-pr-single": "b6a38b898581f6a8",
+  "open-ratification-pr-batch": "1dfa99df38e7b5cd",
+  "pr-body-patch": "e9f7db77f594c595",
+  "sweep-close-superseded-pr": "0e43d646730a2660",
+  "sweep-ready-draft-pr": "2bb3e5584a8ab7e0",
+  "sweep-ci-job-rerun": "8afd792e9abd1add",
+  "worker-direct-merge-squash": "2e4305749768917b",
+  "open-sandbox-spike-pr": "d409cbfc983531f1",
+  "open-landing-pr": "167cb499d2057bc6",
+  "arm-landing-pr-automerge": "d860b35bbe78290c",
+  "force-push-landing-branch": "3cff6171c75317f5",
+  "push-run-branch": "832bd71cf3767e95",
+  "push-empty-commit-rebase": "e0b7dc443bcc414d",
+  "file-needs-human-issue": "5cbb66d175396263",
+  "escalate-issue-close-comment": "cef2f50553b4fe42",
+  "post-review-status": "24d15075efc0c2bf",
+  "post-ci-judge-status": "278d5d65e3e6f02f",
+  "post-review-pr-comment": "0dd10ea928b97685",
+  "specialist-panel-comment": "b5f30fee88f18dfd",
+  "triage-claim-ref-push": "e3cf2e41e57c274d",
+  "dispatch-claim-ref-push": "96ba987f9201c063",
+  "fleet-pause-ref-push": "bf7f5f0a2482d050",
+  "recovery-ref-push": "37782b31e45ff7f0",
+  "task-id-reservation-ref-push": "06b424963c926d98",
+  "task-id-reservation-ref-release": "1fec5408fc01c9f4",
+  "prune-deletable-branches": "2f4e46d3c8e96e77",
+  "archive-stale-held-branches": "b8134fe7b813372a",
+  "garden-close-released-decision-pr": "75172268133ee97f",
+  "machine-judge-withdraw-stale-pr": "1c41d52cc9386916",
+  "onboard-pr": "a725f1777e5686ac",
+  "sre-rerun-failed-ci-job": "f1d4616a6a0b35f4",
+  "head-identity-trailer-commit": "085ad46113c08b28",
+  "issue-close-panel-action": "677537872479a8a6",
+};
+
+function rowDigest(row: AuthorityReportRow, line: string): string {
+  return createHash("sha256").update(JSON.stringify(row)).update("\n").update(line).digest("hex").slice(0, 16);
+}
+
+test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each row without callers, its rmd authority line and its JSON row equal origin/main's", () => {
+  const report = buildAuthorityReport({ ledger: fakeLedger([]) });
+  assert.equal(report.status, "measured");
+  if (report.status !== "measured") return;
+  const lines = renderAuthorityReport(report).split("\n");
+  const withCallers = report.rows.filter((r) => "callers" in r).map((r) => r.id);
+  assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr"]);
+  const withoutCallers = report.rows.filter((row) => row.callers === undefined).map((row) => row.id).sort();
+  assert.deepEqual(withoutCallers, Object.keys(ROWS_AS_BEFORE).sort(), "the pin covers every origin/main row that gained no callers");
+  for (const [id, digest] of Object.entries(ROWS_AS_BEFORE)) {
+    const row: AuthorityReportRow | undefined = report.rows.find((r) => r.id === id);
+    assert.ok(row, `${id} must still exist`);
+    assert.equal(row.callers, undefined, `${id} must carry no callers`);
+    assert.ok(!("callers" in row), `${id}'s JSON row must carry no callers key`);
+    const at = lines.findIndex((l) => l.startsWith(`${id.padEnd(42)} `));
+    assert.ok(at > 0, `rmd authority must print a line for ${id}`);
+    assert.doesNotMatch(lines[at + 1] ?? "", /^\s/, `no caller line may follow ${id}`);
+    assert.equal(rowDigest(row, lines[at]), digest, `${id}: its JSON row or rmd authority line differs from origin/main's`);
   }
 });

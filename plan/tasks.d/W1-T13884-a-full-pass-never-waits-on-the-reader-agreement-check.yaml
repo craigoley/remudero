@@ -17,7 +17,8 @@
     - src/lib/sweep.ts
     - test/review/a-full-pass-never-waits-on-the-reader-agreement-check.test.ts
     - test/two-readers-of-one-fact-must-agree.test.ts
-  status: queued
+    - "src/cli/commands/sweep.ts"
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A full pass finishes while its reader agreement check is still running, and the check's findings are logged when it settles"

@@ -3314,7 +3314,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
-    fixDispatchCauseProbe: (cause) => fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") }),
+    fixDispatchCauseProbe: async (cause, reading) => {
+      if (!fixDispatchMemoryCause(cause)) return fixDispatchCauseProbe(cause, { stateDir: join(config.root, "state") });
+      const readers = sweepFixAdmissionReaders({ ledgerPath }, policy, "probe");
+      return fixAdmissionCauseProbe(reading === undefined ? readers : {
+        ...readers, readPressure: () => reading.pressure, readActiveWorkers: () => reading.activeWorkers,
+      });
+    },
     reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
@@ -15908,6 +15914,12 @@ function dispatchFailureCause(row: Record<string, unknown>): string {
     .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
 }
 
+const FIX_ADMISSION_MEMORY_CAUSE = /^fix dispatch refused: worker admission refused \((?:live host capacity|host worker budget <n>) exhausted/;
+
+export function fixDispatchMemoryCause(cause: string): boolean {
+  return FIX_ADMISSION_MEMORY_CAUSE.test(cause);
+}
+
 function fixDispatchSuccess(row: Record<string, unknown>, pr: OpenPrView): boolean {
   if (isProofAmendmentIdentityRow(row)) return false;
   return (row.step === "fix.dispatch" || row.step === "fix.retrigger") &&
@@ -15937,6 +15949,7 @@ function* fixDispatchHoldAtHeadSteps(
   const last = history.at(-1);
   if (!last) return undefined;
   const cause = dispatchFailureCause(last);
+  const memoryCause = fixDispatchMemoryCause(cause);
   let consecutive = 0;
   for (let i = history.length - 1; i >= 0 && dispatchFailureCause(history[i]!) === cause; i--) consecutive++;
   const nowMs = options.nowMs ?? systemClock.now();
@@ -16015,7 +16028,7 @@ function* fixDispatchHoldAtHeadSteps(
   } else if (cause.startsWith("preservation:") && typeof last.worktree_path === "string") {
     if (!ownerWorktreeExists(last.worktree_path) ||
         (yield* step(() => ownerReclaimable?.(pr, last))) === true) return undefined;
-  } else if (options.causeProbe && fixDispatchRefusalClass(cause) !== undefined) {
+  } else if (options.causeProbe && (memoryCause || fixDispatchRefusalClass(cause) !== undefined)) {
     // W1-T13750: a registered cause reads its probe as fleet-held does: a clear read lifts the hold at this head.
     const read = yield* step(() => options.causeProbe!(cause));
     if (read === "clear") return undefined;
@@ -16032,8 +16045,8 @@ function* fixDispatchHoldAtHeadSteps(
   const nextRetryMs = Math.min(8.64e15, probe === "present" ? nowMs + cadence : failureAt + backoffMs);
   const nextRetryAt = clockFromMillisFn(() => nextRetryMs).iso();
   const escalationKey = `${pr.prNumber}@${pr.headSha}:${cause}`;
-  const escalated = lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
-  if (probe === "unprobed" && nowMs >= nextRetryMs && progress.verdict !== "escalate") return undefined;
+  const escalated = !memoryCause && lines.some(row => atHead(row) && row.step === "sweep.disposed" && row.dispatch_cause_escalated === escalationKey);
+  if (probe === "unprobed" && nowMs >= nextRetryMs && (progress.verdict !== "escalate" || memoryCause)) return undefined;
   const decline = isOwnerClaimDecline(last);
   const staged = Array.isArray(last.staged_paths) ? `, staged ${last.staged_paths.map(String).join(", ")}` : "";
   const reason = `${decline ? "fix checkout claim declined" : "detached fix dispatch failed before fix.dispatch"} on #${pr.prNumber} ` +
@@ -16052,7 +16065,8 @@ async function holdRepeatedFixClaimDecline(
   pr: OpenPrView, hold: FixDispatchHold | undefined, escalate: SweepDeps["escalate"],
 ): Promise<{ reason: string; fields: Record<string, unknown> } | undefined> {
   if (hold === undefined) return undefined;
-  if (hold.fields.judge_verdict === "escalate" && hold.fields.escalation_deferred !== true) {
+  if (hold.fields.judge_verdict === "escalate" && hold.fields.escalation_deferred !== true &&
+      !fixDispatchMemoryCause(String(hold.fields.cause))) {
     if (!hold.escalated) await escalate(pr, hold.reason, renderClarificationQuestion(pr, hold.reason, pr.strikeHistory ?? []));
     hold.fields.dispatch_cause_escalated = hold.fields.dispatch_cause_key;
     if (hold.fields.dispatch_held === "fix_claim_decline")
@@ -16232,7 +16246,7 @@ export interface SweepDeps {
   /** Re-read the shared PAUSE ref for a recorded fleet-held fix failure. */
   fixDispatchFleetHold?: () => string | undefined;
   /** W1-T13750: the stuck-state registry's probe for a fix-dispatch cause it names; undefined for any other cause. */
-  fixDispatchCauseProbe?: (cause: string) => Promise<"clear" | "present" | undefined>;
+  fixDispatchCauseProbe?: (cause: string, reading?: { pressure: FixHostPressure; activeWorkers: number }) => Promise<"clear" | "present" | undefined>;
   restartAdmission?: ((kind: ReviewLaneClass, surface: "light" | "light-refill") => boolean) & { readonly heldBy?: string; readonly recycleWait?: true };
   /** W1-T11148: the head diff (reviewer's source) and the plan-lane bound's readings; absent: code lane, review-width bound. */
   readPrHeadDiff?: (pr: OpenPrView) => Promise<string>;
@@ -20025,12 +20039,12 @@ function readFixHostPressureOnce(
 }
 
 /** The production fix pressure: the host and this container, live work from its reservations; `unitMib` sizes "fits". */
-export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number): FixHostPressure {
+export function productionFixPressure(floorMib: number, ledgerPath: string, unitMib?: number, reclaim = true): FixHostPressure {
   return readFixHostPressure(floorMib, undefined, {
     unitMib,
     read: () => readContainerMemoryHeadroom(),
     ownWorkLive: () => ownContainerWorkLive(dirname(dirname(ledgerPath))),
-    reclaim: installedSlackReclaim,
+    reclaim: reclaim ? installedSlackReclaim : undefined,
   });
 }
 
@@ -20112,16 +20126,36 @@ export function productionFixAdmissionResidents(
 
 /** W1-T9498: the learned estimates and live residency the PRODUCTION pressure path charges with. A caller that injects
  *  its own pressure reading (a test) charges the class defaults with no residency read. */
-export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">): {
+export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPressure" | "fixProgressJudge" | "ledgerPath">,
+  live = deps.fixProgressJudge !== undefined): {
   readEstimate?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   readTypical?: (workerClass: FixAdmissionClass) => LearnedEstimate;
   readResidents?: () => FixAdmissionResidents;
 } {
-  if (deps.readFixPressure || !deps.fixProgressJudge) return {};
+  if (deps.readFixPressure || !live) return {};
   return {
     readEstimate: (workerClass) => classEstimate(workerClass),
     readTypical: (workerClass) => classTypical(workerClass),
     readResidents: () => productionFixAdmissionResidents(dirname(dirname(deps.ledgerPath))),
+  };
+}
+
+function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount" | "fixProgressJudge">,
+  live = deps.fixProgressJudge !== undefined): number {
+  return deps.readActiveWorkerCount?.() ?? activeWorkerCount(live ? dirname(deps.ledgerPath) : undefined);
+}
+
+function sweepFixAdmissionReaders(
+  deps: Parameters<typeof productionFixAdmissionReaders>[0] & Pick<SweepDeps, "readActiveWorkerCount">,
+  policy: SweepPolicy, mode: "pass" | "probe" = "pass",
+) {
+  const live = mode === "probe" || deps.fixProgressJudge !== undefined;
+  return {
+    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+    readActiveWorkers: live || deps.readFixPressure ? () => sweepActiveWorkerCount(deps, live) : undefined,
+    readPressure: deps.readFixPressure ?? (live ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath,
+      classEstimate("fix").estimateMib, mode === "pass") : undefined),
+    ...productionFixAdmissionReaders(deps, live),
   };
 }
 
@@ -20351,6 +20385,19 @@ export function createSweepFixAdmissionController(input: {
       } };
     },
   };
+}
+
+export function fixAdmissionCauseProbe(readers: Pick<
+  Parameters<typeof createSweepFixAdmissionController>[0],
+  "hostWorkerBudget" | "readPressure" | "readActiveWorkers" | "readEstimate" | "readTypical" | "readResidents">): "clear" | "present" {
+  let reading: SweepFixCapacitySnapshot | { reason: unknown };
+  try {
+    reading = createSweepFixAdmissionController({ ...readers, surface: "full", queueDepth: 1,
+      activeWorkers: 0, reviewReservations: 0 }).snapshot();
+  } catch (error) {
+    reading = { reason: error };
+  }
+  return !("reason" in reading) && reading.pressure && reading.fixAdmissionsAvailable > 0 ? "clear" : "present";
 }
 
 /** Production composition for both full-sweep entry points. Kept pure so wiring cannot drift. */
@@ -20888,6 +20935,15 @@ let lastReportedAnomalyGap: string | undefined;
 
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+/** W1-T13884: the reader agreement check in flight per ledger. A full pass starts it and goes on: it scans about
+ *  2M ledger lines twice, and awaited inline it held host passes for up to 40 min (reader.agreement duration_ms,
+ *  2026-11-19). One runs at a time, so a slow check is never doubled by the next interval. */
+const readerAgreementInFlight = new Map<string, Promise<void>>();
+
+/** W1-T13884: settles once the reader agreement check started for `ledgerPath` has finished, if one is in flight. */
+export function settleReaderAgreement(ledgerPath: string): Promise<void> {
+  return readerAgreementInFlight.get(ledgerPath) ?? Promise.resolve();
+}
 const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
@@ -21397,15 +21453,20 @@ export async function runSweep(
   }
   const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
   if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+      !readerAgreementInFlight.has(deps.ledgerPath) &&
       (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
     lastReaderAgreementAt.set(deps.ledgerPath, now);
-    try {
-      const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath: deps.ledgerPath,
-        runId: deps.runId, appendLine });
-      for (const finding of findings) log("reader.disagreement", { ...finding });
-    } catch (error) {
-      log("reader.agreement.unavailable", { reason: String(error) });
-    }
+    const ledgerPath = deps.ledgerPath;
+    // W1-T13884: started, not awaited. Its findings and failures are still logged when it settles.
+    const check = (async () => {
+      try {
+        const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath, runId: deps.runId, appendLine });
+        for (const finding of findings) log("reader.disagreement", { ...finding });
+      } catch (error) {
+        log("reader.agreement.unavailable", { reason: String(error) });
+      }
+    })().finally(() => { if (readerAgreementInFlight.get(ledgerPath) === check) readerAgreementInFlight.delete(ledgerPath); });
+    readerAgreementInFlight.set(ledgerPath, check);
   }
   deps.markPrelude?.("reader_agreement");
   if (endsForRestart("reader_agreement")) return endedEarly();
@@ -22016,7 +22077,7 @@ export async function runSweep(
   // Light passes share one controller across their per-PR calls.
   const fullRepairActiveWorkers =
     deps.repairAdmissionSurface === "full" && !deps.claimFixAdmission
-      ? (deps.readActiveWorkerCount ?? activeWorkerCount)()
+      ? sweepActiveWorkerCount(deps)
       : undefined;
   const fullOutcomes: ReviewAdmissionOutcomes = {
     delivered: prior.reviewDelivered, refused: prior.reviewRefused, retryableThrows: prior.reviewRetryableThrows,
@@ -22051,19 +22112,25 @@ export async function runSweep(
       : createSweepFixAdmissionController({
           surface: "full",
           queueDepth: fullReviewQueueDepth,
-          hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+          ...sweepFixAdmissionReaders(deps, policy),
           activeWorkers: fullRepairActiveWorkers,
-          readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-          readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
-            ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
           reviewReservations: fullReviews.planned,
           readReviewReservations: () =>
             (fullReviews.pulling ? Math.max(fullReviews.planned, fullReviews.started) : fullReviews.started) - fullReviews.settled,
-          ...productionFixAdmissionReaders(deps),
           log,
           reviewQueue: fullReviewQueue,
           waitSinceMs: (pr) => waitSinceMs(pr, false),
         });
+  const fullRepairReading = fullRepairAdmission?.snapshot();
+  if (fullRepairReading?.pressure && deps.fixDispatchCauseProbe) {
+    const reading = { pressure: fullRepairReading.pressure, activeWorkers: fullRepairReading.activeWorkers };
+    for (const [prNumber, hold] of dispatchCauseHolds) {
+      if (hold?.fields.probe_result !== "present") continue;
+      const cause = String(hold.fields.cause);
+      if (fixDispatchMemoryCause(cause) && await deps.fixDispatchCauseProbe(cause, reading) === "clear")
+        dispatchCauseHolds.delete(prNumber);
+    }
+  }
   const fixCapacityReleases = new Map<number, () => void>();
   const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
@@ -28914,14 +28981,10 @@ async function runSweepLightPassCore(
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
     queueDepth,
-    hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
+    ...sweepFixAdmissionReaders(deps, policy),
     activeWorkers,
-    readActiveWorkers: deps.fixProgressJudge || deps.readFixPressure ? deps.readActiveWorkerCount ?? activeWorkerCount : undefined,
-    readPressure: deps.readFixPressure ?? (deps.fixProgressJudge
-      ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath, classEstimate("fix").estimateMib) : undefined),
     reviewReservations: unsettledSpawning,
     readReviewReservations: () => unsettledSpawning,
-    ...productionFixAdmissionReaders(deps),
     log: deps.log,
   });
   const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
