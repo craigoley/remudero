@@ -18,7 +18,7 @@
     - scripts/record-rule-suite-reads.mjs
     - src/lib/ci-parity.ts
     - test/ci/parity/a-rule-suite-read-set-names-what-a-diff-could-skip.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: The recorder runs each rule suite once under a file-read tracer and writes, per suite, its sorted repo-relative read roots and the hash of the suite file into one committed record

@@ -15,15 +15,15 @@
  * with zero conversion at the one call site that matters (retro.ts's `buildGather`).
  */
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerLivePath, readLedgerUnionRecordsSync, realLedgerFs } from "./ledger-union.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -162,7 +162,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
   // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
   // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
-  // draft; with no mined steps it stays, so the scanner still refuses an outcome-only procedure.
+  // draft; with no mined steps it stays, so stageSkillDraft refuses the outcome-only procedure.
   // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
   const steps = eligibleSignals
     .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
@@ -475,12 +475,79 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function procedureStepLines(markdown: string): string[] {
+  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
+  return section.split("\n").filter((line) => line.startsWith("- "));
+}
+
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
 function skillProcedureSteps(markdown: string, descriptions: readonly string[]): string[] {
-  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) =>
-    line.startsWith("- ") && !descriptions.some((description) => restatesOutcome(line, description)),
-  );
+  return procedureStepLines(markdown).filter((line) => !descriptions.some((description) => restatesOutcome(line, description)));
+}
+
+const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+
+/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
+function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
+  const steps = procedureStepLines(markdown);
+  if (steps.length === 0 || !steps.every((line) => SIGNAL_TABLE_STEP_LINES.has(line))) return undefined;
+  return "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
+}
+
+/** The origin a workshop close writes on its decline row. */
+const SKILL_WORKSHOP_ORIGIN = "skill-workshop";
+
+function storedSkillSha256(proposal: Proposal): string {
+  return createHash("sha256").update(proposal.skillFile?.markdown ?? "").digest("hex");
+}
+
+/** True when the workshop already closed this entry's stored text. An operator restore keeps the record. */
+function workshopClosedSkillDraft(proposal: Proposal): boolean {
+  return proposal.skillDraftClose?.skillSha256 === storedSkillSha256(proposal);
+}
+
+/**
+ * Close one staged skill draft: the decline row first, then the close record on the registry entry.
+ * A crash between the two can repeat one row; it cannot record a close for a draft that is still open.
+ * Writes nothing under .claude/skills/. True when it closed.
+ */
+function closeSkillDraft(
+  registryPath: string,
+  proposalId: string,
+  reason: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Pick<Clock, "iso">,
+): boolean {
+  const staged = loadProposalRegistry(registryPath).find((p) => p.id === proposalId);
+  if (!staged || workshopClosedSkillDraft(staged)) return false;
+  return updateProposalRegistry(registryPath, (current) => {
+    const entry = current.find((p) => p.id === proposalId);
+    if (!entry || workshopClosedSkillDraft(entry)) return null;
+    const at = clock.iso();
+    const closeId = randomUUID();
+    const step = "panel.proposal_declined";
+    log(step, { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason, skill_draft_close_id: closeId });
+
+    // appendLedger can return after a short write. Confirm this attempt in the ledger, including rotations.
+    const stateDir = dirname(registryPath);
+    const livePath = ledgerLivePath(stateDir);
+    const { rows } = readLedgerUnionRecordsSync(stateDir, {
+      step, since: at, liveFirst: true, pattern: new RegExp(closeId),
+      where: (row) => row.skill_draft_close_id === closeId && row.task_id === proposalId &&
+        row.origin === SKILL_WORKSHOP_ORIGIN && row.reason === reason,
+      satisfied: (steps) => steps.has(step),
+    }, {
+      ...realLedgerFs,
+      readFileSync: (path) => {
+        const bytes = realLedgerFs.readFileSync(path);
+        // A live tail missing its newline can still be valid JSON until another append joins it.
+        return path === livePath ? bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1) : bytes;
+      },
+    });
+    if (rows.length === 0) throw new Error(`could not confirm the workshop decline for ${proposalId} in the ledger`);
+    const skillDraftClose = { at, reason, skillSha256: storedSkillSha256(entry) };
+    return current.map((p) => p === entry ? { ...p, skillDraftClose } : p);
+  }) !== null;
 }
 
 /**
@@ -505,9 +572,12 @@ export function stageSkillDraft(
   clock: Pick<Clock, "iso"> = systemClock,
 ): StageSkillDraftResult {
   const scan = scanSkillDraft(draft, allowlist);
+  const outcomeOnly = outcomeOnlyDraftRefusal(draft.markdown);
   if (!scan.ok) {
-    return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
+    const detail = `${scan.reason} (offending line: "${scan.offendingLine}")`;
+    return { refused: true, staged: false, alreadyStaged: false, reason: outcomeOnly ? `${outcomeOnly}. ${detail}` : detail };
   }
+  if (outcomeOnly !== undefined) return { refused: true, staged: false, alreadyStaged: false, reason: outcomeOnly };
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
   let alreadyStaged = false;
@@ -1323,7 +1393,7 @@ export function recheckSkillRetirement(
  *
  * STAGING WRITES A PROPOSAL AND NOTHING ELSE. The operator still releases it with `rmd approve`,
  * and only that writes under `.claude/skills/` — so nothing here can put machine-authored text in
- * front of a worker.
+ * front of a worker. The log writes to the ledger beside `registryPath`.
  */
 export function stageSkillDrafts(
   registryPath: string,
@@ -1335,8 +1405,13 @@ export function stageSkillDrafts(
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, typeof allowlist === "function" ? allowlist(draft) : allowlist, reachability(draft));
-      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
+      const list = typeof allowlist === "function" ? allowlist(draft) : allowlist;
+      const r = stageOne(registryPath, draft, list, reachability(draft));
+      const closed = r.refused &&
+        closeSkillDraft(registryPath, skillDraftProposalId(draft.procedureKey), `withdrawn: ${r.reason}`, log, systemClock);
+      const changed = r.staged || r.refreshed === true || r.backfilled === true || r.stamped === true || r.legacyReplaced === true;
+      if (!changed && !closed) continue;
+      log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, closed, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
     }

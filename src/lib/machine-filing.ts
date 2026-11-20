@@ -16,7 +16,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type Task, type TaskRisk } from "./plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, parseTasksFromYaml, type NewPathApprovalFacts, type Task, type TaskRisk } from "./plan.js";
 import { lintTask, promoteIntroducedPlanOnlyDiagnostics, taskRulingPin, type LintOpts, type LintViolation } from "./task-linter.js";
 
 /** Paths whose change is dangerous whoever makes it: secrets and credentials, auth and permissions,
@@ -215,6 +215,10 @@ export interface MachineShardPaths {
   pathExistsAtBase?: (path: string) => boolean;
   /** Defaults to plan.ts's own; a fixture may stand in for it, never production. */
   admissionViolations?: MachineFilingAdmission;
+  /** W1-T10331: verified new-path approval facts prepared before this synchronous precheck; handed to
+   *  the same decision lint-plan's admission runs. Absent, a task naming an approval is refused. */
+  newPathApproval?: NewPathApprovalFacts;
+  nowMs?: number;
 }
 
 /**
@@ -232,7 +236,8 @@ export function machineShardFilingRefusal(text: string, source: string, paths: M
   for (const task of plan.tasks) {
     if (task.author_class !== "machine") continue;
     for (const v of lintTask(task).violations) if (v.severity === "block") reasons.push(`${task.id}: ${v.check}: ${v.message}`);
-    const refused = admission(task, { plan, releasedIds: new Set(), pathExists: paths.pathExists, pathExistsAtBase: paths.pathExistsAtBase });
+    const refused = admission(task, { plan, releasedIds: new Set(), pathExists: paths.pathExists, pathExistsAtBase: paths.pathExistsAtBase,
+      newPathApproval: paths.newPathApproval, nowMs: paths.nowMs });
     if (refused.length > 0) reasons.push(`${task.id}: machine-filing-admission: ${refused.join("; ")}`);
   }
   return reasons.length > 0 ? reasons.join("; ") : undefined;

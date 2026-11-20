@@ -1,0 +1,44 @@
+- id: W1-T13853
+  title: The static author admission test expects a compile cache only when the cache is enabled
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: operator-request#serve-cpu-thread-2026-11-19
+  files:
+    - test/a-static-author-admits-its-nested-checks-once.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    The test "author static admission: real child and grandchild borrow one live owner without releasing
+    it" in test/a-static-author-admits-its-nested-checks-once.test.ts asserts that readdirSync(dir)
+    deep-equals ["node-compile-cache", "slot-1.json"]. It went red on coverage-shard 9/12 on #19690
+    (11506c50b) and coverage-shard 3/12 on #19711 (0f839ea0a) and #19712 (85a26633f). Root cause, observed
+    on Node 24.22.3: it fails every time NODE_DISABLE_COMPILE_CACHE=1 is set and passes every time it is
+    unset. scripts/test-with-retry.mjs --coverage-first-pass uses coverageChildEnvironment, which sets
+    NODE_DISABLE_COMPILE_CACHE=1 and deletes NODE_COMPILE_CACHE, and ci.yml runs every coverage shard that
+    way. The test's child and grandchild spread process.env and then lease.childEnvironment, so the disable
+    flag survives and Node never writes the cache directory. On #19690 shard 9 the instrumented pass failed
+    and the shard went green only on the uninstrumented retry. This is not a production leak: coverage
+    disables the cache on purpose.
+  design: |
+    Assert the node-compile-cache entry only when NODE_DISABLE_COMPILE_CACHE is unset in the child
+    environment the test builds; always assert slot-1.json and no other entries. Write the cause (coverage
+    runs disable the compile cache, and the child inherits that) beside the assertion with the marker
+    "W1-T13853 compile cache". This is a test assertion change, not a gate change.
+
+    INVARIANT static-admission-slot-only: slot-1.json and no extra entry are always required; node-compile-cache is required exactly when the child's compile cache is enabled.
+  acceptance:
+    - claim: invariant:static-admission-slot-only — the admission test always requires slot-1.json and no extra entry, and requires node-compile-cache only when NODE_DISABLE_COMPILE_CACHE is unset
+      proof: 'unit test: test/a-static-author-admits-its-nested-checks-once.test.ts'
+      kind: guard
+    - claim: the test names the coverage compile-cache cause beside the changed assertion
+      proof: 'grep: W1-T13853 compile cache in test/a-static-author-admits-its-nested-checks-once.test.ts'
+  falsifier: |
+    The test passes with NODE_DISABLE_COMPILE_CACHE=1 set and with it unset. A missing slot-1.json, or an
+    extra entry in the directory, fails it in both modes; with the cache enabled, a missing
+    node-compile-cache also fails it.

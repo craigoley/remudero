@@ -15,7 +15,7 @@
   files:
     - src/lib/serve-supervisor.ts
     - test/a-restarting-serve-answers-503-with-its-state.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When no generation is ready (container boot before the first /v1/ready, a generation restart, or a wedge restart from W1-T13276), a request to port 4317 gets 503 with Retry-After and a JSON body {state: \"restarting\" | \"starting\", since, reason, expectedReadyMs}, within 100 ms"

@@ -17,6 +17,7 @@
     - src/run-task.ts
     - test/a-lifetime-pressure-item-says-it-kept-failing-and-its-real-age.test.ts
     - test/adaptive-lifetime-pressure-builds-its-own-shards.test.ts # its sampled-shadow fixture hardcodes the observation key, so it must append the contract segment
+    - test/daemon/the-daemon-loop-never-blocks-on-worktree-git-or-ledger-scans.test.ts # its lifetimeKey fixture rebuilds the observation key, so it must append the contract segment
   status: merged
   attempts: 0
   acceptance:

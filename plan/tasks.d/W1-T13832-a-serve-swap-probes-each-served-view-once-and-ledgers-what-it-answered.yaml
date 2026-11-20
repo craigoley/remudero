@@ -22,7 +22,9 @@
     - src/lib/serve-supervisor.ts
     - src/run-task.ts
     - test/console-api/serve/a-serve-swap-probes-each-served-view-once-and-ledgers-what-it-answered.test.ts
-  status: queued
+    - test/serve-supervisor.test.ts
+    - test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A completed swap writes one serve.swap_probe row with the sha, the generation, the trigger and each served view's status, code and stale"
@@ -85,6 +87,9 @@
     5. serve.ts: ServeGenerationHooks gains swapProbe, bound to runSwapProbe with the reader from onProbeReader, the
        read model and deps.ledgerPath; onViewAnswer forwards source to demand.recordView. run-task.ts registers
        onSwapProbeRequest beside onDrainRequest.
+    6. test/serve-supervisor.test.ts and test/a-memory-deferred-handoff-sheds-worker-threads-and-fits.test.ts assert the
+       exact message types each fake generation is sent (for example ["rmd.promote", "rmd.drain"]). Their rigs stop
+       recording rmd.swap_probe, so those assertions keep judging promote, shed and drain; the new test owns the probe.
   falsifier: |
     Never send swapProbe after handoff_done or supervisor_ready: criterion 1 fails (no row). Drop the send from
     replaceCrashed, or send trigger cold_start there: criterion 5 fails. Count probe answers in
