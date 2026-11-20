@@ -14,6 +14,7 @@ import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { loadPlanAtRef } from "#src/lib/plan.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS, taskIdReservationRef } from "#src/lib/task-id-reservation.js";
 import { ciFailureRegionReducer } from "#src/lib/tick-read-worker.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
@@ -111,7 +112,7 @@ interface Fixture {
 const SHARD_TEXTS = [
   `- id: ${IDS[0]}\n  title: "a fixture shard — no note"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low # a comment\n  status: queued\n`,
   `- id: ${IDS[1]}\n  title: a fixture shard with a note\n  repo: remudero\n  note: filed by hand\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n`,
-  `- id: ${IDS[2]}\n  title: another fixture shard\n  repo: remudero\n  status: queued\n`,
+  `- id: ${IDS[2]}\n  title: another fixture shard\n  repo: remudero\n  type: implement\n  status: queued\n`,
 ];
 
 /** A bare origin holding main, the filing branch and the two reservations; the daemon's checkout of it. */
@@ -167,12 +168,12 @@ async function withFixtureHooks<T>(f: Fixture, run: () => Promise<T>): Promise<T
   }
 }
 
-function handOff(f: Fixture, pr: OpenPrView, git?: typeof hostWorktreeGitAsync) {
+function handOff(f: Fixture, pr: OpenPrView, git?: typeof hostWorktreeGitAsync, log: (step: string) => void = () => {}) {
   const decision = sweep.decidePlanRepair(pr, {}, undefined, new Set());
   assert.equal(decision?.action, "handoff");
   const { handoffs } = decision;
   return withFixtureHooks(f, () => sweep.handOffHeldPlanPrIds(pr, handoffs, f.host.dir, join(dirname(f.hooksDir), `wt-${++cuts}`), {
-    owner: "acme", repo: "remudero", log: () => {}, readJson: f.readJson, nowMs: () => NOW, git,
+    owner: "acme", repo: "remudero", log, readJson: f.readJson, nowMs: () => NOW, git,
   }));
 }
 
@@ -213,6 +214,36 @@ test("W1-T13829 criterion 2: a reservation moved during fetch cannot be proved o
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+test("W1-T13829 criterion 2: a holder published during worktree setup stops the hand-off before commit", async (t) => {
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
+  const writes: string[] = [];
+  const out = await handOff(f, planPr({ headSha: f.headSha }), async (cwd, args) => {
+    if (args[0] === "commit" || args[0] === "push") writes.push(args[0]);
+    return hostWorktreeGitAsync(cwd, args);
+  }, (step) => {
+    if (step === "worktree.add") f.remote.git("update-ref", `refs/heads/${HOLDER}`, "refs/heads/main");
+  });
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${HOLDER}`), f.remote.git("rev-parse", "refs/heads/main"));
+  assert.deepEqual(out, { outcome: "stood-down", reason: `holder branch ${HOLDER} of ${IDS[0]} is on origin` });
+  assert.deepEqual(writes, []);
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
+test("W1-T13829 criterion 2: a holder published after the local commit stops the hand-off before push", async (t) => {
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
+  const writes: string[] = [];
+  const out = await handOff(f, planPr({ headSha: f.headSha }), async (cwd, args) => {
+    const result = await hostWorktreeGitAsync(cwd, args);
+    if (args[0] === "commit" || args[0] === "push") writes.push(args[0]);
+    if (args[0] === "commit") f.remote.git("update-ref", `refs/heads/${HOLDER}`, "refs/heads/main");
+    return result;
+  });
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${HOLDER}`), f.remote.git("rev-parse", "refs/heads/main"));
+  assert.deepEqual(out, { outcome: "stood-down", reason: `holder branch ${HOLDER} of ${IDS[0]} is on origin` });
+  assert.deepEqual(writes, ["commit"]);
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
 test("W1-T13829 criterion 3: the line is added as its own note line per named shard, in one commit pushed with a lease", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
   const out = await handOff(f, planPr({ headSha: f.headSha }));
@@ -234,6 +265,30 @@ test("W1-T13829 criterion 3: the line is added as its own note line per named sh
   assert.equal(moved.outcome, "lease-mismatch", JSON.stringify(moved));
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), head);
 });
+
+for (const { name, original, prior, replacement } of [
+  { name: "an empty note", original: "note:", prior: null, replacement: "note: |\n" },
+  { name: "an empty note with a comment", original: "note: # keep this comment", prior: null, replacement: "note: | # keep this comment\n" },
+  { name: "a quoted note with leading spaces", original: 'note: "  filed by hand" # keep this comment', prior: "  filed by hand", replacement: "note: |2 # keep this comment\n      filed by hand\n" },
+]) {
+  test(`W1-T13829 criterion 3: ${name} survives appending the remedy`, async (t) => {
+    const texts = SHARD_TEXTS.map((text) => text.replace("note: filed by hand", original));
+    const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts });
+    const id = IDS[1]!;
+    const file = SHARDS[1]!;
+    const loadAt = (sha: string) => loadPlanAtRef(f.remote.dir, "plan/tasks.yaml", sha).byId.get(id);
+    assert.equal(loadAt(f.headSha)?.note, prior, "the plan loader accepts the original note");
+    const logTail = heldLog([{ id, file, handoff: handoffLine }]);
+    const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+    assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+    const head = f.remote.git("rev-parse", `refs/heads/${FILER}`);
+    assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), file);
+    const after = f.remote.git("show", `${head}:${file}`) + "\n";
+    assert.equal(after, texts[1]!.replace(`${original}\n`, `${replacement}    ${handoffLine}\n`));
+    assert.equal(loadAt(head)?.note, `${prior ? `${prior}\n` : ""}${handoffLine}\n`);
+    assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+  });
+}
 
 test("W1-T13829 criterion 3: a literal note keeps its header, indentation and trailing blank lines", async (t) => {
   const header = "  note: |4+ # keep these blank lines\n";

@@ -11870,8 +11870,6 @@ export async function handOffHeldPlanPrIds(
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
   const git = deps.git ?? ((cwd, args) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 }));
-  const standDown = await handoffStandDown(handoffs, repoDir, git, deps);
-  if (standDown !== undefined) return { outcome: "stood-down", reason: standDown };
   const edits = new Map<string, { ids: string[]; line: string }>();
   for (const { id, holder, filer, files } of handoffs) {
     const line = reservationHandoffNoteLine(holder, filer);
@@ -11888,6 +11886,8 @@ export async function handOffHeldPlanPrIds(
     cut = true;
     const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
     if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
+    const beforeEdit = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforeEdit !== undefined) return { outcome: "stood-down", reason: beforeEdit };
     const files: string[] = [];
     for (const [rel, edit] of edits) {
       const path = join(wt, rel);
@@ -11905,6 +11905,8 @@ export async function handOffHeldPlanPrIds(
     await git(wt, ["commit", "-m", `chore(plan): record the reservation hand-off for ${ids}\n\nW1-T13829 sweep plan repair.`]);
     const newHeadSha = (await git(wt, ["rev-parse", "HEAD"])).trim();
     assertLiveWriteAllowed("git-push", `recording the reservation hand-off for ${ids} on ${branch} for PR #${pr.prNumber}`);
+    const beforePush = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforePush !== undefined) return { outcome: "stood-down", reason: beforePush };
     await git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
     return { outcome: "handed-off", newHeadSha };
   } catch (error) {
@@ -12000,9 +12002,11 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
       next = `${text.slice(0, end)}${text[end - 1] === "\n" ? "" : eol}${indent}${extra}${line}${eol}${text.slice(end)}`;
     } else {
       const at = text.indexOf("\n", end);
-      const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "");
+      const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "").replace(/^#/, " #");
       const rest = at < 0 ? text.length : at + 1;
-      next = `${text.slice(0, start)}|${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
+      const separator = text[start - 1] === ":" ? " " : "";
+      const indicator = /^\n*[ \t]/.test(joined) ? "|2" : "|";
+      next = `${text.slice(0, start)}${separator}${indicator}${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
     }
   } else {
     const end = task.range[1];
