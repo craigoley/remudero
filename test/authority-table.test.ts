@@ -438,7 +438,6 @@ const ROWS_AS_BEFORE: Record<string, string> = {
   "dispatch-claim-ref-push": "96ba987f9201c063",
   "fleet-pause-ref-push": "bf7f5f0a2482d050",
   "recovery-ref-push": "37782b31e45ff7f0",
-  "task-id-reservation-ref-push": "06b424963c926d98",
   "task-id-reservation-ref-release": "1fec5408fc01c9f4",
   "prune-deletable-branches": "2f4e46d3c8e96e77",
   "archive-stale-held-branches": "b8134fe7b813372a",
@@ -450,16 +449,20 @@ const ROWS_AS_BEFORE: Record<string, string> = {
   "issue-close-panel-action": "677537872479a8a6",
 };
 
+function rowDigest(row: AuthorityReportRow, line: string): string {
+  return createHash("sha256").update(JSON.stringify(row)).update("\n").update(line).digest("hex").slice(0, 16);
+}
+
 test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each row without callers, its rmd authority line and its JSON row equal origin/main's", () => {
   const report = buildAuthorityReport({ ledger: fakeLedger([]) });
   assert.equal(report.status, "measured");
   if (report.status !== "measured") return;
   const lines = renderAuthorityReport(report).split("\n");
   const withCallers = report.rows.filter((r) => r.callers !== undefined).map((r) => r.id);
-  assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr"]);
+  assert.deepEqual(withCallers, ["push-plan-move-branch", "open-plan-move-pr", "task-id-reservation-ref-push"]);
   const withoutCallers = report.rows.filter((row) => row.callers === undefined).map((row) => row.id).sort();
   assert.deepEqual(withoutCallers, Object.keys(ROWS_AS_BEFORE).sort(), "the pin covers every origin/main row that gained no callers");
-  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 43, "the pin covers every origin/main row that gained no callers");
+  assert.equal(Object.keys(ROWS_AS_BEFORE).length, 42, "the pin covers every origin/main row that gained no callers");
   for (const [id, digest] of Object.entries(ROWS_AS_BEFORE)) {
     const row: AuthorityReportRow | undefined = report.rows.find((r) => r.id === id);
     assert.ok(row, `${id} must still exist`);
@@ -468,7 +471,27 @@ test("W1-T13773 criterion 4: invariant every-other-row-reads-as-before — each 
     const at = lines.findIndex((l) => l.startsWith(`${id.padEnd(42)} `));
     assert.ok(at > 0, `rmd authority must print a line for ${id}`);
     assert.doesNotMatch(lines[at + 1] ?? "", /^\s/, `no caller line may follow ${id}`);
-    const actual = createHash("sha256").update(JSON.stringify(row)).update("\n").update(lines[at]).digest("hex").slice(0, 16);
-    assert.equal(actual, digest, `${id}: its JSON row or rmd authority line differs from origin/main's`);
+    assert.equal(rowDigest(row, lines[at]), digest, `${id}: its JSON row or rmd authority line differs from origin/main's`);
   }
+});
+
+test("the reservation report adds the gate gardener fallback while preserving the original row", () => {
+  const id = "task-id-reservation-ref-push";
+  const report = buildAuthorityReport({ ledger: fakeLedger([]) });
+  assert.equal(report.status, "measured");
+  const row = report.rows.find((r) => r.id === id);
+  assert.ok(row);
+  const { callers, ...originalRow } = row;
+  assert.deepEqual(callers, [{
+    module: "src/lib/gate-gardener.ts",
+    symbol: "prepareDefuseTaskIds",
+    verb: "synchronous gate gardener task filing without an injected minter",
+    gate: "always",
+    ledgerSteps: [],
+  }]);
+  const lines = renderAuthorityReport(report).split("\n");
+  const at = lines.findIndex((line) => line.startsWith(`${id.padEnd(42)} `));
+  assert.ok(at > 0);
+  assert.equal(rowDigest(originalRow, lines[at]), "06b424963c926d98");
+  assert.equal(lines[at + 1], "  + caller synchronous gate gardener task filing without an injected minter: gate always; src/lib/gate-gardener.ts prepareDefuseTaskIds");
 });

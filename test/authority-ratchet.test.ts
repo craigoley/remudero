@@ -184,21 +184,6 @@ function holdsLiteral(text: string, word: string): boolean {
   return ['"', "'", "`"].some((quote) => text.includes(`${quote}${word}${quote}`));
 }
 
-function withoutInactiveReservationFallback(files: readonly SourceFile[]): readonly SourceFile[] {
-  // The one production gateGardenSpec call injects a minter. Mask only the argv line in the
-  // nullish fallback when that wiring is present and the import, definition and call are the
-  // only references. A new reference or changed fallback will make the scanner review it again.
-  const cli = files.find((file) => file.path === CLI_REGISTRATION);
-  const injected = /\bgateGardenSpec\(d, probes, \{ mintTaskId: ciLearningTaskIdMinter\(/;
-  const references = files.reduce((count, { text }) => count + [...text.matchAll(/\bgateGardenSpec\b/g)].length, 0);
-  if (!cli || !injected.test(cli.text) || references !== 3) return files;
-
-  const fallbackArgv = /(sources\.mintTaskId \?\? \(\(branch\) => \{\n)    const args = \["--import", "tsx", join\(deps\.repoRoot, "src\/run-task\.ts"\), "next-task-id", "--reserve", "--branch", branch\];/;
-  return files.map((file) => file.path === GATE_GARDENER
-    ? { ...file, text: file.text.replace(fallbackArgv, "$1") }
-    : file);
-}
-
 function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly SourceFile[]): string[] {
   const found: string[] = [];
   for (const row of rows) {
@@ -231,7 +216,7 @@ test("W1-T13773 criterion 2: every tracked src file with both row literals is na
   assert.ok(flagged.some((row) => row.id === "push-plan-move-branch"), "the fifth shape must read the push-plan-move-branch row's verb");
   const janitor = files.find((f) => f.path === "src/lib/plan-task-move-janitor.ts");
   assert.ok(janitor && holdsLiteral(janitor.text, "move-task") && holdsLiteral(janitor.text, "--apply"), "the janitor must hold both literals");
-  const missing = undeclaredChildCallers(AUTHORITY_TABLE, withoutInactiveReservationFallback(files));
+  const missing = undeclaredChildCallers(AUTHORITY_TABLE, files);
   assert.deepEqual(missing, [], `unlisted child callers: ${missing.join(", ")}`);
 });
 
@@ -276,21 +261,15 @@ test("W1-T13773 criterion 2 FALSIFIER: dropping the move-row declarations names 
   ]);
 });
 
-test("the reservation literal match becomes a ratchet failure if production reaches the fallback", () => {
+test("W1-T13773 criterion 2 FALSIFIER: dropping the reservation declaration names the gate gardener's child argv", () => {
   const row = AUTHORITY_TABLE.find((candidate) => candidate.id === "task-id-reservation-ref-push");
   assert.ok(row);
   const files = trackedAllSrcTexts();
-  const match = "task-id-reservation-ref-push: src/lib/gate-gardener.ts (rmd next-task-id --reserve)";
-  assert.deepEqual(undeclaredChildCallers([row], files), [match]);
-  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(files)), []);
-  const withoutInjection = files.map((file) => file.path === CLI_REGISTRATION
-    ? { ...file, text: file.text.replace("gateGardenSpec(d, probes, { mintTaskId:", "gateGardenSpec(d, probes, { otherMinter:") }
-    : file);
-  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(withoutInjection)), [match]);
-  const withAnotherCall = files.map((file) => file.path === GATE_GARDENER
-    ? { ...file, text: file.text + '\nspawn(process.execPath, [entry, "next-task-id", "--reserve"]);' }
-    : file);
-  assert.deepEqual(undeclaredChildCallers([row], withoutInactiveReservationFallback(withAnotherCall)), [match]);
+  assert.deepEqual(row.callers?.map((caller) => caller.module), [GATE_GARDENER]);
+  assert.deepEqual(undeclaredChildCallers([{ ...row, callers: [] }], files), [
+    `task-id-reservation-ref-push: ${GATE_GARDENER} (rmd next-task-id --reserve)`,
+  ]);
+  assert.deepEqual(undeclaredChildCallers([row], files), []);
 });
 
 // ── W1-T13773 report and invariant acceptance tests ──────────────────────────────────────────

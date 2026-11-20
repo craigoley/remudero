@@ -617,6 +617,15 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     ledgerSteps: [],
     verb: "rmd next-task-id --reserve / rmd run-task / rmd drain",
     note: "W1-T1055: the push IS the claim, so two concurrent minters cannot leave holding the same number.",
+    // The synchronous fallback needs no separate gate once filing reaches reservation. The
+    // production gate garden injects ciLearningTaskIdMinter, and async filing requires a minter.
+    callers: [{
+      module: "src/lib/gate-gardener.ts",
+      symbol: "prepareDefuseTaskIds",
+      verb: "synchronous gate gardener task filing without an injected minter",
+      gate: "always",
+      ledgerSteps: [],
+    }],
   },
   // ── src/lib/task-id-release.ts ───────────────────────────────────────────────────────────
   {
