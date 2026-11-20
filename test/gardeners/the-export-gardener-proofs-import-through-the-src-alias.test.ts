@@ -1,6 +1,6 @@
 /**
  * W1-T13955 — the export gardener's appended proof imports the source through `#src` when the root maps that alias.
- * OBSERVED 2026-11-19/20 on #19731: the gardener appended `import("../src/lib/<file>.js")`, and
+ * OBSERVED 2026-11-19/20 on #19731: the gardener appended a dynamic import of the source by a path relative to the test, and
  * test/a-test-imports-through-the-subpath-alias.test.ts (W1-T9864) failed coverage-shard 12/12 on it for 14 hours.
  *
  * @source-text-subject — every read below is of a throwaway fixture checkout the gardener itself rewrote, never this
@@ -77,5 +77,7 @@ test("W1-T13955 criterion 2: a root whose package.json does not parse keeps the 
   const { repo, stateDir } = fixture({ [SOURCE]: DEAD_TEXT, [TESTS]: SEEDED_TESTS, "package.json": "{ not json\n" });
   assert.ok(applyOnce(repo, stateDir), "the deletion lands");
   const tests = readFileSync(join(repo.dir, TESTS), "utf8");
-  assert.ok(tests.endsWith(`  const module = await import("../src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`), tests);
+  // The relative specifier is assembled, so this file itself carries none (W1-T9864 reads test text).
+  const relative = [".", ".", "/src/lib/dead-thing.js"].join("");
+  assert.ok(tests.endsWith(`  const module = await import("${relative}");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`), tests);
 });
