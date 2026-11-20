@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
-import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { recordReviewFindings } from "#src/lib/review-findings.js";
@@ -256,6 +256,39 @@ async function runAbandonedCash(result: Partial<WorkerResult>, callerReason?: Er
   } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/** Two cash calls through the production receipt wrapper, cancelled by ONE caller signal with ONE frozen error. Each
+ *  rung names its own model. Returns the two calls' errors and the spawn-threw worker.attempt rows they wrote. */
+async function runSharedSignalCash(models: readonly string[]): Promise<{ errors: unknown[]; rows: Record<string, unknown>[] }> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-shared-signal-"));
+  const shared = Object.freeze(new Error("caller cancelled every call"));
+  const caller = new AbortController();
+  setTimeout(() => caller.abort(shared), 5);
+  const spawn = benchmarkNonDispatchSpawn("served-model-shared-signal", spawnWorker);
+  try {
+    const errors = await Promise.all(models.map(async (servedModel, index) => {
+      const cwd = join(root, `call-${index}`);
+      mkdirSync(cwd);
+      try {
+        await spawn({ cwd, settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"),
+          permissionMode: "bypassPermissions", prompt: "bounded worker", model: "sonnet", effort: "low", maxTurns: 4,
+          mountProvider: "cash", cashSqueezed: true, clockBound: { boundMs: 60_000, pollMs: 5 }, signal: caller.signal,
+          config: { root, dailyCapUsd: 25, workerProviders: { enabled: ["cash"], cashEndpoint: "https://openai.example.test/" } } as Config,
+          providerRouting: { spawnOpenWeight: (args: { signal?: AbortSignal }) => new Promise((resolve) => {
+            args.signal?.addEventListener("abort", () => resolve({ isError: true, subtype: "error_during_execution", text: "",
+              stderr: "stalled second turn", numTurns: 2, durationMs: 30, totalCostUsd: 0, servedModel } as never), { once: true });
+          }) },
+        } as never);
+        return undefined;
+      } catch (error) { return error; }
+    }));
+    const path = join(root, "state", "ledger.ndjson");
+    const rows = (existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>) : [])
+      .filter((row) => row.step === "worker.attempt" && row.worker_failure === "spawn-threw-before-result");
+    return { errors, rows };
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 test("a codex result records a fixed named reason, since its exec --json stream carries no model id", async () => {
   const result = await runCodex();
   assert.equal(result.isError, false, result.stderr);
@@ -362,8 +395,8 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   assert.equal(findingRows[2]?.served_model, "gpt-5.2");
   assert.equal("served_model_reason" in findingRows[2]!, false, "a named model carries no reason");
 
-  // A body held past the request deadline lands only after the attempt ended and its row was built. The row says so:
-  // the reason names the deadline, never that no reply ever came.
+  // A body held past the request deadline lands only after the attempt ended and its row was built. The row keeps the
+  // existing no-response reason, which the attribution reader keys on: no response had arrived when the attempt ended.
   const heldFixture = cashFixture();
   try {
     const held = await spawnOpenWeightWorker({ cwd: heldFixture.root, workerHome: join(heldFixture.root, "home"), prompt: "classify",
@@ -373,7 +406,6 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
     assert.equal(held.isError, true, "the deadline fails the attempt");
     assert.equal(held.servedModel, null);
     assert.equal(held.servedModelReason, CASH_SERVED_MODEL_REASONS.noResponse);
-    assert.match(String(held.servedModelReason), /before the attempt ended/);
     await new Promise((resolve) => setTimeout(resolve, 120));
   } finally { heldFixture.cleanup(); }
 
@@ -391,6 +423,13 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   const cancelled = await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" }, frozen);
   assert.equal(cancelled, frozen, "the caller's own error is thrown unchanged");
   assert.equal(spawnFailureDetail(cancelled, true).served_model, "gpt-5-nano-2025-08-07");
+  // Two calls cancelled through ONE caller signal throw the same frozen error. Each call's row still records its OWN
+  // model: the observation is the call's, never the shared error's, so the second call cannot overwrite the first.
+  const sharedSignal = await runSharedSignalCash(["gpt-5-nano-2025-08-07", "gpt-6.2-sol-2026-10-01"]);
+  assert.equal(sharedSignal.errors[0], sharedSignal.errors[1], "both calls throw the caller's one error, unchanged");
+  assert.ok(Object.isFrozen(sharedSignal.errors[0]), String(sharedSignal.errors[0]));
+  assert.deepEqual(sharedSignal.rows.map((row) => row.served_model).sort(), ["gpt-5-nano-2025-08-07", "gpt-6.2-sol-2026-10-01"],
+    "each call's failed-attempt row names the model its own rung reported");
 
   // A GPT call over the cash Chat Completions path names what its response named, or why not. Each call succeeds,
   // so the recorded name comes from a real answer, not from an error result.

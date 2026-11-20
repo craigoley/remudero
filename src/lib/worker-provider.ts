@@ -16,6 +16,7 @@ import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
@@ -2299,25 +2300,40 @@ export function codexServedModel(reroutes: readonly string[]): { servedModel: st
   return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
-const observedServedModels = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
+type ObservedServedModel = { servedModel: string | null; servedModelReason?: string };
+const observedServedModels = new WeakMap<object, ObservedServedModel>();
+/** W1-T13868: one call's own observations. A caller's abort reason can be ONE error shared by many calls (one signal,
+ * many calls), so an error-keyed table shared by every call lets one call overwrite another's evidence. */
+const callServedModels = new AsyncLocalStorage<WeakMap<object, ObservedServedModel>>();
+
+/** W1-T13868: run one worker call with its own observation table, which {@link withObservedServedModel} writes to and
+ * the caller reads back with {@link observedServedModelOf}. Calls that share an error never share its evidence. */
+export function observeServedModelsPerCall<T>(observations: WeakMap<object, ObservedServedModel>, run: () => T): T {
+  return callServedModels.run(observations, run);
+}
 
 /** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
  * on the error, so the failed attempt's row records it like a returned result's row does. */
 export function withObservedServedModel<E extends Error>(error: E,
-  observed: { servedModel: string | null; servedModelReason?: string }): E & { servedModel: string | null; servedModelReason?: string } {
+  observed: ObservedServedModel): E & ObservedServedModel {
   const record = { servedModel: observed.servedModel,
     ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) };
-  // The side table is the record of truth: it holds even for a frozen or sealed error (a caller's abort reason), which
-  // keeps its identity and is thrown unchanged. The property copy is only a convenience for readers of the error.
+  // Inside a call's scope the record goes to that call's own table only: the error (perhaps a caller's frozen or
+  // shared abort reason) keeps its identity, is thrown unchanged, and carries nothing another call could read.
+  const scoped = callServedModels.getStore();
+  if (scoped !== undefined) { scoped.set(error, record); return error as E & ObservedServedModel; }
+  // Outside any call scope: the side table holds even for a frozen error; the property copy is a convenience.
   observedServedModels.set(error, record);
   if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);
-  return error as E & { servedModel: string | null; servedModelReason?: string };
+  return error as E & ObservedServedModel;
 }
 
-
-/** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value. */
-export function observedServedModelOf(error: unknown): { servedModel: string | null; servedModelReason?: string } | undefined {
-  return error !== null && typeof error === "object" ? observedServedModels.get(error) : undefined;
+/** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value:
+ * in `observations` when given, else in the current call's table, else in the table for code outside any call. */
+export function observedServedModelOf(error: unknown,
+  observations: WeakMap<object, ObservedServedModel> | undefined = callServedModels.getStore()): ObservedServedModel | undefined {
+  if (error === null || typeof error !== "object") return undefined;
+  return (observations ?? observedServedModels).get(error);
 }
 
 interface CodexJsonEvent {
@@ -5566,7 +5582,7 @@ function openWeightEndpoint(config: Config, model: string): string {
 export const CASH_SERVED_MODEL_REASONS = {
   // W1-T13868: a body that lands after the deadline aborted the attempt reaches only the late usage handler. The row is
   // already written by then, so the reason says when, not that no reply ever came.
-  noResponse: "no cash response arrived before the attempt ended, so none named the model that served it",
+  noResponse: "no cash response was received, so none named the model that served it",
   unnamed: "a cash response named no model id",
   mixed: "cash responses in this attempt named different models",
 } as const;

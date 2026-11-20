@@ -18,7 +18,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE, observedServedModelOf } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -564,7 +564,8 @@ export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
  *  with paths, credentials and long tokens redacted — and whether it failed before any model was
  *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
-export function spawnFailureDetail(error: unknown, assignmentObserved: boolean): Record<string, unknown> {
+export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
+  observations?: WeakMap<object, { servedModel: string | null; servedModelReason?: string }>): Record<string, unknown> {
   const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
   const code = error !== null && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code : undefined;
@@ -575,19 +576,22 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
     .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
     .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
   return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message,
-    ...thrownServedModel(error) };
+    ...thrownServedModel(error, observations) };
 }
 
 /** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
  *  response named one (`withObservedServedModel` in worker-provider.ts), on the error or its `cause` chain.
  *  Absent when none carries either. */
-function thrownServedModel(error: unknown, depth = 0): Record<string, string | null> {
+function thrownServedModel(error: unknown,
+  observations: WeakMap<object, { servedModel: string | null; servedModelReason?: string }> | undefined, depth = 0): Record<string, string | null> {
   if (error === null || typeof error !== "object" || depth > 4) return {};
   // A wrapper such as WorkerAbandonedError keeps the provider's own error as its `cause`.
   // The side table holds the observation even for a frozen error; an own property is the older shape.
-  const observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined = observedServedModelOf(error)
-    ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
-  if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, depth + 1);
+  // With a call's own table, only that table speaks: a property on a shared error may be another call's evidence.
+  const observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined = observations !== undefined
+    ? observedServedModelOf(error, observations)
+    : observedServedModelOf(error) ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
+  if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, observations, depth + 1);
   const { servedModel, servedModelReason } = observed;
   if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
   return typeof servedModelReason === "string" && servedModelReason.length > 0
@@ -670,8 +674,10 @@ export function benchmarkNonDispatchSpawn(
       }
     };
     let result: WorkerResult;
+    // W1-T13868: this call's own served-model observations, never another call's that threw the same shared error.
+    const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
     try {
-      result = await raw({ ...args, onSelectionAssignment: (assignment) => {
+      result = await observeServedModelsPerCall(servedModelObservations, () => raw({ ...args, onSelectionAssignment: (assignment) => {
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
@@ -700,11 +706,11 @@ export function benchmarkNonDispatchSpawn(
         if (observedAssignmentId === attempt.selectionAssignmentId) observedAssignmentId = undefined;
         try { args.onModelFallbackAttempt?.(attempt); }
         catch { console.error(JSON.stringify({ event: "benchmark.non_dispatch_fallback_hook_unavailable", lane })); }
-      } });
+      } }));
     } catch (error) {
       recordAttempt({ ...attemptAssignmentJoin(observedAssignmentId, true),
         success: false, worker_failure: "spawn-threw-before-result",
-        ...spawnFailureDetail(error, observedAssignmentId !== undefined) });
+        ...spawnFailureDetail(error, observedAssignmentId !== undefined, servedModelObservations) });
       throw error;
     }
     const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;
