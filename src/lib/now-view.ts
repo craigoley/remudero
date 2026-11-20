@@ -566,10 +566,14 @@ const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
 /** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
 function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
-  const query = db.prepare("SELECT max(ts) AS ts FROM fact WHERE task_id = ? AND step = 'panel.question_answered' AND trim(coalesce(json_extract(body, '$.answer'), '')) <> ''");
+  // The blank test runs in JS, as the daemon's newestLedgerTaskAnswer does: SQLite trim() strips spaces only.
+  const query = db.prepare("SELECT ts, json_extract(body, '$.answer') AS answer FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
   return (taskId) => {
-    const ts = query.get(taskId)?.ts;
-    return typeof ts === "string" ? ts : undefined;
+    let newest: string | undefined;
+    for (const row of query.all(taskId) as Array<{ ts?: unknown; answer?: unknown }>) {
+      if (typeof row.ts === "string" && typeof row.answer === "string" && row.answer.trim() !== "" && (newest === undefined || row.ts > newest)) newest = row.ts;
+    }
+    return newest;
   };
 }
 
@@ -1144,6 +1148,8 @@ export function createNowView(opts: NowViewOptions): {
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
+    let storeLines: readonly unknown[] = [];
+    const factAnswer = answeredByFact(db);
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
@@ -1176,14 +1182,15 @@ export function createNowView(opts: NowViewOptions): {
       }
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
-      else {
-        const factAnswer = answeredByFact(db);
-        const questions = taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], factAnswer, snapshot.tasks);
-        const asking = new Set(questions.map((decision) => decision.taskId));
-        all.push(...questions, ...heldTaskDecisions(instance.name, plan?.tasks ?? [], (taskId) =>
-          asking.has(taskId) || newestTaskAnswer(store.lines, taskId) !== undefined || factAnswer(taskId) !== undefined));
-      }
+      else storeLines = store.lines;
     }
+    // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
+    const held = heldTaskDecisions(instance.name, plan?.tasks ?? [], (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined);
+    const heldIds = new Set(held.map((decision) => decision.taskId));
+    if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
+      all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));
+    }
+    all.push(...held);
     lap("feedback");
     const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
     const sources: HumanGateSource[] = [{
@@ -1198,6 +1205,8 @@ export function createNowView(opts: NowViewOptions): {
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
+    } else if (plan) {
+      sources.push({ name: "held-tasks", instance: instance.name, state: "complete", gates: held.map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({

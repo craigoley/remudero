@@ -139,7 +139,7 @@ async function kick(daemonRoot: string, ledgerPath: string): Promise<{ ran: stri
 interface Stepped extends Clock { set(ms: number): void }
 
 /** Serve's side: a read model over the shared ledger, serve's question root, and the now view over both. */
-function inbox(t: TestCtx) {
+function inbox(t: TestCtx, instance = "core") {
   const root = readModelFixtureDir(t, "t13940").dir;
   // The answer writers stamp their ledger rows with the system clock; the read model must not see them as future rows.
   let nowMs = Date.now();
@@ -157,22 +157,22 @@ function inbox(t: TestCtx) {
   const serveRoot = join(root, "serve-gen");
   mkdirSync(join(serveRoot, "plan"), { recursive: true });
   const view = createNowView({
-    instances: [{ name: "core", ledgerDir, feedbackRoot: serveRoot }], clock, readPlan: () => PLAN, listGrilling: () => [],
+    instances: [instance === "core" ? { name: "core", ledgerDir, feedbackRoot: serveRoot } : { name: instance, ledgerDir }], coreInstance: "core", clock, readPlan: () => PLAN, listGrilling: () => [],
     github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: null, state: "fresh" } }),
     hostProbe: { rateLimit: () => 4321, diskFree: () => 1 },
   });
   const ctx = (): NowViewContext => ({ now: clock.now(), switches: { views: { now: "shadow" } }, instances: [{
-    state: { instance: "core", generation: Number(db.meta("generation")), lease: "held", failures: 0, tickedAt: clock.now(), newestTs: null }, db }] });
+    state: { instance, generation: Number(db.meta("generation")), lease: "held", failures: 0, tickedAt: clock.now(), newestTs: null }, db }] });
   /** composeNeedsYou over this instance's now body: the list the Console renders, and its gates. */
   const needsYou = () => {
     projector.tick();
     clock.set(clock.now() + 60_000);
-    const body = view.materialize(ctx()).find((b) => b.key === "instance=core");
-    assert.ok(body, "a now body for core");
+    const body = view.materialize(ctx()).find((b) => b.key === `instance=${instance}`);
+    assert.ok(body, `a now body for ${instance}`);
     const data: NowViewData = body.data;
-    const entry: ViewBodyEntry = { view: NOW_VIEW_NAME, key: "instance=core", version: NOW_VIEW_VERSION, generation: 1, etag: viewEtag(NOW_VIEW_NAME, NOW_VIEW_VERSION, false, data),
+    const entry: ViewBodyEntry = { view: NOW_VIEW_NAME, key: `instance=${instance}`, version: NOW_VIEW_VERSION, generation: 1, etag: viewEtag(NOW_VIEW_NAME, NOW_VIEW_VERSION, false, data),
       body: { view: NOW_VIEW_NAME, version: NOW_VIEW_VERSION, generatedAt: clock.iso(), asOf: null, stale: false, sources: body.sources, data } };
-    const composed = composeNeedsYou(new Map([["now", entry]]), ["core"]).data;
+    const composed = composeNeedsYou(new Map([["now", entry]]), [instance]).data;
     const held = composed.decisions.filter((d) => d.kind === "task_question" && d.taskId === TASK);
     const gates = composed.humanGates.gates.filter((g) => g.kind === "task_question");
     return { held, gates, composed };
@@ -261,6 +261,9 @@ test("W1-T13940 criterion 4: the Inbox lists the held task exactly when the disp
       appendFileSync(ledgerPath, `${JSON.stringify({ ts: new Date(T0).toISOString(), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "   " })}\n`);
       writeFileSync(join(serveRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: " ", origin: "tok" })}\n`);
     } },
+    { name: "a tab-and-newline-only answer", refused: true, apply: ({ ledgerPath }) => {
+      appendFileSync(ledgerPath, `${JSON.stringify({ ts: new Date(T0).toISOString(), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "\t\n\r\n\t" })}\n`);
+    } },
     { name: "an answer for another task", refused: true, apply: ({ serveRoot, ledgerPath }) => routeAnswer(serveRoot, ledgerPath, "Use 5 passes.", "W1-T90002") },
     { name: "an answer row rotation dropped after the daemon read it once", refused: false, apply: async ({ serveRoot, daemonRoot, ledgerPath }) => {
       await routeAnswer(serveRoot, ledgerPath, "Use 5 passes.");
@@ -296,4 +299,40 @@ test("W1-T13940 criterion 4: the Inbox lists the held task exactly when the disp
     assert.ok(typeof row.answer === "string" && row.answer.trim() !== "");
     assert.ok(typeof row.origin === "string" && row.origin !== "", JSON.stringify(row));
   }
+});
+
+test("W1-T13940 criterion 3: a held task that also has two outstanding store QUESTION lines is still one decision, carrying the plan question", async (t) => {
+  const box = inbox(t);
+  writeFileSync(join(box.serveRoot, "plan", "questions.ndjson"), [
+    { ts: "2026-11-15T10:00:00Z", task: TASK, question: "A worker's first non-blocking question?" },
+    { ts: "2026-11-15T11:00:00Z", task: TASK, question: "A worker's second non-blocking question?" },
+  ].map((line) => `${JSON.stringify(line)}\n`).join(""));
+  const before = box.needsYou();
+  assert.equal(before.held.length, 1, JSON.stringify(before.held.map((d) => d.id)));
+  const [decision] = before.held;
+  assert.equal(decision.id, `question:${TASK}:${ASKED_AT}`);
+  assert.ok(decision.prompt.includes(QUESTION), decision.prompt);
+  assert.deepEqual(decision.answer, { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
+  assert.deepEqual(before.gates.map((gate) => gate.key), [`task_question:core:${encodeURIComponent(decision.id)}`], "one gate, the decision's own");
+
+  await routeAnswer(box.serveRoot, box.ledgerPath, "Use 5 passes.");
+  const after = box.needsYou();
+  assert.equal(after.held.length, 0);
+  assert.equal(after.gates.length, 0);
+});
+
+test("W1-T13940 criterion 3: a held task on a secondary daemon instance is one answerable decision in that instance's needs-you list", async (t) => {
+  const box = inbox(t, "wreck");
+  const before = box.needsYou();
+  assert.equal(before.held.length, 1, "the secondary instance lists its held task");
+  const [decision] = before.held;
+  assert.equal(decision.instance, "wreck");
+  assert.equal(decision.id, `question:${TASK}:${ASKED_AT}`);
+  assert.deepEqual(decision.answer, { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: TASK }, input: "text" });
+  assert.deepEqual(before.gates.map((gate) => gate.key), [`task_question:wreck:${encodeURIComponent(decision.id)}`]);
+
+  await routeAnswer(box.serveRoot, box.ledgerPath, "Use 5 passes.");
+  const after = box.needsYou();
+  assert.equal(after.held.length, 0, "the ledger answer clears it");
+  assert.equal(after.gates.length, 0);
 });
