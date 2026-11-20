@@ -639,9 +639,9 @@ const SEED_ROWS: readonly SeedRow[] = [
   {
     step: "skills.lifecycle_judged",
     meaning:
-      "A knowledge-gardener skill-lifecycle pass judged one approved skill that was offered. `status` and `basis` " +
-      "are its effectiveness verdict; each arm carries its terminal runs, merged runs and cost per merged PR. " +
-      "`staged` means a retirement proposal was staged or refreshed; `withdrawn` means a staged one was removed.",
+      "A knowledge-gardener skill-lifecycle pass judged one offered, approved skill before updating the proposal " +
+      "registry. `status` and `basis` are its effectiveness verdict. The row carries the settle window and " +
+      "each arm's terminal runs, merged runs and cost per merged PR.",
     writer: ["stageSkillLifecycleForAction"],
     outcomes: ["RETIRE-CANDIDATE", "REVIEW-CANDIDATE", "INSUFFICIENT EVIDENCE"],
   },

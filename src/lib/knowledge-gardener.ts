@@ -690,9 +690,8 @@ export function skillLifecycleCandidates(skillUsage: SkillUsage, approvedNames: 
   }));
 }
 
-/** Build each skill's effectiveness report from one ledger read, stage or withdraw its retirement proposal —
- *  `stageSkillLifecycleProposal` ON SCHEDULE instead of only by hand (`rmd skill lifecycle`) — and log one
- *  `skills.lifecycle_judged` row per skill. BEST-EFFORT: an unreadable or partial ledger judges nothing. */
+/** Build each skill's effectiveness report from one ledger read. Record the judgment before it can change
+ *  offering through the proposal registry. An unreadable or partial ledger judges nothing. */
 export function stageSkillLifecycleForAction(
   stateDir: string,
   repoRoot: string,
@@ -714,18 +713,15 @@ export function stageSkillLifecycleForAction(
   const arm = (c: SkillEffectivenessArm) => ({ terminal_runs: c.terminal_runs, merged_runs: c.merged_runs, cost_per_merged_pr: c.cost_per_merged_pr });
   for (const action of actions) {
     const report = buildSkillEffectivenessReport(ledger.rows, action.target);
-    const judgment = {
+    log("skills.lifecycle_judged", {
       skill: report.skill_name, status: report.status, basis: report.basis, settle_window_ms: report.settle_window_ms,
       selected: arm(report.selected), control: arm(report.control),
-    };
-    let staged: ReturnType<typeof stageSkillLifecycleProposal>;
+    });
     try {
-      staged = stageSkillLifecycleProposal(registry, approvedSkills, report);
+      stageSkillLifecycleProposal(registry, approvedSkills, report);
     } catch (error) {
-      log("skills.lifecycle_judged", { ...judgment, staged: false, withdrawn: false, proposal_error: String(error) });
-      continue;
+      log("knowledge.gardener_failed", { phase: "skill-lifecycle-proposal", skill: report.skill_name, error: String(error) });
     }
-    log("skills.lifecycle_judged", { ...judgment, staged: staged.staged || staged.refreshed, withdrawn: staged.withdrawn });
   }
 }
 

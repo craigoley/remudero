@@ -1164,7 +1164,8 @@ export function buildSkillEffectivenessReport(
   const selectedMergeUpper = selected.terminal_runs === 0 ? 0 : (selected.merged_runs + selected.pending_merge_runs) / selected.terminal_runs;
   const controlMergeUpper = control.terminal_runs === 0 ? 0 : (control.merged_runs + control.pending_merge_runs) / control.terminal_runs;
 
-  const costLowerBound = costDifferenceLowerBound(skillName, costSamples.selected, costSamples.control);
+  const costLowerBound = selected.cost_per_merged_pr === null || control.cost_per_merged_pr === null
+    ? null : costDifferenceLowerBound(skillName, costSamples.selected, costSamples.control);
 
   let status: SkillEffectivenessStatus;
   let basis: SkillEffectivenessReport["basis"];
@@ -1248,7 +1249,7 @@ function renderCostComparison(report: SkillEffectivenessReport): string {
   const bound = report.cost_difference_lower_bound_usd;
   return `settle window ${report.settle_window_ms === null ? "not derived" : `${report.settle_window_ms} ms`}; ` +
     `one-sided ${SKILL_COST_CONFIDENCE} lower bound of selected minus control cost per merged PR ` +
-    `${bound === null ? "not compared" : `${bound.toFixed(2)} USD`}; a bound above 0 retires unless the selected arm merges more`;
+    `${bound === null ? "not compared" : `${bound.toFixed(2)} USD`}; a positive bound supports retirement`;
 }
 
 /** Each version's terminal runs per arm, and a warning when the pooled comparison spans recorded edits. */

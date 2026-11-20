@@ -48,8 +48,8 @@ const merge = (n: number, ts?: number): Row => ({
   ...(ts === undefined ? {} : { ts: iso(ts) }), step: "pr.terminal", pr_url: `${PR}${n}`, pr_number: n, state: "merged",
 });
 
-/** One arm of priced runs: `merged` of them merge through a later pr.terminal row; the rest close unmerged. */
-function pricedArm(prefix: string, treated: boolean, runs: number, merged: number, cost: (i: number) => number, prBase: number, skill = SKILL): Row[] {
+/** An arm with `merged` later PR merges; the rest close unmerged. Undefined cost leaves a run unpriced. */
+function pricedArm(prefix: string, treated: boolean, runs: number, merged: number, cost: (i: number) => number | undefined, prBase: number, skill = SKILL): Row[] {
   const rows: Row[] = [];
   for (let i = 0; i < runs; i++) {
     const runId = `${prefix}-${i}`;
@@ -161,9 +161,26 @@ test("W1-T13860 criterion 4: a skill that merges more at a cost not confidently 
     ...pricedArm("ctl", false, 20, 10, (i) => (i % 2 === 0 ? 2 : 4), 2000),
   ], SKILL);
   assert.ok(shape.selected.cost_per_merged_pr! > shape.control.cost_per_merged_pr!, "precondition: it costs a little more");
-  assert.ok((shape.cost_difference_lower_bound_usd ?? 0) <= 0);
+  assert.ok(shape.cost_difference_lower_bound_usd !== null && shape.cost_difference_lower_bound_usd <= 0);
   assert.equal(shape.status, "REVIEW-CANDIDATE");
   assert.equal(shape.basis, "favorable-comparison");
+});
+
+test("W1-T13860 criterion 4: either arm missing a priced merge leaves the cost comparison unavailable", () => {
+  for (const offeredUnpriced of [true, false]) {
+    const report = buildSkillEffectivenessReport([
+      ...pricedArm("sel", true, 21, 11, (i) => offeredUnpriced ? (i < 11 ? undefined : 0) : (i < 11 ? 5 : undefined), 1000),
+      ...pricedArm("ctl", false, 22, 10, (i) => offeredUnpriced ? (i < 10 ? 1 : undefined) : (i >= 10 ? 0 : undefined), 2000),
+    ], SKILL);
+    assert.equal(report.selected.merged_runs, 11);
+    assert.equal(report.control.merged_runs, 10);
+    assert.ok(report.selected.costed_runs >= report.horizon && report.control.costed_runs >= report.horizon);
+    assert.equal(report.selected.cost_per_merged_pr, offeredUnpriced ? null : 5);
+    assert.equal(report.control.cost_per_merged_pr, offeredUnpriced ? 1 : null);
+    assert.equal(report.status, "REVIEW-CANDIDATE");
+    assert.equal(report.basis, "favorable-comparison");
+    assert.equal(report.cost_difference_lower_bound_usd, null);
+  }
 });
 
 /** A repo root with approved skills, a state dir with skills-usage.json and a ledger. */
@@ -179,7 +196,7 @@ function gardenFixture(skills: readonly string[], usage: Record<string, { offere
   return root;
 }
 
-/** One skill-lifecycle pass through the gardener's own spec; returns its ledger rows. */
+/** One skill-lifecycle pass through the gardener's own spec. */
 function lifecyclePass(root: string): Array<[string, Row]> {
   const logged: Array<[string, Row]> = [];
   const spec = knowledgeGardenSpec({
@@ -190,7 +207,7 @@ function lifecyclePass(root: string): Array<[string, Row]> {
   const actions = spec.candidates(inventory, () => 0.5, []).filter((a) => a.class === "skill-lifecycle");
   const ws: GardenWorkspace = { root, refreshAssertions: () => [], land: () => undefined, dispose: () => {} } as unknown as GardenWorkspace;
   spec.apply(ws, { actions, acting: ["skill-lifecycle"] }, {} as never);
-  return logged.filter(([step]) => step === "skills.lifecycle_judged");
+  return logged;
 }
 
 test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approved skill and writes one row per skill", async () => {
@@ -204,16 +221,20 @@ test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approve
   try {
     const registry = join(root, "state", "inbox-proposals.json");
     await updateProposalRegistryAsync(registry, () => {
-      const judged = lifecyclePass(root);
+      const logged = lifecyclePass(root);
+      const judged = logged.filter(([step]) => step === "skills.lifecycle_judged");
       assert.deepEqual(judged.map(([, row]) => row.skill), [SKILL, "useful-skill"]);
       assert.equal(judged[0]![1].status, "RETIRE-CANDIDATE");
-      assert.equal(judged[0]![1].staged, false);
-      assert.match(String(judged[0]![1].proposal_error), /same-process-busy/);
       assert.equal(judged[1]![1].status, "INSUFFICIENT EVIDENCE");
+      const errors = logged.filter(([step]) => step === "knowledge.gardener_failed");
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0]![1].phase, "skill-lifecycle-proposal");
+      assert.equal(errors[0]![1].skill, SKILL);
+      assert.match(String(errors[0]![1].error), /same-process-busy/);
       return null;
     }, { maxWaitMs: 500 });
     assert.deepEqual(loadProposalRegistry(registry), [], "a held lock prevents staging");
-    const judged = lifecyclePass(root);
+    const judged = lifecyclePass(root).filter(([step]) => step === "skills.lifecycle_judged");
     assert.deepEqual(judged.map(([, row]) => row.skill).sort(), [SKILL, "useful-skill"]);
     const costly = judged.find(([, row]) => row.skill === SKILL)![1];
     assert.equal(costly.status, "RETIRE-CANDIDATE");
@@ -221,7 +242,6 @@ test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approve
     assert.equal(costly.settle_window_ms, HOUR);
     assert.deepEqual(costly.selected, { terminal_runs: 20, merged_runs: 10, cost_per_merged_pr: 10 });
     assert.deepEqual(costly.control, { terminal_runs: 20, merged_runs: 10, cost_per_merged_pr: 2 });
-    assert.equal(costly.staged, true);
     const staged = loadProposalRegistry(registry);
     assert.deepEqual(staged.map((p) => p.id), [skillLifecycleProposalId(SKILL)]);
   } finally {
@@ -300,10 +320,23 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     writeFileSync(join(stateDir, "KNOWLEDGE_OFF-refresh"), "");
     const ledger = writeLedger(rows, { dir: stateDir });
     let now = T0 + HOUR;
+    let failJudgment = true;
     const judged: Row[] = [];
+    const filingFailures: Row[] = [];
+    const keptRun = normal[0]!;
     const deps = {
       stateDir, repoRoot: root, seed: 3, clock: clockFromMillisFn(() => now),
-      log: (step: string, extra?: Row) => { if (step === "skills.lifecycle_judged") judged.push(extra ?? {}); },
+      log: (step: string, extra?: Row) => {
+        if (step === "knowledge.garden_filing_failed") filingFailures.push(extra ?? {});
+        if (step !== "skills.lifecycle_judged") return;
+        if (failJudgment) throw new Error("judgment append failed");
+        if (extra?.status === "RETIRE-CANDIDATE") {
+          assert.deepEqual(loadProposalRegistry(registry), [], "the judgment precedes publication");
+          assert.ok(selectImplementSkills(root, root, task, keptRun).observation.selected_names.includes(SKILL));
+        }
+        ledger.append([{ step, ts: iso(now), ...extra }]);
+        judged.push(extra ?? {});
+      },
       openWorkspace: (): GardenWorkspace => ({
         root, refreshAssertions: () => [], dispose: () => {},
         land: () => { throw new Error("skill lifecycle uses the proposal registry"); },
@@ -313,13 +346,22 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     assert.deepEqual(offeredRuns(), normal, "before staging: offered on every run the seed does not withhold");
     assert.equal(gardenPassDue(spec, deps), true);
     assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
+    assert.deepEqual(filingFailures.map((row) => row.reason), ["judgment append failed"]);
+    assert.equal(judged.length, 0);
+    assert.deepEqual(loadProposalRegistry(registry), [], "a failed append leaves no retirement to consume");
+    assert.deepEqual(offeredRuns(), normal);
+    assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
+
+    failJudgment = false;
+    now += HOUR;
+    assert.equal(gardenPassDue(spec, deps), true, "the failed pass can retry");
+    assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
     assert.equal(judged[0]?.status, "RETIRE-CANDIDATE");
     assert.deepEqual(loadProposalRegistry(registry).map((proposal) => proposal.id), [skillLifecycleProposalId(SKILL)]);
     assert.equal(gardenPassDue(spec, deps), false, "an unchanged tick is idle");
     assert.deepEqual(offeredRuns(), seededShare, "staged: offered only on the seeded share");
     assert.ok(seededShare.length < normal.length / 2);
     // The fix lane reads the same registry.
-    const keptRun = normal[0]!;
     assert.ok(!(await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
     assert.ok((await fixPrompt(root, seededShare[0]!, approved)).includes(`## skill: ${SKILL}`));
 
@@ -331,7 +373,6 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     assert.equal(gardenPassDue(spec, deps), true, "new ledger evidence is eligible on the next hourly pass");
     assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
     assert.deepEqual(judged.map((row) => row.basis), ["costs-more-than-it-saves", "favorable-comparison"]);
-    assert.equal(judged[1]?.withdrawn, true);
     assert.deepEqual(loadProposalRegistry(registry), []);
     assert.deepEqual(offeredRuns(), normal, "withdrawn: the normal share returns");
     assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
@@ -345,7 +386,7 @@ test("W1-T13860 criterion 7: a skill removed from .claude/skills is never offere
   const root = gardenFixture([SKILL], usage, []);
   try {
     assert.deepEqual(skillLifecycleCandidates(usage, [SKILL]).map((a) => a.target), [SKILL]);
-    const judged = lifecyclePass(root);
+    const judged = lifecyclePass(root).filter(([step]) => step === "skills.lifecycle_judged");
     assert.deepEqual(judged.map(([, row]) => row.skill), [SKILL]);
     for (let i = 0; i < 50; i++) {
       const observed = selectImplementSkills(root, root, { type: "implement" as const, files: [] }, `run-${i}`).observation;
