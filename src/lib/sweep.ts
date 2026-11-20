@@ -14,7 +14,7 @@ import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolv
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
-  type FixProgressReaskResult } from "./fix-progress-judge.js";
+  type FixProgressReaskResult, type PriorRoundHold } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -194,6 +194,7 @@ import {
   loadCreditStore,
   readLedgerLines,
   readMergeCreditedTaskIdsAsync,
+  readRequiredStatusCheckContextsAsync,
   recordCreditBackfillReceipt,
   saveCreditStore,
   taskIdFromRunBranch,
@@ -2446,6 +2447,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalateInfrastructureCheck",
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
+  "readRequiredCheckCompletions",
   "liveCiRunForHead",
   "refreshCiRunForHead",
   "reaggregateCiGate",
@@ -2746,6 +2748,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "readCiGateRequired"
+  | "readRequiredCheckCompletions"
   | "readPrHeadDiff"
   | "readPlanLaneCapacity"
   | "liveCiRunForHead"
@@ -2941,6 +2944,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
   });
   const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
+  let branchRequiredChecks: Promise<readonly string[]> | undefined;
+  const readBranchRequiredChecks = async () => {
+    if (deps.readRequiredContextsImpl) return deps.readRequiredContextsImpl(owner, repo) ?? [];
+    const protection = await readRequiredStatusCheckContextsAsync(owner, repo, "main",
+      async args => JSON.stringify(await readJsonImpl(args)));
+    return protection.kind === "contexts" ? protection.contexts : [];
+  };
+  const readCiGateRollup = async (pr: OpenPrView): Promise<RollupCheckEntry[] | undefined> => {
+    try {
+      return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
+    } catch (e) {
+      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(e) });
+      return undefined;
+    }
+  };
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
   const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
@@ -3979,17 +3997,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
     readCiGateRequired: () => requiredChecks,
 
-    readCiGateRollup: async (pr) => {
-      try {
-        return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
-      } catch (e) {
-        log("sweep.ci_gate_rollup.error", {
-          pr_number: pr.prNumber,
-          head_sha: pr.headSha,
-          error: String((e as Error)?.message ?? e),
-        });
-        return undefined;
-      }
+    readCiGateRollup,
+    readRequiredCheckCompletions: async (pr) => {
+      branchRequiredChecks ??= readBranchRequiredChecks();
+      const [rollup, branchChecks] = await Promise.all([readCiGateRollup(pr), branchRequiredChecks]);
+      const required = new Set([...requiredChecks, ...branchChecks]);
+      return (rollup ?? []).flatMap(check => {
+        const name = check.name ?? check.context;
+        const state = rollupState(check);
+        const completed = check.status?.toUpperCase() === "COMPLETED" || REQUIRED_CHECK_OK.has(state) || REQUIRED_CHECK_FAIL.has(state);
+        return name !== undefined && required.has(name) && completed && check.completedAt !== undefined
+          ? [{ name, completedAt: check.completedAt }] : [];
+      });
     },
 
     // W1-T2300 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job: the SAME per-job Actions
@@ -5273,7 +5292,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               // it must reach this SAME "already acted" path, never the "wrote no fix.* row"
               // rethrow meant for a dispatch that never got this far.
               if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
-              log(s, { task_id: task.id, ...extra });
+              log(s, { task_id: task.id, ...extra,
+                ...(s === "fix.done" && extra?.fix_outcome === "NEEDS_SCOPE" ? { contract_revision: taskContractRevision(task) } : {}) });
             },
             say,
             account: (r: WorkerResult) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
@@ -16361,6 +16381,8 @@ export interface SweepDeps {
   /** W1-T5979: ci-gate's REQUIRED list, which a timeout's rollup-sourced not-ready list is filtered
    *  to; `[]` is the reader's unreadable answer. Omitted, that list is the unfiltered rollup. */
   readCiGateRequired?: () => readonly string[];
+  /** Terminal completions required by branch protection or ci-gate for this exact head. */
+  readRequiredCheckCompletions?: (pr: OpenPrView) => Promise<readonly { name: string; completedAt: string }[]>;
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
@@ -18205,7 +18227,8 @@ function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<strin
 
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
-  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS] };
+  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS, "fix.scope_amendment", PR_TERMINAL_STEP,
+    "fix.progress_judged", "fix.progress_reused"] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
@@ -22243,6 +22266,24 @@ export async function runSweep(
     const union = await readRepairHistory();
     return union.ok ? union.rows : undefined;
   };
+  let priorRoundHistory: readonly Record<string, unknown>[] | undefined;
+  const readSweepPriorRoundHold = async (pr: OpenPrView) => {
+    if (priorRoundHistory === undefined) {
+      const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
+      priorRoundHistory = archived === undefined ? ledgerLines : [...archived, ...ledgerLines];
+    }
+    const facts = { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha,
+      get contractRevision() {
+        return pr.taskId === undefined ? undefined : readWitnessContractRevision(pr.taskId);
+      },
+    };
+    const held = priorRoundHold(priorRoundHistory, facts);
+    if (held?.hold !== "FLAKE" || deps.readRequiredCheckCompletions === undefined) return held;
+    const checkCompletions = await deps.readRequiredCheckCompletions(pr);
+    return priorRoundHold(priorRoundHistory, { taskId: facts.taskId, headSha: facts.headSha, checkCompletions });
+  };
+  const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
+    ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}) });
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -24136,6 +24177,13 @@ export async function runSweep(
           repair.reason = `plan-scoped round held by worker admission: ${workerAdmissionHoldReason(deps)}`;
         }
         else {
+          const hold = await readSweepPriorRoundHold(pr);
+          if (hold !== undefined) {
+            byDisposition.wait++;
+            await finalizeDisposition(prIndex, pr, "wait", hold.reason, undefined, false, false, undefined, hold.reason,
+              undefined, undefined, false, undefined, priorRoundHoldFields(hold));
+            continue;
+          }
           const claimed = claimFixDispatch({ ...pr, taskId: escalationTaskIdFor(pr) });
           if (!claimed.ok) {
             repair.reason = claimed.reason;
@@ -25013,6 +25061,15 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
+    const standDownForPriorRound = async () => {
+      const hold = await readSweepPriorRoundHold(pr);
+      if (hold === undefined) return false;
+      acted = false;
+      spent = false;
+      standDownReason = hold.reason;
+      extraDisposedFields = { ...extraDisposedFields, ...priorRoundHoldFields(hold) };
+      return true;
+    };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (settledView !== undefined) extraDisposedFields = { ...extraDisposedFields, review_view_settled: settledView.basis,
       review_view_settled_at: settledView.deliveredAt };
@@ -25234,6 +25291,7 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
+                if (await standDownForPriorRound()) break;
                 const retryHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (retryHold !== undefined) {
                   acted = false;
@@ -25702,6 +25760,7 @@ export async function runSweep(
               // below applies to a PR whose every required check is green.
               const codeqlAlert = repairableCodeqlBlocker(pr);
               if (codeqlAlert) {
+                if (await standDownForPriorRound()) break;
                 const hold = workerAdmissionHoldReason(deps);
                 if (hold) {
                   acted = false;
@@ -25863,20 +25922,7 @@ export async function runSweep(
                   break;
                 }
               }
-              const roundHold = priorRoundHold(ledgerLines, { taskId: fixLedgerTaskIdFor(pr), headSha: pr.headSha,
-                // Only an unresolved NEEDS_SCOPE ruling needs a contract read.
-                get contractRevision() {
-                  return pr.taskId === undefined ? undefined : readWitnessContractRevision(pr.taskId);
-                },
-                checkCompletions: pr.ciFailures });
-              if (roundHold) {
-                acted = false;
-                spent = false;
-                standDownReason = roundHold.reason;
-                extraDisposedFields = { ...extraDisposedFields, [PRIOR_ROUND_HOLD_FIELD]: roundHold.hold, prior_round_hold_since: roundHold.since,
-                  ...(roundHold.contractRevision !== undefined ? { prior_round_hold_contract_revision: roundHold.contractRevision } : {}) };
-                break;
-              }
+              if (await standDownForPriorRound()) break;
               if (refusedSameRed && fixRoundTally(ledgerLines, fixLedgerTaskIdFor(pr), pr.headSha).refusals.length === 0) {
                 progressParkedReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history`;
                 const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
@@ -26540,6 +26586,7 @@ export async function runSweep(
                 standDownReason = deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
                 break;
               }
+              if (await standDownForPriorRound()) break;
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are

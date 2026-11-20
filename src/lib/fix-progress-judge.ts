@@ -683,7 +683,7 @@ export interface FixProgressWitness {
  * Keep this key separate from the escalation latch: that latch still owns its contract-refresh handshake.
  * Old rows lacking these witnesses are conservatively judged once before becoming reusable. */
 type FixProgressResolveOptions = FixProgressWitness & { judge?: FixProgressJudge; firstRound?: boolean };
-type FixProgressReceipt = { step: "fix.progress_judged" | "fix.progress_reused"; input_key: string; judged_at?: string };
+type FixProgressReceipt = { step: "fix.progress_judged" | "fix.progress_reused"; input_key: string; judged_at?: string; contract_revision?: string };
 export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
   opts: FixProgressResolveOptions & { reask: true }): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }>;
 export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
@@ -693,6 +693,7 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
 ): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }> {
   const inputKey = createHash("sha256").update(JSON.stringify({ input,
     reviewInputDigest: opts.reviewInputDigest, contractRevision: opts.contractRevision })).digest("hex");
+  const witness = typeof opts.contractRevision === "string" ? { contract_revision: opts.contractRevision } : {};
   const readable = Boolean(opts.reviewInputDigest?.trim()) && opts.contractRevision !== undefined &&
     (opts.contractRevision === null || opts.contractRevision.trim().length > 0);
   const newest = ledger.findLast(row => row.step === "fix.progress_judged" && row.pr_number === input.prNumber &&
@@ -702,12 +703,12 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
       typeof newest.ts === "string" && Number.isFinite(Date.parse(newest.ts))) {
     const decision = parseFixProgressVerdict(JSON.stringify(newest));
     if (decision?.verdict === "continue" || decision?.verdict === "change-approach") {
-      return { decision, receipt: { step: "fix.progress_reused", input_key: inputKey, judged_at: newest.ts } };
+      return { decision, receipt: { step: "fix.progress_reused", input_key: inputKey, judged_at: newest.ts, ...witness } };
     }
   }
   const decision = (opts.firstRound ? firstFixRoundVerdict(input) : undefined) ??
     (opts.reask ? await judgeFixProgress(input, opts.judge, { reask: true }) : await judgeFixProgress(input, opts.judge));
-  return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey } };
+  return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey, ...witness } };
 }
 
 /** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too. */
@@ -716,29 +717,48 @@ export const PRIOR_ROUND_HOLD_FIELD = "prior_round_hold";
 export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts: { taskId: string | undefined; headSha: string;
   contractRevision?: string; checkCompletions?: readonly { name: string; completedAt?: string }[] }): PriorRoundHold | undefined {
   if (facts.taskId === undefined) return undefined;
-  const done = ledger.findLast(row => row.step === "fix.done" && row.task_id === facts.taskId && row.head_sha === facts.headSha);
+  const doneIndex = ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === facts.taskId && row.head_sha === facts.headSha);
+  const done = ledger[doneIndex];
   const outcome = done?.fix_outcome;
-  if ((outcome !== "NEEDS_SCOPE" && outcome !== "FLAKE") || typeof done!.ts !== "string") return undefined;
-  const since = done!.ts, sinceMs = Date.parse(since);
+  if ((outcome !== "NEEDS_SCOPE" && outcome !== "FLAKE") || typeof done?.ts !== "string") return undefined;
+  const since = done.ts, sinceMs = Date.parse(since);
   if (!Number.isFinite(sinceMs)) return undefined;
   const after = (ts: unknown) => typeof ts === "string" && Date.parse(ts) > sinceMs;
-  const roundId = stringValue(done!.round_id);
+  const roundId = stringValue(done.round_id);
   const head = facts.headSha.slice(0, 7);
   if (outcome === "FLAKE") {
-    if (done!.flake_claim === "refuted" || done!.flake_claim === "confirmed") return undefined;
-    const completed = (facts.checkCompletions ?? []).find(check => after(check.completedAt));
-    if (completed) return undefined;
+    if (facts.checkCompletions?.some(check => after(check.completedAt))) return undefined;
     return { hold: "FLAKE", since, roundId, reason: `the last fix round at ${head} ruled FLAKE at ${since} and no required ` +
       "check has completed on this head since — no fix round until one does" };
   }
-  const amendments = new Set(ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId)
-    .map(row => Number(row.amendmentNumber ?? row.amendment_number)).filter(n => Number.isSafeInteger(n) && n > 0));
-  if (ledger.some(row => row.step === PR_TERMINAL_STEP && row.state === "merged" && amendments.has(Number(row.pr_number)) &&
-    after(row.ts))) return undefined;
+  const amendments = ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId);
+  const amendmentNumbers = new Set(amendments.map(row => Number(row.amendmentNumber ?? row.amendment_number))
+    .filter(n => Number.isSafeInteger(n) && n > 0));
+  const mergeTimes = new Map<number, string>();
+  for (const row of ledger) {
+    const number = Number(row.pr_number);
+    if (row.step === PR_TERMINAL_STEP && row.state === "merged" && amendmentNumbers.has(number) &&
+        typeof row.merged_at === "string" && Number.isFinite(Date.parse(row.merged_at))) {
+      if (after(row.merged_at)) return undefined;
+      mergeTimes.set(number, row.merged_at);
+    }
+  }
+  if (amendments.some(row => {
+    const outcome = row.outcome ?? row.kind ?? row.state;
+    const mergedAt = mergeTimes.get(Number(row.amendmentNumber ?? row.amendment_number)) ?? row.merged_at ?? row.ts;
+    return (outcome === "merged" || outcome === "amendment_merged") && after(mergedAt);
+  })) return undefined;
   const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
-    row.head_sha === facts.headSha && row[PRIOR_ROUND_HOLD_FIELD] === "NEEDS_SCOPE" && row.prior_round_hold_since === since);
+    row.task_id === facts.taskId && row.head_sha === facts.headSha &&
+    row[PRIOR_ROUND_HOLD_FIELD] === "NEEDS_SCOPE" && row.prior_round_hold_since === since);
+  // A run-task round can leave its contract in the rung's own progress receipt before its fix.done.
+  const roundRevision = stringValue(done.contract_revision) ?? (typeof done.run_id === "string" ?
+    stringValue(ledger.findLast((row, index) => index < doneIndex && row.run_id === done.run_id &&
+      row.task_id === facts.taskId && row.head_sha === facts.headSha &&
+      (row.step === "fix.progress_judged" || row.step === "fix.progress_reused") &&
+      (row.site === "fix-strike" || row.site === "fix-retrigger" || row.site === "rung.parked"))?.contract_revision) : undefined);
   const currentRevision = facts.contractRevision;
-  const standingOn = stringValue(done!.contract_revision) ?? stringValue(latched?.prior_round_hold_contract_revision) ?? currentRevision;
+  const standingOn = roundRevision ?? stringValue(latched?.prior_round_hold_contract_revision) ?? currentRevision;
   if (standingOn !== undefined && currentRevision !== undefined && standingOn !== currentRevision) return undefined;
   return { hold: "NEEDS_SCOPE", since, roundId, ...(standingOn !== undefined ? { contractRevision: standingOn } : {}),
     reason: `the last fix round at ${head} ruled NEEDS_SCOPE at ${since}; no scope amendment has merged and the task ` +

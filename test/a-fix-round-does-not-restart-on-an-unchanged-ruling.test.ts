@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
-import { priorRoundHold, PRIOR_ROUND_HOLD_FIELD } from "#src/lib/fix-progress-judge.js";
-import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import { taskContractRevision } from "#src/lib/escalate.js";
+import { classifyScannerBlocker, rollupForAsync } from "#src/lib/open-prs-rest.js";
+import type { Task } from "#src/lib/plan.js";
+import { buildFixProgressInput, priorRoundHold, PRIOR_ROUND_HOLD_FIELD, resolveFixProgress } from "#src/lib/fix-progress-judge.js";
+import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T13865: 53 fix rounds ($10.56) started at a head whose last round had ruled NEEDS_SCOPE or FLAKE.
 const TASK = "W1-T13865";
@@ -49,7 +58,7 @@ const lastDisposed = (rows: Row[]) => rows.findLast(row => row.step === "sweep.d
 
 describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () => {
   test("W1-T13865 criterion 1: a NEEDS_SCOPE round holds its head while no amendment merged and the contract is unchanged", () => {
-    const rows = round("NEEDS_SCOPE");
+    const rows = round("NEEDS_SCOPE", { contract_revision: "contract-A" });
     const hold = priorRoundHold(rows, facts());
     assert.equal(hold?.hold, "NEEDS_SCOPE");
     assert.equal(hold?.since, at(30_000));
@@ -57,7 +66,10 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     const pending = [...rows, { step: "fix.scope_amendment", task_id: TASK, head_sha: HEAD, outcome: "created",
       amendmentNumber: 900, ts: at(20_000) }];
     assert.equal(priorRoundHold(pending, facts())?.hold, "NEEDS_SCOPE", "a pending amendment has not merged");
-    const latched = [...rows, { step: "sweep.disposed", pr_number: 13865, head_sha: HEAD,
+    const reconciled = [...pending, { step: "pr.terminal", task_id: "SWEEP", pr_number: 900, state: "merged",
+      merged_at: at(80_000), ts: at(5_000) }];
+    assert.equal(priorRoundHold(reconciled, facts())?.hold, "NEEDS_SCOPE", "a late receipt cannot move the actual merge past the round");
+    const latched = [...rows, { step: "sweep.disposed", task_id: TASK, pr_number: 13865, head_sha: HEAD,
       [PRIOR_ROUND_HOLD_FIELD]: "NEEDS_SCOPE", prior_round_hold_since: at(30_000), prior_round_hold_contract_revision: "contract-A" }];
     assert.equal(priorRoundHold(latched, facts())?.hold, "NEEDS_SCOPE");
   });
@@ -69,7 +81,9 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(hold?.since, at(30_000));
     assert.equal(priorRoundHold(rows, facts({ checkCompletions: [{ name: "ci-shard (1/8)" }] }))?.hold, "FLAKE",
       "a check with no completion time has not completed");
-    assert.equal(priorRoundHold(round("FLAKE", { flake_claim: "requeue_deferred" }), facts())?.hold, "FLAKE");
+    for (const flake_claim of ["requeue_deferred", "refuted", "confirmed"]) {
+      assert.equal(priorRoundHold(round("FLAKE", { flake_claim }), facts())?.hold, "FLAKE", flake_claim);
+    }
   });
 
   test("W1-T13865 criterion 3: a new head, a new red, a merged amendment, a changed contract or another ruling holds nothing", () => {
@@ -77,23 +91,67 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(priorRoundHold(round("NEEDS_SCOPE"), facts({ headSha: NEW_HEAD })), undefined);
     assert.equal(priorRoundHold(round("FLAKE"), facts({ checkCompletions: [{ name: "ci-shard (1/8)", completedAt: at(10_000) }] })),
       undefined, "a check completed red after the FLAKE round");
-    assert.equal(priorRoundHold(round("FLAKE", { flake_claim: "refuted" }), facts()), undefined,
-      "the round's own rerun already completed red after the FLAKE ruling");
     const merged = [...round("NEEDS_SCOPE"),
       { step: "fix.scope_amendment", task_id: TASK, head_sha: HEAD, outcome: "created", amendmentNumber: 900, ts: at(25_000) },
-      { step: "pr.terminal", pr_number: 900, state: "merged", ts: at(5_000) }];
+      { step: "pr.terminal", pr_number: 900, state: "merged", merged_at: at(10_000), ts: at(5_000) }];
     assert.equal(priorRoundHold(merged, facts()), undefined, "a merged scope amendment after the NEEDS_SCOPE round");
+    const direct = { step: "fix.scope_amendment", task_id: TASK, outcome: "amendment_merged", amendment_number: 901, ts: at(10_000) };
+    assert.equal(priorRoundHold([...round("NEEDS_SCOPE"), direct], facts()), undefined, "the scope receipt records the merge itself");
+    assert.equal(priorRoundHold([...round("NEEDS_SCOPE"), { ...direct, task_id: "W1-T1" }], facts())?.hold, "NEEDS_SCOPE");
     const mergedBefore = [{ step: "fix.scope_amendment", task_id: TASK, outcome: "created", amendmentNumber: 900, ts: at(90_000) },
-      { step: "pr.terminal", pr_number: 900, state: "merged", ts: at(80_000) }, ...round("NEEDS_SCOPE")];
+      { step: "pr.terminal", pr_number: 900, state: "merged", merged_at: at(85_000), ts: at(80_000) }, ...round("NEEDS_SCOPE")];
     assert.equal(priorRoundHold(mergedBefore, facts())?.hold, "NEEDS_SCOPE", "an amendment merged before the round answered nothing");
-    const latched = [...round("NEEDS_SCOPE"), { step: "sweep.disposed", pr_number: 13865, head_sha: HEAD,
+    const latched = [...round("NEEDS_SCOPE"), { step: "sweep.disposed", task_id: TASK, pr_number: 13865, head_sha: HEAD,
       [PRIOR_ROUND_HOLD_FIELD]: "NEEDS_SCOPE", prior_round_hold_since: at(30_000), prior_round_hold_contract_revision: "contract-A" }];
     assert.equal(priorRoundHold(latched, facts({ contractRevision: "contract-B" })), undefined, "a changed contract");
+    assert.equal(priorRoundHold(round("NEEDS_SCOPE", { contract_revision: "contract-A" }), facts({ contractRevision: "contract-B" })),
+      undefined, "the contract changed before the first sweep");
     for (const outcome of ["FIXED", "NOT_LANDED", "NEEDS_DESIGN"]) {
       assert.equal(priorRoundHold(round(outcome), facts()), undefined, outcome);
     }
     assert.equal(priorRoundHold([...round("FLAKE"), ...round("FIXED").slice(1).map(r => ({ ...r, round_id: "R2", ts: at(1_000) }))],
       facts()), undefined, "the newest round at the head decides");
+  });
+
+  test("W1-T13865 criterion 3: a sweep round records the contract before the next sweep can see main change", async t => {
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13865-round-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
+    const task: Task = { id: TASK, title: "repair", repo: "fixture", type: "implement", risk: "low", verify: "auto",
+      status: "queued", attempts: 0, depends_on: [], files: ["src/lib/fixture.ts"] };
+    const rows: Row[] = [];
+    const headRefName = `run-${TASK}-1795126095000`;
+    const fixtureDeps: Partial<BuildSweepEffectsDeps> = {
+      dispatchFixPreflightStandDownImpl: async () => undefined, registeredWorktreeOwnerImpl: () => undefined,
+      createFixRungWorktreeImpl: () => undefined, captureWorktreeSnapshotImpl: () => ({ headSha: HEAD }),
+      ghJsonImpl: () => ({ headRefName, headRefOid: HEAD, body: "", files: [] }),
+      readPackageScriptsImpl: () => ({}), readPreservedOwnerPatchImpl: () => undefined, worktreeRemoveImpl: () => {},
+      fixBranchClaimKeyImpl: () => "fixture-fix-branch", buildFixRungDispatchArgsImpl: () => ({}),
+      openTaskIdsFromPlanImpl: () => new Set([TASK]),
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [], taskDeclaredFiles: task.files }),
+      runFixRungImpl: (args: { deps: { log: (step: string, fields: Row) => void } }) => {
+        args.deps.log("fix.dispatch", round("NEEDS_SCOPE")[0]!);
+        args.deps.log("fix.done", round("NEEDS_SCOPE")[1]!);
+        return { outcome: "stood_down" };
+      },
+    };
+    const effects = buildSweepEffects({ owner: "o", repo: "fixture", repoRoot: REPO_ROOT, config: { root } as Config, runId: "scope-round",
+      ledgerPath: join(root, "state/ledger.ndjson"), plan: { tasks: [task], byId: new Map([[TASK, task]]) }, ciGateRequired: [],
+      log: (step, fields) => rows.push({ step, ...fields }), issuesImpl: { create: () => assert.fail("unexpected issue") }, ...fixtureDeps });
+    await effects.dispatchFix!(pr({ headRefName }), { unmetCriteria: [], ciFailures: pr().ciFailures });
+    assert.equal(rows.find(row => row.step === "fix.done")?.contract_revision, taskContractRevision(task));
+    const current = taskContractRevision({ ...task, files: [...task.files!, "src/lib/newly-admitted.ts"] });
+    assert.equal(priorRoundHold(rows, facts({ contractRevision: current })), undefined);
+  });
+
+  test("W1-T13865 criterion 3: an in-run fix uses its own progress receipt's contract revision", async () => {
+    const input = buildFixProgressInput({ taskId: TASK, headSha: HEAD, currentRed: ["ci"], ledger: [] });
+    const { receipt } = await resolveFixProgress(input, [], { firstRound: true, contractRevision: "contract-A" });
+    const runId = "initial-task-run";
+    const rows = [{ ...receipt, run_id: runId, task_id: TASK, head_sha: HEAD, site: "fix-strike", ts: at(80_000) },
+      ...round("NEEDS_SCOPE", { run_id: runId })];
+    assert.equal(priorRoundHold(rows, facts())?.hold, "NEEDS_SCOPE");
+    assert.equal(priorRoundHold(rows, facts({ contractRevision: "contract-B" })), undefined);
   });
 
   test("W1-T13865 criterion 4: the sweep stands the fix rung down on the hold and spawns no fix worker", async () => {
@@ -106,8 +164,8 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(disposed[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
     assert.match(String(disposed.stand_down_reason), /ruled FLAKE .* no required check has completed on this head since/);
 
-    const later = pr({ ciFailures: [{ name: "ci-shard (1/8)", logTail: "not ok 1 - red again", completedAt: at(1_000) }] });
-    await runSweep([later], f.deps);
+    f.deps.readRequiredCheckCompletions = async () => [{ name: "ci", completedAt: at(1_000) }];
+    await runSweep([pr()], f.deps);
     assert.equal(f.state.dispatched, 1, "a check completed after the round releases the hold");
 
     const scope = swept(round("NEEDS_SCOPE"));
@@ -118,6 +176,61 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(lastDisposed(scope).prior_round_hold_contract_revision, "contract-A");
     await runSweep([pr({ headSha: NEW_HEAD })], s.deps);
     assert.equal(s.state.dispatched, 1, "a new head starts a round");
+  });
+
+  test("W1-T13865 criterion 4: a CodeQL blocker cannot bypass the prior round hold", async () => {
+    const mergeCommitSha = "d".repeat(40);
+    const merge = { mergeable: true, mergeableState: "blocked", state: "clean" as const, mergeCommitSha, headSha: HEAD };
+    const scannerBlocker = classifyScannerBlocker({ number: 13865, headSha: HEAD, merge }, [{
+      number: 42, rule: { id: "js/file-system-race" }, tool: { name: "CodeQL" }, most_recent_instance: {
+        ref: "refs/pull/13865/merge", commit_sha: mergeCommitSha, location: { path: "src/lib/state.ts", start_line: 8 },
+      },
+    }], [{ body: "[Show details](https://github.com/o/remudero/security/code-scanning/42)",
+      user: { login: "github-advanced-security[bot]", type: "Bot" } }]);
+    const candidate = pr({ scannerBlocker, autoMergeArmed: true, checksState: "green", reviewState: "success", ciFailures: [],
+      headRefName: `run-${TASK}-1795126095000`, mergeState: "clean", mergeable: true, mergeableState: "blocked" });
+    const rows = swept(round("NEEDS_SCOPE", { contract_revision: "contract-A" }));
+    const f = fixture(rows);
+    await runSweep([candidate], f.deps);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(lastDisposed(rows).acted, false);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled NEEDS_SCOPE/);
+    f.deps.readTaskContractRevision = () => "contract-B";
+    await runSweep([candidate], f.deps);
+    assert.equal(f.state.dispatched, 1, "the same CodeQL blocker dispatches after a contract change");
+  });
+
+  test("W1-T13865 criterion 5: the sweep reads required completions from the head rollup even with another red", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    let completedAt = at(45_000);
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ciGateRequired: ["ci", "lint-plan"], issuesImpl: { create: () => assert.fail("unexpected issue") },
+      restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["ci-gate"] };
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return { check_runs: [
+          { name: "ci", status: "completed", conclusion: "failure", completed_at: at(45_000) },
+          { name: "lint-plan", status: "completed", conclusion: "success", completed_at: completedAt },
+          { name: "advisory", status: "completed", conclusion: "failure", completed_at: at(1_000) },
+        ] };
+        if (endpoint.endsWith(`/commits/${HEAD}/status`)) return { statuses: [
+          { context: "ci-gate", state: "pending", updated_at: at(1_000) },
+        ] };
+        assert.fail(`unexpected check read ${endpoint}`);
+      },
+    });
+    const deps = { ...f.deps, readRequiredCheckCompletions: effects.readRequiredCheckCompletions };
+    const candidate = pr({ ciFailures: [{ name: "advisory", logTail: "optional failure", completedAt: at(1_000) }, ...pr().ciFailures!] });
+    await runSweep([candidate], deps);
+    assert.equal(f.state.dispatched, 0, "a fresh optional failure and a pending status do not release the hold");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    completedAt = at(1_000);
+    await runSweep([candidate], deps);
+    assert.equal(f.state.dispatched, 1, "a fresh green required check releases the hold even while another stays red");
   });
 
   test("W1-T13865 criterion 4: the existing NEEDS_DESIGN hold is unchanged", async () => {
