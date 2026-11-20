@@ -5744,6 +5744,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         files: resolvedContract.taskDeclaredFiles,
         catalog: resolvedContract.taskCatalog,
       });
+      // W1-T13958: an ops-catalog task's `sourcePath` labels an ops blob ("tasks.d/<file>"); the
+      // core head checkout never holds it, so the promised follow-up reader would throw and post
+      // cannot-evaluate over the real verdict. Drop it, as the lane review's fresh contract does.
+      if (resolvedContract.taskCatalog === "ops") {
+        const { sourcePath: _opsSourcePath, ...withoutSource } = reviewTask as typeof reviewTask & { sourcePath?: string };
+        reviewTask = withoutSource;
+      }
       deps.log("fix.head_contract_refreshed", {
         strike: strikes,
         criteria_count: resolvedContract.criteria.length,
