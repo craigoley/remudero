@@ -78,7 +78,6 @@ export interface InstanceEntry {
     instance: string;
     repository?: string;
     prefix: string;
-    generation?: number;
   };
 }
 
@@ -233,12 +232,14 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
     name: INSTANCES_VIEW_NAME,
     version: INSTANCES_VIEW_VERSION,
     qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION,
-    // Heartbeats/liveness, registries, mounts, contract identities, ownership/generation evidence and stamp budget.
+    // Liveness, registries, mounts, contract identities, lease ownership and stamp budget.
     inputsFingerprint: ({ now, instances }) => JSON.stringify([
       identity(opts.repoPath), identity(opts.hostPath), Math.floor(now / SLOW_LANE_STORE_BUDGET_MS),
       opts.instances.map(i => [i.name, mounted(i.ledgerDir), identity(join(i.ledgerDir, INBOX_CONTRACT_MARKER), true)]),
-      instances.map(({ state, db, lease }) => [state.instance, state.generation, lease !== undefined,
-        db?.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get() ?? null, instanceLiveness(db, now)]),
+      // W1-T13835: not the projector generation, which moves on every projected row; the body no longer publishes it.
+      // W1-T13873: not the raw heartbeat either. The body reads it only as liveness (up, or down since the beat), and a
+      // skip restamps the ledger source's asOf from ledgerReads, so a beat that keeps an instance up rebuilds nothing.
+      instances.map(({ state, db, lease }) => [state.instance, state.lease, lease !== undefined, instanceLiveness(db, now)]),
     ]),
     ledgerReads: (db) => {
       const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
@@ -262,7 +263,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
         const owned = scopeMatches && slot?.state.lease === "held" && slot.lease !== undefined && Number.isSafeInteger(generation) && generation! >= 0;
         const observation = registered && served ? observeInstanceInboxContract(dir, { instance: id, repository: registered.repo }) : undefined;
         const source = `inbox-capability:${id}`;
-        const evidence: NonNullable<InstanceEntry["inboxCapabilityEvidence"]> = { version: 1, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, source, state: "unavailable", instance: id, ...(registered ? { repository: registered.repo } : {}), prefix, ...(Number.isSafeInteger(generation) && generation! >= 0 ? { generation } : {}) };
+        const evidence: NonNullable<InstanceEntry["inboxCapabilityEvidence"]> = { version: 1, qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION, source, state: "unavailable", instance: id, ...(registered ? { repository: registered.repo } : {}), prefix };
         const reading: ViewSource = { name: source, kind: "inbox-store", instance: id, budgetMs: SLOW_LANE_STORE_BUDGET_MS, asOf: fixedClock(now).iso(), state: "unavailable", phase: "failed", reason: "current registered mounted owned conversation contract could not be verified" };
         capabilitySources.push(reading);
         revalidate.push({ mounted: () => dir !== undefined && mounted(dir), qualify: () => {

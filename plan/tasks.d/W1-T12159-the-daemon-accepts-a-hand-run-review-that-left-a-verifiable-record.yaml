@@ -19,7 +19,7 @@
     - src/cli/commands/review.ts
     - src/lib/sweep.ts
     - test/review/the-daemon-accepts-a-hand-run-review-that-left-a-verifiable-record.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review that posts a full verdict also writes one record on the pull request. The record holds the head, the input digest, the verdict on each criterion and the proof results of its review.posted row"

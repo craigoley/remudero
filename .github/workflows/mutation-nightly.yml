@@ -79,6 +79,19 @@ jobs:
             --night-index "$(date -u +%j)" \
             --plan-dir .stryker-plan \
             --report-dir reports/mutation/nightly 2>&1 | tee -a nightly-failure.log
+      # W1-T13903: the configs mutate IN PLACE (see buildNightlyStrykerConfig), so tests that probe this
+      # checkout's identity (`git status -- src`) would read the instrumented file as a dirty tree.
+      # With no active mutant that file behaves as HEAD, so git is told to read it as HEAD.
+      - name: Mark tonight's mutate targets as HEAD to git (in-place mutation)
+        id: mark-mutate-targets
+        env:
+          MUTATE: ${{ steps.plan.outputs.mutate }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra targets <<< "$MUTATE"
+          if [ "${#targets[@]}" -gt 0 ]; then
+            git update-index --skip-worktree -- "${targets[@]}"
+          fi
       # One `npx stryker run` per mutated file; an erroring config does not abort the loop, so the
       # files that DID complete still produce reports.
       #
