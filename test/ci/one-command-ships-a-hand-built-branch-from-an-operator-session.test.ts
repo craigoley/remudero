@@ -11,6 +11,7 @@ import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } 
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { HANDLERS } from "#test/helpers/run-task-test.js";
@@ -846,42 +847,40 @@ test("W1-T12169 criterion 4: an update push is judged against the stored body it
     "exit 0",
   ].join("\n"));
   // No network: the hook's own GitHub read fails, as it does with no credential, and the cached body is used.
-  const ghBin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-gh-`));
-  writeFileSync(join(ghBin, "gh"), '#!/bin/sh\necho "To get started with GitHub CLI, please run:  gh auth login" >&2\nexit 4\n');
-  chmodSync(join(ghBin, "gh"), 0o755);
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${ghBin}:${savedPath ?? ""}`;
-  t.after(() => {
-    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
-    rmSync(ghBin, { recursive: true, force: true });
+  await withGhShim([{ when: "api", stderr: "To get started with GitHub CLI, please run:  gh auth login", exit: 4 }], async () => {
+    const requests: string[][] = [];
+    const reads: string[][] = [];
+    let stored: string | Error | { number: number; body: string }[] = "Acceptance:\n- Ignored files | grep: node_modules in .gitignore\n";
+    const defaults = handShipEffects(() => 0, async (args) => {
+      reads.push(args);
+      if (stored instanceof Error) throw stored;
+      return Array.isArray(stored) ? stored : [{ number: 7, body: stored }];
+    }, async (_cwd, args) => { requests.push([...args]); return ""; });
+    const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+    const source = await defaults.readSource(repo.dir, run);
+    const checks = () => readFileSync(gate, "utf8");
+
+    await withLiveWritesAllowed(() => defaults.push(source, run));
+    assert.match(checks(), /OK -- 1 body proofs \(cached body\)/, "the check judged the body the parent read");
+    assert.equal(requests.length, 1, "a body proof that still holds lets the push go");
+    assert.deepEqual(reads.at(-1), ["api", `repos/example/repo/pulls?state=open&head=example%3A${branch}`]);
+
+    stored = "Acceptance:\n- Marker | grep: body marker in example.ts\n";
+    await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /newly falsifies a proof in the open PR's stored body/);
+    assert.match(checks(), /NEWLY FALSIFIES 1 proof/);
+    assert.equal(requests.length, 1, "a newly falsified body proof stops the push");
+
+    const before = checks();
+    stored = new Error("GitHub unreachable");
+    await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stored body could not be read before the push \(GitHub unreachable\)/);
+    assert.equal(checks(), before, "an unread body refuses the push before the gate runs");
+    assert.equal(requests.length, 1);
+
+    stored = [{ number: 7, body: "" }, { number: 8, body: "" }];
+    await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /GitHub did not name at most one open PR/);
+    assert.equal(checks(), before, "an ambiguous answer refuses the push before the gate runs");
+    assert.equal(requests.length, 1);
   });
-  const requests: string[][] = [];
-  const reads: string[][] = [];
-  let stored: string | Error = "Acceptance:\n- Ignored files | grep: node_modules in .gitignore\n";
-  const defaults = handShipEffects(() => 0, async (args) => {
-    reads.push(args);
-    if (stored instanceof Error) throw stored;
-    return [{ number: 7, body: stored }];
-  }, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
-  const source = await defaults.readSource(repo.dir, run);
-  const checks = () => readFileSync(gate, "utf8");
-
-  await withLiveWritesAllowed(() => defaults.push(source, run));
-  assert.match(checks(), /OK -- 1 body proofs \(cached body\)/, "the check judged the body the parent read");
-  assert.equal(requests.length, 1, "a body proof that still holds lets the push go");
-  assert.deepEqual(reads.at(-1), ["api", `repos/example/repo/pulls?state=open&head=example%3A${branch}`]);
-
-  stored = "Acceptance:\n- Marker | grep: body marker in example.ts\n";
-  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /newly falsifies a proof in the open PR's stored body/);
-  assert.match(checks(), /NEWLY FALSIFIES 1 proof/);
-  assert.equal(requests.length, 1, "a newly falsified body proof stops the push");
-
-  const before = checks();
-  stored = new Error("GitHub unreachable");
-  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stored body could not be read before the push \(GitHub unreachable\)/);
-  assert.equal(checks(), before, "an unread body refuses the push before the gate runs");
-  assert.equal(requests.length, 1);
 });
 
 test("W1-T12169 criterion 4: a required pre-push gate's hook gets no GitHub token or gh login", async (t) => {
@@ -956,7 +955,9 @@ test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or over
     process.stderr.write = writes.err;
   }
   assert.deepEqual(requests, [], "an overflowing gate stops the push");
-  chmodSync(join(dirname(mark), "pre-push"), 0o644);
+  // A directory where the hook should be cannot be executed by any uid.
+  rmSync(join(dirname(mark), "pre-push"));
+  mkdirSync(join(dirname(mark), "pre-push"));
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /refused this push \(spawn EACCES\)/);
   assert.deepEqual(requests, [], "a gate that cannot start stops the push");
 });
