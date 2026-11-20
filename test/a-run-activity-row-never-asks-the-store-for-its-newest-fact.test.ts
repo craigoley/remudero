@@ -1,0 +1,135 @@
+/**
+ * W1-T13905: each run activity row the board ingested asked the store for its run's newest fact time. The only index
+ * is (task_id, seq), so a DAEMON run's MAX(ts_ms) scanned all of DAEMON's fact rows: 706,926 on core, 1.7 s a row,
+ * and 84% of a steady core now build. The board keeps the per-run newest fact time its cold load builds, extends it
+ * from the rows it ingests, and rebuilds it in one grouped read when the store drops rows under it.
+ */
+import assert from "node:assert/strict";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type Row } from "#src/lib/board-projection.js";
+import type { Clock } from "#src/lib/clock.js";
+import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
+import type { GitHub } from "#src/lib/status.js";
+import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
+
+const T0 = Date.parse("2026-11-20T00:00:00.000Z");
+const at = (ms: number): string => new Date(ms).toISOString();
+const task = (id: string): Task => ({ id, title: id, repo: "remudero", depends_on: [], type: "implement", risk: "medium", verify: "auto", status: "queued", attempts: 0 });
+const PLAN: Plan = { tasks: [task("W1-T1")], byId: new Map([["W1-T1", task("W1-T1")]]) };
+const GATEWAY = {
+  readFailed: () => false, prByRef: () => null, findMergedByTrailer: () => null, findMergedByHeadBranch: () => [],
+  listMergedHeadBranches: () => [], listOpenHeadBranches: () => [], headRefName: () => undefined, prBody: () => undefined,
+  issueByUrl: () => null,
+} as unknown as GitHub;
+/** A fact step the board reads, and a step the projector keeps only as run activity. */
+const FACT = "implement.done";
+const ACTIVITY = "worker.tool_lineage";
+const fact = (ms: number, taskId: string, runId: string): Row => ({ ts: at(ms), step: FACT, task_id: taskId, run_id: runId, host: "h1" });
+const activity = (ms: number, taskId: string, runId: string): Row => ({ ts: at(ms), step: ACTIVITY, task_id: taskId, run_id: runId, host: "h1" });
+
+/** Counts executions of the statements whose SQL matches `pattern`. */
+function counting(db: ReadModelDb, patterns: Record<string, RegExp>): { db: ReadModelDb; count: Record<string, number> } {
+  const count = Object.fromEntries(Object.keys(patterns).map((k) => [k, 0]));
+  return {
+    count,
+    db: { ...db, exec: (sql) => db.exec(sql), meta: (key) => db.meta(key), inTransaction: () => db.inTransaction(), close: () => db.close(),
+      prepare: (sql, opts) => {
+        const statement = db.prepare(sql, opts);
+        const names = Object.entries(patterns).filter(([, re]) => re.test(sql)).map(([k]) => k);
+        if (names.length === 0) return statement;
+        const note = (): void => { for (const k of names) count[k]!++; };
+        const counted: ReadModelStatement = {
+          run: (...p) => statement.run(...p),
+          get: (...p) => { note(); return statement.get(...p); },
+          all: (...p) => { note(); return statement.all(...p); },
+          iterate: (...p) => { note(); return statement.iterate(...p); },
+        };
+        return counted;
+      } },
+  };
+}
+
+function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
+  const root = readModelFixtureDir(t, "run-activity-newest-fact").dir;
+  const ms = T0 + 86_400_000;
+  const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
+  const ledgerDir = join(root, "core", "state");
+  mkdirSync(ledgerDir, { recursive: true });
+  const raw = openProjectorReadModel(join(root, "home"), "core", clock);
+  onReadModelClose(t, () => raw.close());
+  const got = acquireLease(raw, { clock, ttlMs: 1e12 });
+  assert.ok(got.ok);
+  const projector = createLedgerProjector({ ledgerDir, db: raw, lease: got.lease, clock });
+  const append = (more: Row[]): void => {
+    appendFileSync(join(ledgerDir, "ledger.ndjson"), more.map((r) => `${JSON.stringify(r)}\n`).join(""));
+    for (let i = 0; i < 50; i++) projector.tick();
+  };
+  append(rows);
+  const board = (db: ReadModelDb = raw): BoardProjection => createBoardProjection({ db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock,
+    readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1", readCreditStore: () => ({}), readCreditOverrideFile: () => "" });
+  const caughtUp = (b: BoardProjection): BoardProjection => { while (!b.update({ force: true }).caughtUp); return b; };
+  return { raw, append, board, caughtUp };
+}
+
+/** The board's run activity stand-ins, as task|run@ts, sorted. */
+const standIns = (b: BoardProjection): string[] =>
+  b.rows().filter((r) => r.step === BOARD_RUN_ACTIVITY_STEP).map((r) => `${String(r.task_id)}|${String(r.run_id)}@${String(r.ts)}`).sort();
+
+const seed = (): Row[] => [
+  ...Array.from({ length: 400 }, (_, i) => fact(T0 + i * 1_000, "DAEMON", `DAEMON-${i % 4}`)),
+  fact(T0 + 1_000_000, "W1-T1", "r1"), activity(T0 + 1_100_000, "W1-T1", "r1"), // activity after the run's last fact: a stand-in
+  fact(T0 + 1_300_000, "W1-T1", "r2"), activity(T0 + 1_200_000, "W1-T1", "r2"), // activity before it: none
+];
+
+test("W1-T13905 criterion 1: after the cold load, ingesting run activity asks the store for no run's newest fact", (t) => {
+  const w = world(t, seed());
+  const counted = counting(w.raw, { perRun: /SELECT MAX\(ts_ms\) AS ms FROM fact WHERE task_id = \? AND run_id = \?/ });
+  const board = w.caughtUp(w.board(counted.db));
+  w.append([activity(T0 + 2_000_000, "DAEMON", "DAEMON-1"), activity(T0 + 2_000_500, "DAEMON", "DAEMON-9"),
+    fact(T0 + 2_001_000, "W1-T1", "r3"), activity(T0 + 2_002_000, "W1-T1", "r3")]);
+  w.caughtUp(board);
+  assert.equal(counted.count.perRun, 0, "no per-run MAX(ts_ms) read");
+  assert.ok(standIns(board).includes(`DAEMON|DAEMON-1@${at(T0 + 2_000_000)}`), "the run activity still stands in");
+});
+
+test("W1-T13905 criterion 2: invariant:same-stand-ins — an extended board holds the run activity stand-ins a fresh cold load holds", (t) => {
+  const w = world(t, seed());
+  const board = w.caughtUp(w.board());
+  assert.deepEqual(standIns(board), standIns(w.caughtUp(w.board())));
+  for (let round = 0; round < 3; round++) {
+    const base = T0 + 3_000_000 + round * 100_000;
+    w.append([
+      activity(base, "W1-T1", "r1"), // newer activity on a run with a stand-in
+      fact(base + 1_000, "W1-T1", "r1"), // then a newer fact withdraws it
+      activity(base + 2_000, "W1-T1", `new-${round}`), // a run with no fact at all
+      fact(base + 3_000, "DAEMON", "DAEMON-2"), activity(base + 2_500, "DAEMON", "DAEMON-2"), // activity older than a new fact
+      activity(base + 4_000, "DAEMON", "DAEMON-3"),
+    ]);
+    w.caughtUp(board);
+    const expected = standIns(w.caughtUp(w.board()));
+    assert.deepEqual(standIns(board), expected, `round ${round}`);
+    assert.ok(expected.length >= 2, "the comparison covers stand-ins");
+  }
+});
+
+test("W1-T13905 criterion 3: a fact row dropped under the board rebuilds the newest fact times in one grouped read", (t) => {
+  const w = world(t, seed());
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+  const board = w.caughtUp(w.board(counted.db));
+  board.index(board.rows()).byStep.get(FACT); // the step cache holds FACT, so a dropped FACT row is noticed
+  assert.equal(counted.count.grouped, 0);
+  const newest = w.raw.prepare(`SELECT MAX(seq) AS seq FROM fact WHERE step = ? AND task_id = 'W1-T1' AND run_id = 'r2'`).get(FACT)!;
+  w.raw.prepare("DELETE FROM fact WHERE seq = ?").run(newest.seq);
+  board.index(board.rows());
+  assert.equal(counted.count.grouped, 1, "one grouped read after the drop");
+  // r2's only fact is gone, so its activity now stands in, as a fresh cold load sees it.
+  w.append([activity(T0 + 5_000_000, "W1-T1", "r2")]);
+  w.caughtUp(board);
+  const fresh = standIns(w.caughtUp(w.board()));
+  assert.deepEqual(standIns(board), fresh);
+  assert.ok(fresh.includes(`W1-T1|r2@${at(T0 + 5_000_000)}`));
+});

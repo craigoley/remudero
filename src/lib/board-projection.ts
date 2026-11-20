@@ -889,6 +889,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ?`),
     runNewestFact: db.prepare(`SELECT MAX(ts_ms) AS ms FROM fact WHERE task_id = ? AND run_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
       AND json_type(body, '$.task_id') = 'text'`),
+    newestFactByRun: db.prepare(`SELECT task_id, run_id, MAX(ts_ms) AS ms FROM fact WHERE task_id IS NOT NULL AND run_id IS NOT NULL
+      AND seq <= ? AND step NOT IN (${unreadSql}) AND json_type(body, '$.task_id') = 'text' AND json_type(body, '$.run_id') = 'text'
+      GROUP BY task_id, run_id`),
   };
   const tableExists = (name: string): boolean => db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
   /** A task's run stand-in sources, prepared once the store has their tables (a store built before them has none). */
@@ -920,8 +923,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
   let bulkOpen = false;
   let bulkOutOfOrder = false;
-  /** Per `task|run`, the newest fact row's time, while a cold load has not yet read the run tables; a later run row asks the store. */
-  let bulkNewestFactMs: Map<string, number> | undefined = new Map();
+  /** Per `task|run`, the newest fact row's time, from every fact row ingested since seq 0. W1-T13905: kept after the cold
+   *  load and extended by the ingest, so a run activity row never asks the store (one DAEMON run's MAX(ts_ms) scanned its
+   *  706,926 fact rows, 1.7 s). Rebuilt in one grouped read when the store is found to have dropped rows or gone behind. */
+  let newestFactMs = new Map<string, number>();
   let crossCount = 0;
   let crossSeq = 0;
   /** W1-T9719: per cross-task step its rows' count and newest seq; the plan-only filings' likewise, and their PRs. */
@@ -1174,9 +1179,14 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   function newestFactMsOf(taskId: string, runId: string): number {
-    const bulk = bulkNewestFactMs?.get(`${taskId}|${runId}`);
-    if (bulkNewestFactMs) return bulk ?? Number.NEGATIVE_INFINITY;
-    return newestStoredFactMs(taskId, runId, lastSeq);
+    return newestFactMs.get(`${taskId}|${runId}`) ?? Number.NEGATIVE_INFINITY;
+  }
+
+  /** W1-T13905: {@link newestFactMs} read afresh from the store up to `lastSeq`, under the same filters as one run's read. */
+  function readNewestFactMs(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const r of sql.newestFactByRun.iterate(lastSeq, ...unread)) out.set(`${String(r.task_id)}|${String(r.run_id)}`, Number(r.ms));
+    return out;
   }
 
   function newestStoredFactMs(taskId: string, runId: string, upTo: number): number {
@@ -1288,7 +1298,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       if (typeof row.task_id === "string" && typeof row.run_id === "string") {
         const key = `${row.task_id}|${row.run_id}`;
-        if (bulkNewestFactMs) bulkNewestFactMs.set(key, Math.max(bulkNewestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
+        newestFactMs.set(key, Math.max(newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
         const standing = activityRows.get(key);
         if (standing && kept.get(standing)!.ord[0] <= tsMs) {
           activityRows.delete(key);
@@ -1314,8 +1324,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     const workers = ingestWorkers();
     const activity = ingestActivity();
-    // The cold load's per-run times have served the run tables' first read; later rows ask the store.
-    bulkNewestFactMs = undefined;
     compact();
     if (activity || workers || fresh > 0) pending = true;
     return { fresh, caughtUp };
@@ -1415,6 +1423,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const reason = moved ? "deleted" : Number(sql.maxSeq.get()?.seq ?? 0) < lastSeq ? "behind" : undefined;
     if (!reason) return;
     dropStepCache();
+    newestFactMs = readNewestFactMs();
     stepReads.resets[reason]++;
   }
 
