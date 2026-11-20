@@ -5022,12 +5022,16 @@ test("W1-T192: `rmd inbox` (inboxCommand) and the daemon's draft rung (buildInbo
   assert.match(inboxBody, /draftProposalBatch\(/, "inboxCommand must call the shared draftProposalBatch");
 
   const hookBody = extractFunctionBody(runTaskSrc, "function buildInboxDraftHook(");
-  // W1-T193: the batch call is now injected (`draftBatch`, a test seam — see the hook's own
-  // doc) rather than calling draftProposalBatch by name directly, but the seam's DEFAULT is
-  // still the SAME draftProposalBatch, and the hook body actually invokes it via that
-  // parameter — never a re-derived spawn loop.
-  assert.match(hookBody, /= draftProposalBatch,/, "buildInboxDraftHook's draftBatch seam must default to the SAME draftProposalBatch");
-  assert.match(hookBody, /await draftBatch\(due,/, "buildInboxDraftHook must actually invoke the (possibly-injected) batch function");
+  assert.match(
+    hookBody,
+    /=>\s*draftProposalBatch\(proposals, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes\),/,
+    "buildInboxDraftHook's default batch must delegate to the shared draftProposalBatch and forward saved cash progress",
+  );
+  assert.match(
+    hookBody,
+    /await draftBatch\(due, config, owner, repo, runId, log, readDraftCashResumes\(/,
+    "buildInboxDraftHook must call the batch with due proposals and saved cash progress",
+  );
 });
 
 test("W1-T192: buildInboxDraftHook is wrapped in its own try/catch, distinct from buildSweepHook's — a draft-rung hiccup never halts the sweep or the daemon", () => {
