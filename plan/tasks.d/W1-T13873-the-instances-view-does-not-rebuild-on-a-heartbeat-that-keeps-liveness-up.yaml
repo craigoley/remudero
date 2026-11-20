@@ -16,7 +16,7 @@
   files:
     - src/lib/instances-view.ts
     - test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A daemon heartbeat that keeps every instance up leaves the instances body skipped, restamps its ledger source at the new beat, and its data equals a skip-disabled build"
