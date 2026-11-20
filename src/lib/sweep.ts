@@ -1033,7 +1033,8 @@ const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   rawPattern: /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/,
   sharedSnapshot: true,
   strictFileIdentity: true,
-  version: "4",
+  verifyCurrentRotationContents: true,
+  version: "5",
   project: ({ step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
     step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
   }),
@@ -1092,10 +1093,9 @@ function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordR
   const history = reader.current(stateDir, { publishSnapshot: true });
   if (!history.ok) return undefined;
   try {
-    for (const archive of history.archiveFiles) readFileSync(archive);
     if (history.liveFileRead) fs.accessSync(ledgerLivePath(stateDir), fs.constants.R_OK);
   } catch {
-    // A failed read or access check makes cached history unknown and holds dispatch.
+    // A failed live access check makes cached history unknown and holds dispatch.
     return undefined;
   }
   return history;
@@ -31361,6 +31361,8 @@ export interface EscalationTriageSlice {
   sharedSnapshot?: boolean;
   /** Invalidate a cached read when file identity or ctime changes under the same size and mtime. */
   strictFileIdentity?: boolean;
+  /** Verify cached rotation bytes during synchronous history reads. */
+  verifyCurrentRotationContents?: boolean;
 }
 
 /** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
@@ -31452,7 +31454,8 @@ export function createEscalationTriageHistoryReader(
     lastLoad.bytesRead += buf.length;
     return buf;
   };
-  const union = createIncrementalLedgerUnion({ ...identity, rawPattern, strictFileIdentity: slice.strictFileIdentity }, { ...fsDeps,
+  const union = createIncrementalLedgerUnion({ ...identity, rawPattern, strictFileIdentity: slice.strictFileIdentity,
+    verifyRotationContents: slice.verifyCurrentRotationContents }, { ...fsDeps,
     readFileSync: (path) => counted(path, () => fsDeps.readFileSync(path)),
     readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
   });

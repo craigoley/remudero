@@ -1,5 +1,5 @@
 import { closeSync as nodeCloseSync, createReadStream as nodeCreateReadStream, existsSync as nodeExistsSync, fstatSync, mkdirSync as nodeMkdirSync, openSync as nodeOpenSync, readFileSync as nodeReadFileSync, readSync as nodeReadSync, readdirSync as nodeReaddirSync, renameSync as nodeRenameSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync, writeFileSync as nodeWriteFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, hash, randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { isMainThread, parentPort, threadId, Worker, workerData, type MessagePort } from "node:worker_threads";
 import { addAbortSignal, type Readable } from "node:stream";
@@ -1126,6 +1126,8 @@ export interface LedgerRotationRecords {
   torn: number;
   /** The raw text of each torn line, replayed to a union read's `onTorn`. */
   tornLines: string[];
+  /** Hash of the source bytes (compressed for gzip) when the reader verifies cache hits. */
+  archiveFingerprint?: string;
 }
 
 /** `parse` is the union's own read of `entry`; the hook may call it, or answer without reading. */
@@ -1906,7 +1908,7 @@ export function ledgerRotationDigests(
   stateDir: string,
   reduce: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>,
   opts: { holder: string; reducerVersion: string; rawPattern?: RegExp; projectLine?: LedgerLineProjection;
-    statKey?: (path: string) => string },
+    statKey?: (path: string) => string; verifyRotationContents?: boolean },
   fsDeps: LedgerGrepFsDeps = realLedgerFs,
 ): { rotationRecords: LedgerRotationHook; counts: () => LedgerRotationDigestCounts } {
   if (!opts.holder || !opts.reducerVersion) throw new Error("rotation digests require a holder and reducer version");
@@ -1934,6 +1936,7 @@ export function ledgerRotationDigests(
     const read = digest?.read as LedgerRotationRecords | undefined;
     const valid = digest?.schema === 1 && digest.holder === opts.holder && digest.reducerVersion === opts.reducerVersion &&
       digest.archive === basename(entry.path) && digest.key === key && read !== undefined && Array.isArray(read.rows) &&
+      (!opts.verifyRotationContents || typeof read.archiveFingerprint === "string") &&
       read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
       Number.isSafeInteger(read.torn) && Array.isArray(read.tornLines) && read.tornLines.length === read.torn &&
       read.tornLines.every((line) => typeof line === "string");
@@ -1952,6 +1955,7 @@ export function ledgerRotationDigests(
     const torn = scanLedgerBuffer(entry.form === "gzip" ? fsDeps.gunzipSync(buf) : buf, opts.rawPattern,
       (row, line) => rows.push(opts.projectLine?.(row, line) ?? row), 0, Number.POSITIVE_INFINITY, (line) => tornLines.push(line)).bad;
     const read: LedgerRotationRecords = { rows: reduce(rows), torn, tornLines };
+    if (opts.verifyRotationContents) read.archiveFingerprint = hash("sha256", buf);
     counts.parsed += 1;
     const path = pathOf(entry);
     const temp = `${path}.${randomUUID()}.tmp`;
@@ -2042,7 +2046,8 @@ export function incrementalLedgerDigestVersion(version: string, steps: readonly 
  */
 export function createIncrementalLedgerUnion(
   opts: { holder: string; reducerVersion: string; rawPattern?: RegExp;
-    project?: (row: Record<string, unknown>) => Record<string, unknown>; strictFileIdentity?: boolean },
+    project?: (row: Record<string, unknown>) => Record<string, unknown>; strictFileIdentity?: boolean;
+    verifyRotationContents?: boolean },
   baseFs: LedgerGrepFsDeps = realLedgerFs,
 ): ((stateDir: string, readOpts?: IncrementalUnionReadOptions) => LedgerUnionRecordRead) & IncrementalLedgerUnionHandle {
   // W1-T9710: every byte a pass reads, digests and inline rotations included, is counted for `lastPass`.
@@ -2094,6 +2099,20 @@ export function createIncrementalLedgerUnion(
     const stateKey = JSON.stringify([stateDir, steps, refuseIncomplete === true, requireArchives === true]);
     const state: IncrementalUnionState = states.get(stateKey) ?? { rotations: new Map() };
     const finish = (result: LedgerUnionRecordRead): LedgerUnionRecordRead => {
+      if (result.ok && opts.verifyRotationContents) {
+        // Check the source bytes after cache lookup. A successful read can still return corrupt gzip.
+        const unread = result.archiveFiles.filter((path) => {
+          const part = state.rotations.get(path);
+          if (part === undefined) return false; // The union read this rotation uncached.
+          try {
+            return hash("sha256", fsDeps.readFileSync(path)) !== part.read.archiveFingerprint;
+          } catch {
+            // A failed verification read makes this rotation unread even when its cached rows are available.
+            return true;
+          }
+        });
+        if (unread.length > 0) return { ...result, unread, ok: false, rows: [] };
+      }
       if (result.ok && state.rotations.size === result.archiveCount) onKeptRotations?.(state.rotations);
       return result;
     };
@@ -2157,7 +2176,7 @@ export function createIncrementalLedgerUnion(
         return hit.read;
       }
       const seeded = seeds.get(entry.path);
-      if (seeded?.key === key) {
+      if (seeded?.key === key && (!opts.verifyRotationContents || typeof seeded.read.archiveFingerprint === "string")) {
         kept.set(entry.path, { key, read: seeded.read, size: partSize(seeded.read) });
         pass.seededRotations += 1;
         return seeded.read;
@@ -2165,7 +2184,7 @@ export function createIncrementalLedgerUnion(
       digests ??= ledgerRotationDigests(stateDir, reduce, {
         holder: opts.holder, reducerVersion: incrementalLedgerDigestVersion(opts.reducerVersion, steps, opts.rawPattern),
         rawPattern: opts.rawPattern,
-        projectLine, statKey: opts.strictFileIdentity ? statKey : undefined,
+        projectLine, statKey: opts.strictFileIdentity ? statKey : undefined, verifyRotationContents: opts.verifyRotationContents,
       }, fsDeps);
       const read = digests.rotationRecords(entry, parse);
       kept.set(entry.path, { key, read, size: partSize(read) });

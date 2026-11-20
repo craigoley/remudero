@@ -124,12 +124,11 @@ function buildInNewProcess(root: string, ledgerPath: string, expectedReason = st
   return JSON.parse(child.stdout) as BuildObservation;
 }
 
-function failRotationRead(archive: string, code: "EACCES" | "EIO"): () => void {
+function interceptRotationRead(archive: string, readArchive: () => Buffer): () => void {
   const read = fs.readFileSync;
   fs.readFileSync = new Proxy(read, {
     apply(target, receiver, args) {
-      if (args[0] === archive) throw Object.assign(new Error(`rotation read failed: ${code}`), { code });
-      return Reflect.apply(target, receiver, args);
+      return args[0] === archive ? readArchive() : Reflect.apply(target, receiver, args);
     },
   });
   syncBuiltinESMExports();
@@ -137,6 +136,12 @@ function failRotationRead(archive: string, code: "EACCES" | "EIO"): () => void {
     fs.readFileSync = read;
     syncBuiltinESMExports();
   };
+}
+
+function failRotationRead(archive: string, code: "EACCES" | "EIO"): () => void {
+  return interceptRotationRead(archive, () => {
+    throw Object.assign(new Error(`rotation read failed: ${code}`), { code });
+  });
 }
 
 function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidates {
@@ -427,6 +432,46 @@ if (process.argv[2] === childFlag) {
       });
       assert.equal(preflights, 0);
       assert.deepEqual(buildInNewProcess(root, path, unreadHistoryReason, archive), { gunzips: 0, stoodDown: candidates });
+    } finally {
+      restore();
+    }
+    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
+  });
+
+  test("W1-T12271 criterion 3: corrupt bytes returned after a rotation cache lookup hold dispatch", async (t) => {
+    const { root, dir, path, archive } = fixture(t);
+    const previouslyFree = candidates[3] as OpenPrView;
+    assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 3) });
+    assert.equal(observeBuild(root, path).gunzips, 0);
+
+    const corrupt = readFileSync(archive);
+    // Damage the final gzip member's CRC while keeping its header, length and file metadata intact.
+    const crcByte = corrupt.length - 8;
+    corrupt[crcByte] = corrupt[crcByte]! ^ 1;
+    const restore = interceptRotationRead(archive, () => corrupt);
+    let preflights = 0;
+    try {
+      const union = resolveLedgerUnion(dir, legacyPattern);
+      assert.equal(union.ok, false);
+      assert.deepEqual(union.unread, [archive]);
+      assert.deepEqual(union.matches, []);
+
+      const effects = buildEffects(root, path, {
+        dispatchFixPreflightStandDownImpl: async () => {
+          preflights++;
+          return true;
+        },
+      });
+      assert.deepEqual({
+        standDown: effects.terminalFixStandDown!(previouslyFree),
+        dispatch: await effects.dispatchFix!(previouslyFree, { unmetCriteria: [] }),
+        preflights,
+      }, {
+        standDown: unreadHistoryReason,
+        dispatch: { roundNotRun: true, reason: unreadHistoryReason },
+        preflights: 0,
+      });
+      assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 0, stoodDown: candidates });
     } finally {
       restore();
     }
