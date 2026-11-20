@@ -23,7 +23,7 @@
     - test/diff-coverage.test.ts
     - test/fast-lane-classifier.test.ts
     - test/a-coverage-skip-message-names-the-diff-class.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The ci and coverage-ratchet jobs each run their first actions/checkout step with an id, timeout-minutes 3 and continue-on-error true"
