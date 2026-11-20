@@ -1890,9 +1890,15 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
     if (waiter) {
+      // W1-T12058: one line, with the WHOLE expected wait. Each queued read ahead takes its slot when
+      // its floor is due and so restarts the window for this one: the floor, then one window per read.
+      const expectedS = (floorWaitMs + ahead * decision.windowS * 1000) / 1000;
       warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}` +
-          (ahead > 0 ? `, behind ${ahead} queued gated read(s) (W1-T10271)` : ""),
+        `gh read cadence (wait, W1-T7957): waiting ${expectedS}s ` +
+          (ahead > 0
+            ? `(${floorWaitMs / 1000}s for the ${decision.windowS}s floor, then ${decision.windowS}s for each of ` +
+              `${ahead} queued gated read(s) ahead, W1-T10271) on ${stampPath}`
+            : `for the ${decision.windowS}s floor on ${stampPath}`),
       );
     } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;

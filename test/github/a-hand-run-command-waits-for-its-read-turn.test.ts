@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -8,9 +8,12 @@ import {
   applyGhReadCadence,
   GhReadCadenceRefusal,
   ghReadCadenceStampPath,
+  ghReadTicketDir,
   readGhReadCadenceStampMs,
+  readGhReadTickets,
   stampGhRead,
   withGhTransportFloor,
+  writeGhReadTicket,
   type GhReadCadenceDeps,
 } from "#src/lib/github-transport.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -90,4 +93,41 @@ test("W1-T12058 criterion 3: the wait is printed once with its length, so the pe
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
   const seconds = (WINDOW_MS - AGE_MS) / 1000;
   assert.match(waits[0]!, new RegExp(`waiting ${seconds}s for the 180s floor`));
+});
+
+test("W1-T12058 criterion 3: with one live ticket ahead, the one wait line states the whole wait, the floor plus that ticket's window", async (t) => {
+  const f = fixture(t);
+  // Reviewer's counterexample: a five-second-old stamp and one live operator ticket queued ahead. The
+  // ticket takes its slot when the floor is due, which restarts the window for this read.
+  const start = f.now();
+  const ahead = {
+    id: "ahead-1", rank: 0, actor: "operator_human", seq: 1, pid: process.pid, host: hostname(),
+    createdMs: start - 1_000, refreshedMs: start - 1_000, yielded: false,
+  };
+  writeGhReadTicket(f.stamp, ahead);
+  let servedAt: number | undefined;
+  const sleep = f.deps.sleepSync!;
+  const deps: GhReadCadenceDeps = {
+    ...f.deps,
+    actor: () => "operator_ai",
+    sleepSync: (ms) => {
+      sleep(ms);
+      const head = readGhReadTickets(f.stamp)[0];
+      if (head?.id === ahead.id) writeGhReadTicket(f.stamp, { ...head, refreshedMs: f.now() });
+      if (servedAt === undefined && head?.id === ahead.id && f.now() - start >= WINDOW_MS - AGE_MS) {
+        rmSync(join(ghReadTicketDir(f.stamp), `${ahead.id}.json`));
+        stampGhRead(f.stamp, "", f.now());
+        servedAt = f.now();
+      }
+    },
+  };
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  const total = (WINDOW_MS - AGE_MS + WINDOW_MS) / 1000;
+  assert.equal(servedAt, start + WINDOW_MS - AGE_MS, "the ticket ahead took its slot when the floor came due");
+  assert.equal(slept(f.sleeps) / 1000, total, "the read waited the floor and then the ticket's window");
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, new RegExp(`waiting ${total}s `), `the line states the whole ${total}s wait: ${waits[0]}`);
 });
