@@ -17,7 +17,7 @@
     - src/lib/instance-gateway.ts
     - src/lib/now-view.ts
     - test/serve-reads-an-instance-plan-whose-other-repository-tasks-name-unseen-dependencies.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Serve's instance plan read loads a plan where a task of another repository depends on an id the plan does not hold, and keeps that dependency"

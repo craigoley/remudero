@@ -1,0 +1,51 @@
+- id: W1-T13902
+  title: "A reviewer-regression incident whose healed-tree reviews fail no less often than the regressed code closes with its blame cleared, so a cause outside the blamed merge no longer keeps every review on a healed tree for days"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # when a reviewer-regression incident closes; a closed incident stops healed-tree reviews and the revert PR
+  band_meaning: span
+  origin: "operator-session#console-daemon-load-2026-11-19"
+  plan_refs:
+    - W1-T10269
+    - W1-T13838
+  files:
+    - src/lib/reviewer-health.ts
+    - test/review/a-healed-tree-that-fails-the-same-way-clears-the-blame.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With enough healed-tree outcomes, an incident whose healed reviews are not better than the regressed shas closes and writes reviewer.regression_blame_cleared naming both rates"
+      proof: "grep: W1-T13902 criterion 1 in test/review/a-healed-tree-that-fails-the-same-way-clears-the-blame.test.ts"
+    - claim: "invariant:healing-keeps-its-incident — when healed reviews fail clearly less often than the regressed shas, or are too few to judge, the incident stays open"
+      kind: guard
+      proof: "grep: W1-T13902 criterion 2 in test/review/a-healed-tree-that-fails-the-same-way-clears-the-blame.test.ts"
+    - claim: "reviewer-health writes the blame-cleared row"
+      proof: 'grep: "reviewer\.regression_blame_cleared" in src/lib/reviewer-health.ts'
+  rationale: |
+    WHY: Craig asked why the Azure host is loaded. In the console daemon, incident reviewer-regression-ef8b74910f25
+    opened on 2026-11-16 13:44Z on ONE setup refusal (1 of 1 against a baseline of 0 of 815) and was still open on
+    2026-11-20. While it is open every console review runs from a healed tree (a fresh worktree, a revert, a tsx
+    compile of src/run-task.ts: 6 to 12 CPU s and 440 MB each). MEASURED from state/reviewer-health.json on
+    2026-11-20: healed-tree outcomes were 132 setup-refused of 213 (62%); main's since the onset 128 of 280 (46%);
+    before the onset 0 of 423. Reverting the blamed merge did not help, so the cause is elsewhere (head-task-metadata
+    refusals of hand PRs whose task filing is still an open companion PR), and returnedToBaseline cannot close it
+    because main keeps receiving those PRs.
+  design: |
+    INVARIANT healing-keeps-its-incident: an incident closes on blame-cleared only when the healed evidence is
+    sufficient and not better than the regressed evidence.
+    In evaluateReviewerHealthNow's step, after the returnedToBaseline check, pool the outcomes of every healed sha
+    recorded since the incident opened and of the incident's regressed shas. When the healed pool is not
+    `insufficient` (same Wilson and family-z machinery as judgeCounts) and its interval's upper bound is not below
+    the regressed pool's lower bound, close the incident through closeIncident with a distinct reason, and write
+    reviewer.regression_blame_cleared with healed k/n, regressed k/n and the offending sha. The closed record keeps
+    its signature, so a recurrence after a real fix is matched as today.
+  falsifier: |
+    Incident stays open with healed reviews failing as often: criterion 1 fails. An incident whose healed reviews
+    recover closes: criterion 2 fails.
+  note: |
+    Id reserved for run-unfiled-1795138766000 with ~/rmd-work/bin/reserve-id.sh.
