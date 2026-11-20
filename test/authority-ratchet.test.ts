@@ -35,7 +35,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { AUTHORITY_TABLE, authorityTableModules, buildAuthorityReport, renderAuthorityReport } from "#src/lib/authority.js";
-import { PLAN_MOVE_JANITOR_STEP, PLAN_MOVE_STAND_DOWN, PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick } from "#src/lib/plan-task-move-janitor.js";
+import { createPlanTaskMover, PLAN_MOVE_JANITOR_STEP, PLAN_MOVE_STAND_DOWN, PLAN_TASK_MOVE_ACTION, planTaskMovePorts, runPlanTaskMoveTick } from "#src/lib/plan-task-move-janitor.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // This ratchet's own two production modules are excluded: authority.ts's `AUTHORITY_TABLE`
@@ -155,14 +155,11 @@ test("AUTHORITY_TABLE carries no unused rows for files the detector no longer fi
 
 // ── W1-T13773: the fifth shape — a child-process caller of a tabled write ────────────────────
 //
-// A row whose verb is `rmd <verb> --<flag>` (a verb that writes only with that explicit flag) can
-// be reached from ANOTHER module that spawns the CLI as a child. The fifth shape examines every
-// tracked `src` file outside the row's own module and `src/run-task.ts` (verb registration).
-// Both exact literals in the same file identify a candidate, regardless of how argv is assembled.
-
-const ROW_VERB_FLAG_RE = /\brmd ([a-z][a-z0-9-]*) (--[a-z][a-z0-9-]*)/g;
+// The complete row verb `rmd <verb> --<flag>` describes an explicit write opt-in. Compound
+// descriptions list several routes and flags in them may be optional (`next-task-id` reserves by
+// default). Scan every tracked src file outside the owner's module and the CLI registration.
+const ROW_VERB_FLAG_RE = /^rmd ([a-z][a-z0-9-]*) (--[a-z][a-z0-9-]*)$/;
 const CLI_REGISTRATION = "src/run-task.ts";
-const GATE_GARDENER = "src/lib/gate-gardener.ts";
 
 interface CallerRowShape {
   id: string;
@@ -176,10 +173,6 @@ interface SourceFile {
   text: string;
 }
 
-function rowVerbFlags(verb: string): { verb: string; flag: string }[] {
-  return [...verb.matchAll(ROW_VERB_FLAG_RE)].map((m) => ({ verb: m[1]!, flag: m[2]! }));
-}
-
 function holdsLiteral(text: string, word: string): boolean {
   return ['"', "'", "`"].some((quote) => text.includes(`${quote}${word}${quote}`));
 }
@@ -187,13 +180,14 @@ function holdsLiteral(text: string, word: string): boolean {
 function undeclaredChildCallers(rows: readonly CallerRowShape[], files: readonly SourceFile[]): string[] {
   const found: string[] = [];
   for (const row of rows) {
+    const command = ROW_VERB_FLAG_RE.exec(row.verb);
+    if (!command) continue;
+    const [, verb, flag] = command;
     const named = new Set((row.callers ?? []).map((c) => c.module));
-    for (const { verb, flag } of rowVerbFlags(row.verb)) {
-      for (const file of files) {
-        if (file.path === CLI_REGISTRATION || file.path === row.module || named.has(file.path)) continue;
-        if (holdsLiteral(file.text, verb) && holdsLiteral(file.text, flag)) {
-          found.push(`${row.id}: ${file.path} (rmd ${verb} ${flag})`);
-        }
+    for (const file of files) {
+      if (file.path === CLI_REGISTRATION || file.path === row.module || named.has(file.path)) continue;
+      if (holdsLiteral(file.text, verb) && holdsLiteral(file.text, flag)) {
+        found.push(`${row.id}: ${file.path} (${command[0]})`);
       }
     }
   }
@@ -212,7 +206,7 @@ function trackedAllSrcTexts(): SourceFile[] {
 
 test("W1-T13773 criterion 2: every tracked src file with both row literals is named among that row's callers", () => {
   const files = trackedAllSrcTexts();
-  const flagged = AUTHORITY_TABLE.filter((row) => rowVerbFlags(row.verb).length > 0);
+  const flagged = AUTHORITY_TABLE.filter((row) => ROW_VERB_FLAG_RE.test(row.verb));
   assert.ok(flagged.some((row) => row.id === "push-plan-move-branch"), "the fifth shape must read the push-plan-move-branch row's verb");
   const janitor = files.find((f) => f.path === "src/lib/plan-task-move-janitor.ts");
   assert.ok(janitor && holdsLiteral(janitor.text, "move-task") && holdsLiteral(janitor.text, "--apply"), "the janitor must hold both literals");
@@ -226,7 +220,8 @@ test("W1-T13773 criterion 2: every caller a row names still holds both literals 
     for (const caller of row.callers ?? []) {
       const text = files.get(caller.module);
       assert.ok(text !== undefined, `${row.id}: caller module ${caller.module} is not a tracked src file`);
-      assert.ok(rowVerbFlags(row.verb).some(({ verb, flag }) => holdsLiteral(text, verb) && holdsLiteral(text, flag)),
+      const command = ROW_VERB_FLAG_RE.exec(row.verb);
+      assert.ok(command && holdsLiteral(text, command[1]) && holdsLiteral(text, command[2]),
         `${row.id}: caller ${caller.module} no longer holds the literals of ${JSON.stringify(row.verb)}`);
     }
   }
@@ -261,15 +256,38 @@ test("W1-T13773 criterion 2 FALSIFIER: dropping the move-row declarations names 
   ]);
 });
 
-test("W1-T13773 criterion 2 FALSIFIER: dropping the reservation declaration names the gate gardener's child argv", () => {
-  const row = AUTHORITY_TABLE.find((candidate) => candidate.id === "task-id-reservation-ref-push");
-  assert.ok(row);
-  const files = trackedAllSrcTexts();
-  assert.deepEqual(row.callers?.map((caller) => caller.module), [GATE_GARDENER]);
-  assert.deepEqual(undeclaredChildCallers([{ ...row, callers: [] }], files), [
-    `task-id-reservation-ref-push: ${GATE_GARDENER} (rmd next-task-id --reserve)`,
+test("W1-T13773 criterion 2: the janitor's production ports build one apply argv after the dry-run argv", async () => {
+  const target = { outcome: "on", repository: "owner/ops", checkoutDir: "/ops" } as const;
+  const commit = "a".repeat(40);
+  const children: { file: string; args: readonly string[] }[] = [];
+  const ledgerSteps: string[] = [];
+  const mover = createPlanTaskMover(planTaskMovePorts({
+    publicRoot: "/public",
+    publicRepository: "owner/public",
+    readSwitch: () => ({ move: target, dispatch: target }),
+    readOpsCatalog: () => "ok",
+    cliEntry: "/public/src/run-task.ts",
+    execArgv: ["--import", "tsx"],
+    git: () => async ([verb]) => ({ status: 0, stdout: verb === "ls-remote" ? `${commit}\tHEAD\n` : "", stderr: "" }),
+    exec: async (file, args) => {
+      children.push({ file, args });
+      const result = args.includes("--apply")
+        ? { step: "copy", applied: true, repository: target.repository, pullRequest: 1 }
+        : { step: "copy" };
+      return { stdout: JSON.stringify(result), stderr: "" };
+    },
+  }));
+
+  const result = await runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step) => ledgerSteps.push(step) }, mover);
+  const dryArgv = ["--import", "tsx", "/public/src/run-task.ts", "move-task",
+    "--public-root", "/public", "--public-commit", commit, "--public-repo", "owner/public",
+    "--ops-root", "/ops", "--ops-commit", commit, "--ops-repo", "owner/ops"];
+  assert.deepEqual(children, [
+    { file: process.execPath, args: dryArgv },
+    { file: process.execPath, args: [...dryArgv, "--apply"] },
   ]);
-  assert.deepEqual(undeclaredChildCallers([row], files), []);
+  assert.deepEqual(result, { outcome: "step", step: "copy" });
+  assert.deepEqual(ledgerSteps, [PLAN_MOVE_JANITOR_STEP]);
 });
 
 // ── W1-T13773 report and invariant acceptance tests ──────────────────────────────────────────
