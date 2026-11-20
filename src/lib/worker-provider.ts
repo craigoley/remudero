@@ -169,8 +169,9 @@ interface CodexWorkerResult {
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
-  /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
-  servedModel?: null;
+  /** W1-T13868: the model codex says the server rerouted every turn to, else `null` beside a named reason
+   * (see {@link codexServedModel}). Never the `--model` request echoed back. */
+  servedModel?: string | null;
   servedModelReason?: string;
   compactionEvents: [];
   compactionFailures: [];
@@ -2278,6 +2279,28 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
 export const CODEX_SERVED_MODEL_REASON =
   "codex exec --json names no model: its thread, turn and item events carry no model id";
 
+/**
+ * W1-T13868: THE ONE PLACE `codex exec --json` NAMES A SERVED MODEL. Verified against the codex-rs source at
+ * tag rust-v0.152.0 (the pinned CLI): the client reads the server's `openai-model` response header
+ * (codex-api/src/sse/responses.rs) and, ONLY when it differs from the requested model, emits ModelReroute, which
+ * exec projects as `item.completed` with `item: { type: "error", message: "model rerouted: <from> -> <to> (<reason>)" }`
+ * (exec/src/event_processor_with_jsonl_output.rs). At most one per turn. A match is logged, never streamed, so
+ * no reroute is NOT proof the request was served: it stays {@link CODEX_SERVED_MODEL_REASON}.
+ */
+export const CODEX_REROUTE_RE = /^model rerouted: (\S+) -> (\S+) \(/;
+/** Bounded like every retained codex field: a turn reroutes at most once, so more than this is not a real stream. */
+const CODEX_REROUTES_KEPT = 64;
+
+/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Named only when every turn
+ * was rerouted to the same model; otherwise `null` with the reason, never the requested model. */
+export function codexServedModel(reroutes: readonly string[], turns: number): { servedModel: string | null; servedModelReason?: string } {
+  if (reroutes.length === 0) return { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON };
+  const distinct = [...new Set(reroutes)].sort();
+  if (distinct.length === 1 && reroutes.length >= turns) return { servedModel: distinct[0]! };
+  return { servedModel: null,
+    servedModelReason: `codex rerouted ${reroutes.length} of ${turns} turn(s), so no one served model: ${distinct.join(", ")}` };
+}
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
@@ -2285,6 +2308,8 @@ interface CodexJsonEvent {
   error?: { message?: string };
   item?: {
     type?: string; text?: string; command?: string; aggregated_output?: string;
+    /** An `error` item's text; a model reroute is reported this way (see {@link CODEX_REROUTE_RE}). */
+    message?: string;
     /** A `file_change` item's changed paths; `kind` is "add", "update" or "delete". */
     changes?: ReadonlyArray<{ path?: unknown; kind?: unknown } | null>;
   };
@@ -2308,6 +2333,8 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
   completion: CodexCompletionEvidence;
+  /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
+  reroutes?: string[];
 }
 
 export interface CodexOutputTruncation {
@@ -2477,6 +2504,7 @@ class CodexJsonlAccumulator {
   private sessionId = "";
   private readonly blocks: string[] = [];
   private readonly errors: string[] = [];
+  private readonly reroutes: string[] = [];
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -2603,6 +2631,7 @@ class CodexJsonlAccumulator {
           ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
           : { state: "complete" },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+      ...(this.reroutes.length > 0 ? { reroutes: [...this.reroutes] } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
         retainedBytes: this.retainedBytes(),
@@ -2696,6 +2725,10 @@ class CodexJsonlAccumulator {
       this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "item.completed") this.observeToolCalls(event.item);
+    if (event.type === "item.completed" && event.item?.type === "error" && typeof event.item.message === "string") {
+      const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
+      if (to !== undefined && this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(to);
+    }
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
@@ -6490,8 +6523,7 @@ async function spawnCodexWorkerInPrivateTemp(
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      servedModel: null,
-      servedModelReason: CODEX_SERVED_MODEL_REASON,
+      ...codexServedModel(parsed.reroutes ?? [], parsed.numTurns),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,

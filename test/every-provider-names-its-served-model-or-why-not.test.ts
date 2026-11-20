@@ -11,8 +11,10 @@ import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources } from "#sr
 import { workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import {
   CASH_SERVED_MODEL_REASONS,
+  CODEX_REROUTE_RE,
   CODEX_SERVED_MODEL_REASON,
   cashResponseModel,
+  codexServedModel,
   cashServedModel,
   spawnCodexWorker,
   spawnOpenWeightWorker,
@@ -114,13 +116,14 @@ test("a multi-response cash attempt reports a model only when every response nam
   }
 });
 
-function codexProcess() {
+function codexProcess(turnItems: Record<string, unknown>[] = []) {
   const stdout = new PassThrough();
   const process = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, stderr: new PassThrough() });
   setImmediate(() => {
     for (const event of [
       { type: "thread.started", thread_id: "codex-thread" },
       { type: "turn.started" },
+      ...turnItems.map((item) => ({ type: "item.completed", item })),
       { type: "item.completed", item: { type: "agent_message", text: "done" } },
       { type: "turn.completed", usage: { input_tokens: 3, output_tokens: 2 } },
     ]) stdout.write(`${JSON.stringify(event)}\n`);
@@ -130,13 +133,13 @@ function codexProcess() {
   return process;
 }
 
-async function runCodex(): Promise<WorkerResult> {
+async function runCodex(turnItems: Record<string, unknown>[] = []): Promise<WorkerResult> {
   const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-"));
   try {
     return await spawnCodexWorker({
       workerHome: join(root, "home"), cwd: process.cwd(), prompt: "review",
       settingsFile: join(process.cwd(), "settings", "worker.json"), tools: ["Read", "Grep", "Glob", "Bash"],
-      containment: { spawn: () => ({ process: codexProcess() as never, pid: 31_337 }), teardown: () => {} },
+      containment: { spawn: () => ({ process: codexProcess(turnItems) as never, pid: 31_337 }), teardown: () => {} },
     }, {
       claudeBin: "/unused/claude", root,
       workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome: join(root, "codex-home") },
@@ -171,4 +174,41 @@ test("the attempt row and its receipt carry the provider's own served-model reas
   // A row written before the reason was carried still falls back to the generic string.
   assert.deepEqual(benchmarkRunAttemptReceipt({ step: "worker.attempt", served_model: null })?.servedModel,
     { state: "unavailable", reason: "provider-did-not-report-served-model" });
+});
+
+test("W1-T13868 criterion 1: a codex call and a GPT call each record the model the response named, or the named reason none was", async () => {
+  // codex-rs rust-v0.152.0 streams the server's model only as a reroute: an `error` item, never a failure.
+  const reroute = { type: "error", message: "model rerouted: gpt-6-luna -> gpt-5.2 (HighRiskCyberActivity)" };
+  const rerouted = await runCodex([reroute]);
+  assert.equal(rerouted.isError, false, rerouted.stderr);
+  assert.equal(rerouted.model, "gpt-6-luna", "the request half is unchanged");
+  assert.equal(rerouted.servedModel, "gpt-5.2");
+  assert.equal(rerouted.servedModelReason, undefined);
+  assert.equal(workerLedgerFields(rerouted).served_model, "gpt-5.2");
+  assert.equal("served_model_reason" in benchmarkWorkerAttemptResources(rerouted), false, "a named model carries no reason");
+
+  // No reroute: codex only logs a matching model, so the request is never written as what served it.
+  const plain = await runCodex([{ type: "error", message: "some unrelated warning" }]);
+  assert.equal(plain.servedModel, null);
+  assert.equal(plain.servedModelReason, CODEX_SERVED_MODEL_REASON);
+  assert.equal(workerLedgerFields(plain).served_model_reason, CODEX_SERVED_MODEL_REASON);
+
+  // Only codex's own reroute line names a model; an unrelated error item or agent prose that mentions a reroute does not.
+  assert.equal(CODEX_REROUTE_RE.test(reroute.message), true);
+  assert.equal(CODEX_REROUTE_RE.exec(reroute.message)?.[2], "gpt-5.2");
+  assert.equal(CODEX_REROUTE_RE.test("some unrelated warning"), false);
+  assert.equal(CODEX_REROUTE_RE.test("the model rerouted: a -> b (x)"), false);
+
+  // A reroute that covers only some turns, or names two models, names no single served model and says why.
+  assert.deepEqual(codexServedModel(["gpt-5.2"], 2), { servedModel: null,
+    servedModelReason: "codex rerouted 1 of 2 turn(s), so no one served model: gpt-5.2" });
+  assert.equal(codexServedModel(["gpt-5.2", "gpt-5.1"], 2).servedModel, null);
+  assert.deepEqual(codexServedModel(["gpt-5.2", "gpt-5.2"], 2), { servedModel: "gpt-5.2" });
+
+  // A GPT call over the OpenAI-compatible cash path names what its response named, or why not.
+  const gpt = await runCash(cashReply({ model: "gpt-6.2-sol-2026-10-01" }), "gpt-6.2-sol");
+  assert.equal(gpt.servedModel, "gpt-6.2-sol-2026-10-01");
+  const gptUnnamed = await runCash(cashReply({}), "gpt-6.2-sol");
+  assert.equal(gptUnnamed.servedModel, null);
+  assert.equal(gptUnnamed.servedModelReason, CASH_SERVED_MODEL_REASONS.unnamed);
 });
