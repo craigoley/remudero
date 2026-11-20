@@ -1,0 +1,56 @@
+- id: W1-T14052
+  title: "In read-model process mode, serve forwards every plan pin to the read-model child over IPC, so the child's views read the commit serve follows and stop statting every plan file on each view check"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # adds one IPC message on the child path only; thread mode is unchanged
+  band_meaning: span
+  origin: "operator-session#serve-cpu-2026-11-20"
+  plan_refs:
+    - W1-T13205
+    - W1-T13683
+    - W1-T5894
+  files:
+    - src/lib/thread-plan.ts
+    - src/lib/read-model-worker.ts
+    - test/console-api/serve/the-read-model-child-receives-serves-plan-pins.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "With the read-model in child mode, a plan pin serve published before the child started, and one published while it runs, both reach the child's view threads: threadPlanPin answers the pinned ref, threadPlan answers the pinned commit's tasks rather than the working tree's, and the adoption row reaches serve's log"
+      proof: "grep: W1-T14052 criterion 1 in test/console-api/serve/the-read-model-child-receives-serves-plan-pins.test.ts"
+    - claim: "invariant:pin-follows-respawn — a read-model child that dies and is respawned starts on the newest pin serve published, never on the generation's working tree"
+      kind: guard
+      proof: "grep: W1-T14052 invariant in test/console-api/serve/the-read-model-child-receives-serves-plan-pins.test.ts"
+  rationale: |
+    WHY: serve's read-model child is serve's largest CPU user with a Console tab open. MEASURED on the Azure host
+    2026-11-20 12:18-12:23Z (idle Console tab): serve container 0.855 cores, of which the read-model child 0.476 and
+    serve's main process 0.297. An inspector profile of the child (12:26-12:28Z, 120 s) put 22.9 s of the views thread
+    and 5.3 s of the heavy-views thread in stat < statIdentity < planFilesIdentity < inputDigest, plus 4.0 s in readdir:
+    each view check statted all 5,843 plan shards.
+    CAUSE (OBSERVED in the host ledger, 2026-11-20 18:20Z): serve hands plan pins to its threads on a BroadcastChannel
+    (src/lib/thread-plan.ts publishThreadPlan), which reaches only serve's own process. Since the read-model switched to
+    child mode (switches.json process: child, from 2026-11-18 ~17Z), serve.plan_pin_adopted rows come only from the
+    board thread (120 in 24 h, 120 serve.plan_reloaded); heavy (3,475 total) and slow-lane (3,764) adoptions stop at
+    that hour. The child's IPC handler (runReadModelProcessChild) accepts only init, env and catalog replies.
+    So threadPlanPin is "" in the child, inputDigest falls back to planFilesIdentity, and threadPlanLoad parses the
+    generation's working tree, which never moves, so the child's views also show the plan as of the generation's boot.
+  design: |
+    INVARIANT pin-follows-respawn: a read-model child never answers from the working tree while serve holds a pin.
+    1. thread-plan.ts: forwardThreadPlans(send) hands `send` every pin this thread published, now and as each later one
+       is published, and returns an unsubscribe; acceptForwardedThreadPlan(pinned, log) holds a forwarded pin as
+       published here (the receiving thread adopts it on its next read, every thread of the process gets it on the
+       channel now, a thread that starts later gets it when it asks), and logs adoptions through `log`.
+    2. read-model-worker.ts, child path only: on each spawn the handle calls forwardThreadPlans and posts
+       {type:"plan_pin"} messages; the SharedArrayBuffer of plan blobs crosses as bytes (as the board catalog's does)
+       and becomes a SharedArrayBuffer again in the child. Forwarding stops on exit, stop and pause, as the catalog
+       bridge does; a respawn re-sends the held pins.
+    3. The child's entry hands a plan_pin message to acceptForwardedThreadPlan with a log that posts {type:"log"} to
+       serve, so its threads' serve.plan_pin_adopted rows land in serve's ledger.
+  falsifier: |
+    Delete the forwarding in read-model-worker.ts (or the resend of held pins in forwardThreadPlans): criterion 1
+    fails with "a pin published before the child started reached its views", and the invariant test fails too.
