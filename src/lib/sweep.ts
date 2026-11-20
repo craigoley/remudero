@@ -139,7 +139,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerLivePath, ledgerRawLineProjection,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, incrementalLedgerDigestVersion, ledgerLivePath, ledgerRawLineProjection,
   ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines, readLedgerUnionRecordsSync, realLedgerFs,
   resolveLedgerUnion, rotationStatKey,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
@@ -31431,7 +31431,7 @@ export function createEscalationTriageHistoryReader(
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
   const rawPattern = slice.rawPattern === undefined ? undefined : new RegExp(slice.rawPattern.source, slice.rawPattern.flags.replace(/[gy]/g, ""));
   const projectLine = rawPattern === undefined ? undefined : ledgerRawLineProjection(project);
-  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}${rawPattern ? `:${rawPattern.source}/${rawPattern.flags}` : ""}`, project };
+  const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}`, project };
   let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0,
     bytesRead: 0, rotationsRead: 0, snapshotHit: false };
   const counted = (path: string, read: () => Buffer): Buffer => {
@@ -31445,7 +31445,7 @@ export function createEscalationTriageHistoryReader(
     readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
   });
   // The digest version the union's own rotation hook reads (see createIncrementalLedgerUnion).
-  const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
+  const durableDigest = { reducerVersion: incrementalLedgerDigestVersion(identity.reducerVersion, steps, rawPattern) };
   // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
   const pattern = rawPattern ?? new RegExp(steps.map((step) => step.replaceAll(".", "\\.")).join("|"));
   const statKey = (path: string): string => rotationStatKey(stat(path), slice.strictFileIdentity);

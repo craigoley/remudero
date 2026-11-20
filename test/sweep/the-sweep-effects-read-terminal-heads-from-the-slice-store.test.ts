@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import fs, { mkdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import { resolveLedgerUnion } from "#src/lib/ledger-union.js";
+import { createIncrementalLedgerUnion, resolveLedgerUnion } from "#src/lib/ledger-union.js";
 import { parseLedger } from "#src/lib/retro.js";
 import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -188,27 +188,54 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(issueBodies.map((body) => /^\*\*Cause:\*\* (.+)$/m.exec(body)?.[1]), expectedCauses);
   });
 
-  test("W1-T12271 criterion 2: a same-size edit before the cached live tail matches the ledger union", (t) => {
-    const { root, dir, path } = fixture(t);
-    const live = readFileSync(path, "utf8");
-    const escalation = JSON.stringify(escalated(4));
-    writeFileSync(path, `${'{"step":"ignored"}'.padEnd(escalation.length)}\n${live}`);
-    utimesSync(path, 1, 1);
-    const before = statSync(path);
-    assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
+  for (const [change, suffix] of [["same-size edit", ""], ["edit followed by growth", '{"step":"unrelated"}\n']] as const) {
+    test(`W1-T12271 criterion 2: a live ${change} before the cached tail matches the ledger union`, (t) => {
+      const { root, dir, path } = fixture(t);
+      const live = readFileSync(path, "utf8");
+      const escalation = JSON.stringify(escalated(4));
+      writeFileSync(path, `${'{"step":"ignored"}'.padEnd(escalation.length)}\n${live}`);
+      utimesSync(path, 1, 1);
+      const before = statSync(path);
+      const tail = readFileSync(path).subarray(before.size - 64);
+      assert.ok(Buffer.byteLength(live) > tail.length);
+      assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
 
-    writeFileSync(path, `${escalation}\n${live}`);
-    utimesSync(path, 2, 2);
-    const after = statSync(path);
-    assert.deepEqual([after.ino, after.size], [before.ino, before.size]);
-    assert.ok(Buffer.byteLength(live) > 64);
+      const fd = openSync(path, "r+");
+      try {
+        assert.equal(writeSync(fd, escalation, 0), Buffer.byteLength(escalation));
+      } finally {
+        closeSync(fd);
+      }
+      if (suffix) writeFileSync(path, suffix, { flag: "a" });
+      utimesSync(path, 2, 2);
+      const after = statSync(path);
+      assert.deepEqual([after.ino, after.size], [before.ino, before.size + Buffer.byteLength(suffix)]);
+      assert.deepEqual(readFileSync(path).subarray(before.size - tail.length, before.size), tail);
 
-    const union = resolveLedgerUnion(dir, legacyPattern);
-    assert.equal(union.ok, true);
-    assert.equal(union.archiveCount, 2);
-    const expected = unionStandDowns(parseLedger(union.matches.join("\n")));
-    assert.deepEqual(expected, candidates.slice(0, 4));
-    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: expected });
+      const union = resolveLedgerUnion(dir, legacyPattern);
+      assert.equal(union.ok, true);
+      assert.equal(union.archiveCount, 2);
+      const expected = unionStandDowns(parseLedger(union.matches.join("\n")));
+      assert.deepEqual(expected, candidates.slice(0, 4));
+      assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: expected });
+    });
+  }
+
+  test("an incremental union distinguishes raw pattern sources and flags in rotation digests", (t) => {
+    const { dir: root } = ownedFixtureDir(t, "terminal-head-digest-pattern");
+    const { dir } = writeLedger([], { dir: root, rotations: [{ at: "2026-11-01T00:00:00.000Z", gz: true,
+      rows: ["first", "second", "SECOND"].map((marker) => ({ ...escalated(1), marker })),
+    }] });
+    const read = (rawPattern: RegExp) => {
+      const union = createIncrementalLedgerUnion({ holder: "test.terminal-digest-pattern", reducerVersion: "1", rawPattern })(
+        dir, { step: escalatedStep, refuseIncomplete: true, requireArchives: true },
+      );
+      assert.equal(union.ok, true);
+      return union.rows.map(({ marker }) => marker);
+    };
+    assert.deepEqual(read(/"marker":"first"/), ["first"]);
+    assert.deepEqual(read(/"marker":"second"/), ["second"]);
+    assert.deepEqual(read(/"marker":"second"/i), ["second", "SECOND"]);
   });
 
   test("W1-T12271 criterion 3: a cold build holds dispatch while a rotation is unreadable", (t) => {

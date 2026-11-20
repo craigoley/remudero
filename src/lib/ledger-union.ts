@@ -1997,7 +1997,6 @@ type IncrementalUnionReadOptions = LedgerUnionRecordReadOptions & {
 
 interface IncrementalLiveState extends IncrementalReadPart {
   ino: number;
-  fileSize: number;
   strictKey?: string;
   /** End of the last complete line read; a line still being written is re-read on the next call. */
   committed: number;
@@ -2018,6 +2017,12 @@ function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
     approximateMemoBytes(read.tornLines) - 4 + read.rows.length * 64 };
 }
 
+/** Shared by incremental reads, rotation preloads, and their snapshots. */
+export function incrementalLedgerDigestVersion(version: string, steps: readonly string[], rawPattern?: RegExp): string {
+  const pattern = rawPattern === undefined ? "" : `:${rawPattern.source}/${rawPattern.flags}`;
+  return `${version}${pattern}:${steps.join(",")}`;
+}
+
 /**
  * {@link readLedgerUnionRecordsSync} for a LONG-LIVED reader that asks the same step-filtered question again and
  * again, with the same answer. OBSERVED 2026-10-10 on the fleet host: the daemon's dispatch selection read the
@@ -2028,7 +2033,8 @@ function incrementalReadSize(read: LedgerRotationRecords): MemoSize {
  *  - a rotation is parsed at most once, reduced to the wanted steps, and kept in memory and as a durable
  *    {@link ledgerRotationDigests} digest, so a restarted process reads digests rather than archives;
  *  - the live file is read from where the last call stopped, while its inode holds and the bytes just before
- *    that point are unchanged. A strict read also restarts if the file changed without growing.
+ *    that point are unchanged. A strict read rescans whenever the live file's stat key changes,
+ *    since growth can accompany an edit before the anchor.
  * The union itself (order, replay dedupe, `ok` and `unread`) is still {@link readLedgerUnionRecordsSync}'s.
  * Only `step`, `refuseIncomplete` and `requireArchives` are cached; any other option reads uncached. The
  * returned `rows` array is frozen and shared between calls: a caller must not mutate it or its rows.
@@ -2157,7 +2163,8 @@ export function createIncrementalLedgerUnion(
         return seeded.read;
       }
       digests ??= ledgerRotationDigests(stateDir, reduce, {
-        holder: opts.holder, reducerVersion: `${opts.reducerVersion}:${steps.join(",")}`, rawPattern: opts.rawPattern,
+        holder: opts.holder, reducerVersion: incrementalLedgerDigestVersion(opts.reducerVersion, steps, opts.rawPattern),
+        rawPattern: opts.rawPattern,
         projectLine, statKey: opts.strictFileIdentity ? statKey : undefined,
       }, fsDeps);
       const read = digests.rotationRecords(entry, parse);
@@ -2180,7 +2187,7 @@ export function createIncrementalLedgerUnion(
       const strictKey = opts.strictFileIdentity ? rotationStatKey(stat, true) : undefined;
       const previous = state.live;
       const prior = previous?.ino === stat.ino && stat.size >= previous.committed &&
-        (stat.size > previous.fileSize || previous.strictKey === strictKey) ? previous : undefined;
+        previous.strictKey === strictKey ? previous : undefined;
       let start = prior ? prior.committed - prior.anchor.length : 0;
       let buf = readRange(path, start, stat.size);
       let base = prior;
@@ -2197,7 +2204,7 @@ export function createIncrementalLedgerUnion(
         : added;
       const committed = (base ? base.committed : 0) + complete.length;
       const anchorFrom = Math.max(0, committed - LIVE_ANCHOR_BYTES) - start;
-      state.live = { ino: stat.ino, fileSize: stat.size, strictKey, committed,
+      state.live = { ino: stat.ino, strictKey, committed,
         anchor: Buffer.from(buf.subarray(Math.max(0, anchorFrom), committed - start)), read,
         size: partSize(added, base?.size) };
       // A final line with no newline yet is read, exactly as a whole-file read reads it, but never committed.
