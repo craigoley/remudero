@@ -1,0 +1,51 @@
+- id: W1-T13952
+  title: A fleet scope amendment is linted for call sites before it opens, and is not opened for a merged target
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # the amendment writer refuses or completes more amendments; hosted lint-plan is unchanged
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T10777
+    - W1-T13238
+  files:
+    - src/lib/proof-amendment.ts
+    - test/fix-lane/a-scope-amendment-is-linted-for-call-sites-before-it-opens.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "newAmendedBlockers passes a moduleExists reader to lintTask, so an amendment that adds a new src module with no call-site criterion is reported blocked before any PR opens"
+      proof: "grep: W1-T13952 criterion 1: in test/fix-lane/a-scope-amendment-is-linted-for-call-sites-before-it-opens.test.ts"
+    - claim: "When the target PR's diff calls the new module, the amendment adds one grep call-site criterion naming the caller file, and the amended shard lints clean"
+      proof: "grep: W1-T13952 criterion 2: in test/fix-lane/a-scope-amendment-is-linted-for-call-sites-before-it-opens.test.ts"
+    - claim: "No amendment is opened for a target PR that has merged or closed"
+      proof: "grep: W1-T13952 criterion 3: in test/fix-lane/a-scope-amendment-is-linted-for-call-sites-before-it-opens.test.ts"
+    - claim: "invariant:amendment-lint-parity — every amendment the writer opens lints clean under the hosted lint-plan rules it can read"
+      kind: guard
+      proof: "grep: W1-T13952 criterion 4: in test/fix-lane/a-scope-amendment-is-linted-for-call-sites-before-it-opens.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (GitHub and host): fleet scope amendments #19703 (W1-T10777 for #19679) and #19847
+    (W1-T13238 for #19685) failed hosted lint-plan with "[call-site] task <id> adds new module <path> but no
+    acceptance criterion proves a CALL SITE for it". #19703 sat red 7.5 h; its target #19679 had merged at
+    2026-11-19 18:47Z before the amendment was even reviewed (closed by hand 2026-11-20). #19847 blocks #19685,
+    and a hand duplicate #19796 failed the same way.
+    OBSERVED in code: the generator is src/lib/proof-amendment.ts (title "fix(plan): extend <id>'s files for #N").
+    It adds only files: entries and "files includes <path>" grep criteria. Its pre-lint newAmendedBlockers calls
+    lintTask without moduleExists, and task-linter.ts says absent moduleExists makes callSiteViolations silent, so
+    the writer cannot see the block the hosted lint raises. It auto-fixes only Rule 19 sizing.
+  design: |
+    INVARIANT amendment-lint-parity: the writer runs the same call-site rule the hosted lint runs.
+    1. newAmendedBlockers passes moduleExists (a read of the base tree) to lintTask.
+    2. For each new src module it adds, find a caller in the target PR's diff (an added line naming an export of
+       the module, outside the module itself). Found: add "grep: <symbol>( in <caller file>". Not found: report
+       the call-site block and open nothing.
+    3. Before opening, read the target PR's state; merged or closed opens nothing.
+  falsifier: |
+    Without moduleExists criterion 1's fixture opens an amendment that the hosted lint refuses.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.

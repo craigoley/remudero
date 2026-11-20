@@ -17,6 +17,8 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts
+    - scripts/task-id-existence-check.mjs
+    - test/a-reservation-names-its-holder.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -73,6 +75,12 @@
        <ids>" and push with a lease on pr.headSha. The outcome row is the existing sweep.plan_repair row.
     4. No new constant, env var or config key. src/lib/sweep.ts has a comment cap
        (test/sweep/compress-src-lib-sweep-ts.test.ts). Re-run the existing plan-repair suites in test/sweep/.
+  note: |
+    files: amendment 2026-11-20, operator grant (Craig 14:30Z, approving the recommendation on #19856): the fix round on #19701
+    at ae4602406 found that the gate prints the standalone hand-off remedy only for a `branch=unknown` holder, so a named holder
+    gets a refusal with no pasteable line, though the gate already accepts a matching note. scripts/task-id-existence-check.mjs
+    prints that existing remedy for a named holder too; what the gate accepts does not change.
+    test/a-reservation-names-its-holder.test.ts pins exactly one remedy block and now pins one per handable holder.
   falsifier: |
     At origin/main criterion 1 fails: decidePlanRepair returns undefined for a hand filing's held id.
     Drop the age test: criterion 2's 30-minute-old reservation gets a push. Write the line into an existing
