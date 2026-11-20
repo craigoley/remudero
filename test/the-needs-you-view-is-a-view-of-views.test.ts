@@ -220,3 +220,18 @@ test("W1-T13876 compose: an input that fails to compose is composed again on the
   assert.notEqual(recovered, first);
   assert.deepEqual((recovered.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T3:c"]);
 });
+
+test("W1-T13876 compose: a body that fails after composing is built again on the next read, never answered by the held body", () => {
+  const { handle, post } = fakeHandle(["core"]);
+  let failNext = false;
+  const flaky: Clock = { ...clock, iso: () => { if (failNext) { failNext = false; throw new Error("clock unavailable"); } return clock.iso(); } };
+  const view = withNeedsYouView(handle, flaky);
+  post(now("core", [decision("core", "question:W1-T1:a", at(30))]));
+  const first = view.body(NEEDS_YOU_VIEW_NAME)!;
+  failNext = true;
+  assert.throws(() => post(now("core", [decision("core", "question:W1-T4:d", at(2))])), /clock unavailable/,
+    "positive control: building the new body throws after composition");
+  const next = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.notEqual(next, first, "the inputs were not recorded against the old body");
+  assert.deepEqual((next.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T4:d"]);
+});
