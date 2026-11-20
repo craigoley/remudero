@@ -24,10 +24,10 @@ import { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV }
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
-/** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
-/** W1-T13875: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
+/** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 type LedgerEvidence = { pid?: number; exited: boolean; failed: boolean; opened?: string };
+/** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
