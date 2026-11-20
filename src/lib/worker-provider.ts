@@ -612,8 +612,8 @@ export function selectWorkerProvider(
   // W1-T10382: subscription headroom wins; a credits lane is drawn only when no subscription has any.
   const headroom = admitted.filter((entry) => entry.lane.lane === undefined);
   const eligible = (headroom.length > 0 ? headroom : admitted)
-    .map(({ capacity, lane: { lane } }) => {
-      const tightestRemainingPercent = tightestRemaining(capacity);
+    .map(({ capacity, lane: { lane, headroomPercent } }) => {
+      const tightestRemainingPercent = headroomPercent ?? Number.NEGATIVE_INFINITY;
       return {
         provider: capacity.provider,
         capacity,
@@ -799,6 +799,8 @@ interface CodexRateLimitWindow {
   resetsAt?: unknown;
 }
 
+const projectedCodexCreditsBalance = Symbol("projected Codex credits balance");
+
 interface CodexRateLimitBucket {
   limitId?: unknown;
   limitName?: unknown;
@@ -808,6 +810,7 @@ interface CodexRateLimitBucket {
   spendControlReached?: unknown;
   /** W1-T10382: prepaid credits, spelled as the app-server's `CreditsSnapshot`; `balance` is a decimal string. */
   credits?: { hasCredits?: unknown; unlimited?: unknown; balance?: unknown } | null;
+  [projectedCodexCreditsBalance]?: number;
 }
 
 interface CodexRateLimitResult {
@@ -1383,7 +1386,8 @@ const UNSIGNED_DECIMAL = /^\d+(?:\.\d+)?$/;
 function parseCodexCredits(bucket: CodexRateLimitBucket): CodexCredits | undefined {
   const block = bucket.credits;
   if (!block || typeof block !== "object" || typeof block.hasCredits !== "boolean" || typeof block.unlimited !== "boolean") return undefined;
-  const parsed = typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN;
+  const parsed = bucket[projectedCodexCreditsBalance] ??
+    (typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN);
   const blocked = codexCreditsBlock(bucket);
   return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
     ...(blocked ? { blocked } : {}) };
@@ -1411,8 +1415,7 @@ function genericCodexBucket(reading: CodexRateLimitResult | undefined): CodexRat
 function codexCreditsFor(bucket: CodexRateLimitBucket | undefined, reading: CodexRateLimitResult | undefined):
   { credits?: CodexCredits; borrowed: boolean } {
   if (!bucket) return { borrowed: false };
-  const own = parseCodexCredits(bucket);
-  if (own) return { credits: own, borrowed: false };
+  if (bucket.credits != null) return { credits: parseCodexCredits(bucket), borrowed: false };
   const generic = genericCodexBucket(reading);
   const shared = generic && generic !== bucket ? parseCodexCredits(generic) : undefined;
   if (!shared) return { borrowed: false };
@@ -2247,50 +2250,58 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     const ageMs = now - current.readAt, reserve = deps.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
     if (!Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(reserve) || reserve < 0 || reserve >= 100) throw new Error("invalid clock or reserve");
     const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
-    // W1-T13855: the credits a bucket would spend past its reserve, with the balance projected over the reading's age.
-    const carriedCredits = (b: CodexRateLimitBucket, old: CodexRateLimitBucket | null | undefined): CodexCredits | undefined => {
-      const { credits } = codexCreditsFor(b, currentRates);
-      if (!credits) return undefined;
-      const before = old ? codexCreditsFor(old, previousRates).credits : undefined;
+    const carryBalance = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
+      if (b == null) return b;
+      const credits = parseCodexCredits(b);
+      if (!credits) return b;
+      const before = old ? parseCodexCredits(old) : undefined;
       const balance = projectedCreditsBalance({ readAt: current.readAt, credits },
-        previous && previous.readAt < current.readAt ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
-      return { ...credits, balance };
+        previous ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
+      return balance === null ? b : { ...b, [projectedCodexCreditsBalance]: balance };
     };
-    let windows = 0;
+    // Project each balance before models look up inherited credits, so both checks use the same pool.
+    const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, genericCodexBucket(previousRates)),
+      rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
+        .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id] ?? (id === "codex" ? previousRates?.rateLimits : undefined))])) };
+    let hasUnresetWindow = false;
+    let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
-      credits: CodexCredits | undefined): CodexRateLimitWindow | null => {
+      credits: CodexCredits | undefined): CodexRateLimitWindow | string | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
           typeof reset !== "number" || !Number.isFinite(reset) || reset * 1000 <= now) return null;
       const elapsed = current.readAt - (reset * 1000 - duration * 60_000);
       if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100 || elapsed < 0 || (elapsed === 0 && used > 0))
-        throw new Error("unreadable quota window");
+        return "unreadable quota window";
       let burn = elapsed > 0 ? used / elapsed : 0;
       if (previous && previous.readAt < current.readAt && old?.resetsAt === reset && old.windowDurationMins === duration &&
           typeof old.usedPercent === "number" && Number.isFinite(old.usedPercent) && old.usedPercent >= 0 && old.usedPercent <= used)
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
-      if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
       // W1-T13855: past the reserve, spendable credits (blocked never, a projected balance above zero) carry the window.
-      if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) throw new Error("projected burn reaches the reserve");
-      windows++;
+      if (!Number.isFinite(projected) || (projected >= 100 - reserve && !codexCreditsSpendable(credits))) return "projected burn reaches the reserve";
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
     const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
       if (b == null) return b;
-      const credits = carriedCredits(b, old);
-      // The projected balance is written back, so the selection below sees what the projection sees.
-      const balance = credits && !credits.unlimited && credits.balance !== null && b.credits
-        ? { credits: { ...b.credits, balance: Math.max(0, credits.balance).toFixed(10) } } : {};
-      return { ...b, ...balance, primary: project(b.primary, old?.primary, credits), secondary: project(b.secondary, old?.secondary, credits) };
+      const { credits } = codexCreditsFor(b, carriedRates);
+      const primary = project(b.primary, old?.primary, credits);
+      const secondary = project(b.secondary, old?.secondary, credits);
+      if (typeof primary !== "string" && typeof secondary !== "string") {
+        hasUnresetWindow ||= primary !== null || secondary !== null;
+        return { ...b, primary, secondary };
+      }
+      rejectedWindow ??= [primary, secondary].find((result) => typeof result === "string");
+      // Keep the bucket identity so its model stays unavailable and its credits block is preserved.
+      return { ...b, primary: null, secondary: null };
     };
-    const rateLimits = { ...currentRates, rateLimits: bucket(currentRates.rateLimits, previousRates?.rateLimits),
-      rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
+    const rateLimits = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
+      rateLimitsByLimitId: carriedRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(carriedRates.rateLimitsByLimitId)
         .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
-    if (windows === 0) throw new Error("no unreset quota window with a duration");
+    if (!hasUnresetWindow) throw new Error(rejectedWindow ?? "no unreset quota window with a duration");
     const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
-    if (!selected.readable) throw new Error(selected.detail ?? "projected model is unavailable");
+    if (!selected.readable) throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     const rescued = providerEligibility(selected, reserve).lane === "codex-credits"
       ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
     return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },
@@ -2308,7 +2319,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     bin = resolveCodexBin(config, deps.resolveEnv);
   } catch (error) {
     // Toolchain absence is a named unreadable capacity, so routing can still use Claude.
-    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message };
+    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message, probeFailure: "terminal" };
   }
   const capabilities = resolveCapabilityLadder(config, deps);
   const now = deps.now ?? Date.now;

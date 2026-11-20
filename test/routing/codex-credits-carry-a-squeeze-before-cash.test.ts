@@ -81,7 +81,7 @@ function codexAccount(t: test.TestContext) {
   const cfg: Config = { root, claudeBin: "/unused", workerProviders: {
     enabled: ["claude", "codex"], codexBin: "/bin/sh", codexHome: join(root, "codex"), capacityCacheMs: 1, reservePercent: 5 } };
   const state = { now: START, used: 97, mode: "ok" as Mode, balance: BALANCE as string, extras: {} as Record<string, unknown>,
-    reset: Math.floor((START + 3 * 86_400_000) / 1000) };
+    reset: Math.floor((START + 3 * 86_400_000) / 1000), buckets: {} as Record<string, unknown>, models: [SOL] };
   const spawn = () => {
     const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
     const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr, kill: () => true });
@@ -94,9 +94,9 @@ function codexAccount(t: test.TestContext) {
           if (state.mode === "rpc") { stdout.write(`${JSON.stringify({ id: 2, error: { message: "fixture RPC refused" } })}\n`); continue; }
           const bucket = { limitId: "codex", primary: { usedPercent: state.used, windowDurationMins: 10080, resetsAt: state.reset },
             credits: { hasCredits: true, unlimited: false, balance: state.balance }, ...state.extras };
-          stdout.write(`${JSON.stringify({ id: 2, result: { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket } } })}\n`);
+          stdout.write(`${JSON.stringify({ id: 2, result: { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket, ...state.buckets } } })}\n`);
         }
-        if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: [SOL], nextCursor: null } })}\n`);
+        if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: state.models, nextCursor: null } })}\n`);
       }
     });
     return proc as never;
@@ -181,6 +181,39 @@ test("W1-T13855 criterion 1: a timed-out probe carries a credits-lane last-good 
   assert.equal(day.windows[0].usedPercent, 100, "the projection is held at 100, not past it");
   assert.equal(providerEligibility(day, 5).lane, "codex-credits");
   assert.equal(selectWorkerProvider([claudeAt(99), day], 5, 0.5).lane, "codex-credits");
+
+  const split = codexAccount(t);
+  const primary = { usedPercent: 99, windowDurationMins: 10080, resetsAt: split.state.reset };
+  split.state.buckets = {
+    sol: { limitName: SOL.id, primary },
+    other: { limitName: SOL61.id, primary, spendControlReached: true },
+  };
+  split.state.models.push(SOL61);
+  await split.read();
+  split.fail();
+  const carriedSol = await split.read();
+  assert.equal(carriedSol.readable, true, carriedSol.detail);
+  assert.equal(carriedSol.model, SOL.id);
+  assert.deepEqual(carriedSol.windows.map((window) => window.usedPercent), [99 + 99 / (4 * 86_400_000) * 61_000]);
+  assert.equal(carriedSol.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "quota-unreadable");
+  assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
+});
+
+test("borrowed credits project from the generic bucket's own history", async (t) => {
+  const split = codexAccount(t);
+  const sol = { limitName: SOL.id, primary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: split.state.reset } };
+  split.state.balance = "10";
+  split.state.buckets.sol = { ...sol, credits: { hasCredits: true, unlimited: false, balance: "20" } };
+  await split.read();
+  split.state.now += 3_600_000;
+  split.state.buckets.sol = sol;
+  await split.read();
+  split.fail(3_600_000);
+  const carriedSol = await split.read();
+  assert.equal(carriedSol.readable, true, carriedSol.detail);
+  assert.equal(carriedSol.model, SOL.id);
+  assert.equal(carriedSol.credits?.balance, 10, "the inherited pool's burn comes from its own history");
+  assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
 });
 
 // A rateLimitsByLimitId split: the selected model's own bucket at 99 percent carries no credits block.
@@ -217,6 +250,10 @@ test("W1-T13855 criterion 2: a model bucket without a credits block is carried b
     assert.ok(blocked.credits?.blocked, JSON.stringify(own));
     assert.equal(providerEligibility(blocked, 5).reason, "below-reserve", JSON.stringify(own));
   }
+  const incomplete = selectCodexModel([SOL], splitReading({ credits: { hasCredits: false } }), CONFIG, "sonnet", "high", CAPABILITIES);
+  assert.equal(incomplete.readable, false, "a present credits block with incomplete flags cannot borrow");
+  assert.equal(incomplete.exhausted, true);
+  assert.equal(providerEligibility(incomplete, 5).reason, "below-reserve");
 });
 
 function statusFor(root: string, nowMs: number, capacities: ProviderCapacity[], state: "selected" | "blocked" = "selected"): ProviderRoutingStatus {
@@ -246,6 +283,13 @@ test("W1-T13855 criterion 3: the routing status marks a credits-lane codex row a
   statusFor(root, nowMs, [claudeAt(95), healthy]);
   const plain = JSON.parse(readFileSync(providerRoutingStatusPath(root), "utf8")) as { providers: Array<Record<string, unknown>> };
   assert.ok(plain.providers.every((row) => row.creditsLane === undefined));
+
+  const exhausted: ProviderCapacity = { ...creditsCodex(), readable: false, exhausted: true };
+  const selected = statusFor(root, nowMs, [claudeAt(95), exhausted]);
+  assert.equal(selected.selected?.provider, "codex");
+  assert.equal(selected.selected?.tightestRemainingPercent, 1);
+  assert.equal(selected.providers?.find((row) => row.provider === "codex")?.creditsLane, true);
+  assert.doesNotMatch(readFileSync(providerRoutingStatusPath(root), "utf8"), /38997|"balance"|creditsBalance/);
 });
 
 const POLICY: ReviewCapacityPolicy = {
@@ -447,6 +491,10 @@ test("W1-T13855 criterion 6: a rescued assignment names its rescue and an unread
   clearCodexCapacityCache();
   assert.equal(unreadable(await fresh.read())?.failureKind, "terminal");
   assert.equal(unreadable({ provider: "codex", readable: false, windows: [], detail: "starved", probeFailure: "starved" })?.failureKind, "starved");
+  fresh.cfg.workerProviders!.codexBin = join(fresh.cfg.root, "absent-codex");
+  const missing = await fresh.read();
+  assert.match(missing.detail ?? "", /Codex executable is absent or not executable/);
+  assert.equal(unreadable(missing)?.failureKind, "terminal");
 });
 
 test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash only when credits cannot carry", async (t) => {
@@ -490,6 +538,16 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
   const halfHour = await soon.read();
   assert.equal(halfHour.readable, true, halfHour.detail);
   assert.ok(Math.abs((halfHour.credits?.balance ?? 0) - 5) < 1e-6, "the projected balance is what the selection sees");
+  const tiny = codexAccount(t);
+  tiny.state.balance = "0.00000000004";
+  await tiny.read();
+  tiny.fail();
+  const tinyBalance = await tiny.read();
+  assert.equal(tinyBalance.credits?.balance, 4e-11, tinyBalance.detail);
+  const tinySpawn = await routeSpawn(tiny);
+  assert.equal(tinySpawn.decision?.rule, "codex-credits");
+  assert.equal(tinySpawn.codexSpawns, 1);
+  assert.equal(tinySpawn.cashSpawns, 0);
   // A terminal probe failure, an invalidated last-good reading, and an absent one.
   await refused("terminal", async (a) => { await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; });
   await refused("invalidated", async (a) => {
