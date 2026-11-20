@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import type { Config } from "#src/lib/config.js";
+import { providerRoutingOwnsHeadroom, resolveHeadroomEnabled, type Config } from "#src/lib/config.js";
 import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
-import { HEADROOM_SAMPLE_MAX_AGE_MS, runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { runDaemon } from "#src/lib/daemon.js";
 import { requestStop, stopDetail } from "#src/lib/fleet-control.js";
 import type { UsageSnapshot } from "#src/lib/headroom.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
@@ -51,7 +51,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T13855. While every subscription window is at or below its reserve, spendable Codex credits
 // are the tier before cash and before holding work: a carried reading, a per-model bucket with no
-// credits block, the review widener and the daemon's headroom governor all honour them.
+// credits block and the review widener all honour them.
 // Readings follow the acceptance: a last-good reading with generic and codex buckets at 97 percent
 // (balance 38997.84), and the 14:47:59Z review.capacity row (claude 95, codex 99, reserve 5, base width 4).
 
@@ -74,8 +74,8 @@ function scratchRoot(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13855-`));
 }
 
-type Mode = "ok" | "timeout" | "rpc";
-/** A Codex app-server stand-in over stdio: one weekly window, a credits block, and a timeout or refusal on demand. */
+type Mode = "ok" | "timeout" | "rpc" | "null-quota";
+/** A Codex app-server stand-in over stdio with configurable quota results. */
 function codexAccount(t: test.TestContext) {
   clearCodexCapacityCache();
   const root = scratchRoot();
@@ -95,7 +95,8 @@ function codexAccount(t: test.TestContext) {
           if (state.mode === "rpc") { stdout.write(`${JSON.stringify({ id: 2, error: { message: "fixture RPC refused" } })}\n`); continue; }
           const bucket = { limitId: "codex", primary: { usedPercent: state.used, windowDurationMins: 10080, resetsAt: state.reset },
             credits: { hasCredits: true, unlimited: false, balance: state.balance }, ...state.extras };
-          stdout.write(`${JSON.stringify({ id: 2, result: { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket, ...state.buckets } } })}\n`);
+          const result = state.mode === "null-quota" ? null : { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket, ...state.buckets } };
+          stdout.write(`${JSON.stringify({ id: 2, result })}\n`);
         }
         if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: state.models, nextCursor: null } })}\n`);
       }
@@ -215,6 +216,52 @@ test("borrowed credits project from the generic bucket's own history", async (t)
   assert.equal(carriedSol.model, SOL.id);
   assert.equal(carriedSol.credits?.balance, 10, "the inherited pool's burn comes from its own history");
   assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
+});
+
+test("a generic window crossing the reserve without credits refuses the carry even with model headroom", async (t) => {
+  const account = codexAccount(t);
+  account.state.extras.credits = null;
+  account.state.buckets.sol = { limitName: SOL.id,
+    primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset } };
+  const fresh = await account.read();
+  assert.equal(fresh.readable, true);
+  assert.equal(fresh.windows[0]?.usedPercent, 40);
+
+  account.fail();
+  const capacity = await account.read();
+  assert.equal(capacity.readable, false, capacity.detail);
+  assert.equal(capacity.probeFailure, "timeout");
+  assert.match(capacity.detail ?? "", /projected burn reaches the reserve/);
+  const routed = await routeSpawn(account);
+  assert.equal(routed.decision?.rule, "cash-fallback");
+  assert.equal(routed.cashSpawns, 1);
+  assert.equal(routed.codexSpawns, 0);
+});
+
+test("a model balance projects from the prior generic balance when its bucket lacked credits", async (t) => {
+  const account = codexAccount(t);
+  const primary = { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset };
+  const modelBucket = { limitId: "codex", primary };
+  account.state.used = 40;
+  account.state.balance = "20";
+  account.state.buckets.codex = modelBucket;
+  assert.equal((await account.read()).credits?.balance, 20);
+
+  account.state.now += 3_600_000;
+  account.state.buckets.codex = { ...modelBucket, primary: { ...primary, usedPercent: 97 },
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  const fresh = await account.read();
+  assert.equal(fresh.credits?.balance, 10);
+  assert.equal(providerEligibility(fresh, 5).lane, "codex-credits");
+
+  account.fail(6 * 3_600_000);
+  const capacity = await account.read();
+  assert.equal(capacity.readable, false, capacity.detail);
+  assert.match(capacity.detail ?? "", /projected burn reaches the reserve/);
+  const routed = await routeSpawn(account);
+  assert.equal(routed.decision?.rule, "cash-fallback");
+  assert.equal(routed.cashSpawns, 1);
+  assert.equal(routed.codexSpawns, 0);
 });
 
 // A rateLimitsByLimitId split: the selected model's own bucket at 99 percent carries no credits block.
@@ -389,9 +436,7 @@ function daemonHostPins() {
   };
 }
 
-async function governedTick(t: test.TestContext, reader: DaemonDeps["readProviderRoutingStatus"], usage: UsageSnapshot | "unreadable" = OVER_CEILING) {
-  const dir = scratchRoot();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+async function governedTick(dir: string, headroomEnabled: boolean, usage: UsageSnapshot | "unreadable" = OVER_CEILING) {
   writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
   const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let spawned = 0, sleeps = 0;
@@ -400,66 +445,35 @@ async function governedTick(t: test.TestContext, reader: DaemonDeps["readProvide
     refreshMerged: () => () => false,
     runOne: async (id) => { spawned += 1; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
     readUsage: () => (usage === "unreadable" ? undefined : usage),
-    ...(reader ? { readProviderRoutingStatus: reader } : {}),
+    fleetLane: { stateDir: join(dir, "state"), ledgerPath: join(dir, "state", "ledger.ndjson"),
+      mergedLastDay: () => 0, approve: () => assert.fail("there are no fleet findings") },
     now: () => new Date(DAEMON_NOW),
     checkStop: () => stopDetail(dir),
     sleep: async () => { sleeps += 1; if (sleeps >= 3) requestStop(dir, "test done polling"); },
     log: (step, extra = {}) => lines.push({ step, extra }),
-  }, { headroomEnabled: true, max: 1, unreadableDegradedLimit: 1 });
+  }, { headroomEnabled, max: 1, unreadableDegradedLimit: 0 });
   return { summary, spawned, lines, beats: lines.filter((line) => line.step === "daemon.headroom").map((line) => line.extra) };
 }
 
-test("W1-T13855 criterion 5: an over-ceiling Claude reading beside a fresh credits lane keeps dispatch running", async (t) => {
+test("a restart into Claude-only still enforces the governor beside a lapsed Codex credits snapshot", async (t) => {
   const root = scratchRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const fresh = statusFor(root, DAEMON_NOW, [claudeAt(95), creditsCodex()]);
-  const carried = await governedTick(t, () => fresh);
-  assert.equal(carried.spawned, 1, "the tick does not idle while credits carry the squeeze");
-  assert.equal(carried.summary.stopReason, "max_reached");
-  assert.equal(carried.beats[0].enforced, true);
-  assert.equal(carried.beats[0].over_ceiling, true);
-  assert.equal(carried.beats[0].credits_lane, "codex-credits");
+  const claudeOnly: Config = { root, claudeBin: "/unused", headroom: { enabled: true }, workerProviders: { enabled: ["claude"] } };
+  const enforcing = (config: Config) => resolveHeadroomEnabled(config, {}) && !providerRoutingOwnsHeadroom(config, {});
+  const codexEnabled: Config = { ...claudeOnly, workerProviders: { enabled: ["claude", "codex"] } };
+  assert.equal(enforcing(codexEnabled), false);
+  assert.equal(enforcing(claudeOnly), true);
 
-  // No fresh status, a codex row without the flag, or a reader that fails: the tick idles as on origin/main.
-  const stale = statusFor(root, DAEMON_NOW - 900_001, [claudeAt(95), creditsCodex()]);
-  const staleNow = readProviderRoutingStatus(root, { now: () => DAEMON_NOW });
-  assert.equal(stale.freshness, "fresh", "control: the same reading was fresh when written");
-  for (const [label, reader] of [
-    ["stale", () => staleNow],
-    ["unflagged", () => unflagged(fresh)],
-    ["absent", () => readProviderRoutingStatus(join(root, "nowhere"))],
-    ["throws", () => { throw new Error("status reader failed"); }],
-    ["no reader", undefined],
-  ] as const) {
-    const idle = await governedTick(t, reader);
-    assert.equal(idle.spawned, 0, `${label}: still idles`);
-    assert.equal(idle.summary.stopReason, "stopped", label);
-    assert.equal(idle.beats[0].credits_lane, undefined, label);
-    assert.equal(idle.beats[0].tick, 1, label);
-    if (label === "throws") assert.ok(idle.lines.some((line) => line.step === "daemon.headroom.credits_lane_unreadable"));
-  }
-
-  // The in-flight sampler's row, taken during the long phase the credits lane let start, gains the same field.
-  const dir = scratchRoot();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, "tasks.yaml"), PLAN_YAML);
-  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  let nowMs = DAEMON_NOW, sleeps = 0, release: (() => void) | undefined;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  await runDaemon(loadPlan(join(dir, "tasks.yaml")), {
-    ...daemonHostPins(),
-    refreshMerged: () => () => false,
-    runOne: async (id) => { await gate; return { taskId: id, runId: `RUN-${id}`, merged: true, costUsd: 0, verdict: "merged" } as never; },
-    sweepLight: async () => {},
-    readUsage: () => OVER_CEILING,
-    readProviderRoutingStatus: () => statusFor(root, nowMs, [claudeAt(95), creditsCodex()]),
-    now: () => new Date(nowMs),
-    sleep: async () => { sleeps += 1; nowMs += HEADROOM_SAMPLE_MAX_AGE_MS + 1_000; if (sleeps >= 6) release?.(); },
-    log: (step, extra = {}) => lines.push({ step, extra }),
-  }, { headroomEnabled: true, max: 1 });
-  const inFlight = lines.filter((line) => line.step === "daemon.headroom" && line.extra.source === "in-flight").map((line) => line.extra);
-  assert.ok(inFlight.length >= 1, "the long phase was sampled");
-  assert.ok(inFlight.every((row) => row.over_ceiling === true && row.credits_lane === "codex-credits"));
+  statusFor(root, DAEMON_NOW - 120_000, [claudeAt(95), creditsCodex()]);
+  const cached = readProviderRoutingStatus(root, { now: () => DAEMON_NOW });
+  assert.equal(cached.freshness, "stale");
+  assert.equal(routingStatus.creditsLaneRoom(cached, DAEMON_NOW), true, "control: the prior snapshot would lift a squeeze");
+  const restarted = await governedTick(root, enforcing(claudeOnly));
+  assert.equal(restarted.spawned, 0, "Claude-only must idle at the ceiling");
+  assert.equal(restarted.summary.stopReason, "stopped");
+  assert.equal(restarted.beats[0]?.enforced, true);
+  assert.equal(restarted.beats[0]?.over_ceiling, true);
+  assert.equal(restarted.beats[0]?.tick, 1);
 });
 
 test("W1-T13855 criterion 6: a rescued assignment names its rescue and an unreadable codex entry its failure kind", async (t) => {
@@ -501,6 +515,15 @@ test("W1-T13855 criterion 6: a rescued assignment names its rescue and an unread
   fresh.state.mode = "rpc";
   clearCodexCapacityCache();
   assert.equal(unreadable(await fresh.read())?.failureKind, "terminal");
+  const unusable = codexAccount(t);
+  await unusable.read();
+  unusable.state.now += 61_000;
+  unusable.state.mode = "null-quota";
+  const nullQuota = unreadable(await unusable.read());
+  assert.equal(nullQuota?.reason, "unreadable");
+  assert.equal(nullQuota?.failureKind, "terminal");
+  unusable.fail();
+  assert.match((await unusable.read()).detail ?? "", /last-good invalidated/);
   assert.equal(unreadable({ provider: "codex", readable: false, windows: [], detail: "starved", probeFailure: "starved" })?.failureKind, "starved");
   fresh.cfg.workerProviders!.codexBin = join(fresh.cfg.root, "absent-codex");
   const missing = await fresh.read();
@@ -583,12 +606,14 @@ test("W1-T13855 criterion 10: the credits lane lifts no memory, CPU or host-work
   // Memory pressure still sheds beside the credits lane.
   assert.ok(widen(3, live, { memAvailableMib: 1_000 }).every((d) => d.reason === "memory-reserve"));
 
-  // The governor's unreadable-usage park is unchanged: the status is never consulted on that path.
-  let reads = 0;
-  const parked = await governedTick(t, () => { reads += 1; return squeeze; }, "unreadable");
-  const plain = await governedTick(t, undefined, "unreadable");
-  assert.equal(reads, 0, "an unreadable usage read never asks the routing status");
+  statusFor(root, DAEMON_NOW - 120_000, [claudeAt(95), creditsCodex()]);
+  const parked = await governedTick(root, true, "unreadable");
+  const empty = scratchRoot();
+  t.after(() => rmSync(empty, { recursive: true, force: true }));
+  const plain = await governedTick(empty, true, "unreadable");
   const degraded = (run: typeof parked) => run.lines.filter((line) => line.step.startsWith("daemon.headroom")).map((line) => line.step);
+  assert.ok(degraded(parked).includes("daemon.headroom.degraded"), "control: the unreadable usage parked the governor");
   assert.deepEqual(degraded(parked), degraded(plain));
-  assert.equal(parked.spawned, plain.spawned);
+  assert.equal(parked.spawned, 0);
+  assert.equal(plain.spawned, 0);
 });

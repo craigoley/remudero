@@ -24,8 +24,7 @@ const MAX_CODEX_MODEL_OPTIONS = 32;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
 /** How old a lapsed provider-routing reading may be and still be judged: three of the daemon's own
  *  headroom sampling intervals (`3 * HEADROOM_SAMPLE_MAX_AGE_MS`, src/lib/daemon.ts), the bound the
- *  review widener pins as `REVIEW_PROVIDER_READING_MAX_AGE_MS`. Declared here because both the
- *  widener and the daemon read it and importing daemon.ts would close an import ring.
+ *  review widener pins as `REVIEW_PROVIDER_READING_MAX_AGE_MS`. A test pins the relationship.
  *  KIND: PRIMARY CONTROL — every {@link creditsLaneRoom} read consults it to decide whether a lapsed cache counts. */
 export const PROVIDER_ROUTING_READING_MAX_AGE_MS = 900_000;
 
@@ -811,7 +810,7 @@ export function readProviderRoutingStatus(
 
 /**
  * W1-T13855: whether the routing status shows a squeeze the Codex credits lane is carrying — the one
- * case a review widener or headroom governor must not read as "no provider room". It holds only for
+ * case the review widener may treat as provider room. It holds only for
  * a selected reading the router still vouches for, or a lapsed one within
  * {@link PROVIDER_ROUTING_READING_MAX_AGE_MS}, whose codex row is on the credits lane while no
  * provider row has subscription headroom at the status's reserve. A blocked, unknown, not-probed or

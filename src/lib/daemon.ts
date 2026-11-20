@@ -1,7 +1,7 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
 import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
 /** Scheduler core (W1-T12a): headless loop; launchd lives in lib/launchd.ts (W1-T12b).
@@ -204,7 +204,6 @@ import {
   type IdleLaneHold,
 } from "./idle-lane-accounting.js";
 import { reviewPrecedenceHold } from "./review-precedence.js";
-import { creditsLaneRoom, readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
 
 /** W1-T3978: the implement producer's exact refusal, carried as runtime metadata without widening
  * the shared RunResult union used by every other dispatch lane. */
@@ -1689,9 +1688,6 @@ export interface DaemonDeps {
    *  or over its reserve beside a different host account with headroom is one divergence episode.
    *  Identity fields only; nothing is copied. A throw is ledgered, never fatal. */
   readFleetAccounts?: () => FleetAccountPair | undefined;
-  /** W1-T13855: the provider-routing status, read only when an enforcing usage reading is over its ceiling, so a
-   *  squeeze the Codex credits lane carries does not idle dispatch. Absent, it is read at `fleetLane`'s root. */
-  readProviderRoutingStatus?: () => ProviderRoutingStatus;
   /** Called at most once per (store uuid, host uuid) episode, on top of the `daemon.fleet_account_diverged`
    *  row. A pure notification: the real command may add its own cross-boot ledger dedup. */
   onFleetAccountDivergence?: (info: FleetAccountDivergence) => void | Promise<void>;
@@ -3437,7 +3433,6 @@ function startInFlightTicker(
                 const snap = await deps.readUsage();
                 const reading = snap ? resolveHeadroomWindows(snap, new Date(nowMs), owner.headroomSampler.policy)[0] : undefined;
                 if (reading) {
-                  const over = reading.percentUsed >= reading.limitPct;
                   log("daemon.headroom", {
                     phase: owner.phase,
                     window: reading.window,
@@ -3445,8 +3440,7 @@ function startInFlightTicker(
                     limit_pct: reading.limitPct,
                     resets_at: reading.resetsAtDisplay,
                     enforced: owner.headroomSampler.enforced,
-                    over_ceiling: over,
-                    ...(owner.headroomSampler.enforced && over && headroomCreditsLane(deps, nowMs, log) ? { credits_lane: "codex-credits" } : {}),
+                    over_ceiling: reading.percentUsed >= reading.limitPct,
                     poll_interval_ms: pollIntervalMs,
                     source: "in-flight",
                   });
@@ -4566,20 +4560,6 @@ export function runLanePool<T extends { id: string }, R>(
  *  slept on this loop since the previous tick. The transport's buffer is empty afterwards. */
 export function drainGhPaceLoopWaits(log: (step: string, extra?: Record<string, unknown>) => void): void {
   for (const { step, ...row } of takeGhPaceLoopWaits()) log(step, row);
-}
-
-/** W1-T13855: whether the Codex credits lane carries the squeeze ({@link creditsLaneRoom}); with no status to read,
- *  or a reader that fails (ledgered), it does not, and the governor behaves as before. */
-function headroomCreditsLane(deps: DaemonDeps, nowMs: number, log: (step: string, extra?: Record<string, unknown>) => void): boolean {
-  const fleetRoot = deps.fleetLane ? dirname(deps.fleetLane.stateDir) : undefined;
-  const read = deps.readProviderRoutingStatus ?? (fleetRoot !== undefined ? () => readProviderRoutingStatus(fleetRoot) : undefined);
-  if (!read) return false;
-  try {
-    return creditsLaneRoom(read(), nowMs);
-  } catch (e) {
-    log("daemon.headroom.credits_lane_unreadable", { error: String((e as Error)?.message ?? e).slice(0, 256) });
-    return false;
-  }
 }
 
 export async function runDaemon(
@@ -7997,10 +7977,7 @@ export async function runDaemon(
         // Enforcement (the W1-T197 curve, unchanged): an at-or-over-limit reading is an in-process idle
         // heartbeat while over, never a stop, and resumes on its own once the window resets. The counter
         // advances before the heartbeat, so the line carries this idle tick's own number.
-        // W1-T13855: an over-ceiling Claude reading while the Codex credits lane carries the squeeze is not a reason
-        // to idle: spendable credits are the tier before holding work. Read only when the governor would idle.
-        const creditsLane = headroomEnabled && over !== null && headroomCreditsLane(deps, daemonClock.now(), log);
-        const enforcingIdle = headroomEnabled && over !== null && !creditsLane;
+        const enforcingIdle = headroomEnabled && over !== null;
         if (enforcingIdle) ticks++;
         // One heartbeat per tick, in every enforcement posture. The log used to sit inside the over-ceiling
         // branch when enforcing and inside the else when disabled, with no else on the inner test — so the
@@ -8035,7 +8012,6 @@ export async function runDaemon(
             resets_at: reading.resetsAtDisplay,
             enforced: headroomEnabled,
             over_ceiling: over !== null,
-            ...(creditsLane ? { credits_lane: "codex-credits" } : {}),
             poll_interval_ms: pollIntervalMs,
             ...(headroomEnabled
               ? {}
