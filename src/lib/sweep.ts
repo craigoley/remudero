@@ -2997,12 +2997,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined, refreshPending: true };
   terminalUncreditableHeadsByLedger.set(ledgerPath, terminalState);
   terminalState.refreshPending = true;
-  const refreshTerminalHistory = (): void => {
-    if (!terminalState.refreshPending) return;
-    const history = readTerminalUncreditableHistory(ledgerPath);
-    terminalState.historyHold = history === undefined ? "terminal uncreditable head history is unreadable" : undefined;
-    if (history !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, history);
-    terminalState.refreshPending = false;
+  const refreshTerminalHistory = (): string | undefined => {
+    if (terminalState.refreshPending) {
+      const history = readTerminalUncreditableHistory(ledgerPath);
+      terminalState.historyHold = history === undefined ? "terminal uncreditable head history is unreadable" : undefined;
+      if (history !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, history);
+      terminalState.refreshPending = false;
+    }
+    return terminalState.historyHold;
   };
   const escalateTerminalHead = async (terminal: TerminalUncreditableHead, pr?: Pick<OpenPrView, "reviewState" | "checksState">): Promise<void> => {
     const key = terminalUncreditableHeadKey(terminal.prNumber, terminal.headSha);
@@ -4441,9 +4443,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
-      refreshTerminalHistory();
-      if (terminalState.historyHold) return { roundNotRun: true, reason: terminalState.historyHold };
+      const initialHistoryHold = refreshTerminalHistory();
+      if (initialHistoryHold) return { roundNotRun: true, reason: initialHistoryHold };
       await observePr(pr, "repair");
+      // Sibling builds can discover unreadable history while admission or preflight is pending.
+      const admissionHistoryHold = refreshTerminalHistory();
+      if (admissionHistoryHold) return { roundNotRun: true, reason: admissionHistoryHold };
       let worktreePath = "";
       let keepWorktree = false;
       // W1-T2609: released in the SAME `finally` below that cleans up `worktreePath` — held for
@@ -4473,11 +4478,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       };
       try {
         const terminalKey = terminalUncreditableHeadKey(pr.prNumber, pr.headSha);
-        const priorTerminal = terminalState.heads.get(terminalKey);
         // A delivered terminal decision is final for THIS SHA and requires no fresh network read.
         // If delivery failed, retain the ordinary live-state preflight below before retrying only
         // the escalation; the expensive/unchangeable head lookup is never repeated either way.
-        if (priorTerminal?.escalated) return;
+        if (terminalState.heads.get(terminalKey)?.escalated) return;
 
         // W1-T177 SITE (v): an INDEPENDENT fresh live-state read, via the
         // SAME `readLiveState`/`ghLiveState` fail-open contract every other
@@ -4486,7 +4490,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // touches this PR. A failed/indeterminate read is ledgered and never
         // stands the dispatch down; only a positive terminal reading does.
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
+        const preflightHistoryHold = refreshTerminalHistory();
+        if (preflightHistoryHold) return { roundNotRun: true, reason: preflightHistoryHold };
         if (preflightStandDown) return;
+        const priorTerminal = terminalState.heads.get(terminalKey);
         if (priorTerminal) {
           await escalateTerminalHead(priorTerminal, pr);
           return;
@@ -5421,8 +5428,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
     // dispatch surface invokes `dispatchFix`. Both share the history hold and the same head index.
     terminalFixStandDown: (pr) => {
-      refreshTerminalHistory();
-      if (terminalState.historyHold) return terminalState.historyHold;
+      const historyHold = refreshTerminalHistory();
+      if (historyHold) return historyHold;
       const terminal = terminalState.heads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain
       // shape is exactly the conflator test/catch-erasure-ratchet.test.ts's detector (b) exists to

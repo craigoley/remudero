@@ -438,6 +438,47 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
   });
 
+  for (const [waitAt, standDown] of [["admission", true], ["preflight", true], ["preflight", false]] as const) {
+    test(`W1-T12271 criterion 3: a sibling rotation EIO holds dispatch after ${waitAt} (preflight stand-down: ${standDown})`, async (t) => {
+      const { root, path, archive } = fixture(t);
+      const pr = candidates[4] as OpenPrView;
+      assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
+
+      let entered!: () => void;
+      const waiting = new Promise<void>((resolve) => { entered = resolve; });
+      let resume!: () => void;
+      const released = new Promise<void>((resolve) => { resume = resolve; });
+      const pause = () => {
+        entered();
+        return released;
+      };
+      let preflights = 0;
+      const effects = buildEffects(root, path, {
+        contributorAdmissionImpl: waitAt === "admission" ? pause : undefined,
+        dispatchFixPreflightStandDownImpl: async () => {
+          preflights++;
+          if (waitAt === "preflight") await pause();
+          return standDown;
+        },
+        ghJsonImpl: () => assert.fail("a held dispatch must not look up the head"),
+      });
+      const dispatch = Promise.resolve(effects.dispatchFix!(pr, { unmetCriteria: [] }));
+      await Promise.race([waiting, dispatch.then(() => assert.fail(`dispatch returned before ${waitAt}`))]);
+
+      const restore = failRotationRead(archive, "EIO");
+      try {
+        const sibling = buildEffects(root, path);
+        assert.equal(sibling.terminalFixStandDown!(pr), unreadHistoryReason);
+        resume();
+        assert.deepEqual(await dispatch, { roundNotRun: true, reason: unreadHistoryReason });
+        assert.equal(preflights, waitAt === "admission" ? 0 : 1);
+      } finally {
+        resume();
+        restore();
+      }
+    });
+  }
+
   test("W1-T12271 criterion 3: corrupt bytes returned after a rotation cache lookup hold dispatch", async (t) => {
     const { root, dir, path, archive } = fixture(t);
     const previouslyFree = candidates[3] as OpenPrView;
