@@ -16,7 +16,7 @@
     - src/lib/doctor.ts
     - src/lib/report-commands.ts
     - test/deploy/doctor-names-a-launchd-service-whose-start-fails-again-and-again.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "On a Mac, doctor reads the state of each Remudero launchd label that is installed: the daemon, serve, the supervisor and the digest"

@@ -443,8 +443,19 @@ export async function writePlainMessage(
 
 export type PlainStore = Record<string, PlainInboxMessage>;
 
+/** W1-T13877: the most stored messages and fingerprints remembered; past it the memo starts over. A BACKSTOP on
+ *  memory only: a healthy Inbox holds far fewer contents, and a clear costs one re-check per content, never a wrong answer. */
+export const PLAIN_CHECK_MEMO_MAX = 4096;
+const fingerprints = new Map<string, string>();
+
 export function plainSourceFingerprint(proposal: { id: string; summary: string }): string {
-  return createHash("sha256").update(JSON.stringify(["inbox-plain-v4", proposal.id, proposal.summary])).digest("hex");
+  const key = JSON.stringify(["inbox-plain-v4", proposal.id, proposal.summary]);
+  const known = fingerprints.get(key);
+  if (known !== undefined) return known;
+  if (fingerprints.size >= PLAIN_CHECK_MEMO_MAX) fingerprints.clear();
+  const fingerprint = createHash("sha256").update(key).digest("hex");
+  fingerprints.set(key, fingerprint);
+  return fingerprint;
 }
 
 export function plainStorePath(stateDir: string): string {
@@ -463,17 +474,56 @@ export function readPlainStore(path: string): PlainStore {
   }
 }
 
-function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
-  const stored = store[proposal.id];
-  if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal) || (stored.source !== "writer" && stored.source !== "template")) return undefined;
+/**
+ * W1-T13877: whether a stored message still checks out, by its content. The checks read only the message and the
+ * proposal's id and summary, which its matched sourceFingerprint already names, so one content is checked once,
+ * not on every thread list.
+ */
+const storedChecks = new Map<string, boolean>();
+
+function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: string; summary: string }): boolean {
+  const key = contentKey(stored);
+  const known = storedChecks.get(key);
+  if (known !== undefined) return known;
   const shape = validateDecisionSummary({
     headline: stored.headline,
     what_happened: stored.whatHappened,
     decision: stored.whatWeNeed,
     options: stored.options,
   });
-  if (!shape || typeof stored.ifNothingHappens !== "string") return undefined;
-  return checkPlainMessage(stored, proposal).ok ? stored : undefined;
+  const ok = shape !== null && shape !== undefined && typeof stored.ifNothingHappens === "string" && checkPlainMessage(stored, proposal).ok;
+  if (storedChecks.size >= PLAIN_CHECK_MEMO_MAX) storedChecks.clear();
+  storedChecks.set(key, ok);
+  return ok;
+}
+
+/** The memo key for a stored message's content: exactly the fields the checks read, so unused metadata on an option
+ *  neither splits the memo nor keeps a card out of it (#19775 review). Every checked field must be a string (an option's
+ *  intent may also be absent) or the check refuses, so any other value is keyed as the one marker `null`: such records
+ *  share one refusal, the key holds only strings and numbers, and naming it can never throw however deep the value. */
+function contentKey(stored: PlainInboxMessage): string {
+  const text = (value: unknown): string | null => typeof value === "string" ? value : null;
+  const options: unknown = stored.options;
+  const checkedOptions = Array.isArray(options)
+    ? options.map((o: unknown) => {
+      if (typeof o !== "object" || o === null) return null;
+      const { label, consequence, intent } = o as Record<string, unknown>;
+      return [text(label), text(consequence), intent === undefined ? 0 : text(intent)];
+    })
+    : null;
+  return JSON.stringify([stored.sourceFingerprint, stored.source, text(stored.headline), text(stored.whatHappened),
+    text(stored.whatWeNeed), text(stored.ifNothingHappens), checkedOptions]);
+}
+
+/** W1-T13877: how many entries each memo holds, so a test can see the bound hold. */
+export function plainCheckMemoSizes(): { fingerprints: number; storedChecks: number } {
+  return { fingerprints: fingerprints.size, storedChecks: storedChecks.size };
+}
+
+function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
+  const stored = store[proposal.id];
+  if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal) || (stored.source !== "writer" && stored.source !== "template")) return undefined;
+  return storedMessageChecksOut(stored, proposal) ? stored : undefined;
 }
 
 /** Legacy or changed-source messages remain in the store but cannot be rendered as current. */

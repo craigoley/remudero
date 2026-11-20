@@ -6,14 +6,21 @@
  * exist yet — and admission must take it as a parked proposal, as it does the legacy shape.
  */
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { CI_FRICTION_REMEDIES_FILE, ciFrictionRemedyTestTitle, ciFrictionShardStem, ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
 import { lintTask, sizingViolation } from "#src/lib/task-linter.js";
-import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath } from "#src/lib/plan.js";
+import { loadPlanFromYaml, machineFilingAdmissionViolations, newTestPath, resolveNewPathApprovalFacts, taskIntentDigest, type NewPathApprovalFacts, type Task } from "#src/lib/plan.js";
+import { machineShardFilingRefusal, machineShardLandingRefusal } from "#src/lib/machine-filing.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { createConfirmNonceStore, createService, makeConfirmNonceRoute, operatorSessionIdentityProvider, type OperatorJwk } from "#src/lib/service.js";
+import { makeNewPathApprovalIssuerRoutes } from "#src/lib/serve.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -138,4 +145,176 @@ test("every drafted remedy claims a mechanism a review can judge from the diff, 
   const plan = loadPlanFromYaml(yaml, "mechanism claim admission");
   assert.deepEqual(lintTask(task, { duplicateSlug: ciFrictionShardStem(key), machineFilingAdmission: { plan, releasedIds: new Set(),
     pathExists: p => existsSync(join(REPO_ROOT, p)) } }).violations.filter(v => v.severity === "block"), []);
+});
+
+// ── W1-T10331: an explicitly approved new path versus an invented filing path ──────────────────
+const NEW_PATH = "src/lib/approved-new-module.ts";
+const NOW = Date.now();
+
+function newPathYaml(over: { id?: string; ref?: string | null; extra?: string[]; hold?: boolean; design?: string; verify?: string } = {}): string {
+  return [
+    `- id: ${over.id ?? "W1-T99950"}`, '  title: "approved new path"', "  repo: remudero", "  depends_on: []", "  type: implement",
+    `  verify: ${over.verify ?? "auto"}`, "  risk: high", "  status: queued", "  attempts: 0", "  author_class: machine",
+    ...(over.hold ? ["  dispatch_hold: true"] : []),
+    ...(over.ref === null ? [] : [`  new_path_approval_ref: ${over.ref ?? "npa-ref-1"}`]),
+    `  design: ${JSON.stringify(over.design ?? "one design")}`,
+    "  files:", "    - src/lib/plan.ts", `    - ${NEW_PATH}`, ...(over.extra ?? []).map((f) => `    - ${f}`),
+    "  acceptance:", '    - claim: "c"', '      proof: "grep: approvedNewModule in src/lib/plan.ts"', "",
+  ].join("\n");
+}
+
+const taskOf = (yaml: string): Task => loadPlanFromYaml(yaml, "new-path-fixture").tasks[0]!;
+
+const present = (p: string): boolean => existsSync(join(REPO_ROOT, p));
+
+function decide(yaml: string, facts?: NewPathApprovalFacts | ((t: Task) => NewPathApprovalFacts | undefined), exists = present, nowMs = NOW): string[] {
+  const plan = loadPlanFromYaml(yaml, "new-path-fixture");
+  const task = plan.tasks[0]!;
+  const newPathApproval = typeof facts === "function" ? facts(task) : facts;
+  return machineFilingAdmissionViolations(task, { plan, releasedIds: new Set(), pathExists: exists, newPathApproval, nowMs });
+}
+
+function jwt(privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"]): string {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const head = b64({ alg: "RS256", kid: "new-path-test" });
+  const payload = b64({ iss: "https://issuer.example", sub: "operator-a", azp: "https://console.example", iat: Math.floor(NOW / 1000), exp: Math.floor(NOW / 1000) + 600, fva: [0, 0] });
+  return `${head}.${payload}.${sign("RSA-SHA256", Buffer.from(`${head}.${payload}`), privateKey).toString("base64url")}`;
+}
+
+async function withIssuer<T>(yaml: string, run: (input: { facts: NewPathApprovalFacts; ref: string; server: ReturnType<typeof createService>; base: string; token: string; operatorHeaders: Record<string, string>; binding: { origin: string; issuerId: string; epoch: number; policy: string; repository: string; instance: string; audience: string }; stateRoot: string }) => Promise<T>): Promise<T> {
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...pair.publicKey.export({ format: "jwk" }), kid: "new-path-test", alg: "RS256", use: "sig" } as OperatorJwk;
+  const keys = { key: async (kid: string) => kid === "new-path-test" ? jwk : undefined };
+  const provider = operatorSessionIdentityProvider({ issuer: "https://issuer.example", allowedOrigins: ["https://console.example"], operatorUserIds: ["operator-a"], keys, clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() } });
+  const store = createConfirmNonceStore();
+  const binding = { origin: "http://127.0.0.1", issuerId: "issuer-test", epoch: 1, policy: "policy-v1", repository: "remudero", instance: "core", audience: "lint-plan" };
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}new-path-issuer-`));
+  const token = "a".repeat(64);
+  const server = createService({ tokens: { read: token, write: token }, routes: [
+    { ...makeConfirmNonceRoute(store), tier: "low" },
+    ...makeNewPathApprovalIssuerRoutes({ binding, repository: "remudero", instance: "core", repoRoot: REPO_ROOT, stateRoot,
+      clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() } }),
+  ], operatorSession: provider, enforceWriteTiers: true, confirmNonces: store });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  binding.origin = base;
+  try {
+    const operatorToken = jwt(pair.privateKey);
+    const headers = { "content-type": "application/json", "x-rmd-operator-session": operatorToken };
+    const preview = await fetch(`${base}/v1/new-path-approval/preview`, { method: "POST", headers, body: JSON.stringify({ taskYaml: yaml, approvedMissingPaths: [NEW_PATH] }) });
+    assert.equal(preview.status, 200);
+    const previewBody = await preview.json() as { previewId: string; ref: string };
+    const payload = JSON.stringify({ previewId: previewBody.previewId });
+    const nonceResponse = await fetch(`${base}/v1/confirm`, { method: "POST", headers, body: JSON.stringify({ method: "POST", path: "/v1/new-path-approval/confirm", payload }) });
+    assert.equal(nonceResponse.status, 200);
+    const nonce = (await nonceResponse.json() as { nonce: string }).nonce;
+    const confirmed = await fetch(`${base}/v1/new-path-approval/confirm`, { method: "POST", headers: { ...headers, "x-confirm-nonce": nonce }, body: payload });
+    assert.equal(confirmed.status, 200);
+    const resolved = await resolveNewPathApprovalFacts({ ...taskOf(yaml), new_path_approval_ref: previewBody.ref }, binding, token, { fetchImpl: fetch });
+    if (resolved.state === "unknown") throw new Error(resolved.reason);
+    return await run({ facts: resolved.facts, ref: previewBody.ref, server, base, token, operatorHeaders: headers, binding, stateRoot });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+}
+
+test("new path admission binds the explicit approval to the exact task and declared paths", async () => {
+  assert.equal(existsSync(join(REPO_ROOT, NEW_PATH)), false, "the approved path is genuinely absent");
+  await withIssuer(newPathYaml({ ref: null }), async ({ facts, ref, binding, stateRoot }) => {
+    const yaml = newPathYaml({ ref });
+    assert.deepEqual(decide(yaml, facts), []);
+    assert.match(decide(newPathYaml({ id: "W1-T99951", ref }), facts).join(";"), /approval is for task W1-T99950/);
+    assert.match(decide(newPathYaml({ ref: "npa-ref-2" }), facts).join(";"), /different reference/);
+    assert.match(decide(newPathYaml({ ref, design: "a changed design" }), facts).join(";"), /task changed since it was approved/);
+    const extra = decide(newPathYaml({ ref, extra: ["src/lib/other-missing-module.ts"] }), facts);
+    assert.match(extra.join(";"), /task changed since it was approved/);
+    assert.match(extra.join(";"), /exist in neither.*approved-new-module\.ts.*other-missing-module\.ts/);
+    assert.match(decide(yaml, facts, present, NOW + 31 * 60_000).join(";"), /not currently valid/);
+    const wrongEpoch = { ...binding, epoch: binding.epoch + 1 };
+    const wrongBinding = await resolveNewPathApprovalFacts(taskOf(yaml), wrongEpoch, "a".repeat(64));
+    assert.equal(wrongBinding.state, "unknown", "facts from an older issuer policy epoch cannot be used");
+    assert.ok(existsSync(join(stateRoot, "state", "new-path-approval-audit.ndjson")), "the resolved authority has a durable audit record");
+    return Promise.resolve();
+  });
+});
+
+test("new path admission refuses missing drifted and unsupported authority before staging", async () => {
+  const text = newPathYaml();
+  assert.match(decide(text).join(";"), /no prepared verified facts/);
+  const copied = { ...({} as NewPathApprovalFacts) };
+  assert.match(decide(text, copied).join(";"), /not verified by a trusted issuer/);
+  const precheck = machineShardFilingRefusal(text, "W1-T99950.yaml", { pathExists: present });
+  assert.match(precheck ?? "", /no prepared verified facts/);
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}new-path-admission-`));
+  try {
+    mkdirSync(join(root, "plan/tasks.d"), { recursive: true });
+    mkdirSync(join(root, "src/lib"), { recursive: true });
+    writeFileSync(join(root, "src/lib/plan.ts"), "// present\n");
+    writeFileSync(join(root, "plan/tasks.d/W1-T99950-approved-new-path.yaml"), text);
+    const landing = machineShardLandingRefusal(root, ["plan/tasks.d/W1-T99950-approved-new-path.yaml"]);
+    assert.match(landing ?? "", /no prepared verified facts/);
+    assert.equal(existsSync(join(root, NEW_PATH)), false, "nothing was staged or created");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("new path admission agrees between the real filing precheck and plan lint", async () => {
+  const admissionOf = (reasons: string | undefined): string[] =>
+    (reasons ?? "").split("; ").filter((r) => /exist in neither|new-path approval|dependency/.test(r)).map((r) => r.replace(/^W1-T\d+: machine-filing-admission: /, ""));
+  await withIssuer(newPathYaml({ ref: null }), async ({ facts, ref, base, operatorHeaders, binding, token }) => {
+    const yaml = newPathYaml({ ref });
+    const plan = loadPlanFromYaml(yaml, "parity");
+    const task = plan.tasks[0]!;
+    const precheck = machineShardFilingRefusal(yaml, "W1-T99950.yaml", { pathExists: present, newPathApproval: facts, nowMs: NOW });
+    const lint = lintTask(task, { machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: present, newPathApproval: facts, nowMs: NOW } })
+      .violations.filter((v) => v.check === "machine-filing-admission").map((v) => v.message);
+    const direct = decide(yaml, facts);
+    assert.equal(precheck?.includes(": machine-filing-admission: ") ?? false, direct.length > 0, `${precheck}`);
+    assert.deepEqual(lint, direct.length > 0 ? [direct.join("; ")] : []);
+    assert.deepEqual(admissionOf(precheck), direct);
+
+    const revokePayload = JSON.stringify({ ref });
+    const nonceResponse = await fetch(`${base}/v1/confirm`, { method: "POST", headers: operatorHeaders,
+      body: JSON.stringify({ method: "POST", path: "/v1/new-path-approval/revoke", payload: revokePayload }) });
+    assert.equal(nonceResponse.status, 200);
+    const nonce = (await nonceResponse.json() as { nonce: string }).nonce;
+    const revoked = await fetch(`${base}/v1/new-path-approval/revoke`, { method: "POST",
+      headers: { ...operatorHeaders, "x-confirm-nonce": nonce }, body: revokePayload });
+    assert.equal(revoked.status, 200, "the same verified operator can revoke with fresh step-up and a consumed action nonce");
+    const replay = await fetch(`${base}/v1/new-path-approval/revoke`, { method: "POST",
+      headers: { ...operatorHeaders, "x-confirm-nonce": nonce }, body: revokePayload });
+    assert.equal(replay.status, 403, "the action nonce cannot be replayed");
+    const oversized = await fetch(`${base}/v1/new-path-approval/confirm`, { method: "POST", headers: operatorHeaders, body: "x".repeat(4097) });
+    assert.equal(oversized.status, 413, "the dispatcher refuses an oversized raw body before nonce consumption or handler work");
+    const afterRevoke = await resolveNewPathApprovalFacts(task, binding, token);
+    assert.equal(afterRevoke.state, "unknown");
+    return Promise.resolve();
+  });
+});
+
+test("new path admission preserves legacy proposals and independent owner holds", async () => {
+  // no reference and no facts: the legacy invented-path refusal is byte-identical
+  const invented = decide(newPathYaml({ ref: null }));
+  assert.deepEqual(invented, [`task W1-T99950 declares file path(s) that exist in neither the checkout nor the base tree: ${NEW_PATH}`]);
+  // an approval never releases a human gate, an unmet dependency, a block or a dispatch hold
+  await withIssuer(newPathYaml({ ref: null, verify: "human" }), async ({ facts, ref }) => {
+    const human = decide(newPathYaml({ verify: "human", ref }), facts).join(";");
+    assert.match(human, /verify:human — not auto-runnable/);
+    assert.doesNotMatch(human, /exist in neither/);
+    return Promise.resolve();
+  });
+  await withIssuer(newPathYaml({ ref: null, hold: true }), ({ facts, ref }) => {
+    const held = taskOf(newPathYaml({ hold: true, ref }));
+    assert.equal(held.dispatch_hold, true);
+    assert.deepEqual(decide(newPathYaml({ hold: true, ref }), facts), [], "a hold permits filing and still holds dispatch");
+    const blocked = newPathYaml({ hold: true, ref }).replace("status: queued", "status: blocked");
+    assert.match(decide(blocked, facts).join(";"), /task changed since it was approved|is blocked/);
+    const base = taskOf(newPathYaml({ hold: true, ref }));
+    assert.equal(taskIntentDigest(base), taskIntentDigest({ ...base, new_path_approval_ref: "other-ref" }));
+    assert.notEqual(taskIntentDigest(base), taskIntentDigest({ ...base, rationale: "x" }));
+    assert.throws(() => taskOf(newPathYaml({ ref: "has space" })), /new_path_approval_ref/);
+    return Promise.resolve();
+  });
 });
