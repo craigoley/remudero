@@ -21,7 +21,7 @@ import {pathToFileURL} from "node:url";
 const [root,fixture,mode]=process.argv.slice(1);
 const {runCensusSuitesViaChild}=await import(pathToFileURL(join(root,"scripts/census-precheck.mjs")).href);
 const {fixtureRetentionReason,retainFixture}=await import(pathToFileURL(join(root,"test/setup/retained-fixtures.ts")).href);
-const make=fs.mkdtempSync,read=fs.readFileSync,open=fs.openSync,remove=fs.rmSync,stat=fs.lstatSync,dirs=[],observed=[],fds=new Map();
+const make=fs.mkdtempSync,read=fs.readFileSync,open=fs.openSync,remove=fs.rmdirSync,stat=fs.lstatSync,dirs=[],observed=[],fds=new Map();
 let faulted=false,clock=0,contexts=0;
 fs.mkdtempSync=(...args)=>{const dir=make(...args);if(basename(dir).startsWith("rmd-census-capture-"))dirs.push(dir);return dir;};
 fs.openSync=(path,...args)=>{const fd=open(path,...args);fds.set(fd,String(path));return fd;};
@@ -37,7 +37,7 @@ fs.lstatSync=(path,...args)=>{
   if(mode==="pin-read"&&String(path).endsWith("/stdout"))throw Object.assign(new Error("capture pin unreadable"),{code:"EACCES"});
   return stat(path,...args);
 };
-fs.rmSync=(path,...args)=>{
+fs.rmdirSync=(path,...args)=>{
   if(mode==="fault-cleanup"&&dirs.includes(String(path))){faulted=true;throw Object.assign(new Error("owned cleanup unwritable"),{code:"EACCES"});}
   return remove(path,...args);
 };

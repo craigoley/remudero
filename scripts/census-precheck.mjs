@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -765,15 +765,18 @@ const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
 
 function completeCensusCapture(dir, owner, result) {
   const names = ["stdout", "stderr", "native.json"];
+  const assertOwner = () => {
+    const current = lstatSync(dir);
+    if (!current.isDirectory() || current.dev !== owner.dev || current.ino !== owner.ino ||
+        current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+  };
   let pins, pinError;
   try { pins = names.map((name) => lstatSync(join(dir, name))); }
   catch (error) { pinError = error; }
   return (accepted, reason) => {
     try {
       if (pinError) throw pinError;
-      const current = lstatSync(dir);
-      if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== owner.dev ||
-          current.ino !== owner.ino || current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+      assertOwner();
       const bytes = names.map((name, index) => {
         const path = join(dir, name), pin = pins[index];
         const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -799,7 +802,13 @@ function completeCensusCapture(dir, owner, result) {
         return;
       }
       if (readdirSync(dir).length !== names.length) throw new Error("capture directory has unexpected entries");
-      rmSync(dir, { recursive: true, force: true });
+      // Unlink refuses a replacement directory, and rmdir refuses any entries that arrived after inventory.
+      for (const name of names) {
+        assertOwner();
+        unlinkSync(join(dir, name));
+      }
+      assertOwner();
+      rmdirSync(dir);
     } catch (error) {
       const reason = `capture custody UNKNOWN (${error.message})`;
       retainFixture(dir, reason);

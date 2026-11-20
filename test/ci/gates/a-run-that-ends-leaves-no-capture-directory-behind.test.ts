@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -168,3 +169,44 @@ test("W1-T13191 criterion 3: cleanup preserves retained evidence and other owner
     assert.equal(readFileSync(join(nested, "payload"), "utf8"), "independently owned");
   });
 });
+
+for (const change of ["replace stderr", "add an entry"] as const) {
+  test(`W1-T13191 criterion 3: cleanup refuses to remove a foreign directory that appears after inventory (${change})`, (t) => {
+    withCaptureRoot(t, (root, captures) => {
+      const scratch = join(root, "scratch");
+      let payload: string | undefined;
+      const inventory = t.mock.method(fs, "readdirSync", new Proxy(fs.readdirSync, {
+        apply(readEntries, receiver, args) {
+          const entries = Reflect.apply(readEntries, receiver, args);
+          const dir: unknown = args[0];
+          if (!payload && typeof dir === "string" && dir.startsWith(join(scratch, PREFIX))) {
+            const nested = join(dir, change === "replace stderr" ? "stderr" : "foreign");
+            if (change === "replace stderr") unlinkSync(nested);
+            mkdirSync(nested);
+            payload = join(nested, "payload");
+            writeFileSync(payload, "independently owned");
+          }
+          return entries;
+        },
+      }));
+      syncBuiltinESMExports();
+      let error: unknown;
+      try {
+        run(root);
+      } catch (cause) {
+        error = cause;
+      } finally {
+        inventory.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.ok(payload, "the capture inventory was read before the foreign directory appeared");
+      assert.ok(fs.existsSync(payload), "cleanup must leave the foreign directory and its payload in place");
+      assert.equal(readFileSync(payload, "utf8"), "independently owned");
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /capture custody UNKNOWN/);
+      const remaining = captures();
+      assert.equal(remaining.length, 1);
+      assert.equal(fixtureRetentionReason(remaining[0]), error.message);
+    });
+  });
+}
