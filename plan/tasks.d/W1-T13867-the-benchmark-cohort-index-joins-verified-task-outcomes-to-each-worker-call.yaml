@@ -26,11 +26,20 @@
     per-call ids in it. The operator chose per-cohort outcome counts instead: each cohort row says how many of
     its calls ended completed, ended without completion, censored or unavailable, and why. That is enough to
     score each model by result. The invariant id is unchanged; its wording now names cohort rows.
+    AMENDED AGAIN 2026-11-20: the first amendment asked both that a cached pass report what a fresh one does and
+    that cohort-level totals not change. Main's cached pass without case files reused an earlier join's totals,
+    so the two could not both hold. Only the analyst command (benchmark-cohort.ts --case-files) joins; the daemon
+    pass that follows it has no case files and, on a cache hit, reported the analyst's join at the analyst's
+    earlier cutoff as its own. The design now says the cache rule wins: such a pass names the unavailable reason,
+    as a fresh pass does. The analyst command also prints each row's outcome counts, not only the totals.
   design: |
     For each cohort row in the index, join each of its calls to its task's verified outcome, from the same
     case-file join the cohort already uses, at the same as-of cutoff, and keep the counts by outcome and the
     reasons on that row. When the join is unavailable, write the existing named unavailable reason, never a
-    guessed outcome. A cached pass reports what a fresh one does. Do not change cohort-level totals.
+    guessed outcome. A cached pass reports what a fresh pass with the same case files and cutoff reports, for rows
+    and cohort-level totals alike, and the index it leaves on disk holds those rows. A pass without case files names
+    the unavailable reason and never reuses an earlier join. Do not change how a joined pass computes the
+    cohort-level totals. An assignment that never reached a worker call is not a call, so no row counts it.
 
     INVARIANT cohort-call-outcome: every cohort row in the index accounts for each of its calls by verified outcome, or names the reason the join is unavailable.
   acceptance:
