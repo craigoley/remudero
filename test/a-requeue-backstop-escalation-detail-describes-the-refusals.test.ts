@@ -57,8 +57,9 @@ test("test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts",
     }).escalateCancelledCheck!;
     await effect(pr, check, "GitHub refused the job rerun (already_running)", kind);
     assert.equal(bodies.length, 1);
-    assert.ok(bodies[0].includes("\n\n## Options\n"));
-    return bodies[0].split("\n\n## Options\n")[0].split("\n\n").at(-1)!;
+    const details = /\n\n## Details\n([\s\S]*?)\n\n_Opened automatically by Remudero /.exec(bodies[0])?.[1];
+    assert.ok(details, "the escalation includes its Details section");
+    return details;
   }
 
   const backstop = await detail("requeue-deferral-backstop");

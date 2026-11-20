@@ -1297,7 +1297,7 @@ export function taskSemanticRevision(task: {
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
 /** Prefer the trailing producer fields to similarly labelled lines in the issue's prose. */
-function machineFields(body = ""): string | undefined {
+export function machineFields(body = ""): string | undefined {
   if (/^\*\*Class:\*\* [^\n]*\n\*\*Task:\*\* /.test(body)) return undefined;
   const marker = `\n\n${MACHINE_FIELDS_HEADING}\n`;
   const start = body.lastIndexOf(marker);
