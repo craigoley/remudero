@@ -434,7 +434,7 @@ export async function unclassifiedHoldRecorded(ledgerPath: string | undefined, h
   inputDigest: string | undefined, decisionDigest: string, shadow = false): Promise<boolean> {
   if (!ledgerPath) return true;
   const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: reviewerShadowStep("review.semantic_incomplete", shadow),
-    keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
+    refuseIncomplete: true, keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
   if (!read.ok) return true;
   return read.rawLines.some((line) => {
     let row: Record<string, unknown>;

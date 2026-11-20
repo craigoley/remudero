@@ -4,9 +4,10 @@
 // then folds as before. The fixtures replay recorded clauses of 2026-11-19 (core ledger union, review.posted rows).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { gzipSync } from "node:zlib";
 import * as reviewCommand from "#src/cli/commands/review.js";
 import type { AsyncIssueGateway } from "#src/lib/escalate.js";
 import { appendLedger } from "#src/lib/ledger.js";
@@ -143,7 +144,7 @@ function reviewFixture(t: TestContext, criterion: Criterion, failingCriterion?: 
     } as never);
     return { verdict, rows: readLedgerLines(ledgerPath) };
   };
-  return { drive, prompts, shim, head };
+  return { drive, prompts, shim, head, ledgerPath: join(repo.dir, "ledger.ndjson") };
 }
 
 /** The posted review comment: the shim logs argv joined by spaces, so a multi-line body spans log lines. */
@@ -256,6 +257,31 @@ test("W1-T13849 criterion 3: an explained, untagged FAIL holds once for each inp
   ]);
 });
 
+test("W1-T13849 criterion 3: an unreadable rotation cannot cause a second hold", async (t) => {
+  const { drive, head, ledgerPath } = reviewFixture(t, W1_T12176);
+  const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
+  const inputBody = "archived hold";
+  const first = await drive(transcript, { inputBody });
+  assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
+  const decisionDigest = first.verdict.reviewDecisionDigest!;
+  const inputDigest = review.reviewInputDigest(head, inputBody);
+  const rotation = join(dirname(ledgerPath), "ledger.2026-11-20T00-00-00-000Z.ndjson.gz");
+  writeFileSync(rotation, gzipSync(readFileSync(ledgerPath)));
+  writeFileSync(ledgerPath, "");
+  assert.equal(await reviewCommand.unclassifiedHoldRecorded(ledgerPath, head, inputDigest, decisionDigest), true);
+  assert.equal(await reviewCommand.unclassifiedHoldRecorded(ledgerPath, head, "unrelated-input", decisionDigest), false);
+
+  writeFileSync(rotation, "unreadable gzip rotation");
+  const second = await drive(transcript, { inputBody });
+  assert.equal(second.verdict.verdictWithheld, undefined);
+  assert.equal(second.verdict.state, "failure");
+  assert.equal(second.verdict.criteria[0]!.proof_exec, "executed_pass");
+  assert.equal(second.verdict.criteria[0]!.met, false);
+  assert.equal(second.verdict.criteria[0]!.downgrade_class, "unclassified");
+  assert.equal(second.rows.some(row => row.step === "review.semantic_incomplete"), false);
+  assert.equal(second.rows.find(row => row.step === "review.posted")?.state, "failure");
+});
+
 test("W1-T13849 criterion 3: each shadow input holds once independently of production", async (t) => {
   const { drive } = reviewFixture(t, W1_T12176);
   const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
@@ -360,6 +386,16 @@ test("W1-T13849 criterion 5: duplicate FAIL lines retain a binding failure and s
       assert.equal(verdict.criteria[0]!.downgrade_class, met ? undefined : "unclassified");
     }
   }
+});
+
+test("W1-T13849 criterion 5: a tagged regression starting with an empty argument list still binds", (t) => {
+  const clause = "() => reload() now throws in the legacy caller at src/legacy.ts:12";
+  const verdict = judged(t, W1_T13709, `REVIEW_VERDICT 1: FAIL (c) ${clause}`, { exec: "pass" });
+  assert.equal(verdict.criteria[0]!.proof_exec, "executed_pass");
+  assert.equal(verdict.criteria[0]!.met, false);
+  assert.equal(verdict.criteria[0]!.downgrade_class, "c");
+  assert.ok(verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}: ${clause}`));
+  assert.equal(verdict.state, "failure");
 });
 
 test("W1-T13849 criterion 5: the gate only narrows — failed proofs, failed floors, (c) and plan-only verdicts stand", async (t) => {

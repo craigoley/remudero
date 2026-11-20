@@ -8335,22 +8335,15 @@ export function clauseCutLength(clause: string | undefined): number | undefined 
   return cut ? Number(cut[2]) : undefined;
 }
 
-/** Pull the bounded clause off a FAIL line's trailing text, already confined to one line by {@link
- *  REVIEW_VERDICT_LINE_RE}. {@link reviewerVerdictContract}'s own example shows a parenthetical after the token, so a
- *  leading `(...)` is unwrapped when present and freeform trailing prose is accepted as-is. `undefined` for
- *  whitespace-only text: a plain `FAIL` with nothing after it. */
+/** Pull the bounded explanation off a verdict line. Untagged lines accept legacy parenthetical explanations.
+ *  After a class tag, parentheses are part of the explanation (for example, `() => reload()`). */
 function extractBoundedClause(trailing: string): string | undefined {
   const tag = DOWNGRADE_TAG_RE.exec(trailing);
-  if (tag) {
-    const rest = extractBoundedClause(trailing.slice(tag[0].length));
-    return rest === undefined ? undefined : `(${tag[1]!.toLowerCase()}) ${rest}`;
-  }
-  const s = trailing.trim();
-  if (!s) return undefined;
-  const paren = s.match(/^\(([^)]*)\)/);
-  const inner = (paren ? paren[1] : s).trim();
-  if (!inner) return undefined;
-  return inner.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(inner) : inner;
+  const text = trailing.slice(tag?.[0].length ?? 0).trim();
+  const explanation = tag ? text : (text.match(/^\(([^)]*)\)/)?.[1] ?? text).trim();
+  if (!explanation) return undefined;
+  const bounded = explanation.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(explanation) : explanation;
+  return tag ? `(${tag[1]!.toLowerCase()}) ${bounded}` : bounded;
 }
 
 /** (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript through the SAME regex for the
