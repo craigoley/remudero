@@ -521,10 +521,11 @@ test("a full sweep retriggered in the same tick reads a fresh generation, never 
   assert.deepEqual(retriggered?.openPrViews.map((pr) => pr.prNumber), [2], "a merged PR is no longer swept");
   assert.deepEqual(requests, [[...previous]]);
   assert.deepEqual(published.facts.openPrViews.map((pr) => pr.prNumber), [1, 2], "the published generation is untouched");
-  assert.equal(await onePassPerGeneration(() => undefined, read, input)(), undefined,
-    "no published generation leaves the hook on its own live read");
+  // W1-T13880: with a plane, no published generation is a fresh off-loop read, never the hook's live read.
+  assert.deepEqual((await onePassPerGeneration(() => undefined, read, input)())?.openPrViews.map((pr) => pr.prNumber), [2],
+    "no published generation reads a fresh generation from the plane");
   const planeless = onePassPerGeneration(() => published, undefined, input);
   assert.equal(await planeless(), published.facts);
   assert.equal(await planeless(), undefined, "a consumed generation with no read plane is never reused");
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
 });
