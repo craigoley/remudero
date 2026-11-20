@@ -1,0 +1,41 @@
+- id: W1-T13886
+  title: remudero-review escalates a criterion that keeps failing semantically on new heads
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#field-trials-2026-11-19
+  plan_refs: [W1-T11443, W1-T2722]
+  files:
+    - src/lib/review.ts
+    - test/a-criterion-that-keeps-failing-semantically-on-new-heads-escalates.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Observed 2026-11-19 on a managed repository pull request: more than 21 review rounds ran in which the
+    criterion's floor proof passed every time, while the semantic reviewer downgraded the same criterion on each
+    new head with a new probe. Each round cost a build and a review, and nothing reached a person.
+    applyVerdictStability in src/lib/review.ts suppresses a repeated verdict only when the head is unchanged, so a
+    new head always starts another silent round.
+  design: |
+    Count, per pull request and criterion, consecutive new-head review verdicts in which the floor proof passed and
+    the semantic reviewer downgraded that criterion. After N of them (default 3, configurable), do not start another
+    silent round: post one Inbox decision for the criterion with the choices accept the residual risk, narrow the
+    claim, or keep iterating, and hold further automatic rounds on that criterion until it is answered. Record each
+    downgrade's probe in the review evidence as a runnable reproduction (command or test input plus the observed
+    result), so the decision names what failed. An unchanged head keeps today's applyVerdictStability behaviour.
+
+    INVARIANT semantic-downgrade-escalation: after N consecutive new-head semantic downgrades of one criterion with its floor met, the next round is an Inbox decision, never another silent round.
+  acceptance:
+    - claim: invariant:semantic-downgrade-escalation — three prior new-head downgrades of one criterion with the floor met yield one Inbox decision, and a fourth silent round does not run
+      proof: 'unit test: test/a-criterion-that-keeps-failing-semantically-on-new-heads-escalates.test.ts'
+    - claim: each recorded downgrade carries its probe as a runnable reproduction in the review evidence
+      proof: 'grep: W1-T13886 runnable reproduction in test/a-criterion-that-keeps-failing-semantically-on-new-heads-escalates.test.ts'
+  falsifier: |
+    With a fixture holding three prior downgrade verdicts on new heads for one criterion (floor met), remove the
+    escalation: the test must fail because a fourth round runs and no Inbox decision is written.

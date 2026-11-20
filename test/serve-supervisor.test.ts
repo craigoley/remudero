@@ -66,7 +66,8 @@ function fakeFleet(behaviour: (slot: PreparedSlot) => { readyAfter?: number; nev
       sent: [],
       killed: [],
       send(message) {
-        gen.sent.push(message);
+        // W1-T13832: the swap probe request is judged by its own test; these rigs judge promote, shed and drain.
+        if (message.type !== "rmd.swap_probe") gen.sent.push(message);
         if (message.type === "rmd.promote" && !behaviour(slot).noPromote) queueMicrotask(() => gen.emit({ type: "rmd.promoted" }));
         if (message.type === "rmd.drain") queueMicrotask(() => gen.die(0));
       },

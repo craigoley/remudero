@@ -172,6 +172,15 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     ...(started.length > 0 ? { buildStartedMs: Math.max(...started) } : {}) };
 }
 
+/** A body the composite reads: every `now` body and the Inbox's needs-you page. */
+function isNeedsYouInput(entry: ReadModelBodyEntry): boolean {
+  return entry.view === NOW_VIEW_NAME || (entry.view === INBOX_VIEW_NAME && entry.key === NEEDS_YOU_INBOX_KEY);
+}
+
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
 /**
  * The read model's handle with the `needs-you` body overlaid: recomposed on each input body the worker
  * posts (and on every read of it, so a dropped input is never served), and posted to body listeners only
@@ -179,13 +188,23 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
  */
 export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = systemClock): ReadModelWorkerHandle {
   let current: ReadModelBodyEntry | undefined;
+  // W1-T13876: what `current` was composed from. Every lookup through the merged map below composes, so an
+  // unchanged set of input entries (held bodies are replaced, never mutated) and instances answers the held body.
+  let composedFrom: { inputs: ReadModelBodyEntry[]; known: string[] } | undefined;
   const compose = (): ReadModelBodyEntry => {
-    const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, inner.state().instances.keys());
+    const known = [...inner.state().instances.keys()];
+    const inputs: ReadModelBodyEntry[] = [];
+    for (const entry of inner.bodies.values()) if (isNeedsYouInput(entry)) inputs.push(entry);
+    if (current && composedFrom && sameItems(composedFrom.inputs, inputs) && sameItems(composedFrom.known, known)) return current;
+    const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, known);
     const stale = sources.some((s) => s.state !== "fresh");
     const etag = viewEtag(NEEDS_YOU_VIEW_NAME, NEEDS_YOU_VIEW_VERSION, stale, data);
-    if (current?.etag === etag) return current;
-    const body: ViewBody = { view: NEEDS_YOU_VIEW_NAME, version: NEEDS_YOU_VIEW_VERSION, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-    current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
+    if (current?.etag !== etag) {
+      const body: ViewBody = { view: NEEDS_YOU_VIEW_NAME, version: NEEDS_YOU_VIEW_VERSION, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+      current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
+    }
+    // Recorded only beside the body these inputs built: any throw above leaves the next lookup to compose again (#19774 review).
+    composedFrom = { inputs, known };
     return current;
   };
   // W1-T5373: a served nav-badge body carries the same composite count; the worker's own body stays the shadow's.
@@ -220,7 +239,7 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
   const listeners = new Set<(entry: ReadModelBodyEntry) => void>();
   inner.onBody((entry) => {
     for (const listener of listeners) listener(badge(entry));
-    const isInput = entry.view === NOW_VIEW_NAME || (entry.view === INBOX_VIEW_NAME && entry.key === NEEDS_YOU_INBOX_KEY);
+    const isInput = isNeedsYouInput(entry);
     const before = current;
     if (!isInput || compose() === before) return;
     for (const listener of listeners) listener(current!);

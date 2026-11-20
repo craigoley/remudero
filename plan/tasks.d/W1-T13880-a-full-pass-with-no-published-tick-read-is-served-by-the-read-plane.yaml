@@ -1,0 +1,54 @@
+- id: W1-T13880
+  title: "A full pass with no published tick read is served by the read plane, never rebuilt on the daemon loop"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: the full sweep's tick-read serve rule (daemon loop liveness)
+  origin: "operator-session#serve-oom-2026-11-16"
+  plan_refs:
+    - W1-T12754
+    - W1-T4075
+  files:
+    - src/lib/read-plane.ts
+    - test/console-api/read-model/a-full-pass-with-no-published-tick-read-is-served-by-the-plane.test.ts
+    - test/daemon/a-full-sweep-joins-the-tick-read-already-in-flight.test.ts
+    - test/the-tick-reads-run-off-the-event-loop.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "A full pass with no published generation joins the tick read in flight, with one worker request"
+      proof: "grep: W1-T13880 criterion 1 in test/console-api/read-model/a-full-pass-with-no-published-tick-read-is-served-by-the-plane.test.ts"
+    - claim: "With nothing published or in flight, the pass reads its own generation from the read plane"
+      proof: "grep: W1-T13880 criterion 2 in test/console-api/read-model/a-full-pass-with-no-published-tick-read-is-served-by-the-plane.test.ts"
+    - claim: "invariant:no-plane-live-read — a daemon with no read plane still leaves the pass on its own live read"
+      proof: "grep: W1-T13880 invariant in test/console-api/read-model/a-full-pass-with-no-published-tick-read-is-served-by-the-plane.test.ts"
+  rationale: |
+    WHY: on the host core daemon (pid 148, 593c2168d, up since 2026-11-19 20:19Z) one full pass logged
+    sweep.full_prelude at 22:13:43Z with tick_read_source "none", tick_read_miss "unpublished" and elapsed 48.7 min
+    (OBSERVED). From 22:18Z on, 112 daemon.loop_stall_profile rows followed: about 1.35M ms of lag, max 161,826 ms,
+    sync_spawn_ms up to 156,433. They were under buildEscalationReconcileCandidates, readMergedPathsByPr's sync git
+    log, resolveMergeLogReadOptions, ghExecFile and deriveStatus. The last sweep.pass was at 22:17:45Z and no PR
+    merged after #19759 at 21:56Z. The 17:39Z prelude shows the same none/unpublished miss. Cause:
+    onePassPerGeneration in src/lib/read-plane.ts returns undefined when nothing is published, even with a plane up
+    (`if (!published || !read)`), for example while daemon.ts's refresher has invalidated the generation and its
+    next read is in flight. sweep.ts then rebuilds every tick fact (open PR views, credit and escalation
+    candidates) on the daemon loop. #9188 kept that branch from the pre-plane behaviour; its incident
+    (DAEMON-1791151532775) was about reusing a stale published generation, which this does not touch.
+  design: |
+    read-plane.ts onePassPerGeneration: return undefined (source none, miss no_plane) only when there is no read.
+    With a plane and nothing published, the pass keeps miss "unpublished" and takes the existing path that consumed
+    and stale take: join the read in flight that no full pass has taken (W1-T12754's age bound applies), else
+    request its own plane read. A generation still answers at most one pass. Two prior assertions that pinned the
+    old branch are amended: W1-T12754 criterion 1's unpublished pass now reads source own_read, and the #9188
+    retrigger test's unpublished call now gets a fresh plane read (requests 2).
+    INVARIANT no-plane-live-read: with no read plane, the pass still gets undefined and its own live read.
+  falsifier: |
+    Restore `if (!published || !read)`: criteria 1 and 2 fail, and so do the two amended assertions (4 failures,
+    checked on the build commit).
+  note: |
+    reservation hand-off: claude/project-thread-u06uh4 -> run-unfiled-1795128700879
+    Reserved with rmd next-task-id by the project coordinator on claude/project-thread-u06uh4 and filed from this branch.

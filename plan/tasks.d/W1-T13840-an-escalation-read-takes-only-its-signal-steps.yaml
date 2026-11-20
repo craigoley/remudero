@@ -17,7 +17,7 @@
     - src/lib/status.ts
     - src/lib/board-projection.ts
     - test/an-escalation-read-takes-only-its-signal-steps.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A store index's byTaskSteps answers a task's own rows of the named steps in ledger order, equal to its byTask rows filtered the same way, as the store grows with late rows"

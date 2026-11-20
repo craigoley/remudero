@@ -232,13 +232,14 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
     name: INSTANCES_VIEW_NAME,
     version: INSTANCES_VIEW_VERSION,
     qualificationGeneration: INSTANCES_QUALIFICATION_GENERATION,
-    // Heartbeats/liveness, registries, mounts, contract identities, lease ownership and stamp budget.
+    // Liveness, registries, mounts, contract identities, lease ownership and stamp budget.
     inputsFingerprint: ({ now, instances }) => JSON.stringify([
       identity(opts.repoPath), identity(opts.hostPath), Math.floor(now / SLOW_LANE_STORE_BUDGET_MS),
       opts.instances.map(i => [i.name, mounted(i.ledgerDir), identity(join(i.ledgerDir, INBOX_CONTRACT_MARKER), true)]),
       // W1-T13835: not the projector generation, which moves on every projected row; the body no longer publishes it.
-      instances.map(({ state, db, lease }) => [state.instance, state.lease, lease !== undefined,
-        db?.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get() ?? null, instanceLiveness(db, now)]),
+      // W1-T13873: not the raw heartbeat either. The body reads it only as liveness (up, or down since the beat), and a
+      // skip restamps the ledger source's asOf from ledgerReads, so a beat that keeps an instance up rebuilds nothing.
+      instances.map(({ state, db, lease }) => [state.instance, state.lease, lease !== undefined, instanceLiveness(db, now)]),
     ]),
     ledgerReads: (db) => {
       const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();

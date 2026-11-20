@@ -168,15 +168,17 @@ test("W1-T4114: skillLifecycleCandidates finds a skill workers rarely report usi
     "rarely-used-skill": { offered: 200, used: 1 },
     "often-used-skill": { offered: 50, used: 40 },
   };
-  const names = skillLifecycleCandidates(usage, ["rarely-used-skill", "often-used-skill"], () => 0.5).map((a) => a.target);
-  assert.deepEqual(names, ["rarely-used-skill"]);
+  // W1-T13860: every offered approved skill is a candidate; the effectiveness report decides.
+  const names = skillLifecycleCandidates(usage, ["rarely-used-skill", "often-used-skill"]).map((a) => a.target);
+  assert.deepEqual(names, ["rarely-used-skill", "often-used-skill"]);
   // Selection alone (no `skills.used` history at all) never manufactures a candidate.
-  assert.deepEqual(skillLifecycleCandidates({}, ["a-skill"], () => 0.5), []);
+  assert.deepEqual(skillLifecycleCandidates({}, ["a-skill"]), []);
 });
 
 test("W1-T4114: stageSkillLifecycleForAction is best-effort — an unreadable ledger stages nothing and never throws", () => {
   const root = tmpRoot("w1t4114-skill-stage-");
-  assert.doesNotThrow(() => stageSkillLifecycleForAction(join(root, "state"), root, { class: "skill-lifecycle", target: "a-skill", reason: "r" }));
+  const rows: string[] = [];
+  assert.doesNotThrow(() => stageSkillLifecycleForAction(join(root, "state"), root, [{ class: "skill-lifecycle", target: "a-skill", reason: "r" }], (step) => rows.push(step)));
 });
 
 // ── GUARD-RETIREMENT: propose through the ratification inbox, operator review ───────────────────

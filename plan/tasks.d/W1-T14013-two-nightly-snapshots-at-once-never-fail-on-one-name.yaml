@@ -1,0 +1,53 @@
+- id: W1-T14013
+  title: Two nightly reclaim runs at once never fail a state snapshot on one archive name
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 10.00
+  risk: high # spans the host-update nightly script and the ledger snapshot writer; both must agree on one snapshot name
+  band_meaning: span
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T5545
+    - W1-T10756
+  files:
+    - deploy/host-update.sh
+    - src/lib/ledger.ts
+    - test/ledger/two-nightly-snapshots-at-once-never-fail-on-one-name.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Two snapshotState calls for one state root at the same clock instant both return a verified archive, and neither throws ENOTEMPTY"
+      proof: "grep: W1-T14013 criterion 1: in test/ledger/two-nightly-snapshots-at-once-never-fail-on-one-name.test.ts"
+    - claim: "A second host-update.sh --reclaim-only started while one runs exits 0 and says another reclaim run holds the lock"
+      proof: "grep: W1-T14013 criterion 2: in test/ledger/two-nightly-snapshots-at-once-never-fail-on-one-name.test.ts"
+    - claim: "invariant:one-snapshot-still-verifies — a single snapshot is still staged, verified and published exactly as today"
+      kind: guard
+      proof: "grep: W1-T14013 criterion 3: in test/ledger/two-nightly-snapshots-at-once-never-fail-on-one-name.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host log, read only): two schedulers each started the nightly `host-update.sh --reclaim-only`
+    at 04:17 UTC. Both snapshotted every state root. For one root both picked the same millisecond archive name: the
+    first run verified it, and the second failed "ENOTEMPTY: directory not empty, rename '.state-backup-tmp-…' ->
+    'state-backup.2026-11-20T04-19-54-148Z'". That failure opened #19822 ("nightly STATE SNAPSHOT FAILED") although a
+    verified archive of that root existed. The off-host disk snapshot raced the same way and one copy succeeded.
+    OBSERVED at origin/main ca83732bd:
+    - src/lib/ledger.ts `snapshotState` stages into mkdtemp and renames it to `datedStateBackupDir(backupsRoot, now())`,
+      a name from the ISO time alone.
+    - deploy/host-update.sh has no lock around the --reclaim-only rung.
+  design: |
+    INVARIANT one-snapshot-still-verifies: one run publishes the same archive it does today.
+    1. deploy/host-update.sh takes one host-wide lock (flock on a file under the state roots' parent) for
+       --reclaim-only. A run that cannot take it prints that another reclaim run holds it and exits 0.
+    2. snapshotState never fails on a name collision: when the dated directory exists, publish under a unique suffix.
+       Keep the dated prefix so retention and newestStateBackup still order archives.
+    3. Find every reader of the archive name pattern (retention, newestStateBackup, the nightly receipt) and keep each
+       reading the new names.
+  falsifier: |
+    Without step 2, criterion 1's second call throws ENOTEMPTY. Without step 1, criterion 2's second run snapshots again.
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host. The duplicate scheduler entry itself
+    is host configuration and is removed by the operator; this task makes a repeat harmless.

@@ -80,7 +80,8 @@ import {
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
-import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewAnswerSource, type ViewBodySource, type ViewProbeReader } from "./views.js";
+import { heldViewKeys, runSwapProbe } from "./serve-swap-probe.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -162,7 +163,7 @@ import {
 } from "./daemon-health.js";
 import {
   INCIDENT_LONGEST_WINDOW_MS,
-  evaluateIncidentInvariants,
+  evaluateIncidentInvariants, INCIDENT_INPUT_LINE,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
   loopStallLedgerLine,
@@ -232,7 +233,7 @@ import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemorySliced, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
-import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type WorkerShedOutcome } from "./serve-generation.js";
+import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type SwapProbeRequest, type WorkerShedOutcome } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -396,7 +397,7 @@ export interface ServeDeps {
   log?: ServiceOptions["log"];
   demand?: Pick<ServeDemandOptions, "clock" | "every">;
   /** W1-T13602: told of each view read's final answer; assembleServeServer points it at the serve.demand window. */
-  onViewAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
+  onViewAnswer?: (view: string, status: number, code: string, stale: boolean, source?: ViewAnswerSource) => void;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -3134,6 +3135,8 @@ interface ServeRoutesAssembly {
   linkRefusals: LinkRefusalRollup;
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
+  /** W1-T13832: the reader the view routes handed out, read when a swap probe runs. */
+  viewProbeReader: () => ViewProbeReader | undefined;
 }
 
 /** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
@@ -3330,7 +3333,9 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   // W1-T13455: the inbox-thread view (built on demand by the worker since P4-T10) is mounted and served with no switch entry.
+  let viewProbeReader: ViewProbeReader | undefined;
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME], onServed: routeReads.served, onAnswer: deps.onViewAnswer,
+    onProbeReader: (reader) => { viewProbeReader = reader; },
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
     demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME, INBOX_THREAD_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"], [INBOX_THREAD_VIEW_NAME]: ["id"] },
@@ -3604,7 +3609,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver, viewProbeReader: () => viewProbeReader };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3671,7 +3676,9 @@ export function startIncidentInvariantsMonitor(
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger;
-  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS);
+  // W1-T13828: the tail parses and holds only the lines some rule reads.
+  const liveRows = readLedger ? () => readLedger(ledgerPath)
+    : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS, { keepLine: INCIDENT_INPUT_LINE });
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
@@ -3872,7 +3879,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       routeReadRollup: routeReads,
       // W1-T13602: bound late; the demand window is built from the routes this call returns, and is read only at request time.
-      onViewAnswer: (view, status, code, stale) => demand.recordView(view, status, code, stale),
+      onViewAnswer: (view, status, code, stale, source) => demand.recordView(view, status, code, stale, undefined, source),
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -4028,9 +4035,12 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     deps.log?.("serve.workers_shed", { ...outcome, kinds: shed.map((reading) => reading.name) });
     return outcome;
   };
+  const swapProbesRun = new Set<string>();
   serveGenerations.set(server, {
     handover: (reason) => staleExit.handover(reason),
     promote: () => readModel?.reload(),
+    swapProbe: (request) => void runSwapProbe(request, { reader: routeAssembly.viewProbeReader(), heldKeys: (view) => heldViewKeys(readModel?.bodies, view),
+      ledgerPath: deps.ledgerPath, seen: swapProbesRun, log: deps.log }),
     shed: () => analyticsCache.shed(),
     restore: (reason) => void analyticsCache.restore(reason),
     shedWorkers,
@@ -4047,6 +4057,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
 type ServeGenerationHooks = {
   handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; restore: (reason: string) => void; probes: ReadinessProbe[];
+  swapProbe: (request: SwapProbeRequest) => void;
   /** Memory tier 2 (W1-T9508): terminates the rebuildable worker threads, resolving once they exited; `restoreWorkers` starts them again. */
   shedWorkers: () => Promise<WorkerShedOutcome>; restoreWorkers: (reason: string) => void;
 };

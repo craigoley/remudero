@@ -6024,7 +6024,26 @@ export async function runDaemon(
   // best-effort cadences and CI waits are released to be re-derived after restart. Shared by the freshness exit
   // and the memory-pressure exit so neither restart can kill work the other would have waited for.
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
-  type ExitPass = { kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number };
+  type ExitPass = {
+    kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number;
+    /** Records pre_exit_pass once: when the pass settles, or at its limit when the exit goes without it (#19797 review). */
+    record?: () => void;
+  };
+  /** W1-T13888: the exit waits for an in-flight pass until its limit, `maxDrainWaitMs` after the latch or the exit,
+   *  then goes without it. The pass ends between pull requests only at its own checkpoints, and on 2026-11-20 one
+   *  stuck inside its prelude held a requested restart for 2,350,250 ms (4 of 53 exits in 7 days passed 30 min). */
+  const passWithinLimit = async (pass: ExitPass): Promise<void> => {
+    if (pass.limitAtMs === undefined) return pass.settled;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<"limit">((resolve) => { timer = setTimeout(() => resolve("limit"), Math.max(0, pass.limitAtMs! - daemonClock.now())); });
+    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit]);
+    clearTimeout(timer);
+    if (outcome === "limit") {
+      pass.record?.();
+      log("daemon.freshness_pre_exit_pass_abandoned", { pre_exit_pass: pass.kind, max_drain_wait_ms: freshnessMaxDrainWaitMs,
+        limit_at: fixedClock(pass.limitAtMs).iso() });
+    }
+  };
   const drainBeforeRestart = async (
     stepPrefix: "daemon.freshness_drain" | "daemon.memory_drain", latchAtMs?: number, pass?: ExitPass,
     exitDeadlineAtMs?: number,
@@ -6113,7 +6132,7 @@ export async function runDaemon(
             }),
             closeRefills: pass?.overlapped !== true && placements.review?.placement !== "child" }),
           drainDirectMergeOperations({ boundMs: detachedBoundMs, onWait: (operation) => observation.watch(directMergeRestartItem(operation)) }),
-          pass?.overlapped ? pass.settled : undefined,
+          pass?.overlapped ? passWithinLimit(pass) : undefined,
         ]);
       } finally {
         const stopped = drainReviewClock ? await drainReviewClock.stop() : undefined;
@@ -6220,12 +6239,16 @@ export async function runDaemon(
       preExitPass = "skipped_ran_since_stale";
     }
     const pass: ExitPass = { kind: preExitPass, settled: Promise.resolve(),
-      overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0 };
-    pass.settled = Promise.resolve(pendingPass).then(() => {
-      if (pendingPass) freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
-      if (pass.overlapped) pass.overlapMs = freshnessPhases.pre_exit_pass!;
-    });
-    if (!pass.overlapped) await pass.settled;
+      overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0,
+      ...(pendingPass ? { limitAtMs: (dispatchLatchAtMs ?? passStartedAtMs) + freshnessMaxDrainWaitMs } : {}) };
+    const recordPass = () => {
+      if (!pendingPass || freshnessPhases.pre_exit_pass !== undefined) return;
+      freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
+      if (pass.overlapped) pass.overlapMs = freshnessPhases.pre_exit_pass;
+    };
+    pass.record = recordPass;
+    pass.settled = Promise.resolve(pendingPass).then(recordPass);
+    if (!pass.overlapped) { await passWithinLimit(pass); recordPass(); }
     // W1-T5721: protect live fix workers; cadences and CI waits are re-derived after restart.
     // The caller stops its interphase clock before the final pass (W1-T2865).
     await drainBeforeRestart("daemon.freshness_drain", dispatchLatchAtMs, pass);
@@ -7917,7 +7940,8 @@ export async function runDaemon(
     // relaunch into the same reading every poll. So this is an in-process idle state, identical in shape
     // to "nothing runnable" below. The usage read happens fresh every tick, so a real reset is picked up
     // automatically with no wake-at-reset timer. The ceiling itself is time-aware.
-    if (deps.readUsage) {
+    // W1-T13837: with the governor off the reading is telemetry only, so it shares the in-flight sampler's cadence.
+    if (deps.readUsage && (headroomEnabled || daemonClock.now() - headroomSampler.lastSampleMs >= HEADROOM_SAMPLE_MAX_AGE_MS)) {
       // The authoritative per-tick read stamps the shared sampler, so an in-flight ticker starting straight
       // after it waits out the full staleness bound instead of re-probing seconds later. Stamped before
       // the guard below because an unreadable read is still an attempt (W1-T2565).

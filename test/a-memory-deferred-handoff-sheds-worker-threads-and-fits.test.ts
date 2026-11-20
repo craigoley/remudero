@@ -38,7 +38,8 @@ function harness(opts: { workersFree: boolean; neverReady?: boolean; extra?: Par
       slot,
       sent: [],
       send(message) {
-        gen.sent.push(message);
+        // W1-T13832: the swap probe request is judged by its own test; these rigs judge promote, shed and drain.
+        if (message.type !== "rmd.swap_probe") gen.sent.push(message);
         const answer = (reply: GenerationMessage): void => queueMicrotask(() => gen.emit(reply));
         if (message.type === GENERATION_MESSAGES.promote) answer({ type: GENERATION_MESSAGES.promoted });
         if (message.type === GENERATION_MESSAGES.shed) answer({ type: GENERATION_MESSAGES.shed_done, beforeBytes: 3_600, afterBytes: 3_600 });
