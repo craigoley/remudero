@@ -71,8 +71,31 @@ import type { LedgerUnionResult } from "./ledger-grep.js";
 import { classifyContribution, feedbackSubjectBinding, type FeedbackAdmissionContext, type FeedbackAdmissionSubject } from "./contributor-admission.js";
 import { systemClock } from "./clock.js";
 
-/** What decides whether a row's write fires. Closed vocabulary — design note (i). */
-export type AuthorityGateKind = "policy" | "ledger-verdict" | "operator-verb" | "sweep-rung" | "always";
+/**
+ * What decides whether a row's write fires. Closed vocabulary — design note (i). W1-T13773 added
+ * `host-switch`: a flag in a host state file, read on each daemon tick (no policy row, no verb).
+ */
+export const AUTHORITY_GATE_KINDS = ["policy", "ledger-verdict", "operator-verb", "sweep-rung", "always", "host-switch"] as const;
+export type AuthorityGateKind = (typeof AUTHORITY_GATE_KINDS)[number];
+
+/**
+ * W1-T13773: another process path that reaches a row's write from another module through a child
+ * `rmd` CLI, so the row's own module, gate and verb describe only the verb itself. The row keeps
+ * the verb's gate, verb and ledger steps; each caller names its own.
+ */
+export interface AuthorityCaller {
+  /** Repo-relative path of the module that spawns the child CLI (git-ls-files spelling). */
+  module: string;
+  /** The symbol that spawns it, as a reader would look it up. */
+  symbol: string;
+  /** The process entry point that runs this caller. */
+  verb: string;
+  gate: AuthorityGateKind;
+  /** For a `host-switch` gate: the host state file and the flag in it that must be on. */
+  hostSwitch?: string;
+  /** Ledger step name(s) this caller writes around the child run; empty when none exists (an honest gap). */
+  ledgerSteps: string[];
+}
 
 /**
  * The kind of external write a row performs. A superset of {@link
@@ -126,7 +149,23 @@ export interface AuthorityRow {
   verb: string;
   /** Caveats, the W1-T that shaped this row's gate, or why it is classified as it is. */
   note: string;
+  /**
+   * W1-T13773: every other module that reaches this write by spawning `verb` as a child process.
+   * Absent when the verb is the only way in; `test/authority-ratchet.test.ts`'s fifth shape names a
+   * missing one.
+   */
+  callers?: AuthorityCaller[];
 }
+
+/** W1-T13773: the daemon's move janitor runs `rmd move-task --apply` as a child, one step per tick. */
+const PLAN_TASK_MOVE_JANITOR_CALLER: AuthorityCaller = {
+  module: "src/lib/plan-task-move-janitor.ts",
+  symbol: "runPlanTaskMoveTick (planTaskMovePorts(...).move)",
+  verb: "daemon plan-task-move action",
+  gate: "host-switch",
+  hostSwitch: "state/plan-destination.json move_public_tasks (dispatch_ops_tasks must also be on)",
+  ledgerSteps: ["plan.move.janitor_step", "plan.move.stand_down"],
+};
 
 /**
  * THE TABLE. One row per external write named in `test/authority-ratchet.test.ts`'s source
@@ -134,6 +173,8 @@ export interface AuthorityRow {
  * carrying an `assertLiveWriteAllowed(` call, a `gh api -X POST/PATCH/PUT/DELETE` argv, a
  * `gh pr|issue create/merge/comment/close` argv, or a raw `["push"` argv, must appear here by
  * `module`. The baseline is empty: every write measured at this task's own HEAD is entered below.
+ * W1-T13773's fifth shape finds child callers by the verb and flag literals of
+ * `rmd <verb> --<flag>` in tracked src files outside the row's module and CLI registration.
  */
 export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   {
@@ -359,7 +400,8 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     gate: "operator-verb",
     ledgerSteps: ["plan.move.step"],
     verb: "rmd move-task --apply",
-    note: "W1-T13680: at most one push per run, after the plan-PR emitter's preflight allows the exact commit; never a run- branch and never a refs/rmd-id reservation. Without --apply nothing is written.",
+    note: "W1-T13680: at most one push per run, after the plan-PR emitter's preflight allows the exact commit; never a run- branch and never a refs/rmd-id reservation. Without --apply nothing is written. W1-T13773: the daemon's move janitor runs the same verb, at most one step per tick and only after the mover's dry run.",
+    callers: [PLAN_TASK_MOVE_JANITOR_CALLER],
   },
   {
     id: "open-plan-move-pr",
@@ -370,7 +412,8 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     gate: "operator-verb",
     ledgerSteps: ["plan.move.step"],
     verb: "rmd move-task --apply",
-    note: "W1-T13680: no Remudero-Task line, so a merge credits no task as built; WAIT while any plan-move- pull request is open in either repository.",
+    note: "W1-T13680: no Remudero-Task line, so a merge credits no task as built; WAIT while any plan-move- pull request is open in either repository. W1-T13773: the daemon's move janitor runs the same verb, at most one step per tick and only after the mover's dry run.",
+    callers: [PLAN_TASK_MOVE_JANITOR_CALLER],
   },
   // ── src/spike.ts ─────────────────────────────────────────────────────────────────────────
   {
@@ -918,6 +961,11 @@ export function renderAuthorityReport(report: AuthorityReport): string {
         renderLastFired(row.lastFired),
       ].join(" "),
     );
+    // W1-T13773: one indented line per child-process caller, with its own gate and switch.
+    for (const caller of row.callers ?? []) {
+      const sw = caller.hostSwitch === undefined ? "" : ` switch ${caller.hostSwitch};`;
+      lines.push(`  + caller ${caller.verb}: gate ${caller.gate};${sw} ${caller.module} ${caller.symbol}`);
+    }
   }
   return lines.join("\n");
 }

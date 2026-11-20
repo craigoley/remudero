@@ -636,6 +636,15 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["observeCloneHealth"],
     outcomes: ["recovered"],
   },
+  {
+    step: "skills.lifecycle_judged",
+    meaning:
+      "A knowledge-gardener skill-lifecycle pass judged one offered, approved skill before updating the proposal " +
+      "registry. `status` and `basis` are its effectiveness verdict. The row carries the settle window and " +
+      "each arm's terminal runs, merged runs and cost per merged PR.",
+    writer: ["stageSkillLifecycleForAction"],
+    outcomes: ["RETIRE-CANDIDATE", "REVIEW-CANDIDATE", "INSUFFICIENT EVIDENCE"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
