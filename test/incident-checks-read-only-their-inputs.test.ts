@@ -136,3 +136,44 @@ test("W1-T13828: a tail with a line filter parses and holds only the kept lines 
     assert.equal(keepLine.lastIndex, 3, "the caller's regex state is preserved");
   }
 });
+
+test("W1-T13828: a tail with a line filter parses and holds only the kept lines when test is overridden", (t) => {
+  const path = join(ownedFixtureDir(t, "incident-tail-regexp-override").dir, "ledger.ndjson");
+  const kept = { step: "runtime.loop_lag", ts: at(0), p99Ms: 1 };
+  const rejected = { ...kept, p99Ms: 2 };
+  writeFileSync(path, [kept, rejected, kept, rejected].map((row) => JSON.stringify(row)).join("\n"));
+
+  class LagFilter extends RegExp {
+    override test(line: string): boolean {
+      return super.test(line) && !line.includes('"p99Ms":2');
+    }
+  }
+
+  for (const flag of ["g", "y"]) {
+    const keepLine = new LagFilter(/^\{"step":"runtime\.loop_lag"/, flag);
+    keepLine.lastIndex = 3;
+    const tail = createLiveLedgerTail(path, 60 * 60_000, { keepLine });
+    const parse = t.mock.method(JSON, "parse");
+    try {
+      assert.deepEqual(tail(NOW), [kept, kept], `the ${flag} filter uses the caller's override`);
+      assert.equal(parse.mock.callCount(), 2, "the rejected complete and pending lines are never parsed");
+      assert.equal(keepLine.lastIndex, 3, "the caller's regex state is preserved");
+    } finally {
+      parse.mock.restore();
+    }
+  }
+});
+
+test("W1-T13828: a tail with a line filter parses and holds only the kept lines within the retention window", (t) => {
+  const path = join(ownedFixtureDir(t, "incident-tail-untimed").dir, "ledger.ndjson");
+  const first = { step: "runtime.loop_lag", ts: at(1) };
+  const last = { step: "runtime.loop_lag", ts: at(0) };
+  writeFileSync(path, `${JSON.stringify(first)}\n42\nnull\n${JSON.stringify(last)}\n7`);
+  const tail = createLiveLedgerTail(path, 60 * 60_000, { keepLine: /./ });
+
+  const cold = parses(t, () => assert.deepEqual(tail(NOW), [first, last]));
+  assert.equal(cold, 2, "untimed JSON values leave both neighboring rows available");
+  appendFileSync(path, "\n");
+  const warm = parses(t, () => assert.deepEqual(tail(NOW), [first, last]));
+  assert.equal(warm, 0, "completing an untimed line leaves both cached timestamps intact");
+});
