@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -9,6 +9,8 @@ import type { Config } from "#src/lib/config.js";
 import { fixedClock, type Clock } from "#src/lib/clock.js";
 import { benchmarkRunAttemptReceipt, benchmarkWorkerAttemptResources, spawnFailureDetail } from "#src/lib/benchmark-run.js";
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
+import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
+import { recordReviewFindings } from "#src/lib/review-findings.js";
 import {
   CASH_SERVED_MODEL_REASONS,
   CODEX_REROUTE_RE,
@@ -191,6 +193,40 @@ async function runHungCodex(items: Record<string, unknown>[], end: "hang" | "ove
   } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+/** A codex call under a selected private registry that completes after its stream named `items`, and whose private
+ * profile is then removed, so cleanup fails after the call already returned a result. */
+async function runCleanupFailedCodex(items: Record<string, unknown>[]): Promise<unknown> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-codex-cleanup-"));
+  const codexHome = join(root, "codex-home"), cwd = join(root, "checkout"), selected = join(root, "private.yaml");
+  const registryText = "instances:\n  worker:\n    github_repo: owner/repo\n";
+  mkdirSync(codexHome); mkdirSync(cwd); mkdirSync(join(root, ".remudero"));
+  writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), registryText.replace("repo\n", "repo\n    mode: live\n"));
+  writeFileSync(selected, registryText.replace("repo\n", "repo\n    mode: shadow\n"));
+  const run = Reflect.get(runtimeRegistry, "withInstanceRegistryRuntime") as <T>(op: () => Promise<T>, input: { envPath: string }) => Promise<T>;
+  try {
+    await run(() => spawnCodexWorker({
+      cwd, workerHome: root, prompt: "review", settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"),
+      tools: ["Read", "Bash"],
+      containment: { spawn: (options) => {
+        const index = options.args.indexOf("--profile");
+        unlinkSync(join(codexHome, options.args[index + 1]! + ".config.toml"));
+        const stdin = new PassThrough(), stdout = new PassThrough();
+        const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr: new PassThrough() });
+        stdin.on("finish", () => {
+          stdout.end([{ type: "thread.started", thread_id: "codex-thread" }, { type: "turn.started" },
+            ...items.map((item) => ({ type: "item.completed", item })), { type: "turn.completed", usage: {} }]
+            .map((event) => `${JSON.stringify(event)}\n`).join(""));
+          queueMicrotask(() => child.emit("exit", 0));
+        });
+        stdin.resume();
+        return { process: child as never, pid: 31_339 };
+      }, teardown: () => {} },
+    }, { claudeBin: "/unused/claude", root,
+      workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna", codexHome } } as Config), { envPath: selected });
+    return undefined;
+  } catch (error) { return error; } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 /** A cash call routed through production `spawnWorker` whose adapter returns `result` only once the clock-bound watchdog
  * has aborted it: the reply that named a model came back, and a later turn stalled past the bound. */
 async function runAbandonedCash(result: Partial<WorkerResult>): Promise<unknown> {
@@ -287,6 +323,33 @@ test("W1-T13868 criterion 1: a codex call and a GPT call each record the model t
   const crashed = await runHungCodex([reroute], "crash");
   assert.ok(crashed instanceof Error && /crashed/.test(crashed.message), String(crashed));
   assert.equal(spawnFailureDetail(crashed, true).served_model, "gpt-5.2");
+
+  // A codex call that returned a named model, and whose private profile cleanup then failed, still records that model.
+  const cleanupFailed = await runCleanupFailedCodex([reroute]);
+  assert.ok(cleanupFailed instanceof runtimeRegistry.InstanceRegistryRuntimeError, String(cleanupFailed));
+  assert.match(String(cleanupFailed), /worker_profile_cleanup_unknown/);
+  assert.equal(spawnFailureDetail(cleanupFailed, true).served_model, "gpt-5.2");
+  const cleanupUnnamed = spawnFailureDetail(await runCleanupFailedCodex([]), true);
+  assert.equal(cleanupUnnamed.served_model, null);
+  assert.equal(cleanupUnnamed.served_model_reason, CODEX_SERVED_MODEL_REASON);
+
+  // A Codex or GPT review whose reviewer named no model writes review.finding rows that name why, never a bare null.
+  const findingRows: Record<string, unknown>[] = [];
+  const capture = { state: "captured", verifiedCount: 0, invalidCount: 0, droppedCount: 0, findings: [{ id: "f1", lineageKey: "l1",
+    criterion: 1, category: "correctness", severity: "high", mechanism: "m", remedy: "r",
+    anchor: { path: "src/a.ts", line: 1, kind: "changed", status: "unsupported", evidenceDigest: "d" } }] } as never;
+  const reviewProvenance = { provider: "codex", requestedModel: "gpt-6-luna", servedModel: null, effort: "high", sessionId: "s" };
+  for (const servedModelReason of [CODEX_SERVED_MODEL_REASON, undefined]) {
+    recordReviewFindings(capture, { taskId: "W1-T13868", prUrl: "https://github.com/o/r/pull/1", headSha: "a".repeat(40),
+      decisionDigest: "d", provenance: { ...reviewProvenance, servedModelReason }, log: (step, row) => findingRows.push({ step, ...row }) });
+  }
+  assert.equal(findingRows[0]?.served_model, null);
+  assert.equal(findingRows[0]?.served_model_reason, CODEX_SERVED_MODEL_REASON, "the reviewer's own reason is kept");
+  assert.equal(typeof findingRows[1]?.served_model_reason, "string", "a null with no reviewer reason still names one");
+  recordReviewFindings(capture, { taskId: "W1-T13868", prUrl: "https://github.com/o/r/pull/1", headSha: "a".repeat(40),
+    decisionDigest: "d", provenance: { ...reviewProvenance, servedModel: "gpt-5.2" }, log: (step, row) => findingRows.push({ step, ...row }) });
+  assert.equal(findingRows[2]?.served_model, "gpt-5.2");
+  assert.equal("served_model_reason" in findingRows[2]!, false, "a named model carries no reason");
 
   // Through production spawnWorker: the watchdog replaces a cash rung that named its model with WorkerAbandonedError, and
   // the failed-attempt row still records that model (or the rung's named reason) through the error's cause.

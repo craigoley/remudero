@@ -3335,8 +3335,8 @@ async function withPrivateRegistryCodexProfile<T>(
     if (error instanceof InstanceRegistryRuntimeError) throw error;
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
   }
-  let operationFailed = false, originalError: unknown;
-  try { await assertInstanceRegistryRuntimeCurrent(); return await operation(profile); }
+  let operationFailed = false, originalError: unknown, result: T | undefined;
+  try { await assertInstanceRegistryRuntimeCurrent(); result = await operation(profile); return result; }
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
@@ -3354,6 +3354,14 @@ async function withPrivateRegistryCodexProfile<T>(
       // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
       const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
       if (operationFailed) error.cause = originalError;
+      else {
+        // W1-T13868: the call already returned; its served model must outlive a cleanup failure that replaces it.
+        const served = (result as { servedModel?: unknown; servedModelReason?: unknown } | undefined);
+        if (served !== undefined && served !== null && typeof served === "object" && "servedModel" in served) {
+          withObservedServedModel(error, { servedModel: typeof served.servedModel === "string" ? served.servedModel : null,
+            ...(typeof served.servedModelReason === "string" ? { servedModelReason: served.servedModelReason } : {}) });
+        }
+      }
       throw error;
     } finally { closeSync(fd!); }
   }
