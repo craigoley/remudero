@@ -693,6 +693,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(lifetimeHistoryBackstop) && files.some((f) => lifetimeHistoryEdges.includes(f))) {
     pathReaders.push(lifetimeHistoryBackstop);
   }
+  // W1-T10557 (PR #13946): the import graph covers the source paths. Keep the two sibling routing edges explicit.
+  const claudeLogin = suitePath("test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts");
+  const claudeLoginSiblings = [
+    suitePath("test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts"),
+    suitePath("test/routing/the-console-signs-the-fleet-into-claude.test.ts"),
+  ];
+  if (input.files.has(claudeLogin) && claudeLoginSiblings.some((suite) => changedSet.has(suite))) {
+    pathReaders.push(claudeLogin);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
