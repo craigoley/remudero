@@ -29,6 +29,7 @@ const ANCHOR_BYTES = 64;
 /** W1-T13828: each retained row's parsed time, so the retention pass parses a row's time once, not once a call. */
 const rowTimes = new WeakMap<object, number | null>();
 function rowMs(row: Record<string, unknown>): number | undefined {
+  if (row === null || typeof row !== "object") return undefined;
   const held = rowTimes.get(row);
   if (held !== undefined) return held ?? undefined;
   const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -44,10 +45,14 @@ function retained(row: Record<string, unknown>, cutoff: number, keepUntimed: boo
 
 function lineFilter(pattern: RegExp): (line: string) => boolean {
   if (!pattern.global && !pattern.sticky) return (line) => pattern.test(line);
-  const regex = new RegExp(pattern);
   return (line) => {
-    regex.lastIndex = 0;
-    return regex.test(line);
+    const lastIndex = pattern.lastIndex;
+    pattern.lastIndex = 0;
+    try {
+      return pattern.test(line);
+    } finally {
+      pattern.lastIndex = lastIndex;
+    }
   };
 }
 

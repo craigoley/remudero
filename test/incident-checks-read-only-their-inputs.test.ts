@@ -136,3 +136,40 @@ test("W1-T13828: a tail with a line filter parses and holds only the kept lines 
     assert.equal(keepLine.lastIndex, 3, "the caller's regex state is preserved");
   }
 });
+
+test("W1-T13828: a tail with a line filter parses and holds only the kept lines when test is overridden", (t) => {
+  class StepFilter extends RegExp {
+    override test(line: string): boolean {
+      return super.test(line) && line.includes('"keep":true');
+    }
+  }
+  const path = join(ownedFixtureDir(t, "incident-tail-custom-regexp").dir, "ledger.ndjson");
+  const kept = { step: "runtime.loop_lag", ts: at(0), keep: true };
+  const keptLine = JSON.stringify(kept);
+  const rejectedLine = JSON.stringify({ ...kept, keep: false });
+  writeFileSync(path, [keptLine, rejectedLine, keptLine, rejectedLine].join("\n"));
+  for (const flag of ["g", "y"]) {
+    const keepLine = new StepFilter(/^\{"step":"runtime\.loop_lag"/, flag);
+    keepLine.lastIndex = 3;
+    const tail = createLiveLedgerTail(path, 60 * 60_000, { keepLine });
+    const parse = t.mock.method(JSON, "parse");
+    try {
+      assert.deepEqual(tail(NOW), [kept, kept]);
+      assert.deepEqual(parse.mock.calls.map(({ arguments: [line] }) => line), [keptLine, keptLine]);
+      assert.equal(keepLine.lastIndex, 3);
+    } finally {
+      parse.mock.restore();
+    }
+  }
+});
+
+test("W1-T13828: kept JSON primitives do not interrupt retention of timed ledger rows", (t) => {
+  const path = join(ownedFixtureDir(t, "incident-tail-primitives").dir, "ledger.ndjson");
+  const first = { step: "runtime.loop_lag", ts: at(1) };
+  const second = { step: "runtime.loop_lag", ts: at(0) };
+  writeFileSync(path, [JSON.stringify(first), "17", JSON.stringify(second), "null"].join("\n"));
+  const tail = createLiveLedgerTail(path, 60 * 60_000, { keepLine: /./ });
+  assert.equal(parses(t, () => assert.deepEqual(tail(NOW), [first, second])), 2);
+  appendFileSync(path, "\n");
+  assert.equal(parses(t, () => assert.deepEqual(tail(NOW), [first, second])), 0);
+});
