@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # a new command that chooses a host, runs a preflight there and may push a branch
+  risk: high # a new command that chooses a host, runs a preflight there and may push a branch; widened by a scope amendment for #19651 to the authority registry, the generated CLI reference and optional abort-signal plumbing in git-push, worktree-git and github-transport
   band_meaning: span
   origin: operator-session#follow-ups-2026-11-10
   plan_refs:
@@ -16,8 +16,13 @@
     - W1-T11914
   files:
     - src/lib/hand-ship.ts
+    - src/lib/git-push.ts
+    - src/lib/worktree-git.ts
+    - src/lib/github-transport.ts
     - src/run-task.ts
     - test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts
+    - src/lib/authority.ts
+    - docs/cli-reference.md
   status: queued
   attempts: 0
   acceptance:
