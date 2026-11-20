@@ -20,7 +20,8 @@
     - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
     - test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts
     - test/sweep/a-design-hold-splits-or-rebuilds-what-it-covers.test.ts
-  status: queued
+    - test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a parked_pr.remedy row for the same pull request, cause and remedy (split-follow-up or close-and-rebuild) whose outcome is refused, whose refusal_checks name the plan preflight checks that refused the draft, and whose input_digest equals the digest of this pass's input (the head sha, the task file text read from the repository that holds it or the plan rebuild's sorted plan files, and the moved criteria), takeParkedPrRemedy calls neither reserveTaskId nor landTaskFiles, writes no row, and returns the remedy as unchanged with a reason that names the earlier refusal"
@@ -105,3 +106,6 @@
     5. Add no counter, bound, time window or config key. Grep test/ for tests that assert a refused split or rebuild
        is tried again at the same head, or assert the whole parked_pr.remedy row; one outside `files` needs an
        amendment. W1-T13656 (a held rebuild lands as a new file) is merged; build on it.
+    AMENDED (2026-11-19): the awaited reserver reservePlanRepairTaskIdAsync is a new reservation lane, so
+    test/a-daemon-lane-reclaim-needs-current-reservation-code.test.ts names it in its expected census map beside
+    reservePlanRepairTaskId (plan-repair).

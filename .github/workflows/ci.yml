@@ -115,11 +115,17 @@ jobs:
         id: dependency-evidence-path
         run: |
           echo "RMD_CI_DEPENDENCY_EVIDENCE=$RUNNER_TEMP/ci-dependency-evidence/evidence.json" >> "$GITHUB_ENV"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
         # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
         # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
         # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        # W1-T13825: that abort never fired. 13 of 18,150 checkouts after it merged still sat 314-1434 s
+        # in one silent fetch (job 134181189924: the env reached git, the fetch ran 19m50s). So the step
+        # is bounded by wall clock: past 3 minutes it is killed and the retry step below runs once.
+        timeout-minutes: 3
+        continue-on-error: true
         env:
           GIT_HTTP_LOW_SPEED_LIMIT: "1000"
           GIT_HTTP_LOW_SPEED_TIME: "120"
@@ -128,6 +134,17 @@ jobs:
           # `git show origin/main:src/run-task.ts` against the live checkout, and a shallow fetch
           # leaves no such ref. It self-clears on a re-run, so it reads as noise — it cost four CI
           # cycles across #1658, #1659 and #1677 in one day.
+          fetch-depth: 0
+      - name: Retry the checkout once after a stalled fetch (W1-T13825)
+        # Runs only when the bounded checkout above failed or timed out. No continue-on-error here, so
+        # a real checkout failure (bad ref, auth) still fails the job on its second try.
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
+        with:
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1714,11 +1731,28 @@ jobs:
     # test/workflow-job-timeouts.test.ts enforces that full dependency path and the margin.
     timeout-minutes: 49
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # W1-T13321: a stalled fetch aborts and actions/checkout retries it (3 attempts, 10-20 s apart).
         # 13 of 37,468 shard checkouts in 2026-11-10..17 sat in one silent fetch for 323-1245 s while
         # sibling shards fetched in 23-26 s; a healthy fetch ends in about 20 s, so 120 s under 1 KB/s
         # is never a healthy fetch. execGit passes process.env to git (checkout v7.0.1).
+        # W1-T13825: that abort never fired. 13 of 18,150 checkouts after it merged still sat 314-1434 s
+        # in one silent fetch (job 134181189924: the env reached git, the fetch ran 19m50s). So the step
+        # is bounded by wall clock: past 3 minutes it is killed and the retry step below runs once.
+        timeout-minutes: 3
+        continue-on-error: true
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "120"
+        with:
+          fetch-depth: 0
+      - name: Retry the checkout once after a stalled fetch (W1-T13825)
+        # Runs only when the bounded checkout above failed or timed out. No continue-on-error here, so
+        # a real checkout failure (bad ref, auth) still fails the job on its second try.
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
         env:
           GIT_HTTP_LOW_SPEED_LIMIT: "1000"
           GIT_HTTP_LOW_SPEED_TIME: "120"

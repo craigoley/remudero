@@ -26,11 +26,12 @@
  */
 import cluster from "node:cluster";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
-import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, type GenerationMessage } from "./serve-generation.js";
+import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, type GenerationMessage, type SwapProbeTrigger } from "./serve-generation.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 export const SERVE_HANDOFF_ENV = "RMD_SERVE_HANDOFF";
@@ -109,6 +110,99 @@ export function servePortOf(serveArgs: readonly string[] | undefined, fallback =
   const at = serveArgs?.indexOf("--port") ?? -1;
   const port = at >= 0 ? Number(serveArgs?.[at + 1]) : Number.NaN;
   return Number.isInteger(port) && port > 0 && port < 65_536 ? port : fallback;
+}
+
+/** W1-T13277: the host serve's own arguments bind (`--host H`); absent, every interface, as node's listen does. */
+export function serveHostOf(serveArgs: readonly string[] | undefined): string | undefined {
+  const at = serveArgs?.indexOf("--host") ?? -1;
+  const host = at >= 0 ? serveArgs?.[at + 1] : undefined;
+  return host && !host.startsWith("--") ? host : undefined;
+}
+
+/** W1-T13277: what serve's port answers while no generation holds it: why, since when, and how long a boot last took. */
+export interface RestartingState {
+  state: "starting" | "restarting";
+  since: string;
+  reason: "boot" | "restart" | "wedge";
+  /** The last measured time from fork to promotion; null before any boot has been measured. */
+  expectedReadyMs: number | null;
+}
+
+/** W1-T13277: the Retry-After a restarting answer gives before any boot has been measured. */
+export const RESTARTING_RETRY_AFTER_DEFAULT_S = 5;
+
+/** W1-T13277: seconds until the expected promotion, at least 1; the default before any measured boot. */
+export function restartingRetryAfterS(state: RestartingState, nowMs: number): number {
+  if (state.expectedReadyMs === null) return RESTARTING_RETRY_AFTER_DEFAULT_S;
+  const left = Date.parse(state.since) + state.expectedReadyMs - nowMs;
+  return Math.max(1, Math.ceil(left / 1000));
+}
+
+export interface RestartingAnswer {
+  /** Starts answering, or replaces the state it answers with. */
+  open(state: RestartingState): Promise<void>;
+  /** Stops answering and frees the port; resolves once the listener is closed. */
+  close(): Promise<void>;
+  state(): RestartingState | undefined;
+}
+
+/**
+ * W1-T13277: while no generation holds serve's port, the supervisor answers it itself: 503, Retry-After and the state
+ * as JSON, to every method. INVARIANT writes-are-never-swallowed: a request is answered at once and its connection
+ * closed, never held or replayed, so a write's only path is the caller's own retry.
+ */
+export function createRestartingAnswer(port: number, host: string | undefined, clock: Clock,
+  log: (step: string, extra?: Record<string, unknown>) => void): RestartingAnswer {
+  let current: RestartingState | undefined;
+  let answered = 0;
+  let listenPort = port;
+  let listening: ReturnType<typeof createServer> | undefined;
+  // One transition at a time: an open and a close never interleave on the listener.
+  let chain: Promise<void> = Promise.resolve();
+  const serially = (step: () => Promise<void>): Promise<void> => (chain = chain.then(step, step));
+  const server = (): ReturnType<typeof createServer> => createServer((req, res) => {
+    const state = current;
+    answered += 1;
+    const body = JSON.stringify(state ?? { state: "restarting", since: clock.iso(), reason: "restart", expectedReadyMs: null });
+    res.writeHead(503, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", connection: "close",
+      "retry-after": String(state ? restartingRetryAfterS(state, clock.now()) : RESTARTING_RETRY_AFTER_DEFAULT_S) });
+    res.end(body);
+    req.resume();
+  });
+  return {
+    state: () => current,
+    open: (state) => serially(async () => {
+      current = state;
+      if (listening) return;
+      const next = server();
+      const bound = await new Promise<boolean>((resolve) => {
+        next.once("listening", () => resolve(true));
+        next.once("error", (error) => {
+          log("serve.restarting_answer_failed", { port: listenPort, reason: errorText(error) });
+          resolve(false);
+        });
+        next.listen(listenPort, host);
+      });
+      if (!bound) return;
+      // Keep the same endpoint across restarts when the first bind used an ephemeral port.
+      listenPort = (next.address() as AddressInfo).port;
+      listening = next;
+      answered = 0;
+      log("serve.restarting_answer_opened", { port: listenPort, ...state });
+    }),
+    close: () => serially(async () => {
+      const open = listening;
+      const was = current;
+      listening = undefined;
+      current = undefined;
+      if (!open) return;
+      await new Promise<void>((resolve) => {
+        open.close(() => resolve());
+        open.closeAllConnections();
+      });
+      log("serve.restarting_answer_closed", { port: listenPort, answered, ...(was ? { reason: was.reason, since: was.since } : {}) });
+    }),
+  };
 }
 
 const TCP_STATES: Record<string, string> = {
@@ -334,6 +428,11 @@ export interface ServeSupervisorOptions {
   servePort?: number;
   /** W1-T13304: the hourly serve.cpu_budget row's seams. */
   cpuBudget?: ServeCpuBudgetOptions;
+  /**
+   * W1-T13277: answer serve's port with 503 and the restarting state while no generation holds it. `true` is serve's
+   * own port and host; an object names them (tests); absent, the gap is left unanswered as before.
+   */
+  restartingAnswer?: boolean | { port: number; host?: string };
 }
 
 /** W1-T9570: the free-memory reads after a tier-2 shed: the first, the one judged, how many, and what ended them. */
@@ -775,6 +874,16 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let lastWedgeRestartAt: number | undefined;
   /** Generations the supervisor itself is killing for a wedge: not probed again, and not a crash to roll back from. */
   const wedged = new Set<Generation>();
+  // W1-T13277: the answer on serve's port while nothing holds it, and the last measured boot it quotes.
+  const restartingOption = opts.restartingAnswer;
+  const restarting = restartingOption === undefined || restartingOption === false ? undefined
+    : restartingOption === true ? createRestartingAnswer(servePort, serveHostOf(opts.serveArgs), clock, opts.log)
+      : createRestartingAnswer(restartingOption.port, restartingOption.host, clock, opts.log);
+  let lastAloneReadyMs: number | undefined;
+  let booted = false;
+  const answerRestarting = (reason: RestartingState["reason"]): Promise<void> => restarting?.open({
+    state: booted ? "restarting" : "starting", since: clock.iso(), reason, expectedReadyMs: lastAloneReadyMs ?? null,
+  }) ?? Promise.resolve();
 
   const fork = (slot: PreparedSlot): Generation => {
     const id = ++next;
@@ -959,6 +1068,15 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     stopProbing = every(() => void probeTick().catch((err: unknown) => opts.log("serve.active_probe_error", { reason: errorText(err) })), ACTIVE_PROBE_INTERVAL_MS);
   };
 
+  /** W1-T13832: ask the generation now serving to probe its views once. Never awaited, so it cannot hold a swap. */
+  const askSwapProbe = (generation: Generation, trigger: SwapProbeTrigger, fromSha?: string): void => {
+    try {
+      generation.process.send({ type: GENERATION_MESSAGES.swapProbe, trigger, generation: generation.id, sha: generation.slot.sha, ...(fromSha === undefined ? {} : { fromSha }) });
+    } catch (error) {
+      opts.log("serve.swap_probe_unsent", { generation: generation.id, trigger, reason: errorText(error) });
+    }
+  };
+
   const activate = (generation: Generation): void => {
     active = generation;
     startProbing();
@@ -985,6 +1103,8 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       generation.process.onMessage((message) => message.type === GENERATION_MESSAGES.promoted && resolve(true));
       void generation.exited.then(() => resolve(false));
     });
+    // W1-T13277: the generation binds serve's port on promote, so the restarting answer frees it first.
+    await restarting?.close();
     generation.process.send({ type: GENERATION_MESSAGES.promote });
     if (!(await promoted)) return false;
     // The standby's boot peak, not its RSS at this instant: both generations are resident until the drain ends.
@@ -1056,6 +1176,9 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       return { ...failure, startedAt, readyMs: clock.now() - startedAt };
     }
     activate(generation);
+    // W1-T13277: the measured boot the next restarting answer quotes.
+    lastAloneReadyMs = clock.now() - startedAt;
+    booted = true;
     return { generation, startedAt, readyMs: clock.now() - startedAt };
   };
 
@@ -1320,11 +1443,14 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       overlapPeakBytes: measured.overlapPeakBytes, overlapSamples: measured.overlapSamples,
       ...(from.workersShedAt === undefined ? {} : { workersShedMs: lastDoneAt - from.workersShedAt }),
     });
+    askSwapProbe(up.generation, "handoff", from.slot.sha);
   };
 
   /** A promoted generation died on its own: replace it, from the previous slot when it is a different build. */
   const replaceCrashed = async (dead: Generation, code: number | null, signal: string | null): Promise<void> => {
     active = undefined;
+    // W1-T13277: from the exit on, serve's port says it is restarting, through the back-off and the boot.
+    void answerRestarting(wedged.has(dead) ? "wedge" : "restart");
     if (inFlight) await inFlight;
     if (active) return;
     crashes += 1;
@@ -1338,6 +1464,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     const up = await bringUpAlone(slot);
     if (up.generation) {
       previous = undefined;
+      askSwapProbe(up.generation, "crash_restart", dead.slot.sha);
       return reportAlone(up.generation, up.startedAt, up.readyMs);
     }
     opts.log("serve.generation_restart_failed", { sha: slot.sha, criterion: up.criterion });
@@ -1361,6 +1488,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
+      await answerRestarting("boot");
       const up = await bringUpAlone(opts.coldSlot);
       if (!up.generation) {
         opts.log("serve.cold_start_failed", { sha: opts.coldSlot.sha, criterion: up.criterion, detail: up.detail });
@@ -1368,6 +1496,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
         return;
       }
       opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      askSwapProbe(up.generation, "cold_start");
       if (opts.spaceFromBoot === true && spacingBaseMs > 0) lastDoneAt = clock.now();
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
@@ -1399,6 +1528,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       stopping = true;
       stopProbing?.();
       budget.stop();
+      await restarting?.close();
       const generation = active;
       if (generation) await drainOld(generation, reason);
       exit(0);

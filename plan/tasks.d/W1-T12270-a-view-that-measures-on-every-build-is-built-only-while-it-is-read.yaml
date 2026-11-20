@@ -21,6 +21,12 @@
     - test/console-api/read-model/a-view-that-measures-on-every-build-is-built-only-while-it-is-read.test.ts
     - test/an-unread-view-backs-off-and-a-read-snaps-it-back.test.ts
     - test/a-read-of-one-instance-paces-only-that-instance.test.ts
+    - test/view-etags-are-deterministic.test.ts
+    - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
+    - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
+  # refusal-amendment (W1-T12270, run work-fix-dispatch-W1-T12270-1795122281770-3ca7@7fd08018a84725ba60cb1eb9dd13ab85d72768b6, 2026-11-19T22:06:52.830Z): the worker refused criterion 5 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
+  #   worker evidence: Stopping unread production `now` units prevents the shadow gate from collecting the fresh comparisons it requires without console traffic.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
@@ -55,3 +61,10 @@
     NOT IN SCOPE: what the `now` view measures, the cost of one build, and the heavy lane.
   falsifier: |
     Keep building at the largest stretch and criteria 1 and 5 must fail. Ignore a read of the needs-you view and criterion 2 must fail. Answer the first read with the old body as current and criterion 3 must fail. Stop a unit that a connected reader reads and criterion 4 must fail. Restore and require all five to pass.
+  note: |
+    files: amendment 2026-11-19: the stop rule moves three suites the first build did not list.
+    test/view-etags-are-deterministic.test.ts never read its views, so the stopped now view's idle republish posted a
+    body; it now notes reads. test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts (W1-T11933 criterion 3)
+    asserted the now view holds at its stretch bound; it now asserts the stop. Both were red on #19655 at 728d1e152.
+    The is-not-rebuilt suite's restamp fixture view is read-paced and unread across its 10-minute jump, so it stops
+    and makes 6 calls, not 7; red at 728d1e152 merged with origin/main, green on origin/main alone.
