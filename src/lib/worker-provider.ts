@@ -2552,6 +2552,12 @@ class CodexJsonlAccumulator {
   private readonly reroutes: string[] = [];
   /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
   observedServedModel(): { servedModel: string | null; servedModelReason?: string } { return codexServedModel(this.reroutes); }
+  /** W1-T13868: record a model the stream named. Past the bound the newest name replaces the last kept one, so the
+   *  model that served the final turn is never dropped for an earlier one. */
+  private observeModel(model: string): void {
+    if (this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(model);
+    else this.reroutes[CODEX_REROUTES_KEPT - 1] = model;
+  }
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -2774,12 +2780,12 @@ class CodexJsonlAccumulator {
     if (event.type === "item.completed") this.observeToolCalls(event.item);
     if (event.type === "item.completed" && event.item?.type === "error" && typeof event.item.message === "string") {
       const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
-      if (to !== undefined && this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(to);
+      if (to !== undefined) this.observeModel(to);
     }
     // W1-T13868: codex 0.152.0 streams no model id on any event, but an event that does carry one (a later CLI, a
     // proxy) names the model that served it, in stream order with the reroutes: the latest name is recorded.
     const eventModel = cashResponseModel(event.model);
-    if (eventModel !== undefined && this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(eventModel);
+    if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;

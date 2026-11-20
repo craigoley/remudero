@@ -549,3 +549,13 @@ test("W1-T13868 criterion 1: a receipt scope that opens after the model was obse
     assert.deepEqual(ledger.map((row) => row.served_model), ["gpt-5.3-codex"], "the non-dispatch lane's row");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T13868 criterion 1: past the kept bound, a codex call still records the model its final event named", async () => {
+  const reroutes = Array.from({ length: 70 }, () => ({ type: "error", message: "model rerouted: gpt-6-luna -> gpt-5.2 (HighRiskCyberActivity)" }));
+  const result = await runCodex(reroutes, 1, "gpt-5.3-codex");
+  assert.equal(result.isError, false, result.stderr);
+  assert.equal(result.servedModel, "gpt-5.3-codex", "the final event's model, not an earlier one kept before the bound");
+  assert.equal(benchmarkWorkerAttemptResources(result).served_model, "gpt-5.3-codex", "the worker.attempt row");
+  const bounded = await runCodex(reroutes);
+  assert.equal(bounded.servedModel, "gpt-5.2", "positive control: without a final model the latest reroute is recorded");
+});
