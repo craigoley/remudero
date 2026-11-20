@@ -6977,7 +6977,7 @@ export function applyReviewStatusHistoryGuard(
   computed: ReviewVerdict,
   headSha: string,
   history: ReviewStatusHistory,
-  reviewerTranscript = "",
+  reviewerEvidence?: ReviewerHistoryEvidence | string,
   previouslyAddressedIds: readonly string[] = computed.reproducedFailuresAddressedAtHead === headSha
     ? computed.reproducedFailureIdsAddressed ?? [] : [],
   presentedFailureIds: readonly string[] = [],
@@ -6988,19 +6988,13 @@ export function applyReviewStatusHistoryGuard(
   if (failures.length === 0) return { kind: "post", verdict: computed };
   const addressed = new Set(previouslyAddressedIds);
   const presented = new Set(presentedFailureIds);
-  const observed = parseReviewerVerdicts(reviewerTranscript, computed.criteria.length);
-  const explained = new Map<number, string>();
-  for (const clause of reviewerTranscript.matchAll(REVIEW_VERDICT_LINE_RE)) {
-    if (clause[2]!.toUpperCase() === "PASS" && extractBoundedClause(clause[3]!) !== undefined) {
-      explained.set(Number(clause[1]), extractBoundedClause(clause[3]!)!);
-    }
-  }
-  for (const match of reviewerTranscript.matchAll(/^REVIEW_ADDRESSED_FAILURE\s+(\d+)\s*:\s*([a-f0-9]{64})\s*$/gim)) {
-    const criterion = Number(match[1]);
-    const id = match[2]!.toLowerCase();
-    if (presented.has(id) && explained.has(criterion) && observed[criterion - 1] === true &&
+  const evidence = typeof reviewerEvidence === "string"
+    ? parseReviewerHistoryEvidence(reviewerEvidence, computed.criteria.length) : reviewerEvidence;
+  for (const { criterion, id } of evidence?.acknowledgements ?? []) {
+    const clause = evidence?.passClauses.get(criterion);
+    if (presented.has(id) && clause !== undefined &&
         failures.some((finding) => finding.id === id && finding.criterion === criterion &&
-          clauseAddressesReproduction(explained.get(criterion)!, finding))) addressed.add(id);
+          clauseAddressesReproduction(clause, finding))) addressed.add(id);
   }
   const unaddressed = failures.filter((finding) => !addressed.has(finding.id));
   if (unaddressed.length === 0) {
@@ -8352,6 +8346,27 @@ function extractBoundedClause(trailing: string): string | undefined {
   if (!explanation) return undefined;
   const bounded = explanation.length > REVIEWER_CLAUSE_MAX_CHARS ? cutClause(explanation) : explanation;
   return tag ? `(${tag[1]!.toLowerCase()}) ${bounded}` : bounded;
+}
+
+export interface ReviewerHistoryEvidence {
+  readonly passClauses: ReadonlyMap<number, string>;
+  readonly acknowledgements: readonly { criterion: number; id: string }[];
+}
+
+/** Evidence for resolving prior same-head failures comes from observed verdicts and explicit acknowledgements. */
+export function parseReviewerHistoryEvidence(text: string, count: number): ReviewerHistoryEvidence {
+  const records = withoutReviewerFollowUpRecords(text);
+  const observed = parseReviewerVerdicts(text, count);
+  const passClauses = new Map<number, string>();
+  for (const [, criterionText, verdict, trailing] of records.matchAll(REVIEW_VERDICT_LINE_RE)) {
+    const criterion = Number(criterionText);
+    if (observed[criterion - 1] !== true || verdict.toUpperCase() !== "PASS") continue;
+    const clause = extractBoundedClause(trailing);
+    if (clause !== undefined) passClauses.set(criterion, clause);
+  }
+  const acknowledgements = Array.from(text.matchAll(/^REVIEW_ADDRESSED_FAILURE\s+(\d+)\s*:\s*([a-f0-9]{64})\s*$/gim),
+    ([, criterion, id]) => ({ criterion: Number(criterion), id: id.toLowerCase() }));
+  return { passClauses, acknowledgements };
 }
 
 /** (W1-T2263) Companion to {@link parseReviewerVerdicts}, reading the SAME transcript through the SAME regex for the
@@ -12166,6 +12181,7 @@ export interface PostReviewStatusGuardedOpts {
   reviewInputDigest?: string;
   reviewDecisionDigest?: string;
   verdict?: ReviewVerdict;
+  reviewerHistoryEvidence?: ReviewerHistoryEvidence;
   reviewerTranscript?: string;
   presentedFailureIds?: readonly string[];
   readReviewStatusHistory?: ReviewStatusHistoryReader;
@@ -12325,7 +12341,7 @@ export async function postReviewStatusGuarded(
         capped: opts.verdict?.capped ?? false, keywordOnly: opts.verdict?.keywordOnly ?? false,
         planOnly: opts.verdict?.planOnly ?? false, summary: opts.verdict?.summary ?? opts.description ?? "remudero-review: PASS" };
       const guarded = applyReviewStatusHistoryGuard(computed, opts.sha, history,
-        opts.reviewerTranscript, undefined, opts.presentedFailureIds);
+        opts.reviewerHistoryEvidence ?? opts.reviewerTranscript, undefined, opts.presentedFailureIds);
       if (guarded.kind === "pending") {
         const reason = `pending: ${guarded.reason}`;
         appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused",

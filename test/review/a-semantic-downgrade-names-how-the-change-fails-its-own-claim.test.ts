@@ -4,7 +4,9 @@
 // then folds as before. The fixtures replay recorded clauses of 2026-11-19 (core ledger union, review.posted rows).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -106,13 +108,14 @@ function reviewFixture(t: TestContext, criterion: Criterion, failingCriterion?: 
     { when: "/statuses?", stdout: "[[]]" },
     { when: "/status", stdout: '{"statuses":[]}' },
     { when: "api ", stdout: "{}" },
-  ], { kind: "semantic-downgrade-review" });
+  ], { kind: "semantic-downgrade-review", parent: ownedFixtureDir(t, "semantic-downgrade-gh").dir });
   const oldPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${oldPath}`;
   t.after(() => { if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath; });
   const prompts: string[] = [];
   const drive = async (transcript: string, opts: {
     mount?: keyof typeof MOUNTS; ledger?: string; headRefName?: string; shadow?: boolean; inputBody?: string;
+    readReviewStatusHistory?: review.ReviewStatusHistoryReader;
   } = {}) => {
     const mount = MOUNTS[opts.mount ?? "sol"];
     const ledgerPath = join(repo.dir, opts.ledger ?? "ledger.ndjson");
@@ -127,6 +130,7 @@ function reviewFixture(t: TestContext, criterion: Criterion, failingCriterion?: 
         run_id: runId, task_id: "W1-T13849", step: health.reviewerShadowStep(step, opts.shadow === true), ...extra,
       }),
       say: () => {}, account: (worker: unknown) => worker, spawnReviewer: true, readReviewReuseFacts: () => undefined,
+      readReviewStatusHistory: opts.readReviewStatusHistory,
       runtimeImageSha: null,
       reviewerSpawnWorker: async (args: { prompt: string }) => {
         prompts.push(args.prompt);
@@ -336,6 +340,53 @@ test("W1-T13849 criterion 3: each shadow input holds once independently of produ
     "a shadow hold never consumes the production retry");
 });
 
+test("W1-T13849 criterion 3: a rotation after archive listing cannot hide the same-input hold", async (t) => {
+  const { drive, head, ledgerPath } = reviewFixture(t, W1_T12176);
+  const transcript = `REVIEW_VERDICT 1: FAIL ${W1_T12176_CLAUSE}`;
+  const inputBody = "hold before rotation";
+  const first = await drive(transcript, { inputBody });
+  assert.equal(first.verdict.verdictWithheld, "downgrade-unclassified");
+
+  const stateDir = dirname(ledgerPath);
+  const readFile = fsPromises.readFile;
+  const initialLedger = readFileSync(ledgerPath);
+  let rotations = 0;
+  let rotationsRemaining = 1;
+  t.mock.method(fsPromises, "readFile", (...args: Parameters<typeof readFile>) => {
+    if (args[0] === ledgerPath && rotationsRemaining > 0) {
+      rotationsRemaining -= 1;
+      rotations += 1;
+      writeFileSync(join(stateDir, `ledger.${rotations}.ndjson.gz`), gzipSync(readFileSync(ledgerPath)));
+      const nextLive = join(stateDir, "replacement-live");
+      writeFileSync(nextLive, "");
+      renameSync(nextLive, ledgerPath);
+    }
+    return readFile(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  assert.equal(await reviewCommand.unclassifiedHoldRecorded(ledgerPath, head, "unrelated-input", first.verdict.reviewDecisionDigest!), false);
+  assert.equal(rotations, 1);
+  // Put the first hold back on the live path to force the same race through publication.
+  writeFileSync(ledgerPath, initialLedger);
+  unlinkSync(join(stateDir, "ledger.1.ndjson.gz"));
+  rotationsRemaining = 1;
+  const retry = await drive(transcript, { inputBody });
+  assert.equal(rotations, 2);
+  assert.equal(retry.verdict.verdictWithheld, undefined);
+  assert.equal(retry.rows.some(row => row.step === "review.semantic_incomplete"), false);
+  const posted = retry.rows.find(row => row.step === "review.posted");
+  const decision = posted?.decision_verdict as review.ReviewVerdict | undefined;
+  assert.equal(posted?.state, "failure");
+  assert.equal(decision?.criteria[0]?.downgrade_class, "unclassified");
+
+  rotationsRemaining = 2;
+  assert.equal(await reviewCommand.unclassifiedHoldRecorded(ledgerPath, head, "unrelated-input", first.verdict.reviewDecisionDigest!), true,
+    "two successive changes leave the history uncertain, so another hold is refused");
+  assert.equal(rotations, 4);
+});
+
 test("W1-T13849 criterion 3: the decision reads the prior hold, and an explained, untagged FAIL still downgrades", (t) => {
   const input = {
     stage: "semantic", plan_only: false, required_semantic: false, criteria_count: 1, risk_present: true,
@@ -459,6 +510,33 @@ test("W1-T13849 criterion 5: a tagged regression starting with an empty argument
   assert.equal(verdict.criteria[0]!.downgrade_class, "c");
   assert.ok(verdict.criteria[0]!.reason.endsWith(`— NOTE: ${ORIGIN_MAIN_NOTE}: ${clause}`));
   assert.equal(verdict.state, "failure");
+});
+
+test("W1-T13849 criterion 5: follow-up prose cannot resolve a reproduced failure on the same head", async (t) => {
+  for (const mode of ["bare PASS", "quoted PASS", "explained PASS"] as const) {
+    await t.test(mode, async (t) => {
+      const { drive, head, shim } = reviewFixture(t, W1_T12176);
+      const id = createHash("sha256").update("same-head reproduced failure").digest("hex");
+      const failure = {
+        headSha: head, criterion: 1, id, summary: "padded final log line loses the crash cause",
+        finding: `1. ${W1_T12176.claim}\n   - proof executed and PASSED — NOTE: reviewer judged the proof non-responsive: ${W1_T12176_CLAUSE}`,
+      };
+      const acknowledgement = `REVIEW_ADDRESSED_FAILURE 1: ${id}`;
+      const explanation = `re-ran reproduction ${id}; it now passes`;
+      const pass = `REVIEW_VERDICT 1: PASS (${explanation})`;
+      const transcript = mode === "explained PASS" ? `${acknowledgement}\n${pass}`
+        : `${acknowledgement}\nREVIEW_VERDICT 1: PASS${mode === "quoted PASS" ? `\nREVIEW_FOLLOW_UP 1: ${pass}` : ""}`;
+      const { verdict, rows } = await drive(transcript, {
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [failure] }),
+      });
+      const expected = mode === "explained PASS" ? "success" : "failure";
+      assert.equal(verdict.state, expected);
+      assert.equal(rows.find(row => row.step === "review.posted")?.state, expected);
+      if (mode === "quoted PASS") assert.ok(reviewBodies(shim).includes(pass), "the quotation is still reported as a follow-up");
+      if (expected === "failure") assert.ok(verdict.criteria[0]?.reason.includes(W1_T12176_CLAUSE));
+      else assert.deepEqual(verdict.reproducedFailureIdsAddressed, [id]);
+    });
+  }
 });
 
 test("W1-T13849 criterion 5: the gate only narrows — failed proofs, failed floors, (c) and plan-only verdicts stand", async (t) => {

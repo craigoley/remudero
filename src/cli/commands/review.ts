@@ -8,9 +8,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
+import { parseReviewerHistoryEvidence, parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
-import { existsSync, lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -32,7 +32,7 @@ import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLin
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
-import { readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
+import { listedLedgerFiles, readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
 import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
@@ -433,15 +433,25 @@ export function reappendLostReviewPosted(
 export async function unclassifiedHoldRecorded(ledgerPath: string | undefined, headSha: string,
   inputDigest: string | undefined, decisionDigest: string, shadow = false): Promise<boolean> {
   if (!ledgerPath) return true;
-  const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPath), { step: reviewerShadowStep("review.semantic_incomplete", shadow),
-    refuseIncomplete: true, keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
-  if (!read.ok) return true;
-  return read.rawLines.some((line) => {
-    let row: Record<string, unknown>;
-    try { row = JSON.parse(line) as Record<string, unknown>; } catch { return false; /* deliberate: a torn line records no hold */ }
-    return row.reason === DOWNGRADE_UNCLASSIFIED && row.head_sha === headSha && (inputDigest !== undefined
-      ? row.review_input_digest === inputDigest : row.review_decision_digest === decisionDigest);
-  });
+  const stateDir = dirname(ledgerPath);
+  const step = reviewerShadowStep("review.semantic_incomplete", shadow);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { step, refuseIncomplete: true,
+      keep: (line) => line.includes(headSha) && line.includes(DOWNGRADE_UNCLASSIFIED) });
+    if (!read.ok || read.rawLines.some((line) => {
+      // The union's exact step filter already verified each line as a JSON object.
+      const row = JSON.parse(line) as Record<string, unknown>;
+      return row.reason === DOWNGRADE_UNCLASSIFIED && row.head_sha === headSha && (inputDigest !== undefined
+        ? row.review_input_digest === inputDigest : row.review_decision_digest === decisionDigest);
+    })) return true;
+    // Rotation publishes its archive before replacing the live file. A second listing after a miss
+    // detects an archive that landed between the first listing and the live read.
+    let listed = true;
+    const { rotations } = listedLedgerFiles(stateDir, { readdirSync }, () => { listed = false; });
+    if (!listed) return true;
+    if (rotations.length === read.archiveFiles.length && rotations.every((entry, i) => entry.path === read.archiveFiles[i])) return false;
+  }
+  return true; // Repeated rotation leaves history uncertain, just like an unreadable ledger.
 }
 
 /**
@@ -1480,7 +1490,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     sha: headSha,
     state: verdict.state,
     verdict,
-    reviewerTranscript: reviewerFindingText ?? "",
+    reviewerHistoryEvidence: reviewerFindingText === undefined ? undefined
+      : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length),
     presentedFailureIds: initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [],
     readReviewStatusHistory: readStatusHistory,
     description,
