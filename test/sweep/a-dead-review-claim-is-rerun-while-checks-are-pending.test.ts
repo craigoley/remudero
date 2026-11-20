@@ -67,3 +67,38 @@ test("W1-T14035: the bounds of the alongside-CI row still hold for a dead claim"
   const green = deriveDisposition(deadClaimView({ checksState: "green" }), DEFAULT_SWEEP_POLICY, NOW);
   assert.match(green.reason, /checks green, remudero-review owner proven dead/, "green checks keep the green row");
 });
+
+test("W1-T14035 criterion 1: a dead pending claim at a looping input escalates through the reviewInputLoop backstop", () => {
+  const loop = { admissions: 2, postsSinceLastAdmission: 1, posts: 1, lookedUpKey: "W1-T14035" };
+  const looped = { reviewInputDigest: "e".repeat(64), reviewInputLoop: loop };
+  const none = deriveDisposition(deadClaimView({ ...looped, reviewState: "none", reviewPendingOwnerDead: undefined,
+    reviewPendingSince: undefined }), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(none.disposition, "blocked-ambiguous", "the no-status path escalates at the backstop");
+  const dead = deriveDisposition(deadClaimView(looped), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(dead.disposition, "blocked-ambiguous", "a dead claim gets no third admission of the same input");
+  assert.match(dead.reason, /^post-review-loop: #19791 has been admitted for review 2 time\(s\)/);
+  const below = deriveDisposition(deadClaimView({ ...looped, reviewInputLoop: { ...loop, admissions: 1 } }),
+    DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(below.disposition, "post-review", "one admission is below the backstop and still re-runs");
+});
+
+test("W1-T14035 criterion 2: a derived release cause is not producer proof of death and does not re-run alongside CI", () => {
+  for (const gone of ["promise-harvest-incomplete", "refused-after-pending", "inconclusive-load"] as const) {
+    const r = deriveDisposition(deadClaimView({ reviewPendingOwnerGone: gone }), DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "wait", `${gone} waits while checks are pending`);
+    assert.doesNotMatch(r.reason, /owner proven dead/);
+  }
+  const pid = deriveDisposition(deadClaimView({ reviewPendingOwnerGone: "owner-pid-dead" }), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(pid.disposition, "post-review");
+  assert.match(pid.reason, /remudero-review owner proven dead/);
+});
+
+test("W1-T14035 criterion 3: a stale-only pending claim past the ceiling still waits while checks are pending", () => {
+  const stale = deriveDisposition(deadClaimView({ reviewPendingOwnerDead: undefined, reviewPendingSince: minutesAgo(61) }),
+    DEFAULT_SWEEP_POLICY, NOW);
+  assert.ok(61 >= DEFAULT_SWEEP_POLICY.pendingCeilingMinutes, "the fixture is past the stale ceiling");
+  assert.equal(stale.disposition, "wait", "a stale pending without proof of death is not taken over while CI runs");
+  const undated = deriveDisposition(deadClaimView({ reviewPendingOwnerDead: undefined, reviewPendingSince: undefined,
+    lastActivityAt: undefined }), DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(undated.disposition, "wait", "an undated pending reads stale and still waits");
+});

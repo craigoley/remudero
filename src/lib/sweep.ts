@@ -6611,9 +6611,18 @@ function reviewDemandLooping(pr: OpenPrView): boolean {
     pr.requiredContextsUnreadable !== true &&
     pr.reviewPostRefused !== true &&
     (pr.checksState === "green" || pr.checksState === "pending") &&
-    (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none") &&
+    (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none" ||
+      (pr.checksState === "pending" && pendingClaimOwnerProvenDead(pr))) &&
     loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP &&
     loop.postsSinceLastAdmission >= 1;
+}
+
+/** W1-T14035 — the alongside-CI row's release of a pending claim: GitHub reads pending and the view producer's own process
+ *  proof says its owner is dead. A derived cause (a refusal, a promise harvest, host load) also sets `reviewPendingOwnerDead`
+ *  but proves no death, so it keeps waiting while checks run (invariant live-claim-waits), as {@link pendingHoldOwnerProvenDead}. */
+function pendingClaimOwnerProvenDead(pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone">): boolean {
+  return pr.reviewState === "pending" && pr.reviewPendingOwnerDead === true &&
+    (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead");
 }
 
 /** W1-T6047 — a DELIVERED verdict dedups a re-post only while GitHub does not contradict it. A
@@ -13372,7 +13381,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     when: (pr, policy, _ageDays, now) => {
       const age = pendingAgeMinutes(pr, now);
       return pr.checksState === "pending" &&
-        (pr.reviewState === "none" || (pr.reviewState === "pending" && pr.reviewPendingOwnerDead === true)) &&
+        (pr.reviewState === "none" || pendingClaimOwnerProvenDead(pr)) &&
         pr.requiredContextsUnreadable !== true && pr.reviewPostRefused !== true &&
         (pr.priorReviewAttemptsForInput ?? 0) === 0 &&
         age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
