@@ -4011,8 +4011,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     readCiGateRollup,
     readRequiredCheckCompletions: async (pr) => {
       const branchChecks = await (branchRequiredChecks ??= readBranchRequiredChecks());
-      if (branchChecks === undefined) return [];
-      const required = new Set([...requiredChecks, ...branchChecks.keys()]);
+      const required = new Set([...requiredChecks, ...(branchChecks?.keys() ?? [])]);
+      if (required.size === 0) return [];
       try {
         // Match ci-gate's paginated check-runs read. Any completed attempt can release this hold.
         const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/check-runs?per_page=100&filter=all`,
@@ -4020,7 +4020,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             name: string; status: string; completed_at: string | null; app?: { id?: number } | null;
           }[] }[];
         return pages.flatMap(page => page.check_runs.flatMap(run => {
-          const pin = branchChecks.get(run.name);
+          const pin = branchChecks?.get(run.name);
           return required.has(run.name) && run.status === "completed" && typeof run.completed_at === "string" &&
             (pin == null || pin === -1 || pin === run.app?.id) ? [{ name: run.name, completedAt: run.completed_at }] : [];
         }));
@@ -25082,11 +25082,11 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
-    const standDownForPriorRound = (hold: PriorRoundHold | undefined) => {
+    const standDownForPriorRound = (hold: PriorRoundHold | undefined, remedy?: string) => {
       if (hold === undefined) return false;
       acted = false;
       spent = false;
-      standDownReason = hold.reason;
+      standDownReason = remedy === undefined ? hold.reason : `${hold.reason}; ${remedy}`;
       extraDisposedFields = { ...extraDisposedFields, ...priorRoundHoldFields(hold) };
       return true;
     };
@@ -25895,8 +25895,6 @@ export async function runSweep(
                 }
               }
               const roundHold = await readSweepPriorRoundHold(pr);
-              // A deferred job retry can produce the completion this FLAKE hold is waiting for.
-              if ((roundHold?.hold !== "FLAKE" || !pendingDeferral) && standDownForPriorRound(roundHold)) break;
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
                 row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
@@ -25917,8 +25915,9 @@ export async function runSweep(
                 // pending, but ask a person only if the amendment writer ultimately refuses it.
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
-                standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
-                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
+                const amended = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
+                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined));
+                if (amended !== undefined || !standDownForPriorRound(roundHold)) standDownReason = amended ?? reason;
                 break;
               }
               if (scopeAmendment?.outcome === "refused") {
@@ -26139,7 +26138,8 @@ export async function runSweep(
                 ciFailuresForFix = ciFailuresForFix.filter((failure) => !handledNames.has(failure.name));
                 if (ciFailuresForFix.length === 0) {
                   acted = false;
-                  standDownReason = `failed CI infrastructure check(s): ${outcomes.join("; ")}`;
+                  const reason = `failed CI infrastructure check(s): ${outcomes.join("; ")}`;
+                  if (!standDownForPriorRound(roundHold, reason)) standDownReason = reason;
                   break;
                 }
               }
@@ -26198,7 +26198,8 @@ export async function runSweep(
                   deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
-                  standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  const reason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  if (!standDownForPriorRound(roundHold, reason)) standDownReason = reason;
                   break;
                 }
               }
@@ -26219,11 +26220,11 @@ export async function runSweep(
                 if (ciFailuresForFix.length === 0) {
                   const retryReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   acted = false;
-                  standDownForPriorRound(roundHold);
-                  standDownReason = roundHold ? `${roundHold.reason}; ${retryReason}` : retryReason;
+                  if (!standDownForPriorRound(roundHold, retryReason)) standDownReason = retryReason;
                   break;
                 }
               }
+              // A required job retry can produce the completion a FLAKE hold needs to release.
               if (standDownForPriorRound(roundHold)) break;
               const logHolds = ciFailuresForFix.flatMap((f) => f.logUnavailable?.kind === "deferred" && Date.parse(f.logUnavailable.until) > now // expiring-fixture: exempt -- W1-T12713 runtime retry time, no blind round before it
                 ? [`${f.name}: ${describeCiLogUnavailable(f.logUnavailable)}`] : []);
@@ -30594,8 +30595,10 @@ export function closedPrFacts(
 }
 
 /** {@link closedPrFacts} for one gateway answer, e.g. `prByRef`; null or open is no fact. */
-export function closedPrFromRef(ref: { number: number; url: string; state: string } | null): ClosedPrFact | undefined {
-  return ref ? closedPrFacts([ref], new Map(), new Set())[0] : undefined;
+export function closedPrFromRef(ref: { number: number; url: string; state: string; mergedAt?: string } | null): ClosedPrFact | undefined {
+  if (!ref) return undefined;
+  const at = ref.state === "MERGED" && ref.mergedAt ? new Map([[ref.number, ref.mergedAt]]) : new Map<number, string>();
+  return closedPrFacts([ref], at, new Set())[0];
 }
 
 /** A url lookup over a closed set, keyed like every PR-keyed ledger read ({@link prUrlKey}). */

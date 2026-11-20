@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -7,8 +7,10 @@ import type { Config } from "#src/lib/config.js";
 import { taskContractRevision } from "#src/lib/escalate.js";
 import { classifyScannerBlocker, rollupForAsync } from "#src/lib/open-prs-rest.js";
 import type { Task } from "#src/lib/plan.js";
+import { buildBatchedGithub, readLedgerLines } from "#src/lib/status.js";
 import { buildFixProgressInput, priorRoundHold, PRIOR_ROUND_HOLD_FIELD, resolveFixProgress } from "#src/lib/fix-progress-judge.js";
-import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
+import { buildSweepEffects, closedPrFromRef, runPrTerminalReconcile, runSweep,
+  type OpenPrView, type SweepDeps, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -161,6 +163,23 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(f.state.dispatched, 1, "changing main to the PR-head revision releases the hold");
   });
 
+  test("W1-T13865 criterion 3: the terminal fallback preserves the amendment's actual merge time", t => {
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13865-terminal-`));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const github = buildBatchedGithub("o", "plan", { fetchAll: () => [
+      { number: 900, url: AMENDMENT_URL, state: "MERGED", mergedAt: at(10_000) },
+    ] });
+    const ledgerPath = join(root, "ledger.ndjson");
+    const rows = [...round("NEEDS_SCOPE"), pendingAmendment,
+      { step: "pr.opened", pr_url: AMENDMENT_URL, ts: at(20_000) }];
+    writeFileSync(ledgerPath, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const result = runPrTerminalReconcile(url => closedPrFromRef(github.prByRef(url)), { ledgerPath, runId: "terminal-fallback" });
+    assert.equal(result.appended, 1);
+    const reconciled = readLedgerLines(ledgerPath);
+    assert.equal(reconciled.find(row => row.step === "pr.terminal")?.merged_at, at(10_000));
+    assert.equal(priorRoundHold(reconciled, facts()), undefined);
+  });
+
   test("W1-T13865 criterion 3: an in-run fix uses its own progress receipt's contract revision", async () => {
     const input = buildFixProgressInput({ taskId: TASK, headSha: HEAD, currentRed: ["ci"], ledger: [] });
     const { receipt } = await resolveFixProgress(input, [], { firstRound: true, contractRevision: "contract-A" });
@@ -229,6 +248,26 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     rows.push(mergedAmendment);
     await runSweep([pr()], f.deps);
     assert.equal(f.state.dispatched, 1, "the amendment's own merge releases the hold");
+  });
+
+  test("W1-T13865 criterion 4: a pending scope amendment still refreshes the branch when main's contract changes", async () => {
+    const rows = swept([...round("NEEDS_SCOPE", { contract_revision: "contract-A" }), pendingAmendment]);
+    const f = fixture(rows);
+    let revision = "contract-A";
+    const refreshed: string[] = [];
+    f.deps.readTaskContractRevision = () => revision;
+    f.deps.updateBranch = candidate => { refreshed.push(candidate.headSha); return "updated"; };
+    await runSweep([pr()], f.deps);
+    assert.deepEqual(refreshed, []);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+    const held = lastDisposed(rows);
+
+    revision = "contract-B";
+    await runSweep([pr()], f.deps);
+    assert.deepEqual(refreshed, [HEAD]);
+    assert.equal(held.progress_contract_revision, "contract-A");
+    assert.equal(lastDisposed(rows).progress_contract_revision, "contract-B");
+    assert.equal(f.state.dispatched, 0, "the refresh runs while the amendment is still pending");
   });
 
   test("W1-T13865 criterion 2: only the branch-protected App's check completion releases FLAKE", async () => {
@@ -345,6 +384,45 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.match(requests[0]![1]!, /[?&]filter=all\b/);
   });
 
+  test("W1-T13865 criterion 3: a fresh ci-gate required failure releases FLAKE when branch protection is unreadable", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    let completedAt = at(45_000);
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ciGateRequired: ["lint-plan"],
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.endsWith("/protection/required_status_checks")) throw new Error("branch protection unavailable");
+        assert.match(endpoint, new RegExp(`/commits/${HEAD}/check-runs\\?`));
+        return [{ check_runs: [
+          { name: "unlisted", status: "completed", conclusion: "failure", completed_at: at(1_000) },
+          { name: "lint-plan", status: "completed", conclusion: "failure", completed_at: completedAt },
+        ] }];
+      },
+    });
+    f.deps.readRequiredCheckCompletions = effects.readRequiredCheckCompletions;
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 0, "a fresh completion whose requirement is unknown keeps the hold");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    completedAt = at(1_000);
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the failed lint-plan check is known to be required through ci-gate");
+  });
+
+  test("W1-T13865 criterion 4: a FLAKE hold allows the first retry of a cancelled required check", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    const name = "coverage-ratchet";
+    const retried: string[] = [];
+    f.deps.requeueCheck = (_pr, check) => { retried.push(String(check.jobId)); return true; };
+    await runSweep([pr({ ciFailures: [{ name, logTail: "" }], cancelledRequiredChecks: [{ name, jobId: "80", runAttempt: 1 }] })], f.deps);
+    assert.deepEqual(retried, ["80"]);
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled FLAKE/);
+  });
+
   test("W1-T13865 criterion 4: a FLAKE hold allows the deferred job retry to produce a new completion", async () => {
     const name = "ci-shard (1/8)";
     const rows = swept([...round("FLAKE", { flake_claim: "requeue_deferred" }),
@@ -377,9 +455,9 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(f.state.dispatched, 1, "the retried job completed red, releasing the hold");
   });
 
-  test("W1-T13865 criterion 4: an owner grant releases an unfiled PR's NEEDS_SCOPE hold", async () => {
+  test("W1-T13865 criterion 1: an unfiled owner grant alone keeps the same-head NEEDS_SCOPE ruling active", async () => {
     const task_id = "PR-13865";
-    const roundRows = round("NEEDS_SCOPE").map(row => ({ ...row, task_id, pr_number: 13865 }));
+    const roundRows = round("NEEDS_SCOPE", { contract_revision: "contract-A" }).map(row => ({ ...row, task_id, pr_number: 13865 }));
     const scopeQuestion = { step: "fix.scope_amendment", task_id, pr_number: 13865, head_sha: HEAD, round_id: "R1",
       outcome: "unfiled-escalated", issue_url: "https://github.com/o/remudero/issues/901", paths: ["src/lib/fixture.ts"], ts: at(35_000) };
     const grant = { step: "panel.question_answered", task_id, answer: "revise-pr", authority: "repository-owner",
@@ -392,12 +470,13 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(f.state.dispatched, 0);
     assert.match(String(lastDisposed(rows).stand_down_reason), /unfiled scope decision awaits resolution/);
     rows.push(grant);
+    assert.equal(priorRoundHold(rows, facts({ taskId: task_id }))?.hold, "NEEDS_SCOPE");
     await runSweep([candidate], f.deps);
-    assert.equal(f.state.dispatched, 1, "the matching owner grant releases the hold at the original head");
-    assert.equal(priorRoundHold([...rows, { ...roundRows[1], round_id: "R2", ts: at(5_000) }], facts({ taskId: task_id }))?.hold,
-      "NEEDS_SCOPE", "a grant already seen by a later round cannot release its ruling");
-    assert.equal(priorRoundHold([roundRows[0]!, scopeQuestion, grant, roundRows[1]!], facts({ taskId: task_id })),
-      undefined, "an answer to this round's own question can arrive before the done receipt");
+    assert.equal(f.state.dispatched, 0);
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled NEEDS_SCOPE/);
+    await runSweep([pr({ taskId: "unfiled", headSha: NEW_HEAD })], f.deps);
+    assert.equal(f.state.dispatched, 1, "the new head no longer matches the original ruling");
   });
 
   test("W1-T13865 criterion 4: the existing NEEDS_DESIGN hold is unchanged", async () => {

@@ -346,16 +346,13 @@ export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: 
  * paths. A reply on another issue, an answer older than the hold, or any other answer grants nothing. An issue reply
  * grants only when it was the bare label (`bare_option`): escalation-answers.ts records a qualified reply such as
  * `revise-pr, but only the test` as its label alone, and a qualification is not the grant the question asked for. */
-export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr: { prNumber: number },
-  ruling?: { index: number; roundId?: string }): UnfiledScopeGrant | undefined {
+export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr: { prNumber: number }): UnfiledScopeGrant | undefined {
   const at = ledger.findLastIndex(row => unfiledHoldRow(row, pr.prNumber));
   if (at < 0) return undefined;
   const held = ledger[at]!;
   const issueUrl = held.issue_url as string;
   const issue = /\/issues\/(\d+)$/.exec(issueUrl)?.[1];
-  // The current round's own question can be answered while its worker is still winding down.
-  const answeredAfter = ruling && (ruling.roundId === undefined || held.round_id !== ruling.roundId) ? Math.max(at, ruling.index) : at;
-  const answer = ledger.slice(answeredAfter + 1).findLast(row => row.step === "panel.question_answered" && row.task_id === `PR-${pr.prNumber}` &&
+  const answer = ledger.slice(at + 1).findLast(row => row.step === "panel.question_answered" && row.task_id === `PR-${pr.prNumber}` &&
     typeof row.answer === "string" && row.answer.trim().toLowerCase() === UNFILED_SCOPE_GRANT_ANSWER &&
     typeof row.origin === "string" &&
     (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`) && row.bare_option === true)));
@@ -733,10 +730,6 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
     if (facts.checkCompletions?.some(check => after(check.completedAt))) return undefined;
     return { hold: "FLAKE", since, roundId, reason: `the last fix round at ${head} ruled FLAKE at ${since} and no required ` +
       "check has completed on this head since — no fix round until one does" };
-  }
-  const unfiledPr = /^PR-(\d+)$/.exec(facts.taskId);
-  if (unfiledPr && unfiledScopeGrant(ledger, { prNumber: Number(unfiledPr[1]) }, { index: doneIndex, roundId })?.heldHead === facts.headSha) {
-    return undefined;
   }
   const amendments = ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId);
   const amendmentKey = (row: Record<string, unknown>) => prUrlKey(row.amendment_url ?? row.amendmentUrl)?.toLowerCase();
