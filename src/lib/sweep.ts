@@ -11,7 +11,7 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
-  scopeAmendmentsWithoutMergeTime, priorRoundRuling, unfiledScopeGrant, type PriorRoundFacts,
+  scopeAmendmentsWithoutMergeTime, priorRoundRuling, type PriorRoundFacts,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
@@ -2699,6 +2699,9 @@ const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 /** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
 export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 
+/** W1-T13865: the checks a PR's base branch requires, each pinned to an App id or null; `complete` is false when one of
+ *  its requirement sources could not be read. */
+type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete: boolean };
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -2948,8 +2951,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   });
   const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
   // W1-T13865: keyed by the PR's own base branch; a requirement only another branch's protection names releases nothing.
-  const branchRequiredChecks = new Map<string, Promise<ReadonlyMap<string, number | null> | undefined>>();
-  const readBranchRequiredChecks = async (branch: string) => {
+  const branchRequiredChecks = new Map<string, Promise<BaseRequiredChecks | undefined>>();
+  const readBranchRequiredChecks = async (branch: string): Promise<BaseRequiredChecks | undefined> => {
     let checks: readonly { context: string; app_id: number | null }[] = [];
     const protection = await readRequiredStatusCheckContextsAsync(owner, repo, encodeURIComponent(branch),
       async args => {
@@ -2969,6 +2972,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
     // Each readable source names checks that are required; an unreadable one names none, so it releases nothing.
     if (protection.kind === "unreadable" && rules === undefined) return undefined;
+    // A 404 answers "no classic protection"; any other failed read leaves the base's requirements partly unknown.
+    const protectionUnknown = protection.kind === "unreadable" && !/not protected|HTTP 404/i.test(protection.reason);
     const required = new Map<string, number | null>();
     const require = (name: string, pin: number | null) => {
       const prior = required.get(name);
@@ -2983,7 +2988,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         require(check.context, typeof check.integration_id === "number" ? check.integration_id : null);
       }
     }
-    return required;
+    return { checks: required, complete: !protectionUnknown && rules !== undefined };
   };
   const readCiGateRollup = async (pr: OpenPrView, read = readJsonImpl): Promise<RollupCheckEntry[] | undefined> => {
     try {
@@ -2995,9 +3000,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
   /** The protection of the PR's own base branch, read fresh from the PR: undefined when the PR or its protection is
    *  unreadable, so only ci-gate's own required list can release a hold. */
-  const readPrBaseRequiredChecks = async (pr: OpenPrView): Promise<ReadonlyMap<string, number | null> | undefined> => {
+  const readPrBaseRequiredChecks = async (pr: OpenPrView): Promise<BaseRequiredChecks | undefined> => {
     if (deps.readRequiredContextsImpl) {
-      return new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null]));
+      return { checks: new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null])), complete: true };
     }
     let base: string | undefined;
     try {
@@ -3017,8 +3022,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     return await read;
   };
   const readRequiredCheckCompletions = async (pr: OpenPrView): Promise<{ name: string; completedAt: string }[]> => {
-    const branchChecks = await readPrBaseRequiredChecks(pr);
-    const required = new Set([...requiredChecks, ...(branchChecks?.keys() ?? [])]);
+    const base = await readPrBaseRequiredChecks(pr);
+    const branchChecks = base?.checks;
+    // W1-T13865: ci-gate's list is required only through ci-gate, so it joins the set only when the PR's own base
+    // requires ci-gate, or when that base's requirements could not be read in full.
+    const throughCiGate = base === undefined || !base.complete || base.checks.has(CI_GATE_CHECK_NAME);
+    const required = new Set([...(throughCiGate ? requiredChecks : []), ...(branchChecks?.keys() ?? [])]);
     if (required.size === 0) return [];
     let runs: { name: string; completedAt: string }[];
     // A pinned requirement's App, as its check runs name it: a commit status carries its creator, not an App id.
@@ -15834,16 +15843,12 @@ export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | unde
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
 
 const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
-/** W1-T13865: the hold the sweep applies. An unfiled PR's owner `revise-pr` grant ({@link unfiledScopeGrant}) authorizes
- *  a round with the granted paths, so a NEEDS_SCOPE ruling made BEFORE that grant no longer stands the round down; a
- *  ruling made after it, by the granted round itself, still does. */
+/** W1-T13865: the hold the sweep applies is {@link priorRoundHold}'s, on every path to a fix worker. An unfiled PR's owner
+ *  `revise-pr` grant (`unfiledScopeGrant`) is neither a merged scope amendment nor a changed contract, so it
+ *  releases no NEEDS_SCOPE hold at the ruled head: the granted round runs at a new head. */
 export function priorRoundHoldForSweep(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number }):
   PriorRoundHold | undefined {
-  const held = priorRoundHold(ledger, facts);
-  if (held?.hold !== "NEEDS_SCOPE") return held;
-  const answeredAt = unfiledScopeGrant(ledger, { prNumber: facts.prNumber })?.answeredAt;
-  const grantedAfter = answeredAt !== undefined && Date.parse(answeredAt) > Date.parse(held.since);
-  return grantedAfter ? undefined : held;
+  return priorRoundHold(ledger, facts);
 }
 /** W1-T13865: {@link priorRoundHoldForSweep} with the live inputs its ruling waits on. A NEEDS_SCOPE ruling always reads
  *  its amendments' live merge times, even when the ledger alone releases it: a local receipt's ts is not a merge time. */
@@ -15868,6 +15873,27 @@ async function amendmentMergeTimes(rows: readonly Record<string, unknown>[], tas
     if (key !== undefined && mergedAt !== undefined) times.set(key, mergedAt);
   }
   return times;
+}
+
+/** W1-T13865: the union read (archives plus the live file, read after sweep entry) merged with the sweep's entry snapshot
+ *  in row-time order. A snapshot row the union already holds is dropped, so a round that landed after entry stays the
+ *  newest; each side keeps its own order, and a row with no readable ts is taken where it stands. */
+export function mergePriorRoundHistory(union: readonly Record<string, unknown>[], snapshot: readonly Record<string, unknown>[]):
+  Record<string, unknown>[] {
+  const seen = new Set(union.map(row => JSON.stringify(row)));
+  const extra = snapshot.filter(row => !seen.has(JSON.stringify(row)));
+  const time = (row: Record<string, unknown>) => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const merged: Record<string, unknown>[] = [];
+  let i = 0, j = 0;
+  while (i < union.length || j < extra.length) {
+    if (j >= extra.length) { merged.push(union[i++]!); continue; }
+    if (i >= union.length) { merged.push(extra[j++]!); continue; }
+    const a = time(union[i]!), b = time(extra[j]!);
+    // Equal or unordered times keep the union's row first: it was read later.
+    if (Number.isFinite(b) && (!Number.isFinite(a) ? false : b < a)) merged.push(extra[j++]!);
+    else merged.push(union[i++]!);
+  }
+  return merged;
 }
 
 /** A conflicted child's live head: dispatchFix reads the prior-round hold there, since the sweep judged another head. */
@@ -22520,7 +22546,7 @@ export async function runSweep(
   const readSweepPriorRoundHold = async (pr: OpenPrView) => {
     if (priorRoundHistory === undefined) {
       const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
-      priorRoundHistory = archived === undefined ? ledgerLines : [...archived, ...ledgerLines];
+      priorRoundHistory = archived === undefined ? ledgerLines : mergePriorRoundHistory(archived, ledgerLines);
     }
     const taskId = fixLedgerTaskIdFor(pr);
     // A FLAKE hold never reads the contract, so read it only for a NEEDS_SCOPE ruling.

@@ -339,7 +339,7 @@ const wellFormedScopeHold = (row: Record<string, unknown>): boolean =>
   Array.isArray(row.paths) && row.paths.length > 0 && row.paths.every(p => typeof p === "string" && p.length > 0);
 const unfiledHoldRow = (row: Record<string, unknown>, prNumber: number): boolean =>
   row.step === "fix.scope_amendment" && rowPrNumber(row) === prNumber && row.outcome === "unfiled-escalated" && wellFormedScopeHold(row);
-export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: string; heldHead?: string; answeredAt?: string }
+export interface UnfiledScopeGrant { paths: string[]; issueUrl: string; origin: string; heldHead?: string }
 /** The repository owner's grant of an unfiled PR's held scope: an accepted `revise-pr` answer (an owner reply on the
  * escalation issue, which lib/escalation-answers.ts ledgers as `panel.question_answered`, or the console's answer
  * route) for this PR's own `PR-<n>` key, newer than its newest well-formed unfiled hold. It grants exactly that hold's
@@ -358,8 +358,7 @@ export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr
     (!row.origin.startsWith("issue#") || (issue !== undefined && row.origin.startsWith(`issue#${issue}:`) && row.bare_option === true)));
   if (!answer) return undefined;
   return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
-    ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}),
-    ...(typeof answer.ts === "string" ? { answeredAt: answer.ts } : {}) };
+    ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
 }
 const grantHint = (paths: readonly unknown[]): string =>
   `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;

@@ -104,9 +104,9 @@ function movedHeadEffects(t: { after: (fn: () => void) => void }, rows: Row[], l
 const deferredAtHold = (rows: Row[]) => rows.filter(row => row.step === "sweep.fix.head_moved_deferred")
   .map(row => [row.to_head, row.reason, row[PRIOR_ROUND_HOLD_FIELD]]);
 
-function grantedScopeRound() {
+function grantedScopeRound(outcome = "NEEDS_SCOPE") {
   const task_id = "PR-13865";
-  const roundRows = round("NEEDS_SCOPE", { contract_revision: "contract-A" }).map(row => ({ ...row, task_id, pr_number: 13865 }));
+  const roundRows = round(outcome, { contract_revision: "contract-A" }).map(row => ({ ...row, task_id, pr_number: 13865 }));
   const scopeQuestion = { step: "fix.scope_amendment", task_id, pr_number: 13865, head_sha: HEAD, round_id: "R1",
     outcome: "unfiled-escalated", issue_url: "https://github.com/o/remudero/issues/901", paths: ["src/lib/fixture.ts"], ts: at(35_000) };
   const grant = { step: "panel.question_answered", task_id, answer: "revise-pr", authority: "repository-owner",
@@ -524,7 +524,8 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
   });
 
   test("W1-T13865 criterion 4: an owner revise-pr grant still reaches the granted round at the same head", async () => {
-    const { rows, grant } = grantedScopeRound();
+    // The round at this head ruled NOT_LANDED, so no prior-round hold stands: the grant path is unchanged.
+    const { rows, grant } = grantedScopeRound("NOT_LANDED");
     const f = fixture(rows);
     const candidate = pr({ taskId: "unfiled" });
     rows.push({ ...grant, origin: "issue#900:comment:9" });
@@ -533,7 +534,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.match(String(lastDisposed(rows).stand_down_reason), /unfiled scope decision awaits resolution/);
     rows.push(grant);
     await runSweep([candidate], f.deps);
-    assert.equal(f.state.dispatched, 1, "the owner's grant authorizes the round the NEEDS_SCOPE ruling asked for");
+    assert.equal(f.state.dispatched, 1, "the owner's grant authorizes the round the scope question asked for");
     assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], undefined);
   });
 
@@ -945,5 +946,62 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(unwired.state.escalated, 1, "the flag's escalation fallback ran at the held head");
     assert.equal(unwired.state.dispatched, 0, "no fix worker");
     assert.equal(lastDisposed(unwiredRows).stale_proof_escalated, true);
+  });
+  test("W1-T13865 criterion 4: an owner revise-pr grant after a same-head NEEDS_SCOPE ruling spawns no fix worker", async () => {
+    const { rows, grant } = grantedScopeRound();
+    rows.push(grant);
+    const f = fixture(rows);
+    await runSweep([pr({ taskId: "unfiled" })], f.deps);
+    assert.equal(f.state.dispatched, 0, "no amendment merged and the contract is unchanged, so the grant releases nothing");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled NEEDS_SCOPE/);
+  });
+
+  test("W1-T13865 criterion 2: a release branch that requires only its own gate keeps FLAKE on an optional ci-gate completion", async () => {
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ciGateRequired: ["lint-plan"], restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[]];
+        if (endpoint === PR_READ) return { base: { ref: "release/1.0" } };
+        if (endpoint.endsWith("/protection/required_status_checks")) return { contexts: ["release-gate"] };
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return [{ check_runs: [
+          { name: "lint-plan", status: "completed", conclusion: "failure", completed_at: at(1_000) }] }];
+        if (endpoint.includes(`/commits/${HEAD}/statuses?`)) return [[]];
+        assert.fail(`unexpected check read ${endpoint}`);
+      },
+    });
+    assert.deepEqual(await effects.readRequiredCheckCompletions!(pr()), [], "the base does not require ci-gate, so its list is optional");
+    f.deps.readRequiredCheckCompletions = effects.readRequiredCheckCompletions;
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 0, "an optional completion releases nothing");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+  });
+
+  test("W1-T13865 criterion 3: a same-head FIXED or NOT_LANDED round that lands after sweep entry releases the hold", async t => {
+    for (const outcome of ["FIXED", "NOT_LANDED"]) {
+      const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13865-late-`));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      mkdirSync(join(root, "state"), { recursive: true });
+      const ledgerPath = join(root, "state/ledger.ndjson");
+      const write = (rows: Row[]) => writeFileSync(ledgerPath, rows.map(row => JSON.stringify(row) + "\n").join(""), { flag: "a" });
+      write(swept(round("FLAKE")));
+      const f = fixture([]);
+      const deps: SweepDeps = { ...f.deps, ledgerPath, readLedger: undefined, appendLine: (_path, row) => write([row]),
+        // After the sweep read its entry snapshot, a newer round at the same head lands in the live file.
+        readMainRepair: async () => {
+          write([{ step: "fix.done", task_id: TASK, round_id: "R2", head_sha: HEAD, ts: at(10_000), fix_outcome: outcome, subtype: "success" }]);
+          return undefined;
+        } };
+      await runSweep([pr()], deps);
+      const ledger = readLedgerLines(ledgerPath);
+      const disposed = ledger.findLast(row => row.step === "sweep.disposed" && row.pr_number === 13865)!;
+      assert.equal(disposed[PRIOR_ROUND_HOLD_FIELD], undefined, `${outcome} is the newest ruling at this head`);
+      // The judge's own history check then re-asks next pass; that is a separate guard, not this hold.
+      assert.doesNotMatch(String(disposed.stand_down_reason), /ruled FLAKE/, `${outcome} holds nothing`);
+    }
   });
 });
