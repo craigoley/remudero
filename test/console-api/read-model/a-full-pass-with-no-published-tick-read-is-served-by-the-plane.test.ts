@@ -74,3 +74,17 @@ test("W1-T13880 invariant: a daemon with no read plane still leaves the pass on 
   assert.equal(await serve(), undefined);
   assert.deepEqual(serve.lastServe(), { source: "none", miss: "no_plane" });
 });
+
+test("W1-T13880 unpublished: a pass that refuses an over-age read in flight still names its miss unpublished", async () => {
+  const p = plane<{ tag: string }>();
+  try {
+    const readTick = joinableRead(p.read);
+    const serve = onePassPerGeneration(unpublished, readTick, () => ({ tag: "own" }), { maxAgeMs: 1 });
+    void readTick({ tag: "in-flight" });
+    const facts = await serve();
+    assert.deepEqual(facts, { tag: "own" }, "positive control: the over-age read was refused and the pass read its own");
+    assert.equal(p.requests(), 2);
+    assert.equal(serve.lastServe()?.source, "own_read");
+    assert.equal(serve.lastServe()?.miss, "unpublished", "no generation was published, so the miss stays unpublished");
+  } finally { await p.stop(); }
+});

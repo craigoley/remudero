@@ -489,7 +489,8 @@ export function onePassPerGeneration<I, T>(
           last = { source: "joined", miss, waitMs, publishedAtMs: joined.publishedAtMs };
           return joined.facts;
         }
-        miss = "stale";
+        // An over-age joined read is refused; with nothing published the pass's miss stays "unpublished" (#19778 review).
+        if (miss !== "unpublished") miss = "stale";
       }
     }
     const requestedAtMs = clock.now();
