@@ -20897,6 +20897,21 @@ const readerAgreementInFlight = new Map<string, Promise<void>>();
 export function settleReaderAgreement(ledgerPath: string): Promise<void> {
   return readerAgreementInFlight.get(ledgerPath) ?? Promise.resolve();
 }
+
+/** W1-T13884: one pass for a caller that exits when it returns (`rmd sweep`): the pass still never waits on the
+ *  reader agreement check, but this boundary does, so a process that exits next never drops the check's findings.
+ *  The daemon calls runSweep directly; its process outlives the check (#19789 review). */
+export async function runSweepAndSettle(
+  openPrs: OpenPrView[],
+  sweepDeps: SweepDeps,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+): Promise<SweepSummary> {
+  try {
+    return await runSweep(openPrs, sweepDeps, policy);
+  } finally {
+    await settleReaderAgreement(sweepDeps.ledgerPath);
+  }
+}
 const strikeLadderMergeBases = new Map<string, Map<string, string>>();
 
 /** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */

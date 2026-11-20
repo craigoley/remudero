@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
+import { runSweepAndSettle } from "../../lib/sweep.js";
 import { appendLedger, deriveLedgerActor } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
@@ -807,7 +808,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
   // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
-  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweep(
+  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweepAndSettle(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     withFullSweepRepairAdmission({
       ...effects,
