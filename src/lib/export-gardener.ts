@@ -305,12 +305,9 @@ const goneTitle = (a: { file: string; name: string }) => `${a.name} is not expor
  *  alias, since test/a-test-imports-through-the-subpath-alias.test.ts (W1-T9864) refuses a new
  *  location-relative specifier and the gardener's PRs went red on it (#19731). */
 function rootMapsSrcAlias(root: string): boolean {
-  try {
-    const imports = (JSON.parse(readFileIfExists(join(root, "package.json")) ?? "{}") as { imports?: Record<string, unknown> }).imports;
-    return imports?.["#src/*"] === "./src/*";
-  } catch {
-    return false;
-  }
+  // A textual match, not JSON.parse: an unreadable or malformed package.json simply has no alias,
+  // and the proof falls back to the relative specifier it always used.
+  return /"#src\/\*"\s*:\s*"\.\/src\/\*"/.test(readFileIfExists(join(root, "package.json")) ?? "");
 }
 
 function goneTest(a: { file: string; name: string }, srcAlias: boolean): string {
