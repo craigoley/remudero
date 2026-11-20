@@ -1,0 +1,134 @@
+- id: W1-T13861
+  title: "The fleet runs a staged skill draft's held-out eval once per text, inside the existing spend limits, so the Inbox shows a verdict"
+  repo: remudero
+  depends_on: [W1-T13858]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high # Rule 19 sizing: one concern (who starts a skill draft's held-out eval) in a new skill-eval-auto.ts, its spend seams in skill-eval-command.ts and skill-eval.ts, one status line in skill-eval-gate.ts read by inbox.ts and panel-graph.ts, and the retro call in run-task.ts
+  band_meaning: span
+  origin: "operator-session#skill-eval-runs-itself-2026-11-19"
+  plan_refs: [W1-T13858, W1-T13859, W1-T13857, W1-T9648, W1-T4338, W1-T3101]
+  files:
+    - src/lib/skill-eval-auto.ts
+    - src/lib/skill-eval-command.ts
+    - src/lib/skill-eval.ts
+    - src/lib/skill-eval-gate.ts
+    - src/lib/skill-workshop.ts
+    - src/lib/inbox.ts
+    - src/lib/panel-graph.ts
+    - src/lib/ledger-steps.ts
+    - src/run-task.ts
+    - test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "autoEvaluateSkillDrafts runs the held-out eval for a staged skill draft that is open (not ratified, not declined, not closed by the workshop), passes the W1-T13858 whole-draft check on its stored text, and has no eval and no auto-eval claim for the sha256 of that text. No argv carries --confirm-spend. It writes the claim on the registry entry and one skill_eval.auto_claimed row before the first attempt, and it records the verdict on the proposal the same way skillEvalCommand does."
+      proof: "grep: W1-T13861 criterion 1: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "No eval runs for a draft that fails the quality bar: a stored text that W1-T13858's whole-draft check refuses (every Procedure step is a signal-table line), a draft the workshop closed, a declined draft and a ratified draft each get zero dispatches, no claim and no row."
+      proof: "grep: W1-T13861 criterion 2: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "invariant:one-eval-per-text No second eval for the same text: a draft whose skillEval names the sha256 of its stored text (any verdict, including too-few-measurable-tasks), or whose auto-eval claim names that sha256 with no verdict (a run that stopped or crashed), gets zero dispatches on later passes. After the workshop rewrites the text, the new sha256 is eligible once."
+      proof: "grep: W1-T13861 criterion 3: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "invariant:gates-wait-never-bypass A refused gate waits and bypasses nothing. When replayIdleGate refuses, when the day's ledgered cost plus SKILL_EVAL_MAX_SPEND_USD is above the effective daily cost ceiling (resolveDailyCostCeiling) or the day has unpriced rows, or when the eval stack bills cash and readOpenWeightAllowance shows less than SKILL_EVAL_MAX_SPEND_USD remaining (or dailyCapUsd is unset), the pass dispatches nothing, writes no claim, and writes one skill_eval.auto_waiting row with the reason. The same reason on the next pass writes no second row. A later pass with every gate open runs the eval."
+      proof: "grep: W1-T13861 criterion 4: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "When runSkillEval or the held-out selection refuses with zero attempts dispatched, the claim is removed and the draft waits for the next pass. A pass starts at most one eval."
+      proof: "grep: W1-T13861 criterion 5: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "The operator path is unchanged: `rmd skill-eval <id>` without --confirm-spend still exits 2 having read nothing, and replayOptIn still refuses an argv without the flag. The standing approval can be passed only as a value in code, never from argv, an environment variable or config."
+      proof: "grep: W1-T13861 criterion 6: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "The Inbox shows the verdict. For a skill draft, `rmd inbox` prints one line under its READY entry and panel-graph's ready item carries the same text: 'eval passed — ready to approve' for a pass on the stored text, 'eval failed: <reason>' for a refusal on the stored text, 'eval running or stopped since <time>' for a claim with no verdict, 'eval waiting: <reason>' after a waiting row, and 'eval not run yet' otherwise. An eval of an earlier text reads as 'eval not run yet'."
+      proof: "grep: W1-T13861 criterion 7: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "invariant:approve-only-writes-skills An auto-eval pass writes nothing under .claude/skills/, even after a pass verdict: the test repository's .claude/skills tree is the same before and after. A pass verdict makes the draft approvable; only `rmd approve` writes the skill."
+      proof: "grep: W1-T13861 criterion 8: in test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts"
+    - claim: "The retro calls the auto eval after it stages skill drafts."
+      proof: "grep: autoEvaluateSkillDrafts( in src/run-task.ts"
+    - claim: "The two new ledger steps are declared."
+      proof: "grep: skill_eval\\.auto_waiting in src/lib/ledger-steps.ts"
+  rationale: |
+    OBSERVED on the Azure host, 2026-11-19 (read-only). The proposal registry holds 4 skill drafts:
+    skill-draft:88d9945faf4c75d3, skill-draft:84a7cc07e1ad07c6, skill-draft:a6051794254ce0ec and
+    skill-draft:c88835e723d6a34d. None has a skillEval record. The live ledger and every rotated ledger
+    hold 0 skill_eval.* rows, so no held-out eval has ever run. `rmd approve` refuses a skill draft
+    until a passing eval is recorded for its current text (skillEvalApprovalRefusal,
+    skill-eval-gate.ts), so no draft can ever be approved.
+
+    The operator approved on 2026-11-19 that the fleet runs the eval by itself, inside the existing
+    spend limits, for drafts that pass the quality bar. The operator's approval stays the final step.
+
+    How the eval spend is gated today:
+    - Consent: runSkillEval and skillEvalCommand refuse unless argv has --confirm-spend
+      (replayOptIn, replay-harness.ts). There is deliberately no environment variable and no config
+      default, so a retro tick cannot inherit the consent. This is the only reason nothing runs.
+    - Quiet fleet: replayIdleGate (golden-corpus.ts) refuses unless the fleet is up in quiet mode and
+      measured headroom is below HEADROOM_LIMIT_PCT (95%).
+    - Per-eval ceiling: SKILL_EVAL_MAX_SPEND_USD = 3 tasks x 2 trials x 2 arms x
+      PAIRED_ATTEMPT_MAX_BUDGET_USD ($15) = $180. Each sealed attempt has a $15 SDK budget, and an
+      attempt that reports no cost counts at $15.
+    - Once per text: skillEvalCommand refuses `already-judged` for a text with a recorded verdict,
+      except too-few-measurable-tasks.
+    - Fleet limits: the daily cost ceiling (`sweep.dailyCostCeilingUsd`, 500 in plan/policy.yaml,
+      bound 100 to 2500, with the state/ override) defers NEW dispatch only. A cash call reserves
+      against `dailyCapUsd` in reserveOpenWeightBudget. The eval checks neither before it starts.
+    - The reservation path (skill-eval-reservation.ts, skill-eval-grant-consumption.ts,
+      skill-eval-control.ts) is default-off. qualifyReservedSkillEval and consumeReservedEvalGrant
+      have no production caller. The qualifier refuses `runtime-safeguards-unverified` until six
+      safeguards are verified, and the grant consumer "cannot mint approvals or create a store".
+      Its own header says the live command stays quiet-only until a consumer is verified.
+
+    The eval stack is the implement/medium src mount (sonnet, effort high, no provider row), so
+    skillEvalStack pins it to the Claude subscription. It bills cash only if that mount row names a
+    cash provider.
+  design: |
+    1. Spend approval as a value. In skill-eval.ts, SkillEvalRunInput gains an optional
+       `standingApproval` that must equal the exported constant SKILL_EVAL_STANDING_APPROVAL
+       ({ ref: "operator-session#skill-eval-runs-itself-2026-11-19" }). runSkillEval accepts that
+       value in place of --confirm-spend and still applies replayIdleGate, the draft check, the
+       held-out task count and SKILL_EVAL_MAX_SPEND_USD unchanged. replayOptIn is not changed. No
+       argv, environment variable or config key can set the approval.
+    2. One eval path. In skill-eval-command.ts, move the body of skillEvalCommand after argument
+       parsing into one function that both callers use: the operator verb passes its argv, the auto
+       path passes the standing approval. Exit codes, refusal reasons and the record are unchanged.
+       Extend SkillEvalCommandInput (no new Deps interface) with an optional `readSpendFit` that
+       skillEvalProductionInput wires: the day's ledgered cost (deriveDayCostUsd and
+       deriveDayUnpricedRows over readLedgerLines of the ledger), the effective ceiling
+       (resolveDailyCostCeiling with the default policy), and, only when the stack's pin bills
+       cash, readOpenWeightAllowance's remainingUsd for its deployment (absent `dailyCapUsd` is a
+       refusal, as config.ts already says). Check new imports with depcruise.
+    3. The quality bar. In skill-workshop.ts, export W1-T13858's whole-draft check as one pure
+       function over the stored markdown, and make stageSkillDraft call it. The auto path treats a
+       draft as passing only when it is staged (the workshop stores only scanned text), not closed by
+       the workshop (W1-T13858's close record), not ratified or declined-and-not-restored
+       (ledgerProposalVerdicts), and the check passes on its stored text. A legacy text staged
+       before W1-T13858 is checked too.
+    4. The auto pass. New src/lib/skill-eval-auto.ts exports autoEvaluateSkillDrafts(input). It
+       takes the first eligible draft in registry order whose stored text has no skillEval and no
+       auto-eval claim for its sha256. It checks the gates in order: replayIdleGate on readIdle,
+       then the spend fit (day cost plus SKILL_EVAL_MAX_SPEND_USD at or under the ceiling, no
+       unpriced rows; for a cash stack, remainingUsd at least SKILL_EVAL_MAX_SPEND_USD). A refusal
+       writes `skillEvalAuto: { draftSha256, state: "waiting", reason, at }` and one
+       skill_eval.auto_waiting row, only when the reason differs from the stored one. When every gate
+       passes it writes `{ draftSha256, state: "claimed", runId, at }` through updateProposalRegistry
+       (compare-and-set on the stored text), then one skill_eval.auto_claimed row, then runs step 2's
+       path. A refusal with zero attempts dispatched removes the claim. Any other end keeps it, so a
+       crash or a cancelled run never leads to a second eval of that text. One eval per pass.
+    5. Call site. retroCommand in run-task.ts calls autoEvaluateSkillDrafts with
+       skillEvalProductionInput, after stageSkillDrafts (and after W1-T13859's expiry once it lands),
+       on a real run only (never --dry-run). A throw is logged and never fails the retro.
+    6. Inbox. skill-eval-gate.ts exports skillEvalInboxStatus(markdown, skillEval, skillEvalAuto),
+       which returns the criterion 7 line. inbox.ts carries skillEvalAuto on the proposal and its
+       classification and prints the line under a skill draft's READY entry. panel-graph.ts adds it
+       to InboxReadyItem as an optional `skillEvalStatus`. The approve refusal text is unchanged.
+    7. Declare skill_eval.auto_waiting and skill_eval.auto_claimed in ledger-steps.ts.
+    8. No new caps: no new dollar figure, count or window. The task reuses replayIdleGate,
+       SKILL_EVAL_MAX_SPEND_USD, the daily cost ceiling and dailyCapUsd as they are.
+    INVARIANT approve-only-writes-skills: The auto pass writes only the proposal registry, the ledger and sealed, never-pushed attempt worktrees. Nothing it does writes under .claude/skills/; only `rmd approve` does, after the operator ratifies.
+    INVARIANT one-eval-per-text: The fleet starts at most one held-out eval per draft sha256, claimed durably before the first attempt; only a refusal with zero attempts dispatched releases the claim.
+    INVARIANT gates-wait-never-bypass: A refused gate (quiet fleet, daily cost ceiling, cash cap) leaves the draft waiting with no spend and no claim; the auto pass never raises, overrides or skips a gate.
+  falsifier: |
+    Drop the sha256 check on the claim: criterion 3's second pass dispatches a second eval and the
+    test fails. Drop the spend fit: criterion 4's over-ceiling pass dispatches and the test fails.
+    Drop the W1-T13858 check from the auto pass: criterion 2's outcome-only draft is evaluated and
+    the test fails. Restore all three, and on the live registry each of the 4 outcome-only drafts
+    named in the rationale gets no eval, while a draft with a mined step gets exactly one.
+  note: "Filed from the 2026-11-19 skill-eval analysis. Depends on W1-T13858 for the whole-draft check and its close record. W1-T13859 expires unanswered drafts; this task runs after its expiry in the retro."

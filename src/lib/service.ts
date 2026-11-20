@@ -86,6 +86,8 @@ export interface Route {
   /** This route's {@link WriteTier} (W1-T404), declared never derived. Write routes only; every one
    *  must carry one ({@link writeRoutesMissingTier}). Enforced once {@link ServiceOptions.enforceWriteTiers} is on. */
   tier?: WriteTier;
+  /** Bound raw request bytes before the HIGH-tier confirmation check consumes a nonce. */
+  maxBodyBytes?: number;
   /** This read route's {@link ReadSensitivity} (W1-T495), declared never derived. Read routes only;
    *  enforced once {@link ServiceOptions.enforceReadSensitivity} is on. */
   sensitivity?: ReadSensitivity;
@@ -200,11 +202,19 @@ export interface IdentityGrant {
 
 /** The verified actor's slot on the request — a symbol key, so no header can ever set it. */
 const VERIFIED_ACTOR = Symbol.for("remudero.service.verifiedActor");
+const VERIFIED_STEP_UP_ACTOR = Symbol.for("remudero.service.verifiedStepUpActor");
+const VERIFIED_CONFIRM_ACTION = Symbol.for("remudero.service.verifiedConfirmAction");
 
 /** W1-T4244 — who the dispatch verified, or `undefined` for the shared bearer token. panel-actions.ts's
  *  `bearerTokenId` reads this first, so every route's existing ledger `origin` names the operator. */
 export function verifiedActor(req: IncomingMessage): string | undefined {
   const actor = (req as unknown as Record<symbol, unknown>)[VERIFIED_ACTOR];
+  return typeof actor === "string" ? actor : undefined;
+}
+
+/** The actor whose signed operator session proves a fresh second factor on this request. */
+export function verifiedStepUpActor(req: IncomingMessage): string | undefined {
+  const actor = (req as unknown as Record<symbol, unknown>)[VERIFIED_STEP_UP_ACTOR];
   return typeof actor === "string" ? actor : undefined;
 }
 
@@ -238,6 +248,15 @@ export interface ConfirmNonceAction {
   path: string;
   /** The raw body text, byte for byte — never a re-serialized object. */
   payload: string;
+}
+
+/** A successful dispatcher nonce spend, unavailable to handlers invoked outside createService. */
+export function verifiedConfirmAction(req: IncomingMessage): ConfirmNonceAction | undefined {
+  const action = (req as unknown as Record<symbol, unknown>)[VERIFIED_CONFIRM_ACTION];
+  if (typeof action !== "object" || action === null) return undefined;
+  const value = action as Partial<ConfirmNonceAction>;
+  return typeof value.method === "string" && typeof value.path === "string" && typeof value.payload === "string"
+    ? value as ConfirmNonceAction : undefined;
 }
 
 /** Single-use, action-and-payload-bound second factor. `consume` verifies AND SPENDS in one step. */
@@ -844,7 +863,7 @@ export async function verifyOperatorSession(
   token: string,
   opts: OperatorSessionOptions,
   nowMs: number,
-): Promise<{ ok: true; sub: string; tier: WriteTier } | { ok: false; reason: OperatorSessionRefusal }> {
+): Promise<{ ok: true; sub: string; tier: WriteTier; stepUpFresh: boolean } | { ok: false; reason: OperatorSessionRefusal }> {
   const parts = token.split(".");
   if (parts.length !== 3) return { ok: false, reason: "malformed" };
   const [headerB64, payloadB64, signatureB64] = parts;
@@ -868,10 +887,10 @@ export async function verifyOperatorSession(
   }
   if (typeof claims.azp !== "string" || !opts.allowedOrigins.includes(claims.azp)) return { ok: false, reason: "origin" };
   if (typeof claims.sub !== "string" || !opts.operatorUserIds.includes(claims.sub)) return { ok: false, reason: "unknown_user" };
-  if (opts.requireStepUp !== true) return { ok: true, sub: claims.sub, tier: "high" };
   const window = opts.stepUpWindowMinutes ?? DEFAULT_OPERATOR_STEP_UP_WINDOW_MINUTES;
-  const tier: WriteTier = operatorStepUpIsFresh(claims.fva, claims.iat, nowMs, window) ? "high" : "middle";
-  return { ok: true, sub: claims.sub, tier };
+  const stepUpFresh = operatorStepUpIsFresh(claims.fva, claims.iat, nowMs, window);
+  if (opts.requireStepUp !== true) return { ok: true, sub: claims.sub, tier: "high", stepUpFresh };
+  return { ok: true, sub: claims.sub, tier: stepUpFresh ? "high" : "middle", stepUpFresh };
 }
 
 /** The operator-session grantor (W1-T4244), via `authorize` only. A failed check is "not mine" (the
@@ -907,6 +926,7 @@ export function operatorSessionIdentityProvider(opts: OperatorSessionOptions): I
         log("service.operator_session_refused", { reason: verdict.reason });
         return undefined;
       }
+      if (verdict.stepUpFresh) (req as unknown as Record<symbol, unknown>)[VERIFIED_STEP_UP_ACTOR] = `operator:${verdict.sub}`;
       return { scopes: READ_WRITE, tier: verdict.tier, actor: `operator:${verdict.sub}` };
     } catch (e) {
       // A token that cannot even be decoded is refused and recorded, never thrown into dispatch.
@@ -1168,12 +1188,26 @@ function createRoutedServer(opts: ServiceOptions): Server {
           // CAVEAT: presenting a nonce drains the request body HERE to bind it to the exact
           // bytes makeConfirmNonceRoute expects, so a handler reached past this point must read
           // the already-parsed input instead of `req` as a stream.
-          const ok = nonce ? confirmNonces.consume(nonce, { method, path, payload: await readRawBody(req) }) : false;
+          let payload: string | undefined;
+          try {
+            payload = route.maxBodyBytes === undefined
+              ? await readRawBody(req)
+              : await readBoundedRawBody(req, route.maxBodyBytes);
+          } catch (error) {
+            if (error instanceof RawBodyTooLargeError) {
+              sendJson(res, 413, { error: "request_body_too_large", max_bytes: route.maxBodyBytes });
+              return;
+            }
+            throw error;
+          }
+          const action = { method, path, payload: payload ?? "" };
+          const ok = nonce ? confirmNonces.consume(nonce, action) : false;
           if (!ok) {
             log("service.confirm_nonce_refused", { method, path });
             sendJson(res, 403, { error: "confirm_nonce_required" });
             return;
           }
+          (req as unknown as Record<symbol, unknown>)[VERIFIED_CONFIRM_ACTION] = Object.freeze(action);
         }
       }
 
