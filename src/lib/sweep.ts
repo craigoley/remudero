@@ -139,8 +139,9 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines,
-  readLedgerUnionRecordsSync, realLedgerFs, resolveLedgerUnion,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerLivePath, ledgerRawLineProjection,
+  ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines, readLedgerUnionRecordsSync, realLedgerFs,
+  resolveLedgerUnion, rotationStatKey,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -1031,9 +1032,10 @@ const TERMINAL_UNCREDITABLE_HISTORY_SLICE: EscalationTriageSlice = {
   steps: [TERMINAL_UNCREDITABLE_HEAD_STEP, TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP],
   rawPattern: /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix\.uncreditable_head_escalated"/,
   sharedSnapshot: true,
-  version: "3",
-  project: ({ ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
-    ts, step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
+  strictFileIdentity: true,
+  version: "4",
+  project: ({ step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal }) => ({
+    step, pr_number, head_sha, head, repair_task_id, cause, reason, terminal,
   }),
 };
 let terminalUncreditableHistoryReader: EscalationTriageHistoryReader | undefined;
@@ -1080,20 +1082,13 @@ function terminalUncreditableHeadKey(prNumber: number, headSha: string): string 
 function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordRead | undefined {
   const stateDir = dirname(ledgerPath);
   const reader = terminalUncreditableHistoryReader ??= createEscalationTriageHistoryReader({ slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE });
-  let history = reader.current(stateDir);
-  const livePath = ledgerLivePath(stateDir);
-  if (history.archiveCount > 0 && history.unread.length === 1 && history.unread[0] === livePath) {
-    // The legacy union accepts complete rotations when only the live read fails. Retry through their cached slices.
-    history = createEscalationTriageHistoryReader({
-      slice: TERMINAL_UNCREDITABLE_HISTORY_SLICE,
-      fs: { ...realLedgerFs, existsSync: (path) => path !== livePath && realLedgerFs.existsSync(path) },
-    }).current(stateDir);
-  }
+  const history = reader.current(stateDir);
   if (!history.ok) return undefined;
   try {
     for (const archive of history.archiveFiles) fs.accessSync(archive, fs.constants.R_OK);
+    if (history.liveFileRead) fs.accessSync(ledgerLivePath(stateDir), fs.constants.R_OK);
   } catch {
-    // A digest may still match the rotation's stat key after read permission is lost.
+    // Cached rows can outlive a read permission change on a file or its parent.
     return undefined;
   }
   return history;
@@ -1102,11 +1097,8 @@ function readTerminalUncreditableHistory(ledgerPath: string): LedgerUnionRecordR
 function terminalUncreditableHeads(ledgerPath: string, history: LedgerUnionRecordRead | undefined): Map<string, TerminalUncreditableHead> {
   const terminals = new Map<string, TerminalUncreditableHead>();
   if (history === undefined) return terminals;
-  let rows = history.rows;
-  if (history.archiveCount === 0 && ledgerPath !== ledgerLivePath(history.stateDir)) {
-    // Without rotations the caller may supply a different live file.
-    rows = readLedgerLines(ledgerPath, undefined, undefined, (line) => TERMINAL_UNCREDITABLE_HISTORY_SLICE.rawPattern!.test(line)); // ledger-read-intent: live
-  }
+  // Without rotations, the legacy live-only read uses the caller's path and parsed-step checks.
+  const rows = history.archiveCount === 0 ? readLedgerLines(ledgerPath) : history.rows; // ledger-read-intent: live
   for (const row of rows) {
     if (
       row.step !== TERMINAL_UNCREDITABLE_HEAD_STEP ||
@@ -31355,6 +31347,8 @@ export interface EscalationTriageSlice {
   version?: string;
   /** Share this holder's reduced rotations with readers in fresh processes. */
   sharedSnapshot?: boolean;
+  /** Invalidate a cached read when file identity or ctime changes under the same size and mtime. */
+  strictFileIdentity?: boolean;
 }
 
 /** The rung's own slice (W1-T9390): its births and the state keys it already rejudged. */
@@ -31394,14 +31388,14 @@ export interface EscalationTriageHistoryLoad {
 }
 
 interface TriageSliceSnapshotRotation {
-  name: string; size: number; mtimeMs: number; read: LedgerRotationRecords;
+  name: string; size: number; mtimeMs: number; key?: string; read: LedgerRotationRecords;
 }
 
 function validTriageSnapshotRotation(value: unknown): value is TriageSliceSnapshotRotation {
   if (!value || typeof value !== "object") return false;
-  const { name, size, mtimeMs, read } = value as TriageSliceSnapshotRotation;
+  const { name, size, mtimeMs, key, read } = value as TriageSliceSnapshotRotation;
   return typeof name === "string" && basename(name) === name && Number.isSafeInteger(size) && size >= 0 &&
-    Number.isFinite(mtimeMs) && !!read && Array.isArray(read.rows) &&
+    Number.isFinite(mtimeMs) && (key === undefined || typeof key === "string") && !!read && Array.isArray(read.rows) &&
     read.rows.every((row) => row !== null && typeof row === "object" && !Array.isArray(row)) &&
     Number.isSafeInteger(read.torn) && read.torn >= 0 && Array.isArray(read.tornLines) &&
     read.tornLines.length === read.torn && read.tornLines.every((line) => typeof line === "string");
@@ -31433,6 +31427,7 @@ export function createEscalationTriageHistoryReader(
   const steps = [...slice.steps];
   const project = slice.project ?? ((row: Record<string, unknown>) => row);
   const rawPattern = slice.rawPattern === undefined ? undefined : new RegExp(slice.rawPattern.source, slice.rawPattern.flags.replace(/[gy]/g, ""));
+  const projectLine = rawPattern === undefined ? undefined : ledgerRawLineProjection(project);
   const identity = { holder: slice.holder, reducerVersion: `${slice.version ?? "1"}${io.parseAll ? "-all-record-objects-v2" : ""}${rawPattern ? `:${rawPattern.source}/${rawPattern.flags}` : ""}`, project };
   let lastLoad: EscalationTriageHistoryLoad = { rotations: 0, digestHits: 0, digestMisses: 0,
     bytesRead: 0, rotationsRead: 0, snapshotHit: false };
@@ -31442,7 +31437,7 @@ export function createEscalationTriageHistoryReader(
     lastLoad.bytesRead += buf.length;
     return buf;
   };
-  const union = createIncrementalLedgerUnion({ ...identity, rawPattern }, { ...fsDeps,
+  const union = createIncrementalLedgerUnion({ ...identity, rawPattern, strictFileIdentity: slice.strictFileIdentity }, { ...fsDeps,
     readFileSync: (path) => counted(path, () => fsDeps.readFileSync(path)),
     readRangeSync: (path, start, end) => counted(path, () => (fsDeps.readRangeSync ?? realLedgerFs.readRangeSync)(path, start, end)),
   });
@@ -31450,10 +31445,7 @@ export function createEscalationTriageHistoryReader(
   const durableDigest = { reducerVersion: `${identity.reducerVersion}:${steps.join(",")}` };
   // Only a line naming one of the steps is parsed while loading; the reducer drops every other row anyway.
   const pattern = rawPattern ?? new RegExp(steps.map((step) => step.replaceAll(".", "\\.")).join("|"));
-  const statKey = (path: string): string => {
-    const s = stat(path);
-    return `${s.size}:${s.mtimeMs}`;
-  };
+  const statKey = (path: string): string => rotationStatKey(stat(path), slice.strictFileIdentity);
   let loaded = new Map<string, string>();
   const kept = new Map<string, { key: string; read: LedgerRotationRecords }>();
   const snapshotTried = new Set<string>();
@@ -31472,7 +31464,7 @@ export function createEscalationTriageHistoryReader(
       for (const entry of snapshot.rotations as TriageSliceSnapshotRotation[]) {
         const path = join(stateDir, entry.name);
         if (!available.has(path)) continue;
-        const key = `${entry.size}:${entry.mtimeMs}`;
+        const key = entry.key ?? `${entry.size}:${entry.mtimeMs}`;
         try {
           if (statKey(path) !== key) continue;
         } catch (error) {
@@ -31500,7 +31492,8 @@ export function createEscalationTriageHistoryReader(
         const hit = kept.get(archive);
         if (hit?.key !== key || statKey(archive) !== key) return;
         const [size, mtimeMs] = key.split(":").map(Number);
-        rotations.push({ name: basename(archive), size: size!, mtimeMs: mtimeMs!, read: hit.read });
+        rotations.push({ name: basename(archive), size: size!, mtimeMs: mtimeMs!, read: hit.read,
+          ...(slice.strictFileIdentity ? { key } : {}) });
       }
       await fs.promises.mkdir(dirname(path), { recursive: true, mode: 0o700 });
       await fs.promises.writeFile(temp, JSON.stringify({ schema: 1, holder: identity.holder,
@@ -31552,8 +31545,12 @@ export function createEscalationTriageHistoryReader(
       if (loaded.get(entry.path) !== key) fresh.push(entry);
     }
     if (fresh.length > 0) {
-      const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && steps.includes(row.step)).map(project), {
-        holder: identity.holder, durableDigest, statKey, ...(io.parseAll ? { requireObjects: true, pattern: rawPattern } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
+      const memo = createLedgerRotationMemo((rows) => {
+        const matching = rows.filter((row) => typeof row.step === "string" && steps.includes(row.step));
+        return projectLine === undefined ? matching.map(project) : matching;
+      }, {
+        holder: identity.holder, durableDigest, statKey, projectLine,
+        ...(io.parseAll ? { requireObjects: true, pattern: rawPattern } : { pattern }), ...(io.readFile ? { readFile: io.readFile } : {}),
       });
       if (slice.sharedSnapshot) {
         for (const entry of fresh) {

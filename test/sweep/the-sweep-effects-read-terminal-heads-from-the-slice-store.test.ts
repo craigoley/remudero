@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import fs, { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { resolveLedgerUnion } from "#src/lib/ledger-union.js";
 import { parseLedger } from "#src/lib/retro.js";
-import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "#src/lib/sweep.js";
+import { buildSweepEffects, createEscalationTriageHistoryReader, DEFAULT_SWEEP_POLICY, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -19,7 +19,7 @@ const legacyPattern = /"step":"sweep\.fix\.uncreditable_head"|"step":"sweep\.fix
 const standDownReason = `terminal uncreditable head already escalated for this PR@head (${escalatedStep})`;
 const unreadHistoryReason = "terminal uncreditable head history is unreadable";
 const childFlag = "--terminal-heads-child";
-const candidates = [1, 2, 3, 4, 5, 6].map((prNumber) => ({ prNumber, headSha: `sha-${prNumber}` }));
+const candidates = [1, 2, 3, 4, 5, 6, 7, 8].map((prNumber) => ({ prNumber, headSha: `sha-${prNumber}` }));
 candidates.push({ prNumber: 1, headSha: "sha-new-push" });
 
 function terminal(prNumber: number) {
@@ -33,18 +33,36 @@ function escalated(prNumber: number) {
   return { step: escalatedStep, pr_number: prNumber, head_sha: `sha-${prNumber}` };
 }
 
+function spacedEscalation(prNumber: number): string {
+  return JSON.stringify(escalated(prNumber)).replace('"step":"', '"step": "');
+}
+
+function corruptWithoutChangingMtime(archive: string): Buffer {
+  const original = readFileSync(archive);
+  const before = statSync(archive);
+  writeFileSync(archive, Buffer.alloc(original.length));
+  utimesSync(archive, before.atime, before.mtime);
+  const after = statSync(archive);
+  assert.deepEqual([after.ino, after.size, after.mtimeMs], [before.ino, before.size, before.mtimeMs]);
+  return original;
+}
+
 function fixture(t: TestContext) {
   const { dir: root } = ownedFixtureDir(t, "terminal-head-slices");
-  const ledger = writeLedger([escalated(2), terminal(3), escalated(3), terminal(4), terminal(6)], {
+  const firstReview = [7, 8].map((prNumber) => ({ ...terminal(prNumber), ts: "2026-10-31T00:00:00.000Z", run_id: "review-first" }));
+  const ledger = writeLedger([
+    escalated(2), terminal(3), escalated(3), terminal(4), terminal(6),
+    { ...firstReview[0]!, run_id: "review-last" }, firstReview[1]!,
+  ], {
     dir: join(root, "state"),
     rotations: [
-      { at: "2026-11-01T00:00:00.000Z", gz: true, rows: [terminal(1), { step: "unrelated" }] },
+      { at: "2026-11-01T00:00:00.000Z", gz: true, rows: [terminal(1), { step: "unrelated" }, ...firstReview] },
       { at: "2026-11-02T00:00:00.000Z", gz: true, rows: [
         escalated(1), terminal(2), { ...terminal(5), reason: "wrong_task_id" }, escalated(5),
+        ...firstReview.map((row) => ({ ...row, run_id: "ci-middle", cause: "ci" })),
       ] },
     ],
   });
-  const spacedEscalation = (prNumber: number) => JSON.stringify(escalated(prNumber)).replace('"step":"', '"step": "');
   const archive = join(ledger.dir, "ledger.2026-11-02T00-00-00-000Z.ndjson.gz");
   writeFileSync(ledger.path, `${spacedEscalation(4)}\n`, { flag: "a" });
   writeFileSync(archive, zlib.gzipSync(`${spacedEscalation(6)}\n`), { flag: "a" });
@@ -56,11 +74,11 @@ interface BuildObservation {
   stoodDown: typeof candidates;
 }
 
-function buildEffects(root: string, ledgerPath: string) {
+function buildEffects(root: string, ledgerPath: string, deps: Partial<BuildSweepEffectsDeps> = {}) {
   return buildSweepEffects({
     owner: "acme", repo: "scratch", config: { root } as never,
     ledgerPath, runId: "SWEEP-terminal-heads", plan: { tasks: [], byId: new Map() },
-    log: () => {}, policy: DEFAULT_SWEEP_POLICY,
+    log: () => {}, policy: DEFAULT_SWEEP_POLICY, ...deps,
   });
 }
 
@@ -118,7 +136,7 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(second.stoodDown, first.stoodDown);
   });
 
-  test("W1-T12271 criterion 2: the sweep stands down the same heads as the ledger union", (t) => {
+  test("W1-T12271 criterion 2: sweep stand-down and retry decisions match the ledger union", async (t) => {
     const { root, dir, path } = fixture(t);
     const union = resolveLedgerUnion(dir, legacyPattern);
     assert.equal(union.ok, true);
@@ -131,6 +149,25 @@ if (process.argv[2] === childFlag) {
     });
     assert.deepEqual(expected, candidates.slice(0, 3));
     assert.deepEqual(observeBuild(root, path).stoodDown, expected);
+
+    const issueBodies: string[] = [];
+    const { dispatchFix } = buildEffects(root, path, {
+      issuesImpl: { create: (_title, body) => {
+        issueBodies.push(body);
+        return `https://github.com/acme/scratch/issues/${issueBodies.length}`;
+      } },
+      dispatchFixPreflightStandDownImpl: async () => false,
+    });
+    assert.ok(dispatchFix);
+    const retries = candidates.filter(({ prNumber }) => prNumber === 7 || prNumber === 8);
+    const expectedCauses = retries.map(({ prNumber, headSha }) => rows.findLast((row) =>
+      row.step === terminalStep && row.pr_number === prNumber && row.head_sha === headSha)?.cause);
+    // PR 7 has a distinct final review row. PR 8 replays the exact first review row.
+    assert.deepEqual(expectedCauses, ["review", "ci"]);
+    for (const retry of retries) {
+      await dispatchFix({ ...retry, checksState: "red" } as OpenPrView, { unmetCriteria: [] });
+    }
+    assert.deepEqual(issueBodies.map((body) => /^\*\*Cause:\*\* (.+)$/m.exec(body)?.[1]), expectedCauses);
   });
 
   test("W1-T12271 criterion 3: a cold build holds dispatch while a rotation is unreadable", (t) => {
@@ -148,13 +185,17 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
   });
 
-  test("an unread rotation holds sweep and direct dispatch even after a successful build", async (t) => {
-    const { root, path, archive } = fixture(t);
+  test("W1-T12271 criterion 3: same-size, same-mtime corruption holds warm and restarted dispatch", async (t) => {
+    const { root, dir, path, archive } = fixture(t);
+    utimesSync(archive, 1, 1);
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
-    const original = readFileSync(archive);
-    writeFileSync(archive, "unreadable gzip");
+    const original = corruptWithoutChangingMtime(archive);
+    const unread = resolveLedgerUnion(dir, legacyPattern);
+    assert.equal(unread.ok, false);
+    assert.deepEqual(unread.unread, [archive]);
 
     assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 1, stoodDown: candidates });
+    assert.deepEqual(buildInNewProcess(root, path, unreadHistoryReason), { gunzips: 1, stoodDown: candidates });
     const { dispatchFix } = buildEffects(root, path);
     assert.ok(dispatchFix);
     assert.deepEqual(await dispatchFix(candidates[0] as OpenPrView, { unmetCriteria: [] }), {
@@ -165,14 +206,48 @@ if (process.argv[2] === childFlag) {
     assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
   });
 
-  test("W1-T12271 criterion 4: production sweep effects keep complete rotations when the live read fails", (t) => {
+  test("a raw-pattern slice preserves replay identity and rejects a stale shared snapshot", async (t) => {
+    const { dir, archive } = fixture(t);
+    const slice = {
+      holder: "test.terminal-snapshot", steps: [terminalStep, escalatedStep], rawPattern: legacyPattern,
+      sharedSnapshot: true, strictFileIdentity: true,
+      project: ({ step, pr_number, cause }: Record<string, unknown>) => ({ step, pr_number, cause }),
+    };
+    utimesSync(archive, 1, 1);
+    const read = await createEscalationTriageHistoryReader({ slice })(dir);
+    assert.equal(read.ok, true);
+    const union = resolveLedgerUnion(dir, legacyPattern);
+    assert.equal(union.ok, true);
+    const expected = parseLedger(union.matches.join("\n")).map(slice.project);
+    assert.deepEqual(read.rows.map(slice.project), expected);
+
+    const warm = createEscalationTriageHistoryReader({ slice });
+    assert.deepEqual(warm.current(dir).rows.map(slice.project), expected);
+    assert.equal(warm.lastLoad().snapshotHit, true);
+    assert.equal(warm.lastLoad().rotationsRead, 0);
+
+    corruptWithoutChangingMtime(archive);
+    const fresh = createEscalationTriageHistoryReader({ slice });
+    const unread = fresh.current(dir);
+    assert.equal(unread.ok, false);
+    assert.deepEqual(unread.unread, [archive]);
+    assert.equal(fresh.lastLoad().rotationsRead, 1);
+  });
+
+  test("W1-T12271 criterion 4: production sweep effects hold dispatch when the live read fails", async (t) => {
     const { root, dir, path } = fixture(t);
+    assert.deepEqual(observeBuild(root, path).stoodDown, candidates.slice(0, 3));
     unlinkSync(path);
     mkdirSync(path);
 
     const union = resolveLedgerUnion(dir, legacyPattern);
     assert.equal(union.ok, true);
-    assert.deepEqual(observeBuild(root, path), { gunzips: 2, stoodDown: candidates.slice(0, 1) });
+    assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 0, stoodDown: candidates });
+    const { dispatchFix } = buildEffects(root, path);
+    assert.ok(dispatchFix);
+    assert.deepEqual(await dispatchFix(candidates[2] as OpenPrView, { unmetCriteria: [] }), {
+      roundNotRun: true, reason: unreadHistoryReason,
+    });
   });
 
   test("an unreadable rotation holds dispatch even when its slice is cached", (t) => {
@@ -194,7 +269,9 @@ if (process.argv[2] === childFlag) {
 
   test("without rotations the sweep uses the caller's live ledger path", (t) => {
     const { dir: root } = ownedFixtureDir(t, "terminal-head-live-only");
-    const { path: livePath } = writeLedger([terminal(1), escalated(1)], { dir: root });
+    const { path: livePath } = writeLedger([terminal(1)], { dir: root });
+    writeFileSync(livePath, `${spacedEscalation(1)}\n`, { flag: "a" });
+    assert.deepEqual(observeBuild(root, livePath), { gunzips: 0, stoodDown: candidates.slice(0, 1) });
     const path = join(root, "custom.ndjson");
     renameSync(livePath, path);
 
