@@ -66,7 +66,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument, visit } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -11648,7 +11648,7 @@ function gateHandoffLogParser(filer: string) {
         entry = undefined;
       } else if (held) {
         const id = /^\s+(W\d+-T\d+) -- /.exec(line)?.[1];
-        const file = /^\s+(plan\/tasks\.d\/[^/\s]+\.ya?ml):\d+$/.exec(line)?.[1];
+        const file = /^\s+(plan\/tasks\.d\/[^/]+\.ya?ml):\d+$/.exec(line)?.[1];
         const handoff = /^\s+reservation hand-off: (\S+) -> (\S+)$/.exec(line);
         if (id) entries.push(entry = { id, filer, files: [] });
         else if (entry && file) entry.files.push(file);
@@ -11866,8 +11866,19 @@ export async function renumberPlanPrIds(
   }
 }
 
-/** W1-T13829: hand-off attempts this process began, by ledger and PR head. */
-const handoffAttempts = new Set<string>();
+// Persist the claim before the effect so even a crashed sweep cannot spend the same head again.
+function claimPlanHandoff(ledgerPath: string, head: string, runId: string): boolean {
+  const dir = join(dirname(ledgerPath), "plan-handoff-attempts");
+  const key = createHash("sha256").update(JSON.stringify([basename(ledgerPath), head])).digest("hex");
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(join(dir, key), JSON.stringify({ head, run_id: runId }), { flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
 
 /** W1-T13829: the gate's printed hand-off line, added to each named shard's note of a PR whose holders are abandoned
  *  (W1-T6026's proof: no holder head on origin, no open PR on it, a reservation past RESERVATION_PUSH_GRACE_MS). */
@@ -11976,8 +11987,10 @@ async function handoffStandDown(
         return `holder branch ${holder} of ${id} is on origin`;
       }
     }
-    // Validating one reservation at a time leaves the earlier ones free to change: read them all again, together.
-    const final = await readShas([...validated.keys()]);
+    // One advertisement rechecks every branch and reservation after the individual reads.
+    const final = await readShas([...validated.keys(), ...handoffs.map(({ holder }) => `refs/heads/${holder}`)]);
+    const published = handoffs.find(({ holder }) => final.has(`refs/heads/${holder}`));
+    if (published) return `holder branch ${published.holder} of ${published.id} is on origin`;
     const moved = handoffs.find(({ id }) => final.get(taskIdReservationRef(id)) !== validated.get(taskIdReservationRef(id)));
     if (moved !== undefined) return `the reservation of ${moved.id} changed while the hand-off was being checked`;
     return undefined;
@@ -12047,6 +12060,17 @@ function shardWithHandoffNote(text: string, ids: readonly string[], line: string
     const at = text[end - 1] === "\n" ? end : text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end);
     const block = `${pad}note: |${eol}${body}`;
     next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}${eol}${text.slice(at)}` : `${text.slice(0, at)}${eol}${block}${text.slice(at)}`;
+  }
+  if (isScalar(noteNode) && noteNode.anchor) {
+    // Preserve the old value for aliases that resolve to this note, even when another anchor reuses its name.
+    const references: Array<[number, number]> = [];
+    visit(doc, { Alias(_key, alias) {
+      if (alias.range && alias.resolve(doc) === noteNode) references.push([alias.range[0], alias.range[1]]);
+    } });
+    const shift = next.length - text.length;
+    for (const [start, end] of references.reverse()) {
+      next = `${next.slice(0, start + shift)}${JSON.stringify(noteNode.value)}${next.slice(end + shift)}`;
+    }
   }
   const after = parseDocument(next);
   const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
@@ -22719,12 +22743,13 @@ export async function runSweep(
         facts = (handoffJobId && cached?.handoffs === undefined ? undefined : cached) ?? await deps.readPlanRepairFacts(pr, handoffJobId);
         planRoundFacts.set(pr.prNumber, facts);
       } catch (e) {
-        appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
+        if (!deps.dryRun) appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
         return notRepaired;
       }
     }
     const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory, deps.behindMainByPr?.get(pr.prNumber));
     if (decision === undefined) return notRepaired;
+    if (deps.dryRun) return { repaired: true, reason: `plan repair (${decision.signature}): would ${decision.action} on ${decision.check}` };
     if (decision.signature === "base-red") baseRedStandDownPrs.add(pr.prNumber);
     const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
     if (decision.action === "wait") {
@@ -22733,18 +22758,14 @@ export async function runSweep(
       planRepairHistory.add(key);
       return { repaired: true, reason: `plan repair (base-red): ${decision.check} also fails on main's latest run — waiting for main, no escalation` };
     }
-    if (decision.action === "handoff") {
-      // Once per head across overlapping passes: this pass's ledger snapshot can predate another pass's attempt.
-      const attempt = `${deps.ledgerPath}\0${head}`;
-      if (handoffAttempts.has(attempt) ||
-          planRepairHistoryFromLedger(readLedger(deps.ledgerPath)).has(`${head}@held-task-id-handoff`)) {
-        planRepairHistory.add(`${head}@held-task-id-handoff`);
-        return notRepaired;
-      }
-      handoffAttempts.add(attempt);
-    }
     let result: PlanRepairOutcome;
     try {
+      if (decision.action === "handoff" &&
+          (planRepairHistoryFromLedger(readLedger(deps.ledgerPath)).has(`${head}@${decision.signature}`) ||
+           !claimPlanHandoff(deps.ledgerPath, head, deps.runId))) {
+        planRepairHistory.add(`${head}@${decision.signature}`);
+        return notRepaired;
+      }
       result =
         decision.signature === "base-red"
           ? { outcome: !deps.updateBranch ? "unwired"

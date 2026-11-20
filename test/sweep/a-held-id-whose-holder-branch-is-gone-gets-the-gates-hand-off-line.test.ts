@@ -8,7 +8,8 @@
  * line itself, once per head, when W1-T6026's proof of abandonment holds for every holder.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
@@ -18,8 +19,10 @@ import { loadPlanAtRef } from "#src/lib/plan.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS, taskIdReservationRef } from "#src/lib/task-id-reservation.js";
 import { ciFailureRegionReducer } from "#src/lib/tick-read-worker.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import * as sweep from "#test/helpers/sweep-test.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
@@ -82,6 +85,10 @@ test("W1-T13829 criterion 1: only the gate's printed hand-off line for this head
     signature: "held-task-id-handoff", action: "handoff", check: "task-id-existence",
     handoffs: IDS.map((id, i) => ({ id, holder: HOLDER, filer: FILER, files: [SHARDS[i]!] })),
   });
+  const spaced = `plan/tasks.d/${IDS[0]}-hand filing.yaml`;
+  const fromSpacedPath = sweep.decidePlanRepair(planPr({ ciFailures: [failure(fullLog.replace(SHARDS[0]!, spaced))] }), {}, undefined, new Set());
+  assert.equal(fromSpacedPath?.action, "handoff");
+  assert.deepEqual(fromSpacedPath.handoffs[0]?.files, [spaced]);
   const none = (logTail: string, over: Partial<OpenPrView> = {}) =>
     assert.notEqual(sweep.decidePlanRepair(planPr({ ciFailures: [failure(logTail)], ...over }), {}, undefined, new Set())?.action, "handoff");
   // A held id with no printed line: the gate gave no cure for it, so nothing is handed off.
@@ -277,6 +284,28 @@ test("W1-T13829 criterion 2: a holder published after the local commit stops the
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+test("W1-T13829 criterion 2: a holder published during another holder's last branch lookup stops the push", async (t) => {
+  const otherHolder = "run-unfiled-1795065830000";
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, holders: [HOLDER, otherHolder, otherHolder] });
+  const logTail = heldLog(IDS.map((id, i) => {
+    const holder = i === 0 ? HOLDER : otherHolder;
+    return { id, file: SHARDS[i]!, holder, handoff: `reservation hand-off: ${holder} -> ${FILER}` };
+  }));
+  let committed = false;
+  let published = false;
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }), async (cwd, args) => {
+    if (args[0] === "commit") committed = true;
+    if (committed && !published && args[0] === "ls-remote" && args[1] === "--heads" && args[3] === `refs/heads/${otherHolder}`) {
+      f.remote.git("update-ref", `refs/heads/${HOLDER}`, "refs/heads/main");
+      published = true;
+    }
+    return hostWorktreeGitAsync(cwd, args);
+  });
+  assert.equal(published, true);
+  assert.deepEqual(out, { outcome: "stood-down", reason: `holder branch ${HOLDER} of ${IDS[0]} is on origin` });
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
 test("W1-T13829 criterion 3: the line is added as its own note line per named shard, in one commit pushed with a lease", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
   const out = await handOff(f, planPr({ headSha: f.headSha }));
@@ -414,6 +443,25 @@ test("W1-T13829 criterion 3: a remedy already in the shard is left in place", as
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+test("W1-T13829 criterion 3: a note anchor used elsewhere leaves those values unchanged", async (t) => {
+  const original = `- id: ${IDS[0]}\n  note: &shared | # keep the note comment\n    filed by hand\n  title: *shared # keep the title comment\n`;
+  const second = `- id: ${IDS[1]}\n  title: *shared\n  note: &shared for the second task\n  status: queued\n`;
+  const third = `- id: ${IDS[2]}\n  title: *shared\n  status: queued\n`;
+  const prior = original + second + third;
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts: [prior] });
+  const logTail = heldLog([{ id: IDS[0]!, file: SHARDS[0]!, handoff: handoffLine }]);
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(logTail)] }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  const after = f.remote.git("show", `${out.newHeadSha}:${SHARDS[0]}`) + "\n";
+  assert.equal(after, (original + second)
+    .replace("    filed by hand\n", `    filed by hand\n    ${handoffLine}\n`)
+    .replaceAll("title: *shared", 'title: "filed by hand\\n"') + third);
+  const expected = parseYaml(prior) as Array<Record<string, unknown>>;
+  expected[0]!.note = `filed by hand\n${handoffLine}\n`;
+  assert.deepEqual(parseYaml(after), expected);
+  assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
 test("W1-T13829 criterion 3: two different remedies for one shard stand down", async (t) => {
   const otherHolder = "run-unfiled-1795065830000";
   const f = fixture(t, {
@@ -431,9 +479,25 @@ test("W1-T13829 criterion 3: two different remedies for one shard stand down", a
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
-test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI excerpt drops the HELD header", async (t) => {
+test("W1-T13829 criterion 5: the real sweep clears the gate when the CI excerpt drops the HELD header", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
-  const lines = `${fullLog}\n2026-11-19T05:33:02.1234567Z ##[error]Process completed with exit code 1.`.split("\n");
+  const root = dirname(f.hooksDir);
+  const baseline = join(root, "task-id-existence-baseline.json");
+  writeFileSync(baseline, "[]\n");
+  const openPrs = "repos/acme/remudero/pulls?state=open&per_page=100";
+  const gh = ghShim([{ when: openPrs, stdout: "[]" }], { parent: root, kind: "t13829-gate" });
+  const gateAt = (sha: string) => {
+    f.host.git("checkout", "--quiet", "--detach", sha);
+    const args = [join(REPO_ROOT, "scripts/task-id-existence-check.mjs"),
+      "--cwd", f.host.dir, "--dir", "plan", "--base", "origin/main", "--baseline", baseline,
+      "--head-ref", FILER, "--owner", "acme", "--repo", "remudero", "--require-open-prs"];
+    return spawnSync(process.execPath, args, { encoding: "utf8", env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH ?? ""}` } });
+  };
+  const refused = gateAt(f.headSha);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /HELD by a different reservation holder/);
+  const stamp = "2026-11-19T05:33:01.1234567Z ";
+  const lines = (refused.stderr + "##[error]Process completed with exit code 1.\n").trimEnd().split("\n").map((line) => stamp + line);
   const reducer = ciFailureRegionReducer(60);
   for (const line of lines) reducer.push(line);
   const logTail = reducer.finish();
@@ -441,7 +505,6 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   assert.doesNotMatch(logTail, /W1-T13787/);
   assert.match(logTail, /W1-T13789/);
   const pr = planPr({ headSha: f.headSha, ciFailures: [{ ...failure(logTail), jobId: "12345" }] });
-  const root = dirname(f.hooksDir);
   const ledger: Record<string, unknown>[] = [];
   const readErrors: unknown[] = [];
   let logUnavailable = true;
@@ -464,7 +527,7 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   const deps = {
     arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: async () => {},
     readPlanRepairFacts: effects.readPlanRepairFacts, repairPlanPr: effects.repairPlanPr,
-    ledgerPath: "/dev/null/w1-t13829.ndjson", runId: "W1-T13829-test",
+    ledgerPath: join(root, "ledger.ndjson"), runId: "W1-T13829-test",
     readLedger: () => ledger, appendLine: (_path: string, line: Record<string, unknown>) => { ledger.push(line); },
     now: () => NOW,
   } as unknown as SweepDeps;
@@ -477,9 +540,13 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   assert.equal(f.remote.git("rev-parse", `${head}^`), f.headSha);
   assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), SHARDS.join("\n"));
   assert.equal(ledger.find((row) => row.step === sweep.PLAN_REPAIR_STEP)?.outcome, "handed-off");
+  const accepted = gateAt(head);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, /task-id-existence: OK/);
+  assert.deepEqual(gh.calls(), [`api ${openPrs}`, `api ${openPrs}`]);
 });
 
-test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attempt at their head", async () => {
+test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attempt at their head", async (t) => {
   const ledger: Record<string, unknown>[] = [];
   const calls: Array<Record<string, unknown>> = [];
   let answer: { outcome: string; reason?: string } = { outcome: "error", reason: "the push was refused" };
@@ -487,7 +554,7 @@ test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attem
     arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: async () => {},
     readPlanRepairFacts: () => ({}),
     repairPlanPr: (_pr: OpenPrView, decision: Record<string, unknown>) => { calls.push(decision); return answer; },
-    ledgerPath: "/dev/null/w1-t13829.ndjson", runId: "W1-T13829-test",
+    ledgerPath: join(ownedFixtureDir(t, "t13829-ledger").dir, "ledger.ndjson"), runId: "W1-T13829-test",
     readLedger: () => ledger, appendLine: (_path: string, line: Record<string, unknown>) => { ledger.push(line); },
     now: () => NOW,
   } as unknown as SweepDeps;
@@ -568,14 +635,17 @@ function overlappingSweepDeps(ledgerPath: string, ledger: Record<string, unknown
   } as unknown as SweepDeps;
 }
 
-test("W1-T13829 criterion 4: two overlapping sweeps make one hand-off attempt at a head", async () => {
+test("W1-T13829 criterion 4: two independent overlapping sweeps make one hand-off attempt at a head", async (t) => {
+  const otherModule: string = `${import.meta.resolve("#src/lib/sweep.js")}?t13829-independent`;
+  const { runSweep: runOtherSweep } = (await import(otherModule)) as { runSweep: typeof runSweep };
+  assert.notEqual(runOtherSweep, sweep.runSweep);
   const ledger: Record<string, unknown>[] = [];
   let calls = 0;
   let release!: () => void;
   const released = new Promise<void>((resolve) => { release = resolve; });
   let entered!: () => void;
   const inside = new Promise<void>((resolve) => { entered = resolve; });
-  const deps = overlappingSweepDeps("/dev/null/w1-t13829-overlap.ndjson", ledger, async () => {
+  const deps = overlappingSweepDeps(join(ownedFixtureDir(t, "t13829-overlap").dir, "ledger.ndjson"), ledger, async () => {
     // Only the first attempt waits, so a second one would finish rather than deadlock the test.
     if (++calls === 1) {
       entered();
@@ -584,22 +654,25 @@ test("W1-T13829 criterion 4: two overlapping sweeps make one hand-off attempt at
     return { outcome: "error", reason: "the push was refused" };
   });
   const first = runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
-  await inside;
-  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
-  release();
-  await first;
+  try {
+    await Promise.race([inside, first.then(() => assert.fail("the first sweep never reached the effect"))]);
+    await runOtherSweep([planPr()], { ...deps, runId: "second-sweep" }, DEFAULT_SWEEP_POLICY);
+  } finally {
+    release();
+    await first;
+  }
   const rows = ledger.filter((l) => l.step === sweep.PLAN_REPAIR_STEP && l.signature === "held-task-id-handoff");
   assert.equal(calls, 1, "the second sweep began while the first attempt was in flight and did not attempt again");
   assert.deepEqual(rows.map((r) => r.outcome), ["error"], "one failure is ledgered for the head");
 });
 
-test("W1-T13829 criterion 4: a sweep whose snapshot predates another process's attempt reads the ledger again", async () => {
+test("W1-T13829 criterion 4: a sweep whose snapshot predates another process's attempt reads the ledger again", async (t) => {
   // Another sweep process recorded its failed attempt after this pass read its ledger snapshot.
   const ledger: Record<string, unknown>[] = [{ step: sweep.PLAN_REPAIR_STEP, run_id: "other-process", pr_number: 19604, head_sha: HEAD,
     signature: "held-task-id-handoff", action: "handoff", outcome: "error", reason: "the push was refused" }];
   let calls = 0;
   let reads = 0;
-  const deps = overlappingSweepDeps("/dev/null/w1-t13829-other-process.ndjson", ledger, async () => {
+  const deps = overlappingSweepDeps(join(ownedFixtureDir(t, "t13829-before-outcome").dir, "ledger.ndjson"), ledger, async () => {
     calls++;
     return { outcome: "error", reason: "the push was refused" };
   });
@@ -609,4 +682,22 @@ test("W1-T13829 criterion 4: a sweep whose snapshot predates another process's a
   assert.ok(reads > 1, "the pass read the ledger again before the attempt");
   assert.equal(calls, 0, "the other process's attempt already spent this head");
   assert.deepEqual(rows.map((r) => r.run_id), ["other-process"], "no second failure is ledgered");
+});
+
+test("W1-T13829 criterion 5: dry-run previews a hand-off without taking or spending the attempt", async (t) => {
+  const dir = ownedFixtureDir(t, "t13829-preview").dir;
+  const ledger: Record<string, unknown>[] = [];
+  let calls = 0;
+  const deps = overlappingSweepDeps(join(dir, "ledger.ndjson"), ledger, async () => {
+    calls++;
+    return { outcome: "error", reason: "the push was refused" };
+  });
+  const preview = await runSweep([planPr()], { ...deps, dryRun: true }, DEFAULT_SWEEP_POLICY);
+  assert.equal(calls, 0);
+  assert.equal(ledger.length, 0);
+  assert.equal(existsSync(join(dir, "plan-handoff-attempts")), false);
+  assert.match(preview.actions[0]?.reason ?? "", /would handoff on task-id-existence/);
+  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(calls, 1, "the live sweep can still attempt the same head");
+  assert.deepEqual(ledger.filter((row) => row.step === sweep.PLAN_REPAIR_STEP).map((row) => row.outcome), ["error"]);
 });
