@@ -8,9 +8,11 @@
  * line itself, once per head, when W1-T6026's proof of abandonment holds for every holder.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -18,6 +20,7 @@ import { loadPlanAtRef } from "#src/lib/plan.js";
 import { formatReservationAnchorMessage, RESERVATION_PUSH_GRACE_MS, taskIdReservationRef } from "#src/lib/task-id-reservation.js";
 import { ciFailureRegionReducer } from "#src/lib/tick-read-worker.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import * as sweep from "#test/helpers/sweep-test.js";
@@ -214,6 +217,29 @@ test("W1-T13829 criterion 2: a reservation moved during fetch cannot be proved o
   assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
 });
 
+test("W1-T13829 criterion 2: replacing an earlier reservation during the final fetch stops the push", async (t) => {
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
+  const firstRef = taskIdReservationRef(IDS[0]!);
+  const lastRef = taskIdReservationRef(IDS[2]!);
+  const tree = f.remote.git("rev-parse", "refs/heads/main^{tree}");
+  const recent = f.remote.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: HOLDER, startedAt: new Date(NOW - 1).toISOString() }));
+  const writes: string[] = [];
+  let replaced = false;
+  const out = await handOff(f, planPr({ headSha: f.headSha }), async (cwd, args) => {
+    if (args[0] === "commit" || args[0] === "push") writes.push(args[0]);
+    if (args[0] === "fetch" && args.at(-1) === lastRef && writes.includes("commit")) {
+      f.remote.git("update-ref", firstRef, recent);
+      replaced = true;
+    }
+    return hostWorktreeGitAsync(cwd, args);
+  });
+  assert.equal(replaced, true);
+  assert.equal(out.outcome, "stood-down", JSON.stringify(out));
+  assert.match(out.reason ?? "", /reservation of W1-T13787 changed/);
+  assert.deepEqual(writes, ["commit"]);
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha);
+});
+
 for (const phase of ["before worktree setup", "before push"]) {
   test(`W1-T13829 criterion 2: a holder published during reservation fetch ${phase} stops the hand-off`, async (t) => {
     const otherHolder = "run-unfiled-1795065830000";
@@ -337,6 +363,24 @@ test("W1-T13829 criterion 3: a literal note keeps its header, indentation and tr
   assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
 });
 
+test("W1-T13829 criterion 3: an alias-backed note keeps its text, comment and shared anchor", async (t) => {
+  const original = "  rationale: &filing |+\n    filed by hand\n\n  note: *filing # note comment\n  design: *filing\n";
+  const texts = SHARD_TEXTS.map((text) => text.replace("  note: filed by hand\n", original));
+  const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000, texts });
+  const id = IDS[1]!;
+  const file = SHARDS[1]!;
+  const loadAt = (sha: string) => loadPlanAtRef(f.remote.dir, "plan/tasks.yaml", sha).byId.get(id);
+  assert.equal(loadAt(f.headSha)?.note, "filed by hand\n\n");
+  const out = await handOff(f, planPr({ headSha: f.headSha, ciFailures: [failure(heldLog([{ id, file, handoff: handoffLine }]))] }));
+  assert.equal(out.outcome, "handed-off", JSON.stringify(out));
+  const head = f.remote.git("rev-parse", `refs/heads/${FILER}`);
+  assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), file);
+  const after = f.remote.git("show", `${head}:${file}`) + "\n";
+  assert.equal(after, texts[1]!.replace("  note: *filing # note comment\n", `  note: | # note comment\n    filed by hand\n\n    ${handoffLine}\n`));
+  assert.deepEqual(loadAt(head), { ...loadAt(f.headSha), note: `filed by hand\n\n${handoffLine}\n` });
+  assert.equal(shardNoteRecordsReservationHandoff(after, HOLDER, FILER), true);
+});
+
 test("W1-T13829 criterion 3: empty block scalar notes keep the blank lines after their headers", async (t) => {
   const notes = [
     { header: "  note: |\n", blank: "\n", indent: "    ", suffix: "\n" },
@@ -433,7 +477,20 @@ test("W1-T13829 criterion 3: two different remedies for one shard stand down", a
 
 test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI excerpt drops the HELD header", async (t) => {
   const f = fixture(t, { startedAgoMs: RESERVATION_PUSH_GRACE_MS + 60_000 });
-  const lines = `${fullLog}\n2026-11-19T05:33:02.1234567Z ##[error]Process completed with exit code 1.`.split("\n");
+  const root = dirname(f.hooksDir);
+  const baseline = join(root, "task-id-existence-baseline.json");
+  writeFileSync(baseline, "[]\n");
+  const gh = ghShim([{ when: "api", stdout: "[]" }], { kind: "t13829-gate" });
+  const gate = () => spawnSync(process.execPath, [fileURLToPath(import.meta.resolve(GATE)),
+    "--cwd", f.host.dir, "--base", "origin/main", "--baseline", baseline, "--head-ref", FILER,
+    "--owner", "acme", "--repo", "remudero", "--require-open-prs"],
+  { encoding: "utf8", env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH ?? ""}` } });
+  f.host.git("checkout", "--quiet", "--detach", `origin/${FILER}`);
+  const red = gate();
+  assert.equal(red.status, 1, `${red.stderr}${red.error ?? ""}`);
+  assert.deepEqual(red.stderr.split("\n").filter((line) => line.trim() === handoffLine), Array(3).fill(`          ${handoffLine}`));
+  const lines = `${red.stderr.trimEnd()}\n##[error]Process completed with exit code 1.`.split("\n")
+    .map((line) => `2026-11-19T05:33:02.1234567Z ${line}`);
   const reducer = ciFailureRegionReducer(60);
   for (const line of lines) reducer.push(line);
   const logTail = reducer.finish();
@@ -441,7 +498,6 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   assert.doesNotMatch(logTail, /W1-T13787/);
   assert.match(logTail, /W1-T13789/);
   const pr = planPr({ headSha: f.headSha, ciFailures: [{ ...failure(logTail), jobId: "12345" }] });
-  const root = dirname(f.hooksDir);
   const ledger: Record<string, unknown>[] = [];
   const readErrors: unknown[] = [];
   let logUnavailable = true;
@@ -477,6 +533,10 @@ test("W1-T13829 criterion 5: the real sweep repairs all three shards when the CI
   assert.equal(f.remote.git("rev-parse", `${head}^`), f.headSha);
   assert.equal(f.remote.git("diff", "--name-only", f.headSha, head), SHARDS.join("\n"));
   assert.equal(ledger.find((row) => row.step === sweep.PLAN_REPAIR_STEP)?.outcome, "handed-off");
+  f.host.git("fetch", "--quiet", "origin", FILER);
+  f.host.git("checkout", "--quiet", "--detach", head);
+  const green = gate();
+  assert.equal(green.status, 0, `${green.stderr}${green.error ?? ""}`);
 });
 
 test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attempt at their head", async () => {
@@ -510,3 +570,36 @@ test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attem
   assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${other.headSha}@held-task-id-handoff`), true);
   assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${HEAD}@held-task-id-handoff`), true);
 });
+
+for (const phase of ["while the push is in flight", "after a stale ledger read"]) {
+  test(`W1-T13829 criterion 4: overlapping sweeps spend one attempt ${phase}`, async () => {
+    const ledger: Record<string, unknown>[] = [];
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const failPush = { outcome: "error", reason: "the push was refused" };
+    let calls = 0;
+    const deps = {
+      arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: async () => {},
+      readPlanRepairFacts: () => ({}),
+      repairPlanPr: () => { calls++; return failPush; },
+      ledgerPath: `/dev/null/w1-t13829-${phase}.ndjson`, runId: "W1-T13829-test",
+      readLedger: () => [...ledger], appendLine: (_path: string, line: Record<string, unknown>) => { ledger.push(line); },
+      now: () => NOW,
+    } satisfies SweepDeps;
+    const pr = planPr({ ciFailures: [{ ...failure(fullLog), jobId: "12345" }] });
+    const delayed = phase === "while the push is in flight"
+      ? { ...deps, repairPlanPr: async () => { entered.resolve(); await resume.promise; return deps.repairPlanPr(); } }
+      : { ...deps, readPlanRepairFacts: async () => { entered.resolve(); await resume.promise; return {}; } };
+    const pending = runSweep([pr], delayed, DEFAULT_SWEEP_POLICY);
+    await entered.promise;
+    try {
+      await runSweep([pr], deps, DEFAULT_SWEEP_POLICY);
+    } finally {
+      resume.resolve();
+      await pending;
+    }
+    assert.equal(calls, 1);
+    const rows = ledger.filter((row) => row.step === sweep.PLAN_REPAIR_STEP && row.signature === "held-task-id-handoff");
+    assert.deepEqual(rows.map(({ outcome, reason }) => ({ outcome, reason })), [failPush]);
+  });
+}

@@ -445,8 +445,7 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
   repo.git("push", "--quiet", "origin", "HEAD:refs/rmd-id/W1-T9101");
   // A THIRD holder shape, the one the fleet daemon actually mints: reserved from a detached HEAD,
   // so `currentBranch` recorded the literal `unknown`. It is unreadable AS A CLAIM like W1-T9101
-  // above, but unlike it there IS a recorded value to hand off from — so this row, and only this
-  // row, must carry the exact remedy line an author can paste into the shard note.
+  // above, but unlike it there IS a recorded value to hand off from.
   repo.git(
     "commit",
     "--quiet",
@@ -482,18 +481,10 @@ test("W1-T3100 (gate copy): main reports differing and unreadable reservation ho
   assert.match(r.err, /W1-T9100 -- reserved by run-W1-T3100-holder, while this filing is run-W1-T3100-filer/);
   assert.match(r.err, /W1-T9101 -- holder unreadable \(malformed value for branch\)/);
   assert.match(r.err, /W1-T9102 -- holder unreadable \(missing branch\)/);
-  // The detached-mint row prints the line that CLEARS it, verbatim and pasteable, as a block --
-  // hand-off ALONE on its own line (W1-T3648: a one-line fragment silently failed the matcher
-  // once merged with an existing note). The other two rows must not: W1-T9100 has a real holder
-  // branch (so the generic remedy below already names it), and W1-T9101's holder could not be
-  // read at all, so there is nothing to hand off FROM.
-  assert.match(r.err, /note: \|/);
-  assert.match(r.err, /reservation hand-off: unknown -> run-W1-T3100-filer/);
-  assert.equal(
-    (r.err.match(/note: \|/g) ?? []).length,
-    1,
-    "exactly one row earns a pasteable remedy — the one whose reservation recorded a value",
-  );
+  const [named, corrupt, detached] = r.err.split(/(?=^  W1-T910[0-2] -- )/m).slice(1);
+  assert.match(named!, /^        note: \|\n          reservation hand-off: run-W1-T3100-holder -> run-W1-T3100-filer$/m);
+  assert.doesNotMatch(corrupt!, /reservation hand-off:/);
+  assert.match(detached!, /^        note: \|\n          reservation hand-off: unknown -> run-W1-T3100-filer$/m);
   assert.match(r.err, /reservation hand-off: <holder> -> <filer>/);
   assert.doesNotMatch(r.out, /open-PR collision check SKIPPED/);
 });
