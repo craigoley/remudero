@@ -1,0 +1,211 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
+import { test } from "node:test";
+import { createHash } from "node:crypto";
+import { fixedClock } from "#src/lib/clock.js";
+import { ledgerProposalVerdicts, loadProposalRegistry } from "#src/lib/inbox.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
+import { inboxFirstSeenPath, readInboxFirstSeen } from "#src/lib/panel-graph.js";
+import { expireUnansweredSkillDrafts, skillDraftExpiryBound } from "#src/lib/skill-workshop.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+
+const DAY = 86_400_000;
+const at = (iso: string) => Date.parse(iso);
+const NOW = at("2026-11-19T12:00:00.000Z");
+const clock = fixedClock(NOW);
+const BACKFILL = "2026-10-13T00:00:00.000Z";
+const SKILL_MARKDOWN = "---\nname: proc\napplies-to: implement\n---\n\n## Procedure\n\n- Add a failing test first.\n";
+
+interface Site { root: string; stateDir: string; registryPath: string; ledgerPath: string; done: () => void }
+
+function site(): Site {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}skill-draft-expiry-`));
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  return { root, stateDir, registryPath: join(stateDir, "inbox-proposals.json"), ledgerPath: join(stateDir, "ledger.ndjson"),
+    done: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+function row(s: Site, step: string, taskId: string, ts: string, extra: Record<string, unknown> = {}) {
+  appendLedger(s.ledgerPath, { ts, run_id: "PANEL-1", task_id: taskId, step, ...extra });
+}
+
+/** The retro's own log shape (run-task.ts retroCommand). */
+const retroLog = (s: Site) => (step: string, extra: Record<string, unknown> = {}) =>
+  appendLedger(s.ledgerPath, { run_id: "RETRO-1", task_id: "RETRO", step, lane: "retro", ...extra });
+
+/** An answered population whose longest measured wait is p-b's 7.5 days. */
+function answered(s: Site, firstSeen: Record<string, string>) {
+  writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({
+    "backfill-1": BACKFILL,
+    "p-a": "2026-10-20T00:00:00.000Z",
+    "p-b": "2026-10-25T00:00:00.000Z",
+    "p-c": "2026-10-26T00:00:00.000Z",
+    ...firstSeen,
+  }));
+  row(s, "ratify.approved", "backfill-1", "2026-11-18T00:00:00.000Z", { origin: "rmd-cli" }); // 36 days, but its age is unknown
+  row(s, "panel.proposal_declined", "p-a", "2026-10-19T00:00:00.000Z", { origin: "rmd-cli" }); // before first-seen: not an answer
+  row(s, "ratify.approved", "p-a", "2026-10-23T00:00:00.000Z", { origin: "rmd-cli" }); // 3 days: the first answer
+  row(s, "panel.proposal_declined", "p-a", "2026-11-10T00:00:00.000Z", { origin: "rmd-cli" }); // a later answer
+  row(s, "panel.proposal_declined", "p-b", "2026-11-01T12:00:00.000Z", { origin: "fleet-lane" }); // 7.5 days
+  row(s, "panel.proposal_declined", "p-c", "2026-11-15T00:00:00.000Z",
+    { origin: "skill-workshop", reason: "expired: unanswered for 20.00 days" }); // the workshop's own expiry
+}
+
+function union(s: Site) {
+  return readLedgerUnionRecordsSync(s.stateDir, { step: ["ratify.approved", "panel.proposal_declined"], refuseIncomplete: true });
+}
+
+function skillDraft(id: string, extra: Record<string, unknown> = {}) {
+  return { id, summary: SKILL_MARKDOWN, evidenceAnchors: [], skillFile: { name: id.replace(/\W/g, "-"), markdown: SKILL_MARKDOWN },
+    skillFileStagedAt: "2026-10-14T00:00:00.000Z", ...extra };
+}
+
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/** Drafts: one old and unanswered, one young, one approved, one declined, one the workshop closed and the operator restored. */
+function drafts(s: Site) {
+  answered(s, {
+    "skill-draft:old": "2026-11-01T12:00:00.000Z",
+    "skill-draft:young": "2026-11-15T12:00:00.000Z",
+    "skill-draft:approved": "2026-11-01T00:00:00.000Z",
+    "skill-draft:declined": "2026-11-01T00:00:00.000Z",
+    "skill-draft:closed": "2026-11-01T00:00:00.000Z",
+  });
+  row(s, "ratify.approved", "skill-draft:approved", "2026-11-02T00:00:00.000Z", { origin: "rmd-cli" });
+  row(s, "panel.proposal_declined", "skill-draft:declined", "2026-11-03T00:00:00.000Z", { origin: "rmd-cli" });
+  row(s, "panel.proposal_declined", "skill-draft:closed", "2026-11-04T00:00:00.000Z", { origin: "skill-workshop", reason: "withdrawn: x" });
+  row(s, "panel.proposal_restored", "skill-draft:closed", "2026-11-05T00:00:00.000Z", { origin: "rmd-cli" });
+  writeFileSync(s.registryPath, JSON.stringify({ proposals: [
+    skillDraft("skill-draft:old"),
+    skillDraft("skill-draft:young"),
+    skillDraft("skill-draft:approved"),
+    skillDraft("skill-draft:declined"),
+    skillDraft("skill-draft:closed", { skillDraftClose: { at: "2026-11-04T00:00:00.000Z", reason: "withdrawn: x", skillSha256: sha(SKILL_MARKDOWN) } }),
+  ] }));
+}
+
+const rows = (s: Site) => [...readLedgerLines(s.ledgerPath)];
+const declinesOf = (s: Site, id: string) => rows(s).filter((r) => r.step === "panel.proposal_declined" && r.task_id === id);
+const pass = (s: Site) => expireUnansweredSkillDrafts(s.registryPath, s.stateDir, readInboxFirstSeen(s.stateDir), retroLog(s), clock);
+
+function treeOf(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  const walk = (d: string) => {
+    for (const name of readdirSync(d).sort()) {
+      const p = join(d, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else out.push(`${relative(dir, p)}:${readFileSync(p, "utf8")}`);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+test("W1-T13859 criterion 1: the bound is the longest first-seen-to-first-answer wait, without backfill stamps or workshop answers", () => {
+  const s = site();
+  try {
+    answered(s, {});
+    const measured = skillDraftExpiryBound(readInboxFirstSeen(s.stateDir), union(s));
+    assert.deepEqual(measured, { bound: 7.5 * DAY, sample: 2 });
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 2: an old unanswered draft closes once as expired, with its age, the bound and the sample", () => {
+  const s = site();
+  try {
+    drafts(s);
+    const first = pass(s);
+    assert.deepEqual(first.expired, ["skill-draft:old"]);
+    const declined = declinesOf(s, "skill-draft:old");
+    assert.equal(declined.length, 1);
+    assert.equal(declined[0]!.origin, "skill-workshop");
+    assert.equal(declined[0]!.reason,
+      "expired: unanswered for 18.00 days; the longest wait of any answered proposal is 7.50 days (4 answered)");
+    assert.match(loadProposalRegistry(s.registryPath).find((p) => p.id === "skill-draft:old")?.skillDraftClose?.reason ?? "", /^expired:/);
+    assert.equal(ledgerProposalVerdicts(rows(s)).isDeclined("skill-draft:old")?.startsWith("expired:"), true);
+
+    const before = rows(s).length;
+    const second = pass(s);
+    assert.equal(second.expired.length, 0);
+    assert.equal(rows(s).length, before, "a second pass writes no row");
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 3: young, approved, declined and workshop-closed drafts are not changed and get no row", () => {
+  const s = site();
+  try {
+    drafts(s);
+    const keep = ["skill-draft:young", "skill-draft:approved", "skill-draft:declined", "skill-draft:closed"];
+    const before = new Map(keep.map((id) => [id, JSON.stringify(loadProposalRegistry(s.registryPath).find((p) => p.id === id))]));
+    const declinesBefore = new Map(keep.map((id) => [id, declinesOf(s, id).length]));
+    pass(s);
+    for (const id of keep) {
+      assert.equal(JSON.stringify(loadProposalRegistry(s.registryPath).find((p) => p.id === id)), before.get(id), id);
+      assert.equal(declinesOf(s, id).length, declinesBefore.get(id), id);
+    }
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: an incomplete ledger union or an empty sample closes nothing and returns a reason", () => {
+  const s = site();
+  try {
+    drafts(s);
+    writeFileSync(join(s.stateDir, "ledger.2026-10-01T00-00-00-000Z.ndjson.gz"), "not gzip");
+    const registry = readFileSync(s.registryPath, "utf8");
+    const before = rows(s).length;
+    const r = pass(s);
+    assert.equal(r.expired.length, 0);
+    assert.match(r.reason, /^no skill draft expires: .*incomplete ledger union/);
+    assert.equal(rows(s).length, before);
+    assert.equal(readFileSync(s.registryPath, "utf8"), registry);
+  } finally { s.done(); }
+
+  const e = site();
+  try {
+    writeFileSync(inboxFirstSeenPath(e.stateDir), JSON.stringify({ "skill-draft:old": BACKFILL, "skill-draft:new": "2026-10-20T00:00:00.000Z" }));
+    writeFileSync(e.registryPath, JSON.stringify({ proposals: [skillDraft("skill-draft:old"), skillDraft("skill-draft:new")] }));
+    row(e, "ratify.approved", "unrelated", "2026-11-01T00:00:00.000Z");
+    const r = pass(e);
+    assert.equal(r.expired.length, 0);
+    assert.match(r.reason, /^no skill draft expires: no answered proposal has a measured wait/);
+    assert.equal(declinesOf(e, "skill-draft:old").length + declinesOf(e, "skill-draft:new").length, 0);
+  } finally { e.done(); }
+});
+
+test("W1-T13859 criterion 5: the workshop's own expiry declines never enter the sample", () => {
+  const s = site();
+  try {
+    answered(s, {});
+    const withExpiry = union(s);
+    const pc = withExpiry.rows.find((r) => r.task_id === "p-c");
+    assert.ok(pc && at(String(pc.ts)) - at("2026-10-26T00:00:00.000Z") > 7.5 * DAY, "the expiry would be the longest wait");
+    const without = { ...withExpiry, rows: withExpiry.rows.filter((r) => r !== pc) };
+    const firstSeen = readInboxFirstSeen(s.stateDir);
+    assert.deepEqual(skillDraftExpiryBound(firstSeen, withExpiry), skillDraftExpiryBound(firstSeen, without));
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 6: invariant:approve-only-writes-skills an expiry writes nothing under .claude/skills and a restore keeps the draft open", () => {
+  const s = site();
+  try {
+    const skills = join(s.root, ".claude", "skills", "existing");
+    mkdirSync(skills, { recursive: true });
+    writeFileSync(join(skills, "SKILL.md"), "---\nname: existing\n---\n");
+    const tree = treeOf(join(s.root, ".claude"));
+    drafts(s);
+    assert.deepEqual(pass(s).expired, ["skill-draft:old"]);
+    assert.deepEqual(treeOf(join(s.root, ".claude")), tree);
+    row(s, "panel.proposal_restored", "skill-draft:old", "2026-11-19T13:00:00.000Z", { origin: "rmd-cli" });
+    pass(s);
+    pass(s);
+    assert.equal(declinesOf(s, "skill-draft:old").length, 1, "the restored draft is not closed again");
+    assert.equal(ledgerProposalVerdicts(rows(s)).isDeclined("skill-draft:old"), undefined);
+    assert.deepEqual(treeOf(join(s.root, ".claude")), tree);
+  } finally { s.done(); }
+});

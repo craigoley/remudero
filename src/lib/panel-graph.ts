@@ -2578,7 +2578,7 @@ export function inboxFirstSeenPath(stateDir: string): string {
   return join(stateDir, "inbox-first-seen.json");
 }
 
-function readFirstSeen(stateDir: string): Record<string, string> {
+export function readInboxFirstSeen(stateDir: string): Record<string, string> {
   try {
     const parsed = JSON.parse(readFileSync(inboxFirstSeenPath(stateDir), "utf8")) as unknown;
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
@@ -2595,7 +2595,7 @@ function readFirstSeen(stateDir: string): Record<string, string> {
  * Returns how many ids were added.
  */
 export function recordInboxFirstSeen(stateDir: string, ids: Iterable<string>, nowIso: string): number {
-  const held = readFirstSeen(stateDir);
+  const held = readInboxFirstSeen(stateDir);
   const added = [...new Set(ids)].filter((id) => held[id] === undefined);
   if (added.length === 0) return 0;
   for (const id of added) held[id] = nowIso;
@@ -2617,7 +2617,7 @@ export interface InboxProvenanceEvidence {
 
 function inboxProvenance(inboxRoot: string, proposals: ReadonlyArray<{ id: string }>, evidence: InboxProvenanceEvidence): Record<string, InboxProvenance> {
   const stateDir = join(inboxRoot, "state");
-  const firstSeen = readFirstSeen(stateDir);
+  const firstSeen = readInboxFirstSeen(stateDir);
   const threads = readAllThreads({ threadStorePath: inboxThreadStorePath(inboxRoot) });
   const rowAt = new Map<string, string[]>();
   for (const row of evidence.ledgerLines ?? []) {
