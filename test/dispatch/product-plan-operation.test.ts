@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -655,25 +656,34 @@ function preloadChildModule(t: TestContext, f: Fixture, source: string) {
 }
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
-  for (const legacy of [false, true]) {
-    const f = fixture(t);
-    const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
-    const operationId = first.observation.operationId;
-    if (legacy) seedLegacyRefusal(f, operationId); // the saved Nov 3 refusal: a journal written before this fix
-    else {
-      f.release("refused");
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
-    assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED });
+  const f = fixture(t);
+  const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  f.release("refused");
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // Ledger rows that would read as a proposal: a refused hand-off must not even look.
-    const evidence = reader(() => proposalLines(f, operationId));
-    const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
-    assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
-    assert.equal(evidence.reads.length, 0, legacy ? "a legacy refusal" : "a pre-launch refusal");
-    assert.equal(f.calls.length, 1);
-  }
+  const evidence = reader(() => proposalLines(f, operationId));
+  const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
+  assert.equal(evidence.reads.length, 0, "a confirmed pre-launch refusal skips the reader");
+  assert.equal(f.calls.length, 1);
+
+  const active = await ok(f.service({ inFlight: (taskId) => taskId === productPlanLedgerTaskId(operationId),
+    readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.equal(active.observation.state, "proposed", "in-flight work must still look for evidence");
+  assert.equal(evidence.reads.length, 1);
+});
+
+test("W1-T13875: a legacy refused hand-off can recover a proposal after a nonzero exit", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  nativeRun(f, operationId, { pr: PR_URL });
+  f.row(at(4_000), { task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 });
+  const recovered = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([recovered.observation.state, recovered.observation.proposal], ["proposed", PR_URL]);
+  assert.equal(f.calls.length, 1);
 });
 
 test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 20_000 }, async (t) => {
@@ -689,8 +699,10 @@ test("W1-T13875: a nonzero child exit preserves an opened proposal across resume
     appendFileSync(${JSON.stringify(f.ledgerPath)}, rows.map((row) => JSON.stringify(row) + "\n").join(""));
     process.exitCode = 1;
   `, { mode: 0o755 });
+  let launch!: () => void;
+  const launchReady = new Promise<void>((resolve) => { launch = resolve; });
   const gateway = ratifyCliGateway(f.root, join(f.root, "logs"), {
-    ledgerPath: f.ledgerPath, freshTree: async (action) => action({ path: f.root, sha: HEAD }),
+    ledgerPath: f.ledgerPath, freshTree: async (action) => { await launchReady; return action({ path: f.root, sha: HEAD }); },
   });
   let handoff: ReturnType<NonNullable<typeof gateway.productPlan>> | undefined;
   const service = new ProductPlanOperationService({
@@ -699,6 +711,8 @@ test("W1-T13875: a nonzero child exit preserves an opened proposal across resume
     gateway: { inFlight: gateway.inFlight, productPlan: (call) => handoff = gateway.productPlan!(call) },
   });
   const first = await ok(service.execute(actor, f.command()));
+  assert.equal(first.observation.state, "pending");
+  launch();
   assert.deepEqual(await handoff, { outcome: "refused" });
   await new Promise<void>((resolve) => setImmediate(resolve));
   const path = join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!);
@@ -819,7 +833,7 @@ test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
   assert.equal(f.calls.length, 1, "the moved head never launched a second planner for an unresolved brief");
 });
 
-test("W1-T13875: a proposal's evidence is read once and kept when the journal is full", async (t) => {
+test("W1-T13875: a proposal's evidence is read once and kept in a fresh process when the journal is full", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
@@ -838,16 +852,46 @@ test("W1-T13875: a proposal's evidence is read once and kept when the journal is
   const each = size() - before; // every entry and its comma have the same length
   for (let i = 1, total = before + each; total < limit - 900; i++, total += each) entry(i);
   filler.command.repoRoot = "/" + "x".repeat(limit - size());
-  writeFileSync(path, JSON.stringify(journal));
+  const fullJournal = JSON.stringify(journal);
+  writeFileSync(path, fullJournal);
   assert.equal(statSync(path).size, limit, "the journal is at its byte limit");
 
   const evidence = reader(() => proposalLines(f, operationId));
-  for (const resumed of [f.service({ gateway: false, readLedgerLines: evidence.read }), f.service({ gateway: false, readLedgerLines: evidence.read })]) {
-    const next = await ok(resumed.execute(actor, f.command()));
-    assert.deepEqual([next.observation.operationId, next.observation.state, next.observation.proposal], [operationId, "proposed", PR_URL]);
-  }
+  const settled = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([settled.observation.operationId, settled.observation.state, settled.observation.proposal], [operationId, "proposed", PR_URL]);
   assert.equal(evidence.reads.length, 1, "a journal with no room still keeps the proposal it read");
-  assert.equal(statSync(path).size, limit, "nothing was written past the limit");
+  const resumed = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { ProductPlanOperationService } from "#src/lib/product-plan-operation.js";
+    const service = new ProductPlanOperationService({
+      root: ${JSON.stringify(f.root)}, ledgerPath: ${JSON.stringify(f.ledgerPath)},
+      target: { inspect: async () => ({ head: ${JSON.stringify(HEAD)} }) },
+      readLedgerLines: async () => { throw new Error("fresh process tried to read the ledger again"); },
+    });
+    const result = await service.execute(${JSON.stringify(actor)}, ${JSON.stringify(f.command())});
+    console.log(JSON.stringify(result));
+  `], { cwd: repoRoot(), encoding: "utf8", timeout: 15_000 });
+  const result = JSON.parse(resumed);
+  assert.equal(result.ok, true, resumed);
+  assert.deepEqual([result.value.observation.operationId, result.value.observation.state, result.value.observation.proposal],
+    [operationId, "proposed", PR_URL]);
+  assert.equal(readFileSync(path, "utf8"), fullJournal, "the journal remains full and all request bindings are preserved");
+});
+
+test("W1-T13875: every ledger row must be at or after the operation's request", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const task_id = productPlanLedgerTaskId(operationId);
+  f.row(at(-2), { task_id, step: "ratify.cli_started", pid: 4242 });
+  f.row(at(-1), { task_id, step: "ratify.cli_exited", code: 1 });
+  f.row(at(-1), { run_id: "PLAN-clarify-1", step: "pr.opened", pr_url: PR_URL.replace("/42", "/41") });
+  const service = f.service({ gateway: false });
+  assert.equal((await ok(service.execute(actor, f.command()))).observation.state, "unknown");
+  f.row(at(0), { task_id, step: "ratify.cli_started", pid: 4242 });
+  assert.equal((await ok(service.execute(actor, f.command()))).observation.state, "pending", "the cutoff is inclusive");
+  nativeRun(f, operationId, { pr: PR_URL });
+  const proposed = await ok(service.execute(actor, f.command()));
+  assert.deepEqual([proposed.observation.state, proposed.observation.proposal], ["proposed", PR_URL]);
 });
 
 test("W1-T13875: a proposal's evidence is read once and kept across rotation during the read", async (t) => {

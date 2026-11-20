@@ -30,6 +30,7 @@ export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as con
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
+const FINAL_EVIDENCE_BYTES = 4 * 1024;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
@@ -244,7 +245,8 @@ const modeSchema = z.enum(["create", "clarify"]);
 const finalEvidenceSchema = z.object({
   exited: z.boolean(), failed: z.boolean(), opened: z.string().optional(),
 }).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined);
-type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
+type FinalLedgerEvidence = z.infer<typeof finalEvidenceSchema>;
+type LedgerEvidence = FinalLedgerEvidence & { pid?: number };
 type LedgerRead = LedgerEvidence | "unread";
 const recordSchema = z.object({
   operationId: hex64, productId: productIdSchema, revision, objectiveRevision: revision, briefDigest: hex64,
@@ -252,8 +254,8 @@ const recordSchema = z.object({
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  // "exited" is a nonzero child exit; the gateway reports it as refused, and only a pre-launch refusal stays "refused".
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime() }).strict().optional(),
+  // Older journals used "refused" for both a pre-launch refusal and a nonzero child exit.
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "prelaunch-refused", "exited", "unknown"]), at: z.string().datetime() }).strict().optional(),
   finalEvidence: finalEvidenceSchema.optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
@@ -305,8 +307,9 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const parsed = rawLines.flatMap((line): Array<Record<string, unknown>> => {
     try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
   });
-  const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
-  const rows = parsed.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
+  const at = (row: Record<string, unknown>) => (typeof row?.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+  const requestedAt = Date.parse(record.requestedAt);
+  const rows = parsed.filter((row) => at(row) >= requestedAt).sort((a, b) => at(a) - at(b));
   const mine = rows.filter((row) => row.task_id === taskId);
   const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
   const pid = started?.pid as number | undefined;
@@ -314,7 +317,7 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const failed = mine.some((row) => row.step === "ratify.handoff_failed");
   const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
     row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
-    typeof row.brief === "string" && digest(row.brief) === record.briefDigest && at(row) >= Date.parse(record.requestedAt));
+    typeof row.brief === "string" && digest(row.brief) === record.briefDigest);
   const runs = new Map(candidates.map((row) => [row.run_id, row]));
   // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
   const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
@@ -327,10 +330,6 @@ function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readon
   const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
   return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
 }
-
-// W1-T13875: final evidence kept per journal and operation, also when a full journal cannot store it.
-const keptEvidence = new Map<string, LedgerEvidence>();
-const keptKey = (paths: Paths, operationId: string) => `${paths.state}\0${operationId}`;
 
 // Service instances share one actor journal. Order in-process writers before taking the real cross-process lock.
 const journalChains = new Map<string, Promise<unknown>>();
@@ -472,7 +471,7 @@ export class ProductPlanOperationService {
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
       let reusable = journal.operations[operationId];
       for (const entry of reusable ? [] : sameBrief) {
-        const seen = await this.readEvidence(paths, journal, entry);
+        const seen = await this.readEvidence(paths, entry);
         const state = this.observeWith(entry, product, head, seen).state;
         if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
           reusable = entry;
@@ -483,7 +482,7 @@ export class ProductPlanOperationService {
       if (reusable) {
         record = reusable;
         replayed = true;
-        journal = this.bind(paths, journal, requestKey, { operationId: reusable.operationId, payloadDigest });
+        this.bind(paths, journal, requestKey, { operationId: reusable.operationId, payloadDigest });
       } else {
         if (Object.keys(journal.operations).length >= PRODUCT_PLAN_OPERATION_LIMITS.operations) throw new Fault("capacity");
         const checkout = await this.options.checkout(subject, head);
@@ -518,16 +517,14 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const seen = selectedEvidence ?? await this.readEvidence(paths, journal, record);
+    const seen = selectedEvidence ?? await this.readEvidence(paths, record);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };
   }
 
-  private bind(paths: Paths, journal: Journal, requestKey: string, entry: { operationId: string; payloadDigest: string }): Journal {
-    const next = { ...journal, requests: { ...journal.requests, [requestKey]: entry } };
-    this.commit(paths, next);
-    return next;
+  private bind(paths: Paths, journal: Journal, requestKey: string, entry: { operationId: string; payloadDigest: string }): void {
+    this.commit(paths, { ...journal, requests: { ...journal.requests, [requestKey]: entry } });
   }
 
   private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string): string {
@@ -565,8 +562,10 @@ export class ProductPlanOperationService {
         const journal = this.readJournal(paths);
         const stored = journal.operations[record.operationId];
         if (!stored) return;
-        // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
-        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso() };
+        const disposition = outcome === "refused"
+          ? accepted === true ? "exited" : accepted === false ? "prelaunch-refused" : "refused"
+          : outcome;
+        const handoff = { outcome: disposition, at: this.clock.iso() } as const;
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
@@ -594,7 +593,8 @@ export class ProductPlanOperationService {
       else if (seen.failed) state = "unknown";
       else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
       else if (this.inFlight(record.operationId)) state = "pending";
-      else if (record.handoff?.outcome === "refused") state = "refused";
+      else if (record.handoff?.outcome === "prelaunch-refused" || record.handoff?.outcome === "refused" ||
+        record.handoff?.outcome === "exited") state = "refused";
       // A late proposal is historical evidence for its frozen brief, never for a newer objective.
       if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
       // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
@@ -605,23 +605,16 @@ export class ProductPlanOperationService {
       requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
-  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
+  private async readEvidence(paths: Paths, record: Record_): Promise<LedgerRead> {
     if (record.finalEvidence) return record.finalEvidence;
-    const key = keptKey(paths, record.operationId);
-    const kept = keptEvidence.get(key);
-    if (kept) return kept;
+    // One bounded receipt per journaled operation, even when the request journal has reached its byte quota.
+    const evidence = { ...paths, state: join(paths.directory, `${paths.ownerKey}.${record.operationId}.evidence`) };
+    const saved = this.readState(evidence.state, FINAL_EVIDENCE_BYTES, finalEvidenceSchema);
+    if (saved !== undefined) return saved;
     const seen = await this.ledger(record);
     if (seen !== "unread" && (seen.opened !== undefined || seen.exited || seen.failed)) {
       const { opened, exited, failed } = seen;
-      const finalEvidence = { exited, failed, ...(opened !== undefined ? { opened } : {}) };
-      // Kept in memory first: a journal at its byte limit still answers this evidence without another read.
-      keptEvidence.set(key, finalEvidence);
-      try {
-        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...record, finalEvidence } } });
-        journal.operations[record.operationId] = { ...record, finalEvidence };
-      } catch (error) {
-        if (!(error instanceof Fault && error.code === "capacity")) throw error;
-      }
+      this.commit(evidence, { exited, failed, opened }, FINAL_EVIDENCE_BYTES);
     }
     return seen;
   }
@@ -629,7 +622,7 @@ export class ProductPlanOperationService {
   private async ledger(record: Record_): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    if (ledgerPath === undefined || (record.handoff?.outcome === "refused" && !this.inFlight(record.operationId))) return none;
+    if (ledgerPath === undefined || (record.handoff?.outcome === "prelaunch-refused" && !this.inFlight(record.operationId))) return none;
     const taskId = productPlanLedgerTaskId(record.operationId);
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
@@ -703,11 +696,18 @@ export class ProductPlanOperationService {
   }
 
   private readJournal(paths: Paths): Journal {
+    const journal = this.readState(paths.state, PRODUCT_PLAN_OPERATION_LIMITS.stateBytes, journalSchema);
+    if (journal === undefined) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+    if (journal.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+    return journal;
+  }
+
+  private readState<T>(path: string, maxBytes: number, schema: z.ZodType<T>): T | undefined {
     let fd: number | undefined;
     try {
-      fd = openSync(paths.state, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = fstatSync(fd);
-      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("unavailable");
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > maxBytes) throw new Fault("unavailable");
       const buffer = Buffer.alloc(info.size);
       let size = 0;
       while (size < buffer.length) {
@@ -718,19 +718,19 @@ export class ProductPlanOperationService {
       let raw: unknown;
       try { raw = size === info.size ? JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) : undefined; }
       catch (error) { void error; throw new Fault("corrupt"); }
-      const parsed = journalSchema.safeParse(raw);
-      if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+      const parsed = schema.safeParse(raw);
+      if (!parsed.success) throw new Fault("corrupt");
       return parsed.data;
     } catch (error) {
-      if (errno(error, "ENOENT")) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+      if (errno(error, "ENOENT")) return undefined;
       throw error;
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
   /** Atomic replace. A failure before the rename is `unavailable`; after it the outcome is unknowable. */
-  private commit(paths: Paths, journal: Journal): void {
-    const body = JSON.stringify(journal);
-    if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("capacity");
+  private commit(paths: Paths, value: Journal | FinalLedgerEvidence, maxBytes: number = PRODUCT_PLAN_OPERATION_LIMITS.stateBytes): void {
+    const body = JSON.stringify(value);
+    if (Buffer.byteLength(body) > maxBytes) throw new Fault("capacity");
     this.ensureDirectory(paths);
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let renamed = false;
