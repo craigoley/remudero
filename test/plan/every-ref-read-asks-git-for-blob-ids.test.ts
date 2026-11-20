@@ -73,7 +73,8 @@ test("readBlobsAtRefAsync asks the batch for blob ids only, and a path the tree 
 
   await assert.rejects(
     () => readBlobsAtRefAsync(async (args, stdin) => run(args, stdin), "HEAD", [paths[0]!, "plan/tasks.d/absent.yaml"]),
-    /could not read HEAD:plan\/tasks\.d\/absent\.yaml \(HEAD:plan\/tasks\.d\/absent\.yaml missing\)/,
+    /could not read HEAD:plan\/tasks\.d\/absent\.yaml \([0-9a-f]{40,64}:plan\/tasks\.d\/absent\.yaml missing\)/,
   );
-  assert.match(batches[1]!.split("\n")[1]!, /^HEAD:plan\/tasks\.d\/absent\.yaml$/, "only the unlisted path is asked by path");
+  const tree = execFileSync("git", ["-C", dir, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+  assert.equal(batches[1]!.split("\n")[1], `${tree}:plan/tasks.d/absent.yaml`, "only the unlisted path is asked by path, at the listed tree");
 });

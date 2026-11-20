@@ -39,7 +39,8 @@ function planRepo(t: TestContext, rationales: string[]): { repo: GitRepo; dir: s
   const paths = ids.map((id) => `plan/tasks.d/${id}-fixture.yaml`);
   rationales.forEach((rationale, i) => writeFileSync(join(repo.dir, paths[i]!), shard(ids[i]!, rationale)));
   writeFileSync(join(repo.dir, "plan", "tasks.d", "café.txt"), "café — fallback\n".repeat(600));
-  repo.git("add", "plan");
+  writeFileSync(join(repo.dir, "notice-é.txt"), "top-level file\n");
+  repo.git("add", "-A");
   repo.git("commit", "--quiet", "-m", "fixture plan");
   return { repo, dir: repo.dir, paths, ids };
 }
@@ -66,15 +67,17 @@ test("W1-T13824 criterion 1: shards over 64 MiB load through loadPlanAtRef and l
 test("W1-T13824 criterion 2: canonical and ./-prefixed UTF-8 shards have the same exact batch bound", async (t) => {
   const { dir, paths } = planRepo(t, ["über — ünïcödé ✓ ".repeat(5000), "日本語のテキスト ".repeat(4000), "plain ascii"]);
   const exact = batchBytes(dir, paths);
+  const subdir = join(dir, "test");
+  mkdirSync(subdir);
   const batches: Array<{ input: string | undefined; bound: number | undefined }> = [];
-  const asyncRun = defaultGitRunnerAsync(dir);
+  const asyncRun = defaultGitRunnerAsync(subdir);
   const awaited: typeof asyncRun = (args, stdin, opts) => {
     if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer });
     return asyncRun(args, stdin, opts);
   };
   const syncRun: GitBlobRunner = (args, stdin, opts) => {
     if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer });
-    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
+    return execFileSync("git", ["-C", subdir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
   };
   const expected = readBlobsAtRef(syncRun, "HEAD", paths);
   assert.equal(expected[1]!.includes("日本語"), true, "the non-ASCII text survives the framing");
@@ -97,28 +100,30 @@ test("W1-T13824 criterion 1: the sized listing supplies UTF-8 blob IDs and an ab
   const quoted = "plan/tasks.d/café.txt";
   const missing = "plan/tasks.d/absent-é.yaml";
   const request = [quoted, paths[0]!, `./${quoted}`, missing];
-  const commit = repo.git("rev-parse", "HEAD");
+  const tree = repo.git("rev-parse", "HEAD^{tree}");
   const quotedId = repo.git("rev-parse", `HEAD:${quoted}`);
   const shardId = repo.git("rev-parse", `HEAD:${paths[0]}`);
-  const missingLine = `${commit}:${missing}`;
+  const missingLine = `${tree}:${missing}`;
   const batchInput = `${quotedId}\n${shardId}\n${quotedId}\n${missingLine}\n`;
   const exact = batchBytes(dir, request.slice(0, -1)) + Buffer.byteLength(`${missingLine} missing\n`);
   const asyncRun = defaultGitRunnerAsync(dir);
   const batches: Array<{ input: string | undefined; bound: number | undefined; bytes: number }> = [];
   const missingError = /could not read HEAD:plan\/tasks\.d\/absent-é\.yaml \(.*absent-é\.yaml missing\)/;
-  assert.throws(() => readBlobsAtRef((args, stdin, opts) => {
-    assert.ok(args[1] !== "--batch-check");
+  assert.throws(() => readBlobsAtRef((args, stdin, opts = {}) => {
+    assert.ok(args[0] === "ls-tree" || args[1] === "--batch");
     const output = execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin, maxBuffer: opts?.maxBuffer });
     if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer, bytes: Buffer.byteLength(output) });
     return output;
   }, "HEAD", request), missingError);
-  await assert.rejects(() => readBlobsAtRefAsync(async (args, stdin, opts) => {
-    assert.ok(args[1] !== "--batch-check");
+  await assert.rejects(() => readBlobsAtRefAsync(async (args, stdin, opts = {}) => {
+    assert.ok(args[0] === "ls-tree" || args[1] === "--batch");
     const output = await asyncRun(args, stdin, opts);
     if (args[1] === "--batch") batches.push({ input: stdin, bound: opts?.maxBuffer, bytes: Buffer.byteLength(output) });
     return output;
   }, "HEAD", request), missingError);
   assert.deepEqual(batches, Array.from({ length: 2 }, () => ({ input: batchInput, bound: exact, bytes: exact })));
+  await assert.rejects(() => readBlobsAtRefAsync(asyncRun, "HEAD", ["./"]), /could not read HEAD:\.\/ \(tree\)/);
+  await assert.rejects(() => readBlobsAtRefAsync(asyncRun, "HEAD", ["plan/absent\n.txt"]), /invalid batch path/);
 });
 
 test("W1-T13824 criterion 2: a ref moving after the sized listing cannot grow the batch or resolve a missing path", async (t) => {
@@ -185,10 +190,10 @@ test("W1-T13824 criterion 3: a two-argument runner still reads the plan, and the
   assert.equal((await defaultGitRunnerAsync(dir)(["cat-file", "blob", blob])).length, shard(ids[0]!, big).length);
 });
 
-test("W1-T13824 criterion 3: a legacy two-argument fake with an empty ID listing still uses the path batch", async (t) => {
+test("W1-T13824 criterion 3: a legacy runner with an unused optional third parameter still uses the path batch", async (t) => {
   const { dir, paths, ids } = planRepo(t, ["first shard", "second shard"]);
   const commands: string[] = [];
-  const legacy = (args: string[], stdin?: string): string => {
+  const legacy: GitBlobRunner = (args, stdin, _unused) => {
     commands.push(args.slice(0, 2).join(" "));
     if (args[0] === "ls-tree" && args.includes("-l")) return "";
     if (args[0] === "cat-file") {
@@ -200,7 +205,7 @@ test("W1-T13824 criterion 3: a legacy two-argument fake with an empty ID listing
     return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", input: stdin });
   };
   assert.deepEqual(loadPlanAtRef(dir, "plan/tasks.yaml", "HEAD", legacy).tasks.map(task => task.id).sort(), ids);
-  const awaited = await loadPlanAtRefAsync(dir, "plan/tasks.yaml", "HEAD", async (args, stdin) => legacy(args, stdin));
+  const awaited = await loadPlanAtRefAsync(dir, "plan/tasks.yaml", "HEAD", async (args, stdin, unused) => legacy(args, stdin, unused));
   assert.deepEqual(awaited.tasks.map(task => task.id).sort(), ids);
   const expected = ["show HEAD:plan/tasks.yaml", "ls-tree --name-only", "ls-tree -l", "cat-file --batch"];
   assert.deepEqual(commands, [...expected, ...expected]);

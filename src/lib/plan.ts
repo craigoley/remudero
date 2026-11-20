@@ -1308,9 +1308,7 @@ type GitBlobRunOptions = { maxBuffer?: number };
  *  retain their PlanError/GitFetchError wrappers. */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const pin = blobBatchPinArgs(runGit.length, ref);
-  const batchRef = pin ? runGit(pin).trim() : ref;
-  const batch = blobBatchRequest(batchRef, relPaths, runGit(blobIdListingArgs(batchRef, relPaths)), runGit.length >= 3);
+  const batch = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
   return parseBlobBatch(runGit(["cat-file", "--batch"], batch.request, { maxBuffer: batch.maxBuffer }), ref, relPaths);
 }
 
@@ -1335,15 +1333,7 @@ export async function blobBatchRequestAsync(
   ref: string,
   relPaths: string[],
 ): Promise<{ request: string; maxBuffer: number | undefined }> {
-  const pin = blobBatchPinArgs(runGit.length, ref);
-  const batchRef = pin ? (await runGit(pin)).trim() : ref;
-  return blobBatchRequest(batchRef, relPaths, await runGit(blobIdListingArgs(batchRef, relPaths)), runGit.length >= 3);
-}
-
-// Runners with the batch options parameter can pin missing requests; older runners keep their path-batch protocol.
-function blobBatchPinArgs(runnerArity: number, ref: string): string[] | undefined {
-  if (runnerArity < 3 || /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(ref)) return undefined;
-  return ["rev-parse", "--verify", "--end-of-options", ref];
+  return blobBatchRequest(ref, relPaths, await runGit(blobIdListingArgs(ref, relPaths)));
 }
 
 /** List sizes and raw paths for every entry in the requested directories. */
@@ -1353,31 +1343,53 @@ function blobIdListingArgs(ref: string, relPaths: string[]): string[] {
     const dir = posix.dirname(p);
     return dir === "." ? p : `${dir}/`;
   }));
-  return ["ls-tree", "-l", "-z", ref, "--", ...[...dirs].sort()];
+  return ["ls-tree", "-l", "-z", "--full-tree", "-t", ref, "--", ".", ...[...dirs].sort()];
 }
 
 function blobListingPath(path: string): string {
   return path.startsWith("./") ? posix.normalize(path) : path;
 }
 
-function blobBatchRequest(ref: string, relPaths: string[], listing: string, pinned: boolean) {
+function blobBatchRequest(ref: string, relPaths: string[], listing: string) {
   const listed = new Map<string, { type: string; oid: string; size: number | undefined }>();
   const rawPaths = listing.endsWith("\0");
+  const rootEntries: Buffer[] = [];
+  let sizedListing = rawPaths;
   for (const line of listing.split(rawPaths ? "\0" : "\n")) {
-    const entry = /^\d{6} (\w+) ([0-9a-f]{40,64})(?: +(\d+|-))?\t([\s\S]+)$/.exec(line);
+    if (!line) continue;
+    const entry = /^(\d{6}) (\w+) ([0-9a-f]{40}(?:[0-9a-f]{24})?)(?: +(\d+|-))?\t([\s\S]+)$/.exec(line);
+    sizedListing &&= entry?.[4] !== undefined;
     if (entry) {
-      const [, type, oid, size, path] = entry;
+      const [, mode, type, oid, size, path] = entry;
       listed.set(path!, { type: type!, oid: oid!, size: size === undefined || size === "-" ? undefined : Number(size) });
+      if (rawPaths && !path!.includes("/")) {
+        rootEntries.push(Buffer.from(`${Number(mode)} ${path}\0`), Buffer.from(oid!, "hex"));
+      }
     }
   }
+  let treeId: string | undefined;
   const batch = relPaths.map(path => {
     const key = blobListingPath(path);
     const entry = listed.get(key) ?? (key.endsWith("/") ? listed.get(key.slice(0, -1)) : undefined);
     if (entry && entry.type !== "blob") throw new Error(`git cat-file --batch could not read ${ref}:${path} (${entry.type})`);
     if (entry && !key.endsWith("/")) return { input: entry.oid, size: entry.size };
-    return { input: `${ref}:${path}`, size: pinned && (rawPaths || listing === "") ? "missing" as const : undefined };
+    if (key === "" || key === "./") throw new Error(`git cat-file --batch could not read ${ref}:${path} (tree)`);
+    if (key.startsWith("../") || /[\0\n]|\r$/.test(key)) {
+      throw new Error(`git cat-file --batch could not read ${ref}:${path} (invalid batch path)`);
+    }
+    if (sizedListing && rootEntries.length > 0) {
+      // Pin fallback requests to the same tree as the size listing, even if its ref moves.
+      treeId ??= blobListingRootId(rootEntries);
+      return { input: `${treeId}:${key}`, size: "missing" as const };
+    }
+    return { input: `${ref}:${path}`, size: listing === "" ? "missing" as const : undefined };
   });
   return { request: batch.map(({ input }) => input).join("\n") + "\n", maxBuffer: blobBatchMaxBuffer(batch) };
+}
+
+function blobListingRootId(entries: Buffer[]): string {
+  const payload = Buffer.concat(entries);
+  return createHash(entries[1]!.length === 32 ? "sha256" : "sha1").update(`tree ${payload.length}\0`).update(payload).digest("hex");
 }
 
 function blobBatchMaxBuffer(batch: Array<{ input: string; size: number | "missing" | undefined }>): number | undefined {
