@@ -1143,7 +1143,7 @@ import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shado
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
-  CashDraftSkippedError, cashDraftFit, spawnOpenWeightWorker } from "./lib/worker-provider.js";
+  cashDraftFit } from "./lib/worker-provider.js";
 import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
@@ -2954,7 +2954,7 @@ export function retroErrorLedgerFields(error: unknown): Record<string, unknown> 
 }
 // W1-T2627/W1-T2888: `readWorktreeBase`'s only reader (doctorCommand) moved to
 // src/lib/report-commands.ts, which imports it directly from lib/worker.js.
-import { assertLiveSpawnAllowed, LiveSpawnBlockedError } from "./lib/spawn-guard.js";
+import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 import { memoryStoreReadFailure, readMemoryLedger } from "./lib/host-memory-ledger.js";
 import { createMemoryReadTracker, type DispatchGovernorDeps, type MemoryReadHold, type MemoryReadSource, type MemoryReadTracker } from "./lib/dispatch-governor.js";
 import { captureHeavyNewBuildStartupGate } from "./lib/heavy-ready-startup.js";
@@ -37500,6 +37500,7 @@ export function buildInboxDraftSpawnArgs(args: {
   currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
+  cashFit?: NonNullable<SpawnWorkerArgs["draftRouting"]>["cashFit"];
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
@@ -37514,6 +37515,7 @@ export function buildInboxDraftSpawnArgs(args: {
       log: registryRecord,
       // With no batch session, the spawn awaits the process's slice read: still no union on the loop (W1-T13185).
       readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
+      cashFit: args.cashFit,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37623,6 +37625,7 @@ export async function draftProposalBatch(
   log: (step: string, extra?: Record<string, unknown>) => void,
   rawSpawn: typeof spawnWorker = spawnWorker,
   providerRouting?: SpawnWorkerArgs["providerRouting"],
+  mount?: Mount,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
   const causalScope = { repository: `${owner}/${repo}` };
@@ -37634,8 +37637,7 @@ export async function draftProposalBatch(
   // it to plan authorship's tier. It rides its OWN mount (`synthesis.inbox_draft`, mounts.yaml),
   // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
   // called here any more — see the identical note at the retro call site.
-  const mountsTable = loadMounts(mountsPath(repoRoot));
-  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  const inboxDraftMount = mount ?? loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
   const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log, readInboxDraftStats);
 
   const settingsFile = renderWorkerSettings({
@@ -37674,48 +37676,29 @@ export async function draftProposalBatch(
             currentPlanText: planText,
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
+            cashFit: ctx?.cashFit,
             avoidModels: ctx?.avoidModels,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
             disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
           }), onSelectionAssignment: undefined };
-          const checkCashFit = ctx?.cashFit;
           const requestedModel = spawnArgs.model ?? null;
           ctx?.onRequestedModel?.(requestedModel);
           return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
             ...spawnArgs,
-            providerRouting: checkCashFit ? {
-              ...providerRouting,
-              // The worker calls this after model selection, including every adapter rung it walks.
-              spawnOpenWeight: (args, routedConfig, selection) => {
-                const fit = checkCashFit({ deployment: selection.model, promptChars: prompt.length,
-                  promptBytes: Buffer.byteLength(args.prompt, "utf8"), squeezed: args.cashSqueezed,
-                  atIso: fixedClock((providerRouting?.now ?? systemClock.now)()).iso() });
-                if (!fit.fits) throw new CashDraftSkippedError(fit);
-                if (providerRouting?.spawnOpenWeight) return providerRouting.spawnOpenWeight(args, routedConfig, selection);
-                assertLiveSpawnAllowed("spawnOpenWeightWorker for inbox draft");
-                return spawnOpenWeightWorker(args, routedConfig, selection);
-              },
-            } : providerRouting,
+            providerRouting,
           }), requestedModel };
         },
         ...(inboxDraftMount.provider === "cash" ? {
-          escalate: async (proposal, prompt, reason) => {
+          escalate: async (proposal, prompt) => {
             const args = { cwd: worktreePath, settingsFile, mount: inboxDraftMount, config, prompt, proposal,
               currentPlanText: planText, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS };
             const spawn = benchmarkNonDispatchSpawn("inbox-draft", rawSpawn);
-            if (reason !== "cash-fit") return spawnEscalatedInboxDraft(args, spawn);
-            const policy = resolveProviderRoutingPolicy(config.root, config, { now: providerRouting?.now });
-            if (!policy.routableProviders.some(provider => provider !== "cash")) return undefined;
-            const subscription = buildInboxDraftSpawnArgs(args);
-            const result = await spawn({ ...subscription, mountProvider: undefined, providerRouting,
-              config: { ...config, overflow: "none", workerProviders: { ...config.workerProviders, cashFallbackWhenBlocked: false } },
-              onSelectionAssignment: undefined });
-            return { ...result, requestedModel: subscription.model ?? null };
+            return spawnEscalatedInboxDraft(args, spawn);
           },
-          cashFit: input => cashDraftFit(config, input),
         } : {}),
+        cashFit: input => cashDraftFit(config, input),
         log,
       },
       runId,

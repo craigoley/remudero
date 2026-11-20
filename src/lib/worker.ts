@@ -216,6 +216,9 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
+  CashDraftSkippedError,
+  type CashDraftFit,
+  type CashDraftFitInput,
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
@@ -1338,6 +1341,7 @@ export interface SpawnWorkerArgs {
     /** W1-T13185: the lane's stats, read off the daemon loop: a batch's loaded snapshot, or an awaited slice read. */
     readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
+    cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -1345,7 +1349,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall" | "cash-fit";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -2358,7 +2362,8 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 /** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
- * on failed output contracts (W1-T4067). `OpenWeightUnsupportedResponseFormatError` names the remedy.
+ * on failed output contracts (W1-T4067). Whole-run fit gates the initial draft and each
+ * fallback deployment. An admitted draft already walking the ladder may skip an unfit rung.
  * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
  * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
  * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
@@ -2367,11 +2372,12 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall" | "cash-fit"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
   let lastRefusal: unknown;
+  let lastCashSkip: CashDraftSkippedError | undefined;
   for (const [index, model] of rungs.entries()) {
     try {
       const result = await run({ ...selection, model });
@@ -2399,6 +2405,15 @@ export async function runOpenWeightWalkingLadder(
       }
       return result;
     } catch (err) {
+      if (err instanceof CashDraftSkippedError) {
+        if (index === 0) throw err;
+        lastCashSkip = err;
+        if (rungs[index + 1]) {
+          try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "cash-fit" }); }
+          catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
+        }
+        continue;
+      }
       if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
@@ -2420,7 +2435,7 @@ export async function runOpenWeightWalkingLadder(
       if (!next) break;
     }
   }
-  throw lastRefusal;
+  throw lastCashSkip ?? lastRefusal;
 }
 
 /** True when a Foundry Sonnet attempt failed at zero cost, or was stopped by the Foundry Claude sub-cap,
@@ -2837,8 +2852,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
-      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
-        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      // Inbox drafts use the stronger whole-run gate on the actual ladder and log its refusals there.
+      const checkDraftFit = args.draftRouting?.cashFit;
+      const allowanceRefusal = (models: readonly string[]) => checkDraftFit ? undefined
+        : cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
+          fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
       const plainCashModels = () => {
         const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
           { config, runId: args.runId, taskId: args.taskId, cashSqueezed: true, modelApprovals: config.modelApprovals,
@@ -2880,7 +2898,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         const sonnetEnv = args.env ?? process.env;
         const canTrySonnet = requestedCapability === "balanced" &&
           !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-        if (refusal === undefined) {
+        if (refusal === undefined && !checkDraftFit) {
           let models: string[];
           try { models = plainCashModels(); }
           catch (selectionError) {
@@ -3267,6 +3285,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             },
           });
           cashController.signal.throwIfAborted();
+          const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: args.prompt.length,
+            promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
+            atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
+          if (fit && !fit.fits) throw new CashDraftSkippedError(fit);
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);

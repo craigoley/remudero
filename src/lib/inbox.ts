@@ -1993,8 +1993,8 @@ export interface DraftRungDeps {
   repoFacts?: DraftRepoFacts;
   clock?: Clock;
   spawn: DraftSpawn;
-  /** One optional subscription attempt after a cash refusal or a failed draft. */
-  escalate?: (proposal: Proposal, prompt: string, reason: "cash-fit" | "dirty-lint" | "fragment-contract") => Promise<DraftWorkerResult | undefined>;
+  /** One optional subscription attempt after a failed draft. */
+  escalate?: (proposal: Proposal, prompt: string, reason: "dirty-lint" | "fragment-contract") => Promise<DraftWorkerResult | undefined>;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -2526,7 +2526,6 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       const avoidModels: string[] = [];
       let dirty: { from: string | null; violations: string[] } | undefined;
       let attempts = 0;
-      let skipped: Extract<CashDraftFit, { fits: false }> | undefined;
       const cashFit = deps.cashFit;
       for (let attempt = 1; attempt <= MAX_DRAFT_LINT_ATTEMPTS; attempt++) {
         lastWorker = undefined;
@@ -2539,6 +2538,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               onRequestedModel: model => { lastRequestedModel = model; },
               ...(cashFit ? { cashFit: input => cashFit({ ...input, expectedRequests }) } : {}) }));
         } catch (error) {
+          let skipped: Extract<CashDraftFit, { fits: false }>;
           if (error instanceof CashDraftSkippedError) skipped = error.fit;
           else if (cashFit && error instanceof OpenWeightRequestTooLargeError) {
             skipped = { fits: false, reason: "window", deployment: null,
@@ -2549,8 +2549,8 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             estimated_usd: skipped.reason === "allowance" ? skipped.estimatedUsd : null,
             left_usd: skipped.reason === "allowance" ? skipped.leftUsd : null, expected_requests: expectedRequests,
             prompt_chars: prompt.length, plan_index_chars: planIndexChars });
-          parsed = null;
-          break;
+          return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
+            refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` } };
         }
         attempts = attempt;
         lastWorker = worker;
@@ -2591,9 +2591,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           prompt = `${initialPrompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`;
         }
       }
-      if ((skipped || (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0))) && deps.escalate) {
-        const reason = skipped ? "cash-fit" : parsed ? "dirty-lint" : "fragment-contract";
-        const escalationPrompt = skipped ? prompt : parsed
+      if (lastWorker && !lastWorker.usageRefusal && (!parsed || violations.length > 0) && deps.escalate) {
+        const reason = parsed ? "dirty-lint" : "fragment-contract";
+        const escalationPrompt = parsed
           ? `${prompt}\n\n${inboxDraftRelintPrompt(proposal, parsed.fragmentYaml, violations)}`
           : `${prompt}\n\nThe cash draft missed the fragment contract. Re-emit the complete fragment and STAMP using the literal markers in the prompt.`;
         try {
@@ -2602,7 +2602,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           if (escalated) {
             deps.log("inbox.draft_escalated", {
               proposal_id: proposal.id,
-              from: skipped ? skipped.deployment : lastWorker && draftWorkerModel(lastWorker),
+              from: draftWorkerModel(lastWorker),
               to: escalated.servedModel ?? draftWorkerModel(escalated),
               reason,
             });
@@ -2628,10 +2628,6 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           // A failed subscription attempt cannot discard the cash fragment already produced.
           deps.log("inbox.draft_escalation_error", { proposal_id: proposal.id, error: String((error as Error)?.message ?? error) });
         }
-      }
-      if (skipped && (!parsed || violations.length > 0)) {
-        return { proposalId: proposal.id, ok: false, error: `cash draft skipped before transport: ${skipped.reason}`,
-          refused: { matched: `inbox.draft_cash_skipped:${skipped.reason}` } };
       }
       if (!parsed) {
         // W1-T2564: A REFUSED RUN PRODUCES NO OUTPUT, SO IT LANDS HERE LOOKING MALFORMED. The bare error sent every
