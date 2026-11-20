@@ -68,7 +68,7 @@ test("W1-T9702: runSweep names its surface on the sweep.pass row, full or light"
     arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
     ledgerPath: "/dev/null/ledger.ndjson", runId: "ida", dryRun: true,
     ...(surface ? { repairAdmissionSurface: surface } : {}),
-    readLedger: () => [], appendLine: () => {}, readActiveWorkerCount: () => 0,
+    readLedger: () => [], appendLine: () => {},
     log: (step: string, data?: Record<string, unknown>) => { if (step === "sweep.pass") rows.push({ ...data }); },
   });
   await runSweep([], deps("full"), DEFAULT_SWEEP_POLICY);

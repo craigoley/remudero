@@ -20137,8 +20137,9 @@ export function productionFixAdmissionReaders(deps: Pick<SweepDeps, "readFixPres
   };
 }
 
-function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount">): number {
-  return deps.readActiveWorkerCount?.() ?? activeWorkerCount(dirname(deps.ledgerPath));
+function sweepActiveWorkerCount(deps: Pick<SweepDeps, "ledgerPath" | "readActiveWorkerCount" | "fixProgressJudge">,
+  live = deps.fixProgressJudge !== undefined): number {
+  return deps.readActiveWorkerCount?.() ?? activeWorkerCount(live ? dirname(deps.ledgerPath) : undefined);
 }
 
 function sweepFixAdmissionReaders(
@@ -20148,7 +20149,7 @@ function sweepFixAdmissionReaders(
   const live = mode === "probe" || deps.fixProgressJudge !== undefined;
   return {
     hostWorkerBudget: policy.reviewCapacity.hostWorkerBudget,
-    readActiveWorkers: live || deps.readFixPressure ? () => sweepActiveWorkerCount(deps) : undefined,
+    readActiveWorkers: live || deps.readFixPressure ? () => sweepActiveWorkerCount(deps, live) : undefined,
     readPressure: deps.readFixPressure ?? (live ? () => productionFixPressure(policy.memoryFloorMib, deps.ledgerPath,
       classEstimate("fix").estimateMib, mode === "pass") : undefined),
     ...productionFixAdmissionReaders(deps, live),
