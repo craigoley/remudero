@@ -8907,7 +8907,45 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
-  return runFixRungFromModule(asyncFixRungOptions(opts, hostWorktreeGitAsync), fixCommandHost());
+  const options = asyncFixRungOptions(opts, hostWorktreeGitAsync);
+  const host = fixCommandHost();
+  const { deps, taskId } = options;
+  const { fetchPrBody, scopeAmendmentPortsIo } = deps;
+  if (deps.scopeAmendmentWritePorts || scopeAmendmentPortsIo?.findShardFn || /^PR-\d+$/.test(taskId)) {
+    return runFixRungFromModule(options, host);
+  }
+
+  type Shard = Awaited<ReturnType<typeof findScopeAmendmentBaseShard>>;
+  let observed: { dir: string; result: PromiseSettledResult<Shard> } | undefined;
+  const readBody = fetchPrBody ?? host.fetchPrBodyViaGh;
+  // The scope writer is synchronous and always reads the PR identity first. Load its base
+  // alongside that read, and surface lookup errors only to a writer that uses the observation.
+  const readBodyWithScopeBase: typeof readBody = async (url) => {
+    if (url !== options.prUrl) return readBody(url);
+    const dir = options.worktreePath;
+    const [body, result] = await Promise.allSettled([
+      readBody(url),
+      findScopeAmendmentBaseShard(dir, taskId),
+    ]);
+    if (body.status === "rejected") throw body.reason;
+    observed = { dir, result };
+    return body.value;
+  };
+  deps.scopeAmendmentPortsIo = {
+    ...scopeAmendmentPortsIo,
+    findShardFn: (dir, id) => {
+      if (dir !== observed?.dir) return findTaskShard(dir, id);
+      if (observed.result.status === "rejected") throw observed.result.reason;
+      return observed.result.value;
+    },
+  };
+  if (fetchPrBody) deps.fetchPrBody = readBodyWithScopeBase;
+  try {
+    return await runFixRungFromModule(options, fetchPrBody ? host : { ...host, fetchPrBodyViaGh: readBodyWithScopeBase });
+  } finally {
+    deps.fetchPrBody = fetchPrBody;
+    deps.scopeAmendmentPortsIo = scopeAmendmentPortsIo;
+  }
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
@@ -8947,6 +8985,23 @@ export function buildProofAmendmentGitOps(git: (worktreePath: string, args: stri
       return git(worktreePath, ["rev-parse", "HEAD"]).trim();
     },
   };
+}
+
+async function findScopeAmendmentBaseShard(repoDir: string, taskId: string): Promise<ReturnType<typeof findTaskShard>> {
+  const base = (await hostWorktreeGitAsync(repoDir, ["rev-parse", "--verify", "refs/remotes/origin/main"])).trim();
+  const repoPath = (path: string) => relative(repoDir, path).split(sep).join("/");
+  const readOptionalBlob = async (path: string) => {
+    const result = await hostWorktreeGitAnswerAsync(repoDir, ["show", `${base}:${path}`]);
+    return result.status === 0 ? result.stdout : undefined;
+  };
+  const override = await readOptionalBlob(".remudero/layout.json");
+  const layout = resolveRepoLayout(repoDir, () => override);
+  const listing = await hostWorktreeGitAsync(repoDir, shardListingArgs(base, repoPath(join(layout.planDir, "tasks.d"))));
+  const shard = shardPathsFromListing(listing).find((path) => isTaskShardName(basename(path), taskId));
+  if (shard !== undefined) return { path: shard, text: await hostWorktreeGitAsync(repoDir, ["show", `${base}:${shard}`]) };
+  const path = repoPath(layout.planMonolith);
+  const text = await readOptionalBlob(path);
+  return text?.includes(`id: ${taskId}\n`) ? { path, text } : undefined;
 }
 
 /**
