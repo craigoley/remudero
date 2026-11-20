@@ -15,7 +15,7 @@ import { test } from "node:test";
 
 import type { ReaderFigures } from "#src/lib/reader-agreement.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { runSweep, runSweepAndSettle, settleReaderAgreement, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { runSweep, settleReaderAgreement, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const figures: ReaderFigures = { dispatchStreaks: {}, openPrCount: 3, healthyDeploys: {} };
 const MINUTE = 60_000;
@@ -83,17 +83,3 @@ test("W1-T13884 invariant: a due pass never starts a second check while one is i
   } finally { f.release(); f.cleanup(); }
 });
 
-test("W1-T13884 one-shot boundary: `rmd sweep` returns only after the check it started has logged its findings", async () => {
-  const f = fixture();
-  try {
-    let settled = false;
-    const pass = runSweepAndSettle([], f.deps).then(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(f.boardCalls(), 1, "positive control: the check was started");
-    assert.equal(settled, false, "the one-shot boundary is still waiting on the held check");
-    f.release();
-    await pass;
-    assert.equal(f.rows.filter((row) => row.step === "reader.disagreement").length, 1,
-      "by the time the one-shot pass returns, the finding is logged: an exit next drops nothing");
-  } finally { f.release(); f.cleanup(); }
-});

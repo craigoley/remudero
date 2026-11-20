@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { runSweepAndSettle } from "../../lib/sweep.js";
+import { settleReaderAgreement } from "../../lib/sweep.js";
 import { appendLedger, deriveLedgerActor } from "../../lib/ledger.js";
 import { systemClock, type Clock } from "../../lib/clock.js";
 import { loadPlan, type Plan, type MergedResolver } from "../../lib/plan.js";
@@ -808,7 +808,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
   // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
   const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
-  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweepAndSettle(
+  const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweep(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     withFullSweepRepairAdmission({
       ...effects,
@@ -860,6 +860,10 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
     prune: !dryRun,
     root: repo === self.repo ? repoRoot : join(config.root, "repos", repo),
   });
+
+  // W1-T13884: the pass started the reader agreement check and went on; every rung above ran beside it. This
+  // process exits next, so it waits here, last, for the check to log its findings (#19789 review).
+  await settleReaderAgreement(ledgerPath);
 
   console.log(
     `### rmd sweep${dryRun ? " --dry-run" : ""} — ${owner}/${repo}\n` +
