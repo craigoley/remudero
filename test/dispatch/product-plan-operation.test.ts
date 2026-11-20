@@ -707,6 +707,36 @@ test("W1-T13875: a legacy refusal can recover a proposal opened before the child
   assert.equal(f.calls.length, 1);
 });
 
+test("W1-T13875: a legacy refusal reads through the first cut after its window and skips later sources", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const dir = dirname(f.ledgerPath);
+  const cut = (offset: number) => new Date(at(offset)).toISOString();
+  const lastRelevant = cut(PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS + 1_000);
+  const later = cut(PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS + 2_000);
+  const gzipPath = (stamp: string) => join(dir, `ledger.${stamp.replace(/[:.]/g, "-")}.ndjson.gz`);
+  writeLedger([], { dir, rotations: [
+    { at: cut(2_500), rows: [started!, planned!] },
+    { at: lastRelevant, gz: true, rows: [opened!] },
+  ] });
+  writeFileSync(gzipPath(later), "unreadable later archive");
+  unlinkSync(f.ledgerPath);
+  mkdirSync(f.ledgerPath);
+
+  const archive = gzipPath(lastRelevant);
+  const saved = readFileSync(archive);
+  writeFileSync(archive, "unreadable relevant archive");
+  const incomplete = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([incomplete.observation.state, incomplete.observation.proposal], ["unknown", undefined]);
+
+  writeFileSync(archive, saved);
+  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL]);
+});
+
 test("W1-T13875: a legacy refusal never takes rows from outside its hand-off window", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));

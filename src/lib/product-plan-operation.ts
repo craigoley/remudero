@@ -4,7 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
@@ -13,7 +13,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords, rotationStampIso } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -281,6 +281,26 @@ const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
 const ledgerReaderEntry = fileURLToPath(import.meta.url);
 const ledgerReaderArg = "--read-product-plan-evidence";
 
+async function readLegacyPlanLedgerRows(stateDir: string, subject: LedgerSubject, taskId: string, untilMs: number) {
+  let ok = true;
+  const markUnread = () => { ok = false; };
+  const corpusSnapshot = listedLedgerFiles(stateDir, { readdirSync }, markUnread);
+  if (!ok) return undefined;
+  const stamps = corpusSnapshot.rotations.map(({ path }) => Date.parse(rotationStampIso(basename(path)) ?? ""));
+  // Include the first cut after the window. An unstamped rotation prevents ruling out any later file.
+  const last = stamps.every(Number.isFinite)
+    ? corpusSnapshot.rotations[stamps.findIndex((stamp) => stamp > untilMs)]
+    : undefined;
+  const rows = await readLedgerUnionRecords(stateDir, {
+    corpusSnapshot, sinceTs: subject.requestedAt, throughRotation: last && basename(last.path), includeLive: last === undefined,
+    step: ["ratify.cli_started", "ratify.cli_exited", "ratify.handoff_failed", "plan.start", "pr.opened"],
+    where: (row) => (row.task_id === taskId || row.step === "plan.start" || row.step === "pr.opened") &&
+      typeof row.ts === "string" && Date.parse(row.ts) <= untilMs,
+    onUnreadArchive: markUnread, onUnreadLive: markUnread,
+  });
+  return { ok, archiveFiles: corpusSnapshot.rotations.map(({ path }) => path), rows };
+}
+
 /** Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. */
 async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSubject): Promise<LedgerRead> {
   const livePath = ledgerLivePath(stateDir);
@@ -291,17 +311,22 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
   const taskId = productPlanLedgerTaskId(subject.operationId);
   for (;;) {
     const before = liveIdentity();
-    const read = await readLedgerUnionRawLinesAsync(stateDir, {
-      sinceTs: subject.requestedAt, ...(subject.untilMs !== undefined ? { untilMs: subject.untilMs } : {}), refuseIncomplete: true,
-      keep: keepEvidenceLine(taskId),
-    });
-    if (read.unread.includes(stateDir)) return "unread";
+    const read = subject.untilMs === undefined
+      ? await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) })
+      : await readLegacyPlanLedgerRows(stateDir, subject, taskId, subject.untilMs);
+    if (read === undefined || ("unread" in read && read.unread.includes(stateDir))) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
     if (before !== after || archives.length !== read.archiveFiles.length ||
       archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
-    return read.ok ? correlateLedger(subject, taskId, read.rawLines) : "unread";
+    return read.ok ? correlateLedger(subject, taskId, "rows" in read ? read.rows : parseEvidenceLines(read.rawLines)) : "unread";
   }
+}
+
+function parseEvidenceLines(rawLines: readonly string[]): Array<Record<string, unknown>> {
+  return rawLines.flatMap((line): Array<Record<string, unknown>> => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
+  });
 }
 
 /**
@@ -310,10 +335,7 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
  * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
  * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
  */
-function correlateLedger(record: LedgerSubject, taskId: string, rawLines: readonly string[]): LedgerEvidence {
-  const parsed = rawLines.flatMap((line): Array<Record<string, unknown>> => {
-    try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
-  });
+function correlateLedger(record: LedgerSubject, taskId: string, parsed: readonly Record<string, unknown>[]): LedgerEvidence {
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   // Only rows inside the operation's window: from its request, and for a legacy refusal up to that refusal.
   const from = Date.parse(record.requestedAt);
@@ -678,7 +700,7 @@ export class ProductPlanOperationService {
         this.options.readLedgerLines
           ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilMs !== undefined ? { untilMs } : {}), refuseIncomplete: true,
             keep: keepEvidenceLine(taskId) })
-            .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, read.rawLines) : "unread")
+            .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.
           : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
             { signal: controller.signal, killSignal: "SIGKILL" })
