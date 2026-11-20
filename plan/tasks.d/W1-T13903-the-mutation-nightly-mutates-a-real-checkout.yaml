@@ -1,0 +1,55 @@
+# reservation handoff: claude/plan-mutation-nightly-real-checkout -> claude/project-thread-q7m7px
+- id: W1-T13903
+  title: The mutation nightly mutates a real checkout so git-reading tests see tracked files
+  repo: remudero
+  depends_on: []
+  priority: 1.0
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#mutation-nightly-thread-2026-11-20
+  plan_refs: [W1-T133, W1-T2514]
+  files:
+    - scripts/mutation-ratchet.mjs
+    - .github/workflows/mutation-nightly.yml
+    - test/ci/gates/the-nightly-mutates-a-real-checkout-so-git-sees-tracked-files.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Mutation Nightly failed 7 of 10 nights (2026-11-10..14, 11-17, 11-19; runs 42750186208, 42953579466,
+    43149001216, 43359737571, 43552241378, 44011034405, 44452272063). Every failing config failed Stryker's dry
+    run on a test that runs git against REPO_ROOT. Stryker copies the tree into .stryker-tmp-<slug>/sandbox-*,
+    a gitignored subfolder of the checkout with no .git of its own, so git resolves to the outer repository and
+    every sandbox path is untracked: `git ls-files --error-unmatch` prints "pathspec ... did not match any
+    file(s) known to git" (benchmark-run.ts executingHarnessRevision, stderr noise only), `git grep -- src`
+    finds nothing (main-entry), the repo-layout ratchet counts 0 at the merge base, the trust-root census
+    opens no CLAUDE.md, worktree-git refuses the sandbox ("no .git entry", engine-tree), and check-proof
+    --base grades a head-and-base match as "discriminates" (repair-proof-grader). The plan step's own
+    measure run executes in the real checkout, so it never sees these failures. Reproduced locally at
+    origin/main 0d4d5e4 with @stryker-mutator/core 9.6.1: the generated config fails the dry run with the
+    same tests as CI.
+  design: |
+    In buildNightlyStrykerConfig set `inPlace: true` (Stryker 9.6.1 schema: mutates the files in place, keeps
+    the originals in tempDirName, restores them when done) so the tests run in the real checkout, and set
+    `disableTypeChecks: false`, because no checker is configured (tsx runs untyped) and the pattern rewrote
+    every src file with `// @ts-nocheck`, which in place makes `git status -- src` dirty. Add a workflow step
+    after `plan` that marks tonight's included mutate targets `git update-index --skip-worktree`, so the
+    instrumented file reads as HEAD to identity probes (executingHarnessRevision's clean-tree check); with no
+    active mutant the instrumented file behaves as HEAD. The stryker loop stays sequential, which in-place
+    requires. No test is skipped or excluded and no threshold changes.
+
+    INVARIANT real-checkout: every nightly Stryker config runs its tests in the git checkout itself, never a
+    sandbox subfolder.
+  acceptance:
+    - claim: invariant:real-checkout — the generated nightly config mutates in place and rewrites no file for type checks
+      proof: 'unit test: the nightly config mutates in place and rewrites no file for type checks'
+    - claim: the skip-worktree step leaves git status clean for a modified mutate target, and a control without it is dirty
+      proof: 'unit test: the mark step makes an in-place mutate target read as HEAD to git status'
+    - claim: the test names the failing runs it pins
+      proof: 'grep: 44452272063 in test/ci/gates/the-nightly-mutates-a-real-checkout-so-git-sees-tracked-files.test.ts'
+  falsifier: |
+    Remove `inPlace: true` from buildNightlyStrykerConfig: the config test fails. Remove the skip-worktree step:
+    the git-status test reads a dirty src file.

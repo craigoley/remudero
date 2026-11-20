@@ -501,6 +501,18 @@ function guardrailCells(units: GuardrailUnit[]) {
     opportunities: units.length, fires: units.filter((unit) => unit.fired).length };
 }
 
+/** W1-T13866: append in place. A `push(...items)` passes every item as an argument and overflows the stack on a large fleet. */
+function appendAll<T>(target: T[], items: readonly T[]): void {
+  for (const item of items) target.push(item);
+}
+
+/** W1-T13866: group in place. Copying the bucket on every insert is quadratic in the bucket's size. */
+function appendTo<K, T>(groups: Map<K, T[]>, key: K, item: T): void {
+  const bucket = groups.get(key);
+  if (bucket === undefined) groups.set(key, [item]);
+  else bucket.push(item);
+}
+
 function withDigest<U extends Omit<Unit, "digest">>(unit: U): U & Unit {
   return { ...unit, digest: sha256(JSON.stringify(unit)) };
 }
@@ -509,7 +521,7 @@ function withDigest<U extends Omit<Unit, "digest">>(unit: U): U & Unit {
 function rebuildFamily<U extends Unit, C>(family: string, units: U[], prior: Record<string, Partition<C>> | undefined,
   compute: (units: U[]) => C, rebuilt: string[], reused: { count: number }): Record<string, Partition<C>> {
   const groups = new Map<string, U[]>();
-  for (const unit of units) groups.set(unit.key, [...(groups.get(unit.key) ?? []), unit]);
+  for (const unit of units) appendTo(groups, unit.key, unit);
   const out: Record<string, Partition<C>> = {};
   for (const key of [...groups.keys()].sort()) {
     const inputHash = sha256(groups.get(key)!.map((unit) => unit.digest).sort().join("\n"));
@@ -711,7 +723,7 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
   const mergedByTask = new Map<string, GithubPull[]>();
   for (const pull of ctx.mergedByNumber.values()) {
     const task = taskOf.get(pull.nodeId);
-    if (task !== undefined) mergedByTask.set(task, [...(mergedByTask.get(task) ?? []), pull]);
+    if (task !== undefined) appendTo(mergedByTask, task, pull);
   }
   return [...ctx.mergedByNumber.values()].map((pull) => {
     const task = taskOf.get(pull.nodeId);
@@ -739,7 +751,7 @@ function repairUnits(ctx: SourceContext, taskOf: Map<string, string>, classOf: M
 function adoptionUnits(ctx: SourceContext, caseFiles: readonly TaskCaseFile[] | undefined): { units: AdoptionUnit[]; transitions: ModelTransition[] } {
   const assignments = ctx.rows.filter((row) => row.step === "worker.assignment" && row.assignmentId !== null);
   const filesByTask = new Map<string, TaskCaseFile[]>();
-  for (const file of caseFiles ?? []) filesByTask.set(file.taskId, [...(filesByTask.get(file.taskId) ?? []), file]);
+  for (const file of caseFiles ?? []) appendTo(filesByTask, file.taskId, file);
   const calls = new Map<string, FlowRow>();
   for (const row of ctx.rows) {
     if ((row.step === "worker.attempt" || row.step === "verdict") && row.assignmentId !== null) calls.set(row.assignmentId, row);
@@ -1037,7 +1049,9 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     const ledgerTasksOfPr = new Map<number, Set<string>>();
     for (const row of ledgerRows) {
       if (row.step !== "pr.opened" || row.taskId === null || row.prNumber === null || row.prRepo?.toLowerCase() !== source.repo.toLowerCase()) continue;
-      ledgerTasksOfPr.set(row.prNumber, new Set([...(ledgerTasksOfPr.get(row.prNumber) ?? []), row.taskId]));
+      const tasks = ledgerTasksOfPr.get(row.prNumber);
+      if (tasks === undefined) ledgerTasksOfPr.set(row.prNumber, new Set([row.taskId]));
+      else tasks.add(row.taskId);
     }
     const taskOf = new Map<string, string>();
     const pullsOfTask = new Map<string, GithubPull[]>();
@@ -1061,7 +1075,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       if (paths.filter(Boolean).length > 1) links.byPath.multiplePaths += 1;
       const task = [...candidates][0]!;
       taskOf.set(pull.nodeId, task);
-      pullsOfTask.set(task, [...(pullsOfTask.get(task) ?? []), pull]);
+      appendTo(pullsOfTask, task, pull);
     }
     for (const number of ledgerTasksOfPr.keys()) if (!pulls.some((pull) => pull.number === number)) links.ledgerPrNotInGithub += 1;
     links.githubOnlyTasks += [...pullsOfTask.keys()].filter((task) => !rowsByTask.has(task)).length;
@@ -1074,12 +1088,12 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
       units.funnel.push(funnel);
       units.flow.push(flow);
     }
-    units.repair.push(...repairUnits(ctx, taskOf, classOf, rowsByTask));
+    appendAll(units.repair, repairUnits(ctx, taskOf, classOf, rowsByTask));
     const adoption = adoptionUnits(ctx, input.caseFiles);
-    units.adoption.push(...adoption.units);
-    transitions.push(...adoption.transitions);
-    units.learning.push(...learningUnits(ctx, storeOf));
-    units.guardrails.push(...guardrailUnits(ledgerRows));
+    appendAll(units.adoption, adoption.units);
+    appendAll(transitions, adoption.transitions);
+    appendAll(units.learning, learningUnits(ctx, storeOf));
+    appendAll(units.guardrails, guardrailUnits(ledgerRows));
   }
   const rebuilt: string[] = [];
   const reused = { count: 0 };
