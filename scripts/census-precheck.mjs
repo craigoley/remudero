@@ -47,7 +47,7 @@ import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { scanSource as scanChildCoverage } from "./coverage-session-blanking-check.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
-import { retainFixture } from "./lib/retained-fixtures.mjs";
+import { fixtureRetentionReason, retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -793,8 +793,13 @@ function completeCensusCapture(dir, owner, result) {
           native.durationMs !== result.durationMs || native.error?.code !== result.error?.code) {
         throw new Error("native receipt does not bind this closed complete capture");
       }
-      if (accepted) rmSync(dir, { recursive: true, force: true });
-      else retainFixture(dir, `rejected complete census measurement: ${reason}`);
+      if (fixtureRetentionReason(dir) !== undefined) return;
+      if (!accepted) {
+        retainFixture(dir, `rejected complete census measurement: ${reason}`);
+        return;
+      }
+      if (readdirSync(dir).length !== names.length) throw new Error("capture directory has unexpected entries");
+      rmSync(dir, { recursive: true, force: true });
     } catch (error) {
       const reason = `capture custody UNKNOWN (${error.message})`;
       retainFixture(dir, reason);
@@ -841,9 +846,10 @@ function runCensusChild(file, args, options) {
       // Keeping partial bytes is not evidence that the native receipt remains readable or valid.
       custody = `capture custody UNKNOWN (${error.message}); partial diagnostics retained at`;
     }
-    retainFixture(dir, `${custody} ${dir}`);
+    const reason = result.error?.message ?? (result.signal ? `child ended by ${result.signal}` : "incomplete census capture");
+    retainFixture(dir, `${custody} ${dir}: ${reason}`);
     // Custody changes neither the original native outcome nor W1-T9919's timeout disposition.
-    result.error = Object.assign(new Error(`${result.error?.message ?? "incomplete census capture"}; ${custody} ${dir}`), { code: result.error?.code });
+    result.error = Object.assign(new Error(`${reason}; ${custody} ${dir}`), { code: result.error?.code });
   }
   return result;
 }
@@ -917,6 +923,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     if (!pending.delete(sample)) return;
     sample[CENSUS_CAPTURE_DISPOSITION]?.(accepted, reason);
   };
+  const reject = (sample, error) => {
+    try { dispose(sample, false, error.message); }
+    catch (custody) { error.message += `; ${custody.message}`; }
+    return error;
+  };
   try {
     const once = () => {
       // W1-T8379: a run of this module's own child is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0
@@ -951,14 +962,14 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         const sizedBy = childBound.source === "history" ? `a bound from its history (${childBound.historyRuns} recorded run(s))`
           : `the fixed backstop (${childBound.overruns > 0 ? `${childBound.overruns} recorded overrun(s)`
             : childBound.historyRuns === 0 ? "no recorded run" : "no usable history"})`;
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - ` +
+        throw reject(res, Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - ` +
           `${files.join(", ")} under ${sizedBy} - time bound: ` +
           `${Math.round(finishedMs - startedMs)} ms elapsed of the ${childBound.ms} ms bound, ${files.length} suite(s), ` +
-          `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
+          `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true }));
       }
       if (timeBound) {
         // Below the child's bound the bound is a reader's measured budget: an overrun its qualification re-measures once.
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true });
+        throw reject(res, Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true }));
       }
       assertChildFinished(res, "census suite");
       const stdout = String(res.stdout ?? "");
@@ -1109,10 +1120,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     }
     return measured.failing;
   } catch (error) {
-    for (const sample of pending) {
-      try { dispose(sample, false, error.message); }
-      catch (custody) { error.message += `; ${custody.message}`; }
-    }
+    for (const sample of pending) reject(sample, error);
     throw error;
   }
 }
