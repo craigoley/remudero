@@ -2997,8 +2997,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined, refreshPending: true };
   terminalUncreditableHeadsByLedger.set(ledgerPath, terminalState);
   terminalState.refreshPending = true;
-  const refreshTerminalHistory = (): string | undefined => {
-    if (terminalState.refreshPending) {
+  const terminalHistoryHold = (recheckReadableHistory = false): string | undefined => {
+    // Keep an unread-history hold through this build to avoid retrying a failed archive for each PR.
+    if (terminalState.refreshPending || (recheckReadableHistory && terminalState.historyHold === undefined)) {
       const history = readTerminalUncreditableHistory(ledgerPath);
       terminalState.historyHold = history === undefined ? "terminal uncreditable head history is unreadable" : undefined;
       if (history !== undefined) terminalState.heads = terminalUncreditableHeads(ledgerPath, history);
@@ -3053,7 +3054,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     );
     if (!issueUrl) return;
     // Apply any refresh queued during delivery before marking the current entry as escalated.
-    refreshTerminalHistory();
+    terminalHistoryHold();
     const delivered = terminalState.heads.get(key) ?? terminal;
     delivered.escalated = true;
     log(TERMINAL_UNCREDITABLE_HEAD_ESCALATED_STEP, {
@@ -4449,11 +4450,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     },
 
     dispatchFix: async function dispatchFix(pr, evidence, onPhase, control) {
-      const initialHistoryHold = refreshTerminalHistory();
+      const initialHistoryHold = terminalHistoryHold();
       if (initialHistoryHold) return { roundNotRun: true, reason: initialHistoryHold };
       await observePr(pr, "repair");
-      // Sibling builds can discover unreadable history while admission or preflight is pending.
-      const admissionHistoryHold = refreshTerminalHistory();
+      // A sibling can discover unreadable history while contributor admission is pending.
+      const admissionHistoryHold = terminalHistoryHold();
       if (admissionHistoryHold) return { roundNotRun: true, reason: admissionHistoryHold };
       let worktreePath = "";
       let keepWorktree = false;
@@ -4496,7 +4497,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // touches this PR. A failed/indeterminate read is ledgered and never
         // stands the dispatch down; only a positive terminal reading does.
         const preflightStandDown = await dispatchFixPreflightStandDown(ghLiveState, pr, log);
-        const preflightHistoryHold = refreshTerminalHistory();
+        // A rotation can become unreadable during preflight without a sibling queuing a refresh.
+        const preflightHistoryHold = terminalHistoryHold(true);
         if (preflightHistoryHold) return { roundNotRun: true, reason: preflightHistoryHold };
         if (preflightStandDown) return;
         const priorTerminal = terminalState.heads.get(terminalKey);
@@ -5434,7 +5436,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T2752 — the outer, synchronous admission seam `runSweep` consults before EITHER
     // dispatch surface invokes `dispatchFix`. Both share the history hold and the same head index.
     terminalFixStandDown: (pr) => {
-      const historyHold = refreshTerminalHistory();
+      const historyHold = terminalHistoryHold(true);
       if (historyHold) return historyHold;
       const terminal = terminalState.heads.get(terminalUncreditableHeadKey(pr.prNumber, pr.headSha));
       // Written as two explicit checks, not `!terminal?.escalated` — that negated-optional-chain

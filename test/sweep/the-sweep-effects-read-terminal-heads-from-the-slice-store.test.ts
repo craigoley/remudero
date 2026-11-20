@@ -479,6 +479,51 @@ if (process.argv[2] === childFlag) {
     });
   }
 
+  test("W1-T12271 criterion 3: rotation EIO during preflight holds dispatch without a sibling build", async (t) => {
+    const { root, path, archive } = fixture(t);
+    const pr = candidates[4] as OpenPrView;
+    let restore: (() => void) | undefined;
+    let headLookups = 0;
+    const effects = buildEffects(root, path, {
+      dispatchFixPreflightStandDownImpl: async () => {
+        restore = failRotationRead(archive, "EIO");
+        return false;
+      },
+      ghJsonImpl: () => {
+        headLookups++;
+        return {};
+      },
+    });
+    assert.equal(effects.terminalFixStandDown!(pr), undefined);
+
+    try {
+      const dispatch = await effects.dispatchFix!(pr, { unmetCriteria: [] });
+      assert.ok(restore, "preflight ran and made the rotation unreadable");
+      assert.deepEqual({ dispatch, headLookups }, {
+        dispatch: { roundNotRun: true, reason: unreadHistoryReason },
+        headLookups: 0,
+      });
+      assert.equal(effects.terminalFixStandDown!(pr), unreadHistoryReason);
+    } finally {
+      restore?.();
+    }
+  });
+
+  test("W1-T12271 criterion 3: stand-down checks cached rotation readability without rebuilding effects", (t) => {
+    const { root, path, archive } = fixture(t);
+    const effects = buildEffects(root, path);
+    const pr = candidates[4] as OpenPrView;
+    assert.equal(effects.terminalFixStandDown!(pr), undefined);
+    const restore = failRotationRead(archive, "EIO");
+    try {
+      assert.equal(effects.terminalFixStandDown!(pr), unreadHistoryReason);
+    } finally {
+      restore();
+    }
+    assert.equal(buildEffects(root, path).terminalFixStandDown!(pr), undefined);
+    assert.equal(effects.terminalFixStandDown!(pr), undefined);
+  });
+
   test("W1-T12271 criterion 3: corrupt bytes returned after a rotation cache lookup hold dispatch", async (t) => {
     const { root, dir, path, archive } = fixture(t);
     const previouslyFree = candidates[3] as OpenPrView;
