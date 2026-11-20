@@ -1,0 +1,105 @@
+- id: W1-T13911
+  title: "A plan blob batch sizes its output buffer from the blob sizes git lists, not a fixed ceiling: the plan catalog is 35,177,507 bytes against the 64 MiB runner bound and grew 5.1 MB in 14 days (held rebuild)"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  origin: operator-session#fleet-follow-ups-2026-11-19
+  plan_refs:
+    - W1-T13824
+    - W1-T13458
+    - W1-T7743
+  files:
+    - src/lib/plan.ts
+    - src/run-task.ts
+    - test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts
+    - test/next-task-id-reserve.test.ts
+    - test/plan/every-ref-read-asks-git-for-blob-ids.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: invariant:bound-from-listing — readBlobsAtRef and readBlobsAtRefAsync list blob ids with `ls-tree -l` and pass the `cat-file --batch` call a maxBuffer equal to the sum, over the requested paths, of each listed blob's size plus its header and trailing newline bytes (oid length + ' blob ' + the size's digits + 2); when any requested path is not listed as a blob (it is asked as `<ref>:<path>`), the batch passes no bound and the runner keeps its present bound; a real git repository whose shards total more than 64 MiB loads through loadPlanAtRef and loadPlanAtRefAsync with the default runners
+      proof: "grep: W1-T13824 criterion 1 in test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts"
+    - claim: invariant:bound-is-exact — for a fixture with non-ASCII shard text the derived bound is at least the byte length git writes for the batch and less than twice it, so the bound is neither short nor a hidden ceiling
+      proof: "grep: W1-T13824 criterion 2 in test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts"
+    - claim: invariant:old-runners-still-work — a GitBlobRunner fake that takes only (args, stdin) still reads the plan; the runner's third argument is optional, and loadPlanAtRef's default runner and defaultGitRunnerAsync use it when given and keep their present bound only when none is given
+      proof: "grep: W1-T13824 criterion 3 in test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts"
+    - claim: taskIdDestinationSnapshot passes the bound readBlobsAtRefAsync derives to its destination git call and no longer uses TASK_ID_DESTINATION_MAX_BUFFER; a destination plan larger than that old constant still mints
+      proof: "grep: W1-T13824 criterion 4 in test/next-task-id-reserve.test.ts"
+    - claim: the batch reads call the new bound helper
+      proof: "grep: blobBatchMaxBuffer( in src/lib/plan.ts"
+  rationale: |
+    REBUILD of W1-T13824, filed by the sweep (W1-T12709) from https://github.com/craigoley/remudero/pull/19697 at 453ae90e59f367960da60b8409b4d60bba548bec: the design hold covers 1 red checks and no criterion; a red check cannot leave the task, so the pull request is closed and rebuilt as a held task.
+    FINDINGS of the pull request:
+    - no unmet criterion was recorded
+    WHY: #19534 (merged 2026-11-19 01:32Z, "a plan destination over 1 MiB still mints task ids") gave
+    taskIdDestinationSnapshot (src/run-task.ts) a fixed TASK_ID_DESTINATION_MAX_BUFFER of 1 << 27. Its
+    comment calls it a BACKSTOP that "matches the other plan readers' bound". Those readers are
+    loadPlanAtRef's default runner and defaultGitRunnerAsync in src/lib/plan.ts, both a fixed 1 << 26
+    (64 MiB). All of them read the whole catalog in one `git cat-file --batch`, so the catalog size is
+    the output size.
+    MEASURED on origin/main with `git ls-tree -r -l` over plan/tasks.yaml and plan/tasks.d/:
+    2026-09-19: 1,671 entries, 14,788,260 bytes. 2026-10-19: 4,170 entries, 26,194,884 bytes.
+    2026-11-05: 4,895 entries, 30,105,889 bytes. 2026-11-19: 5,779 entries, 35,177,507 bytes.
+    The 64 MiB bound is 67,108,864 bytes. At the last 14 days' growth (5,071,618 bytes) the catalog
+    reaches it in about 88 days. Past it the daemon's plan reload, the reviewer's at-head read and the
+    Inbox approval all refuse the plan.
+    The sizes are already free: readBlobsAtRef runs one `git ls-tree` over the shard directories to
+    get blob ids (#15230). With `-l` the same call names every blob's size, so the batch's exact output
+    size is known before the batch runs. W1-T13458 used the same idea for the fix census snapshot
+    (src/run-task.ts, `--batch-check` headers summed into the batch's maxBuffer).
+    NOT IN SCOPE: the `ls-tree` listing itself (797,020 bytes for plan/tasks.d/ today, growing about
+    140 bytes a shard) and the `git show` of plan/tasks.yaml (1,071,324 bytes) keep their runner's
+    present bound. They grow far more slowly than the batch.
+    AMENDED 2026-11-20 after #19697. Its only red at its last head was acceptance-author-gate: the fix
+    changed test/plan/every-ref-read-asks-git-for-blob-ids.test.ts, which was not in `files`. Its three
+    review rounds before that failed on one cause: the design sized a path asked as `<ref>:<path>` as a
+    `missing` line, but git can resolve such a path to a blob. The reviewer showed four ways: a `./`
+    prefix (79 bytes budgeted, 7,338 written), a path outside the listed directories, a ref that moves
+    between the listing and the batch, and a listing run from a subdirectory (cwd-relative). The fixer
+    then pinned the fallback to a root tree id it hashed from the listing. That works but is far more
+    code than the task needs. An unlisted path is an error path: parseBlobBatch refuses a `missing`
+    answer. So this amendment keeps today's bound for any batch that holds an unlisted path, and the
+    exact bound covers the normal case, in which every path is asked by its immutable blob id.
+    This task replaces W1-T13824: it carries that task's surface plus the existing blob-id test, and
+    the narrower unlisted-path rule above. W1-T13824's dispatch ref is still held by #19697's lane.
+  design: |
+    INVARIANT bound-from-listing: when every requested path is listed as a blob, the batch's buffer is the exact byte count git will write, computed from the listing.
+    INVARIANT bound-is-exact: the bound is never smaller than the output and adds no fixed ceiling of its own.
+    INVARIANT old-runners-still-work: runners that ignore the bound keep working unchanged.
+    1. blobIdListingArgs adds `-l` and `--full-tree`, so the listed paths are relative to the
+       repository root even when git runs in a subdirectory. blobBatchRequest's line regex accepts the
+       size column (`<mode> blob <oid> <size>\t<path>`; `-l` pads the size with spaces) and a line
+       without it. It looks each requested path up after posix.normalize, so `./plan/x.yaml` finds
+       `plan/x.yaml`. It returns the request plus `blobBatchMaxBuffer(...)`: the sum, for each path
+       asked by id, of oid.length + " blob ".length + String(size).length + 1 + size + 1.
+       If any path is asked as `<ref>:<path>`, or the listing has no size column, the bound is
+       undefined and the runner keeps its present bound. Do not hash trees or add a git call to pin the
+       ref: blob ids are already immutable. Sizes are bytes; Node's maxBuffer counts what it reads, and
+       a byte count is never smaller than a character count, so the bound holds for utf8 output.
+       The unlisted-path request stays `<ref>:<path>`, so the error text and the request line that
+       test/plan/every-ref-read-asks-git-for-blob-ids.test.ts asserts do not change. That file is in
+       `files` only for a case the build needs to add there (for example a `./` path read by id).
+    2. GitBlobRunner and the async runner type gain an optional third argument `{ maxBuffer?: number }`.
+       readBlobsAtRef and readBlobsAtRefAsync pass the derived bound to the `cat-file --batch` call only.
+       loadPlanAtRef's default runner and defaultGitRunnerAsync use the given bound, else today's value.
+       Always pass the third argument; never branch on a runner's declared arity (`fn.length`). A default
+       parameter value lowers the arity, and #19697's third review round found the bound skipped that way.
+    3. In taskIdDestinationSnapshot, `run` takes the optional bound and passes it to hostWorktreeGitAsync;
+       delete TASK_ID_DESTINATION_MAX_BUFFER and its export. #19534's test in test/next-task-id-reserve.test.ts
+       stops importing the constant and instead asserts that the batch call got the derived bound.
+       The other destination calls (fetch, rev-parse, ls-tree) keep the hostWorktreeGitAsync default.
+    4. No new constant, env var or config key. Run test/plan/compress-src-lib-plan-ts.test.ts and
+       test/plan-blob-buffer.test.ts; add as few comment lines to src/lib/plan.ts as possible.
+  falsifier: |
+    At origin/main criterion 1 fails: a fixture over 64 MiB refuses with "stdout maxBuffer length exceeded".
+    Drop the header bytes from the bound: criterion 2's exact-size fixture refuses. Make the third
+    runner argument required: criterion 3's two-argument fake fails to typecheck or read.
+  needs_input:
+    question: "Pull request https://github.com/craigoley/remudero/pull/19697 (task W1-T13824) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13824-1795143069296-1fd8:1:1795143350099) — Hosted CI requires a merged scope amendment. The fix harness routes test-only NEEDS_SCOPE reports to commit, which would republish the refused path."
+    source_pr: https://github.com/craigoley/remudero/pull/19697
+    asked_at: 2026-11-20T03:04:45.410Z

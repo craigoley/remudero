@@ -18,7 +18,7 @@
     - packages/api-client/src/schema.d.ts
     - test/instances-view.test.ts
     - test/console-api/read-model/a-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A row that moves only the projector generation leaves the instances body skipped, publishing no generation, and equal to a full build"

@@ -172,3 +172,66 @@ test("the needs you route answers view_disabled while dark and the composite und
   assert.equal(served.status, 200);
   assert.deepEqual((served.body.data as NeedsYouData).decisions.map((d) => d.id), ["grill:fb-1"]);
 });
+
+test("W1-T13876 criterion 1: reading the needs you view or walking its bodies composes again only when an input entry or the instances moved", () => {
+  const { handle, post } = fakeHandle(["core"]);
+  const view = withNeedsYouView(handle, clock);
+  const counted = (e: ViewBodyEntry): { entry: ViewBodyEntry; reads: () => number } => {
+    let reads = 0;
+    const data = e.body.data;
+    Object.defineProperty(e.body, "data", { get: () => (reads++, data), enumerable: true });
+    return { entry: e, reads: () => reads };
+  };
+  const core = counted(now("core", [decision("core", "question:W1-T1:a", at(30))]));
+  post(core.entry);
+  const first = view.body(NEEDS_YOU_VIEW_NAME)!;
+  const composed = core.reads();
+  assert.ok(composed > 0, "positive control: composing reads the now body's data");
+  for (let i = 0; i < 20; i++) {
+    view.body(NEEDS_YOU_VIEW_NAME);
+    view.bodies.get(`now\u0000instance=core`);
+    void [...view.bodies.values()];
+  }
+  assert.equal(core.reads(), composed, "W1-T13876 compose: unchanged inputs are not composed again");
+  assert.equal(view.body(NEEDS_YOU_VIEW_NAME), first, "and the held composite answers");
+  post(entry("repositories", "", 2, { unrelated: true }, []));
+  view.body(NEEDS_YOU_VIEW_NAME);
+  assert.equal(core.reads(), composed, "a body that is not an input does not compose");
+  const next = counted(now("core", [decision("core", "question:W1-T2:b", at(5))]));
+  post(next.entry);
+  const moved = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.ok(next.reads() > 0, "a replaced input composes");
+  assert.deepEqual((moved.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T2:b"]);
+  (handle.state().instances as Map<string, ReadModelInstanceState>).set("wild", { instance: "wild", generation: 1, lease: "held", failures: 0, newestTs: null });
+  const known = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.deepEqual((known.body.data as NeedsYouData).instances.map((i) => i.instance), ["core", "wild"], "a newly reported instance composes");
+});
+
+test("W1-T13876 compose: an input that fails to compose is composed again on the next read, never answered by the held body", () => {
+  const { handle, post } = fakeHandle(["core"]);
+  const view = withNeedsYouView(handle, clock);
+  post(now("core", [decision("core", "question:W1-T1:a", at(30))]));
+  const first = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.throws(() => post(entry("now", "instance=core", 3, { decisions: "malformed" }, [])),
+    "positive control: the malformed body fails to compose when it is posted");
+  assert.throws(() => view.body(NEEDS_YOU_VIEW_NAME), "the failed inputs are not recorded as composed");
+  post(now("core", [decision("core", "question:W1-T3:c", at(1))]));
+  const recovered = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.notEqual(recovered, first);
+  assert.deepEqual((recovered.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T3:c"]);
+});
+
+test("W1-T13876 compose: a body that fails after composing is built again on the next read, never answered by the held body", () => {
+  const { handle, post } = fakeHandle(["core"]);
+  let failNext = false;
+  const flaky: Clock = { ...clock, iso: () => { if (failNext) { failNext = false; throw new Error("clock unavailable"); } return clock.iso(); } };
+  const view = withNeedsYouView(handle, flaky);
+  post(now("core", [decision("core", "question:W1-T1:a", at(30))]));
+  const first = view.body(NEEDS_YOU_VIEW_NAME)!;
+  failNext = true;
+  assert.throws(() => post(now("core", [decision("core", "question:W1-T4:d", at(2))])), /clock unavailable/,
+    "positive control: building the new body throws after composition");
+  const next = view.body(NEEDS_YOU_VIEW_NAME)!;
+  assert.notEqual(next, first, "the inputs were not recorded against the old body");
+  assert.deepEqual((next.body.data as NeedsYouData).decisions.map((d) => d.id), ["question:W1-T4:d"]);
+});

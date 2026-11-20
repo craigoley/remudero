@@ -16,7 +16,7 @@
     - src/lib/review.ts
     - src/cli/commands/review.ts
     - test/review/a-satellite-review-reads-a-core-id-reservation-from-core.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A satellite review reads a W1 id its own origin lacks from core's origin, and passes a head that holds it"

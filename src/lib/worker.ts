@@ -6736,6 +6736,29 @@ export async function worktreeRemoveAsync(repoDir: string, worktreePath: string)
   sweepStaleWorkerScratch({ maxAgeMs: DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS });
 }
 
+/** W1-T13897: the healed reviewer tree's cut and remove. Both remove through {@link worktreeRemoveAsync}, off the event
+ *  loop: on 2026-11-20 one sync `git worktree remove` there held the daemon loop for 253,258 ms (00:46:28Z, pid 1098566).
+ *  `prepare` cuts or proves `<worktreeRoot>/<prefix>-<sha12>`; when it refuses, a tree left at that path by an earlier
+ *  process (its memo gone) is removed, then cut again. */
+export function healedReviewerTreeTools(repoDir: string, worktreeRoot: string, prepare: (prefix: string, sha: string) => string): {
+  cut: (prefix: string, sha: string) => Promise<string>;
+  remove: (dir: string) => Promise<void>;
+} {
+  const cut = async (prefix: string, sha: string): Promise<string> => {
+    try {
+      return prepare(prefix, sha);
+    } catch (error) {
+      try {
+        await worktreeRemoveAsync(repoDir, `${worktreeRoot}/${prefix}-${sha.slice(0, 12)}`);
+      } catch {
+        throw error; // deliberate: nothing was there to remove, so the cut's own refusal stands
+      }
+      return prepare(prefix, sha);
+    }
+  };
+  return { cut, remove: (dir) => worktreeRemoveAsync(repoDir, dir) };
+}
+
 /** W1-T12550: only git's complete absence diagnostic qualifies; a lock reason can quote it. */
 function worktreeAlreadyRemoved(error: unknown, worktreePath: string): boolean {
   const failure = (error ?? {}) as { stderr?: unknown };
@@ -7878,6 +7901,7 @@ export async function runAdhocLaneReapRung(
     root = (deps.root ?? (() => adhocLaneRoot(config)))();
     try {
       const disk = (deps.diskHeadroom ?? ((path: string) => {
+        while (!existsSync(path) && dirname(path) !== path) path = dirname(path);
         const stat = statfsSync(path);
         return { freeBytes: stat.bavail * stat.bsize, totalBytes: stat.blocks * stat.bsize };
       }))(root);
@@ -7894,6 +7918,8 @@ export async function runAdhocLaneReapRung(
       maxAgeMs: graceMs,
       isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
       onEnumerationError: (e: unknown): void => {
+        // W1-T13789: a lanes root that was never made is a survey of zero lanes.
+        if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
         error = String(e);
         log("adhoc_lane.reap.enumeration_error", { root, error });
       },

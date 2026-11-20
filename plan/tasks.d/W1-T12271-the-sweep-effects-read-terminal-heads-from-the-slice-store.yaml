@@ -17,6 +17,9 @@
     - W1-T9390
   files:
     - src/lib/sweep.ts
+    - src/lib/ledger-union.ts
+    - scripts/union-retention-census.mjs
+    - test/a-union-read-of-an-unretained-step-is-refused.test.ts
     - test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts
     - test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts
     - test/non-fleet-head-escalation-precision.test.ts
@@ -44,11 +47,15 @@
     The first sweep after a restart, the review command and the fix command each build the effects in a new process. Each pays the full read.
     CHECKED for overlap: W1-T12235 covers the lifetime history only. W1-T12236 (queued) covers the open pull request reads at a restart.
   design: |
+    NO-INVARIANTS: This amendment names the files needed to meet existing parity and unread-history criteria; it adds no independent guarantee.
     Give `terminalUncreditableHeads` its rows from a reader that `createEscalationTriageHistoryReader` builds for a new slice:
     - a holder name of its own, the steps that the pattern of today matches, `sharedSnapshot: true`;
     - a `project` function that keeps only the fields that the function reads.
+    Preserve the legacy raw-line filter as well as the parsed `step` filter. The caller's `resolveLedgerUnion` regex is whitespace-sensitive, so the slice's compacted rows must not accept a spaced `"step": "..."` line that the legacy query would omit. The incremental reader's cache identity includes an optional raw pattern without changing digest versions for slices that do not set one.
+    Update the union-retention census and its regression when these two steps move from a full-corpus query to the terminal-head slice.
     Keep the function's result type and its callers. Keep the answer for an unread history.
     The builder must confirm with the test of criterion 2 that the reader gives the same heads as the union read. If it cannot, stop and report the difference.
+    An unreadable rotation is unknown history: keep dispatch held rather than treating a missing cached head as free. Preserve the legacy answer only when the relevant history was read completely.
     NOT IN SCOPE: the other `resolveLedgerUnion` calls in src/lib/sweep.ts (lines 18742, 19374 and 19685 read for one pull request at action time), and the store itself.
   falsifier: |
-    Call `resolveLedgerUnion` again and criterion 1 must fail. Drop the rows of the live file and criterion 2 must fail. Return no heads for an unreadable file and criterion 3 must fail. Restore and require all four to pass.
+    Call `resolveLedgerUnion` again and criterion 1 must fail. Drop the rows of the live file or accept a spaced `"step": "..."` row that the legacy raw regex misses, and criterion 2 must fail. Return no heads for an unreadable file and criterion 3 must fail. Restore and require all four to pass.

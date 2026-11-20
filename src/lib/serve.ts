@@ -21,7 +21,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, rea
 import { createConnection } from "node:net";
 import { promises as fsPromises } from "node:fs";
 import { execFile, execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
@@ -44,6 +44,11 @@ import {
   ingestTokenProvider,
   operatorJwksUrl,
   operatorSessionIdentityProvider,
+  RAW_BODY_CACHE,
+  RawBodyTooLargeError,
+  readBoundedRawBody,
+  verifiedConfirmAction,
+  verifiedStepUpActor,
   type IdentityProvider,
   type OperatorIdentityConfig,
   type ServiceOptions,
@@ -52,6 +57,7 @@ import {
   type WriteTier,
   verifiedActor,
 } from "./service.js";
+import { isCanonicalRepoPath, loadPlanFromYaml, taskIntentDigest, validNewPathApprovalIssuerOrigin, type NewPathApprovalFacts, type NewPathApprovalIssuerBinding, type Task } from "./plan.js";
 import {
   buildIncidentEventsRoute,
   INCIDENT_INGEST_ROUTE_METHOD,
@@ -74,7 +80,8 @@ import {
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
-import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewAnswerSource, type ViewBodySource, type ViewProbeReader } from "./views.js";
+import { heldViewKeys, runSwapProbe } from "./serve-swap-probe.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { analyticsLegacyView, captureHostModelApprovals, type HostModelApprovalConfig } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -99,7 +106,7 @@ import { BOARD_PROJECTION_IDLE_INTERVAL_MS } from "./board-worker.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { fleetRuntimeHealthTelemetry, readFleetRuntimeHealth, type FleetRuntimeHealth } from "./fleet-runtime-health.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
-import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
+import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, versionsReadViews, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
@@ -156,7 +163,7 @@ import {
 } from "./daemon-health.js";
 import {
   INCIDENT_LONGEST_WINDOW_MS,
-  evaluateIncidentInvariants,
+  evaluateIncidentInvariants, INCIDENT_INPUT_LINE,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
   loopStallLedgerLine,
@@ -226,7 +233,7 @@ import { createServeDrain, exitWithin } from "./serve-drain.js";
 import { publishHostServeEvidence, HOST_SERVE_ERROR_STEP, type HostServePublishOptions } from "./host-serve-evidence.js";
 import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemorySliced, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
   withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
-import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type WorkerShedOutcome } from "./serve-generation.js";
+import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe, type SwapProbeRequest, type WorkerShedOutcome } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -331,6 +338,8 @@ export interface ServeDeps {
    * by {@link buildServeServer}; injectable for tests. Absent: preserve existing authorization.
    */
   operatorIdentity?: OperatorIdentityConfig;
+  /** Optional explicit new-path issuer trust binding. Absent: no issuer routes or issuer work. */
+  newPathApprovalIssuer?: NewPathApprovalIssuerBinding;
   /** The key-set fetch and clock the operator provider uses — injectable so a test is hermetic. */
   operatorIdentityIo?: { fetchImpl?: typeof fetch; clock?: Clock };
   /** W1-T2562: re-resolve the CURRENT on-disk sha. Handed to {@link gateStaleCodeExit}, which
@@ -388,7 +397,7 @@ export interface ServeDeps {
   log?: ServiceOptions["log"];
   demand?: Pick<ServeDemandOptions, "clock" | "every">;
   /** W1-T13602: told of each view read's final answer; assembleServeServer points it at the serve.demand window. */
-  onViewAnswer?: (view: string, status: number, code: string, stale: boolean) => void;
+  onViewAnswer?: (view: string, status: number, code: string, stale: boolean, source?: ViewAnswerSource) => void;
   /**
    * W1-T163: per-token recap markers (last-seen.ts), shared with digest.ts's
    * `sendMarkerAwareDigest` so push and pull read/advance the same state. Injectable; otherwise
@@ -2308,6 +2317,258 @@ export function operatorIdentityConfig(
   return configured ?? operatorIdentityFromFile(file);
 }
 
+/** Unreadable config disables this opt-in issuer; it never falls back to consoleUrl or task data. */
+export function newPathApprovalIssuerConfig(read: () => Pick<Config, "serve"> = loadConfig): NewPathApprovalIssuerBinding | undefined {
+  try {
+    const binding = read().serve?.newPathApprovalIssuer;
+    return binding && validNewPathApprovalIssuerOrigin(binding.origin) && Number.isSafeInteger(binding.epoch) && binding.epoch >= 0 &&
+      binding.issuerId.trim() !== "" && binding.policy.trim() !== "" && binding.repository.trim() !== "" &&
+      binding.instance.trim() !== "" && binding.audience.trim() !== "" ? binding : undefined;
+  } catch {
+    // Unreadable configuration cannot authorize an issuer binding; undefined keeps those routes inert.
+    return undefined;
+  }
+}
+
+const NEW_PATH_PREVIEW_TTL_MS = 5 * 60_000;
+const NEW_PATH_APPROVAL_TTL_MS = 30 * 60_000;
+const NEW_PATH_REQUEST_MAX_BYTES = 64 * 1024;
+
+interface NewPathApprovalPreview {
+  id: string;
+  ref: string;
+  task: Task;
+  operator: string;
+  intentDigest: string;
+  declaredPaths: readonly string[];
+  missingPaths: readonly string[];
+  approvedMissingPaths: readonly string[];
+  expiresAtMs: number;
+}
+
+function responseJson(res: import("node:http").ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+  res.end(body);
+}
+
+function factsDigest(facts: NewPathApprovalFacts): string {
+  return createHash("sha256").update(JSON.stringify(facts)).digest("hex");
+}
+
+/**
+ * The real opt-in issuer mounted by serve. Draft bytes are parsed here, the preview is kept in
+ * process memory and tied to the verified operator, and only a HIGH-tier dispatcher confirmation
+ * can create active state. The append-only audit is evidence; boot never restores authority from it.
+ */
+export function makeNewPathApprovalIssuerRoutes(input: {
+  binding?: NewPathApprovalIssuerBinding;
+  repository?: string;
+  instance?: string;
+  repoRoot: string;
+  stateRoot: string;
+  clock?: Clock;
+}): Route[] {
+  const binding = input.binding;
+  const unavailable = (path: string): Route => ({
+    method: "POST", path, scope: "write", tier: path.endsWith("/confirm") || path.endsWith("/revoke") ? "high" : "low",
+    ...(path.endsWith("/confirm") || path.endsWith("/revoke") ? { maxBodyBytes: 4096 } : {}),
+    handler: (_req, res) => responseJson(res, 404, { error: "approval_issuer_disabled" }),
+  });
+  if (!binding || !validNewPathApprovalIssuerOrigin(binding.origin) || binding.repository !== input.repository || binding.instance !== input.instance ||
+    !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !binding.issuerId || !binding.policy || !binding.instance || !binding.audience) {
+    // Keep the routes mounted for a stable API surface; without an explicit matching binding
+    // each is inert and performs no file, identity, or network work.
+    return [unavailable("/v1/new-path-approval/preview"), unavailable("/v1/new-path-approval/confirm"),
+      unavailable("/v1/new-path-approval/resolve"), unavailable("/v1/new-path-approval/revoke")];
+  }
+  const clock = input.clock ?? systemClock;
+  const auditPath = join(input.stateRoot, "state", "new-path-approval-audit.ndjson");
+  const previews = new Map<string, NewPathApprovalPreview>();
+  const active = new Map<string, NewPathApprovalFacts>();
+
+  const readObject = async (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, maxBytes = NEW_PATH_REQUEST_MAX_BYTES): Promise<Record<string, unknown> | undefined> => {
+    try {
+      const raw = await readBoundedRawBody(req, maxBytes);
+      const value: unknown = raw.trim() ? JSON.parse(raw) : {};
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        responseJson(res, 400, { error: "invalid_request" });
+        return undefined;
+      }
+      return value as Record<string, unknown>;
+    } catch (error) {
+      if (error instanceof RawBodyTooLargeError) responseJson(res, 413, { error: "request_body_too_large", max_bytes: maxBytes });
+      else responseJson(res, 400, { error: "invalid_request" });
+      return undefined;
+    }
+  };
+  const verifiedOperator = (req: import("node:http").IncomingMessage): string | undefined => {
+    const actor = verifiedActor(req);
+    return actor?.startsWith("operator:") ? actor : undefined;
+  };
+  const appendAudit = async (event: Record<string, unknown>): Promise<void> => {
+    await fsPromises.mkdir(dirname(auditPath), { recursive: true, mode: 0o700 });
+    const file = await fsPromises.open(auditPath, "a", 0o600);
+    try {
+      await file.writeFile(`${JSON.stringify(event)}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  };
+  const auditIsCurrent = async (facts: NewPathApprovalFacts): Promise<boolean> => {
+    const raw = await fsPromises.readFile(auditPath, "utf8");
+    let confirmed = false;
+    let revoked = false;
+    for (const line of raw.split("\n").filter(Boolean)) {
+      const row: unknown = JSON.parse(line);
+      if (typeof row !== "object" || row === null || Array.isArray(row)) return false;
+      const record = row as Record<string, unknown>;
+      if (record.ref !== facts.ref) continue;
+      if (record.event === "confirmed" && record.factsDigest === factsDigest(facts)) confirmed = true;
+      if (record.event === "revoked") revoked = true;
+    }
+    return confirmed && !revoked;
+  };
+
+  const previewRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/preview", scope: "write", tier: "low",
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      if (!operator) return responseJson(res, 403, { error: "verified_operator_session_required" });
+      const body = await readObject(req, res);
+      if (!body) return;
+      if (Object.keys(body).some((key) => !["taskYaml", "approvedMissingPaths"].includes(key))) return responseJson(res, 400, { error: "invalid_request" });
+      if (typeof body.taskYaml !== "string" || body.taskYaml.length > 48 * 1024 || !Array.isArray(body.approvedMissingPaths) ||
+        body.approvedMissingPaths.some((path) => typeof path !== "string")) return responseJson(res, 400, { error: "invalid_request" });
+      let task: Task;
+      try {
+        const parsed = loadPlanFromYaml(body.taskYaml, "issuer-preview");
+        if (parsed.tasks.length !== 1) return responseJson(res, 400, { error: "one_task_required" });
+        task = parsed.tasks[0]!;
+      } catch {
+        return responseJson(res, 400, { error: "task_draft_unreadable" });
+      }
+      const declaredPaths = task.files ?? [];
+      if (task.repo !== binding.repository || task.author_class !== "machine" || task.new_path_approval_ref !== undefined ||
+        declaredPaths.length === 0 || declaredPaths.some((path) => !isCanonicalRepoPath(path)) ||
+        new Set(declaredPaths.map((path) => path.toLowerCase())).size !== declaredPaths.length) {
+        return responseJson(res, 409, { error: "task_scope_unsupported" });
+      }
+      const missingPaths = declaredPaths.filter((path) => !existsSync(join(input.repoRoot, path)));
+      const approvedMissingPaths = body.approvedMissingPaths as string[];
+      if (approvedMissingPaths.length === 0 || new Set(approvedMissingPaths.map((path) => path.toLowerCase())).size !== approvedMissingPaths.length ||
+        approvedMissingPaths.some((path) => !missingPaths.includes(path))) return responseJson(res, 409, { error: "approval_subset_mismatch" });
+      const createdAt = clock.now();
+      const preview: NewPathApprovalPreview = {
+        id: randomUUID(), ref: `npa_${randomUUID()}`, task, operator,
+        intentDigest: taskIntentDigest(task), declaredPaths: Object.freeze([...declaredPaths]),
+        missingPaths: Object.freeze([...missingPaths]), approvedMissingPaths: Object.freeze([...approvedMissingPaths]),
+        expiresAtMs: createdAt + NEW_PATH_PREVIEW_TTL_MS,
+      };
+      previews.set(preview.id, preview);
+      responseJson(res, 200, {
+        previewId: preview.id, ref: preview.ref, taskId: task.id, title: task.title, repo: task.repo,
+        issuerId: binding.issuerId, epoch: binding.epoch, policy: binding.policy, instance: binding.instance, audience: binding.audience,
+        intentDigest: preview.intentDigest, declaredPaths: preview.declaredPaths, missingPaths: preview.missingPaths,
+        approvedMissingPaths: preview.approvedMissingPaths, operator, expiresAtMs: preview.expiresAtMs,
+      });
+    },
+  };
+  const confirmRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/confirm", scope: "write", tier: "high", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      const action = verifiedConfirmAction(req);
+      const raw = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+      if (!operator || verifiedStepUpActor(req) !== operator || !action || action.method !== "POST" ||
+        action.path !== "/v1/new-path-approval/confirm" || typeof raw !== "string" || action.payload !== raw) {
+        return responseJson(res, 403, { error: "verified_step_up_confirmation_required" });
+      }
+      let body: Record<string, unknown>;
+      try {
+        const parsed: unknown = raw.trim() ? JSON.parse(raw) : {};
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("invalid confirmation body");
+        body = parsed as Record<string, unknown>;
+      } catch {
+        return responseJson(res, 400, { error: "invalid_request" });
+      }
+      const preview = typeof body.previewId === "string" ? previews.get(body.previewId) : undefined;
+      const timestamp = clock.now();
+      if (!preview || preview.operator !== operator || preview.expiresAtMs <= timestamp) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
+      if (Object.keys(body).some((key) => key !== "previewId") || !previews.delete(preview.id)) return responseJson(res, 409, { error: "preview_expired_or_wrong_actor" });
+      const facts: NewPathApprovalFacts = Object.freeze({
+        protocol: "new-path-approval-v1", ref: preview.ref, issuerId: binding.issuerId, issuerEpoch: binding.epoch,
+        policy: binding.policy, taskId: preview.task.id, repo: preview.task.repo, instance: binding.instance, audience: binding.audience,
+        intentDigest: preview.intentDigest, declaredPaths: Object.freeze([...preview.declaredPaths]),
+        approvedMissingPaths: Object.freeze([...preview.approvedMissingPaths]), operator,
+        confirmation: randomUUID(), issuedAtMs: timestamp, expiresAtMs: timestamp + NEW_PATH_APPROVAL_TTL_MS, revoked: false,
+      });
+      try {
+        await appendAudit({ event: "confirmed", ref: facts.ref, atMs: timestamp, factsDigest: factsDigest(facts), facts });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      active.set(facts.ref, facts);
+      responseJson(res, 200, { ref: facts.ref, taskId: facts.taskId, intentDigest: facts.intentDigest, expiresAtMs: facts.expiresAtMs });
+    },
+  };
+  const resolveRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/resolve", scope: "write", tier: "low", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const body = await readObject(req, res, 4096);
+      if (!body) return;
+      if (Object.keys(body).some((key) => !["ref", "taskId"].includes(key))) return responseJson(res, 400, { error: "invalid_request" });
+      if (typeof body.ref !== "string" || typeof body.taskId !== "string") return responseJson(res, 400, { error: "invalid_request" });
+      const facts = active.get(body.ref);
+      if (!facts || facts.taskId !== body.taskId) return responseJson(res, 404, { error: "approval_unknown" });
+      if (facts.expiresAtMs <= clock.now()) {
+        active.delete(facts.ref);
+        return responseJson(res, 410, { error: "approval_expired" });
+      }
+      try {
+        if (!(await auditIsCurrent(facts))) return responseJson(res, 503, { error: "approval_audit_unknown" });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      responseJson(res, 200, facts);
+    },
+  };
+  const revokeRoute: Route = {
+    method: "POST", path: "/v1/new-path-approval/revoke", scope: "write", tier: "high", maxBodyBytes: 4096,
+    handler: async (req, res) => {
+      const operator = verifiedOperator(req);
+      const action = verifiedConfirmAction(req);
+      const raw = (req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE];
+      if (!operator || verifiedStepUpActor(req) !== operator || !action || action.method !== "POST" ||
+        action.path !== "/v1/new-path-approval/revoke" || typeof raw !== "string" || action.payload !== raw) {
+        return responseJson(res, 403, { error: "verified_step_up_confirmation_required" });
+      }
+      let body: Record<string, unknown>;
+      try {
+        const parsed: unknown = raw.trim() ? JSON.parse(raw) : {};
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("invalid revoke body");
+        body = parsed as Record<string, unknown>;
+      } catch {
+        return responseJson(res, 400, { error: "invalid_request" });
+      }
+      if (Object.keys(body).some((key) => key !== "ref")) return responseJson(res, 400, { error: "invalid_request" });
+      const facts = typeof body.ref === "string" ? active.get(body.ref) : undefined;
+      if (!facts || facts.operator !== operator) return responseJson(res, 404, { error: "approval_unknown" });
+      const revokedAt = clock.now();
+      try {
+        if (!(await auditIsCurrent(facts))) return responseJson(res, 503, { error: "approval_audit_unknown" });
+        await appendAudit({ event: "revoked", ref: facts.ref, atMs: revokedAt, operator, factsDigest: factsDigest(facts) });
+      } catch {
+        return responseJson(res, 503, { error: "approval_audit_unavailable" });
+      }
+      active.delete(facts.ref);
+      responseJson(res, 200, { ref: facts.ref, revoked: true });
+    },
+  };
+  return [previewRoute, confirmRoute, resolveRoute, revokeRoute];
+}
+
 /**
  * W1-T4244 — COMPOSE THE OPERATOR-SESSION PROVIDER, OR NOTHING. Absent config, or one with no
  * issuer / no allowed origin / no operator, composes NO provider: a verifier with an empty
@@ -2874,6 +3135,8 @@ interface ServeRoutesAssembly {
   linkRefusals: LinkRefusalRollup;
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
+  /** W1-T13832: the reader the view routes handed out, read when a swap probe runs. */
+  viewProbeReader: () => ViewProbeReader | undefined;
 }
 
 /** Internal route assembly that keeps the first-mint readiness signal beside the routes it protects. */
@@ -3070,7 +3333,9 @@ function assembleServeRoutes(
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, repository: scope.repository, analytics: scope.analytics })), modelApprovalConfig: deps.modelApprovalConfig });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   // W1-T13455: the inbox-thread view (built on demand by the worker since P4-T10) is mounted and served with no switch entry.
+  let viewProbeReader: ViewProbeReader | undefined;
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name, AGENT_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME], onServed: routeReads.served, onAnswer: deps.onViewAnswer,
+    onProbeReader: (reader) => { viewProbeReader = reader; },
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, ACTIONS_VIEW_NAME, HOST_VIEW_NAME, AGENT_VIEW_NAME, INCIDENTS_VIEW_NAME, TASK_VIEW_NAME, CODE_HEALTH_VIEW_NAME, INBOX_THREAD_VIEW_NAME, INBOX_THREADS_VIEW_NAME],
     demandViews: [...DEMAND_VIEWS, CODE_HEALTH_VIEW_NAME, DAILY_PROGRESS_VIEW_NAME, INBOX_THREAD_VIEW_NAME],
     requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"], [AGENT_VIEW_NAME]: ["instance", "part"], [INBOX_THREAD_VIEW_NAME]: ["id"] },
@@ -3083,6 +3348,8 @@ function assembleServeRoutes(
     legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy, agentLegacyView({ scopes: navBadgeScopes })] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
+    ...makeNewPathApprovalIssuerRoutes({ binding: deps.newPathApprovalIssuer, repository: deps.assistantRepository,
+      instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repoRoot: deps.questionsRoot, stateRoot: deps.fleetControlRoot }),
     ...buildImprovementThreadRoutes({ stateDir: dirname(deps.ledgerPath) }),
     ...buildProductRoutes({ root: deps.fleetControlRoot }),
     ...buildProductResearchRoutes({ root: deps.fleetControlRoot, provider: deps.productResearchProvider, budgetUsd: deps.productResearchBudgetUsd }),
@@ -3342,7 +3609,7 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready, selectedRegistryObserver, viewProbeReader: () => viewProbeReader };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
@@ -3409,7 +3676,9 @@ export function startIncidentInvariantsMonitor(
   deps: NonNullable<ServeDeps["incidentInvariants"]> & { log?: ServiceOptions["log"] } = {},
 ): (() => void) & { stallProfiler: LoopStallProfiler } {
   const readLedger = deps.readLedger;
-  const liveRows = readLedger ? () => readLedger(ledgerPath) : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS);
+  // W1-T13828: the tail parses and holds only the lines some rule reads.
+  const liveRows = readLedger ? () => readLedger(ledgerPath)
+    : createLiveLedgerTail(ledgerPath, INCIDENT_INVARIANTS_TAIL_RETAIN_MS, { keepLine: INCIDENT_INPUT_LINE });
   const writeLedger = deps.writeLedger ?? appendLedger;
   const eventLoopLag = deps.eventLoopLag
     ?? createEventLoopLagMonitor(systemClock, () => monitorEventLoopDelay({ resolution: SERVE_LOOP_LAG_RESOLUTION_MS }));
@@ -3591,7 +3860,9 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
       // A per-instance view's read names its instance, so only that instance's unit keeps its cadence.
-      readModel?.noteViewRead?.(route.path, new URL(req.url ?? "/", "http://localhost").searchParams.get("instance") ?? undefined);
+      // W1-T11979: a versions poll that names its page's views keeps only those on their cadence.
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      readModel?.noteViewRead?.(route.path, params.get("instance") ?? undefined, versionsReadViews(route.path, params));
     });
   // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
   const memory = createServeMemoryRegistry();
@@ -3602,12 +3873,13 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   const routeAssembly = assembleServeRoutes(
     {
       ...deps,
+      newPathApprovalIssuer: deps.newPathApprovalIssuer ?? newPathApprovalIssuerConfig(),
       consoleSha,
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
       routeReadRollup: routeReads,
       // W1-T13602: bound late; the demand window is built from the routes this call returns, and is read only at request time.
-      onViewAnswer: (view, status, code, stale) => demand.recordView(view, status, code, stale),
+      onViewAnswer: (view, status, code, stale, source) => demand.recordView(view, status, code, stale, undefined, source),
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -3763,9 +4035,12 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     deps.log?.("serve.workers_shed", { ...outcome, kinds: shed.map((reading) => reading.name) });
     return outcome;
   };
+  const swapProbesRun = new Set<string>();
   serveGenerations.set(server, {
     handover: (reason) => staleExit.handover(reason),
     promote: () => readModel?.reload(),
+    swapProbe: (request) => void runSwapProbe(request, { reader: routeAssembly.viewProbeReader(), heldKeys: (view) => heldViewKeys(readModel?.bodies, view),
+      ledgerPath: deps.ledgerPath, seen: swapProbesRun, log: deps.log }),
     shed: () => analyticsCache.shed(),
     restore: (reason) => void analyticsCache.restore(reason),
     shedWorkers,
@@ -3782,6 +4057,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
 type ServeGenerationHooks = {
   handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; restore: (reason: string) => void; probes: ReadinessProbe[];
+  swapProbe: (request: SwapProbeRequest) => void;
   /** Memory tier 2 (W1-T9508): terminates the rebuildable worker threads, resolving once they exited; `restoreWorkers` starts them again. */
   shedWorkers: () => Promise<WorkerShedOutcome>; restoreWorkers: (reason: string) => void;
 };

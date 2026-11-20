@@ -112,6 +112,16 @@ export interface Config {
       stepUpWindowMinutes?: number;
       requireStepUp?: boolean;
     };
+      /** Explicit issuer trust binding for the opt-in new-path approval protocol. Absent disables issuer routes and lookup I/O. */
+      newPathApprovalIssuer?: {
+        origin: string;
+        issuerId: string;
+        epoch: number;
+        policy: string;
+        repository: string;
+        instance: string;
+        audience: string;
+      };
   };
   relay?: { url?: string; token?: string };
   headroom?: { enabled?: boolean };
@@ -431,6 +441,18 @@ export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
           configField("operatorUserIds", "string[]", false, undefined, "config.json", "Clerk user ids allowed to act.", stringArrayShape),
           configField("stepUpWindowMinutes", "number", true, 10, "config.json", "Minutes a verified factor keeps high tier.", numberShape),
           configField("requireStepUp", "boolean", true, false, "config.json", "When true, high tier needs a recent verified factor; off, sign-in is the only gate.", booleanShape),
+        ],
+      }),
+      configField("newPathApprovalIssuer", "object", true, undefined, "config.json", "Explicit issuer trust binding for opt-in new-path approval (W1-T10331).", {
+        kind: "object",
+        fields: [
+          configField("origin", "string", false, undefined, "config.json", "Issuer HTTPS origin; never derived from consoleUrl or task data.", stringShape),
+          configField("issuerId", "string", false, undefined, "config.json", "Stable identity of the trusted issuer implementation.", stringShape),
+          configField("epoch", "number", false, undefined, "config.json", "Current issuer epoch; changing it invalidates existing approvals.", numberShape),
+          configField("policy", "string", false, undefined, "config.json", "Current versioned issuer policy identifier.", stringShape),
+          configField("repository", "string", false, undefined, "config.json", "Exact repository served by this issuer.", stringShape),
+          configField("instance", "string", false, undefined, "config.json", "Exact daemon instance served by this issuer.", stringShape),
+          configField("audience", "string", false, undefined, "config.json", "Exact issuer response audience.", stringShape),
         ],
       }),
     ],

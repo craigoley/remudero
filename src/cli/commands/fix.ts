@@ -45,7 +45,7 @@ import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldForRun } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
@@ -2755,12 +2755,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   };
   // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
   // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  const stagedRetirements = typeof opts.config.root === "string"
+    ? stagedSkillRetirements(join(opts.config.root, "state", "inbox-proposals.json")) : new Set<string>();
   const fixSkillSelection = observeSkillSelection(
     loadInjectableSkills(deps.approvedSkillsDir ?? join(repoRoot, ".claude", "skills")),
     SKILL_FIX_TASK_TYPE,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     opts.task.files,
-    (skillName) => skillWithheldForRun(opts.runId, skillName),
+    (skillName) => skillWithheldUnderRetirement(opts.runId, skillName, stagedRetirements),
   );
   let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {

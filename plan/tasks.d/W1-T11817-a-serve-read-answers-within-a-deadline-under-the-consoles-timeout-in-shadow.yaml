@@ -19,7 +19,7 @@
     - src/lib/serve.ts
     - test/console-api/serve/a-serve-read-past-its-deadline-is-ledgered-late-and-answered-stale-in-enforce.test.ts
     - "src/lib/config-schema.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: In shadow mode, the default, a read that takes longer than the deadline is still answered exactly as before and is counted late in the route family's window, with no change to its response

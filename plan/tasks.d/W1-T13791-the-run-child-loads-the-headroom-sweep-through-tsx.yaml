@@ -18,7 +18,7 @@
     - src/cli/commands/run-task-verb.ts
     - test/mounts-wiring.test.ts
     - test/worker/the-run-child-loads-the-headroom-sweep-through-tsx.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:loads-without-a-tsx-loader — src/lib/mount-exploration.ts, bundled with esbuild the way scripts/build-child-entries.mjs bundles a child entry and imported by a plain node child with no tsx loader, exports loadMountHeadroomCells(repoRoot, stateDir), which returns an array of cells for a fixture state folder; with the sweep loaded by a plain import() the same child fails with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX"

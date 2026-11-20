@@ -1,0 +1,74 @@
+- id: W1-T13862
+  title: "The fleet records its paid model spend per merged PR once a UTC day, by lane, as a ledger row and a status board line"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # a new daily row and board line across four modules; no spend decision reads it yet
+  origin: "operator-session#spend-per-merged-pr-2026-11-19"
+  plan_refs:
+    - W1-T4066
+    - W1-T930
+    - W1-T9387
+  files:
+    - src/lib/spend-per-merged.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/status-board.ts
+    - src/lib/ledger-steps.ts
+    - test/paid-spend-per-merged-pr-is-recorded-daily.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:spend-counted-once — For one finished UTC day, paidSpendPerMergedDay sums every produced paid row (isProducedSpendRow with billing_mode api or provider cash) and every worker.attempt api row whose selection_assignment_id has no produced paid row, and divides by that day's pr.terminal merged rows"
+      kind: guard
+      proof: "grep: W1-T13862 criterion 1: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "The row splits the paid sum by lane (implement, fix, review, judge and shadow, gardener, inbox and triage, retro, scout, other) and the lane amounts add up to the total"
+      proof: "grep: W1-T13862 criterion 2: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "A day with zero merged PRs records a null ratio and its paid total, never a ratio of 0 or Infinity"
+      proof: "grep: W1-T13862 criterion 3: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "A cash row with partial or unavailable token usage is counted in a separate unpriced_rows count and never added to the dollar total"
+      proof: "grep: W1-T13862 criterion 4: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "The measurement cadence writes one spend.per_merged_daily row per finished UTC day and writes no second row for a day that already has one"
+      proof: "grep: W1-T13862 criterion 5: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "The status board text shows the last finished day's paid spend per merged PR, its 7-day median, and the largest lane"
+      proof: "grep: W1-T13862 criterion 6: in test/paid-spend-per-merged-pr-is-recorded-daily.test.ts"
+    - claim: "The measurement cadence calls the new daily reader"
+      proof: "grep: paidSpendPerMergedDay( in src/lib/measurement-cadence.ts"
+    - claim: "The status board reads the newest daily row"
+      proof: "grep: latestSpendPerMergedRow( in src/lib/status-board.ts"
+  rationale: |
+    WHY: nothing in the fleet reports paid spend per merged PR, so no lane can steer by it.
+    OBSERVED (ledger union of core, ops, site and console, 2026-11-05 to 2026-11-19 18:25Z, rows deduplicated by
+    line hash; merged PRs from GitHub): produced paid spend by the spend-rows.ts rule was $99.32 for 1,987 merged PRs,
+    $0.050 per merged PR ($0.054 before 2026-11-18, $0.033 after). Inbox drafts were $88.89 (89.5%), issue
+    revalidation $5.94, fix rounds $3.12, review $1.34, implement $0.02. All produced spend including subscription
+    notional was $3,400.75, $1.71 per merged PR.
+    OBSERVED: worker.attempt rows with billing_mode api carried $151.98 over the same days, and $40.41 of inbox
+    rows had partial or unavailable token usage. spend-rows.ts leaves both out of every spend series, so the true
+    paid figure is above $99.32. From 2026-11-12 to 2026-11-18 the api attempts were $9.83 to $9.99 every day,
+    which looks like the daily cash allowance being used up (INFERRED).
+    OBSERVED in code: retro-closure.ts costPerMerge is a per-class line in the retro text and counts run cost only;
+    experiment-promotion.ts cost_per_merged_ratio guards canary cohorts only; status-board.ts shows per-run notional
+    cost and cost anomalies. None is a daily fleet row and none counts the inbox, gardener or judge lanes.
+  design: |
+    INVARIANT spend-counted-once: a dollar enters the daily total once: from its produced row, or from its
+    worker.attempt api row only when no produced paid row carries the same selection_assignment_id.
+    1. src/lib/spend-per-merged.ts: paidSpendPerMergedDay(rows, utcDay) returns { day, paid_usd, merged_prs,
+       paid_usd_per_merged_pr, lanes, unpriced_rows, attempt_only_usd }. It reuses isProducedSpendRow and
+       spendAmountUsd from spend-rows.ts; it makes no model call. merged_prs counts pr.terminal rows with state
+       merged whose ts falls in the day. latestSpendPerMergedRow(rows) returns the newest daily row and the 7-day
+       median of the ratio.
+    2. measurement-cadence.ts: each cadence run writes spend.per_merged_daily for every finished UTC day in the last
+       seven that has no such row yet. Add zero net comment lines (run its compress-src cap test).
+    3. status-board.ts: one line "spend/merged : $X.XXX yesterday (7-day median $Y.YYY), top lane <lane> $Z.ZZ".
+    4. ledger-steps.ts: declare spend.per_merged_daily, its writer and its fields.
+
+  falsifier: |
+    Count worker.attempt api rows that share a selection_assignment_id with a produced row: criterion 1's total
+    rises above the fixture's known bill and the test fails.
+  note: |
+    Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.
+    The numbers above are from a one-off read of the ledger union, kept in the filing PR body.

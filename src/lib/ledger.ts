@@ -556,6 +556,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T13470: a capture once per head and check id, an escalation once per head; archived, each would repeat.
   "security.codeql_configuration_warning_captured",
   "security.codeql_configuration_warning_escalated",
+  "security.producer_redispatched", // W1-T13787: keep recent claims live; older claims are read from rotations.
   "automerge.rearmed_after_disarm",
   "automerge.rearm_exhausted",
   "automerge.stale_rollup_refreshed", // W1-T6404: the once-per-PR refresh bound; forgotten, it loops.

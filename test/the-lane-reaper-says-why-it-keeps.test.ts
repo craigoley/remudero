@@ -363,8 +363,10 @@ test("W1-T4065: published work remains reclaimable and a failed unmanaged pass r
 test("W1-T4065: an unreadable population is distinct from an empty pass", async () => {
   const { root, config } = fixture();
   const rec = recorder();
-  await runAdhocLaneReapRung(config, rec.log, { root: () => join(root, "absent") });
+  // W1-T13789: a missing root is now the empty case, so a file where the folder belongs is the unreadable one.
+  writeFileSync(join(root, "blocked"), "not a folder\n");
+  await runAdhocLaneReapRung(config, rec.log, { root: () => join(root, "blocked") });
   assert.equal(rec.census().reaped.count, 0);
-  assert.match(rec.census().error!, /ENOENT/);
+  assert.match(rec.census().error!, /ENOTDIR/);
   assert.ok(rec.rows.some((r) => r.step === "adhoc_lane.reap.enumeration_error"));
 });

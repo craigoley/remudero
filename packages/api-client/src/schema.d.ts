@@ -625,6 +625,38 @@ export interface components {
       version: "product-runner-config-preview-v1";
       error: "invalid_identity" | "invalid_input" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required";
     };
+    /** Binds the exact head and digest an operator accepted from the preview; carries no bytes or paths. */
+    ProductRunnerConfigProposalCommand: {
+      version: "product-runner-config-proposal-v1";
+      requestId: string;
+      productId: ProductId;
+      expectedRevision: ProductRevision;
+      expectedObjectiveRevision: ProductRevision;
+      targetHead: string;
+      configDigest: string;
+    };
+    /** One add-only pull request for the runner configuration. merged counts only after an approving review and identical bytes at the merge commit. */
+    ProductRunnerConfigProposalReceipt: {
+      version: "product-runner-config-proposal-v1";
+      productId: ProductId;
+      state: "open" | "merged" | "merged_unreviewed" | "merged_drifted" | "closed_unmerged" | "unknown";
+      replayed: boolean;
+      proposal: {
+        path: ".remudero/mounts.yaml";
+        branch: string;
+        targetHead: string;
+        configDigest: string;
+        sourceCommit: string;
+        pullRequest: {
+          number: number;
+          url: string;
+        };
+      };
+    };
+    ProductRunnerConfigProposalError: {
+      version: "product-runner-config-proposal-v1";
+      error: "invalid_identity" | "invalid_input" | "request_too_large" | "not_found" | "stale_revision" | "idempotency_conflict" | "capacity" | "busy" | "corrupt" | "unavailable" | "outcome_unknown" | "recovery_required" | "repository_missing" | "repository_conflict" | "provider_unreadable" | "stale_preview" | "runner_config_present" | "runner_config_invalid" | "source_unavailable" | "branch_conflict";
+    };
     /** A server observation of the exact repository a create or adopt would act on, taken at observedAt. It is informational: it writes nothing and authorizes nothing, and the mutation rechecks every prerequisite itself. state ready means the exact adoption target exists, or the creation target is absent and the owner namespace allows creation. absent, conflict, stale, denied and unavailable are never ready; reasons name why. creation reports the provider's answer for the owner namespace and is not_checked when the repository read did not succeed or a product-level state decided first. */
     ProductRepositoryPreview: {
       version: "product-repository-preview-v1";
@@ -6874,6 +6906,61 @@ export interface components {
       /** 48 hex characters; present it as the `X-Confirm-Nonce` header. */
       nonce: string;
     };
+    NewPathApprovalPreviewRequest: {
+      /** One machine-authored task draft, before its new_path_approval_ref is added. */
+      taskYaml: string;
+      approvedMissingPaths: (string)[];
+    };
+    NewPathApprovalPreview: {
+      previewId: string;
+      ref: string;
+      taskId: string;
+      title?: string;
+      repo?: string;
+      issuerId?: string;
+      epoch?: number;
+      policy?: string;
+      instance?: string;
+      audience?: string;
+      intentDigest: string;
+      declaredPaths: (string)[];
+      missingPaths: (string)[];
+      approvedMissingPaths: (string)[];
+      operator: string;
+      expiresAtMs: number;
+    };
+    NewPathApprovalConfirmRequest: {
+      previewId: string;
+    };
+    NewPathApprovalResolveRequest: {
+      ref: string;
+      taskId: string;
+    };
+    NewPathApprovalRevokeRequest: {
+      ref: string;
+    };
+    NewPathApprovalFacts: {
+      protocol: string;
+      ref: string;
+      issuerId: string;
+      issuerEpoch: number;
+      policy: string;
+      taskId: string;
+      repo: string;
+      instance: string;
+      audience: string;
+      intentDigest: string;
+      declaredPaths: (string)[];
+      approvedMissingPaths: (string)[];
+      operator: string;
+      confirmation: string;
+      issuedAtMs: number;
+      expiresAtMs: number;
+      revoked: boolean;
+    };
+    NewPathApprovalRefusal: {
+      error: "invalid_request" | "verified_operator_session_required" | "verified_step_up_confirmation_required" | "task_draft_unreadable" | "task_scope_unsupported" | "approval_subset_mismatch" | "preview_expired_or_wrong_actor" | "approval_audit_unavailable" | "approval_unknown" | "approval_expired" | "approval_audit_unknown";
+    };
     /** POST /v1/drain/feedback's body (src/lib/panel-actions.ts's `validateDrainFeedback`) -- the post-drain rundown's one-tap verdict on one task (W1-T141). */
     DrainFeedbackRequest: {
       taskId: string;
@@ -7286,6 +7373,20 @@ export interface paths {
           "409": ProductRepositoryError;
           "413": ProductRepositoryError;
           "503": ProductRepositoryError;
+        };
+    };
+  };
+  "/v1/products/runner-config-proposal": {
+    post: {
+      responses: {
+          "200": ProductRunnerConfigProposalReceipt;
+          "400": ProductRunnerConfigProposalError;
+          "401": ProductRepositoryAccessError;
+          "403": (ProductRunnerConfigProposalError) | (ProductRepositoryAccessError);
+          "404": ProductRunnerConfigProposalError;
+          "409": ProductRunnerConfigProposalError;
+          "413": ProductRunnerConfigProposalError;
+          "503": ProductRunnerConfigProposalError;
         };
     };
   };
@@ -9262,6 +9363,53 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+        };
+    };
+  };
+  "/v1/new-path-approval/preview": {
+    post: {
+      responses: {
+          "200": NewPathApprovalPreview;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "409": NewPathApprovalRefusal;
+        };
+    };
+  };
+  "/v1/new-path-approval/confirm": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "409": NewPathApprovalRefusal;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/new-path-approval/resolve": {
+    post: {
+      responses: {
+          "200": NewPathApprovalFacts;
+          "400": Error;
+          "401": Error;
+          "404": undefined;
+          "410": undefined;
+          "503": undefined;
+        };
+    };
+  };
+  "/v1/new-path-approval/revoke": {
+    post: {
+      responses: {
+          "200": undefined;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "404": undefined;
+          "503": undefined;
         };
     };
   };

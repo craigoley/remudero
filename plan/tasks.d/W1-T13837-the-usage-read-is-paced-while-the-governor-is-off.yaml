@@ -16,7 +16,7 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/the-usage-read-is-paced-while-the-governor-is-off.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the governor off, ticks inside five minutes of the last usage read do not read usage again; the first tick and a tick five minutes later do"

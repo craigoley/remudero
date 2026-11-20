@@ -715,6 +715,8 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
     "/v1/inbox/approve",
     "/v1/manual/approve",
     "/v1/merge-hold",
+    "/v1/new-path-approval/confirm",
+    "/v1/new-path-approval/revoke",
     "/v1/operator-agent/actions/decision",
     "/v1/operator-agent/actions/execute-high",
     "/v1/operator-agent/consequences/decision",
@@ -728,6 +730,8 @@ test("W1-T2269: arming (or not arming) the credential refresh changes NOTHING ab
     "/v1/products/build",
     "/v1/products/case",
     "/v1/products/repository",
+    // W1-T11197: proposes the runner configuration as a branch and pull request on the product repository.
+    "/v1/products/runner-config-proposal",
     // W1-T4077: /v1/pr-actions moved to LOW (operator ruling 2026-09-22) — review and fix only enter the ordinary pipelines.
     "/v1/skills/run",
   ].sort());

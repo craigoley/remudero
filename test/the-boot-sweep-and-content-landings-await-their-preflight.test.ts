@@ -60,6 +60,12 @@ test("W1-T9695: the plan-reconcile landing never drives the sync preflight", asy
   seed.git("push", "--quiet", "origin", "HEAD:main");
   const checkout = gitRepo({ cloneFrom: origin.dir, kind: "w9695-reconcile-clone" });
   const ids = Array.from({ length: 10 }, (_, i) => `W1-T${i + 1}`);
+  // W1-T13816: the landing edits main's copy, so main gains the shards after the checkout was cloned.
+  mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
+  for (const id of ids) writeFileSync(join(seed.dir, "plan", "tasks.d", `${id}.yaml`), `- id: ${id}\n  status: queued\n`);
+  seed.git("add", "plan");
+  seed.git("commit", "--quiet", "-m", "shards on main");
+  seed.git("push", "--quiet", "origin", "HEAD:main");
   const gh = (args: string[]): string => (args[1] === "list" ? "[]" : args[1] === "create" ? "https://github.com/o/r/pull/9695\n" : "");
   // The seam answers with a Promise: only the awaited driver can read its green verdict. A sync driver would
   // take the Promise itself for the verdict and refuse the landing.

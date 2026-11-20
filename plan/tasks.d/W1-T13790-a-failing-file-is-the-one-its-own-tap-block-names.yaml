@@ -18,6 +18,7 @@
     - src/lib/base-reproduction.ts
     - scripts/test-with-retry.mjs
     - test/a-failing-file-is-the-one-its-own-tap-block-names.test.ts
+    - test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts
   status: merged
   attempts: 0
   acceptance:
@@ -84,6 +85,9 @@
     4. No change to decideBaseReproduction, localProbeVerdict or the rung.
     5. The test uses the measured excerpt (lines from job 135054821069, trimmed to the two failure blocks
        and the FLAKE-RETRY lines) as a fixture string.
+    AMENDED (2026-11-19): test/a-red-the-pr-caused-is-fixed-not-refreshed.test.ts (PR 14196 tests 15 and 16) used a
+    tail `not ok 6 - FILE` then `ok 7 - OTHER` and passed only because the free-text read counted the passing OTHER;
+    under the column-0 rule its OTHER line becomes `not ok 7 - OTHER`, keeping what those tests assert.
   falsifier: |
     Keep today's free-text read for TAP tails: criteria 1, 2 and 6 fail. Keep matching any location: text
     in a block: criterion 3 fails. Read only the first column-0 block, or drop nested subtests' parents:

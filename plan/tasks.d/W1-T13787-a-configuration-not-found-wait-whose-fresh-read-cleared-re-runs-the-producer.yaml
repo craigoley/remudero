@@ -16,7 +16,7 @@
     - src/lib/sweep.ts
     - src/lib/ledger.ts
     - test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:stale-status-wakes-the-producer — observeCodeqlConfigurationWarning, for a PR whose posted security-merge-policy status reads unknown codeql-configuration-not-found, whose fresh readSecurityMergeObservation at the same head answers a reason other than codeql-configuration-not-found with no configurationWarning, calls dispatchSecurityMergeProducer once with that PR, writes one security.producer_redispatched row naming the PR, head and fresh decision, and its returned reason names the fresh decision and the dispatch"
