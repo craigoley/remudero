@@ -13,6 +13,8 @@
   plan_refs: [W1-T13858, W1-T8825, W1-T2766]
   files:
     - src/lib/skill-workshop.ts
+    - src/lib/ledger.ts # amended 2026-11-20: exports tryAcquireRotationLock for the compactor and the expiry reader
+    - src/lib/ledger-compact-worker.ts # amended 2026-11-20: the worker's parent thread holds the lock, so an ended worker cannot leave it held
     - src/run-task.ts
     - src/lib/panel-graph.ts
     - test/an-unanswered-skill-draft-expires.test.ts
