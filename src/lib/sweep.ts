@@ -4530,6 +4530,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         };
         log("sweep.fix.prepare_timing", { pr_number: pr.prNumber, stage: "head-lookup",
           elapsed_ms: performance.now() - headReadStarted, asynchronous: deps.ghJsonImpl === undefined });
+        const headLookupHistoryHold = terminalHistoryHold(true);
+        if (headLookupHistoryHold) return { roundNotRun: true, reason: headLookupHistoryHold };
         // An unread identity is retryable evidence loss, not an uncreditable head or a successful child.
         if (typeof headRef?.headRefName !== "string" || !headRef.headRefName.trim() ||
             typeof headRef.headRefOid !== "string" || !headRef.headRefOid.trim()) {

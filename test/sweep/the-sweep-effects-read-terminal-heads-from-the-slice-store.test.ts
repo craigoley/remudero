@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createIncrementalLedgerUnion, resolveLedgerUnion } from "#src/lib/ledger-union.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { parseLedger } from "#src/lib/retro.js";
@@ -508,6 +509,55 @@ if (process.argv[2] === childFlag) {
       restore?.();
     }
   });
+
+  for (const siblingReads of [true, false]) {
+    test(`W1-T12271 criterion 3: rotation EIO during head lookup holds before the branch claim (sibling reads: ${siblingReads})`, async (t) => {
+      const { root, path, archive } = fixture(t);
+      const pr = { ...candidates[4], prUrl: "https://github.com/acme/scratch/pull/5", priorStrikes: 0 } as OpenPrView;
+      const head = { headRefName: "run-unfiled-1", headRefOid: pr.headSha, body: "", files: [] };
+      const claimKey = "terminal-head-lookup";
+      const holder = acquireInflightLock(join(root, "state", "inflight"), claimKey, { run_id: "OTHER-ROUND" });
+      t.after(() => holder.release());
+
+      let entered!: () => void;
+      const waiting = new Promise<void>((resolve) => { entered = resolve; });
+      let resume!: (identity: typeof head) => void;
+      const pending = new Promise<typeof head>((resolve) => { resume = resolve; });
+      const claims: unknown[] = [];
+      const build = () => buildEffects(root, path, {
+        dispatchFixPreflightStandDownImpl: async () => false,
+        readJsonImpl: async (args) => {
+          assert.deepEqual(args, ["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]);
+          entered();
+          return pending;
+        },
+        registeredWorktreeOwnerImpl: () => undefined,
+        fixBranchClaimKeyImpl: () => claimKey,
+        log: (step, fields) => {
+          if (step === "sweep.fix.checkout_claim_declined") claims.push(fields?.holder_run_id);
+        },
+      });
+      const effects = build();
+      assert.equal(effects.terminalFixStandDown!(pr), undefined);
+      const dispatch = Promise.resolve(effects.dispatchFix!(pr, { unmetCriteria: [] }));
+      await Promise.race([waiting, dispatch.then(() => assert.fail("dispatch returned before head lookup"))]);
+
+      const restore = failRotationRead(archive, "EIO");
+      try {
+        if (siblingReads) assert.equal(buildEffects(root, path).terminalFixStandDown!(pr), unreadHistoryReason);
+        resume(head);
+        assert.deepEqual({ result: await dispatch, claims }, {
+          result: { roundNotRun: true, reason: unreadHistoryReason }, claims: [],
+        });
+      } finally {
+        resume(head);
+        restore();
+      }
+
+      await build().dispatchFix!(pr, { unmetCriteria: [] });
+      assert.deepEqual(claims, ["OTHER-ROUND"], "readable history reaches the same branch's existing claim");
+    });
+  }
 
   test("W1-T12271 criterion 3: stand-down checks cached rotation readability without rebuilding effects", (t) => {
     const { root, path, archive } = fixture(t);
