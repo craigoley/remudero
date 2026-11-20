@@ -483,7 +483,7 @@ const storedChecks = new Map<string, boolean>();
 
 function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: string; summary: string }): boolean {
   const key = contentKey(stored);
-  const known = key === undefined ? undefined : storedChecks.get(key);
+  const known = storedChecks.get(key);
   if (known !== undefined) return known;
   const shape = validateDecisionSummary({
     headline: stored.headline,
@@ -492,30 +492,27 @@ function storedMessageChecksOut(stored: PlainInboxMessage, proposal: { id: strin
     options: stored.options,
   });
   const ok = shape !== null && shape !== undefined && typeof stored.ifNothingHappens === "string" && checkPlainMessage(stored, proposal).ok;
-  if (key === undefined) return ok;
   if (storedChecks.size >= PLAIN_CHECK_MEMO_MAX) storedChecks.clear();
   storedChecks.set(key, ok);
   return ok;
 }
 
 /** The memo key for a stored message's content: exactly the fields the checks read, so unused metadata on an option
- *  neither splits the memo nor keeps a card out of it (#19775 review). Each option stays an object so an absent intent
- *  and a null one name different content. Undefined when even those fields cannot be serialized (too deep, a cycle, a
- *  BigInt): that content is checked without the memo, exactly as before W1-T13877. */
-function contentKey(stored: PlainInboxMessage): string | undefined {
+ *  neither splits the memo nor keeps a card out of it (#19775 review). Every checked field must be a string (an option's
+ *  intent may also be absent) or the check refuses, so any other value is keyed as the one marker `null`: such records
+ *  share one refusal, the key holds only strings and numbers, and naming it can never throw however deep the value. */
+function contentKey(stored: PlainInboxMessage): string {
+  const text = (value: unknown): string | null => typeof value === "string" ? value : null;
   const options: unknown = stored.options;
   const checkedOptions = Array.isArray(options)
     ? options.map((o: unknown) => {
       if (typeof o !== "object" || o === null) return null;
       const { label, consequence, intent } = o as Record<string, unknown>;
-      return { label, consequence, intent };
+      return [text(label), text(consequence), intent === undefined ? 0 : text(intent)];
     })
-    : { notAList: typeof options };
-  try {
-    return JSON.stringify([stored.sourceFingerprint, stored.source, stored.headline, stored.whatHappened, stored.whatWeNeed, stored.ifNothingHappens, checkedOptions]);
-  } catch {
-    return undefined; // deliberate: unnameable content is not an error, only unmemoized; the caller checks it in full
-  }
+    : null;
+  return JSON.stringify([stored.sourceFingerprint, stored.source, text(stored.headline), text(stored.whatHappened),
+    text(stored.whatWeNeed), text(stored.ifNothingHappens), checkedOptions]);
 }
 
 /** W1-T13877: how many entries each memo holds, so a test can see the bound hold. */
