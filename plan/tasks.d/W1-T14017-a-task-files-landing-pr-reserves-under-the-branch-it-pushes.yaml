@@ -1,0 +1,46 @@
+- id: W1-T14017
+  title: A task-files landing PR reserves its ids under the same branch name it pushes, so review never refuses it for its own reservation
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # the branch name a landing reserves ids under and pushes to; a wrong name strands every landing PR
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T12199
+  files:
+    - src/lib/feedback-landing.ts
+    - test/inbox/a-task-files-landing-pr-reserves-under-the-branch-it-pushes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The branch a task-files landing reserves its ids under and the branch it pushes and opens its PR from are computed by one call with the same inputs, whatever the working directory"
+      proof: "grep: W1-T14017 criterion 1: in test/inbox/a-task-files-landing-pr-reserves-under-the-branch-it-pushes.test.ts"
+    - claim: "A landing whose target repository differs from the repository of the working directory reserves under the scoped landing branch it pushes, not the bare task-files-landing name"
+      proof: "grep: W1-T14017 criterion 2: in test/inbox/a-task-files-landing-pr-reserves-under-the-branch-it-pushes.test.ts"
+    - claim: "invariant:same-repo-landing-unchanged — a landing whose source and target are the same repository with no landing owner keeps the bare branch name for both steps"
+      kind: guard
+      proof: "grep: W1-T14017 criterion 3: in test/inbox/a-task-files-landing-pr-reserves-under-the-branch-it-pushes.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 on remudero-console #2737 (issue #2739): the console reservation ref for W1-T4308 names holder
+    branch=task-files-landing, while the landing PR head is task-files-landing-craigoley-remudero-console-default-<hash>.
+    The reviewer refused it as "reserved by task-files-landing, not this PR — renumber", and a needs-human issue opened.
+    - feedback-landing.ts `landingIdentity` scopes the branch only when a landing owner is set or the source repository
+      differs from the target.
+    - `taskFilesLandingBranchAsync` reads the source repository from the working directory
+      (`sourceRepositoryFromCwdAsync`), so a reserve step and a push step run from different directories compute
+      different branch names for one landing.
+  design: |
+    INVARIANT same-repo-landing-unchanged: a same-repository landing with no owner keeps the bare branch name.
+    1. Compute the landing identity once per landing, from explicit source and target repositories, and pass that
+       identity to both the reservation and the push. Do not read the working directory in either step.
+    2. Find every caller of `taskFilesLandingBranchAsync` with `git grep` and move it to the shared identity.
+  falsifier: |
+    At origin/main criterion 2 fails: a reserve computed from a directory of the target repository and a push
+    computed from the core checkout yield two different branch names.
+  note: |
+    Id reserved for run-unfiled-1795191000000 with rmd next-task-id on the host.
