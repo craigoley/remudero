@@ -4,6 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -30,8 +31,6 @@ export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as con
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
-/** W1-T13875: how long after a legacy refusal was saved its run's last rows can still land in the ledger. */
-export const PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS = 60_000;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
@@ -414,7 +413,6 @@ export class ProductPlanOperationService {
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
-  private readonly keptInMemory = new Map<string, LedgerEvidence>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -638,65 +636,97 @@ export class ProductPlanOperationService {
       requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
-  /** Final evidence is read once: kept beside the journal (and in memory if that write fails), never read again. */
+  /**
+   * Final evidence is read once and kept beside the journal, never read again. The bound covers the WHOLE lookup, from
+   * its first filesystem call: the kept file is opened asynchronously under the same timer as the ledger read, and an
+   * answer that arrives past the deadline is "unread" whatever it holds. Evidence is answered as final only once it is
+   * durably kept: a failed write refuses the request instead of answering from memory a restart would not have.
+   */
   private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
-    const kept = this.keptInMemory.get(record.operationId) ?? this.readKept(paths)?.evidence[record.operationId];
-    if (kept) return kept;
-    const seen = await this.ledger(record);
-    if (seen === "unread") return seen;
-    const { opened, exited, failed } = seen;
-    const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
-      : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
-    if (final === undefined) return seen;
-    this.keptInMemory.set(record.operationId, final);
-    this.keep(paths, journal, record.operationId, final);
-    return final;
+    const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
+    const deadline = performance.now() + bound;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<"unread">((resolve) => { timer = setTimeout(() => resolve("unread"), bound); });
+    try {
+      const kept = await Promise.race([this.readKept(paths), expired]);
+      if (kept === "unread" || performance.now() >= deadline) return "unread";
+      const known = kept?.evidence[record.operationId];
+      if (known) return known;
+      const seen = await this.ledger(record, expired, deadline);
+      if (seen === "unread") return seen;
+      const { opened, exited, failed } = seen;
+      const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
+        : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
+      if (final === undefined) return seen;
+      this.keep(paths, journal, kept, record.operationId, final);
+      return final;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private legacyRefusal(record: Record_): boolean {
     return record.handoff?.outcome === "refused" && record.handoff.beforeLaunch !== true && !this.inFlight(record.operationId);
   }
 
-  private readKept(paths: Paths): Kept | undefined {
+  /** The kept final evidence, read without blocking serve's loop; undefined only when no file exists yet. */
+  private async readKept(paths: Paths): Promise<Kept | undefined> {
+    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      const parsed = keptSchema.safeParse(this.readPrivate(paths.kept, PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes));
-      return parsed.success && parsed.data.ownerKey === paths.ownerKey ? parsed.data : undefined;
+      handle = await open(paths.kept, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error) {
-      void error; return undefined; // kept evidence is a cache of the ledger: an unreadable file means read the ledger
+      if (errno(error, "ENOENT")) return undefined;
+      // An unreadable kept file is never "nothing kept": reading the ledger again, then rewriting it, would drop it.
+      throw Object.assign(new Fault("unavailable"), { cause: error });
+    }
+    try {
+      const info = await handle.stat();
+      const limit = PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes;
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
+      const buffer = Buffer.alloc(info.size);
+      let size = 0;
+      while (size < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
+        if (bytesRead === 0) break;
+        size += bytesRead;
+      }
+      if (size !== info.size) throw new Fault("corrupt");
+      let raw: unknown;
+      try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)); }
+      catch (error) { void error; throw new Fault("corrupt"); }
+      const parsed = keptSchema.safeParse(raw);
+      if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+      return parsed.data;
+    } finally {
+      await handle.close();
     }
   }
 
-  private keep(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence): void {
-    const prior = this.readKept(paths)?.evidence ?? {};
+  /** Durably keeps one operation's final evidence; a failure propagates, so nothing is answered as kept that is not. */
+  private keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence): void {
     // Only operations the journal still holds, so the file stays within operations x one entry.
-    const evidence = Object.fromEntries(Object.entries({ ...prior, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
-    try {
-      this.writePrivate(paths, paths.kept, JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence }),
-        PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes);
-    } catch (error) {
-      void error; // the in-memory copy still answers this process; a restart reads the ledger once more
-    }
+    const evidence = Object.fromEntries(Object.entries({ ...kept?.evidence, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
+    this.writePrivate(paths, paths.kept, JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence }),
+      PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes);
   }
 
-  private async ledger(record: Record_): Promise<LedgerRead> {
+  private async ledger(record: Record_, expired: Promise<"unread">, deadline: number): Promise<LedgerRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
     const refused = record.handoff?.outcome === "refused" && !this.inFlight(record.operationId);
     if (ledgerPath === undefined || (refused && record.handoff?.beforeLaunch === true)) return none;
-    // A legacy refusal can be a nonzero exit after a proposal opened: read only its request-to-refusal window.
-    const untilMs = refused ? Date.parse(record.handoff!.at) + PRODUCT_PLAN_LEGACY_REFUSAL_SLACK_MS : undefined;
+    // A legacy refusal can be a nonzero exit after a proposal opened. The gateway saves the refusal only after the child
+    // exited and its exit row was written, so its window ends exactly at the saved refusal.
+    const untilMs = refused ? Date.parse(record.handoff!.at) : undefined;
     const taskId = productPlanLedgerTaskId(record.operationId);
-    const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
-    const deadline = performance.now() + bound;
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const { operationId, mode, repository, requestedAt } = record;
       const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest,
         ...(untilMs !== undefined ? { untilMs } : {}) };
       const stateDir = dirname(ledgerPath);
       const seen = await Promise.race([
-        new Promise<"unread">((resolve) => { timer = setTimeout(() => resolve("unread"), bound); }),
+        expired,
         this.options.readLedgerLines
           ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilMs !== undefined ? { untilMs } : {}), refuseIncomplete: true,
             keep: keepEvidenceLine(taskId) })
@@ -711,7 +741,6 @@ export class ProductPlanOperationService {
       if (performance.now() >= deadline) return "unread";
       throw error;
     } finally {
-      clearTimeout(timer);
       controller.abort();
     }
   }
