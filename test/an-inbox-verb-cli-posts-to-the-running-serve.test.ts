@@ -4,7 +4,7 @@
  * the same actions through serve's write routes, which hold the plan snapshot. The CLI now posts there first.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, globalAgent, type Server } from "node:http";
 import { Socket, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -13,8 +13,12 @@ import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
 import type { Config } from "#src/lib/config.js";
-import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
-import { applyProposalVerdict } from "#src/lib/inbox.js";
+import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
+import { anchorFingerprint, applyProposalVerdict } from "#src/lib/inbox.js";
+import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { createService } from "#src/lib/service.js";
+import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { proposalVerdictCommand } from "#src/lib/inbox-verdict-command.js";
 
 type Ctx = { after: (fn: () => void | Promise<void>) => void; mock: { method: typeof import("node:test").mock.method } };
@@ -120,12 +124,35 @@ test("W1-T13238: the CLI prefers RMD_SERVE_PORT, then the configured port, then 
   const configured = { ...base, serve: { port: 9 } };
 
   process.env.RMD_SERVE_PORT = "4400";
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:4400", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:4400", token: TOKEN, alternates: ["http://127.0.0.1:9"] });
+  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN, alternates: [`http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`] });
+  process.env.RMD_SERVE_PORT = "9";
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
 
   delete process.env.RMD_SERVE_PORT;
   assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
   assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
+});
+
+test("W1-T13238 criterion 1: with RMD_SERVE_PORT naming another port, rmd archive still reaches serve on its configured port", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  const { port, seen } = await serve(t, fakeActions());
+  const elsewhere = await closedPort();
+  process.env.RMD_SERVE_PORT = String(elsewhere);
+  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
+  assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
+  assert.deepEqual(seen, [{ path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+
+  // Neither address answers: the fallback line names both, and the verb runs in-process once.
+  const unused = await closedPort();
+  const none = { root: root(t), serve: { port: unused } } as unknown as Config;
+  const local = fakeActions();
+  const fallback = await captured(t, () => inboxVerbViaServe("archive", ["P7"], none, () => local));
+  assert.equal(fallback.code, 0);
+  assert.deepEqual(local.calls, ["archive"]);
+  assert.deepEqual(fallback.err, [`rmd archive: no serve answered at http://127.0.0.1:${elsewhere} (ECONNREFUSED) or http://127.0.0.1:${unused} (ECONNREFUSED); running in-process`]);
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
@@ -287,4 +314,57 @@ test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no
   assert.deepEqual(refused, { code: 0, out: [],
     err: [`rmd restore: no serve answered at http://127.0.0.1:${port} (ECONNREFUSED); running in-process`] });
   assert.equal(ran, 2);
+});
+
+/** serve's real verdict routes over a registry holding one age-only observation, as test/console-api's write test builds them. */
+const AGE = { id: "board-review:stale:PR-7", originatingItemId: "PR-7", summary: "board-review: PR-7 has sat open 30.0h, past the 24h depth threshold",
+  evidenceAnchors: [{ description: "age", pattern: "pattern-age" }] };
+async function realVerdictServe(t: Ctx): Promise<{ root: string; port: number; ledgerPath: string }> {
+  const repo = gitRepo({ seedCommit: false, kind: "inbox-cli-age-only" });
+  const dir = repo.dir;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "state"), { recursive: true });
+  mkdirSync(join(dir, "plan"), { recursive: true });
+  const planPath = join(dir, "plan", "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const ledgerPath = join(dir, "state", "ledger.ndjson");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(join(dir, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [AGE] }));
+  writeFileSync(join(dir, "state", "inbox-drafts.json"), JSON.stringify({ [AGE.id]: { releaseTaskId: "PR-7", anchorFingerprint: anchorFingerprint(AGE.evidenceAnchors) } }));
+  writeFileSync(join(dir, "state", "service-tokens.json"), JSON.stringify({ read: "cd".repeat(32), write: TOKEN }));
+  repo.git("add", "plan/tasks.yaml");
+  repo.git("commit", "-q", "-m", "plan");
+  const deps: PanelGraphDeps = {
+    root: dir, inboxRoot: dir, planPath, ledgerPath,
+    github: { prView: () => null },
+    statusGithub: fakeGitHub(),
+    ratify: { approve: () => undefined, reframe: () => undefined },
+    inboxMainSha: () => "a".repeat(40),
+    inboxGrepAnchor: () => true,
+  };
+  const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(deps) });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return { root: dir, port: (server.address() as AddressInfo).port, ledgerPath };
+}
+
+test("W1-T13238 criterion 3: an age-only Inbox observation is refused the same by serve's real route and in-process", async (t) => {
+  const world = await realVerdictServe(t);
+  const config = { root: world.root, serve: { port: world.port } } as unknown as Config;
+  const find = (id: string) => id === AGE.id ? { exists: true, classification: { proposalId: AGE.id, state: "ready" } as never, proposal: AGE } : { exists: false };
+  for (const kind of ["decline", "restore"] as const) {
+    const args = [AGE.id, "--reason", "noise"];
+    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, () => { throw new Error("must not run in-process"); }));
+    const local = await captured(t, async () => proposalVerdictInProcess(kind, args, find, () => assert.fail("recorded a verdict on an observation")));
+    assert.deepEqual(remote, { code: 1, out: [], err: [`rmd ${kind}: This age observation is readable information, not an operator decision or work request.`] });
+    assert.deepEqual(local, remote, kind);
+  }
+  assert.equal(readFileSync(world.ledgerPath, "utf8"), "", "neither path recorded a verdict");
+
+  // Positive control: an ordinary proposal still records through the in-process command, and usage errors still come first.
+  const recorded: string[] = [];
+  const ordinary = await captured(t, async () => proposalVerdictInProcess("decline", ["P1", "--reason", "duplicate"], verdictFind, (step) => { recorded.push(step); }));
+  assert.equal(ordinary.code, 0);
+  assert.deepEqual(recorded, ["panel.proposal_declined"]);
+  assert.equal((await captured(t, async () => proposalVerdictInProcess("decline", [AGE.id], find, () => {}))).code, 2);
 });

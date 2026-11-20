@@ -254,7 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { inboxVerbViaServe, proposalVerdictViaServe } from "./lib/inbox-cli-serve.js";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -930,7 +930,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { INBOX_VERBS, inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { INBOX_VERBS, inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -39791,13 +39791,14 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  return proposalVerdictCommand(
+  // W1-T13238: with serve's informational-only guard, so the answer is the same through serve or in-process.
+  return proposalVerdictInProcess(
     kind,
     rest,
     (id) => {
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
-      return { exists: proposal !== undefined, classification };
+      return { exists: proposal !== undefined, classification, proposal };
     },
     (step, id, reason) => {
       // W1-T10077: a decline of a verify-human proposal records the state it was given on.
