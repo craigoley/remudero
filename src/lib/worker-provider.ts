@@ -2321,7 +2321,8 @@ export interface CodexRetentionLoss {
   blocks: boolean;
   /** Spilled lines rebuilt from their bounded head and tail. */
   rebuiltLines: number;
-  /** Rebuilt lines whose JSON envelope did not parse: a partial line never certifies. */
+  /** Rebuilt lines that did not parse, or parsed to something other than a Codex event envelope: a partial line
+   *  never certifies. */
   rejectedRebuiltLines: number;
 }
 
@@ -2503,6 +2504,15 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
+/** W1-T13960: the event shape the stream parser reads: an object with a string type whose item, when present, is an
+ *  object. A rebuilt line that parses to anything else is no Codex event and never certifies its spill. */
+function isCodexEventEnvelope(value: unknown): boolean {
+  const isObject = (candidate: unknown) => typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+  if (!isObject(value)) return false;
+  const { type, item } = value as { type?: unknown; item?: unknown };
+  return typeof type === "string" && (item === undefined || isObject(item));
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 class CodexJsonlAccumulator {
   private sessionId = "";
@@ -2531,6 +2541,8 @@ class CodexJsonlAccumulator {
   private blocksCut = false;
   private rebuiltLines = 0;
   private rejectedRebuiltLines = 0;
+  /** W1-T13960: the bytes written to the spill file for the line now spilling, so its read must account for each. */
+  private spillLineBytes = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -2562,6 +2574,7 @@ class CodexJsonlAccumulator {
       const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
+        this.spillLineBytes = this.pendingLineBytes();
         this.spilledBytes += this.pendingLineBytes();
         this.appendSpillHead(this.pending);
         this.pending = "";
@@ -2569,7 +2582,9 @@ class CodexJsonlAccumulator {
       }
       if (this.spilling) {
         this.appendSpillHead(part);
-        appendFileSync(this.pendingFile!, part);
+        // W1-T13960: an empty append writes nothing but would recreate a spill file removed under the run.
+        if (part) appendFileSync(this.pendingFile!, part);
+        this.spillLineBytes += Buffer.byteLength(part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
         this.pending += part;
@@ -2585,7 +2600,13 @@ class CodexJsonlAccumulator {
     let sourceBytes: number | undefined;
     let rebuilt = false;
     if (this.spilling) {
-      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      let tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      // W1-T13960: a spill accounts for its line only when its file holds every byte written for that line. A file
+      // removed, recreated or rewritten under the run reads as unreadable, as one that changed while being read does.
+      if ((tail.state === "complete" || tail.state === "truncated") && tail.fileBytes !== this.spillLineBytes) {
+        tail = { state: "unreadable", text: "", bytesRead: tail.bytesRead, fileBytes: tail.fileBytes,
+          reason: `spill file holds ${tail.fileBytes} of the ${this.spillLineBytes} bytes spilled for its line` };
+      }
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
       if (tail.state === "truncated") {
@@ -2734,6 +2755,7 @@ class CodexJsonlAccumulator {
       this.failed = true;
       return;
     }
+    if (rebuilt && !isCodexEventEnvelope(event)) this.rejectedRebuiltLines += 1;
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
