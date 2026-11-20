@@ -102,6 +102,7 @@ import {
 import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { inboxFirstSeenPath, readInboxFirstSeen, withSkillDraftVerdictLock } from "./skill-workshop.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
@@ -2573,21 +2574,7 @@ export function nextInboxSnoozeWake(stateDir: string, nowMs: number): string | n
   return ahead.sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null;
 }
 
-/** W1-T8825: the first time the inbox classified each proposal id, kept where ledger rotation cannot shed it. */
-export function inboxFirstSeenPath(stateDir: string): string {
-  return join(stateDir, "inbox-first-seen.json");
-}
-
-export function readInboxFirstSeen(stateDir: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(readFileSync(inboxFirstSeenPath(stateDir), "utf8")) as unknown;
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(Object.entries(parsed).filter(([, at]) => typeof at === "string" && Number.isFinite(Date.parse(at)))) as Record<string, string>;
-  } catch {
-    // deliberate: no file, or a torn one, is "nothing recorded yet" - the next slow-lane pass records afresh.
-    return {};
-  }
-}
+export { inboxFirstSeenPath, readInboxFirstSeen };
 
 /**
  * Record nowIso as the first-seen instant of every id the store does not hold yet. Written by the slow lane
@@ -4160,6 +4147,10 @@ function inboxRegistryHas(deps: PanelGraphDeps, proposalId: string): boolean {
 }
 
 export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxCausalScope): InboxVerbActions {
+  const verdict = (kind: ProposalVerdictKind) =>
+    validatedInboxAction(validateDeclineProposal, (input, actor, respond) =>
+      withSkillDraftVerdictLock(dirname(deps.ledgerPath), input.proposalId, () =>
+        proposalVerdictResponse(kind, deps, input, actor, respond)));
   const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
     if (!proposalId.startsWith("improvement:")) return false;
     respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });
@@ -4263,8 +4254,8 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       appendPanelLedger(deps.ledgerPath, "inbox.snoozed", input.proposalId, actor.origin, { until: input.until });
       respond(200, { ok: true, proposalId: input.proposalId, snoozedUntil: held?.snoozedUntil ?? null });
     }),
-    decline: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("decline", deps, input, actor, respond)),
-    restore: validatedInboxAction(validateDeclineProposal, (input, actor, respond) => proposalVerdictResponse("restore", deps, input, actor, respond)),
+    decline: verdict("decline"),
+    restore: verdict("restore"),
     reply: validatedInboxAction(validateThreadReply, async (input, caller, respond) => {
       const proposalId = proposalIdOfThread(input.threadId)!;
       // The detail route and daemon responder both require a current operator-owned item.

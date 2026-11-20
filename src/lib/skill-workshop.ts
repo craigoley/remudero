@@ -20,6 +20,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { systemClock, type Clock } from "./clock.js";
 import { ledgerProposalVerdicts, loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillLifecycleAction, type UpdateProposalRegistryOpts } from "./inbox.js";
+import { withInflightLock } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
@@ -514,7 +515,7 @@ function workshopClosedSkillDraft(proposal: Proposal): boolean {
 function closeSkillDraft(
   registryPath: string,
   proposalId: string,
-  reason: string,
+  reasonFor: string | ((entry: Proposal) => string | undefined),
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Pick<Clock, "iso">,
 ): boolean {
@@ -523,6 +524,8 @@ function closeSkillDraft(
   return updateProposalRegistry(registryPath, (current) => {
     const entry = current.find((p) => p.id === proposalId);
     if (!entry || workshopClosedSkillDraft(entry)) return null;
+    const reason = typeof reasonFor === "string" ? reasonFor : reasonFor(entry);
+    if (reason === undefined) return null;
     const at = clock.iso();
     const closeId = randomUUID();
     const step = "panel.proposal_declined";
@@ -1424,17 +1427,43 @@ export function stageSkillDrafts(
 const SKILL_DRAFT_ANSWER_STEPS: readonly string[] = ["ratify.approved", "panel.proposal_declined"];
 const DAY_MS = 86_400_000;
 
+/** W1-T8825: the inbox's durable first-seen store, shared by the panel and the workshop. */
+export function inboxFirstSeenPath(stateDir: string): string {
+  return join(stateDir, "inbox-first-seen.json");
+}
+
+export function readInboxFirstSeen(stateDir: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(readFileSync(inboxFirstSeenPath(stateDir), "utf8")) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, at]) => typeof at === "string" && Number.isFinite(Date.parse(at)))) as Record<string, string>;
+  } catch {
+    // deliberate: an absent or unreadable store supplies no measured waits.
+    return {};
+  }
+}
+
+/** Serialize expiry with operator decisions on this draft, including approval through its ledger receipt. */
+export function withSkillDraftVerdictLock<T>(stateDir: string, proposalId: string | undefined, action: () => T): T {
+  if (proposalId === undefined || !proposalId.startsWith(SKILL_DRAFT_ID_PREFIX)) return action();
+  const lockId = `skill-draft-verdict-${createHash("sha256").update(proposalId).digest("hex")}`;
+  return withInflightLock(stateDir, lockId, action, { run_id: proposalId });
+}
+
 /** `bound` is in ms; `sample` counts the answered proposals it was measured over. */
 export type SkillDraftExpiryBound = { bound: number; sample: number } | { unmeasured: string };
 
-/**
- * The longest wait between a proposal's first-seen time (`firstSeen`, the inbox-first-seen.json store) and its
- * first answer at or after that time, over `union` (a complete read that holds the answer steps). Ids stamped
- * with the store's earliest time have an unknown age, and the workshop's own declines would feed the bound back
- * into itself, so neither is sampled. The caller reads the store: panel-graph.ts sits above this module.
- */
-export function skillDraftExpiryBound(firstSeen: Readonly<Record<string, string>>, union: LedgerUnionRecordRead): SkillDraftExpiryBound {
-  if (!union.ok) return { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s)` };
+/** The longest first-seen-to-first-answer wait from the complete ledger. */
+export function skillDraftExpiryBound(stateDir: string): SkillDraftExpiryBound {
+  const union = readLedgerUnionRecordsSync(stateDir, { step: SKILL_DRAFT_ANSWER_STEPS, refuseIncomplete: true });
+  return measureSkillDraftWaits(readInboxFirstSeen(stateDir), union);
+}
+
+function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, union: LedgerUnionRecordRead): SkillDraftExpiryBound {
+  if (!union.ok || union.torn > 0) {
+    return { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${union.torn} torn row(s)` };
+  }
+  // The earliest stamp is backfilled, and workshop declines would feed the bound back into itself.
   const earliest = Object.values(firstSeen).reduce((min, at) => Math.min(min, Date.parse(at)), Infinity);
   const firstAnswer = new Map<string, number>();
   for (const row of union.rows) {
@@ -1458,6 +1487,23 @@ export interface SkillDraftExpiryPass {
   reason: string;
 }
 
+export function reportSkillDraftExpiry(
+  expire: () => SkillDraftExpiryPass,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  say: (message: string) => void,
+): void {
+  try {
+    say(`skill drafts: ${expire().reason}`);
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    try {
+      log("skill.expire_failed", { error: message });
+    } catch (logError) {
+      say(`skill.expire_failed: ${message} (writing the failure to the ledger also failed: ${String(logError)})`);
+    }
+  }
+}
+
 /**
  * Close, once, each staged skill draft that nobody answered and that has waited longer than any answered
  * proposal waited. It uses the W1-T13858 close, so it writes only the decline row and the close record;
@@ -1467,29 +1513,39 @@ export interface SkillDraftExpiryPass {
 export function expireUnansweredSkillDrafts(
   registryPath: string,
   stateDir: string,
-  firstSeen: Readonly<Record<string, string>>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Pick<Clock, "iso" | "now">,
 ): SkillDraftExpiryPass {
-  let union: LedgerUnionRecordRead;
-  try {
-    union = readLedgerUnionRecordsSync(stateDir, { step: [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"], refuseIncomplete: true });
-  } catch (error) {
-    return { expired: [], reason: `no skill draft expires: unreadable ledger union under ${stateDir}: ${String(error)}` };
-  }
-  const measured = skillDraftExpiryBound(firstSeen, union);
+  const firstSeen = readInboxFirstSeen(stateDir);
+  const readVerdicts = () => readLedgerUnionRecordsSync(stateDir, {
+    step: [...SKILL_DRAFT_ANSWER_STEPS, "panel.proposal_restored"], refuseIncomplete: true,
+  });
+  const union = readVerdicts();
+  let measured = measureSkillDraftWaits(firstSeen, union);
   if ("unmeasured" in measured) return { expired: [], reason: `no skill draft expires: ${measured.unmeasured}` };
   const verdicts = ledgerProposalVerdicts(union.rows);
+  const now = clock.now();
   const days = (ms: number): string => (ms / DAY_MS).toFixed(2);
   const expired: string[] = [];
   for (const proposal of loadProposalRegistry(registryPath)) {
     if (!proposal.id.startsWith(SKILL_DRAFT_ID_PREFIX) || !proposal.skillFile) continue;
     if (verdicts.isRatified(proposal.id) || verdicts.isDeclined(proposal.id) !== undefined || workshopClosedSkillDraft(proposal)) continue;
-    const age = clock.now() - Date.parse(firstSeen[proposal.id] ?? "");
+    const age = now - Date.parse(firstSeen[proposal.id] ?? "");
     if (!(age > measured.bound)) continue;
-    const reason = `expired: unanswered for ${days(age)} days; the longest wait of any answered proposal is ` +
-      `${days(measured.bound)} days (${measured.sample} answered)`;
-    if (closeSkillDraft(registryPath, proposal.id, reason, log, clock)) expired.push(proposal.id);
+    const closed = withSkillDraftVerdictLock(stateDir, proposal.id, () =>
+      closeSkillDraft(registryPath, proposal.id, (entry) => {
+        if (!entry.skillFile) return undefined;
+        // Re-read under both locks. An answer may have landed since the pass began and extended the bound.
+        const current = readVerdicts();
+        measured = measureSkillDraftWaits(firstSeen, current);
+        if ("unmeasured" in measured || age <= measured.bound) return undefined;
+        const currentVerdicts = ledgerProposalVerdicts(current.rows);
+        if (currentVerdicts.isRatified(entry.id) || currentVerdicts.isDeclined(entry.id) !== undefined) return undefined;
+        return `expired: unanswered for ${days(age)} days; the longest wait of any answered proposal is ` +
+          `${days(measured.bound)} days (${measured.sample} answered)`;
+      }, log, clock));
+    if (closed) expired.push(proposal.id);
+    if ("unmeasured" in measured) return { expired, reason: `skill draft expiry stopped: ${measured.unmeasured}` };
   }
   return { expired, reason: `${expired.length} skill draft(s) expired; the bound is ${days(measured.bound)} days over ${measured.sample} answered proposal(s)` };
 }

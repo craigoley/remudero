@@ -423,7 +423,7 @@ import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type Kn
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
 import { contestedPropensities } from "./lib/knowledge-outcome.js";
 import { KNOWLEDGE_MEASURED_STEP } from "./lib/knowledge-gaps.js";
-import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, readInboxFirstSeen, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
+import { buildInboxVerbActions, inboxThreadStorePath, ratifyCliGateway, type PanelGraphDeps, type RatifyCliHandle, type RatifyCliTree } from "./lib/panel-graph.js";
 import { realThreadDecider, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { realRecommendationWriter } from "./lib/inbox-recommendation.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
@@ -1648,6 +1648,8 @@ import {
   skillWithheldForRun,
   stageSkillDrafts,
   expireUnansweredSkillDrafts,
+  reportSkillDraftExpiry,
+  withSkillDraftVerdictLock,
   stageSkillLifecycleProposal,
   withdrawSkillLifecycleProposal,
   workerAllowlistFromCapabilityContext,
@@ -24418,14 +24420,11 @@ async function retroCommand(
     log,
   );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
-  // W1-T13859: after staging, close each draft that nobody answered within the longest observed wait.
-  // Best-effort like the staging: a throw is logged and never fails the retro.
-  try {
-    const stateDir = dirname(ledgerPath);
-    say(`skill drafts: ${expireUnansweredSkillDrafts(followupRegistryPath, stateDir, readInboxFirstSeen(stateDir), log, systemClock).reason}`);
-  } catch (e) {
-    log("skill.expire_failed", { error: String((e as Error)?.message ?? e) });
-  }
+  reportSkillDraftExpiry(
+    () => expireUnansweredSkillDrafts(followupRegistryPath, dirname(ledgerPath), log, systemClock),
+    log,
+    say,
+  );
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -39794,7 +39793,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  return proposalVerdictCommand(
+  const decide = () => proposalVerdictCommand(
     kind,
     rest,
     (id) => {
@@ -39811,6 +39810,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
         (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
     },
   );
+  return withSkillDraftVerdictLock(dirname(ledgerPath), rest[0], decide);
 }
 
 /**
@@ -40459,8 +40459,14 @@ export async function approveCommand(
         payload: { proposalId, fragmentYaml: "", stampLine: "" },
       };
     } else {
-      result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
-        approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus }));
+      result = withSkillDraftVerdictLock(dirname(ledgerPath), proposalId, () => {
+        const current = proposal.skillFile
+          ? loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot).classification
+          : classification;
+        if (!current) throw new Error(`rmd approve: ${proposalId} left the active registry`);
+        return withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
+          approveProposal(current, gateway, { ledgerPath, runId, duplicateCorpus }));
+      });
     }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
