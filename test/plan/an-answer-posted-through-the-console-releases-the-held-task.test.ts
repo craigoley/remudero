@@ -486,3 +486,68 @@ test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer
   read();
   assert.equal(storeLines(daemonRoot).length, lines, "a later read copies nothing");
 });
+
+test("W1-T13940 criterion 2: a GitHub reply whose store line and ledger row straddle a competing answer is copied by no later pass", (t) => {
+  const daemonRoot = tempDir(t, "daemon");
+  const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
+  const at = (ms: number) => new Date(T0 + ms).toISOString();
+  const github = "issue#501:comment:9001";
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  const store = join(daemonRoot, "plan", "questions.ndjson");
+  // readEscalationAnswers stamps its store line, then its ledger row; a route answer lands between the two.
+  appendFileSync(store, `${JSON.stringify({ ts: at(0), task: TASK, answer: "Use 5 passes.", origin: github })}\n`);
+  appendFileSync(store, `${JSON.stringify({ ts: at(500), task: TASK, answer: "Use 3 passes.", origin: "tok", answer_id: "a-1" })}\n`);
+  appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(500), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "Use 3 passes.", answer_id: "a-1" })}\n`);
+  appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(1000), run_id: "RUN-1", task_id: TASK, step: "panel.question_answered", origin: github, answer: "Use 5 passes." })}\n`);
+  const copiesOfReply = () => storeLines(daemonRoot).filter((line) => line.origin === github).length;
+  for (const pass of [1, 2]) {
+    assert.ok(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), `pass ${pass}: the task is answered`);
+    assert.equal(copiesOfReply(), 1, `pass ${pass}: the GitHub reply is in the store once`);
+  }
+  assert.equal(storeLines(daemonRoot).length, 2, "no pass copies anything");
+  assert.equal(answerRows(ledgerPath).length, 2, "no pass writes a ledger row");
+});
+
+test("W1-T13940 criterion 4: a newer answer row with the same text but another id or origin is copied, so its identity outlives the ledger row", (t) => {
+  const daemonRoot = tempDir(t, "daemon");
+  const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
+  const at = (ms: number) => new Date(T0 + ms).toISOString();
+  const row = (ms: number, origin: string, extra: Record<string, unknown> = {}) => appendFileSync(ledgerPath,
+    `${JSON.stringify({ ts: at(ms), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin, answer: "Use 5 passes.", ...extra })}\n`);
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  appendFileSync(join(daemonRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: at(0), task: TASK, answer: "Use 5 passes.", origin: "issue#501:comment:9001" })}\n`);
+  row(0, "issue#501:comment:9001");
+  const read = () => taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
+  assert.equal(read(), "Use 5 passes.");
+  assert.equal(storeLines(daemonRoot).length, 1, "control: the daemon's own GitHub reply is not copied");
+  row(1000, "tok", { answer_id: "a-1", author_login: "craigoley" });
+  assert.equal(read(), "Use 5 passes.");
+  row(2000, "tok", { answer_id: "a-2" });
+  assert.equal(read(), "Use 5 passes.");
+  writeFileSync(ledgerPath, "");
+  assert.equal(read(), "Use 5 passes.", "the store still answers once the rows are gone");
+  const ids = storeLines(daemonRoot).filter((line) => line.source === "ledger").map((line) => [line.answer_id, line.origin, line.author_login ?? null, line.ts]);
+  assert.deepEqual(ids, [["a-1", "tok", "craigoley", at(1000)], ["a-2", "tok", null, at(2000)]], "each newer row is copied with its own id and origin");
+  read();
+  assert.equal(storeLines(daemonRoot).length, 3, "a later read copies nothing");
+});
+
+test("W1-T13940 criterion 4: the answer route and the escalation reply route stamp the store line and the answer row from the one injected clock", async (t) => {
+  const root = tempDir(t, "clock");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const threads = join(root, "threads.jsonl");
+  const stamp = new Date(T0 - 86_400_000).toISOString();
+  await routeAnswer(join(root, "serve"), ledgerPath, "route answer");
+  appendThreadMessage({ taskId: TASK, class: "BLOCKED" }, "escalation", "the retry still failed CI", { threadStorePath: threads });
+  assert.equal(await post([buildEscalationReplyRoute({ ...deps(join(root, "config"), ledgerPath, threads), clock: fixedClock(T0 - 86_400_000) })],
+    "/v1/escalation/reply", { taskId: TASK, class: "BLOCKED", text: "reply answer" }), 200);
+  const stores = [...storeLines(join(root, "serve")), ...storeLines(join(root, "config"))].filter((line) => line.task === TASK);
+  assert.deepEqual(stores.map((line) => [line.answer, line.ts]), [["route answer", new Date(T0).toISOString()], ["reply answer", stamp]], "control: the store lines use the clock");
+  const rows = answerRows(ledgerPath);
+  assert.deepEqual(rows.map((row) => [row.answer, row.ts, row.answer_id]), stores.map((line) => [line.answer, line.ts, line.answer_id]),
+    "each answer row carries its store line's ts and answer_id");
+  // An older route answer cannot outrank a newer GitHub answer by its wall-clock ledger stamp.
+  const daemonRoot = tempDir(t, "daemon");
+  appendFileSync(ledgerPath, `${JSON.stringify({ ts: new Date(T0 + 1000).toISOString(), run_id: "RUN-1", task_id: TASK, step: "panel.question_answered", origin: "issue#501:comment:9001", answer: "Use 5 passes." })}\n`);
+  assert.equal(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), "Use 5 passes.", "the newer GitHub answer wins");
+});
