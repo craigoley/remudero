@@ -814,6 +814,15 @@ function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAss
     coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
 }
 
+/** A cached row's outcome counts, read back from a checkpoint: an object whose counts are whole numbers. */
+function isCohortVerifiedOutcome(value: unknown): value is CohortVerifiedOutcome {
+  if (value === null || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return ["assignments", "completed", "endedWithoutCompletion", "censored", "unavailable"]
+    .every((key) => Number.isInteger(row[key]) && (row[key] as number) >= 0)
+    && row.reasons !== null && typeof row.reasons === "object";
+}
+
 /** W1-T13867: give every cohort row its calls' verified outcomes, joined one assignment at a time against its task's
  * case files at `cutoff`. Without case files every row names the join's unavailable reason, never a guessed outcome. */
 function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOutcome">[], assignments: CohortAssignment[],
@@ -839,11 +848,17 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
 
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  // W1-T13867: a cached pass without case files reports exactly what a fresh one does, so no row says the join is
-  // unavailable while the snapshot keeps totals from an earlier pass that had one.
+  // W1-T13867: a cached pass without case files keeps the cohort-level totals it already had (unchanged from before this
+  // task). Each row agrees with them: where the snapshot keeps an earlier join, a row keeps the outcome that same join
+  // gave it; only a row with no such outcome names the unavailable reason.
+  if (!caseFiles) {
+    const retained = typeof snapshot.verifiedTaskOutcome !== "string";
+    return { ...snapshot, cohorts: snapshot.cohorts.map((cohort) => ({ ...cohort,
+      verifiedOutcome: retained && isCohortVerifiedOutcome(cohort.verifiedOutcome) ? cohort.verifiedOutcome : NO_VERIFICATION_JOIN })) };
+  }
   const assignments = cohortAssignments(sources, faults);
   return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff),
-    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) : "unavailable-no-github-verification-join",
+    verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
     modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
     selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
