@@ -1,0 +1,126 @@
+- id: W1-T14172
+  title: "Needs you says when the now view is switched off and does not show its old body as current, and held task questions still reach the Inbox from the plan"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes what the needs-you composite and the nav badge count, on serve's main thread, across needs-you-view.ts, serve.ts and the answer reader in worker.ts
+  origin: "operator-session#needs-you-stale-now-2026-11-21"
+  plan_refs:
+    - W1-T13940
+    - W1-T13876
+    - W1-T13180
+    - W1-T12715
+    - W1-T5373
+  files:
+    - src/lib/needs-you-view.ts
+    - src/lib/serve.ts
+    - src/lib/worker.ts
+    - test/needs-you-says-when-the-now-view-is-switched-off.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:no-old-body-as-current — with views.now off in read-model/switches.json and a held core now body (generatedAt 2026-11-20T02:07:39Z, 13 decisions), the needs-you composite has a core now source with state unavailable and a reason that names views.now, the word off and that generatedAt. data.decisions holds none of the 13 decisions, data.instances[core] has no counts, and the body is stale"
+      kind: guard
+      proof: "grep: W1-T14172 criterion 1: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "With the same fixture the served nav-badge body and GET /v1/status needsYou mark the now decisions unavailable with the same reason. Neither shows the count from the old body"
+      proof: "grep: W1-T14172 criterion 2: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "With views.now shadow or serve the composite is the same as on origin/main for the same bodies. When the switch moves from off to serve, the next read composes again (the mode is part of the composite's input key)"
+      proof: "grep: W1-T14172 criterion 3: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "invariant:held-questions-without-now — with views.now off and a plan with three queued tasks that have needs_input, one of them answered in the answers file beside the ledger, the composite shows two task_question decisions. Each has answer path /v1/questions/answer and its taskId. humanGates has a held-tasks source for core with state fresh and those two gates"
+      kind: guard
+      proof: "grep: W1-T14172 criterion 4: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "invariant:one-question — when the core now body is used (views.now serve), the composite adds no held-tasks source, and a held task that the now body carries is shown once"
+      kind: guard
+      proof: "grep: W1-T14172 criterion 5: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "invariant:one-answer-decision — readTaskInputAnswer(repoRoot, ledgerPath) in src/lib/worker.ts finds an answer for exactly the tasks taskInputAnswerWithLedger finds one for (fixtures: a question-store answer, a panel.question_answered ledger row, a published answer, none). It writes no file: the store, the answers file and the ledger keep their size and mtime"
+      kind: guard
+      proof: "grep: W1-T14172 criterion 6: in test/needs-you-says-when-the-now-view-is-switched-off.test.ts"
+    - claim: "Serve wires the held-task source into the composite in production"
+      proof: "grep: heldTasks: in src/lib/serve.ts"
+    - claim: "Serve reads held answers through the read-only reader"
+      proof: "grep: readTaskInputAnswer( in src/lib/serve.ts"
+  rationale: |
+    WHY: the Console Inbox showed "13 Needs you" as current while three held task questions were missing.
+    W1-T13940 (#19873) deployed, and W1-T13904, W1-T13911 and W1-T14002 (queued, each with needs_input)
+    never appeared in the Inbox.
+    MEASURED on the Azure host, 2026-11-21, read-only:
+    - ~/rmd-state2/state/read-model/switches.json has views.now = "off". The read_model.switch ledger rows
+      (rotated ledger.*.gz, 2026-11-19 and 2026-11-20) show a hand switch through the read-model CLI at
+      2026-11-20T02:07Z.
+    - The core now body in the read model's view_body table has generatedAt 2026-11-20T02:07:39Z. It is
+      the last body built before the switch.
+    - Shadow mode was tried first. It builds the now view but does not serve it (/v1/views/needs-you said
+      "not served by core (dark or not ready)"). The read_model.slow_view rows give the core now build as
+      82770 ms (52888 cpuMs) the first time, then 7665 ms (4948 cpuMs); the console instance's build took
+      4846 ms. The CPU cost of keeping the view on is not yet measured: single docker-stats samples swung
+      from 8% to 215% with shadow on and from 9% to 135% after it went off at 16:24Z. So the now view may
+      stay off, and Needs you must tell the truth while it is off.
+    HOW IT FAILS (origin/main 0bfbe2161):
+    - src/lib/now-view.ts:1435-1437 eachInstance returns at once unless the mode is shadow or serve. So
+      the now build never runs, and heldTaskDecisions (src/lib/now-decisions.ts:126, called at
+      now-view.ts:1210) never runs.
+    - loadCommittedViewBodies (src/lib/read-model-worker.ts:2869) loads every committed body at warm boot,
+      the old now body too.
+    - composeNeedsYou (src/lib/needs-you-view.ts:77-118) uses any now body whose version matches. It never
+      reads the now switch and never reads the body's age. The nav badge (needs-you-view.ts:213) and
+      /v1/status needsYou (serve.ts:863-870) count from the same composite.
+    - The plan alone is enough to find held questions. projectHeldTaskQuestionGates
+      (src/lib/human-gate.ts:251) already does it for `rmd inbox` (run-task.ts:38371), with
+      taskInputAnswerWithLedger (src/lib/worker.ts:5108), the same reader the daemon's dispatch hold uses
+      (src/cli/commands/daemon.ts:2377). That reader also writes (it appends to the question store and the
+      answers file), so serve needs a read-only form of it.
+  design: |
+    INVARIANT no-old-body-as-current: when the now view's effective mode is off, no now body is used as a needs-you input.
+    INVARIANT held-questions-without-now: a held task question reaches the composite from the plan when core's now body is not used.
+    INVARIANT one-question: a held task is shown once, from the now body when it is used, else from the plan.
+    INVARIANT one-answer-decision: serve's held check and the daemon's dispatch hold find an answer for the same tasks.
+    CHOICE: make the composite read the now switch, and add one cheap held-task source from the plan. Rejected:
+    - Turning the now view back on: each core build costs seconds of CPU (above), and the cost of keeping
+      it on is not yet measured. This task makes Needs you correct whichever way the switch is set.
+    - An age limit on the now body: it needs a new constant, and a body that is fresh but unserved is just as
+      wrong. The switch is the fact that says the body is not kept current.
+    - Only a `rmd status` line: `rmd inbox` already prints held questions, but the operator answers in the
+      Console (W1-T13940), so the Console must show them.
+    1. src/lib/needs-you-view.ts:
+       - composeNeedsYou gains an optional third argument { nowMode?: ViewSwitchMode | EffectiveViewMode; held?: HeldTaskInput }.
+         When nowMode is off, each now body is skipped: the instance gets reason "the now view is switched off
+         (read-model/switches.json views.now is off); its last body, from <generatedAt>, is not shown". The
+         reason goes through absentSource and the unavailable gate source, as the missing-body case does today.
+       - When core's now body is not used (off, absent or wrong version) and held is given, push a gate source
+         { name: "held-tasks", instance: "core", state: "fresh", gates: projectHeldTaskQuestionGates(...) } and
+         the decisions from heldTaskDecisions(core, tasks, answered) (no ops ids; serve holds the public plan).
+       - withNeedsYouView(inner, clock, heldTasks?) reads the mode from inner.switches().views.now, and
+         from inner.autoMode?.("now") when it is auto. The mode and heldTasks().key join composedFrom, so a switch flip or a held change
+         composes again. heldTasks is () => { key: string; tasks: readonly Task[]; answered: (id) => boolean }.
+    2. src/lib/worker.ts: add readTaskInputAnswer(repoRoot, ledgerPath): TaskInputAnswer. It reads the same
+       sources as taskInputAnswerWithLedger (question store lines, sharedAnswerEvidence rows and published
+       lines) and returns newestTaskAnswer over them (plan.ts:289), with no append. taskInputAnswerWithLedger keeps its
+       writes and returns the same decision.
+    3. src/lib/serve.ts (withNeedsYouView call at :3816): pass heldTasks built from serve's current plan
+       (the reloaded deps.plan) and readTaskInputAnswer(repoRoot, deps.ledgerPath). key is the plan's
+       loaded sha plus the sizes of the ledger, the answers file and the question store, from stat calls
+       only, so a read with nothing new costs no file read.
+    4. Tests in test/needs-you-says-when-the-now-view-is-switched-off.test.ts, titled "W1-T14172 criterion N: ...".
+       They call composeNeedsYou and withNeedsYouView on a fake handle with fixture bodies and switches, and
+       readTaskInputAnswer on a temp ledger and store. No real worker, no network. Load
+       test/setup/tmp-hygiene.ts.
+    MEASURE AFTER DEPLOY: with views.now still off, GET /v1/views/needs-you names the switch in its now source,
+    and W1-T13904, W1-T13911 and W1-T14002 (if still held) appear as task_question decisions. The held-task
+    source adds no read-model build (no new read_model.slow_view row for it).
+  falsifier: |
+    On origin/main the composite uses the 2026-11-20 now body with views.now off: criterion 1 finds 13
+    decisions and no unavailable source. Read the mode once at construction: criterion 3's flip does not
+    compose again. Add the held source also when the now body is used: criterion 5 shows a task twice. Use
+    taskInputAnswerWithLedger in serve: criterion 6's no-write check is not what serve calls, and the
+    readTaskInputAnswer grep in serve.ts finds nothing. Wire heldTasks only in tests: the heldTasks: grep in
+    serve.ts finds nothing.
+  note: |
+    Id reserved for run-unfiled-1795278625059 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Not in scope: making the now view cheaper, switching it back on, and the instances other than core
+    (their held questions stay with their own now bodies).

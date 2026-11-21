@@ -1,0 +1,58 @@
+- id: W1-T14139
+  title: Matched learnings reach the fix prompt once the shadow shows enough matching rounds, the withheld arm stays on, and harm switches it off
+  repo: remudero
+  depends_on: [W1-T14138]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # changes the fix prompt for the offered arm of every matching round
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T14138, W1-T14137, W1-T4630, W1-T4241]
+  files:
+    - src/lib/fix-learnings-shadow.ts
+    - src/cli/commands/fix.ts
+    - src/lib/learnings.ts
+    - test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21). W1-T14138 measures, per fix round, which learnings the failing checks would match
+    and injects nothing. Injecting only pays if matches are common enough to measure and the matched text helps.
+    - computeCorpusChurn and renderFreshnessNote (src/lib/learnings.ts:822-843) write a "verify first" note for a fact whose cited
+      files changed since it was earned; no production caller passes churn (wipe-test.ts:132 and bundle.ts:474 call
+      renderMatchedLearnings with one argument). A stale fact without that note misleads.
+    - src/lib/eval-card.ts checks that a trial's protocol was committed before its first assignment (:495-505) and computes sample
+      sizes (twoProportionSampleSize, :139).
+    - The knowledge budget (DEFAULT_KNOWLEDGE_BUDGET_CHARS, 8,148 characters) is shared with the skills block.
+  design: |
+    1. Before the first injected round, write the protocol once as a state file and register it with eval-card's protocolHash and
+       a preRegisteredAt earlier than that round: estimand = the difference between offered and withheld matching rounds in
+       next-head green rate, and in rounds to green per task; unit = task; withheld share 0.25; per-arm floor from
+       twoProportionSampleSize at a 0.10 difference, power 0.8, confidence 0.95; stop for harm as in step 4.
+    2. Injection stays off while the W1-T14138 summary shows the per-arm floor cannot be reached within 28 days at the observed
+       match rate, and the summary says so. It turns on by itself once the floor is reachable.
+    3. In the offered arm the fix prompt gets renderMatchedLearnings(selected, corpusChurn) after the skills block, inside the
+       shared knowledge budget; the withheld arm gets nothing. Rows record the arm, the injected ids and the characters injected.
+    4. If offered matching rounds are worse than withheld ones by more than two standard errors on next-head green rate or rounds to
+       green, injection turns itself off and one finding is staged through the existing knowledge gardener path; the row says why.
+
+    INVARIANT the-control-stays: while injection is on, a task-keyed 25% of matching rounds stays withheld.
+  acceptance:
+    - claim: "Injection stays off, and the summary names why, while the per-arm floor cannot be reached within 28 days"
+      proof: "grep: W1-T14139 criterion 1: in test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts"
+    - claim: "Once the floor is reachable, offered matching rounds carry the matched learnings and withheld rounds carry none"
+      proof: "grep: W1-T14139 criterion 2: in test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts"
+    - claim: "A matched fact whose cited files changed since it was earned carries the verify-first note"
+      proof: "grep: W1-T14139 criterion 3: in test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts"
+    - claim: "Offered rounds worse than withheld by more than two standard errors turn injection off and stage one finding"
+      proof: "grep: W1-T14139 criterion 4: in test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts"
+    - claim: "invariant:the-control-stays — with injection on, a task-keyed quarter of matching rounds stays withheld, and the protocol was registered before the first injected round"
+      kind: guard
+      proof: "grep: W1-T14139 criterion 5: in test/learning/matched-learnings-reach-the-fix-prompt-once-the-shadow-clears-its-floor.test.ts"
+    - claim: "The fix lane asks the shadow summary whether to inject"
+      proof: "grep: fixLearningsInjection( in src/cli/commands/fix.ts"
+  falsifier: |
+    Inject while the floor is unreachable and criterion 1 must fail. Drop the withheld arm and criterion 5 must fail. Keep
+    injecting after harm and criterion 4 must fail. Restore and require all to pass.
