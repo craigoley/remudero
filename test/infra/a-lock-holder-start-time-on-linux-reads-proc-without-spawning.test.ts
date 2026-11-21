@@ -183,13 +183,15 @@ test("W1-T11457 criterion 2: a /proc read or parse failure on Linux falls back t
   }
 });
 
-test("W1-T11457 criterion 2: an unreadable CLK_TCK is not cached, so the next call reads /proc again once it heals", () => {
+test("W1-T11457 criterion 2: an unreadable CLK_TCK is not cached, so the next call reads /proc again once it heals", (t) => {
+  const now = BTIME_SEC * 1000 + 2_000_000;
+  t.mock.method(Date, "now", () => now);
   const files = { ...healthy(), "/proc/self/auxv": errno("EACCES", "/proc/self/auxv") as FixtureFile };
   const { sys, execCalls } = linuxSeam(files);
-  assertTodaysPsResult(defaultGetProcessStartTime(PID, sys), Date.now() - 5, Date.now() + 5);
+  assert.equal(defaultGetProcessStartTime(PID, sys), now - 330_000);
   files["/proc/self/auxv"] = auxvWithHz(100);
   assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 1_234_560);
-  assert.equal(execCalls.length, 1, "only the failed call asked ps");
+  assert.deepEqual(execCalls, [["ps", PS_ARGS, { encoding: "utf8" }]], "only the failed call asked ps");
 });
 
 test("W1-T11457: the real default seam judges this live test process its own current holder", () => {
