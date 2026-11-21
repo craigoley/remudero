@@ -4606,7 +4606,11 @@ export function ghGateway(
       // W1-T377: the OPEN twin, off the deterministic LIST API. Contract: {@link GitHub.listOpenHeadBranches}.
       const rows = listPullsByState("open", 1000);
       if (rows === null) return null;
-      return rows.map((r) => ({ number: r.number, url: r.html_url, state: "OPEN", headRefName: r.head?.ref ?? "" }));
+      // W1-T13957: the body rides this SAME list fetch (REST `null` is an empty body, read as ""), so the Inbox CLI's
+      // inboxBoardReferents can tell a run branch's own Remudero-Task trailer from a conflicting one. A row whose
+      // `body` key is absent stays body-less, so ownership reads unknown rather than trailer-free.
+      return rows.map((r) => ({ number: r.number, url: r.html_url, state: "OPEN", headRefName: r.head?.ref ?? "",
+        ...(r.body === undefined ? {} : { body: r.body ?? "" }) }));
     },
     headRefName(prUrl) {
       const row = fetchPrRow(prUrl);

@@ -14,18 +14,22 @@
     - W1-T2279
   files:
     - src/lib/escalate.ts
-    - test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts
+    - "test/inbox/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+    - "test/decision-summary.test.ts"
     - "src/lib/escalation-conversation.ts"
     - "src/lib/tick-read-worker.ts"
+    - "test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts"
+    - "src/lib/escalation-answers.ts"
+    - "src/lib/issue-revalidation-garden.ts"
   status: queued
   attempts: 0
   acceptance:
     - claim: "The issue body opens with the summary, then the options and the recommendation, and the machine fields (class, task, host, run, head, cause) follow under their own heading"
-      proof: "grep: W1-T12041 criterion 1 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+      proof: "grep: W1-T12041 criterion 1 in test/inbox/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
     - claim: "Every machine field the reconciler and the answer reader parse today is still read from a body in the new order"
-      proof: "grep: W1-T12041 criterion 2 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+      proof: "grep: W1-T12041 criterion 2 in test/inbox/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
     - claim: "A body in the old order, written before this change, is still read without loss"
-      proof: "grep: W1-T12041 criterion 3 in test/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
+      proof: "grep: W1-T12041 criterion 3 in test/inbox/an-escalation-opens-with-what-is-needed-in-plain-words.test.ts"
   rationale: |
     OBSERVED 2026-11-10 on the six newest escalations (#17633 to #17638): every body opens with five to seven machine lines (Class, Task, Host, Run, Head, Cause) before the first plain sentence. None showed a decision summary in its first 600 characters.
     - Example title: "[MANUAL] TRIAGE-incident-ba882173ff28a357: PR …/17617 needs a clarification — PR stage stalled: #17617 …/17617 — awaiting-review". It has a hash id, the same URL twice and no request.
@@ -34,7 +38,11 @@
   design: |
     Reorder the body builder: summary, options, recommendation, then a "Machine fields" heading with the fields unchanged. Readers of the body find a field by its label, so the order does not matter to them; criterion 2 and 3 prove it on both orders.
     NOT IN SCOPE: the wording of any one escalation's summary or detail (about 95 call sites, later tasks), the title format, and how many escalations are opened.
+    NO-INVARIANTS: this scope amendment only changes the declared files and matching proof paths; it introduces no new product behavior or implementation invariant.
   falsifier: |
     Put a machine field before the summary and criterion 1 must fail. Make a reader depend on the old position and criterion 2 must fail. Stop reading an old-order body and criterion 3 must fail. Restore and require all three to pass.
   note: |
+    files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): #19695's coverage shard fails
+    test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts, which reads the detail from the paragraph
+    before Options; the new body order puts the summary there, so the build must update that reader test.
     Open issues keep their old bodies; only new issues use the new order.

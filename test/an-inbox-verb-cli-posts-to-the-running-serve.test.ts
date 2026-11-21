@@ -16,7 +16,7 @@ import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbNam
 import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, serveFirstInboxActions, verdictMayDifferOnServe, INBOX_CLI_DEFAULT_SERVE_PORT, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
 import { declinedWithReceipts } from "#src/lib/inbox-verdict-receipts.js";
 import { resolveServePort } from "#src/lib/serve.js";
-import type { PrRef } from "#src/lib/status.js";
+import { readLedgerLines, type PrRef } from "#src/lib/status.js";
 import { anchorFingerprint, applyProposalVerdict } from "#src/lib/inbox.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createService } from "#src/lib/service.js";
@@ -485,21 +485,18 @@ function lapsedDeclineServe(t: Ctx): { root: string; ledgerPath: string; stateDi
   return { root: dir, ledgerPath, stateDir };
 }
 
-const ledgerRows = (path: string): Array<Record<string, unknown>> =>
-  readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
-
 test("W1-T13238 criterion 3: a verify-human decline serve re-opens after its dependencies merged prints and exits as in-process", async (t) => {
   const world = lapsedDeclineServe(t);
   const config = { resolveServePort, root: world.root, serve: { port: SERVE_PORT } };
   const before = readFileSync(world.ledgerPath, "utf8");
   // The in-process verdict as loadProposalForRatify classifies it: the ledger's decline, with no lapse applied.
   const legacyFind = (id: string) => {
-    const declinedReason = declinedWithReceipts(ledgerRows(world.ledgerPath), world.stateDir)(id);
+    const declinedReason = declinedWithReceipts(readLedgerLines(world.ledgerPath), world.stateDir)(id);
     return id !== PARKED ? { exists: false } : { exists: true, classification: declinedReason === undefined
       ? { proposalId: id, state: "ready" as const, reasons: [] } : { proposalId: id, state: "declined" as const, reasons: [], declinedReason } };
   };
   // What run-task.ts's proposalVerdictServeFirst passes: the live ledger and the retained receipts.
-  const legacyVerdict = (id: string) => verdictMayDifferOnServe(id, ledgerRows(world.ledgerPath), world.stateDir);
+  const legacyVerdict = (id: string) => verdictMayDifferOnServe(id, readLedgerLines(world.ledgerPath), world.stateDir);
   for (const kind of ["decline", "restore"] as const) {
     const args = [PARKED, "--reason", "still not now"];
     const recorded: Array<[string, string, string]> = [];
@@ -516,6 +513,6 @@ test("W1-T13238 criterion 3: a verify-human decline serve re-opens after its dep
   const posted = await captured(t, () => proposalVerdictViaServe("decline", [PARKED, "--reason", "still not now"], config, () => assert.fail("ran in-process")));
   assert.deepEqual(posted, { code: 0, out: [`rmd decline: ${PARKED} DECLINED — take it back with rmd restore ${PARKED} --reason "<text>"`], err: [] });
   // Only a verify-human decline that recorded an observed state can lapse; every other item still posts.
-  assert.equal(verdictMayDifferOnServe("board-review:stale:PR-7", ledgerRows(world.ledgerPath), world.stateDir), false);
+  assert.equal(verdictMayDifferOnServe("board-review:stale:PR-7", readLedgerLines(world.ledgerPath), world.stateDir), false);
   assert.equal(verdictMayDifferOnServe(PARKED, [{ ts: "2026-10-13T02:56:30.145Z", task_id: PARKED, step: "panel.proposal_declined" }], join(world.root, "none")), false);
 });
