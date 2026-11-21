@@ -44,8 +44,9 @@ test("W1-T6352: output past the retention budget is truncated, not fatal", async
     const result = await child.run;
     assert.equal(result.text, "REPORT\nCOMMIT_MESSAGE: fix(worker): preserve the result");
     assert.equal(result.sessionId, "budget-run");
-    assert.equal(result.isError, true);
-    assert.equal(result.subtype, "error_incomplete_output");
+    // W1-T13960: a completed run whose spill precedes its intact final message succeeds
+    assert.equal(result.isError, false);
+    assert.equal(result.subtype, "success");
     assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.deepEqual(result.exit, { kind: "exit", code: 0 });
     assert.deepEqual(result.tokens, { input: 100, output: 10, cacheRead: 25, cacheCreation: 0 });
