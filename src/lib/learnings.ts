@@ -1734,19 +1734,30 @@ export function learningContentIdentities(snapshot: readonly LearningEntry[], id
   return out;
 }
 
-/** W1-T11115: {@link selectLearnings}, remembering the content identities of the last draw it
+/** W1-T11115: what one propensity draw of {@link selectLearnings} names beyond the ids it relays. */
+export interface LearningDrawRecord {
+  /** The revision of EVERY matched id, selected or dropped, contested or not
+   *  ({@link learningContentIdentities} over the whole snapshot the draw read). */
+  contentIds?: Record<string, string>;
+  /** The ids the budget cut decided: at least one matched COPY of the id was selected under some
+   *  derived seeds and not under others. A contested id can read a pooled share of 1 (see
+   *  {@link selectLearnings}), so the share alone never decides this. */
+  contestedIds?: string[];
+}
+
+/** W1-T11115: {@link selectLearnings}, remembering the {@link LearningDrawRecord} of the last draw it
  *  returned. The producer reaches selection through wipe-test.ts's `computeMatchedLearningsForArm`,
- *  which relays ids only. This lets the producer ledger the identities of THAT draw. It never
- *  re-reads the corpus, which could see a later tree. */
-export function recordingSelectLearnings(): { selectLearnings: typeof selectLearnings; contentIds: () => Record<string, string> | undefined } {
-  let last: Record<string, string> | undefined;
+ *  which relays ids and shares only. This lets the producer ledger the identities and the contest of
+ *  THAT draw. It never re-reads the corpus, which could see a later tree. */
+export function recordingSelectLearnings(): { selectLearnings: typeof selectLearnings; lastDraw: () => LearningDrawRecord } {
+  let last: LearningDrawRecord = {};
   return {
     selectLearnings: (entries, taskFiles, budgetChars, context) => {
       const result = selectLearnings(entries, taskFiles, budgetChars, context);
-      last = result.contentIds;
+      last = { contentIds: result.contentIds, contestedIds: result.contestedIds };
       return result;
     },
-    contentIds: () => last,
+    lastDraw: () => last,
   };
 }
 
@@ -1926,7 +1937,7 @@ export function selectLearnings<T extends LearningEntry>(
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   context?: LearningsSelectionContext,
-): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number>; contentIds?: Record<string, string> } {
+): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number> } & LearningDrawRecord {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const haystack = selectionHaystack(context);
@@ -1935,10 +1946,12 @@ export function selectLearnings<T extends LearningEntry>(
     .map((entry) => ({ entry, counts: matchCounts(entry, files, haystack, context?.knownSymbols) }))
     .filter((r) => r.counts.file > 0 || r.counts.symbol > 0 || r.counts.error > 0)
     // W1-T4091: one posterior draw per entry, taken in a fixed (id) order so the seed reproduces it.
-    .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0));
+    .sort((a, b) => (a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0))
+    // W1-T11115: a slot names one matched COPY, since an id can be held by more than one.
+    .map((r, slot) => ({ ...r, slot }));
   const bestStrength = matched.reduce((best, r) => Math.max(best, matchStrength(r.counts)), 0);
 
-  const selectWith = (seed: number): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts } => {
+  const selectWith = (seed: number): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; selectedSlots: number[] } => {
     const rng = usage ? seededRandom(seed) : undefined;
     const ranked = matched
       .map((r) => ({ ...r, draw: rng ? sampleBeta(learningValue(r.entry.id, usage), rng) : 0 }))
@@ -1956,10 +1969,11 @@ export function selectLearnings<T extends LearningEntry>(
       });
 
     const selected: T[] = [];
+    const selectedSlots: number[] = [];
     const dropped: T[] = [];
     const matchedBy: LearningMatchCounts = { file: 0, symbol: 0, error: 0 };
     let used = 0;
-    for (const { entry, counts } of ranked) {
+    for (const { entry, counts, slot } of ranked) {
       if (selected.length > 0 && bestStrength > 0 && matchStrength(counts) < bestStrength * MATCH_STRENGTH_FRACTION) {
         dropped.push(entry);
         continue;
@@ -1970,32 +1984,47 @@ export function selectLearnings<T extends LearningEntry>(
         continue;
       }
       selected.push(entry);
+      selectedSlots.push(slot);
       if (counts.file > 0) matchedBy.file++;
       if (counts.symbol > 0) matchedBy.symbol++;
       if (counts.error > 0) matchedBy.error++;
       used += cost;
     }
-    return { selected, dropped, matchedBy };
+    return { selected, dropped, matchedBy, selectedSlots };
   };
 
   const seed = context?.seed ?? 0;
-  const result = selectWith(seed);
+  const primary = selectWith(seed);
+  const result = { selected: primary.selected, dropped: primary.dropped, matchedBy: primary.matchedBy };
   const draws = context?.propensityDraws ?? 0;
   if (draws <= 0) return result;
   // W1-T4241: 0 < share < 1 means the budget cut, not match strength, decided the entry.
-  // W1-T11115: the counts live in a Map and the shares in a {@link learningIdRecord}, so every id is a key.
-  const hits = new Map<string, number>(matched.map((r) => [r.entry.id, 0]));
+  // W1-T11115: the draw is counted PER COPY. One id can be held by more than one matching copy (a
+  // project and a user-overall shard, say). A per-id sum of their wins hid a contest: two copies
+  // winning 31 and 33 of 64 re-selections summed to a share of 1, or above 1 when both fit, so the
+  // id was ledgered with no share and no revision while it sat in both arms. An id's share is now
+  // the fraction of re-selections in which ANY copy of it was selected: the chance the id reaches
+  // the prompt, never above 1. The id is CONTESTED when any one copy's own share is strictly
+  // between 0 and 1, whatever the pooled share reads, so a copy-split id can be contested at a
+  // share of 1. With one copy per id both readings equal the old per-id share. The shares live in a
+  // {@link learningIdRecord} and the id counts in a Map, so every id is a key.
+  const copyHits = matched.map(() => 0);
+  const idHits = new Map<string, number>(matched.map((r) => [r.entry.id, 0]));
   for (let k = 0; k < draws; k++) {
-    for (const entry of selectWith(propensitySeed(seed, k)).selected) hits.set(entry.id, hits.get(entry.id)! + 1);
+    const reached = new Set<string>();
+    for (const slot of selectWith(propensitySeed(seed, k)).selectedSlots) {
+      copyHits[slot]! += 1;
+      reached.add(matched[slot]!.entry.id);
+    }
+    for (const id of reached) idHits.set(id, idHits.get(id)! + 1);
   }
-  const propensity = learningIdRecord([...hits].map(([id, n]) => [id, n / draws] as const));
-  // W1-T11115: the revision of every contested entry, selected AND dropped, resolved against EVERY
-  // entry of the snapshot this draw read: matched or not, active or not. A same-id copy the task
-  // never matched is still a second revision of that id in the source, so the id reads ambiguous
-  // instead of taking the matched copy's digest. Absent when nothing was contested.
-  const contested = Object.keys(propensity).filter((id) => propensity[id]! > 0 && propensity[id]! < 1);
-  if (contested.length === 0) return { ...result, propensity };
-  return { ...result, propensity, contentIds: learningContentIdentities(entries, contested) };
+  const propensity = learningIdRecord([...idHits].map(([id, n]) => [id, n / draws] as const));
+  const contestedIds = [...new Set(matched.filter((r) => copyHits[r.slot]! > 0 && copyHits[r.slot]! < draws).map((r) => r.entry.id))];
+  // W1-T11115: the revision of EVERY matched id, selected AND dropped, contested or not, resolved
+  // against every entry of the snapshot this draw read: matched or not, active or not. A same-id copy
+  // the task never matched is still a second revision of that id in the source, so the id reads
+  // ambiguous instead of taking the matched copy's digest. Every id either arm names has its own entry.
+  return { ...result, propensity, contestedIds, contentIds: learningContentIdentities(entries, idHits.keys()) };
 }
 
 export const LEXICAL_SHADOW_VERSION = "lexical-shadow-v1" as const;

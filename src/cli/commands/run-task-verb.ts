@@ -99,7 +99,7 @@ import { ContainmentError, probeContainment, type ProbeExecutor } from "../../li
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, LEARNING_PROPENSITY_DRAWS, parseRuleBodyPointer, parseRuleHeadlines, projectLearningsHome, recordingSelectLearnings, renderHeadlineOnlyIndex, retrieveRuleBodyOrDegrade } from "../../lib/learnings.js";
-import type { RuleHeadline } from "../../lib/learnings.js";
+import type { LearningDrawRecord, RuleHeadline } from "../../lib/learnings.js";
 import { assertProvenance, citation } from "../../lib/provenance.js";
 import { loadOperatorNotesForTask, operatorNoteStore, renderOperatorNotes } from "../../lib/operator-notes.js";
 
@@ -5296,14 +5296,15 @@ export function selectImplementSkills(stateRoot: string, repoRoot: string, task:
 }
 
 /** The implement lane's `learnings.injected` row for ONE draw: the ids it selected and dropped, and the
- *  contested propensities (W1-T4241). The budget cut, not match strength, decided those entries
- *  (0 < p < 1), so injected vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts)
- *  can read. W1-T11115: `contentIds` must come from the same draw (learnings.ts's
- *  `recordingSelectLearnings`). The row carries one `lc1:` digest per contested entry, selected AND
- *  dropped, and never the entry's content. */
+ *  contested propensities (W1-T4241). The budget cut, not match strength, decided those entries, so
+ *  injected vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
+ *  W1-T11115: `draw` must come from the same draw (learnings.ts's `recordingSelectLearnings`). The row
+ *  carries one `lc1:` digest (or the `ambiguous` marker) for EVERY id either arm names, and never the
+ *  entry's content. An id whose copies split the draw is contested even at a pooled share of 1, so it
+ *  keeps its own share: one id held by two layers can never read as decided. */
 export function learningsInjectedRow(
   result: MatchedLearningsResult,
-  contentIds: Record<string, string> | undefined,
+  draw: LearningDrawRecord,
   masked: boolean,
   learningUsage: LearningUsage,
 ): Record<string, unknown> {
@@ -5315,8 +5316,8 @@ export function learningsInjectedRow(
     matched_by: result.matchedBy,
     global_refused_reason: result.globalRefusedReason,
     masked,
-    propensity: contestedPropensities(result.propensity),
-    content_ids: contentIds,
+    propensity: contestedPropensities(result.propensity, draw.contestedIds),
+    content_ids: draw.contentIds,
     usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
   };
 }
@@ -6706,8 +6707,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
     // block ran before W1-T86.
     const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
-    // W1-T11115: the real selector, recording the content identities of the draw it makes, so the
-    // row below names the exact revision of each contested entry from THIS snapshot.
+    // W1-T11115: the real selector, recording the content identities and the contest of the draw it
+    // makes, so the row below names the exact revision of each entry it lists from THIS snapshot.
     const learningsDraw = recordingSelectLearnings();
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
       homes: {
@@ -6746,7 +6747,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // archiving it away loses analytics (the retro-side citation miner's input), never
     // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
     // next reader should know which side of that line this row sits on before "fixing" it.
-    log("learnings.injected", learningsInjectedRow(learningsResult, learningsDraw.contentIds(), !!opts.maskLearnings, learningUsage));
+    log("learnings.injected", learningsInjectedRow(learningsResult, learningsDraw.lastDraw(), !!opts.maskLearnings, learningUsage));
 
     // ── Render + provenance-lint the prompt.
     // W1-T2761: the `rule_headlines` part — "" (identical to every render before this task)

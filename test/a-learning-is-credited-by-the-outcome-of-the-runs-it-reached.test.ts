@@ -6,8 +6,10 @@
  * dropped to the run's clean-merge outcome with inverse-propensity weights.
  *
  * W1-T11115: an edit keeps a learning's id, so the fold credits the exact content revision a run
- * exposed. The producer ledgers one `lc1:` digest per contested entry, selected AND dropped, from the
- * draw's own snapshot; the fold groups by {id, revision} and counts every observation it cannot pin.
+ * exposed. The producer ledgers one `lc1:` digest per id either arm names, selected AND dropped, from
+ * the draw's own snapshot; the fold groups by {id, revision} and counts every observation it cannot pin.
+ * An id is not unique across layers: two matching copies of one id are counted per copy, so the id
+ * keeps its share and its `ambiguous` marker, and the fold counts an id listed in both arms.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -191,9 +193,15 @@ interface ProducerRun {
   row: Row;
   /** The same row for a masked wipe-test arm B. */
   maskedRow: Row;
-  /** The corpus the draw read, parsed again from the same shard. */
+  /** The corpus the draw read, parsed again from the same shards, in the loader's layer order. */
   corpus: LearningEntry[];
+  /** Per re-selection `k`: the `corpus` indexes of the COPIES the producer's draw chose under derived
+   *  seed `k`, replayed with the real selector one seed at a time, outside the producer's counting. */
+  chosenByDraw: ReadonlyArray<ReadonlySet<number>>;
 }
+
+/** How many of a producer run's re-selections chose each copy, aligned with its `corpus`. */
+const copyWins = (run: ProducerRun): number[] => run.corpus.map((_, i) => run.chosenByDraw.filter((chosen) => chosen.has(i)).length);
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object") {
@@ -210,12 +218,18 @@ function deepFreeze<T>(value: T): T {
  *  the 8,148-char budget, so about 19 fit and the seeded draw decides which.
  *  `userLayerCopyOf` also writes a user-overall layer holding a second, different copy of that id,
  *  whose glob the task never matches, as a real cross-layer corpus can. `userLayerIds` writes
- *  user-overall entries that DO match, as equal-strength rivals. `oversized` adds a project entry of
+ *  user-overall entries that DO match, as equal-strength rivals. An id that is also a project id is a
+ *  second, different copy that matches too: runTaskBody loads both homes, and both copies compete in
+ *  every re-selection. `userLayerPinnedCopyOf` writes a matching user-overall copy of a project id
+ *  whose symbol the task text also names: it outranks every project entry, so it is selected in
+ *  every re-selection while the project copy stays contested. `oversized` adds a project entry of
  *  ~7,700 chars: it fits only when the draw ranks it first, so its propensity is a few 64ths.
  *  The usage store is written and read with the producer's own reader. It holds a no-history count,
  *  the same prior an absent id gets, for every fixture id. An absent `__proto__` or `constructor`
  *  would read an inherited member in knowledge-value.ts's `learningValue`, outside this task. */
-function producerRun(opts: { userLayerCopyOf?: string; userLayerIds?: readonly string[]; oversized?: string; runId?: string } = {}): ProducerRun {
+function producerRun(
+  opts: { userLayerCopyOf?: string; userLayerIds?: readonly string[]; userLayerPinnedCopyOf?: string; oversized?: string; runId?: string } = {},
+): ProducerRun {
   const runId = opts.runId ?? PRODUCER_RUN_ID;
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-corpus-"));
   const userDir = mkdtempSync(join(tmpdir(), "rmd-lcr-user-"));
@@ -232,6 +246,10 @@ function producerRun(opts: { userLayerCopyOf?: string; userLayerIds?: readonly s
     writeFileSync(join(dir, "revision.yaml"), projectLines.join("\n") + "\n");
     const userIds = [...(opts.userLayerIds ?? [])];
     const userLines = userIds.map((id) => line(id, `${RAW_FACT_SENTINEL}-user-${id} ${"x".repeat(380)}`, PRODUCER_TASK_FILE));
+    if (opts.userLayerPinnedCopyOf !== undefined) {
+      userIds.push(opts.userLayerPinnedCopyOf);
+      userLines.push(`${line(opts.userLayerPinnedCopyOf, `${RAW_FACT_SENTINEL}-user-pinned ${"p".repeat(380)}`, PRODUCER_TASK_FILE)}\n  symbols: ["producer"]`);
+    }
     if (opts.userLayerCopyOf !== undefined) {
       userIds.push(opts.userLayerCopyOf);
       userLines.push(line(opts.userLayerCopyOf, `${RAW_FACT_SENTINEL}-user-layer-revision`, "docs/never-in-this-task.md"));
@@ -254,18 +272,66 @@ function producerRun(opts: { userLayerCopyOf?: string; userLayerIds?: readonly s
     for (const arm of ["A", "B"] as const) {
       const draw = recordingSelectLearnings();
       const result = computeMatchedLearningsForArm(arm, input, { ...REAL_LEARNINGS_INJECTION_DEPS, selectLearnings: draw.selectLearnings });
-      const fields = learningsInjectedRow(result, draw.contentIds(), arm === "B", usage);
+      const fields = learningsInjectedRow(result, draw.lastDraw(), arm === "B", usage);
       appendLedger(ledgerLivePath(stateDir), { step: "learnings.injected", run_id: runId, task_id: "T-LEARN-REVISION", ts: ts(), ...fields });
     }
     const rows = readLedgerUnionRecordsSync(stateDir).rows.filter((r) => r.step === "learnings.injected");
     assert.equal(rows.length, 2, "both arms' rows come back from the ledger");
     const corpus = [...loadLearningsCorpus(dir), ...(withUserLayer ? loadLearningsCorpus(userDir) : [])];
-    return { row: rows.find((r) => r.masked === false)!, maskedRow: rows.find((r) => r.masked === true)!, corpus };
+    const chosenByDraw = Array.from({ length: LEARNING_PROPENSITY_DRAWS }, (_, k) => {
+      const context = { ...input.selectionContext, seed: propensitySeed(input.selectionContext.seed, k), propensityDraws: 0 };
+      return new Set(selectLearnings(corpus, input.taskFiles, input.budgetChars, context).selected.map((chosen) => corpus.indexOf(chosen)));
+    });
+    return { row: rows.find((r) => r.masked === false)!, maskedRow: rows.find((r) => r.masked === true)!, corpus, chosenByDraw };
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(userDir, { recursive: true, force: true });
     rmSync(stateDir, { recursive: true, force: true });
   }
+}
+
+/** THE PRODUCER INVARIANT, checked on a real producer row against its replayed source draw. Every id
+ *  either arm names has its own `content_ids` entry: the digest of its single source revision, or
+ *  the `ambiguous` marker when the source holds it with different content. Every CONTESTED id, one
+ *  with any copy chosen in some re-selections and not in others, has its own share, and that share is
+ *  the fraction of re-selections in which any copy was chosen. */
+function assertProducerInvariant(run: ProducerRun): void {
+  const ids = run.row.content_ids as Record<string, string>;
+  const p = (run.row.propensity ?? {}) as Record<string, number>;
+  const arms = [...(run.row.matched_ids as string[]), ...(run.row.dropped as string[])];
+  assert.ok(arms.length > 0, "the draw matched entries");
+  for (const id of arms) {
+    assert.ok(Object.hasOwn(ids, id), `${id}: an id either arm names has its own content_ids entry`);
+    const revisions = new Set(run.corpus.filter((e) => e.id === id).map((e) => learningContentIdentity(e)));
+    assert.equal(ids[id], revisions.size === 1 ? [...revisions][0] : AMBIGUOUS_LEARNING_CONTENT, `${id}: the source draw's own identity`);
+  }
+  const wins = copyWins(run);
+  for (const id of new Set(run.corpus.map((e) => e.id))) {
+    const slots = run.corpus.flatMap((e, i) => (e.id === id ? [i] : []));
+    if (!slots.some((i) => wins[i]! > 0 && wins[i]! < LEARNING_PROPENSITY_DRAWS)) continue;
+    assert.ok(Object.hasOwn(p, id), `${id}: a contested id has its own share`);
+    const reached = run.chosenByDraw.filter((chosen) => slots.some((i) => chosen.has(i))).length;
+    assert.equal(p[id], reached / LEARNING_PROPENSITY_DRAWS, `${id}: the share of re-selections that chose any copy`);
+  }
+}
+
+/** THE REVIEWER'S CASE (round 4), through the real producer: a project copy and a user-overall copy
+ *  of one id, with different content, BOTH matching the task, as runTaskBody loads its two homes. It
+ *  returns the first seeded run in which each copy is contested, the id sits in both arms, and the
+ *  copies' wins sum to at least the draw count. That per-id sum read the id at a share of 1 or more,
+ *  so the row carried no share and no revision for it, and the fold counted nothing. */
+let copySplit: { run: ProducerRun; id: string } | undefined;
+function copySplitRun(): { run: ProducerRun; id: string } {
+  if (copySplit) return copySplit;
+  const id = "lcr-07";
+  for (let i = 0; i < 24; i++) {
+    const run = producerRun({ userLayerIds: [id], runId: `${PRODUCER_RUN_ID}-copy-split-${i}` });
+    const wins = copyWins(run).filter((_, j) => run.corpus[j]!.id === id);
+    const both = (run.row.matched_ids as string[]).includes(id) && (run.row.dropped as string[]).includes(id);
+    const pooledAtLeastOne = wins.reduce((sum, n) => sum + n, 0) >= LEARNING_PROPENSITY_DRAWS;
+    if (wins.length === 2 && wins.every((n) => n > 0 && n < LEARNING_PROPENSITY_DRAWS) && both && pooledAtLeastOne) return (copySplit = { run, id });
+  }
+  throw new Error("no seeded run split two contested copies of one id across both arms");
 }
 
 test("W1-T11115: learning outcome revision identifies both selected and dropped source content", () => {
@@ -275,9 +341,11 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   const snapshot = [...tied, strong];
   const files = ["src/x.ts", "src/y.ts"];
   const drawn = selectLearnings(snapshot, files, 700, { usage: {}, seed: 42, propensityDraws: 64 });
-  const contested = Object.keys(contestedPropensities(drawn.propensity)!).sort();
+  const contested = Object.keys(contestedPropensities(drawn.propensity, drawn.contestedIds)!).sort();
   assert.deepEqual(contested, ["a", "b", "c", "d"]);
-  assert.deepEqual(Object.keys(drawn.contentIds!).sort(), contested, "every contested entry, and only those, carries a revision");
+  assert.deepEqual(drawn.contestedIds, contested, "the draw names the ids the budget cut decided");
+  assert.deepEqual(Object.keys(drawn.contentIds!).sort(), [...contested, "strong"], "every matched entry, contested or not, carries a revision");
+  assert.equal(drawn.contentIds!.strong, learningContentIdentity(strong));
   const selectedContested = drawn.selected.filter((e) => contested.includes(e.id));
   const droppedContested = drawn.dropped.filter((e) => contested.includes(e.id));
   assert.ok(selectedContested.length > 0 && droppedContested.length > 0, "the draw selected some contested entries and dropped others");
@@ -334,15 +402,17 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   assert.equal(selectedCopy.contentIds![selectedId], AMBIGUOUS_LEARNING_CONTENT, `${selectedId}: a selected entry is checked the same way`);
 
   // THE PRODUCER: the implement dispatch's row names the revision of every contested entry it drew.
-  const { row, corpus } = producerRun();
+  const producer = producerRun();
+  const { row, corpus } = producer;
   const p = row.propensity as Record<string, number>;
   const ids = row.content_ids as Record<string, string>;
   assert.ok(ids && typeof ids === "object", "the producer row carries content_ids");
   const producerContested = Object.keys(p).sort();
   assert.ok(producerContested.length > 0, "the fixture corpus overflows the budget, so the draw contests entries");
-  assert.deepEqual(Object.keys(ids).sort(), producerContested);
   const matched = new Set(row.matched_ids as string[]);
   const dropped = new Set(row.dropped as string[]);
+  assert.deepEqual(Object.keys(ids).sort(), [...new Set([...matched, ...dropped])].sort(), "every id either arm names carries a revision");
+  assertProducerInvariant(producer);
   assert.ok(producerContested.some((id) => matched.has(id)), "a selected contested entry carries a revision");
   assert.ok(producerContested.some((id) => dropped.has(id)), "a dropped contested entry carries a revision");
   for (const id of producerContested) {
@@ -364,6 +434,51 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   const layeredFold = foldLearningOutcomes([layered.row, { step: "verdict", run_id: layered.row.run_id, ts: ts(), verdict: "merged" }]);
   assert.equal(layeredFold.excludedRevision.ambiguous, 1);
   assert.equal(layeredFold.learnings.some((l) => l.id === layeredId), false, `${layeredId} is credited to no revision`);
+  assertProducerInvariant(layered);
+
+  // TWO MATCHING COPIES OF ONE ID (the round-4 review). The draw is counted per COPY. Here the budget
+  // fits `strong` and ONE copy of `d`, so every re-selection keeps one copy and drops the other. Each
+  // copy is contested, and either copy reaches the prompt in every draw: a pooled share of exactly 1.
+  // Counted per id, the copies' wins summed to that 1, and the id read as decided, with no share and
+  // no revision, while it sat in both arms. Now it is contested at its pooled share, and ambiguous.
+  const dCopies = [entry("d", files, "first copy " + "1".repeat(320)), entry("d", files, "second copy " + "2".repeat(320))];
+  const split = selectLearnings([strong, ...dCopies], files, 400, { usage: {}, seed: 42, propensityDraws: 64 });
+  assert.deepEqual([split.selected.map((e) => e.id), split.dropped.map((e) => e.id)], [["strong", "d"], ["d"]], "one copy is selected, the other dropped");
+  const splitWins = dCopies.map((copy) => Array.from({ length: 64 }, (_, k) => k).filter((k) => selectLearnings([strong, ...dCopies], files, 400, { usage: {}, seed: propensitySeed(42, k) }).selected.includes(copy)).length);
+  assert.ok(splitWins.every((n) => n > 0 && n < 64), `each copy is contested: ${splitWins.join(", ")} of 64`);
+  assert.equal(splitWins[0]! + splitWins[1]!, 64, "the per-id sum of the copies' wins reads exactly 1");
+  assert.equal(split.propensity!.d, 1, "a copy of d reaches the prompt in every re-selection");
+  assert.deepEqual(split.contestedIds, ["d"], "d is contested at a pooled share of 1");
+  assert.deepEqual(contestedPropensities(split.propensity, split.contestedIds), { __proto__: null, d: 1 }, "so it keeps its own share");
+  assert.equal(split.contentIds!.d, AMBIGUOUS_LEARNING_CONTENT, "two matching revisions of one id");
+  assert.equal(split.contentIds!.strong, learningContentIdentity(strong));
+
+  // THE SAME CASE THROUGH THE PRODUCER: a project copy and a user-overall copy of one id, BOTH matching
+  // the task, as runTaskBody loads its two homes, through the real loader, selector, producer row,
+  // appendLedger and the ledger union read. Each copy is contested and the draw put one in each arm.
+  const { run: splitRun, id: splitId } = copySplitRun();
+  const splitRunWins = copyWins(splitRun).filter((_, j) => splitRun.corpus[j]!.id === splitId);
+  assert.ok(splitRunWins.reduce((sum, n) => sum + n, 0) >= LEARNING_PROPENSITY_DRAWS, `per id, ${splitRunWins.join(" + ")} of 64 reads a share of 1 or more`);
+  assert.deepEqual([(splitRun.row.matched_ids as string[]).filter((m) => m === splitId), (splitRun.row.dropped as string[]).filter((d) => d === splitId)], [[splitId], [splitId]]);
+  const splitP = splitRun.row.propensity as Record<string, number>;
+  assert.ok(Object.hasOwn(splitP, splitId) && splitP[splitId]! > 0 && splitP[splitId]! <= 1, `${splitId} keeps its own share: ${splitP[splitId]}`);
+  assert.equal((splitRun.row.content_ids as Record<string, string>)[splitId], AMBIGUOUS_LEARNING_CONTENT, `${splitId}: the row carries its ambiguity marker`);
+  assertProducerInvariant(splitRun);
+  const splitFold = foldLearningOutcomes([splitRun.row, { step: "verdict", run_id: splitRun.row.run_id, ts: ts(), verdict: "merged" }]);
+  assert.equal(splitFold.excludedRevision.ambiguous, 1, `${splitId}'s exposure is counted as ambiguous`);
+  assert.equal(splitFold.learnings.some((l) => l.id === splitId), false, `${splitId} is credited to no revision`);
+  // AT A POOLED SHARE OF 1, THROUGH THE PRODUCER: the task text also names the user-overall copy's
+  // symbol, so it is selected in every re-selection, while the project copy stays contested. The id
+  // reaches the prompt every time, yet the budget cut decides a copy of it: the row keeps its share of 1.
+  const pinned = producerRun({ userLayerPinnedCopyOf: splitId, runId: `${PRODUCER_RUN_ID}-pinned` });
+  const pinnedWins = copyWins(pinned).filter((_, j) => pinned.corpus[j]!.id === splitId);
+  assert.equal(pinnedWins[1], LEARNING_PROPENSITY_DRAWS, "the pinned copy is selected in every re-selection");
+  assert.ok(pinnedWins[0]! > 0 && pinnedWins[0]! < LEARNING_PROPENSITY_DRAWS, `the project copy is contested: ${pinnedWins[0]} of 64`);
+  assert.equal((pinned.row.propensity as Record<string, number>)[splitId], 1, `${splitId} is ledgered at its pooled share of 1`);
+  assert.equal((pinned.row.content_ids as Record<string, string>)[splitId], AMBIGUOUS_LEARNING_CONTENT);
+  assertProducerInvariant(pinned);
+  const pinnedFold = foldLearningOutcomes([pinned.row, { step: "verdict", run_id: pinned.row.run_id, ts: ts(), verdict: "merged" }]);
+  assert.equal(pinnedFold.excludedRevision.ambiguous, 1, `${splitId}'s exposure is counted as ambiguous, never trimmed or dropped`);
 
   // IDS THAT NAME Object.prototype MEMBERS. A learning id is free corpus text, and the YAML loader
   // accepts `__proto__`. On an ordinary object, `contentIds["__proto__"] = digest` called the inherited
@@ -382,10 +497,12 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   // read, every contested entry of every row still names its source revision as an own key.
   const memberRuns = Array.from({ length: 8 }, (_, i) => producerRun({ userLayerIds: PROTOTYPE_MEMBER_IDS, runId: `${PRODUCER_RUN_ID}-member-${i}` }));
   const memberArms = new Map<string, Set<string>>(PROTOTYPE_MEMBER_IDS.map((pid) => [pid, new Set<string>()]));
+  for (const memberRun of memberRuns) assertProducerInvariant(memberRun);
   for (const { row: memberRow, corpus: memberCorpus } of memberRuns) {
     const memberP = memberRow.propensity as Record<string, number>;
     const memberIds = memberRow.content_ids as Record<string, string>;
-    assert.deepEqual(Object.keys(memberIds).sort(), Object.keys(memberP).sort(), "every contested entry, and only those, carries a revision");
+    const memberArmIds = [...(memberRow.matched_ids as string[]), ...(memberRow.dropped as string[])];
+    assert.deepEqual(Object.keys(memberIds).sort(), [...new Set(memberArmIds)].sort(), "every id either arm names carries a revision");
     for (const pid of PROTOTYPE_MEMBER_IDS) {
       if (!Object.hasOwn(memberP, pid)) continue;
       assert.ok(Object.hasOwn(memberIds, pid), `${pid}: the revision survives the ledger as an own key`);
@@ -615,6 +732,72 @@ test("W1-T11115: learning outcome revision reports unresolved exposure identitie
   );
   assert.deepEqual(missingMember.excludedRevision, { ...zero, unresolved: 4 });
 
+  // AN ID IN BOTH ARMS (the round-4 review). Two copies of one id that split a draw put the id in both
+  // arms. The fold never credits it, and never drops it silently: it is an exposure, with or without
+  // a ledgered share, and lands in ONE counter by the same order. Row 0 is the shape the per-id
+  // producer wrote for the reviewer's draw: both arms, no share and no revision for L, beside M's own.
+  const splitRow = (over: Row): Row => ({ matched_ids: ["L", "M"], dropped: ["L"], propensity: { M: 0.5 }, content_ids: { M: other }, ...over });
+  const splitRows: Row[] = [
+    {},
+    { content_ids: { M: other, L: AMBIGUOUS_LEARNING_CONTENT } },
+    { content_ids: undefined },
+    { propensity: undefined, content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } },
+    { propensity: { L: 1, M: 0.5 }, content_ids: { M: other, L: AMBIGUOUS_LEARNING_CONTENT } },
+    { propensity: { L: 1, M: 0.5 }, content_ids: { M: other, L: REV } },
+    // A copy-split id the draw contests at a pooled share of 1, with BOTH copies selected this time.
+    { matched_ids: ["L", "L", "M"], dropped: [], propensity: { L: 1, M: 0.5 }, content_ids: { M: other, L: AMBIGUOUS_LEARNING_CONTENT } },
+    { matched_ids: ["L", "M"], dropped: [], propensity: { L: 1, M: 0.5 }, content_ids: { M: other, L: REV } },
+  ].flatMap((over, i) => [injectedRow(`split-${i}`, splitRow(over)), verdict(`split-${i}`)]);
+  const splitFold = foldLearningOutcomes(splitRows);
+  // L: 0 unresolved (no identity), 1 ambiguous, 2 legacy, 3 ambiguous with no share record at all,
+  // 4 ambiguous at a share of 1 (identity before the trim), 5 one revision but both arms: unresolved,
+  // 6 ambiguous at a share of 1 in one arm, 7 one revision at a share of 1 in one arm: trimmed.
+  // M: legacy in row 2, and credited to its own revision in the other six rows that ledger its share.
+  assert.deepEqual(splitFold.excludedRevision, { ...zero, legacy: 2, ambiguous: 4, unresolved: 2 });
+  assert.equal(splitFold.excludedTrimmed, 1, "only the single revision in a single arm reaches the trim");
+  assert.equal(splitFold.runs, 8, "a row whose only exposure is a both-arms id still counts its run");
+  assert.deepEqual(splitFold.learnings, [{ id: "M", contentId: other, injected: 6, dropped: 0, verdict: "unmeasurable" }]);
+  // A both-arms id is in the run's census too: beside a row of the same run that pins it, it conflicts.
+  const splitConflictRows = [
+    injectedRow("split-conflict", { matched_ids: ["L"], dropped: ["L"], propensity: undefined, content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } }),
+    injectedRow("split-conflict", {}),
+    verdict("split-conflict"),
+  ];
+  const splitConflict = foldLearningOutcomes(splitConflictRows);
+  assert.deepEqual(splitConflict.excludedRevision, { ...zero, conflicting: 2 });
+  assert.deepEqual(splitConflict.learnings, []);
+  // THE PRODUCER'S OWN ROW for the reviewer's draw (two matching copies, project and user-overall):
+  // the split id is counted as ambiguous, never dropped and never credited.
+  const { run: splitRun, id: splitId } = copySplitRun();
+  const producerSplitRows = [splitRun.row, verdict(String(splitRun.row.run_id))];
+  const producerSplit = foldLearningOutcomes(producerSplitRows);
+  assert.equal(producerSplit.excludedRevision.ambiguous, 1, `${splitId} is counted as ambiguous`);
+  assert.equal(producerSplit.learnings.some((l) => l.id === splitId), false);
+
+  // THE FOLD-SIDE INVARIANT, stated apart from the fold: every exposure of an unmasked run with a
+  // verdict (an entry with a ledgered share in (0, 1], or an id in both arms) lands in exactly one
+  // place: one exclusion counter, the trim, or one cohort observation. None is ever dropped silently.
+  const exposures = (all: Row[]): number => {
+    const verdicts = new Set(all.filter((r) => r.step === "verdict").map((r) => r.run_id));
+    return all
+      .filter((r) => r.step === "learnings.injected" && r.masked !== true && verdicts.has(r.run_id))
+      .reduce((n, r) => {
+        const shares = Object.entries((r.propensity ?? {}) as Record<string, unknown>).filter(([, sp]) => typeof sp === "number" && sp > 0 && sp <= 1);
+        const droppedIds = new Set((r.dropped ?? []) as string[]);
+        const both = ((r.matched_ids ?? []) as string[]).filter((m) => droppedIds.has(m));
+        return n + new Set([...shares.map(([sid]) => sid), ...both]).size;
+      }, 0);
+  };
+  const placed = (all: Row[]): number => {
+    const folded = foldLearningOutcomes(all);
+    const excluded = Object.values(folded.excludedRevision).reduce((sum, n) => sum + n, 0);
+    return excluded + folded.excludedTrimmed + folded.learnings.reduce((sum, l) => sum + l.injected + l.dropped, 0);
+  };
+  for (const fixture of [rows, splitRows, splitConflictRows, producerSplitRows, trimmedRows, [...rows, ...splitRows, ...producerSplitRows]]) {
+    assert.ok(exposures(fixture) > 0);
+    assert.equal(placed(fixture), exposures(fixture), "every exposure is placed exactly once");
+  }
+
   // A HISTORICAL knowledge.measured row (pooled by id, before revisions) is labelled legacy, never
   // shown as if it measured today's content.
   const historical = {
@@ -637,6 +820,10 @@ test("W1-T11115: learning outcome revision preserves randomized exposure bounds 
   // THE PRODUCER ROW: digests only, beside the unchanged propensity and masking fields.
   const { row, maskedRow } = producerRun();
   assert.ok(!JSON.stringify(row).includes(RAW_FACT_SENTINEL), "no raw learning content enters the ledger");
+  // Nor on the copy-split path: two matching copies of one id ledger a marker, never either fact.
+  const { run: splitRun, id: splitId } = copySplitRun();
+  assert.ok(!JSON.stringify(splitRun.row).includes(RAW_FACT_SENTINEL), "no raw learning content enters the ledger");
+  assert.equal((splitRun.row.content_ids as Record<string, string>)[splitId], AMBIGUOUS_LEARNING_CONTENT);
   assert.equal(row.masked, false);
   assert.match(String(row.usage_sha), /^[0-9a-f]{16}$/);
   const ids = row.content_ids as Record<string, string>;

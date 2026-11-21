@@ -27,6 +27,10 @@ import { fixDispatchCountByRun } from "./retro.js";
  * `excludedRevision`. It is never given the current corpus's bytes: this fold reads the ledger only.
  * A learning id is free corpus text (`__proto__` and `constructor` load), so every id-keyed lookup
  * here is a Map or an own-property read, and a produced id-keyed record has no prototype.
+ * An id is not unique across layers either: a project and a user-overall copy of one id can both
+ * match a task. The producer counts the draw per copy, so such an id keeps its share and its
+ * `ambiguous` marker, and the fold reads an id listed in BOTH arms as an exposure it counts and
+ * never credits (see {@link foldLearningOutcomes}).
  */
 
 /** Propensities outside [TRIM, 1 - TRIM] are excluded: an inverse weight of 20+ lets one run
@@ -54,7 +58,7 @@ export interface LearningOutcome {
 export interface LearningOutcomeReport {
   /** Earliest and latest `ts` among the runs that contributed an observation. */
   window?: { from: string; to: string };
-  /** Runs with contested propensities and a terminal verdict. */
+  /** Runs with a terminal verdict whose row ledgered shares or listed an id in both arms. */
   runs: number;
   excludedNoVerdict: number;
   excludedMasked: number;
@@ -77,18 +81,26 @@ export interface RevisionExclusions {
   /** The draw's snapshot held this id more than once with different content. */
   ambiguous: number;
   /** One run's rows for the same entry name more than one claim: two different revisions, or a
-   *  revision beside a row that names none. The check reads EVERY row of the run that contests the
+   *  revision beside a row that names none. The check reads EVERY row of the run that exposes the
    *  entry, before the trim and every other exclusion, so a trimmed row still voids the exposure. */
   conflicting: number;
-  /** No identity for the contested entry, or it is not listed in exactly one of selected and dropped. */
+  /** No identity for the exposed entry, no ledgered share for it, or it is not listed in exactly one of
+   *  selected and dropped. An id listed in both arms always lands here, or in an earlier reason. */
   unresolved: number;
 }
 
-/** Keep only the entries the budget cut decided (0 < p < 1); `undefined` when none were. The result
- *  is a learnings.ts `learningIdRecord` (no prototype), so an id such as `__proto__` stays a key. */
-export function contestedPropensities(propensity: Record<string, number> | undefined): Record<string, number> | undefined {
+/** Keep only the entries the budget cut decided; `undefined` when none were. An entry is decided when
+ *  its share is strictly between 0 and 1, or when the draw names it in `contestedIds` (learnings.ts's
+ *  `selectLearnings`): an id whose copies split the draw is contested even at a pooled share of 1,
+ *  and keeps that share here. The result is a learnings.ts `learningIdRecord` (no prototype), so an
+ *  id such as `__proto__` stays a key. */
+export function contestedPropensities(
+  propensity: Record<string, number> | undefined,
+  contestedIds: Iterable<string> = [],
+): Record<string, number> | undefined {
   if (propensity === undefined) return undefined;
-  const contested = Object.entries(propensity).filter(([, p]) => p > 0 && p < 1);
+  const decided = new Set(contestedIds);
+  const contested = Object.entries(propensity).filter(([id, p]) => (p > 0 && p < 1) || decided.has(id));
   return contested.length > 0 ? learningIdRecord(contested) : undefined;
 }
 
@@ -146,22 +158,40 @@ const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
  *  identity, so it can never collide with one. */
 const NO_SINGLE_REVISION = "\u0000none";
 
-const isContested = (p: unknown): p is number => typeof p === "number" && p > 0 && p < 1;
+/** A ledgered share: in (0, 1]. The producer ledgers only contested entries, and an id whose copies
+ *  split the draw is contested at a pooled share of 1 (learnings.ts's `selectLearnings`). */
+const isLedgeredShare = (p: unknown): p is number => typeof p === "number" && p > 0 && p <= 1;
 
 /** One run's draws of one entry. */
 const exposureKey = (runId: string, id: string): string => `${runId}\u0000${id}`;
 
+/** The exposures one `learnings.injected` row records, each id with its ledgered share: every entry
+ *  the row ledgers a share for, and every id the row lists in BOTH arms, with or without a share. A
+ *  both-arms id is one id whose copies split the draw: one reached the prompt and another did not.
+ *  The fold can never credit it, so it is an exposure only to be COUNTED, never silently dropped.
+ *  `undefined` when the row records no draw at all: no share record and no both-arms id. */
+function exposuresOf(r: Record<string, unknown>): Map<string, number | undefined> | undefined {
+  const propensity = r.propensity;
+  const hasShares = propensity !== null && typeof propensity === "object";
+  const dropped = new Set(stringList(r.dropped));
+  const bothArms = stringList(r.matched_ids).filter((id) => dropped.has(id));
+  if (!hasShares && bothArms.length === 0) return undefined;
+  const exposures = new Map<string, number | undefined>();
+  if (hasShares) {
+    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) if (isLedgeredShare(p)) exposures.set(id, p);
+  }
+  for (const id of bothArms) if (!exposures.has(id)) exposures.set(id, undefined);
+  return exposures;
+}
+
 /** Every revision claim each exposure (one run's draws of one entry) received, from EVERY
- *  `learnings.injected` row that contests the entry: trimmed, masked or verdict-less alike. Read
+ *  `learnings.injected` row that exposes the entry: trimmed, masked or verdict-less alike. Read
  *  before any observation is withheld, so a conflict on a row the trim drops is still seen. */
 function revisionClaimsByExposure(all: readonly Record<string, unknown>[]): Map<string, Set<string>> {
   const claims = new Map<string, Set<string>>();
   for (const r of all) {
     if (r.step !== "learnings.injected" || typeof r.run_id !== "string") continue;
-    const propensity = r.propensity;
-    if (propensity === null || typeof propensity !== "object") continue;
-    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
-      if (!isContested(p)) continue;
+    for (const id of exposuresOf(r)?.keys() ?? []) {
       const revision = revisionOf(r.content_ids, id);
       const exposure = exposureKey(r.run_id, id);
       const seen = claims.get(exposure) ?? new Set<string>();
@@ -175,14 +205,17 @@ function revisionClaimsByExposure(all: readonly Record<string, unknown>[]): Map<
 /** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
  *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted.
  *
- *  THE COUNTING RULE: each contested entry observation of an unmasked run with a verdict lands in
- *  exactly ONE place, the first of these that applies:
+ *  THE COUNTING RULE: each exposure of an unmasked run with a verdict (an entry its row ledgers a
+ *  share for, or an id its row lists in both arms: see `exposuresOf`) lands in exactly ONE place,
+ *  the first of these that applies:
  *  1. `excludedRevision.conflicting`: the exposure (over EVERY row of the run) names more than one claim;
  *  2. `excludedRevision.{legacy, malformed, ambiguous, unresolved}`: the row names no single revision;
- *  3. `excludedRevision.unresolved`: the entry is not listed in exactly one of selected and dropped;
+ *  3. `excludedRevision.unresolved`: the row ledgers no share for it, or does not list it in exactly
+ *     one of selected and dropped. A both-arms id never passes this step;
  *  4. `excludedTrimmed`: its propensity is outside [trim, 1 - trim];
  *  5. its {id, revision} cohort.
- *  Identity comes before the trim, so a trimmed row can never hide an unresolved identity. */
+ *  Identity comes before the trim, so a trimmed row can never hide an unresolved identity, and an
+ *  id in both arms is counted under its own reason: `ambiguous` when its copies differ. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -212,8 +245,8 @@ export function foldLearningOutcomes(
   let to: string | undefined;
   for (const r of all) {
     if (r.step !== "learnings.injected" || typeof r.run_id !== "string") continue;
-    const propensity = r.propensity;
-    if (propensity === null || typeof propensity !== "object") continue;
+    const exposures = exposuresOf(r);
+    if (exposures === undefined) continue;
     if (r.masked === true) {
       report.excludedMasked++;
       continue;
@@ -231,8 +264,7 @@ export function foldLearningOutcomes(
     const clean = verdict === "merged" && (fixes.get(r.run_id) ?? 0) === 0;
     const selected = new Set(stringList(r.matched_ids));
     const dropped = new Set(stringList(r.dropped));
-    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
-      if (!isContested(p)) continue;
+    for (const [id, p] of exposures) {
       if (claimsByExposure.get(exposureKey(r.run_id, id))!.size > 1) {
         report.excludedRevision.conflicting++;
         continue;
@@ -243,7 +275,7 @@ export function foldLearningOutcomes(
         continue;
       }
       const { contentId } = revision;
-      if (selected.has(id) === dropped.has(id)) {
+      if (p === undefined || selected.has(id) === dropped.has(id)) {
         report.excludedRevision.unresolved++;
         continue;
       }
