@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
+import { type ReviewCommandHost, runReview } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { meaningOfStep } from "#src/lib/ledger-steps.js";
+import type { ReviewReplayInput } from "#src/lib/review-outcome-class.js";
 import { evaluateRoutingExperimentResult, requiredRoutingTasksPerArm } from "#src/lib/routing-experiment-result.js";
 import { experimentDrawSeed, ROUTING_EXPERIMENTS } from "#src/lib/routing-experiments.js";
 import {
@@ -18,7 +20,7 @@ import {
   routingPolicyFloor,
   type RoutingPolicyEstimate,
 } from "#src/lib/routing-policy-estimate.js";
-import type { WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
 import {
   type ProviderCapacity,
   ROUTING_DRAW_METHOD,
@@ -27,6 +29,9 @@ import {
   selectWorkerProvider,
   spawnDecisionPoint,
 } from "#src/lib/worker-provider.js";
+import { ledgeredNonDispatchSpawn } from "#src/run-task.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { buildMeasurementCadenceDaemonHooks } from "#test/helpers/run-task-test.js";
 
 type Row = Record<string, unknown>;
@@ -598,86 +603,130 @@ test("W1-T14146: the measurement cadence writes one routing.policy.estimate row 
   }
 });
 
-test("W1-T14146: the cadence's estimate carries the review pipeline from the review lane's own rows, whose receipt names no task class", async () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-routing-policy-review-"));
+const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
+
+/** The review lane run for real (`runReview`, src/cli/commands/review.ts) through to its reviewer. The reviewer's
+ *  spawn is the production receipt writer, run-task.ts's `ledgeredNonDispatchSpawn("review", …)`, given whatever work
+ *  `runReview` passes it; only the provider call under it is a fixture, routed by the production auction and
+ *  returning a passing verdict. Returns the rows the writer ledgered, each `ts` pinned to `at(n)`. */
+async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">,
+  n: number): Promise<Row[]> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-routing-policy-review-lane-"));
+  const shim = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
+    { when: "/commits/", stdout: '{"statuses":[]}' },
+    { when: "/pulls/", stdout: JSON.stringify({ number: 1, html_url: "https://github.com/acme/remudero/pull/1", updated_at: "t", body: "", head: { ref: "b", sha: HEAD } }) },
+    { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD }) },
+    { when: "pr view", stdout: '{"state":"OPEN"}' },
+    { when: "pr diff", stdout: "" },
+    { when: "api ", stdout: "{}" },
+  ]);
+  const oldPath = process.env.PATH;
   try {
-    // The review lane's assignment rows come from its production writer, `benchmarkNonDispatchSpawn("review")`
-    // (src/cli/commands/review.ts), fed the assignment the auction hands every routed spawn.
-    const laneRoot = join(root, "lane");
-    const reviews = 24;
-    const task = (i: number) => `W1-T${700 + i}`;
-    const served = (i: number) => i % 2 === 0 ? "claude" : "codex";
-    const assignmentId = (i: number) => `review-assignment-${i}`;
-    const spawn = benchmarkNonDispatchSpawn("review", async (args) => {
-      const i = Number(args.taskId!.slice("W1-T".length)) - 700;
-      const provider = served(i);
+    process.env.PATH = `${shim.dir}:${oldPath}`;
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+    const provider = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+      const routed = auction({ claude: 30, codex: 30 }, { unit: "spawn", taskId: args.taskId!, attempt: args.runId!, point: spawnDecisionPoint(args) });
+      const id = `${args.runId}-reviewer`;
       args.onSelectionAssignment?.({
-        version: 1, id: assignmentId(i), phase: "pre-execution",
-        requested: { model: "reviewer-model", effort: "high", maxTurns: 40 },
-        selected: { provider, model: `${provider}-model`, effort: "high" },
-        routing: { mode: "multi-provider", selectionPath: "auction",
-          policy: { preference: "automatic", reservePercent: 5, provenance: "default" },
-          decision: { rule: "headroom-auction", capability: "balanced", considered: [], headroomPercent: {} },
-          propensity: selectionPropensity({ selected: provider, considered: ["claude", "codex"], selection: { draw: {
-            method: ROUTING_DRAW_METHOD, value: 0.25, seed: "0000abcd",
-            probabilities: [{ provider: "claude", probability: 0.5 }, { provider: "codex", probability: 0.5 }] } } }) },
+        version: 1, id, phase: "pre-execution", requested: { model: args.model!, effort: args.effort!, maxTurns: args.maxTurns ?? null },
+        selected: { provider: routed.served, model: `${routed.served}-model`, effort: args.effort! },
+        routing: { mode: "multi-provider", selectionPath: "auction", policy: { preference: "automatic", reservePercent: 5, provenance: "default" },
+          decision: { rule: "headroom-auction", capability: "balanced", considered: [], headroomPercent: {} }, propensity: routed.propensity },
         candidates: [],
       } as unknown as WorkerSelectionAssignment);
-      return { sessionId: `review-session-${i}`, costUsd: 0.1, numTurns: 1, text: "VERDICT", blocks: [], stderr: "",
-        subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: `${provider}-model`,
-        effort: "high", tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
-        qualitySuspect: false, workerDurationMs: 5, selectionAssignmentId: assignmentId(i) } as unknown as WorkerResult;
-    });
-    for (let i = 0; i < reviews; i++) {
-      await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "review",
-        config: { root: laneRoot } as Config, runId: `review-PR${100 + i}-1795000000000`, taskId: task(i) });
-    }
-    const laneRows = readFileSync(join(laneRoot, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
-      .filter((row) => row.step === "worker.assignment");
-    assert.equal(laneRows.length, reviews);
-    for (const row of laneRows) {
-      assert.equal(row.lane, "review");
-      assert.deepEqual((row.benchmark_run as { work: { taskClass: unknown } }).work.taskClass,
-        { state: "unavailable", reason: "not-recorded-at-assignment" }, "production's review receipt names no task class");
-    }
-    // Each task's implement dispatch wrote its `run.start` (src/cli/commands/run-task-verb.ts) before its PR was
-    // reviewed; the review then posted its verdict naming the assignment that served it. Timestamps are pinned.
-    const rows: Row[] = laneRows.flatMap((assignment, i) => {
-      const id = assignmentId(i);
-      const provider = served(i);
-      const runStart: Row = { ts: at(3 * i), run_id: `${task(i)}-1795000000000`, task_id: task(i), step: "run.start", repo: "remudero",
-        type: "implement", risk: "medium", task_class: "src", mount_class: "src", provider: "claude", worker_role: "implementer" };
-      const posted: Row = { ts: at(3 * i + 2), run_id: assignment.run_id, task_id: task(i), step: "review.posted", lane: "review",
-        context: "remudero-review", state: Math.floor(i / 2) % 2 === 0 ? "failure" : "success", head_sha: `head-${i}`,
-        pr_url: `https://github.com/craigoley/remudero/pull/${100 + i}`, evaluator_provenance: { provider,
-          requestedModel: "reviewer-model", servedModel: `${provider}-model`, effort: "high", sessionId: `review-session-${i}`,
-          routedModel: `${provider}-model`, selectionAssignmentId: id } };
-      // The last review's task had no dispatch before it: its own run.start comes later, so it names no class.
-      return i === reviews - 1 ? [{ ...assignment, ts: at(3 * i + 1) }, posted, { ...runStart, ts: at(3 * i + 3) }]
-        : [runStart, { ...assignment, ts: at(3 * i + 1) }, posted];
-    });
-    const report = estimateRoutingPolicies(rows, today);
-    assert.deepEqual(report.unplaced, { "no-capability": 0, "no-effort": 0, "no-task-class": 1 });
-    // A lane's own run.start names its lane, not a task class, so it never places that lane's rows.
-    const lane = attemptRows({ task: "TRIAGE-9", id: "triage-1", served: "codex", probabilities: { claude: 0.5, codex: 0.5 },
-      cell: { taskClass: "" }, at: 9000 });
-    const laneStart = { ts: at(8999), run_id: "TRIAGE-9-1795000000000", task_id: "TRIAGE-9", step: "run.start", type: "triage", task_class: "triage" };
-    assert.equal(estimateRoutingPolicies([...rows, laneStart, ...lane], today).unplaced["no-task-class"], 2);
+      return { sessionId: `${id}-session`, costUsd: 0.01, numTurns: 1, text: "REVIEW_VERDICT 1: PASS", blocks: [], stderr: "",
+        subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: `${routed.served}-model`,
+        effort: args.effort, tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
+        qualitySuspect: false, workerDurationMs: 5, selectionAssignmentId: id } as unknown as WorkerResult;
+    };
+    const host: ReviewCommandHost = {
+      GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+      acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+      attributeWorkerStreamEvent: unexpected,
+      ledgeredNonDispatchSpawn: (lane, _raw, known) => ledgeredNonDispatchSpawn(lane, provider, known),
+      lintPlanForReview: unexpected, liveWorkerRunIds: new Set<string>(), materializeReviewWorktree: unexpected,
+      readHeadShaRest: () => HEAD, readMainPlanTreeSha: unexpected,
+      realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+      reviewPostedDescription: (verdict) => verdict.summary, reviewWorkerLockId: (runId) => runId,
+      reviewerClockBoundMs: () => 60_000, reviewSubjectGit: unexpected,
+    };
+    await runReview(host, {
+      owner: "acme", repo: "remudero", prUrl: "https://github.com/acme/remudero/pull/1",
+      task: { ...task, acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-w1-t14146" }] },
+      report: "This report deliberately substantiates nothing.", reviewInputBody: "body",
+      reviewReplaySetupInput: { stage: "setup", plan_only: false, required_semantic: false, criteria_count: 1, risk_present: false,
+        budget_present: false, own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [], ...setup },
+      settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as never,
+      log: () => {}, say: () => {}, account: (r: never) => r, spawnReviewer: true, disarm: () => {},
+      reviewerMount: { model: "sonnet", provider: "claude", effort: "high", maxTurns: 10, contextBudget: 120000 },
+      headCheckoutDir: REPO_ROOT, ledgerPath: join(root, "review-ledger.ndjson"), runId: `review-PR1-${1795000000000 + n}`,
+    } as never);
+    return readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
+      .filter((row) => row.step === "worker.assignment").map((row) => ({ ...row, ts: at(n) }));
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+}
 
+/** Beside a review's assignment row: its task's implement `run.start`, naming `runStartClass`, before it, and the
+ *  review's verdict naming the assignment that served it, after it. */
+function aroundReview(assignment: Row, n: number, runStartClass: string, failed: boolean): Row[] {
+  const task = text(assignment.task_id);
+  return [
+    { ts: at(n - 1), run_id: `${task}-1795000000000`, task_id: task, step: "run.start", type: "implement", risk: "medium",
+      task_class: runStartClass, mount_class: runStartClass, provider: "claude", worker_role: "implementer" },
+    assignment,
+    { ts: at(n + 1), run_id: assignment.run_id, task_id: task, step: "review.posted", lane: "review", context: "remudero-review",
+      state: failed ? "failure" : "success", pr_url: "https://github.com/acme/remudero/pull/1",
+      evaluator_provenance: { selectionAssignmentId: (assignment.worker_assignment as Row).id } },
+  ];
+}
+const text = (value: unknown): string => typeof value === "string" ? value : "";
+
+/** The cadence's own pass over `rows`, written to a fresh state directory: the cell keys it wrote today. */
+async function cadenceCells(rows: Row[]): Promise<string[]> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-routing-policy-cadence-"));
+  try {
     mkdirSync(join(root, "state"));
     writeFileSync(join(root, "state", LEDGER_FILENAME), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-    const hooks = buildMeasurementCadenceDaemonHooks({ config: { root } as Config, now: () => new Date(`${today}T10:00:00.000Z`),
-      verifyHumanCadenceResult: async () => { throw new Error("fixture stops sibling work"); } });
-    await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
-    const written = readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
-      .filter((row) => row.step === ROUTING_POLICY_ESTIMATE_STEP);
-    assert.deepEqual(written.map((row) => row.cell_key), [KEY]);
-    const estimate = written[0]!.estimate as RoutingPolicyEstimate;
-    assert.equal(estimate.pipelines.build, null);
-    assert.equal(estimate.pipelines.review?.n, reviews - 1, "every review whose task class is known is estimated");
-    assert.equal(estimate.pipelines.review?.policies["always-claude"].n, 12, "the even reviews, 0 to 22, were served by Claude");
-    assert.equal(estimate.n, reviews - 1);
+    return (await recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today })).map((estimate) => estimate.cellKey).sort();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("W1-T14146: the review lane's assignment receipt records its PR's plan task class, and the cadence estimates the review in that cell", async () => {
+  // A docs-only plan task: deriveTaskClass reads `docs`, the class its implement run's run.start records.
+  const [assignment, ...others] = await reviewedByTheLane({ id: "W1-T14901", files: ["docs/routing.md"] },
+    { untasked: false, head_task_resolved: true }, 10);
+  assert.deepEqual(others, [], "the reviewer was assigned once");
+  assert.equal(assignment!.lane, "review");
+  assert.equal(assignment!.task_id, "W1-T14901");
+  assert.deepEqual((assignment!.benchmark_run as { work: { taskClass: unknown } }).work.taskClass, { state: "observed", value: "docs" },
+    "the receipt records the reviewed task's class when the reviewer is assigned");
+  // The task's run.start names another class: the receipt's own class places the row, and nothing overrides it.
+  const rows = aroundReview(assignment!, 10, "src", true);
+  const report = estimateRoutingPolicies(rows, today);
+  assert.deepEqual(report.cells.map((c) => c.cellKey), ["balanced/high/docs"]);
+  assert.deepEqual(report.unplaced, { "no-capability": 0, "no-effort": 0, "no-task-class": 0 });
+  assert.equal(report.cells[0]!.pipelines.review?.n, 1, "the review's verdict is estimated in its task's cell");
+  assert.deepEqual(await cadenceCells(rows), ["balanced/high/docs"], "the cadence writes that cell");
+});
+
+test("W1-T14146: a review receipt that recorded no class is counted unplaced, and never takes its task's run.start class", async () => {
+  // The review names a plan task whose record did not resolve at head, so its receipt records no class, though the
+  // task's files would read `docs` and its run.start names `src`.
+  const [assignment] = await reviewedByTheLane({ id: "W1-T14902", files: ["docs/routing.md"] },
+    { untasked: false, head_task_resolved: false }, 20);
+  assert.deepEqual((assignment!.benchmark_run as { work: { taskClass: unknown } }).work.taskClass,
+    { state: "unavailable", reason: "not-recorded-at-assignment" }, "no plan task, so the receipt records no class");
+  const rows = aroundReview(assignment!, 20, "src", false);
+  const report = estimateRoutingPolicies(rows, today);
+  assert.deepEqual(report.cells, [], "no cell is built from a receipt that recorded no class, run.start's included");
+  assert.deepEqual(report.unplaced, { "no-capability": 0, "no-effort": 0, "no-task-class": 1 }, "the row is counted unplaced");
+  assert.deepEqual(await cadenceCells(rows), [], "the cadence writes no cell for it");
 });

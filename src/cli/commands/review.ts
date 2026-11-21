@@ -28,6 +28,7 @@ import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, try
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
+import { deriveTaskClass } from "../../lib/task-class.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -66,7 +67,7 @@ export interface ReviewCommandHost {
   readonly JUDGE_AT_OWN_START_FLAG: string;
   acceptedReviewAttemptId(value: unknown, prNumber?: number): string | undefined;
   attributeWorkerStreamEvent(event: WorkerStreamEvent, assignment: Pick<WorkerSelectionAssignment, "id" | "selected"> | undefined): WorkerStreamEvent;
-  ledgeredNonDispatchSpawn(lane: string, raw?: typeof spawnWorker): typeof spawnWorker;
+  ledgeredNonDispatchSpawn(lane: string, raw?: typeof spawnWorker, known?: { taskClass?: string }): typeof spawnWorker;
   lintPlanForReview(
     headCheckoutDir: string | undefined,
     git?: (cwd: string, args: string[]) => string | Promise<string>,
@@ -560,6 +561,13 @@ export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post:
     await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
       : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
   };
+}
+
+/** W1-T14146: what the reviewer's assignment receipt records of the reviewed work — the class of the PR's plan task,
+ *  `deriveTaskClass` of its files as its implement run records it — and nothing when the review has no plan task
+ *  (untasked, or its task unresolved at head), so the receipt names no class rather than the default one. */
+export function reviewedTaskWork(task: { files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">): { taskClass?: string } {
+  return setup.untasked || !setup.head_task_resolved ? {} : { taskClass: deriveTaskClass({ files: task.files }) };
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -1123,7 +1131,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerClockBoundMs =
           host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
-        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review", undefined, reviewedTaskWork(task, replayInput));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {

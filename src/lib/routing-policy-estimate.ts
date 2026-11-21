@@ -23,11 +23,10 @@ import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
  *   that gave BOTH providers a probability inside `[trim, 1 - trim]`. Every other row is excluded and counted by
  *   {@link RoutingPolicyExclusion}; a row that names no cell is counted in {@link RoutingPolicyReport.unplaced}.
  * - CELL: capability (`routing.decision.capability`) × requested effort × task class (`benchmark_run.work.taskClass`).
- *   A non-dispatch lane's receipt names no class (`nonDispatchBenchmarkWork`): the review lane's and the sweep's fix
- *   rung's rows read `not-recorded-at-assignment`. Such a row takes the `task_class` of its task's latest `run.start`
- *   at or before it ({@link taskClassFromDispatch}): the dispatch's own row, and the field its receipt copies
- *   (`observeBenchmarkWork`). A lane's own `run.start` (triage, retro) names its lane, not a task class, so only a
- *   plan task's counts; a row with neither stays unplaced as `no-task-class`.
+ *   The class is the one the receipt recorded when the worker was assigned, and only that: the review lane's receipt
+ *   records its PR's plan task's class (`reviewedTaskWork`, src/cli/commands/review.ts). A receipt that recorded
+ *   none, such as a review of a PR with no plan task, stays unplaced as `no-task-class` and is counted; its class is
+ *   never borrowed from another row, the task's `run.start` included.
  * - OUTCOME: the ledger-only terminal join routing-experiment-result.ts uses, per pipeline. Its helpers are private
  *   to that module, so the join is restated below ({@link terminalOutcome}); a change to one must change both.
  * - ESTIMATOR: Hajek (self-normalised) weights `1 / selectedProbability`, the estimator knowledge-outcome.ts runs
@@ -226,16 +225,6 @@ function terminalOutcome(row: Row): { pipeline: RoutingPolicyPipeline; positive:
   return undefined;
 }
 
-/** A plan task's id, the shape dispatch-value.ts's `PLAN_TASK_ID` reads `run.start` by: a lane's own id
- *  (`TRIAGE-<feedback>`, `PR-<n>`) never matches. */
-const PLAN_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
-
-/** The class a dispatch's `run.start` gave its task, or undefined for any other row. */
-function taskClassFromDispatch(row: Row): { task: string; taskClass: string } | undefined {
-  const task = text(row.task_id);
-  const taskClass = text(row.task_class);
-  return row.step === "run.start" && PLAN_TASK_ID.test(task) && taskClass ? { task, taskClass } : undefined;
-}
 
 interface Observation { task: string; served: string; weight: number; claude: number; codex: number; ts: string }
 type Admission = { reason: RoutingPolicyExclusion } | Omit<Observation, "task" | "ts">;
@@ -440,11 +429,7 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
   type Placed = { task: string; ts: string; routing: Row; served: string }
     & ({ unplaced: RoutingPolicyUnplaced } | { cell: RoutingPolicyEstimate["cell"] });
   const assignments = new Map<string, Placed>();
-  // Rows are in time order, so this holds each task's latest dispatch class at the row being read.
-  const dispatchClass = new Map<string, string>();
   for (const row of rows) {
-    const dispatched = taskClassFromDispatch(row);
-    if (dispatched) { dispatchClass.set(dispatched.task, dispatched.taskClass); continue; }
     const assignment = object(row.worker_assignment);
     const id = text(assignment.id);
     if (row.step !== "worker.assignment" || !id) continue;
@@ -452,7 +437,8 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
     const capability = text(object(routing.decision).capability);
     const effort = text(object(assignment.requested).effort);
     const classEvidence = object(object(object(row.benchmark_run).work).taskClass);
-    const taskClass = classEvidence.state === "observed" ? text(classEvidence.value) : dispatchClass.get(text(row.task_id)) ?? "";
+    // Only the class this receipt recorded: one it did not record is never borrowed.
+    const taskClass = classEvidence.state === "observed" ? text(classEvidence.value) : "";
     const unplaced = !capability ? "no-capability" : !effort ? "no-effort" : !taskClass ? "no-task-class" : undefined;
     assignments.set(id, { task: text(row.task_id) || id, ts: text(row.ts), routing,
       served: text(object(assignment.selected).provider), ...(unplaced ? { unplaced } : { cell: { capability, effort, taskClass } }) });
@@ -523,8 +509,7 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
 }
 
 /** The ledger steps the estimate reads, beside its own rows (read back so a day is written once). */
-export const ROUTING_POLICY_SOURCE_STEPS = ["worker.assignment", "verdict", "verdict.merged", "fix.done", "review.posted", "pr.opened",
-  "run.start"] as const;
+export const ROUTING_POLICY_SOURCE_STEPS = ["worker.assignment", "verdict", "verdict.merged", "fix.done", "review.posted", "pr.opened"] as const;
 
 /** The measurement cadence's pass: one `routing.policy.estimate` row per cell per UTC day. A cell already written
  *  today is frozen for that day, concluded or not; the next day estimates it again from the larger log. */
@@ -538,8 +523,7 @@ export async function recordRoutingPolicyEstimates(opts: { stateDir: string; tod
   for await (const row of openLedgerUnion(opts.stateDir, { step: [...ROUTING_POLICY_SOURCE_STEPS, ROUTING_POLICY_ESTIMATE_STEP],
     onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
     onUnreadDirectory: (path) => unread.push(path) })) {
-    // A run.start carries the task's whole shape block; the estimate reads its class alone, so keep only that.
-    rows.push(row.step === "run.start" ? { ts: row.ts, step: row.step, task_id: row.task_id, task_class: row.task_class } : row);
+    rows.push(row);
   }
   if (unread.length > 0) throw new Error(`routing policy ledger unreadable: ${unread.join(", ")}`);
   const written = new Set(rows.flatMap((row) =>

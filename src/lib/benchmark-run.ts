@@ -344,9 +344,11 @@ export function observeBenchmarkWork(work: BenchmarkWorkInput, step: string, ext
     reconSizeEstimate: unavailable(RECON_SIZE_GAPS[recon]) } };
 }
 
-/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap. */
-export function nonDispatchBenchmarkWork(lane: string): BenchmarkWorkInput {
-  return { shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
+/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap, except a class
+ *  its caller knows when the worker is assigned (the review lane's, its PR's plan task: W1-T14146). */
+export function nonDispatchBenchmarkWork(lane: string, known: Pick<BenchmarkWorkInput, "taskClass"> = {}): BenchmarkWorkInput {
+  return { ...(known.taskClass ? { taskClass: known.taskClass } : {}),
+    shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
 }
 
 export interface BenchmarkRunAssignmentInput {
@@ -653,9 +655,10 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
 }
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
- * caller's existing assignment sink remains authoritative when one is supplied. */
+ * caller's existing assignment sink remains authoritative when one is supplied. `known` is the work the
+ * caller knows at assignment ({@link nonDispatchBenchmarkWork}); absent, the receipt records none. */
 export function benchmarkNonDispatchSpawn(
-  lane: string, raw: typeof spawnWorker = spawnWorker,
+  lane: string, raw: typeof spawnWorker = spawnWorker, known: Pick<BenchmarkWorkInput, "taskClass"> = {},
 ): typeof spawnWorker {
   return async (requested) => {
     // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.
@@ -703,7 +706,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, known), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {
