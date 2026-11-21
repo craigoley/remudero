@@ -339,13 +339,25 @@ test("an instrument diff pairs each value with its own key, whatever the hunk's 
   const exempt = (from: string, to: string) => `-  "exempt": ${from},\n+  "exempt": ${to},\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n`;
   assert.equal(classify(exempt('["a.ts", "b.ts"]', '[\n+    "a.ts",\n+    "b.ts"\n+  ]')), "tightening");
   assert.equal(classify(exempt('["a.ts", "b.ts"]', '["b.ts", "a.ts"]')), "undetermined");
-  // Past INSTRUMENT_ALIGN_CELLS a change block's tokens stay unaligned, read line by line: the same re-laid entries
-  // beside the same tightening read `tightening` in a block under the budget and `undetermined` in one over it.
+  // A key moved whole, whatever its value, is a reordering, in its hunk or another, even one that starts inside an
+  // object; a moved container whose contents changed is not.
+  const moved = (exempt: string) => `-  "path": "src/a.ts",\n-  "exempt": ["a.ts"],\n   "judgeMinPaired": 200,\n-  "judgeMinAgreeShare": 0.98\n` +
+    `+  "judgeMinAgreeShare": 0.99,\n+  "exempt": ${exempt},\n+  "path": "src/a.ts"\n`;
+  assert.equal(classify(moved('["a.ts"]')), "tightening");
+  assert.equal(classify(moved('[\n+    "a.ts"\n+  ]')), "tightening");
+  assert.equal(classify(moved('["a.ts", "b.ts"]')), "undetermined");
+  assert.equal(classify('-  "exempt": ["a.ts"],\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n', '   }\n+  , "exempt": ["a.ts"]\n'), "tightening");
+  assert.equal(classify('-  "judgeMinPaired": 200,\n', '   }\n+  , "judgeMinPaired": 250\n'), "tightening");
+  assert.equal(classify('-  "judgeMinPaired": 200,\n', '   }\n+  , "judgeMinPaired": 150\n'), "loosening");
+  // Past INSTRUMENT_ALIGN_CELLS a change block's tokens stay unaligned, read line by line: re-indented array entries
+  // beside the same two raises read `tightening` in a block under the budget and `undetermined` in one over it, where
+  // only a whole keyed pair can still be found moved and the entries' own brackets cannot.
   const block = (entries: number) => {
-    const rows = (indent: string) => Array.from({ length: entries }, (_, i) => `${indent}"k${i}": { "v": ${i} },`).join("\n");
-    return `-  "judgeMinPaired": 200,\n${rows("-  ")}\n-  "judgeMinAgreeShare": 0.98\n+  "judgeMinPaired": 250,\n${rows("+    ")}\n+  "judgeMinAgreeShare": 0.99\n`;
+    const rows = (indent: string, raise: number) => Array.from({ length: entries }, (_, i) =>
+      `${indent}{ "k${i}": ${i === 0 || i === entries - 1 ? i + raise : i} }${i === entries - 1 ? "" : ","}`).join("\n");
+    return `   "list": [\n${rows("-    ", 0)}\n${rows("+      ", 1)}\n   ]\n`;
   };
-  assert.ok((8 * 50 + 5) ** 2 < INSTRUMENT_ALIGN_CELLS && (8 * 1000) ** 2 > INSTRUMENT_ALIGN_CELLS, "positive control: the two blocks straddle it");
+  assert.ok((6 * 50) ** 2 < INSTRUMENT_ALIGN_CELLS && (6 * 1000 - 4) ** 2 > INSTRUMENT_ALIGN_CELLS, "positive control: the two blocks straddle it");
   assert.equal(classify(block(50)), "tightening");
   assert.equal(classify(block(1000)), "undetermined");
   // Tokens no pair holds: an array element, a bare string, a colon with no key, a stray literal, a non-JSON run.

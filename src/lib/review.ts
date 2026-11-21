@@ -10760,11 +10760,21 @@ function isInstrumentProvenanceKey(key: string): boolean {
  *  token, so a blank or re-indented line holds none and a line break moves none. */
 interface InstrumentToken { kind: DiffLine["kind"]; text: string; str?: string; num?: number; punct?: string; literal: boolean }
 
-/** One key/value pair one side of a hunk shows (old: context + removed lines; new: context + added). `value` is the
- *  number, the string, or `undefined` for any other JSON value; `tokens` are its key, colon and value, wherever the
+/** One key/value pair one side of hunk `hunk` shows (old: context + removed lines; new: context + added). `value` is
+ *  the number, the string, or `undefined` for any other JSON value; `tokens` are its key, colon and value, wherever the
  *  lines put them (`"k":` then `0.98`, or `"k"` then `: 0.98`). `path` is the key under the keyed containers the hunk
- *  opens around it, after the containers it closes first, so a key moved into another object is another pair. */
-interface InstrumentPair { key: string; path: string; value: number | string | undefined; tokens: [number, number, number] }
+ *  opens around it, so a key moved into another object is another pair; `full` adds how many containers the hunk
+ *  closed first, which only pairs of one hunk share a starting point for. `whole` is every token of the value, a
+ *  container's to its closing bracket, and `end` the last, when the hunk holds them. */
+interface InstrumentPair {
+  hunk: number; key: string; path: string; full: string; value: number | string | undefined; tokens: [number, number, number];
+  end?: number; whole?: string;
+}
+
+/** Whether `a` and `b` can be one key: the same {@link InstrumentPair.path}, and, within one hunk, the same `full`. */
+function samePlace(a: InstrumentPair, b: InstrumentPair): boolean {
+  return a.path === b.path && (a.hunk !== b.hunk || a.full === b.full);
+}
 
 /** What a token is on one side, and the containers around it there. An `orphan` is a token no pair can hold: a number
  *  or string whose key lies outside the hunk (or an array element), a colon with no key, a stray literal, a non-JSON run. */
@@ -10792,12 +10802,16 @@ function hunkTokens(hunk: ReadonlyArray<{ kind: DiffLine["kind"]; text: string }
 
 /** One side of one hunk read as JSON: its pairs, and every token's {@link InstrumentRole}. W1-T3133 read one line at
  *  a time, so a key and its value on different lines (valid JSON) read as no pair (PR #20033's second review). */
-function instrumentSide(tokens: readonly InstrumentToken[], skip: DiffLine["kind"]): { pairs: InstrumentPair[]; roles: Map<number, InstrumentRole> } {
+function instrumentSide(tokens: readonly InstrumentToken[], skip: DiffLine["kind"], hunk: number): {
+  pairs: InstrumentPair[]; roles: Map<number, InstrumentRole>;
+} {
   const pairs: InstrumentPair[] = [];
   const roles = new Map<number, InstrumentRole>();
-  const open: Array<string | undefined> = []; // each container this side opens, with its key when it has one
+  const open: Array<{ pair?: InstrumentPair; from: number }> = []; // each container this side opens, and its pair if keyed
+  const seen: number[] = []; // this side's tokens so far
   let closedAbove = 0; // containers closed here that the hunk never opened
-  const scope = () => `${closedAbove}${open.flatMap((k) => (k === undefined ? [] : [`/${JSON.stringify(k)}`])).join("")}`;
+  const chain = () => open.flatMap((o) => (o.pair === undefined ? [] : [`/${JSON.stringify(o.pair.key)}`])).join("");
+  const scope = () => `${closedAbove}${chain()}`;
   const role = (id: number, name: InstrumentRole["name"]) => roles.set(id, { name, scope: scope() });
   let candidate: { key: string; id: number } | undefined; // a string that a colon would make a key
   let pending: { key: string; ids: [number, number] } | undefined; // a key and its colon, awaiting a value
@@ -10807,15 +10821,18 @@ function instrumentSide(tokens: readonly InstrumentToken[], skip: DiffLine["kind
   };
   tokens.forEach((t, id) => {
     if (t.kind === skip) return;
+    seen.push(id);
     const opens = t.punct === "{" || t.punct === "[";
     if (pending && (t.str !== undefined || t.num !== undefined || t.literal || opens)) {
       // A string or number settles the pending key with itself; a container or a literal with a non-scalar value.
       const [keyId, colonId] = pending.ids;
-      pairs.push({ key: pending.key, path: `${scope()}/${JSON.stringify(pending.key)}`, value: t.str ?? t.num, tokens: [keyId, colonId, id] });
+      const path = `${chain()}/${JSON.stringify(pending.key)}`;
+      const pair: InstrumentPair = { hunk, key: pending.key, path, full: `${closedAbove}${path}`, value: t.str ?? t.num, tokens: [keyId, colonId, id] };
+      pairs.push(opens ? pair : { ...pair, end: id, whole: t.text });
       role(keyId, "key");
       role(colonId, "colon");
       role(id, "value");
-      if (opens) open.push(pending.key);
+      if (opens) open.push({ pair: pairs.at(-1), from: seen.length - 1 });
       pending = undefined;
     } else if (t.str !== undefined) {
       strand();
@@ -10826,10 +10843,11 @@ function instrumentSide(tokens: readonly InstrumentToken[], skip: DiffLine["kind
     } else {
       strand(); // anything else strands a key still waiting for its value, or a bare string
       const closes = t.punct === "}" || t.punct === "]";
-      if (closes && open.length > 0) open.pop();
-      else if (closes) closedAbove++;
+      const closed = closes ? open.pop() : undefined;
+      if (closes && closed === undefined) closedAbove++;
+      if (closed?.pair) Object.assign(closed.pair, { end: id, whole: seen.slice(closed.from).map((i) => tokens[i]!.text).join(" ") });
       role(id, t.punct === "," ? "comma" : opens || closes ? "bracket" : "orphan");
-      if (opens) open.push(undefined);
+      if (opens) open.push({ from: seen.length - 1 });
     }
   });
   strand();
@@ -10894,8 +10912,8 @@ function tokenPartners(tokens: readonly InstrumentToken[]): Map<number, number> 
   return partner;
 }
 
-/** Every pair the instrument's diff changes, hunk by hunk (a key never pairs across a hunk boundary). A new pair is
- *  unchanged when its three tokens partner the three of one old pair under the same path, and any other token when
+/** Every pair the instrument's diff changes, read hunk by hunk (a key never pairs across a hunk boundary). A new pair
+ *  is unchanged when its three tokens partner the three of one old pair under the same path, and any other token when
  *  its partner has the same role in the same scope. `events` are the new side's changed pairs and its changed tokens
  *  no pair holds (`undefined`), in order; `dropped`, an old orphan changed (an array entry removed). Lines before a
  *  file's first `@@` form one hunk, as {@link walkDiff} keeps them. */
@@ -10926,32 +10944,53 @@ function instrumentDiffPairs(diff: string, file: string): {
     const kind: DiffLine["kind"] = raw.startsWith("+") ? "add" : raw.startsWith("-") ? "del" : "ctx";
     hunk.push({ kind, text: kind === "ctx" && !raw.startsWith(" ") ? raw : raw.slice(1) });
   }
-  const removed: InstrumentPair[] = [];
+  const read = hunks.map((h, hunk) => {
+    const tokens = hunkTokens(h);
+    const [before, after, partner] = [instrumentSide(tokens, "add", hunk), instrumentSide(tokens, "del", hunk), tokenPartners(tokens)];
+    const keyAt = new Map(after.pairs.map((p) => [p.tokens[0], p]));
+    const kept = new Set<InstrumentPair>();
+    const gone: InstrumentPair[] = [];
+    for (const p of before.pairs) {
+      const q = keyAt.get(partner.get(p.tokens[0]) ?? -1);
+      if (q?.full === p.full && p.tokens.every((id, i) => partner.get(id) === q.tokens[i])) kept.add(q);
+      else gone.push(p);
+    }
+    const came = after.pairs.filter((q) => !kept.has(q));
+    return { tokens, before, after, partner, gone, came, moved: { old: new Set<number>(), new: new Set<number>() } };
+  });
+  // A pair that reappears whole under the same path, in its hunk or another, was moved (a reordered key, whatever its
+  // value): neither it nor any token inside it changed. An old pair accounts for one new pair, never two.
+  const span = (p: InstrumentPair) => Array.from({ length: p.end! - p.tokens[0] + 1 }, (_, i) => p.tokens[0] + i);
+  const sig = (p: InstrumentPair) => `${p.path}\u0000${p.whole}`;
+  const waiting = new Map<string, Array<{ p: InstrumentPair; at: Set<number> }>>();
+  for (const { gone, moved } of read) {
+    for (const p of gone) if (p.whole !== undefined) waiting.set(sig(p), waiting.get(sig(p)) ?? []).get(sig(p))!.push({ p, at: moved.old });
+  }
+  for (const { came, moved } of read) {
+    for (const q of came) {
+      if (q.whole === undefined || moved.new.has(q.tokens[0])) continue;
+      const match = waiting.get(sig(q))?.find(({ p, at }) => samePlace(p, q) && !span(p).some((id) => at.has(id)));
+      if (match === undefined) continue;
+      for (const id of span(match.p)) match.at.add(id);
+      for (const id of span(q)) moved.new.add(id);
+    }
+  }
+  const removed = read.flatMap(({ gone, moved }) => gone.filter((p) => !moved.old.has(p.tokens[0])));
   const added: InstrumentPair[] = [];
   const events: Array<InstrumentPair | undefined> = [];
   let dropped = false;
-  for (const h of hunks) {
-    const tokens = hunkTokens(h);
-    const before = instrumentSide(tokens, "add");
-    const after = instrumentSide(tokens, "del");
-    const partner = tokenPartners(tokens);
-    const keyAt = new Map(after.pairs.map((p) => [p.tokens[0], p]));
-    const kept = new Set<InstrumentPair>();
-    for (const p of before.pairs) {
-      const q = keyAt.get(partner.get(p.tokens[0]) ?? -1);
-      if (q?.path === p.path && p.tokens.every((id, i) => partner.get(id) === q.tokens[i])) kept.add(q);
-      else removed.push(p);
-    }
+  for (const { tokens, before, after, partner, came, moved } of read) {
     const same = (id: number, mine: Map<number, InstrumentRole>, theirs: Map<number, InstrumentRole>): boolean => {
       const [a, b] = [mine.get(id), theirs.get(partner.get(id) ?? -1)];
       return a?.name === b?.name && a?.scope === b?.scope;
     };
-    const valueAt = new Map(after.pairs.map((p) => [p.tokens[2], p]));
+    const changedAt = new Map(came.map((q) => [q.tokens[2], q]));
     tokens.forEach((_, id) => {
-      if (before.roles.get(id)?.name === "orphan" && !same(id, before.roles, after.roles)) dropped = true;
+      if (before.roles.get(id)?.name === "orphan" && !moved.old.has(id) && !same(id, before.roles, after.roles)) dropped = true;
+      if (moved.new.has(id)) return;
+      const pair = changedAt.get(id);
       const role = after.roles.get(id)?.name;
-      const pair = valueAt.get(id);
-      if (pair !== undefined && !kept.has(pair)) {
+      if (pair !== undefined) {
         events.push(pair);
         added.push(pair);
       } else if ((role === "orphan" || role === "bracket") && !same(id, after.roles, before.roles)) events.push(undefined);
@@ -10982,13 +11021,11 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
   const { lines, removed, added, events, dropped } = instrumentDiffPairs(diff, file);
   if (lines === 0) return "undetermined";
 
-  // One path with several removed values (two hunks that each cut away their pair's parent, a duplicated key) cannot
-  // say which old value an added one replaces, so any added value under that path is unaccountable.
-  const removedByPath = new Map<string, Set<number>>();
   const net = new Map<string, number>();
+  const removedAt = new Map<string, InstrumentPair[]>();
   for (const p of removed) {
-    if (typeof p.value === "number") removedByPath.set(p.path, (removedByPath.get(p.path) ?? new Set()).add(p.value));
     net.set(p.path, (net.get(p.path) ?? 0) + 1);
+    removedAt.set(p.path, removedAt.get(p.path) ?? []).get(p.path)!.push(p);
   }
   for (const p of added) net.set(p.path, (net.get(p.path) ?? 0) - 1);
   // A removed row or entry is strictly fewer exemptions / one less recorded allowance. Always tightening. Tokens that
@@ -10998,11 +11035,13 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
     // W1-T3182: a pair carrying ONLY provenance/prose is accountable (a correct re-capture must refresh `capturedAt`);
     // a changed token no pair holds -- a structural line, a row this parser cannot read -- still refuses.
     if (pair === undefined) return "undetermined"; // a hunk this parser cannot account for
-    const { key, path, value } = pair;
+    const { key, value } = pair;
     if (typeof value === "string" && isInstrumentProvenanceKey(key)) continue;
     if (typeof value !== "number") return "undetermined";
-    const before = removedByPath.get(path);
-    if (before === undefined) {
+    // Several removed values at one place (two hunks that each cut away their pair's parent, a duplicated key) cannot
+    // say which one an added value replaces, so any added value there is unaccountable.
+    const before = new Set((removedAt.get(pair.path) ?? []).flatMap((p) => (typeof p.value === "number" && samePlace(p, pair) ? [p.value] : [])));
+    if (before.size === 0) {
       // A brand-new key is admissible ONLY when it names a source file this diff also adds.
       if (!diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) return "undetermined";
       continue;
