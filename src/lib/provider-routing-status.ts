@@ -487,16 +487,12 @@ function publishStatus(target: string, input: ProviderRoutingWriteInput): void {
     }
   } else {
     const projected = projectWrite(input);
-    const probed = stored?.state === "selected" || stored?.state === "blocked" ? stored : undefined;
     if (input.state === "selected" && input.observedAtMs <= cutoffMs) {
       const codex = projected.providers?.find((row) => row.provider === "codex" && row.creditsLane);
-      if (codex) {
-        if (input.selection.lane === "codex-credits" ||
-            (typeof probed?.observedAt === "string" && Date.parse(probed.observedAt) > input.observedAtMs)) return;
-        delete codex.creditsLane;
-      }
+      if (input.selection.lane === "codex-credits") return;
+      if (codex) delete codex.creditsLane;
     }
-    const kept = input.state === "not-probed" ? probed : undefined;
+    const kept = input.state === "not-probed" && (stored?.state === "selected" || stored?.state === "blocked") ? stored : undefined;
     record = kept
       ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
       : projected;

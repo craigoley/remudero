@@ -330,6 +330,31 @@ test("W1-T13855 criterion 6: unfunded generic reserve breach refuses carry besid
   assert.equal(routed.cashSpawns, 1);
 });
 
+test("W1-T13855 criterion 6: an unmapped funded bucket cannot clear a carried reserve refusal", async (t) => {
+  const account = codexAccount(t);
+  const unmapped = { ...SOL, id: "gpt-6-unmapped", displayName: "GPT-6-Unmapped" };
+  const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
+  account.state.balance = "0";
+  account.state.models.push(unmapped);
+  account.state.buckets.sol = { limitName: SOL.id, primary: { ...primary, usedPercent: 40 } };
+  account.state.buckets.other = { limitName: unmapped.id, primary,
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  const fresh = await account.read();
+  assert.equal(fresh.model, SOL.id);
+  assert.equal(fresh.credits?.balance, 0);
+  assert.equal(fresh.modelDecision?.options.find((option) => option.id === unmapped.id)?.reason, "unmapped");
+
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.readable, false, carried.detail);
+  assert.match(carried.detail ?? "", /projected burn reaches the reserve/);
+  assert.equal(carried.carriedForward, undefined);
+  const routed = await routeSpawn(account);
+  assert.equal(routed.decision?.rule, "cash-fallback");
+  assert.equal(routed.codexSpawns, 0);
+  assert.equal(routed.cashSpawns, 1);
+});
+
 test("W1-T13855 criterion 9: carried subscription headroom wins beside an unfunded generic window and a funded model", async (t) => {
   const account = codexAccount(t);
   const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
@@ -828,6 +853,34 @@ test("W1-T13855 criterion 9: a newly visible model with its own credits starts w
   assert.equal(spawn.cashSpawns, 0);
 });
 
+test("W1-T13855 criterion 9: a named bucket carries the same visible model's prior generic credit history", async (t) => {
+  const account = codexAccount(t);
+  account.state.genericSource = "top-level";
+  account.state.used = 40;
+  account.state.balance = "20";
+  const previous = await account.read();
+  assert.equal(previous.model, SOL.id);
+  assert.equal(previous.credits?.balance, 20);
+
+  account.state.now += 3_600_000;
+  account.state.buckets.sol = { limitName: SOL.id,
+    primary: { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  const current = await account.read();
+  assert.equal(current.model, SOL.id);
+  assert.equal(current.credits?.balance, 10);
+  assert.equal(providerEligibility(current, 5).lane, "codex-credits");
+
+  account.fail(6 * 3_600_000);
+  const carried = await account.read();
+  assert.equal(carried.readable, false, carried.detail);
+  assert.match(carried.detail ?? "", /projected burn reaches the reserve/);
+  const routed = await routeSpawn(account);
+  assert.equal(routed.decision?.rule, "cash-fallback");
+  assert.equal(routed.codexSpawns, 0);
+  assert.equal(routed.cashSpawns, 1);
+});
+
 test("W1-T13855 criterion 10: the credits lane lifts no memory, CPU or host-worker bound", async (t) => {
   const root = scratchRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1103,8 +1156,35 @@ test("W1-T13855 criterion 4: cash fallback preserves delayed Claude subscription
     ["healthy-window", 5, undefined]);
 
   const newer = statusFor(root, START + 1, [claudeAt(95), codex]);
+  statusFor(root, delayedAt, [claudeAt(95), codex]);
+  assert.deepEqual(readStatus(START + 1), newer, "a delayed credits-only selection cannot replace the newer selection");
+});
+
+test("W1-T13855 criterion 4: a delayed Claude subscription selection publishes beside a stored blocked auction", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  const codex = creditsCodex();
+  const before = statusFor(root, START - 5_000, [claudeAt(95), codex]);
+  assert.equal(reviewProviderObservation(before, START).creditsLane, true);
+  account.state.balance = "0";
+  assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+
+  const blocked = statusFor(root, START, [claudeAt(95), { ...codex, credits: undefined }], "blocked");
+  assert.equal(blocked.state, "blocked");
+  const delayedAt = START - 1;
   statusFor(root, delayedAt, [claudeAt(90), codex]);
-  assert.deepEqual(readStatus(START + 1), newer);
+  const readStatus = (nowMs: number) => readProviderRoutingStatus(root, { now: () => nowMs });
+  const delayed = readStatus(START);
+  assert.equal(delayed.selected?.provider, "claude");
+  assert.equal(delayed.observedAt, new Date(delayedAt).toISOString());
+  assert.equal(delayed.providers?.find((row) => row.provider === "codex")?.creditsLane, undefined);
+  const decision = widen(3, readStatus).at(-1)!;
+  assert.deepEqual([decision.reason, decision.effectiveWidth, decision.evidence.providerCreditsLane],
+    ["healthy-window", 5, undefined]);
+
+  statusFor(root, START + 1, [claudeAt(95), codex]);
+  statusFor(root, delayedAt, [claudeAt(90), codex]);
+  assert.deepEqual(readStatus(START), delayed, "the prior selection's timestamp does not change subscription publication");
 });
 
 test("a first cash fallback records the credits cutoff before any funded status reaches disk", async (t) => {

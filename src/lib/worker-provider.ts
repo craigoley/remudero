@@ -1344,11 +1344,25 @@ export function selectOpenWeightModel(
     ...(capacityShortfalls.length > 0 ? { capacityShortfalls } : {}) };
 }
 
+function namedCodexBucket(buckets: CodexRateLimitBucket[], model: CodexModelInfo): CodexRateLimitBucket | undefined {
+  const names = new Set([model.id, model.model, model.displayName].map(normalizedModelName).filter(Boolean));
+  return buckets.find((bucket) => names.has(normalizedModelName(bucket.limitName)));
+}
+
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
   const buckets = Object.values(result.rateLimitsByLimitId ?? {});
-  const names = new Set([model.id, model.model, model.displayName].map(normalizedModelName).filter(Boolean));
-  const named = buckets.find((bucket) => names.has(normalizedModelName(bucket.limitName)));
-  return named ?? buckets.find((bucket) => bucket.limitId === "codex") ?? result.rateLimits ?? undefined;
+  return namedCodexBucket(buckets, model) ?? buckets.find((bucket) => bucket.limitId === "codex") ?? result.rateLimits ?? undefined;
+}
+
+function visibleCodexModels(models: CodexModelInfo[]): Map<string, CodexModelInfo> {
+  const visible = new Map<string, CodexModelInfo>();
+  for (const model of models) {
+    const id = canonicalCodexModelId(model);
+    if (model.hidden || !id || visible.has(id)) continue;
+    visible.set(id, model);
+    if (visible.size === 100) break;
+  }
+  return visible;
 }
 
 function capacityFromBucket(bucket: CodexRateLimitBucket | undefined, accountLabel?: string): ProviderCapacity {
@@ -1461,15 +1475,7 @@ export function selectCodexModel(
     switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string } } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
-  const visible: CodexModelInfo[] = [];
-  const visibleIds = new Set<string>();
-  for (const model of models) {
-    const id = canonicalCodexModelId(model);
-    if (model.hidden || !id || visibleIds.has(id)) continue;
-    visibleIds.add(id);
-    visible.push(model);
-    if (visible.length === 100) break;
-  }
+  const visible = [...visibleCodexModels(models).values()];
   const forced = config.workerProviders?.codexModel;
   const { tier, fallbackReason: capabilityFallbackReason } = resolveCodexCapability(capabilities, requestedModel);
   const preferred = forced
@@ -2224,6 +2230,17 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     const ageMs = now - current.readAt, reserve = deps.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
     if (!Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(reserve) || reserve < 0 || reserve >= 100) throw new Error("invalid clock or reserve");
     const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
+    const visible = visibleCodexModels(current.value.models);
+    const previousModels = visibleCodexModels(previous?.value.models ?? []);
+    const currentBuckets = Object.values(currentRates.rateLimitsByLimitId ?? {});
+    // A named bucket follows the model's prior reading, including a prior generic fallback.
+    const previousByNamedBucket = new Map<CodexRateLimitBucket, CodexRateLimitBucket | undefined>();
+    for (const [id, model] of visible) {
+      const currentBucket = namedCodexBucket(currentBuckets, model);
+      if (!currentBucket || previousByNamedBucket.has(currentBucket)) continue;
+      const previousModel = previousModels.get(id);
+      previousByNamedBucket.set(currentBucket, previousRates && previousModel ? codexBucketForModel(previousRates, previousModel) : undefined);
+    }
     const carryBalance = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
       if (b == null) return b;
       const credits = parseCodexCredits(b);
@@ -2233,14 +2250,12 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         previous ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
       return balance === null ? b : { ...b, [projectedCodexCreditsBalance]: balance };
     };
-    // Project the shared balance before model buckets inherit it.
     const previousGeneric = genericCodexBucket(previousRates);
     const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, previousGeneric),
       rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
-        .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id] ??
-          (id === "codex" ? previousGeneric : undefined))])) };
+        .map(([id, b]) => [id, carryBalance(b, previousByNamedBucket.has(b) ? previousByNamedBucket.get(b) :
+          previousRates?.rateLimitsByLimitId?.[id] ?? (id === "codex" ? previousGeneric : undefined))])) };
     let hasUnresetWindow = false;
-    let carriedByCredits = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
       creditsSpendable: boolean): CodexRateLimitWindow | string | null => {
@@ -2257,13 +2272,10 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
-      if (projected >= 100 - reserve) {
-        if (!creditsSpendable) return "projected burn reaches the reserve";
-        carriedByCredits = true;
-      }
+      if (projected >= 100 - reserve && !creditsSpendable) return "projected burn reaches the reserve";
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
-    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
+    const bucket = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
       if (b == null) return b;
       const creditsSpendable = codexCreditsSpendable(codexCreditsFor(b, carriedRates).credits);
       const primary = project(b.primary, old?.primary, creditsSpendable);
@@ -2276,13 +2288,26 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
       // Keep the refused bucket and its credits block so the model stays unavailable.
       return { ...b, primary: null, secondary: null };
     };
-    const rateLimits = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
+    const rateLimits: CodexRateLimitResult = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
       rateLimitsByLimitId: carriedRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(carriedRates.rateLimitsByLimitId)
         .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
-    // Keep the original reserve refusal unless credits actually carry a projected window.
-    if (rejectedWindow && !carriedByCredits) throw new Error(rejectedWindow);
-    if (!hasUnresetWindow) throw new Error("no unreset quota window with a duration");
-    const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
+    if (!hasUnresetWindow) throw new Error(rejectedWindow ?? "no unreset quota window with a duration");
+    const runtime = { rateLimits, models: current.value.models };
+    const selected = selectCodexRuntime(runtime, config, deps, capabilities);
+    if (rejectedWindow) {
+      const decision = selected.modelDecision ?? (deps.selectedModel
+        ? selectCodexRuntime(runtime, config, { ...deps, selectedModel: undefined }, capabilities).modelDecision
+        : undefined);
+      const carriedByCredits = decision?.options.some((option) => {
+        if (!option.eligible) return false;
+        const modelBucket = codexBucketForModel(rateLimits, visible.get(option.id)!);
+        const { credits, borrowed } = codexCreditsFor(modelBucket, rateLimits);
+        return codexCreditsSpendable(credits) && [modelBucket, borrowed ? genericCodexBucket(rateLimits) : undefined]
+          .some((source) => [source?.primary?.usedPercent, source?.secondary?.usedPercent]
+            .some((used) => typeof used === "number" && used >= 100 - reserve));
+      });
+      if (!carriedByCredits) throw new Error(rejectedWindow);
+    }
     if (!selected.readable) {
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     }
