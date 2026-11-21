@@ -1,0 +1,108 @@
+- id: W1-T14021
+  title: A proof home that holds a read-only tree is removed, and its removal never stops the daemon (held rebuild)
+  repo: remudero
+  priority: 1.1
+  depends_on: []
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high
+  origin: operator-session#fleet-measure-2026-11-19
+  plan_refs:
+    - W1-T11468
+    - W1-T11421
+    - W1-T5344
+    - W1-T3266
+    - W1-T6156
+  files:
+    - src/lib/tmp.ts
+    - src/lib/review.ts
+    - src/run-task.ts
+    - test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts
+    - test/host-capability-fixtures.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "removeOwnedTree(dir) on a directory that holds a read-only tree (directories mode 0o555 and files mode 0o444, nested three deep, as a killed W1-T11468 test leaves its seed store) removes the whole directory and returns { ok: true }"
+      proof: "grep: W1-T13819 criterion 1 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: Through defaultProofSpawner and defaultAsyncProofSpawner with the pass-through proof sandbox (test/helpers/pass-through-proof-sandbox.ts), a node child that exits 0 after it makes a read-only tree under its HOME returns its stdout, not an EACCES error, and its rmd-proof-home-* directory no longer exists, with nothing injected in place of the removal
+      proof: "grep: W1-T13819 criterion 2 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: invariant:a-proof-failure-stays-the-proof-failure — a child that makes the same read-only tree and exits 1 makes both spawners throw the child's own failure (its status and its stderr text), not EACCES, and the home is removed
+      kind: guard
+      proof: "grep: W1-T13819 criterion 3 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: invariant:only-the-owned-tree-changes — a symbolic link inside the directory that points at a read-only directory outside it is removed as a link; the outside directory, its files and their modes are byte-identical before and after
+      kind: guard
+      proof: "grep: W1-T13819 criterion 4 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: "A removal that still fails (the directory's parent made read-only by the test) returns { ok: false, reason } naming the path and the error code; both spawners then return or throw exactly what the child gave, and do not throw the removal error"
+      proof: "grep: W1-T13819 criterion 5 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: sweepStaleTempDirs removes a stale rmd- directory that holds a read-only tree and counts it as removed
+      proof: "grep: W1-T13819 criterion 6 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts"
+    - claim: The proof child's cleanup removes its home with removeOwnedTree
+      proof: "grep: removeOwnedTree(home) in src/lib/review.ts"
+    - claim: The coverage precheck's run removes its proof home with removeOwnedTree
+      proof: "grep: removeOwnedTree(home) in src/run-task.ts"
+  rationale: |
+    REBUILD of W1-T13819, filed by the sweep (W1-T12709) from https://github.com/craigoley/remudero/pull/19699 at af1398f3b11d503cd65c1273bd9a90c6d546d1ed: no part of the pull request can merge without operator input, and the stall remedies were tried; the pull request is closed and rebuilt as a held task.
+    FINDINGS of the pull request:
+    - removeOwnedTree(dir) on a directory that holds a read-only tree (directories mode 0o555 and files mode 0o444, nested three deep, as a killed W1-T11468 test leaves its seed store) removes the whole directory and returns { ok: true }: proof executed and PASSED on the PR head (grep: W1-T13819 criterion 1 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): The nested-tree test passed on Linux, but src/lib/tmp.ts:160–162 restricts permission repair to Linux. On macOS, EACCES or EPERM causes a retry with the same modes, and the PR’s simulated ENOTEMPTY test confirms an immediate failure with the tree still present.
+    - Through defaultProofSpawner and defaultAsyncProofSpawner with the pass-through proof sandbox (test/helpers/pass-through-proof-sandbox.ts), a node child that exits 0 after it makes a read-only tree under its HOME returns its stdout, not an EACCES error, and its rmd-proof-home-* directory no longer exists, with nothing injected in place of the removal: proof executed and PASSED on the PR head (grep: W1-T13819 criterion 2 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): Both pass-through spawners returned stdout and removed their homes on Linux. Tracing their shared cleanup to src/lib/tmp.ts:160–162 shows that it leaves the read-only home on macOS when removal hits the reported ENOTEMPTY, so the home-removal part of the claim fails.
+    - invariant:a-proof-failure-stays-the-proof-failure — a child that makes the same read-only tree and exits 1 makes both spawners throw the child's own failure (its status and its stderr text), not EACCES, and the home is removed: proof executed and PASSED on the PR head (grep: W1-T13819 criterion 3 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): Both pass-through spawners preserved status 1 and stderr and removed their homes on Linux. On macOS, the helper returns the reported ENOTEMPTY without repair, so the spawners preserve the child failure but leave its home behind.
+    - invariant:only-the-owned-tree-changes — a symbolic link inside the directory that points at a read-only directory outside it is removed as a link; the outside directory, its files and their modes are byte-identical before and after: proof executed and PASSED on the PR head (grep: W1-T13819 criterion 4 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): The static symlink test passed, but src/lib/tmp.ts:186–191 continues chmod through an open directory after a concurrent rename can move it outside the supplied tree. The rename test moves the subtree within the root, so it misses the explicit constraint against changing modes outside that root.
+    - sweepStaleTempDirs removes a stale rmd- directory that holds a read-only tree and counts it as removed: proof executed and PASSED on the PR head (grep: W1-T13819 criterion 6 in test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): The stale-tree test passed on Linux. On macOS, src/lib/tmp.ts:160–162 leaves the read-only tree after the reported ENOTEMPTY, and line 263 records it as kept instead of removing it and counting it as removed.
+    WHY: the core daemon crashed twice on 2026-11-19 with exit code 1, and the crash-loop check opened #19644.
+    The container log for each exit has one stop line:
+    - 08:13:21Z: "stopped : error — W1-T11820: EACCES, Permission denied: '/tmp/rmd-proof-home-3ubX7Z'"
+    - 10:32:57Z: "stopped : error — W1-T12062: EACCES, Permission denied: '/tmp/rmd-proof-home-RWbPDE'"
+    The core ledger has a run_child.settled row with outcome rejected and the same reason 1 to 2 s before each
+    daemon.process.exit row (exit_code 1, clean_exit false). Both proof homes are still on the host, under the
+    container's /tmp. Each holds .rmd-private-tmp/rmd-w1-t11468-*/home/.local/share/remudero/dependencies/<key>/
+    node_modules, with directories mode r-x and files mode r--. That is the read-only seed store that
+    test/review/a-host-checkout-whose-lockfile-moves-is-re-primed-or-told-how.test.ts (W1-T11468, merged
+    2026-11-19 05:22Z) makes. Its t.after makes the tree writable before it removes it, but a proof child that
+    reaches its timeout is killed with SIGKILL (W1-T3266, src/lib/review.ts spawnPreparedProofSync), so t.after
+    never runs and the tree stays in the proof home.
+    THE CHAIN: prepareProofChild (src/lib/review.ts:2549) removes the home with rmSync(home, { recursive: true,
+    force: true }) in the spawners' finally blocks (defaultProofSpawner :2635, defaultAsyncProofSpawner :2698).
+    force does not override permissions: rmSync cannot unlink an entry in a directory without write permission,
+    so it throws EACCES. A throw in finally replaces the proof's own result. The run rejects with EACCES, and
+    the daemon's classifyRejection (src/lib/daemon.ts:9511) does not know that error, so it is fatal by design
+    (W1-T5344: an unprefixed throw exits 1). The coverage precheck's run (src/run-task.ts:11496) removes its proof
+    home the same way. The stale temp sweep (src/lib/tmp.ts:215) uses the same rmSync and ignores the error, so a
+    tree like this is never reaped: rmd-proof-home-8aSaru from 2026-10-30 is still there.
+    COST: each crash cost about 2.5 min with no daemon (the entrypoint waits 120 s before a restart) and lost the
+    run children of the old process (run_child.lost for W1-T11819 at 10:36:23Z). Any proof that runs the W1-T11468
+    test and reaches its timeout crashes the daemon again.
+  design: |
+    INVARIANT a-proof-failure-stays-the-proof-failure: removing the home never changes what a spawner returns or
+    throws for the child.
+    INVARIANT only-the-owned-tree-changes: the removal changes modes only of entries inside the directory it is
+    given, never follows a symbolic link, and never touches anything outside that directory.
+    1. In src/lib/tmp.ts add an exported removeOwnedTree(dir: string): { ok: true } | { ok: false; reason: string }.
+       It first calls fs.rmSync(dir, { recursive: true, force: true }). If that throws EACCES or EPERM, it walks
+       the tree with lstat, adds owner rwx to each directory (it does not follow symbolic links), and calls rmSync
+       once more. Any error left is returned as reason (path and code), never thrown. A missing directory is ok.
+    2. In src/lib/review.ts prepareProofChild's cleanup calls removeOwnedTree(home). When it returns ok false,
+       write the reason with process.emitWarning (one line, the reason only) and return; the spawners' finally
+       blocks then never throw. Add no comment lines to review.ts (it has a comment cap; run
+       test/review/compress-src-lib-review-ts.test.ts).
+    3. In src/run-task.ts realCoverageRun's finally calls removeOwnedTree(home) the same way.
+    4. In sweepStaleTempDirs (src/lib/tmp.ts) remove each stale entry with removeOwnedTree, and count it as
+       removed only when it returns ok. Do not change sweepStaleTempDirsAsync unless its test needs it; if it uses
+       the same removal, give it the same behaviour.
+    5. Add no ledger step, config key or constant. Do not change the daemon's rejection classes (W1-T5344) or the
+       W1-T11468 test.
+    6. The test makes its trees under makeTempDir, loads test/setup/tmp-hygiene.ts, uses
+       test/helpers/pass-through-proof-sandbox.ts for the spawners, and restores modes in t.after.
+    NOT IN SCOPE: making the W1-T11468 test survive SIGKILL (no test can), the crash-loop issue itself (#19644
+    closes when the daemon stops crashing), and a general rule that unknown run rejections end only their lane.
+    BUILD FOUND (2026-11-19): the new test makes the read-only tree it reproduces (chmod 0o444 and 0o555),
+    so test/host-capability-fixtures.test.ts declares those two host-capability fixtures.
+  falsifier: |
+    Put rmSync(home, { recursive: true, force: true }) back in prepareProofChild's cleanup: criteria 2, 3 and 5
+    must fail with EACCES. Make removeOwnedTree follow symbolic links: criterion 4 must fail. Leave the sweep on
+    plain rmSync: criterion 6 must fail. Restore and require all to pass.
+  needs_input:
+    question: "Pull request https://github.com/craigoley/remudero/pull/19699 (task W1-T13819) cannot merge without your input. \"removeOwnedTree(dir) on a directory that holds a read-only tree (directories mode 0o555 and files mode 0o444, nested three deep, as a killed W1-T11468 test leaves its seed store) removes the whole directory and returns { ok: true }\"; \"Through defaultProofSpawner and defaultAsyncProofSpawner with the pass-through proof sandbox (test/helpers/pass-through-proof-sandbox.ts), a node child that exits 0 after it makes a read-only tree under its HOME returns its stdout, not an EACCES error, and its rmd-proof-home-* directory no longer exists, with nothing injected in place of the removal\"; \"invariant:a-proof-failure-stays-the-proof-failure — a child that makes the same read-only tree and exits 1 makes both spawners throw the child's own failure (its status and its stderr text), not EACCES, and the home is removed\"; \"invariant:only-the-owned-tree-changes — a symbolic link inside the directory that points at a read-only directory outside it is removed as a link; the outside directory, its files and their modes are byte-identical before and after\"; \"sweepStaleTempDirs removes a stale rmd- directory that holds a read-only tree and counts it as removed\". What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13819-1795182576230-2750:1:1795182893797) — Permission repair requires an enforced boundary that prevents an uncoordinated rename from moving a dir"
+    source_pr: https://github.com/craigoley/remudero/pull/19699
+    asked_at: 2026-11-20T15:21:01.578Z

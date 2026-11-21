@@ -1,0 +1,45 @@
+- id: W1-T14015
+  title: A task on a deliberate dispatch hold never counts as a recoverable blocker in the starvation notice
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 8.00
+  risk: high # spans the drain dispatch census and the starvation notice; one new filter reason both must read
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T5896
+  files:
+    - src/lib/drain.ts
+    - src/lib/escalation-catalogue.ts
+    - test/inbox/a-deliberate-hold-never-reads-as-a-starved-queue.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A task with dispatch_hold true is counted in a held bucket, not in blocked, by the dispatch census"
+      proof: "grep: W1-T14015 criterion 1: in test/inbox/a-deliberate-hold-never-reads-as-a-starved-queue.test.ts"
+    - claim: "A queue whose only undispatchable tasks are held raises no starvation escalation"
+      proof: "grep: W1-T14015 criterion 2: in test/inbox/a-deliberate-hold-never-reads-as-a-starved-queue.test.ts"
+    - claim: "invariant:recoverable-still-raises — a blocked task that is not on a deliberate hold still raises the starvation notice as today"
+      kind: guard
+      proof: "grep: W1-T14015 criterion 3: in test/inbox/a-deliberate-hold-never-reads-as-a-starved-queue.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 on GitHub: remudero-console #2745 "dispatch queue starved — zero dispatchable, 1 recoverable
+    class(es) blocking" named five ids. Three of them (CONSOLE-T144, CONSOLE-T104, CONSOLE-T128) are dispatch_hold: true
+    by design, each waiting on core tasks that have not shipped.
+    OBSERVED at origin/main ca83732bd:
+    - src/lib/drain.ts `isDispatchEligible` reports a `dispatch_hold === true` task through onFiltered as "blocked".
+    - src/lib/escalation-catalogue.ts `escalateStarvation` names the blocked count among the RECOVERABLE classes.
+    So a deliberate hold reads as a fault, and the notice fires on a healthy queue.
+  design: |
+    INVARIANT recoverable-still-raises: only dispatch_hold tasks move out of blocked.
+    1. In isDispatchEligible, report a dispatch_hold task under a new filter reason "held".
+    2. Count "held" in the census beside retired and leave it out of the starved verdict and its recoverable list.
+    3. Find every reader of the filter reasons (git grep the "blocked" literal on onFiltered callers) and keep each one.
+  falsifier: |
+    Without step 1, criterion 1 counts the held task as blocked and criterion 2's fixture raises the notice.
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host.

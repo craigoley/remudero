@@ -26,15 +26,13 @@
   # refusal-amendment (W1-T12271, run work-fix-dispatch-W1-T12271-1795099850819-4520@cf761b9a797c7d82afaf4446c1d966b519435374, 2026-11-19T15:28:16.790Z): the worker refused criterion 3 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The legacy implementation clears the terminal index when a rotation is unreadable, and the existing caller admits previously held heads when their entries are absent.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second build of the sweep effects on the same state directory, in a new process, decompresses no rotated ledger file that the first build read"
       proof: "grep: W1-T12271 criterion 1 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
     - claim: "The terminal heads are the same as those that `resolveLedgerUnion` gives for the same files, in a fixture with rows in the live file and in two rotated files"
       proof: "grep: W1-T12271 criterion 2 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
-    - claim: "An unreadable rotated file gives the answer of today for an unread history. A head is never reported as free because its file could not be read"
-      proof: "grep: W1-T12271 criterion 3 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
     - claim: "The test goes through `buildSweepEffects`, the production caller, with nothing injected in place of the reader"
       proof: "grep: W1-T12271 criterion 4 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
   rationale: |
@@ -46,6 +44,8 @@
     - Line 28000: `createEscalationTriageHistoryReader` reads a slice of each rotated file once and keeps it in a store with a shared snapshot. W1-T12235 (queued) uses that store for the lifetime history and exports what a second user needs.
     The first sweep after a restart, the review command and the fix command each build the effects in a new process. Each pays the full read.
     CHECKED for overlap: W1-T12235 covers the lifetime history only. W1-T12236 (queued) covers the open pull request reads at a restart.
+
+    MOVED to W1-T14089 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19672 merges on the rest.
   design: |
     NO-INVARIANTS: This amendment names the files needed to meet existing parity and unread-history criteria; it adds no independent guarantee.
     Give `terminalUncreditableHeads` its rows from a reader that `createEscalationTriageHistoryReader` builds for a new slice:

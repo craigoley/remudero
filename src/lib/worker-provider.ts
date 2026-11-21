@@ -16,6 +16,7 @@ import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
@@ -169,8 +170,9 @@ interface CodexWorkerResult {
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
-  /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
-  servedModel?: null;
+  /** W1-T13868: the model codex says the server rerouted every turn to, else `null` beside a named reason
+   * (see {@link codexServedModel}). Never the `--model` request echoed back. */
+  servedModel?: string | null;
   servedModelReason?: string;
   compactionEvents: [];
   compactionFailures: [];
@@ -2278,13 +2280,123 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
 export const CODEX_SERVED_MODEL_REASON =
   "codex exec --json names no model: its thread, turn and item events carry no model id";
 
+/**
+ * W1-T13868: THE ONE PLACE `codex exec --json` NAMES A SERVED MODEL. Verified against the codex-rs source at
+ * tag rust-v0.152.0 (the pinned CLI): the client reads the server's `openai-model` response header
+ * (codex-api/src/sse/responses.rs) and, ONLY when it differs from the requested model, emits ModelReroute, which
+ * exec projects as `item.completed` with `item: { type: "error", message: "model rerouted: <from> -> <to> (<reason>)" }`
+ * (exec/src/event_processor_with_jsonl_output.rs). At most one per turn. A match is logged, never streamed, so
+ * no reroute is NOT proof the request was served: it stays {@link CODEX_SERVED_MODEL_REASON}.
+ */
+export const CODEX_REROUTE_RE = /^model rerouted: (\S+) -> (\S+) \(/;
+/** Bounded like every retained codex field: a turn reroutes at most once, so more than this is not a real stream. */
+const CODEX_REROUTES_KEPT = 64;
+
+/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Any model name the stream
+ * reported is recorded: the latest one, which served the turn that produced the attempt's final answer. With none,
+ * `null` with {@link CODEX_SERVED_MODEL_REASON}, never the requested model. */
+export function codexServedModel(reroutes: readonly string[]): { servedModel: string | null; servedModelReason?: string } {
+  const latest = reroutes.at(-1);
+  return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
+}
+
+type ObservedServedModel = { servedModel: string | null; servedModelReason?: string };
+const observedServedModels = new WeakMap<object, ObservedServedModel>();
+/** W1-T13868: one call's own observations. A caller's abort reason can be ONE error shared by many calls (one signal,
+ * many calls), so an error-keyed table shared by every call lets one call overwrite another's evidence. */
+const callServedModels = new AsyncLocalStorage<readonly WeakMap<object, ObservedServedModel>[]>();
+
+/** W1-T13868: run one worker call with its own observation table, which {@link withObservedServedModel} writes to and
+ * the caller reads back with {@link observedServedModelOf}. Calls that share an error never share its evidence.
+ * A call opened inside another call's scope (a wrapper that stands aside for its caller's receipt) keeps the enclosing
+ * tables too: the record goes to each, so the receipt-owning caller reads what its inner call saw. */
+export function observeServedModelsPerCall<T>(observations: WeakMap<object, ObservedServedModel>, run: () => T): T {
+  return callServedModels.run([...(callServedModels.getStore() ?? []), observations], run);
+}
+
+/** W1-T13868: the key under which a call's table holds the served model of the result its worker RETURNED. A wrapper can
+ * still replace that result with its own error (the quiet-worker watchdog's QuietRoundEndedError ends a round after the
+ * worker came back), and that error names no model; the call's reader falls back to this record. */
+const RETURNED_RESULT_KEY: object = Object.freeze({ key: "returned-result-served-model" });
+
+/** W1-T13868: record, in every enclosing call's table, the served model of the result a worker returned. Outside any
+ * call's scope it records nothing. */
+export function observeReturnedServedModel(result: { servedModel?: string | null; servedModelReason?: string }): void {
+  const scoped = callServedModels.getStore();
+  if (scoped === undefined) return;
+  const record = { servedModel: typeof result.servedModel === "string" ? result.servedModel : null,
+    ...(result.servedModelReason !== undefined ? { servedModelReason: result.servedModelReason } : {}) };
+  for (const table of scoped) table.set(RETURNED_RESULT_KEY, record);
+}
+
+/** W1-T13868: forget a returned result's record in every enclosing call's table, as a new worker call starts, so a
+ * later call's replaced result is never read as an earlier call's. */
+export function forgetReturnedServedModel(): void {
+  for (const table of callServedModels.getStore() ?? []) { table.delete(RETURNED_RESULT_KEY); table.delete(THROWN_IN_CALL_KEY); }
+}
+
+/** W1-T13868: the key under which a call's table holds the latest record {@link withObservedServedModel} made for an
+ * error thrown inside the call. A wrapper can throw its own error in that error's place (the quiet-worker guard throws
+ * QuietRoundEndedError instead of the abort error the adapter threw), and its own error names no model. */
+const THROWN_IN_CALL_KEY: object = Object.freeze({ key: "thrown-in-call-served-model" });
+
+/** W1-T13868: the served model the latest error thrown inside this call carried, if any, whatever error replaced it. */
+export function thrownInCallServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(THROWN_IN_CALL_KEY);
+}
+
+/** W1-T13868: the served model of the result this call's worker returned before an error replaced it, if any. */
+export function returnedServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(RETURNED_RESULT_KEY);
+}
+
+/** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
+ * on the error, so the failed attempt's row records it like a returned result's row does. */
+export function withObservedServedModel<E extends Error>(error: E,
+  observed: ObservedServedModel): E & ObservedServedModel {
+  const record = { servedModel: observed.servedModel,
+    ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) };
+  // Inside a call's scope the record goes to that call's own table only: the error (perhaps a caller's frozen or
+  // shared abort reason) keeps its identity, is thrown unchanged, and carries nothing another call could read.
+  const scoped = callServedModels.getStore();
+  if (scoped !== undefined) {
+    // W1-T13868: also the call's latest thrown record, for a wrapper that then throws its own error in this one's place.
+    for (const table of scoped) { table.set(error, record); table.set(THROWN_IN_CALL_KEY, record); }
+    return error as E & ObservedServedModel;
+  }
+  // Outside any call scope: the side table holds even for a frozen error; the property copy is a convenience.
+  observedServedModels.set(error, record);
+  if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);
+  return error as E & ObservedServedModel;
+}
+
+/** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value:
+ * in `observations` when given, else in the current call's table, else in the table for code outside any call. */
+export function observedServedModelOf(error: unknown,
+  observations: WeakMap<object, ObservedServedModel> | undefined = callServedModels.getStore()?.at(-1)): ObservedServedModel | undefined {
+  if (error === null || typeof error !== "object") return undefined;
+  return (observations ?? observedServedModels).get(error);
+}
+
+/** W1-T13868: the record {@link withObservedServedModel} made OUTSIDE any call's scope, for this thrown value. A call's
+ * reader falls back to it: an observation made where no call's scope reached (a stream or a wrapper whose async context
+ * opened before the call's) would otherwise be lost. An in-scope record never lands here, so calls sharing an error
+ * inside their scopes still never read each other's evidence. */
+export function unscopedObservedServedModelOf(error: unknown): ObservedServedModel | undefined {
+  return error !== null && typeof error === "object" ? observedServedModels.get(error) : undefined;
+}
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
+  /** Not streamed by codex 0.152.0; read when present (W1-T13868). */
+  model?: unknown;
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
   item?: {
     type?: string; text?: string; command?: string; aggregated_output?: string;
+    /** An `error` item's text; a model reroute is reported this way (see {@link CODEX_REROUTE_RE}). */
+    message?: string;
     /** A `file_change` item's changed paths; `kind` is "add", "update" or "delete". */
     changes?: ReadonlyArray<{ path?: unknown; kind?: unknown } | null>;
   };
@@ -2308,6 +2420,8 @@ export interface ParsedCodexEvents {
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
   completion: CodexCompletionEvidence;
+  /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
+  reroutes?: string[];
   /** W1-T13960: which retained output lost bytes, per line, rather than whether any line did. */
   retentionLoss: CodexRetentionLoss;
 }
@@ -2563,6 +2677,15 @@ class CodexJsonlAccumulator {
   private sessionId = "";
   private readonly blocks: string[] = [];
   private readonly errors: string[] = [];
+  private readonly reroutes: string[] = [];
+  /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
+  observedServedModel(): { servedModel: string | null; servedModelReason?: string } { return codexServedModel(this.reroutes); }
+  /** W1-T13868: record a model the stream named. Past the bound the newest name replaces the last kept one, so the
+   *  model that served the final turn is never dropped for an earlier one. */
+  private observeModel(model: string): void {
+    if (this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(model);
+    else this.reroutes[CODEX_REROUTES_KEPT - 1] = model;
+  }
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -2723,6 +2846,7 @@ class CodexJsonlAccumulator {
           ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
           : { state: "complete" },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+      ...(this.reroutes.length > 0 ? { reroutes: [...this.reroutes] } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
         retainedBytes: this.retainedBytes(),
@@ -2835,6 +2959,14 @@ class CodexJsonlAccumulator {
       this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "item.completed") this.observeToolCalls(event.item);
+    if (event.type === "item.completed" && event.item?.type === "error" && typeof event.item.message === "string") {
+      const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
+      if (to !== undefined) this.observeModel(to);
+    }
+    // W1-T13868: codex 0.152.0 streams no model id on any event, but an event that does carry one (a later CLI, a
+    // proxy) names the model that served it, in stream order with the reroutes: the latest name is recorded.
+    const eventModel = cashResponseModel(event.model);
+    if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
@@ -3442,8 +3574,8 @@ async function withPrivateRegistryCodexProfile<T>(
     if (error instanceof InstanceRegistryRuntimeError) throw error;
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
   }
-  let operationFailed = false, originalError: unknown;
-  try { await assertInstanceRegistryRuntimeCurrent(); return await operation(profile); }
+  let operationFailed = false, originalError: unknown, result: T | undefined;
+  try { await assertInstanceRegistryRuntimeCurrent(); result = await operation(profile); return result; }
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
@@ -3461,6 +3593,14 @@ async function withPrivateRegistryCodexProfile<T>(
       // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
       const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
       if (operationFailed) error.cause = originalError;
+      else {
+        // W1-T13868: the call already returned; its served model must outlive a cleanup failure that replaces it.
+        const served = (result as { servedModel?: unknown; servedModelReason?: unknown } | undefined);
+        if (served !== undefined && served !== null && typeof served === "object" && "servedModel" in served) {
+          withObservedServedModel(error, { servedModel: typeof served.servedModel === "string" ? served.servedModel : null,
+            ...(typeof served.servedModelReason === "string" ? { servedModelReason: served.servedModelReason } : {}) });
+        }
+      }
       throw error;
     } finally { closeSync(fd!); }
   }
@@ -4613,6 +4753,59 @@ export function readOpenWeightAllowance(config: Config,
   }) };
 }
 
+/** W1-T13863: a cash draft's whole-run fit, read before its first paid request. Reserves nothing. */
+export type CashDraftFit =
+  | { fits: true }
+  | { fits: false; reason: "window"; deployment: string | null; estimatedTokens: number; windowTokens?: number }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: number; allowanceError?: never }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: null; allowanceError: string };
+
+export interface CashDraftFitInput {
+  deployment: string;
+  promptChars: number;
+  promptBytes?: number;
+  expectedRequests: number;
+  squeezed?: boolean;
+  atIso: string;
+}
+
+export class CashDraftSkippedError extends RmdError {
+  constructor(readonly fit: Extract<CashDraftFit, { fits: false }>) {
+    super("usage", 1, `cash draft skipped before transport: ${fit.reason}`);
+  }
+}
+
+export class CashDraftResumeBlockedError extends RmdError {
+  constructor() {
+    super("usage", 1, "no eligible cash deployment after excluding previously paid draft work");
+  }
+}
+
+/** Check the deployment and billing posture selected by the router. */
+export function cashDraftFit(config: Config, input: CashDraftFitInput): CashDraftFit {
+  const { deployment, squeezed, atIso } = input;
+  const expectedRequests = Math.max(1, Math.ceil(input.expectedRequests));
+  const promptBytes = input.promptBytes ?? input.promptChars;
+  const estimatedTokens = openWeightEstimatedTokens(promptBytes) * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS;
+  const windowTokens = openWeightEffectiveWindow(deployment, learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment)));
+  if (windowTokens === undefined || estimatedTokens > windowTokens) {
+    return { fits: false, reason: "window", deployment, estimatedTokens, windowTokens };
+  }
+  const estimatedUsd = openWeightReservationUsd(deployment, promptBytes) * expectedRequests;
+  let leftUsd: number;
+  try {
+    leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso, squeezed }).deployments[0]!.remainingUsd;
+  } catch (error) {
+    return { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd: null,
+      allowanceError: String(error).slice(0, 512) };
+  }
+  return estimatedUsd > leftUsd
+    ? { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd }
+    : { fits: true };
+}
+
 /** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
  *  needs a PEER to have committed between this call's read and its rename, so a handful of retries
  *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
@@ -5650,6 +5843,8 @@ function openWeightEndpoint(config: Config, model: string): string {
 
 /** W1-T4650: the named reasons a cash attempt reports no served model. */
 export const CASH_SERVED_MODEL_REASONS = {
+  // W1-T13868: a body that lands after the deadline aborted the attempt reaches only the late usage handler. The row is
+  // already written by then, so the reason says when, not that no reply ever came.
   noResponse: "no cash response was received, so none named the model that served it",
   unnamed: "a cash response named no model id",
   mixed: "cash responses in this attempt named different models",
@@ -5673,12 +5868,10 @@ export function cashResponseModel(model: unknown): string | undefined {
  */
 export function cashServedModel(named: readonly (string | undefined)[]): { servedModel: string | null; servedModelReason?: string } {
   if (named.length === 0) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse };
-  if (named.some((model) => model === undefined)) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed };
-  const distinct = [...new Set(named)].sort();
-  if (distinct.length > 1) {
-    return { servedModel: null, servedModelReason: `${CASH_SERVED_MODEL_REASONS.mixed}: ${distinct.join(", ")}` };
-  }
-  return { servedModel: distinct[0]! };
+  // W1-T13868: a call that received a model name records it, even when another response omitted or changed it. The
+  // latest named response wins: it produced the attempt's final answer. Never the requested deployment.
+  const latest = named.findLast((model) => model !== undefined);
+  return latest === undefined ? { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } : { servedModel: latest };
 }
 
 function openWeightResult(input: {
@@ -5900,6 +6093,8 @@ export async function spawnFoundryClaudeWorker(
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = foundryClaudeReceiptUsage(envelope);
           if (!usage) return;
           attempt.tokens = { input: usage.input_tokens, output: usage.output_tokens,
@@ -5942,7 +6137,6 @@ export async function spawnFoundryClaudeWorker(
         content?: Array<Record<string, unknown>>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const measured = foundryClaudeReceiptUsage(envelope);
       if (!measured) {
         settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: pending!.atIso, reason: "usage unavailable" });
@@ -6158,6 +6352,8 @@ export async function spawnOpenWeightWorker(
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = openWeightEnvelopeUsage(envelope, usesResponses);
           attempt.tokens = { input: validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0,
             output: validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0,
@@ -6229,7 +6425,6 @@ export async function spawnOpenWeightWorker(
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
@@ -6537,13 +6732,17 @@ async function spawnCodexWorkerInPrivateTemp(
           reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
       }
     }
-    const text = stdoutDecoder.write(chunk);
+    const room = CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES - stdoutBytes;
+    const observedAt = Date.now();
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
+      // W1-T13868: the bytes still inside the budget are read after the limit's evidence is taken, so a complete
+      // reroute line among them names the served model however the chunks happened to split.
+      if (room > 0) stdout.push(stdoutDecoder.write(chunk.subarray(0, room)), observedAt);
       return;
     }
-    const observedAt = Date.now();
+    const text = stdoutDecoder.write(chunk);
     stdout.push(text, observedAt);
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
@@ -6562,8 +6761,9 @@ async function spawnCodexWorkerInPrivateTemp(
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     await contained.outputClosed;
-    if (outputLimit) throw outputLimit;
-    if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (outputLimit) throw withObservedServedModel(outputLimit, stdout.observedServedModel());
+    if (timedOut) throw withObservedServedModel(new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`),
+      stdout.observedServedModel());
     if (!stdoutFailure) {
       try { stdoutValidator.decode(); }
       catch (error) {
@@ -6643,14 +6843,17 @@ async function spawnCodexWorkerInPrivateTemp(
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      servedModel: null,
-      servedModelReason: CODEX_SERVED_MODEL_REASON,
+      ...codexServedModel(parsed.reroutes ?? []),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
       qualitySuspect: false,
       workerDurationMs: Date.now() - startedAt,
     };
+  } catch (error) {
+    // W1-T13868: ANY failure after the stream named a model carries it (or the named reason) to the failed-attempt row.
+    if (error instanceof Error && observedServedModelOf(error) === undefined) withObservedServedModel(error, stdout.observedServedModel());
+    throw error;
   } finally {
     // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
     const droppedStderr = stderrRetainer.truncation();
