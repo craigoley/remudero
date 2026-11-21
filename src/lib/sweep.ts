@@ -6860,11 +6860,17 @@ function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: numb
     loop.postsSinceLastAdmission >= 1;
 }
 
+/** W1-T14035 — a view as the sweep's own retry views pass it on. `reviewPendingOwnerPidProven` is sweep-local, never on
+ *  {@link OpenPrView} and never set by a producer: {@link promiseHarvestRetryView} sets it when a hold cause replaced the
+ *  producer's `owner-pid-dead`, so the alongside-CI row still sees the producer's proof of death. The green-check rows
+ *  never read it. */
+type SweepPrView = OpenPrView & { reviewPendingOwnerPidProven?: true };
+
 /** W1-T14035 — the view producer's own process proof that the pending owner is dead: the producer's `owner-pid-dead`, or
- *  {@link OpenPrView.reviewPendingOwnerPidProven} where a hold cause has since taken the cause field. A derived cause alone
+ *  the sweep-local {@link SweepPrView} flag where a hold cause has since taken the cause field. A derived cause alone
  *  (a refusal, a promise harvest, host load) also sets `reviewPendingOwnerDead` but proves no death. */
 function producerProvedOwnerDead(
-  pr: Pick<OpenPrView, "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven">,
+  pr: Pick<SweepPrView, "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven">,
 ): boolean {
   return pr.reviewPendingOwnerPidProven === true || (pr.reviewPendingOwnerDead === true &&
     (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead"));
@@ -6876,7 +6882,7 @@ function producerProvedOwnerDead(
  *  not visible yet, and an unknown run on either side waits. Timestamps are not compared: GitHub's and the host's clocks
  *  differ, a status can be undated, and a live claim can land in the same second as the dead row. */
 function pendingClaimOwnerProvenDead(
-  pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven" |
+  pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven" |
     "reviewPendingOwnerRunId" | "reviewPendingStatusRunId">,
 ): boolean {
   return pr.reviewState === "pending" && producerProvedOwnerDead(pr) &&
@@ -7058,7 +7064,7 @@ export function reviewViewSettledFromDeliveredFailure(
 function deliveredFailureView(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
-): { view: OpenPrView; row: Record<string, unknown> } | undefined {
+): { view: SweepPrView; row: Record<string, unknown> } | undefined {
   const row = newestFullVerdictRow(postedRowsForInput(pr, lines));
   const verdict = row?.decision_verdict as ReviewVerdict | undefined;
   if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
@@ -8478,9 +8484,6 @@ export interface OpenPrView {
   reviewPendingOwnerDead?: boolean;
   reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
   reviewPendingOwnerGoneReason?: string;
-  /** W1-T14035 — set by the sweep (never the producer) when a hold cause replaced the producer's `owner-pid-dead`, so the
-   *  alongside-CI row still sees the producer's proof of death. The green-check rows never read it. */
-  reviewPendingOwnerPidProven?: true;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. */
   reviewPendingOwnerRunId?: string;
   /** W1-T14035 — the run the live `remudero-review` status names ("owned by run <id>"); absent when unreadable. */
@@ -17476,8 +17479,8 @@ export function inconclusiveLoadLowered(
 }
 
 function promiseHarvestRetryView(
-  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
-): OpenPrView {
+  pr: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+): SweepPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
   // W1-T14035: a hold cause keeps its precedence over the producer's `owner-pid-dead`, as before; the producer's proof rides
   // along as a sweep-local flag that only the alongside-CI row and reviewDemandLooping read.
@@ -17490,7 +17493,7 @@ function promiseHarvestRetryView(
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }
 
-function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
+function completedRefusalRetryView(pr: SweepPrView, prior: PriorActions): SweepPrView {
   const key = reviewOutcomeKeyForPr(pr);
   const freshness = prior.reviewFreshnessRefusals.get(key);
   const hostGap = prior.reviewHostGapRefusals.get(key);
