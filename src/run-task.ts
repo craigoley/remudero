@@ -2224,10 +2224,12 @@ export function freshOriginMainTreeRunner(
   repoDir: string,
   deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
 ): RatifyCliTree["freshTree"] {
+  // Preserve ratify's synchronous teardown so serve shutdown cannot interrupt the removal.
+  const treeTools = { ...deps, removeWorktree: deps.removeWorktree ?? worktreeRemove };
   return async (action) => {
     try {
       const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
-      return await inPerAttemptTree(repoDir, deps, "approve", sha, (path) => action({ path, sha }));
+      return await inPerAttemptTree(repoDir, treeTools, "approve", sha, (path) => action({ path, sha }));
     } catch (err) {
       throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
     }
