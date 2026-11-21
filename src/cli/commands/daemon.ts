@@ -84,6 +84,8 @@ import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
+import { catalogFilingReader, opsFilingBinding } from "../../lib/dispatch-filing-catalogs.js";
+import { filingDatesFromPlanHistory } from "../../lib/dispatch-value.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
@@ -136,7 +138,7 @@ import {
   bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
 } from "../../lib/run-child-mode.js";
-import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot } from "../../lib/tick-read-worker.js";
+import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
 
 /**
  * W1-T9333: everything `daemonCommand` reaches in `src/run-task.ts` that is not a `src/lib` symbol. This module
@@ -2318,6 +2320,10 @@ export async function daemonCommand(
       if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
       return { outcome: "selected", source: input, publicCommit };
     };
+    // W1-T14214: an ops task is dated from the ops checkout's history at the commit the dispatch capture is bound to.
+    const datedFiling = catalogFilingReader({ publicReader: dispatchFilingPrefetch, log,
+      ports: { parseFilingDates: filingDatesFromPlanHistory, gitFor: planSyncGitRunnerAsync },
+      ops: () => opsFilingBinding(opsDispatchSelection(join(config.root, "state")), opsSourceRepository, opsShadow?.forDispatch()) });
     const summary = await runDaemonFn(
       plan,
       {
@@ -2365,7 +2371,7 @@ export async function daemonCommand(
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, datedFiling(dispatchPlan)),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
