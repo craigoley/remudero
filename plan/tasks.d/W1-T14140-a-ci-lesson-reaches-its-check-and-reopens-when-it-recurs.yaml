@@ -14,7 +14,8 @@
     - src/lib/measurement-cadence.ts
     - src/lib/ci-lesson-recurrence.ts
     - src/lib/flow-remedy-gardener.ts
-    - test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts
+    - src/run-task.ts
+    - test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts
     - test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts
     - test/the-learnings-store-merges-without-conflict.test.ts
     - test/ci-learning-safe-landing.test.ts
@@ -23,6 +24,8 @@
     - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/diff.patch
     - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/report.md
     - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/golden.yaml
+    - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/checkout/learnings/ci.yaml
+    - test/golden-verdicts.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -48,6 +51,10 @@
       did not work is never replaced.
     - Machine shards must keep `files:` to the lesson and its golden fixture (src/lib/plan.ts:1786-1790), and proof-scope blocks a
       path proof outside files for machine shards (src/lib/task-linter.ts:3356-3363); a `unit test:` title names no path.
+    - A builder observed that the reviewer's resolver answers `unresolvable` for a generated test title, which is never written
+      literally in a file, and falls back to running the whole suite. So a per-lesson `unit test:` proof would make every
+      machine lesson's review slow and fragile. The generated suite runs in CI on every PR, so it can enforce reach instead.
+    - The cadence's two mint callers in src/run-task.ts pass no filed lessons, so without wiring the reopen would never run live.
   design: |
     1. ciLearningShardYaml's note tells the worker to write the new entry with `src: "<findingId>"` and
        `error_signatures: [<gate>]`, the check name that went red, so the generated suite can read the gate from src.
@@ -55,33 +62,39 @@
        entry in learnings/ci.yaml and learnings/ci.d/*.yaml, titled `ci lesson <findingId> is selected for its own check`. Each
        runs selectLearnings over the real corpus with the gate name as context text and asserts the entry is selected.
        Superseded entries get no test, since they are never injected.
-    3. The shard template's first proof becomes `unit test: ci lesson <findingId> is selected for its own check`. It is absent at
-       the merge base, so it discriminates. Keep the golden-fixture proof. Update the two tests that pin the old proof.
+    3. The shard template's proofs are unchanged. Reach is enforced by the generated suite, which CI runs on every PR: a lesson
+       whose entry is not selected for its own check turns that suite red, so its PR cannot merge.
     4. When a gate's held lesson reads recurred, mintCiLearningShards no longer drops that gate. It drafts a reopen whose finding id
        carries `#r<N>`, where N is one more than the prior reopens. ciLearningGateOf and parseFiledCiLesson accept the suffix.
+       In src/run-task.ts, both mint callers read the filed lessons before minting and pass them when the read is measured, and
+       a ladder hand-off is given to the flow-remedy ladder, so the reopen and the hand-off run live.
     5. At the third reopen the gate goes to the existing flow-remedy ladder (LadderKind, src/lib/flow-remedy-gardener.ts:61-85) instead
        of filing another lesson. A held lesson files nothing, and so does an unmeasurable one.
     6. Backfill: add `error_signatures: [<gate>]` to every active ci-learning entry in learnings/ci.yaml whose signatures do not
        already hold its gate exactly, keeping any existing signature. Change no fact text. Add the golden verdict case
-       test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/ in the layout of the existing ci-*-lesson cases, so
-       prompt-surface-gate admits the data change and test/golden-verdicts.test.ts passes on it.
+       test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/ in the layout of the existing ci-*-lesson cases, with a
+       checkout/learnings/ci.yaml, and register it in test/golden-verdicts.test.ts. It must replay as an executed pass, as the
+       other ci-*-lesson cases do. A case nothing runs would be evidence in name only.
     The hand-fix lesson template (the ci-learning rung's file-keyed drafts, parked for operator release) is out of scope and
     keeps its proofs.
 
-    INVARIANT a-lesson-proves-reach: every CI lesson drafted from a failing check is proved by a test that selects it for its own check, never by the presence of its id alone.
+    INVARIANT a-lesson-proves-reach: a CI lesson drafted from a failing check cannot merge unless the generated suite selects it for its own check.
   acceptance:
     - claim: "A drafted CI lesson shard tells its worker to write the finding id as src and the gate's check name as an error signature"
-      proof: "grep: W1-T14140 criterion 1: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
+      proof: "grep: W1-T14140 criterion 1: in test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
     - claim: "Every active ci-learning entry is selected by selectLearnings for a context naming its own check, one generated test per entry"
       proof: "grep: is selected for its own check in test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts"
-    - claim: "invariant:a-lesson-proves-reach — a machine-filed lesson's first proof is the generated unit test that selects it, not a grep of its id"
+    - claim: "invariant:a-lesson-proves-reach — an active ci-learning entry that is not selected for its own check fails the generated suite"
       kind: guard
-      proof: "grep: W1-T14140 criterion 3: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
+      proof: "grep: W1-T14140 criterion 3: in test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
     - claim: "A gate whose held lesson recurred is drafted again as a reopen, numbered one past the prior reopens"
-      proof: "grep: W1-T14140 criterion 4: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
+      proof: "grep: W1-T14140 criterion 4: in test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
     - claim: "The third reopen goes to the flow-remedy ladder, and a held or unmeasurable lesson files nothing"
-      proof: "grep: W1-T14140 criterion 5: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
+      proof: "grep: W1-T14140 criterion 5: in test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
+    - claim: "The measurement cadence hands the filed lessons to the mint, so a recurred gate reopens live"
+      proof: "grep: W1-T14140 criterion 6: in test/gardeners/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
   falsifier: |
     Keep the heldGates filter for a recurred lesson and criterion 4 must fail. Write the lesson without the gate signature and
     criterion 1 must fail, and its generated selection test must fail. Remove one backfilled signature and that entry's
-    generated test must fail. Restore and require all to pass.
+    generated test must fail. Drop the mint callers' lessons in src/run-task.ts and criterion 6 must fail. Restore and require
+    all to pass.
