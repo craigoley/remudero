@@ -456,13 +456,15 @@ test("W1-T14146 criterion 4: on the production auction's own probabilities 0.10 
   assert.equal(underFloor.status, "underpowered");
   assert.match(underFloor.decision.reason, /^build: always-claude has 391\.0 effective tasks, below the floor of 392$/);
 
-  // THE INTERVAL'S BOUND. Every task is three attempts, one merged, so each arm's rate is exactly 1/3 in every
-  // resample. In doubles the two arms' 1/3 differ by one unit in the last place, Codex's above Claude's at the first
-  // readings and below at the second: a bound that far from 0 is 0, so the interval includes 0.
+  // THE INTERVAL'S BOUND. Every task is three attempts Claude served and three Codex served, one of each merged, so
+  // each arm's rate is exactly 1/3 in every resample, and every resample draws the same mix. In doubles the two arms'
+  // 1/3 differ by one unit in the last place, Codex's above Claude's at the first readings and below at the second,
+  // so read bare every resample's difference sits on one side of 0. A bound that close to 0 is 0: the interval
+  // includes 0, and the cell names that, not a difference below the minimum.
   for (const used of [{ claude: 60, codex: 40 }, { claude: 42, codex: 17 }]) {
     const thirds = cell([
       ...auctionArm("claude", used, { tasks: 400, positive: 400, first: 600000, attempts: 3 }),
-      ...auctionArm("codex", used, { tasks: 400, positive: 400, first: 700000, attempts: 3 }),
+      ...auctionArm("codex", used, { tasks: 400, positive: 400, first: 600000, attempts: 3 }),
     ]);
     const build = thirds.pipelines.build!;
     const claude = build.policies["always-claude"].estimate!, codex = build.policies["always-codex"].estimate!;
