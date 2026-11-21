@@ -437,13 +437,13 @@ function projectWrite(input: Exclude<ProviderRoutingWriteInput, { state: "invali
   };
 }
 
-/** The record on disk when it holds a probed reading (`selected` or `blocked`) with its provider windows. */
-function probedRecord(target: string): Record<string, unknown> | undefined {
+function storedRecord(target: string): Record<string, unknown> | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
-    return parsed.state === "selected" || parsed.state === "blocked" ? parsed : undefined;
+    const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown> | null;
+    return parsed?.version === PROVIDER_ROUTING_STATUS_VERSION &&
+      (parsed.state === "selected" || parsed.state === "blocked" || parsed.state === "not-probed") ? parsed : undefined;
   } catch {
-    // An absent, unreadable or malformed snapshot has no probed reading to keep.
+    // An absent, unreadable or malformed snapshot has no reading to retain.
     return undefined;
   }
 }
@@ -469,23 +469,32 @@ export function writeProviderRoutingStatus(root: string, input: ProviderRoutingW
 }
 
 function publishStatus(target: string, input: ProviderRoutingWriteInput): void {
+  const stored = storedRecord(target);
+  // Keep the cutoff in the same atomic write as the flag. The public projection omits it.
+  const storedCutoff = stored?.creditsInvalidatedAtMs;
+  let creditsInvalidatedAtMs = typeof storedCutoff === "number" && Number.isFinite(storedCutoff) ? storedCutoff : undefined;
+  const cutoffMs = creditsInvalidatedAtMs ?? Number.NEGATIVE_INFINITY;
   let record: ProviderRoutingStatus | Record<string, unknown>;
   if (input.state === "invalidate-credits") {
-    const kept = probedRecord(target);
-    if (kept?.state !== "selected" || typeof kept.observedAt !== "string" ||
-        !(Date.parse(kept.observedAt) <= input.observedAtMs) || !Array.isArray(kept.providers)) return;
-    const codex = kept.providers.find((row) => row?.provider === "codex" && row.creditsLane === true);
-    if (!codex) return;
-    delete codex.creditsLane;
-    record = kept;
+    if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
+    if (input.observedAtMs <= cutoffMs) return;
+    creditsInvalidatedAtMs = input.observedAtMs;
+    record = stored ?? projectWrite({ ...input, state: "not-probed" });
+    if (record.state === "selected" && typeof record.observedAt === "string" &&
+        Date.parse(record.observedAt) <= input.observedAtMs && Array.isArray(record.providers)) {
+      const codex = record.providers.find((row) => row?.provider === "codex");
+      if (codex) delete codex.creditsLane;
+    }
   } else {
     const projected = projectWrite(input);
-    const kept = input.state === "not-probed" ? probedRecord(target) : undefined;
+    if (projected.state === "selected" && input.observedAtMs <= cutoffMs &&
+        projected.providers?.some((row) => row.creditsLane)) return;
+    const kept = input.state === "not-probed" && (stored?.state === "selected" || stored?.state === "blocked") ? stored : undefined;
     record = kept
       ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
       : projected;
   }
-  const payload = `${JSON.stringify(record)}\n`;
+  const payload = `${JSON.stringify(creditsInvalidatedAtMs === undefined ? record : { ...record, creditsInvalidatedAtMs })}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
   }

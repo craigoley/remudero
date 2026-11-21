@@ -252,7 +252,7 @@ test("borrowed credits project from the generic bucket's own history", async (t)
   assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
 });
 
-test("W1-T13855 criterion 9: an unfunded generic window preserves the carried reserve refusal", async (t) => {
+test("W1-T13855 criterion 9: cash carries when a model's projected window reaches the reserve without spendable credits", async (t) => {
   const funded = { hasCredits: true, unlimited: false, balance: BALANCE };
   for (const [label, generic] of [
     ["absent", { credits: null }],
@@ -261,8 +261,9 @@ test("W1-T13855 criterion 9: an unfunded generic window preserves the carried re
     ["projected depletion", { credits: { ...funded, balance: "10" } }],
   ] as const) {
     const account = codexAccount(t);
+    // This model has headroom on the fresh read, but its own window reaches the reserve on carry.
     account.state.buckets.sol = { limitName: SOL.id,
-      primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset } };
+      primary: { usedPercent: 94.99, windowDurationMins: 10080, resetsAt: account.state.reset } };
     if (label === "projected depletion") {
       account.state.balance = "20";
       assert.equal((await account.read()).credits?.balance, 20);
@@ -271,7 +272,7 @@ test("W1-T13855 criterion 9: an unfunded generic window preserves the carried re
     Object.assign(account.state.extras, generic);
     const fresh = await account.read();
     assert.equal(fresh.readable, true);
-    assert.equal(fresh.windows[0]?.usedPercent, 40);
+    assert.equal(fresh.windows[0]?.usedPercent, 94.99);
     assert.equal(providerEligibility(fresh, 5).lane, undefined, "control: the fresh read is subscription headroom");
 
     account.fail(label === "projected depletion" ? 6 * 3_600_000 : undefined);
@@ -305,12 +306,12 @@ test("W1-T13855 criterion 6: a carried model past its reserve on borrowed credit
     { path: "carried", projectedBalance: Number(BALANCE), ageMs: 61_000, failureKind: "timeout" });
 });
 
-test("W1-T13855 criterion 9: a carried model with its own headroom is chosen before a funded peer past its reserve", async (t) => {
+test("W1-T13855 criterion 9: carried subscription headroom wins beside an unfunded generic window and a funded model", async (t) => {
   const account = codexAccount(t);
   const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
   const credits = { hasCredits: true, unlimited: false, balance: "10" };
   const other = { limitName: SOL61.id, primary: { ...primary, usedPercent: 40 } };
-  account.state.used = 40;
+  account.state.used = 97;
   account.state.balance = "0";
   account.state.models.push(SOL61);
   account.state.buckets = {
@@ -324,6 +325,11 @@ test("W1-T13855 criterion 9: a carried model with its own headroom is chosen bef
   assert.equal(carried.model, SOL61.id, "subscription headroom is drawn before the peer's credits");
   assert.equal(providerEligibility(carried, 5).lane, undefined);
   assert.equal(carried.creditsRescue, undefined);
+  assert.equal(carried.modelDecision?.options.find((option) => option.id === SOL.id)?.lane, "codex-credits");
+  const routed = await routeSpawn(account);
+  assert.equal(routed.assignments.at(-1)?.selected.model, SOL61.id);
+  assert.equal(routed.codexSpawns, 1);
+  assert.equal(routed.cashSpawns, 0);
   const attribution = await account.read({ selectedModel: SOL61.id });
   assert.equal(attribution.readable, true, attribution.detail);
   assert.equal(providerEligibility(attribution, 5).lane, undefined);
@@ -1014,4 +1020,51 @@ test("W1-T13855 criterion 7: a funded publication racing fallback invalidation k
   assert.equal(status.observedAt, new Date(newerAt).toISOString());
   assert.equal(routingStatus.creditsLaneRoom(status, newerAt), true);
   assert.equal(reviewProviderObservation(status, newerAt).creditsLane, true);
+});
+
+test("W1-T13855 criterion 7: a delayed funded publication cannot restore the review credits lane after cash fallback", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  const funded = [claudeAt(99), creditsCodex()];
+  const before = statusFor(root, START, funded);
+  assert.equal(reviewProviderObservation(before, START).creditsLane, true);
+
+  const fallbackAt = START + 5_000;
+  account.state.now = fallbackAt;
+  account.state.balance = "0";
+  assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+  const readStatus = () => readProviderRoutingStatus(root, { now: () => fallbackAt });
+  const invalidated = readStatus();
+  assert.equal(reviewProviderObservation(invalidated, fallbackAt).creditsLane, undefined);
+
+  for (const delayedAt of [fallbackAt - 1, fallbackAt]) {
+    statusFor(root, delayedAt, funded);
+    const after = readStatus();
+    assert.deepEqual(after, invalidated);
+    const observation = hostHealthy(fallbackAt, after);
+    assert.equal(observation.provider.creditsLane, undefined);
+    const { decision } = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), POLICY,
+      observation, BOUNDS);
+    assert.equal(decision.reason, "provider-headroom");
+  }
+
+  const newer = statusFor(root, fallbackAt + 1, funded);
+  assert.equal(reviewProviderObservation(newer, fallbackAt + 1).creditsLane, true);
+  statusFor(root, fallbackAt - 1, funded);
+  assert.deepEqual(readStatus(), newer, "a later publication preserves the cutoff for delayed writers");
+});
+
+test("a first cash fallback records the credits cutoff before any funded status reaches disk", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  const fallbackAt = START + 5_000;
+  account.state.now = fallbackAt;
+  account.state.balance = "0";
+  assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+
+  const delayed = statusFor(root, START, [claudeAt(99), creditsCodex()]);
+  assert.equal(delayed.state, "not-probed");
+  assert.equal(reviewProviderObservation(delayed, fallbackAt).creditsLane, undefined);
+  const newer = statusFor(root, fallbackAt + 1, [claudeAt(99), creditsCodex()]);
+  assert.equal(reviewProviderObservation(newer, fallbackAt + 1).creditsLane, true);
 });

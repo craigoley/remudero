@@ -2295,8 +2295,6 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     }
     const onCredits = providerEligibility(selected, reserve).lane === "codex-credits";
-    // A reserve refusal still bars subscription carry. Another model can carry on funded credits.
-    if (rejectedWindow && !onCredits) throw new Error(rejectedWindow);
     const rescued = onCredits
       ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
     return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },
