@@ -712,7 +712,7 @@ test("W1-T13875: a legacy refusal can recover a proposal opened before the child
   assert.equal(f.calls.length, 1);
 });
 
-test("W1-T13875: a legacy refusal reads through the first cut after its window and skips later sources", async (t) => {
+test("W1-T13875: a legacy refusal retries an incomplete archive scan without keeping its result", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
@@ -720,21 +720,15 @@ test("W1-T13875: a legacy refusal reads through the first cut after its window a
   const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
   const dir = dirname(f.ledgerPath);
   const cut = (offset: number) => new Date(at(offset)).toISOString();
-  const lastRelevant = cut(REFUSED_OFFSET + 1_000);
   const later = cut(REFUSED_OFFSET + 2_000);
-  const gzipPath = (stamp: string) => join(dir, `ledger.${stamp.replace(/[:.]/g, "-")}.ndjson.gz`);
   writeLedger([], { dir, rotations: [
     { at: cut(2_500), rows: [started!, planned!] },
-    // A real cut after the window holds a row written after it: that row, not the file's name, proves the cut.
-    { at: lastRelevant, gz: true, rows: [opened!, { ts: cut(REFUSED_OFFSET + 500), step: "daemon.heartbeat" }] },
+    { at: cut(REFUSED_OFFSET + 1_000), gz: true, rows: [opened!, { ts: cut(REFUSED_OFFSET + 500), step: "daemon.heartbeat" }] },
+    { at: later, gz: true, rows: [] },
   ] });
-  writeFileSync(gzipPath(later), "unreadable later archive");
-  unlinkSync(f.ledgerPath);
-  mkdirSync(f.ledgerPath);
-
-  const archive = gzipPath(lastRelevant);
+  const archive = join(dir, `ledger.${later.replace(/[:.]/g, "-")}.ndjson.gz`);
   const saved = readFileSync(archive);
-  writeFileSync(archive, "unreadable relevant archive");
+  writeFileSync(archive, "unreadable later archive");
   const incomplete = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([incomplete.observation.state, incomplete.observation.proposal], ["unknown", undefined]);
 
@@ -872,6 +866,32 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
   const next = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.equal(next.observation.state, "proposed");
   assert.equal(next.observation.proposal, PR_URL, "late evidence was discarded and a new read could succeed");
+});
+
+test("W1-T13875: invariant:bounded-read preserves stale-target and changed-brief when a read is promptly incomplete", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  const calls: string[] = [];
+  const service = f.service({ gateway: false, ledgerReadBoundMs: 1_000, readLedgerLines: async (_dir, { sinceTs }) => {
+    calls.push(sinceTs);
+    return { ok: false, rawLines: proposalLines(f, operationId) };
+  } });
+  f.target.inspection.head = MOVED;
+  const stale = await ok(service.execute(actor, f.command()));
+
+  assert.ok(f.store.write(actor, { version: "product-intent-v1", requestId: "brief-changed-000002", id: f.productId,
+    expectedRevision: revisionOf(f), brief: { ...brief, idea: "a different original idea" } }).ok);
+  const changed = await ok(service.execute(actor, f.command()));
+  assert.deepEqual([stale, changed].map(({ observation }) => [observation.state, observation.proposal]),
+    [["stale-target", undefined], ["changed-brief", undefined]]);
+  assert.deepEqual(calls, [REQUESTED, REQUESTED], "an incomplete view is retried and contributes no proposal");
+
+  const never = reader(() => "never");
+  const expired = await ok(f.service({ gateway: false, ledgerReadBoundMs: 20, readLedgerLines: never.read }).execute(actor, f.command()));
+  assert.deepEqual([expired.observation.state, expired.observation.proposal], ["unknown", undefined]);
+  assert.equal(never.reads.length, 1, "the expired read could not report either changed state");
 });
 
 test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
@@ -1022,6 +1042,12 @@ test("W1-T13875 criterion 1: a legacy refusal's window ends at its saved refusal
   assert.deepEqual([kept.observation.state, kept.observation.proposal], ["proposed", PR_URL]);
 });
 
+function deferredSignal() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers unknown within the bound and releases the journal", { timeout: 20_000 }, async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
@@ -1032,15 +1058,13 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
   const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
   assert.ok(existsSync(kept));
 
-  let signalOpen!: () => void;
-  const openStarted = new Promise<void>((resolve) => { signalOpen = resolve; });
-  let releaseOpen!: () => void;
-  const openReleased = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const openStarted = deferredSignal();
+  const openReleased = deferredSignal();
   const realOpen = fsPromises.open;
   const stalledOpen = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
     if (args[0] === kept) {
-      signalOpen();
-      await openReleased;
+      openStarted.resolve();
+      await openReleased.promise;
     }
     return realOpen(...args);
   });
@@ -1051,7 +1075,7 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
     let pending = true;
     const resume = ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()))
       .finally(() => { pending = false; });
-    await Promise.race([openStarted, resume.then(() => assert.fail("resume answered without opening the kept file"))]);
+    await Promise.race([openStarted.promise, resume.then(() => assert.fail("resume answered without opening the kept file"))]);
     t.mock.timers.tick(bound - 1);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(pending, true, "the open is still pending one tick before the bound");
@@ -1067,7 +1091,7 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
     t.mock.timers.reset();
     stalledOpen.mock.restore();
     syncBuiltinESMExports();
-    releaseOpen();
+    openReleased.resolve();
   }
 
   const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
@@ -1075,19 +1099,89 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
   assert.equal(evidence.reads.length, 1, "the kept proposal answered once the file was readable");
 });
 
+function mockEvidenceSync(t: TestContext, f: Fixture, flush: (sync: () => Promise<void>) => Promise<void>) {
+  const realOpen = fsPromises.open;
+  const mock = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
+    const handle = await realOpen(...args);
+    if (String(args[0]).startsWith(`${f.journalDirectory}/.`) && String(args[0]).endsWith(".pending")) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = () => flush(sync);
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  return () => { mock.mock.restore(); syncBuiltinESMExports(); };
+}
+
+test("W1-T13875: invariant:bounded-read releases the journal while a new evidence flush is stalled", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const evidence = reader(() => proposalLines(f, operationId));
+  const ownerKey = createHash("sha256").update(actor).digest("hex");
+  const kept = join(f.journalDirectory, `${ownerKey}.evidence.json`);
+  const started = deferredSignal();
+  const release = deferredSignal();
+  const discarded = deferredSignal();
+  const restoreSync = mockEvidenceSync(t, f, async (sync) => {
+    started.resolve();
+    await release.promise;
+    await sync();
+  });
+  const realUnlink = fsPromises.unlink;
+  const unlinkStage = t.mock.method(fsPromises, "unlink", async (path: Parameters<typeof realUnlink>[0]) => {
+    await realUnlink(path);
+    if (String(path).startsWith(`${f.journalDirectory}/.`)) discarded.resolve();
+  });
+  syncBuiltinESMExports();
+  const bound = 5_000;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let finished = false;
+    const resume = ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()))
+      .finally(() => { finished = true; });
+    await Promise.race([started.promise, resume.then(() => assert.fail("resume answered before flushing its evidence"))]);
+    t.mock.timers.tick(bound);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(finished, true, "resume answered at the deadline while the flush was still stalled");
+    const result = await resume;
+    assert.deepEqual([result.observation.state, result.observation.proposal], ["unknown", undefined]);
+    acquireInflightLock(join(f.journalDirectory, "locks"), ownerKey, { run_id: "while-evidence-flush-stalled" }).release();
+    assert.equal(existsSync(kept), false, "unflushed evidence was never published");
+    assert.equal(evidence.reads.length, 1);
+    t.mock.timers.reset();
+    restoreSync();
+
+    const nextUrl = PR_URL.replace(/42$/, "43");
+    const next = reader(() => proposalLines(f, operationId).map((line) => line.replace(PR_URL, nextUrl)));
+    assert.equal((await ok(f.service({ gateway: false, readLedgerLines: next.read }).execute(actor, f.command()))).observation.proposal, nextUrl);
+    release.resolve();
+    await discarded.promise;
+    assert.equal((await ok(f.service({ gateway: false, readLedgerLines: next.read }).execute(actor, f.command()))).observation.proposal, nextUrl);
+    assert.equal(next.reads.length, 1, "the late stage was discarded and the successful retry stayed kept across restarts");
+  } finally {
+    t.mock.timers.reset();
+    restoreSync();
+    unlinkStage.mock.restore();
+    syncBuiltinESMExports();
+    release.resolve();
+  }
+});
+
 test("W1-T13875 criterion 3: a proposal is never answered from evidence its write failed to keep", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
   const evidence = reader(() => proposalLines(f, operationId));
-  const eio = (fd: number) => {
-    if (fstatSync(fd).isFile()) throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" });
-    fsyncSync(fd);
-  };
-  const failing = f.service({ gateway: false, readLedgerLines: evidence.read, sync: eio });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // Not from instance memory either: the same service never answers a proposal it could not keep.
-    assert.equal(await refused(failing.execute(actor, f.command())), "unavailable");
+  const restore = mockEvidenceSync(t, f, async () => { throw Object.assign(new Error("EIO: i/o error, fsync"), { code: "EIO" }); });
+  const failing = f.service({ gateway: false, readLedgerLines: evidence.read });
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // The same service never answers a proposal it could not keep.
+      assert.equal(await refused(failing.execute(actor, f.command())), "unavailable");
+    }
+  } finally {
+    restore();
   }
   const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
   assert.equal(existsSync(kept), false, "nothing was kept, so nothing was answered as kept");
@@ -1116,7 +1210,7 @@ test("W1-T13875 criterion 3: an unreadable kept file is never rewritten without 
   assert.equal(evidence.reads.length, 1);
 });
 
-test("W1-T13875 criterion 1: a legacy refusal reads past a cut stamped after its window when the cut's snapshot preceded it", async (t) => {
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a legacy proposal past a future-stamped heartbeat is kept", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
@@ -1124,9 +1218,9 @@ test("W1-T13875 criterion 1: a legacy refusal reads past a cut stamped after its
   const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
   const ts = (offset: number) => new Date(at(offset)).toISOString();
   // Rotation snapshots the live file BEFORE it stamps the archive. Here the snapshot preceded the in-window proposal and its
-  // nonzero exit, so the first archive stamped after the refusal holds neither: they were carried into the NEXT archive.
+  // nonzero exit. It already held an unrelated future-stamped heartbeat; the proposal and exit reached the next archive.
   writeLedger([{ ts: ts(REFUSED_OFFSET + 9_000), step: "daemon.heartbeat" }], { dir: dirname(f.ledgerPath), rotations: [
-    { at: ts(REFUSED_OFFSET + 1), gz: true, rows: [started!, planned!] },
+    { at: ts(REFUSED_OFFSET + 1), gz: true, rows: [started!, planned!, { ts: ts(REFUSED_OFFSET + 2_000), step: "daemon.heartbeat" }] },
     { at: ts(REFUSED_OFFSET + 4_000), gz: true, rows: [{ ...opened!, ts: ts(REFUSED_OFFSET - 500) },
       { ts: ts(REFUSED_OFFSET - 100), task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 },
       { ts: ts(REFUSED_OFFSET + 3_000), step: "daemon.heartbeat" }] },

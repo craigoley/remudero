@@ -4,7 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -15,7 +15,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
-import { ledgerLivePath, ledgerRotationEntries, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -249,6 +249,7 @@ const finalEvidenceSchema = z.object({
 }).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined || seen.settled === true);
 type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
 type LedgerRead = LedgerEvidence | "unread";
+type EvidenceRead = LedgerRead | "expired";
 const recordSchema = z.object({
   operationId: hex64, productId: productIdSchema, revision, objectiveRevision: revision, briefDigest: hex64,
   repository: z.object({ id: revision, owner: z.string().min(1).max(64), name: z.string().min(1).max(128) }).strict(),
@@ -281,34 +282,6 @@ const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
 const ledgerReaderEntry = fileURLToPath(import.meta.url);
 const ledgerReaderArg = "--read-product-plan-evidence";
 
-const legacyEvidenceSteps: readonly unknown[] = ["ratify.cli_started", "ratify.cli_exited", "ratify.handoff_failed", "plan.start", "pr.opened"];
-
-/**
- * A legacy refusal's window ends at its saved refusal. A rotation's NAME cannot end the read: its stamp is taken after
- * its snapshot, so rows written between the two sit in the NEXT file. Only a file holding a row stamped after the window
- * proves it was cut after the window, so every row written by then is in it or an earlier file; the read stops there.
- */
-async function readLegacyPlanLedgerRows(stateDir: string, subject: LedgerSubject, taskId: string, untilMs: number) {
-  let ok = true;
-  const markUnread = () => { ok = false; };
-  const corpusSnapshot = listedLedgerFiles(stateDir, { readdirSync }, markUnread);
-  if (!ok) return undefined;
-  let cutAfterWindow = false;
-  const rows = await readLedgerUnionRecords(stateDir, {
-    // No step filter: a row of ANY step stamped after the window is what proves its file's cut.
-    corpusSnapshot, sinceTs: subject.requestedAt,
-    where: (row) => {
-      const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-      if (ts > untilMs) { cutAfterWindow = true; return false; }
-      return Number.isFinite(ts) && legacyEvidenceSteps.includes(row.step) &&
-        (row.task_id === taskId || row.step === "plan.start" || row.step === "pr.opened");
-    },
-    stopAfterRotation: () => cutAfterWindow,
-    onUnreadArchive: markUnread, onUnreadLive: markUnread,
-  });
-  return { ok, archiveFiles: corpusSnapshot.rotations.map(({ path }) => path), rows };
-}
-
 /**
  * Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. After
  * the swap, rows written to the replaced inode reach the new live file only when the rotation drains it, under the
@@ -330,15 +303,15 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       continue;
     }
     const before = liveIdentity();
-    const read = subject.untilMs === undefined
-      ? await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) })
-      : await readLegacyPlanLedgerRows(stateDir, subject, taskId, subject.untilMs);
-    if (read === undefined || ("unread" in read && read.unread.includes(stateDir))) return "unread";
+    // A rotation is named after its snapshot, and its rows can be future-stamped. Apply a legacy refusal's upper
+    // bound to evidence rows in correlateLedger, scanning later sources that can still contain in-window rows.
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
+    if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
     if (rotating() || before !== after || archives.length !== read.archiveFiles.length ||
       archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
-    return read.ok ? correlateLedger(subject, taskId, "rows" in read ? read.rows : parseEvidenceLines(read.rawLines)) : "unread";
+    return read.ok ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread";
   }
 }
 
@@ -494,7 +467,7 @@ export class ProductPlanOperationService {
     if (known && !record) throw new Fault("corrupt");
     let replayed = known !== undefined;
     let head: string | undefined;
-    let selectedEvidence: LedgerRead | undefined;
+    let selectedEvidence: EvidenceRead | undefined;
     if (!record) {
       // A fresh request: everything the operation will freeze is verified against the live target first.
       if (!repository) throw new Fault("repository_missing");
@@ -635,10 +608,10 @@ export class ProductPlanOperationService {
   }
 
   /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
-  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: LedgerRead): ProductPlanObservation {
+  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: EvidenceRead): ProductPlanObservation {
     let state: ProductPlanState = "unknown";
-    const proposal = seen === "unread" ? undefined : seen.opened;
-    if (seen !== "unread") {
+    const proposal = typeof seen === "string" ? undefined : seen.opened;
+    if (typeof seen !== "string") {
       if (proposal !== undefined) state = "proposed";
       else if (seen.exited) state = "refused";
       else if (seen.failed) state = "unknown";
@@ -646,6 +619,8 @@ export class ProductPlanOperationService {
       else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
       else if (this.inFlight(record.operationId)) state = "pending";
       else if (record.handoff?.outcome === "refused") state = "refused";
+    }
+    if (seen !== "expired") {
       // A late proposal is historical evidence for its frozen brief, never for a newer objective.
       if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
       // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
@@ -659,30 +634,38 @@ export class ProductPlanOperationService {
   /**
    * Final evidence is read once and kept beside the journal, never read again. The bound covers the WHOLE lookup, from
    * its first filesystem call: the kept file is opened asynchronously under the same timer as the ledger read, and an
-   * answer that arrives past the deadline is "unread" whatever it holds. Evidence is answered as final only once it is
+   * answer that arrives past the deadline is "expired" whatever it holds. Evidence is answered as final only once it is
    * durably kept: a failed write refuses the request instead of answering from memory a restart would not have.
    */
-  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<LedgerRead> {
+  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<EvidenceRead> {
+    if (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.inFlight(record.operationId)) {
+      return { exited: false, failed: false };
+    }
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<"unread">((resolve) => { timer = setTimeout(() => resolve("unread"), bound); });
+    let deadlineReached = false;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => { deadlineReached = true; resolve("expired"); }, bound);
+    });
+    const pastDeadline = () => deadlineReached || performance.now() >= deadline;
     try {
       const kept = await Promise.race([this.readKept(paths), expired]);
-      if (kept === "unread" || performance.now() >= deadline) return "unread";
+      if (kept === "expired" || pastDeadline()) return "expired";
       const known = kept?.evidence[record.operationId];
       if (known) return known;
-      const seen = await this.ledger(record, expired, deadline);
-      if (seen === "unread") return seen;
+      const seen = await this.ledger(record, expired, pastDeadline);
+      if (pastDeadline()) return "expired";
+      if (typeof seen === "string") return seen;
       const { opened, exited, failed } = seen;
       const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
         : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
       if (final === undefined) return seen;
-      this.keep(paths, journal, kept, record.operationId, final);
-      return final;
+      const saved = await Promise.race([this.keep(paths, journal, kept, record.operationId, final, pastDeadline), expired]);
+      return pastDeadline() ? "expired" : saved;
     } catch (error) {
       // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
-      if (performance.now() >= deadline) return "unread";
+      if (pastDeadline()) return "expired";
       throw error;
     } finally {
       clearTimeout(timer);
@@ -726,19 +709,42 @@ export class ProductPlanOperationService {
     }
   }
 
-  /** Durably keeps one operation's final evidence; a failure propagates, so nothing is answered as kept that is not. */
-  private keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence): void {
+  /** Flush a private stage asynchronously, then publish it only while this attempt still owns the journal lock. */
+  private async keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence,
+    pastDeadline: () => boolean): Promise<LedgerEvidence | "expired"> {
     // Only operations the journal still holds, so the file stays within operations x one entry.
     const evidence = Object.fromEntries(Object.entries({ ...kept?.evidence, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
-    this.writePrivate(paths, paths.kept, JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence }),
-      PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes);
+    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence });
+    if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
+    const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
+    let staged = false;
+    let renamed = false;
+    try {
+      const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      staged = true;
+      try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
+      finally { await handle.close(); }
+      if (pastDeadline()) return "expired";
+      // Keep the deadline check and publish in one turn. A queued rename could overwrite a later attempt after timeout.
+      renameSync(temporary, paths.kept);
+      renamed = true;
+      const directory = await open(paths.directory, constants.O_RDONLY);
+      try { await directory.sync(); } finally { await directory.close(); }
+      return final;
+    } catch (error) {
+      throw Object.assign(new Fault(renamed ? "outcome_unknown" : "unavailable"), { cause: error });
+    } finally {
+      if (staged && !renamed) {
+        try { await unlink(temporary); } catch (error) { void error; /* an unremovable private stage is reaped with the directory */ }
+      }
+    }
   }
 
-  private async ledger(record: Record_, expired: Promise<"unread">, deadline: number): Promise<LedgerRead> {
+  private async ledger(record: Record_, expired: Promise<"expired">, pastDeadline: () => boolean): Promise<EvidenceRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
     const refused = record.handoff?.outcome === "refused" && !this.inFlight(record.operationId);
-    if (ledgerPath === undefined || (refused && record.handoff?.beforeLaunch === true)) return none;
+    if (ledgerPath === undefined) return none;
     // A legacy refusal can be a nonzero exit after a proposal opened. The gateway saves the refusal only after the child
     // exited and its exit row was written, so its window ends exactly at the saved refusal.
     const untilMs = refused ? Date.parse(record.handoff!.at) : undefined;
@@ -749,21 +755,17 @@ export class ProductPlanOperationService {
       const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest,
         ...(untilMs !== undefined ? { untilMs } : {}) };
       const stateDir = dirname(ledgerPath);
-      const seen = await Promise.race([
+      return await Promise.race([
         expired,
         this.options.readLedgerLines
           ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilMs !== undefined ? { untilMs } : {}), refuseIncomplete: true,
             keep: keepEvidenceLine(taskId) })
-            .then((read): LedgerRead => read.ok && performance.now() < deadline ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread")
+            .then((read): LedgerRead => read.ok && !pastDeadline() ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.
           : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
             { signal: controller.signal, killSignal: "SIGKILL" })
             .then(({ stdout }): LedgerRead => JSON.parse(stdout) as LedgerRead),
       ]);
-      return performance.now() >= deadline ? "unread" : seen;
-    } catch (error) {
-      if (performance.now() >= deadline) return "unread";
-      throw error;
     } finally {
       controller.abort();
     }
