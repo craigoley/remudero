@@ -67,12 +67,13 @@ import { interventionFromLedgerRow, interventionKey, mostChangedFile, OPERATOR_I
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
-import { judgeCiLessonEfficacy, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson, type FiledCiLessonsRead } from "./ci-lesson-recurrence.js";
-import { CI_LESSON_HANDOFF_STEP, FLOW_LADDER, ladderOrigin, ownRedCauseKey } from "./flow-remedy-gardener.js";
-export { judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
+import { CI_LEARNING_ID_RE, ciLearningGateOf, judgeCiLessonEfficacy, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson, type FiledCiLessonsRead } from "./ci-lesson-recurrence.js";
+import { CI_LESSON_HANDOFF_STEP } from "./flow-remedy-gardener.js";
+export { CI_LEARNING_ID_RE, ciLearningGateOf, judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  loadLearnings,
   loadLearningsCorpus,
   mineRevertedLearningSourcePrsFromGitDump,
   projectLearningsHome,
@@ -3156,17 +3157,8 @@ export const CI_LEARNING_DOMINANT_FILE_COUNT = 3;
 /** The primary key: PR plus gate, never a similarity score — deterministic, so a rerun over an
  *  unchanged corpus recognises what it already filed ({@link adoptionProposalId}'s discipline). */
 export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">, reopen = 0): string {
-  return `ci-learning:${finding.pr}:${finding.gate}${reopen > 0 ? `#r${reopen}` : ""}`;
-}
-
-/** A CI lesson's finding id: `ci-learning:<pr>:<gate>`, then `#r<N>` on a reopen. A hand-fix origin does not match. */
-export const CI_LEARNING_ID_RE = /^ci-learning:\d+:(.+?)(?:#r(\d+))?$/;
-
-/** The gate {@link ciLearningShardId} names, or undefined for another origin.
- *  Dedup by gate: a window's changing first PR made whole-id dedup re-file existing lessons.
- *  Evidence: 2026-09-29 plan/tasks.d audit, retained in the W1-T11007 review record. */
-export function ciLearningGateOf(findingId: string): string | undefined {
-  return CI_LEARNING_ID_RE.exec(findingId)?.[1];
+  const gate = finding.gate.replace(/%/g, "%25").replace(/#/g, "%23");
+  return `ci-learning:${finding.pr}:${gate}${reopen > 0 ? `#r${reopen}` : ""}`;
 }
 
 /** W1-T14140: which reopen of its gate's lesson a finding id is — 0 for the first lesson, N for `#r<N>`. */
@@ -3186,9 +3178,54 @@ export function ciLessonReach<T extends LearningEntry>(corpus: T[]): { entry: T;
   return corpus.flatMap((entry) => {
     const gate = entry.lifecycle === "active" ? ciLearningGateOf(entry.src) : undefined;
     if (gate === undefined) return [];
-    const { selected } = selectLearnings(corpus, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS, { text: gate });
-    return [{ entry, gate, selected: selected.includes(entry) }];
+    return [{ entry, gate, selected: lessonReachesGate(corpus, entry, gate) }];
   });
+}
+
+function lessonReachesGate(corpus: LearningEntry[], entry: LearningEntry, gate: string): boolean {
+  return selectLearnings(corpus, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS, { text: gate }).selected.includes(entry);
+}
+
+function activeLessonReplacement(entry: LearningEntry, byId: ReadonlyMap<string, LearningEntry>): LearningEntry | undefined {
+  const visited = new Set<string>();
+  let current: LearningEntry | undefined = entry;
+  while (current?.lifecycle === "superseded" && current.supersededBy && !visited.has(current.id)) {
+    visited.add(current.id);
+    current = byId.get(current.supersededBy);
+  }
+  return current?.lifecycle === "active" ? current : undefined;
+}
+
+/** A filed shard owns the identity of its lesson file. Parked tasks can precede the file. */
+export function ciLessonBindingErrors(
+  root: string,
+  tasks: readonly Pick<Task, "origin" | "files">[],
+  corpus: LearningEntry[],
+): string[] {
+  const byId = new Map(corpus.map((entry) => [entry.id, entry]));
+  const errors = new Set<string>();
+  for (const { origin, files } of tasks) {
+    const gate = origin === undefined ? undefined : ciLearningGateOf(origin);
+    if (gate === undefined) continue;
+    const lessonFile = files?.find((file) => /^learnings\/ci\.d\/[^/]+\.yaml$/.test(file));
+    if (!lessonFile || !existsSync(join(root, lessonFile))) continue;
+    const entries = loadLearnings(join(root, lessonFile));
+    if (!entries.some(({ id, src }) => {
+      const entry = byId.get(id);
+      if (src !== origin || !entry || entry.src !== origin) return false;
+      if (entry.lifecycle === "active") return true;
+      const replacement = activeLessonReplacement(entry, byId);
+      return replacement !== undefined && lessonReachesGate(corpus, replacement, gate);
+    })) {
+      errors.add(`${lessonFile} must contain a corpus entry with src: ${JSON.stringify(origin)} that is active or has an active replacement for ${JSON.stringify(gate)}`);
+    }
+    for (const entry of entries) {
+      if (entry.lifecycle === "active" && entry.src !== origin) {
+        errors.add(`${lessonFile} entry ${entry.id} has src ${JSON.stringify(entry.src)}, expected ${JSON.stringify(origin)}`);
+      }
+    }
+  }
+  return [...errors];
 }
 
 /** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
@@ -3253,8 +3290,7 @@ export interface CiLearningShardDraft {
   reopen?: { n: number; priorFindingId: string; recurredPrs: number[] };
 }
 
-/** W1-T14140: a gate the lesson rung stops filing for, handed to the flow-remedy ladder (FLOW_LADDER) under the cause
- *  key the flow ladder prices for a PR that check holds red. */
+/** A gate the lesson rung stops filing for, with evidence the ladder can join to its sweep episodes. */
 export interface CiLessonLadderHandoff {
   gate: string;
   /** The newest filed lesson for the gate, which recurred. */
@@ -3262,9 +3298,7 @@ export interface CiLessonLadderHandoff {
   /** The reopen this would have been: {@link CI_LEARNING_LADDER_REOPEN}. */
   reopen: number;
   recurredPrs: number[];
-  /** {@link ownRedCauseKey} of the gate, and the origin a rung-1 flow remedy for it carries. */
-  cause: string;
-  origin: string;
+  redHeads: { pr: number; sha: string }[];
 }
 
 // ── W1-T12837: a repeated hand-fix class is a lesson the fleet never learned ─────────────────────
@@ -3492,9 +3526,8 @@ function recurredHeldGates(
 /**
  * Draft one bounded, exactly-deduped, MARKED shard per repaired CI failure.
  *
- * ONLY A REPAIRED PAIR IS MINTABLE: the lesson is in the DELTA, and a bare failure count teaches
- * nothing — the invariant `collectCiFailureCorpus` is built on. And THE TARGET IS ZERO REPEAT
- * FAILURES, NOT ZERO RED: a first-time red is how a convention gets discovered.
+ * A first lesson requires a repaired pair. A reopen can cite an open refusal as evidence that the
+ * prior guidance failed, with any observed repairs supplying the delta.
  *
  * W1-T14140: `filedLessons` are the plan's judgeable lessons ({@link FiledCiLesson}). A held gate whose newest lesson
  * recurred is drafted again as reopen `#r<N>` over the pull requests after that lesson's watermark; at reopen
@@ -3515,21 +3548,17 @@ export function mintCiLearningShards(
   const reopened = new Map([...recurred].filter(([, fate]) => fate.reopen < CI_LEARNING_LADDER_REOPEN));
   const ladder: CiLessonLadderHandoff[] = [...recurred]
     .filter(([, fate]) => fate.reopen >= CI_LEARNING_LADDER_REOPEN)
-    .map(([gate, fate]) => {
-      const cause = ownRedCauseKey(gate);
-      return { gate, findingId: fate.prior.findingId, reopen: fate.reopen, recurredPrs: [...fate.prior.recurredPrs],
-        cause, origin: ladderOrigin(FLOW_LADDER, cause) };
-    })
+    .map(([gate, { prior, reopen }]) => ({
+      gate, findingId: prior.findingId, reopen, recurredPrs: prior.recurredPrs,
+      redHeads: corpus.pairs.filter((p) => p.gate === gate && p.pr > prior.watermarkPr)
+        .map((p) => ({ pr: p.pr, sha: p.redSha })),
+    }))
     .sort((a, b) => a.gate.localeCompare(b.gate));
 
   const ordered = corpus.pairs
-    .filter((p) => p.state === "repaired")
-    .filter((p) => !already.has(ciLearningShardId(p)))
-    // A lesson is its GATE, so a gate the plan already holds a lesson for is never re-filed under
-    // the window's newer first pull request. Its recurrence is still reported, by
-    // `judgeCiLessonEfficacy`, against the lesson already filed. W1-T14140: a reopened gate keeps
-    // only the pull requests after its newest lesson's watermark — that lesson's own evidence stays out.
-    .filter((p) => !heldGates.has(p.gate) || p.pr > (reopened.get(p.gate)?.prior.watermarkPr ?? Infinity))
+    .filter((p) => heldGates.has(p.gate)
+      ? p.pr > (reopened.get(p.gate)?.prior.watermarkPr ?? Infinity)
+      : p.state === "repaired" && !already.has(ciLearningShardId(p)))
     .sort((a, b) => (a.pr !== b.pr ? a.pr - b.pr : a.gate.localeCompare(b.gate)));
 
   // W1-T3044: cluster by gate, rank by refused PR count, then cap causes, not instances.
@@ -3537,18 +3566,20 @@ export function mintCiLearningShards(
   // and repair file; excludedFindings names remaining causes. Evidence: W1-T11007 review record.
   const clusters = new Map<
     string,
-    { gate: string; prs: number[]; repairFileHits: Map<string, number>; firstId: string }
+    { gate: string; prs: number[]; repairFilePrs: Map<string, Set<number>>; firstId: string }
   >();
   for (const p of ordered) {
     const existing = clusters.get(p.gate);
     const cluster = existing ?? {
-      gate: p.gate, prs: [], repairFileHits: new Map<string, number>(), firstId: ciLearningShardId(p, reopened.get(p.gate)?.reopen ?? 0),
+      gate: p.gate, prs: [], repairFilePrs: new Map<string, Set<number>>(), firstId: ciLearningShardId(p, reopened.get(p.gate)?.reopen ?? 0),
     };
-    cluster.prs.push(p.pr);
+    if (cluster.prs.at(-1) !== p.pr) cluster.prs.push(p.pr);
     // W1-T3051: count per repair to expose recurring files; a flat union hid them among 66 paths.
-    // Dedup within each repair so repeated paths cannot inflate their share.
-    for (const f of new Set(p.repairFiles ?? [])) {
-      cluster.repairFileHits.set(f, (cluster.repairFileHits.get(f) ?? 0) + 1);
+    // One PR can repair more than one refusal of the same gate.
+    for (const f of (p.state === "repaired" ? p.repairFiles ?? [] : [])) {
+      const prs = cluster.repairFilePrs.get(f) ?? new Set<number>();
+      prs.add(p.pr);
+      cluster.repairFilePrs.set(f, prs);
     }
     if (!existing) clusters.set(p.gate, cluster);
   }
@@ -3581,7 +3612,7 @@ export function mintCiLearningShards(
     }
     const prList = c.prs.map((n) => `#${n}`).join(", ");
     // Most-repaired first, file path breaking ties so one window ranks the same way twice.
-    const rankedFiles = [...c.repairFileHits.entries()].sort((a, b) =>
+    const rankedFiles = [...c.repairFilePrs].map(([file, prs]) => [file, prs.size] as const).sort((a, b) =>
       b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0]),
     );
     const dominant = rankedFiles.filter(([, n]) => n > 1).slice(0, CI_LEARNING_DOMINANT_FILE_COUNT);
@@ -3628,11 +3659,12 @@ export function mintCiLearningFromPlan(input: {
   runId: string;
 }): { result: CiLearningMintResult; filedLessons: FiledCiLessonsRead } {
   const filedLessons = input.readLessons();
-  const result = mintCiLearningShards(input.corpus, input.alreadyFiledFindingIds, input.handFix,
-    filedLessons.status === "measured" ? filedLessons.lessons : undefined);
+  const lessons = filedLessons.status === "measured" ? filedLessons.lessons : [];
+  const origins = [...input.alreadyFiledFindingIds, ...lessons.map((lesson) => lesson.findingId)];
+  const result = mintCiLearningShards(input.corpus, origins, input.handFix, lessons);
   for (const h of result.ladder) {
     appendLedger(join(input.stateRoot, "state", LEDGER_FILENAME), { run_id: input.runId, task_id: "DAEMON", step: CI_LESSON_HANDOFF_STEP,
-      gate: h.gate, cause: h.cause, origin: h.origin, finding_id: h.findingId, reopen: h.reopen, recurred_prs: h.recurredPrs });
+      gate: h.gate, finding_id: h.findingId, reopen: h.reopen, recurred_prs: h.recurredPrs, red_heads: h.redHeads });
   }
   return { result, filedLessons };
 }
@@ -3689,6 +3721,10 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
   const lessonsFile = ciLearningLessonsFile(draft.findingId);
   const fixtureDir = ciLearningGoldenFixtureDir(draft.findingId);
   const fixturePath = `${fixtureDir}/criteria.yaml`;
+  const files = draft.repairFiles.join(", ") || "no recorded file";
+  const evidence = draft.reopen === undefined
+    ? `went red on #${draft.pr} and was repaired; the repair touched ${files}`
+    : `went red again on #${draft.pr}; observed repairs across the recurrences touched ${files}`;
   return [
     `- id: ${taskId}`,
     `  title: ${q(draft.title)}`,
@@ -3710,7 +3746,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${fixturePath}`)}`,
-    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. ${ciLessonEntryInstruction(draft)} prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — use the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/ and include ${draft.findingId} in ${fixturePath}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
+    `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate ${evidence}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. ${ciLessonEntryInstruction(draft)} prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — use the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/ and include ${draft.findingId} in ${fixturePath}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
     "",
   ].join("\n");
 }

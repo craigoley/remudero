@@ -522,11 +522,11 @@ test("W1-T3542 criterion 3: generated CLI and operator docs describe queue-backe
 /** A checkout whose WORKING TREE is behind origin/main, where origin/main already carries a shard
  *  with `origin` — the daemon's operator checkout between self-syncs, after yesterday's landing PR
  *  merged and acknowledgeMergedCiLearningShards emptied the pending queue. */
-function checkoutBehindMainCarrying(origin: string): { bareOrigin: string; checkout: string } {
+function checkoutBehindMainCarrying(origin: string, prs = [4321]): { bareOrigin: string; checkout: string } {
   const bareOrigin = makeBareOrigin();
   const checkout = cloneRoot(bareOrigin);
   mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
-  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9020-merged.yaml"), ciLearningShardYaml(draft(origin), "W1-T9020"), "utf8");
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9020-merged.yaml"), ciLearningShardYaml({ ...draft(origin), prs }, "W1-T9020"), "utf8");
   git(checkout, "add", "-A");
   git(checkout, "commit", "--quiet", "-m", "chore(ci-learning): land pending lessons");
   git(checkout, "push", "--quiet", "origin", "main");
@@ -594,38 +594,52 @@ test("W1-T4190: an unreadable origin/main is reported, not read as no merged fin
 });
 
 test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the filed lessons, so a recurred gate reopens live", async (t) => {
-  const fixture = mkdtempSync(join(tmpdir(), "rmd-ci-learning-reopen-"));
-  const root = join(fixture, "root");
-  const checkoutRoot = join(fixture, "checkout");
-  mkdirSync(join(root, "state"), { recursive: true });
-  mkdirSync(join(checkoutRoot, "plan", "tasks.d"), { recursive: true });
-  // repairedWindow(): ci-gate went red on #4321 and was repaired. The plan's lesson for ci-gate is held up to #4300.
+  const root = stateRoot();
   const base = "ci-learning:4200:ci-gate";
-  const measured = { status: "measured" as const, lessons: [{ findingId: base, gate: "ci-gate", watermarkPr: 4300 }] };
-  const cadence = async (lessons: { status: "unreadable" } | typeof measured) => {
+  const { checkout } = checkoutBehindMainCarrying(base, [4200, 4300]);
+  assert.deepEqual(ciLearningPlanOrigins(checkout), []);
+  const cadence = async (checkoutRoot: string, pending: string[] = []) => {
     const filed: string[] = [];
     await buildCiLearningCadenceRunner({
-      root, checkoutRoot, loadWindow: () => repairedWindow(), planOrigins: [base], pendingOrigins: () => [], mergedOrigins: () => [],
-      handFixInput: (at) => ({ rows: [], now: at }), loadLessons: () => lessons, recordFire: () => {}, recordAttempt: () => {},
-      fileShards: ((drafts: CiLearningShardDraft[]) => { filed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
+      root, checkoutRoot, loadWindow: () => repairedWindow(), pendingOrigins: () => pending,
+      handFixInput: (at) => ({ rows: [], now: at }), recordFire: () => {}, recordAttempt: () => {},
+      fileShards: (drafts) => { filed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; },
       mintTaskId: () => "W1-T900006", windowDays: 1,
     })();
     return filed;
   };
-  assert.deepEqual(await cadence(measured), ["ci-learning:4321:ci-gate#r1"], "the scheduled rung reopens the recurred gate");
-  assert.deepEqual(await cadence({ status: "unreadable" }), [], "an unreadable plan read reopens nothing");
+  const expected = ["ci-learning:4321:ci-gate#r1"];
+  assert.deepEqual(await cadence(checkout), expected, "the scheduled rung reopens using the merged watermark");
+  assert.deepEqual(await cadence(checkout, expected), [], "a newer queued reopen is held until it can be judged");
 
-  // The hand-run verb: at the third reopen it drafts nothing and names the flow-ladder hand-off it wrote.
-  const filed = [base, "ci-learning:4250:ci-gate#r1", "ci-learning:4290:ci-gate#r2"];
-  const landed: string[] = [];
   const logs = t.mock.method(console, "log", () => {});
-  const code = ciLearningCommand(["--force"], {
-    root, checkoutRoot, loadWindow: () => repairedWindow(), planOrigins: filed,
-    loadLessons: () => ({ status: "measured", lessons: [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 4300 }] }),
-    landShards: ((drafts: CiLearningShardDraft[]) => { landed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
-  });
-  logs.mock.restore();
-  assert.equal(code, 0);
-  assert.deepEqual(landed, []);
+  const manual = (checkoutRoot: string) => {
+    const landed: string[] = [];
+    const code = ciLearningCommand(["--force"], {
+      root, checkoutRoot, loadWindow: () => repairedWindow(),
+      landShards: (drafts) => { landed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; },
+    });
+    assert.equal(code, 0);
+    return landed;
+  };
+  assert.deepEqual(manual(checkout), expected, "the manual verb reopens using the merged watermark");
+
+  const latest = "ci-learning:4290:ci-gate#r2";
+  const { checkout: twiceReopened } = checkoutBehindMainCarrying(latest, [4290, 4300]);
+  mkdirSync(join(twiceReopened, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(twiceReopened, "plan", "tasks.d", "W1-T9021-local.yaml"),
+    ciLearningShardYaml({ ...draft(base), prs: [4200, 4300] }, "W1-T9021"));
+  assert.deepEqual(ciLearningPlanOrigins(twiceReopened), [base]);
+  assert.deepEqual(await cadence(twiceReopened), []);
+  assert.deepEqual(manual(twiceReopened), []);
   assert.ok(logs.mock.calls.some((c) => String(c.arguments[0]).includes("HANDED TO THE FLOW LADDER ci-gate")), "the hand-off is named");
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(ledger.filter((r) => r.step === "ci_learning.ladder_handoff").map((r) => r.finding_id), [latest, latest]);
+
+  git(checkout, "update-ref", "-d", "refs/remotes/origin/main");
+  mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9021-local.yaml"),
+    ciLearningShardYaml({ ...draft(base), prs: [4200, 4300] }, "W1-T9021"));
+  assert.deepEqual(await cadence(checkout), [], "an unreadable fetched plan does not authorize a reopen from a partial view");
+  assert.deepEqual(manual(checkout), []);
 });

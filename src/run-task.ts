@@ -1452,7 +1452,9 @@ import {
 } from "./lib/model-availability.js";
 import {
   judgeCiLessonEfficacy,
-  readFiledCiLessons,
+  readCheckoutCiLessons,
+  readMergedCiLessons,
+  readMergedCiLessonsAsync,
   summarizeCiLessonRecurrences,
   type FiledCiLessonsRead,
 } from "./lib/ci-lesson-recurrence.js";
@@ -15916,7 +15918,7 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
-    /** W1-T14140 — the plan's filed lessons the mint judges. Production reads the checkout's plan/tasks.d. */
+    /** The plan's filed lessons, including fetched main in production. */
     loadLessons?: () => FiledCiLessonsRead;
     destinationSnapshot?: TaskIdDestinationSnapshot | null;
     destinationFailure?: string;
@@ -16003,10 +16005,10 @@ export function ciLearningCommand(
   const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
   const { result } = mintCiLearningFromPlan({
     corpus, alreadyFiledFindingIds: planOrigins, stateRoot: root, runId: `CI-LEARNING-${process.pid}`,
-    readLessons: () => (deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(checkoutRoot, "plan", "tasks.d"))),
+    readLessons: deps.loadLessons ?? (() => readCheckoutCiLessons(checkoutRoot, readMergedCiLessons(checkoutRoot))),
   });
   for (const h of result.ladder) {
-    console.log(`  HANDED TO THE FLOW LADDER ${h.gate}: lesson ${h.findingId} recurred on ${h.recurredPrs.map((n) => `#${n}`).join(", ")} -> ${h.origin}`);
+    console.log(`  HANDED TO THE FLOW LADDER ${h.gate}: lesson ${h.findingId} recurred on ${h.recurredPrs.map((n) => `#${n}`).join(", ")}`);
   }
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
@@ -27892,7 +27894,7 @@ export function buildCiLearningCadenceRunner(deps: {
   root: string;
   checkoutRoot: string;
   loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
-  loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
+  loadLessons?: () => FiledCiLessonsRead;
   fileShards?: typeof fileCiLearningShards;
   /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
   landShards?: CiLearningShardLander;
@@ -27931,9 +27933,10 @@ export function buildCiLearningCadenceRunner(deps: {
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
+    const lessonRead = deps.loadLessons?.() ?? readCheckoutCiLessons(deps.checkoutRoot, await readMergedCiLessonsAsync(deps.checkoutRoot));
     const { result, filedLessons } = mintCiLearningFromPlan({
       corpus, alreadyFiledFindingIds: idempotencyOrigins, handFix, stateRoot: deps.root, runId: `CI-LEARNING-${at.getTime()}`,
-      readLessons: () => (deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"))),
+      readLessons: () => lessonRead,
     });
     const lessonRecurrences =
       filedLessons.status === "measured"

@@ -1,7 +1,16 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { CiFailureCorpus } from "./ci-failure-corpus.js";
-import { parseTasksFromYaml } from "./plan.js";
+import { parseTasksFromYaml, readBlobsAtRef, readBlobsAtRefAsync, type Task } from "./plan.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+
+export const CI_LEARNING_ID_RE = /^ci-learning:\d+:(.+?)(?:#r(\d+))?$/;
+
+export function ciLearningGateOf(findingId: string): string | undefined {
+  return CI_LEARNING_ID_RE.exec(findingId)?.[1].replace(/%23|%25/g, (escape) => escape === "%23" ? "#" : "%");
+}
 
 /**
  * W1-T3055 — DID THE LESSON WORK? The one question that settles whether this whole loop is worth
@@ -91,13 +100,18 @@ export interface FiledCiLesson {
  *  origin's first pull request would judge the lesson against its own evidence.
  *  W1-T14140: a reopen's origin ends `#r<N>`; the finding id keeps it and the gate does not. */
 export function parseFiledCiLesson(contents: string): FiledCiLesson | undefined {
-  const origin = /^\s*origin:\s*"(ci-learning:(\d+):(.+?)(?:#r\d+)?)"\s*$/m.exec(contents);
-  if (!origin) return undefined;
-  const prs = /^\s*ci_learning_prs:\s*\[([0-9,\s]*)\]\s*$/m.exec(contents);
-  if (!prs) return undefined;
-  const nums = prs[1].split(",").map((n) => Number(n.trim())).filter((n) => Number.isInteger(n) && n > 0);
-  if (nums.length === 0) return undefined;
-  return { findingId: origin[1], gate: origin[3], watermarkPr: Math.max(...nums) };
+  const origin = /^[ \t]*origin:[ \t]*(.+)$/m.exec(contents);
+  const prs = /^[ \t]*ci_learning_prs:[ \t]*(\[[\d,\s]*\])[ \t]*$/m.exec(contents);
+  if (!origin || !prs) return undefined;
+  return filedCiLesson(parseYaml(origin[1]), parseYaml(prs[1]));
+}
+
+function filedCiLesson(findingId: unknown, prs: unknown): FiledCiLesson | undefined {
+  if (typeof findingId !== "string") return undefined;
+  const gate = ciLearningGateOf(findingId);
+  if (gate === undefined || !Array.isArray(prs) || prs.length === 0 ||
+      !prs.every((pr: unknown) => typeof pr === "number" && Number.isSafeInteger(pr) && pr > 0)) return undefined;
+  return { findingId, gate, watermarkPr: Math.max(...prs) };
 }
 
 export interface CiLessonRecurrenceSummary {
@@ -268,8 +282,86 @@ export function summarizeCiLessonRecurrences(
 }
 
 export type FiledCiLessonsRead =
-  | { status: "measured"; lessons: { findingId: string; gate: string; watermarkPr: number }[] }
-  | { status: "unreadable" };
+  | { status: "measured"; lessons: FiledCiLesson[] }
+  | { status: "unreadable"; reason?: string };
+
+const CI_LESSON_ORIGIN_LINE = "^[[:blank:]]*origin:[[:blank:]]*[\"']?ci-learning:[0-9]+:";
+
+function filedCiLessonsInTasks(tasks: readonly Task[]): FiledCiLesson[] {
+  return tasks.flatMap((task) => {
+    if (!task.origin || !CI_LEARNING_ID_RE.test(task.origin) || task.ci_learning_prs === undefined) return [];
+    const lesson = filedCiLesson(task.origin, task.ci_learning_prs);
+    if (!lesson) throw new Error(`invalid CI learning watermark on ${task.id}`);
+    return [lesson];
+  });
+}
+
+function readCiLessonTasks(contents: string, path: string): FiledCiLesson[] {
+  return filedCiLessonsInTasks(parseTasksFromYaml(contents, path, undefined, {}, "preserve-external"));
+}
+
+const ciLessonShardPath = (root: string) => join(resolveRepoLayout(root).planDir, "tasks.d");
+const listCiLessonBlobs = (ref: string, dir: string) => ["grep", "-l", "-E", CI_LESSON_ORIGIN_LINE, ref, "--", dir];
+const ciLessonBlobPaths = (ref: string, listing: string) =>
+  listing.trimEnd().split("\n").filter(Boolean).map((line) => line.slice(ref.length + 1));
+
+function mergedCiLessons(ref: string, paths: string[], blobs: string[]): FiledCiLessonsRead {
+  const byFinding = new Map<string, FiledCiLesson>();
+  for (const [index, blob] of blobs.entries()) {
+    rememberCiLessons(byFinding, readCiLessonTasks(blob, `${ref}:${paths[index]}`));
+  }
+  return { status: "measured", lessons: [...byFinding.values()] };
+}
+
+function rememberCiLessons(byFinding: Map<string, FiledCiLesson>, lessons: readonly FiledCiLesson[]): void {
+  for (const lesson of lessons) {
+    const prior = byFinding.get(lesson.findingId);
+    if (!prior || lesson.watermarkPr > prior.watermarkPr) byFinding.set(lesson.findingId, lesson);
+  }
+}
+
+function ciLessonGrepFailure(error: unknown): boolean {
+  const failure = error as { status?: unknown; code?: unknown };
+  return (failure.status ?? failure.code) === 1;
+}
+
+export function readMergedCiLessons(root: string): FiledCiLessonsRead {
+  const git = (args: string[], input?: string) => hostWorktreeGit(root, args, { input, maxBuffer: 1 << 26 });
+  try {
+    const ref = git(["rev-parse", "--verify", "origin/main"]).trim();
+    let listing: string;
+    try { listing = git(listCiLessonBlobs(ref, relative(root, ciLessonShardPath(root)))); }
+    catch (error) { if (!ciLessonGrepFailure(error)) throw error; listing = ""; }
+    const paths = ciLessonBlobPaths(ref, listing);
+    return mergedCiLessons(ref, paths, readBlobsAtRef(git, ref, paths));
+  } catch (error) {
+    return { status: "unreadable", reason: String(error) };
+  }
+}
+
+export async function readMergedCiLessonsAsync(root: string): Promise<FiledCiLessonsRead> {
+  const git = (args: string[], input?: string) => hostWorktreeGitAsync(root, args, { input, maxBuffer: 1 << 26 });
+  try {
+    const ref = (await git(["rev-parse", "--verify", "origin/main"])).trim();
+    let listing: string;
+    try { listing = await git(listCiLessonBlobs(ref, relative(root, ciLessonShardPath(root)))); }
+    catch (error) { if (!ciLessonGrepFailure(error)) throw error; listing = ""; }
+    const paths = ciLessonBlobPaths(ref, listing);
+    return mergedCiLessons(ref, paths, await readBlobsAtRefAsync(git, ref, paths));
+  } catch (error) {
+    return { status: "unreadable", reason: String(error) };
+  }
+}
+
+/** Main is authoritative for an ID it contains. Keep local-only records for work awaiting sync. */
+export function readCheckoutCiLessons(root: string, merged: FiledCiLessonsRead): FiledCiLessonsRead {
+  if (merged.status === "unreadable") return merged;
+  const local = readFiledCiLessons(ciLessonShardPath(root));
+  if (local.status === "unreadable") return local;
+  return { status: "measured", lessons: [...new Map([...local.lessons, ...merged.lessons].map(
+    (lesson) => [lesson.findingId, lesson],
+  )).values()] };
+}
 
 /** Read the machine filer's own one-record shard format. A missing directory is a real empty set;
  * any unreadable or invalid candidate shard makes the whole read unknown, never a partial score. */
@@ -285,7 +377,7 @@ export function readFiledCiLessons(shardDir: string): FiledCiLessonsRead {
       : { status: "unreadable" };
   }
 
-  const byFinding = new Map<string, { findingId: string; gate: string; watermarkPr: number }>();
+  const byFinding = new Map<string, FiledCiLesson>();
   for (const name of names) {
     const path = join(shardDir, name);
     let contents: string;
@@ -294,16 +386,12 @@ export function readFiledCiLessons(shardDir: string): FiledCiLessonsRead {
     } catch {
       return { status: "unreadable" };
     }
-    const lesson = parseFiledCiLesson(contents);
-    if (!lesson) continue;
+    if (!/^[ \t]*origin:[ \t]*["']?ci-learning:\d+:/m.test(contents)) continue;
     try {
-      const tasks = parseTasksFromYaml(contents, path);
-      if (!tasks.some((task) => task.origin === lesson.findingId)) return { status: "unreadable" };
+      rememberCiLessons(byFinding, readCiLessonTasks(contents, path));
     } catch {
       return { status: "unreadable" };
     }
-    const prior = byFinding.get(lesson.findingId);
-    if (!prior || lesson.watermarkPr > prior.watermarkPr) byFinding.set(lesson.findingId, lesson);
   }
   return { status: "measured", lessons: [...byFinding.values()] };
 }

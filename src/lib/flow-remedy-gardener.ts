@@ -27,6 +27,7 @@ export interface Episode {
   pr: number; key: string; owner: string; start: number; end: number;
   outcome: "open" | "cleared" | "failed" | "unknown"; eligible: boolean;
   charges: Charge[];
+  handedOff?: boolean;
 }
 export interface Price { key: string; hours: number; prs: number; owners: string[]; thresholdHours?: number }
 export interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
@@ -188,12 +189,7 @@ export const reasonClass = (reason: string) => reason.split(" — ")[0]!
   .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
 /** The `origin:` a ladder's remedy for `key` carries at `rung`, for a rung that hands a cause to the ladder. */
 export const ladderOrigin = (kind: LadderKind, key: string, rung = 1): string => originOf(kind, key, rung);
-/** W1-T14140: the flow ladder's cause key for a PR one failing check holds red — the key {@link episodesOf} derives from
- *  the sweep's own-red reason `<check> failed on <sha>` (describeCiFailures, src/lib/sweep.ts). The ci-learning rung hands
- *  a check here when its reopened lessons keep recurring. */
-export const ownRedCauseKey = (check: string): string => `own-red:${reasonClass(`${check} failed on 0000000`)}`;
-/** W1-T14140: the ledger row the ci-learning rung writes when it hands a check to the flow ladder; its `cause` is an
- *  {@link ownRedCauseKey}. The flow ladder reads it beside the sweep's own rows. */
+/** A recurring check and its observed red heads, read beside the sweep's disposition rows. */
 export const CI_LESSON_HANDOFF_STEP = "ci_learning.ladder_handoff";
 /** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
  *  `readOutcomes` asks GraphQL, so the bare login is the one a fleet merge actually carries (sweep's isFleetAppAuthor). */
@@ -271,8 +267,23 @@ export function readOutcomes(prs: readonly number[], sources: FlowGardenSources)
   return result;
 }
 
+function handedOffChecks(records: readonly LedgerRecord[]): Map<number, { gate: string; sha: string }[]> {
+  const byPr = new Map<number, { gate: string; sha: string }[]>();
+  for (const { step, gate, red_heads: heads } of records) {
+    if (step !== CI_LESSON_HANDOFF_STEP || typeof gate !== "string" || !Array.isArray(heads)) continue;
+    for (const head of heads) {
+      if (!head || !Number.isSafeInteger(head.pr) || head.pr <= 0 || typeof head.sha !== "string" || !head.sha) continue;
+      const checks = byPr.get(head.pr) ?? [];
+      checks.push({ gate, sha: head.sha });
+      byPr.set(head.pr, checks);
+    }
+  }
+  return byPr;
+}
+
 export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyMap<number, PrOutcome>, now: number): Episode[] {
   const byPr = new Map<number, LedgerRecord[]>();
+  const handoffs = handedOffChecks(records);
   for (const r of records) {
     if (r.step !== "sweep.disposed" || !Number.isSafeInteger(r.pr_number) || Number(r.pr_number) <= 0 ||
         !PR_BLOCKERS.includes(r.blocker as PrBlocker) || typeof r.ts !== "string" || !Number.isFinite(Date.parse(r.ts)) ||
@@ -294,6 +305,13 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
         if (episode) { episode.outcome = "cleared"; episode.end = start; }
         episode = { pr, key, owner: String(r.blocker_owner), start, end: start, outcome: "open", eligible: false, charges: [] };
         episodes.push(episode);
+      }
+      // Sweep can give one aggregate reason for several red checks. Join the evidence on the PR
+      // and prefer the sweep's check names when recorded, otherwise use the observed red head.
+      const checks = r.red_checks;
+      if (r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) =>
+        Array.isArray(checks) && checks.length > 0 ? checks.includes(gate) : r.head_sha === sha)) {
+        episode.handedOff = true;
       }
       const next = rows[i + 1];
       if (next) {
@@ -351,9 +369,7 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
   now: number, fileable?: LadderFileable): Inventory {
   const episodes = episodesOf(records, outcomes, now);
   const thresholds = markEligibility(episodes, now);
-  // W1-T14140: two reopened lessons did not stop a handed-over check, so its episodes are remedy candidates however they ended.
-  const handed = new Set(records.filter(r => r.step === CI_LESSON_HANDOFF_STEP && typeof r.cause === "string").map(r => r.cause));
-  for (const e of episodes) if (handed.has(e.key)) e.eligible = true;
+  for (const e of episodes) if (e.handedOff) e.eligible = true;
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
 

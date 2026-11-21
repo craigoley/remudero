@@ -9,9 +9,9 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { CiFailureCorpus, CiFailurePair, CiFullyObservedGatePr } from "#src/lib/ci-failure-corpus.js";
+import { collectCiFailureCorpus, type CiFailureCorpus, type CiFailurePair, type CiFullyObservedGatePr } from "#src/lib/ci-failure-corpus.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { CI_LESSON_HANDOFF_STEP, episodesOf, FLOW_LADDER, flowGardenSpec, ladderOrigin, ownRedCauseKey } from "#src/lib/flow-remedy-gardener.js";
+import { CI_LESSON_HANDOFF_STEP, flowGardenSpec } from "#src/lib/flow-remedy-gardener.js";
 import type { GardenerDeps } from "#src/lib/gardener.js";
 import { loadLearningsCorpus } from "#src/lib/learnings.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
@@ -22,14 +22,16 @@ import {
   ciLearningGateOf,
   ciLearningRecordVerdict,
   ciLearningReopenOf,
+  ciLearningShardId,
   ciLearningShardYaml,
+  ciLessonBindingErrors,
   ciLessonReach,
   mintCiLearningFromPlan,
   mintCiLearningShards,
   parseFiledCiLesson,
   type CiLearningShardDraft,
 } from "#src/lib/measurement-cadence.js";
-import { loadPlanFromYaml } from "#src/lib/plan.js";
+import { loadPlanFromYaml, type Task } from "#src/lib/plan.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -60,13 +62,15 @@ function instructedEntryFields(note: string): { src: string; errorSignatures: st
 }
 
 /** A copy of the real corpus with one more lesson file written into learnings/ci.d/, read back as the suite reads it. */
-function corpusWithLesson(file: string, lines: string[]): ReturnType<typeof loadLearningsCorpus> {
+function corpusWithLesson(file: string, lines: string[], tasks: Task[] = [], replacement?: string[]) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-ci-lesson-reach-"));
   try {
     cpSync(join(REPO_ROOT, "learnings"), join(dir, "learnings"), { recursive: true });
     mkdirSync(join(dir, "learnings", "ci.d"), { recursive: true });
     writeFileSync(join(dir, file), [...lines, ""].join("\n"));
-    return loadLearningsCorpus(join(dir, "learnings"));
+    if (replacement) writeFileSync(join(dir, "learnings", "ci.d", "replacement.yaml"), replacement.join("\n"));
+    const entries = loadLearningsCorpus(join(dir, "learnings"));
+    return { entries, bindingErrors: ciLessonBindingErrors(dir, tasks, entries) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -92,18 +96,23 @@ test("W1-T14140 criterion 1: a drafted CI lesson shard tells its worker to write
 
   // Write the entry exactly as instructed, at the path the shard declares, into a copy of the real corpus: the
   // generated suite's own reach check selects it for a round whose failing check is the gate.
-  const entries = corpusWithLesson(task.files![0]!,
-    lessonLines("drafted-ci-lesson", fields.src, [`  error_signatures: ${JSON.stringify(fields.errorSignatures)}`]));
+  const { entries, bindingErrors } = corpusWithLesson(task.files![0]!,
+    lessonLines("drafted-ci-lesson", fields.src, [`  error_signatures: ${JSON.stringify(fields.errorSignatures)}`]), [task]);
+  assert.deepEqual(bindingErrors, []);
   const reach = ciLessonReach(entries).find((r) => r.entry.id === "drafted-ci-lesson");
   assert.deepEqual(reach?.entry.errorSignatures, [gate], "the YAML the note instructs parses to the one check name");
   assert.deepEqual([reach?.gate, reach?.selected], [gate, true], "the drafted lesson is selected for its own check");
 });
 
 test("W1-T14140 criterion 3: an active ci-learning entry that is not selected for its own check fails the generated suite", () => {
-  const entries = corpusWithLesson("learnings/ci.d/ci-learning-4321-lint-plan.yaml", [
-    ...lessonLines("unsigned-ci-lesson", "ci-learning:4321:lint-plan (merge the shards, classify)"),
+  const drafted = draft("lint-plan (merge the shards, classify)");
+  const [task] = loadPlanFromYaml(ciLearningShardYaml(drafted, "W1-T900002"), "filed lesson").tasks;
+  const file = task!.files![0]!;
+  const { entries, bindingErrors } = corpusWithLesson(file, [
+    ...lessonLines("unsigned-ci-lesson", drafted.findingId),
     ...lessonLines("unsigned-superseded-ci-lesson", "ci-learning:4322:lint-plan (merge the shards, classify)", [], "superseded"),
-  ]);
+  ], [task!]);
+  assert.deepEqual(bindingErrors, [], "the unsigned entry belongs to the filed task");
   const reach = ciLessonReach(entries);
   // The generated suite asserts `selected` for every row: the unsigned active lesson is the one row it would fail on.
   assert.deepEqual(reach.filter((r) => !r.selected).map((r) => [r.entry.id, r.gate]),
@@ -112,17 +121,40 @@ test("W1-T14140 criterion 3: an active ci-learning entry that is not selected fo
   assert.equal(reach.some((r) => r.entry.id === "unsigned-superseded-ci-lesson"), false);
   // CONTROL: every lesson already on main is selected for its own check, so the red above is the new entry's alone.
   assert.ok(reach.length > 2 && reach.filter((r) => r.entry.id !== "unsigned-ci-lesson").every((r) => r.selected));
+
+  const comment = `# proof cites ${drafted.findingId}`;
+  const otherGate = "some-other-check";
+  const otherId = ciLearningShardId({ pr: 4321, gate: otherGate });
+  const signed = [`  error_signatures: ${JSON.stringify([otherGate])}`];
+  const substituted = corpusWithLesson(file, [comment, ...lessonLines("substituted", otherId, signed)], [task!]);
+  assert.ok(ciLessonReach(substituted.entries).find((r) => r.entry.id === "substituted")?.selected);
+  assert.match(substituted.bindingErrors.join("\n"), /substituted has src .*expected/);
+  for (const replacement of ["PR#4321", drafted.findingId.replace(":4321:", ":4320:")]) {
+    const renamed = corpusWithLesson(file,
+      [comment, ...lessonLines("renamed", replacement, [`  error_signatures: ${JSON.stringify([drafted.gate])}`])], [task!]);
+    assert.match(renamed.bindingErrors.join("\n"), /renamed has src .*expected/);
+  }
+  const empty = corpusWithLesson(file, [comment, "[]"], [task!]);
+  assert.match(empty.bindingErrors.join("\n"), /must contain a corpus entry/);
+  const retired = lessonLines("retired", drafted.findingId, ['  superseded_by: "replacement"'], "superseded");
+  const unlinked = corpusWithLesson(file, retired, [task!]);
+  assert.match(unlinked.bindingErrors.join("\n"), /active replacement/);
+  const replaced = corpusWithLesson(file, retired, [task!],
+    lessonLines("replacement", drafted.findingId, [`  error_signatures: ${JSON.stringify([drafted.gate])}`]));
+  assert.deepEqual(replaced.bindingErrors, []);
+  assert.equal(ciLessonReach(replaced.entries).some((r) => r.entry.id === "retired"), false);
 });
 
 test("W1-T14140 criterion 4: a gate whose held lesson recurred is drafted again as a reopen, numbered one past the prior reopens", () => {
   const base = "ci-learning:100:ci-gate";
   // 110 is the lesson's own evidence (at or below its watermark); 130 and 140 came after it landed.
-  const first = mintCiLearningShards(corpus([pair(110), pair(130), pair(140)]), [base], undefined,
+  const first = mintCiLearningShards(corpus([pair(110), pair(130, "ci-gate", "open"), pair(140), pair(140)]), [base], undefined,
     [{ findingId: base, gate: "ci-gate", watermarkPr: 120 }]);
   assert.deepEqual(first.drafts.map((d) => [d.findingId, d.gate, d.prs, d.reopen]), [
     ["ci-learning:130:ci-gate#r1", "ci-gate", [130, 140], { n: 1, priorFindingId: base, recurredPrs: [130, 140] }],
   ]);
   assert.deepEqual(first.ladder, []);
+  assert.deepEqual(first.drafts[0]?.dominantRepairFiles, [], "two repairs on one PR contribute one file hit");
 
   // The reopen's shard round-trips: its origin carries the suffix, its gate and watermark read back without it.
   const shard = ciLearningShardYaml(first.drafts[0]!, "W1-T900004");
@@ -135,6 +167,7 @@ test("W1-T14140 criterion 4: a gate whose held lesson recurred is drafted again 
   assert.deepEqual(ciLearningRecordVerdict(shard, "criterion 4"), { ok: true, reason: "" });
   const task = loadPlanFromYaml(shard, "criterion 4").tasks[0]!;
   assert.ok(task.note!.includes(base), "the reopen names the lesson that did not hold");
+  assert.ok(task.note!.includes("went red again on #130;"), "an open refusal is recorded as open evidence");
 
   // The next reopen is numbered from the reopens already filed, and judged on the newest lesson.
   const filed = [base, "ci-learning:130:ci-gate#r1"];
@@ -153,23 +186,41 @@ test("W1-T14140 criterion 4: a gate whose held lesson recurred is drafted again 
     [{ n: 1, priorFindingId: base, recurredPrs: [130] }]);
   // Without the judged lessons the rung keeps dropping a held gate, exactly as before.
   assert.deepEqual(mintCiLearningShards(corpus([pair(130)]), [base]).drafts, []);
+
+  const gate = 'verify "target" %23#r1';
+  const literal = ciLearningShardId({ pr: 100, gate });
+  assert.deepEqual([ciLearningGateOf(literal), ciLearningReopenOf(literal)], [gate, 0]);
+  const openWindow = collectCiFailureCorpus({
+    prs: [{ number: 130, commits: [{ sha: "red130", rollup: [
+      { name: gate, conclusion: "FAILURE" }, { name: "first-time-red", conclusion: "FAILURE" },
+    ] }] }],
+  });
+  const openReopen = mintCiLearningShards(openWindow, [literal], undefined, [{ findingId: literal, gate, watermarkPr: 120 }]);
+  assert.deepEqual(openReopen.drafts.map((d) => [d.gate, d.prs, d.repairFiles, d.action]), [[gate, [130], [], "unclear"]]);
+  const [openDraft] = openReopen.drafts;
+  assert.ok(openDraft?.findingId.endsWith("#r1"));
+  assert.deepEqual([ciLearningGateOf(openDraft.findingId), ciLearningReopenOf(openDraft.findingId)], [gate, 1]);
+  assert.deepEqual(parseFiledCiLesson(ciLearningShardYaml(openDraft, "W1-T900005")),
+    { findingId: openDraft.findingId, gate, watermarkPr: 130 });
+  assert.notEqual(literal, ciLearningShardId({ pr: 100, gate: gate.slice(0, -3) }, 1));
 });
 
 test("W1-T14140 criterion 5: the third reopen goes to the flow-remedy ladder, and a held or unmeasurable lesson files nothing", () => {
   const filed = ["ci-learning:100:ci-gate", "ci-learning:130:ci-gate#r1", "ci-learning:150:ci-gate#r2"];
   const lessons = [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 160 }];
-  const third = mintCiLearningShards(corpus([pair(170), pair(171, "commitlint")]), filed, undefined, lessons);
+  const third = mintCiLearningShards(corpus([pair(170, "ci-gate", "open"), pair(171, "commitlint")]), filed, undefined, lessons);
   assert.equal(CI_LEARNING_LADDER_REOPEN, 3);
   assert.deepEqual(third.drafts.map((d) => d.findingId), ["ci-learning:171:commitlint"], "no fourth lesson is drafted for ci-gate");
-  const cause = ownRedCauseKey("ci-gate");
   assert.deepEqual(third.ladder, [{
-    gate: "ci-gate", findingId: filed[2], reopen: 3, recurredPrs: [170], cause, origin: ladderOrigin(FLOW_LADDER, cause),
+    gate: "ci-gate", findingId: filed[2], reopen: 3, recurredPrs: [170], redHeads: [{ pr: 170, sha: "red170" }],
   }]);
-  assert.equal(third.ladder[0]!.origin, "flow-blocker:own-red:ci-gate failed on <sha>");
-  // The cause is the one the flow ladder already prices from the sweep's own-red reason for that check.
-  const [episode] = episodesOf([{ step: "sweep.disposed", ts: "2026-11-20T10:00:00.000Z", pr_number: 170, blocker: "own-red",
-    blocker_owner: "fix-lane", reason: "ci-gate failed on abcdef1" }], new Map(), Date.parse("2026-11-21T00:00:00.000Z"));
-  assert.equal(episode!.key, cause);
+  const handoff = { step: CI_LESSON_HANDOFF_STEP, gate: "ci-gate", red_heads: third.ladder[0]!.redHeads };
+  const inventory = flowInventory([handoff]);
+  assert.deepEqual(inventory.candidates.map((p) => p.key), [
+    "own-red:required checks red", "own-red:commitlint failed on <sha>; ci-gate failed on <sha>",
+  ]);
+  assert.equal(inventory.next?.origin, "flow-blocker:own-red:required checks red");
+  assert.deepEqual(flowInventory([]).candidates, []);
 
   // HELD: later PRs met the gate and it did not refuse them.
   const held = mintCiLearningShards(corpus([], [{ pr: 180, gate: "ci-gate" }]), filed, undefined, lessons);
@@ -186,20 +237,28 @@ test("W1-T14140 criterion 5: the third reopen goes to the flow-remedy ladder, an
 const NOW = Date.parse("2026-11-21T12:00:00.000Z");
 const HOUR = 3_600_000;
 
-/** The flow-remedy ladder's inventory over `records`: PR 170 was held own-red by ci-gate, then merged by the fleet. */
-function flowCandidates(records: LedgerRecord[]): string[] {
+function flowInventory(records: LedgerRecord[], pr = 170) {
   const iso = (h: number) => new Date(NOW + h * HOUR).toISOString();
   const deps: GardenerDeps = { repoRoot: "/unused", stateDir: "/unused", clock: fixedClock(NOW), log: () => {},
     openWorkspace: () => { throw new Error("unexpected workspace"); } };
   const sweep: LedgerRecord[] = [
-    { step: "sweep.disposed", pr_number: 170, ts: iso(-3), blocker: "own-red", reason: "ci-gate failed on abcdef1", blocker_owner: "fix-lane" },
-    { step: "sweep.disposed", pr_number: 170, ts: iso(-1), blocker: "armed-idle", reason: "armed", blocker_owner: "armed-idle-merge" },
+    { step: "sweep.disposed", pr_number: pr, ts: iso(-6), blocker: "own-red", reason: "lint failed on abcdef1",
+      head_sha: "other-head", blocker_owner: "fix-lane" },
+    { step: "sweep.disposed", pr_number: pr, ts: iso(-5), blocker: "own-red", reason: "required checks red",
+      head_sha: `red${pr}`, blocker_owner: "fix-lane" },
+    { step: "sweep.disposed", pr_number: pr, ts: iso(-2), blocker: "own-red", reason: "commitlint failed on abcdef1; ci-gate failed on abcdef1",
+      head_sha: "a-later-head", red_checks: ["commitlint", "ci-gate"], blocker_owner: "fix-lane" },
+    { step: "sweep.disposed", pr_number: pr, ts: iso(-1), blocker: "armed-idle", reason: "armed", blocker_owner: "armed-idle-merge" },
+    { step: "sweep.disposed", pr_number: 99, ts: iso(-3), blocker: "own-red", reason: "required checks red",
+      head_sha: `red${pr}`, red_checks: ["ci-gate"], blocker_owner: "fix-lane" },
+    { step: "sweep.disposed", pr_number: 99, ts: iso(-1), blocker: "armed-idle", reason: "armed", blocker_owner: "armed-idle-merge" },
   ];
   const spec = flowGardenSpec(deps, { owner: "acme", repo: "remudero", mintTaskId: () => "W1-T900007",
     ledgerRecords: () => [...sweep, ...records], planState: () => ({ tasks: [] }),
-    prOutcomes: () => new Map([[170, { state: "merged" as const, at: iso(-0.5), mergedBy: "remudero-fleet" }]]),
+    prOutcomes: () => new Map([pr, 99].map((number) =>
+      [number, { state: "merged" as const, at: iso(-0.5), mergedBy: "remudero-fleet" }])),
     ownerSearch: { filesContaining: () => [{ file: "src/lib/sweep.ts", hits: 1 }], fileExists: () => true } });
-  return spec.inventory().candidates.map((p) => p.key);
+  return spec.inventory();
 }
 
 test("W1-T14140 criterion 6: the measurement cadence hands the filed lessons to the mint, so a recurred gate reopens live", (t) => {
@@ -226,10 +285,10 @@ test("W1-T14140 criterion 6: the measurement cadence hands the filed lessons to 
   assert.deepEqual(third.result.drafts, []);
   const rows = readFileSync(join(stateRoot, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((l) => JSON.parse(l) as LedgerRecord);
   const handoffs = rows.filter((r) => r.step === CI_LESSON_HANDOFF_STEP);
-  assert.deepEqual(handoffs.map((r) => [r.gate, r.cause, r.origin, r.finding_id, r.reopen, r.recurred_prs]), [
-    ["ci-gate", ownRedCauseKey("ci-gate"), "flow-blocker:own-red:ci-gate failed on <sha>", filed[2], 3, [130]],
+  assert.deepEqual(handoffs.map((r) => [r.gate, r.finding_id, r.reopen, r.recurred_prs, r.red_heads]), [
+    ["ci-gate", filed[2], 3, [130], [{ pr: 130, sha: "red130" }]],
   ]);
-  // The flow ladder takes the handed-over check as a remedy candidate, though the fleet cleared its episode.
-  assert.deepEqual(flowCandidates([]), [], "control: a cleared own-red episode is not a candidate by itself");
-  assert.deepEqual(flowCandidates(handoffs), [ownRedCauseKey("ci-gate")]);
+  const inventory = flowInventory(handoffs, 130);
+  assert.equal(inventory.candidates.find((candidate) => candidate.key === "own-red:required checks red")?.prs, 1,
+    "the handoff selects the matching PR only, even if another PR has the same check, head, and blocker reason");
 });

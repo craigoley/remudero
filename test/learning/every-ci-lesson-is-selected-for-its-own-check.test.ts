@@ -11,11 +11,18 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 import { learningsSourceFiles, loadLearningsCorpus } from "#src/lib/learnings.js";
-import { ciLessonReach } from "#src/lib/measurement-cadence.js";
+import { ciLessonBindingErrors, ciLessonReach } from "#src/lib/measurement-cadence.js";
+import { loadPlan } from "#src/lib/plan.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const LEARNINGS_DIR = join(REPO_ROOT, "learnings");
-const lessons = ciLessonReach(loadLearningsCorpus(LEARNINGS_DIR));
+const corpus = loadLearningsCorpus(LEARNINGS_DIR);
+const lessons = ciLessonReach(corpus);
+
+test("each filed CI lesson uses the finding ID of the task that declares its file", () => {
+  const tasks = loadPlan(join(REPO_ROOT, "plan", "tasks.yaml")).tasks;
+  assert.deepEqual(ciLessonBindingErrors(REPO_ROOT, tasks, corpus), []);
+});
 
 test("W1-T14140: the generated suite reads the ci-learning corpus it generates its tests from", () => {
   // POSITIVE CONTROL: a corpus read that found no lesson would generate no per-entry test and pass vacuously.
