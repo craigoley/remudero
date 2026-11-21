@@ -2332,7 +2332,17 @@ export function observeReturnedServedModel(result: { servedModel?: string | null
 /** W1-T13868: forget a returned result's record in every enclosing call's table, as a new worker call starts, so a
  * later call's replaced result is never read as an earlier call's. */
 export function forgetReturnedServedModel(): void {
-  for (const table of callServedModels.getStore() ?? []) table.delete(RETURNED_RESULT_KEY);
+  for (const table of callServedModels.getStore() ?? []) { table.delete(RETURNED_RESULT_KEY); table.delete(THROWN_IN_CALL_KEY); }
+}
+
+/** W1-T13868: the key under which a call's table holds the latest record {@link withObservedServedModel} made for an
+ * error thrown inside the call. A wrapper can throw its own error in that error's place (the quiet-worker guard throws
+ * QuietRoundEndedError instead of the abort error the adapter threw), and its own error names no model. */
+const THROWN_IN_CALL_KEY: object = Object.freeze({ key: "thrown-in-call-served-model" });
+
+/** W1-T13868: the served model the latest error thrown inside this call carried, if any, whatever error replaced it. */
+export function thrownInCallServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(THROWN_IN_CALL_KEY);
 }
 
 /** W1-T13868: the served model of the result this call's worker returned before an error replaced it, if any. */
@@ -2349,7 +2359,11 @@ export function withObservedServedModel<E extends Error>(error: E,
   // Inside a call's scope the record goes to that call's own table only: the error (perhaps a caller's frozen or
   // shared abort reason) keeps its identity, is thrown unchanged, and carries nothing another call could read.
   const scoped = callServedModels.getStore();
-  if (scoped !== undefined) { for (const table of scoped) table.set(error, record); return error as E & ObservedServedModel; }
+  if (scoped !== undefined) {
+    // W1-T13868: also the call's latest thrown record, for a wrapper that then throws its own error in this one's place.
+    for (const table of scoped) { table.set(error, record); table.set(THROWN_IN_CALL_KEY, record); }
+    return error as E & ObservedServedModel;
+  }
   // Outside any call scope: the side table holds even for a frozen error; the property copy is a convenience.
   observedServedModels.set(error, record);
   if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);

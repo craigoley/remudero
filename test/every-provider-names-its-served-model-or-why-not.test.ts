@@ -603,3 +603,54 @@ test("W1-T13868 criterion 1: a call whose returned result the quiet-worker watch
   assert.deepEqual(await attempt({ servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } as never),
     [["QuietRoundEndedError", null, CASH_SERVED_MODEL_REASONS.unnamed]], "an unnamed response");
 });
+
+/** A dispatch call as run-task-verb wires it: recordBenchmarkWorkerAttempt around the quiet-worker guard around
+ * production spawnWorker. `adapter` stands in for the provider call; it ends the round (as `end_round` does while the
+ * worker finishes) and then returns or throws what the real adapter gave. Returns the spawn-threw rows and the error. */
+async function runQuietEndedDispatch(provider: "codex" | "cash", adapter: (endRound: () => void) => Promise<WorkerResult>) {
+  const root = mkdtempSync(join(tmpdir(), "rmd-served-model-quiet-ended-"));
+  let ended: QuietRoundEndedError | undefined;
+  const endRound = () => { ended = new QuietRoundEndedError({ reason: "quiet past its bound" }); };
+  const watched = guardSpawnWithQuietWatchdog(spawnWorker, {
+    watchdog: { observer: () => {}, tick: async () => {}, start: () => () => {} },
+    abort: new AbortController(), onRootPid: () => {}, ended: () => ended,
+  });
+  const rows: Record<string, unknown>[] = [];
+  try {
+    const error = await recordBenchmarkWorkerAttempt(() => watched({ cwd: globalThis.process.cwd(),
+      settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"), permissionMode: "bypassPermissions",
+      prompt: "bounded worker", model: "sonnet", effort: "low", maxTurns: 4, mountProvider: provider,
+      ...(provider === "cash" ? { cashSqueezed: true } : {}),
+      config: { claudeBin: "/unused/claude", root, dailyCapUsd: 25, workerProviders: provider === "cash"
+        ? { enabled: ["cash"], cashEndpoint: "https://openai.example.test/" }
+        : { enabled: ["codex"], codexModel: "gpt-6-luna" } } as Config,
+      providerRouting: provider === "cash" ? { spawnOpenWeight: () => adapter(endRound) } : { spawnCodex: () => adapter(endRound) },
+    } as never), (step, fields) => rows.push({ step, ...fields }), () => undefined, () => {}).then(() => undefined, (e: unknown) => e);
+    return { error, rows: rows.filter((row) => row.worker_failure === "spawn-threw-before-result")
+      .map((row) => [row.step, row.served_model, row.served_model_reason]) };
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test("W1-T13868 criterion 1: a call the quiet-worker watchdog ended still records the served model, or the named reason", async () => {
+  const reroute = { type: "error", message: "model rerouted: gpt-6-luna -> gpt-5.2 (HighRiskCyberActivity)" };
+  // The adapter returned a result; the guard replaces it with QuietRoundEndedError.
+  const codexNamed = await runQuietEndedDispatch("codex", async (endRound) => { const r = await runCodex([reroute]); endRound(); return r; });
+  assert.ok(codexNamed.error instanceof QuietRoundEndedError, String(codexNamed.error));
+  assert.deepEqual(codexNamed.rows, [["worker.attempt", "gpt-5.2", undefined]], "a codex reroute the stream named");
+  const codexUnnamed = await runQuietEndedDispatch("codex", async (endRound) => { const r = await runCodex(); endRound(); return r; });
+  assert.deepEqual(codexUnnamed.rows, [["worker.attempt", null, CODEX_SERVED_MODEL_REASON]], "a codex stream that named no model");
+  const gptNamed = await runQuietEndedDispatch("cash", async (endRound) => {
+    const r = await runCash(cashReply({ model: "gpt-5-nano-2025-08-07" })) as WorkerResult; endRound(); return r; });
+  assert.ok(gptNamed.error instanceof QuietRoundEndedError, String(gptNamed.error));
+  assert.deepEqual(gptNamed.rows, [["worker.attempt", "gpt-5-nano-2025-08-07", undefined]], "a GPT response's model");
+  const gptUnnamed = await runQuietEndedDispatch("cash", async (endRound) => {
+    const r = await runCash(cashReply({})) as WorkerResult; endRound(); return r; });
+  assert.deepEqual(gptUnnamed.rows, [["worker.attempt", null, CASH_SERVED_MODEL_REASONS.unnamed]], "a GPT response with no model");
+  // The adapter threw after its stream named a model; the guard throws QuietRoundEndedError in its place.
+  const codexThrew = await runQuietEndedDispatch("codex", async (endRound) => { const e = await runHungCodex([reroute]); endRound(); throw e; });
+  assert.ok(codexThrew.error instanceof QuietRoundEndedError, String(codexThrew.error));
+  assert.deepEqual(codexThrew.rows, [["worker.attempt", "gpt-5.2", undefined]], "a thrown codex call's model");
+  // Positive control: a call that observed nothing adds no served-model fields.
+  const nothing = await runQuietEndedDispatch("codex", async (endRound) => { endRound(); throw new Error("spawn failed"); });
+  assert.deepEqual(nothing.rows, [["worker.attempt", undefined, undefined]]);
+});

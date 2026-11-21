@@ -18,7 +18,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, returnedServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, returnedServedModelOf, thrownInCallServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -588,8 +588,9 @@ function thrownServedModelEvidence(error: unknown,
   try {
     const thrown = thrownServedModel(error, observations);
     if (Object.keys(thrown).length > 0 || observations === undefined) return thrown;
-    // A wrapper's error (the quiet-worker watchdog's round end) replaced a result the worker had returned.
-    return servedModelEvidence(returnedServedModelOf(observations));
+    // A wrapper's error (the quiet-worker watchdog's round end) replaced a result the worker had returned, or replaced
+    // an error the adapter threw after its stream named a model.
+    return servedModelEvidence(returnedServedModelOf(observations) ?? thrownInCallServedModelOf(observations));
   } catch { const reason = THROWN_SERVED_MODEL_UNREADABLE; return { served_model: null, served_model_reason: reason }; }
 }
 
