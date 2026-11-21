@@ -2196,27 +2196,38 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
 
 /**
  * W1-T14114: an open PR whose own task is filed only in the ops catalog has no public projection row, so its
- * escalation could never be verified. With an ok catalog, project just the ops tasks the open PRs claim (run branch
- * or Remudero-Task trailer) and add their rows, for the board referents only. inboxBoardReferents still requires
- * exactly one observable row, and the classifier's projection never sees these rows (W1-T12211).
+ * escalation could never be verified. Project the ops tasks with unambiguous claims for the board referents.
+ * A row directly naming a PR must also match that PR's claim, since it bypasses the referent's ownership fallback.
+ * The classifier gets only the public projection (W1-T12211).
  */
 function opsOwnTaskRows(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
   openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): Map<string, StatusProjection> {
-  const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
+  if (openPrs === undefined || openPrs.length === 0) return projection;
+  const combined = deps.inboxReferentPlan?.(plan);
   if (!combined || combined === plan) return projection;
-  const claimed = new Set<string>();
-  for (const pr of openPrs!) {
+  const owners = new Map<number, string>();
+  for (const pr of openPrs) {
+    if (pr.state !== "OPEN" || pr.body === undefined) continue;
+    const claimed = new Set<string>();
     const head = taskIdFromRunBranch(pr.headRefName);
     if (head) claimed.add(head);
-    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) claimed.add(match[1]);
+    for (const match of pr.body.matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) claimed.add(match[1]);
+    if (claimed.size === 1) {
+      const [id] = claimed;
+      owners.set(pr.number, id);
+    }
   }
-  const tasks = [...claimed].flatMap(id => {
+  const tasks = [...new Set(owners.values())].flatMap(id => {
     const task = plan.byId.has(id) || projection.has(id) ? undefined : combined.byId.get(id);
     return task ? [task] : [];
   });
   if (tasks.length === 0) return projection;
   const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
-  return new Map([...projection, ...rows]);
+  const referents = new Map(projection);
+  for (const [id, row] of rows) {
+    if (row.prNumber === undefined || owners.get(row.prNumber) === id) referents.set(id, row);
+  }
+  return referents;
 }
 
 /**

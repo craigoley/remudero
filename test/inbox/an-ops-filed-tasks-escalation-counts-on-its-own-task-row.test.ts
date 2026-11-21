@@ -3,22 +3,21 @@
 // ops catalog, so core's projection had no row for them and their escalation counts stayed unverified.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { serialize } from "node:v8";
-import type { Clock } from "#src/lib/clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "#src/lib/clock.js";
 import { planDestinationRepository } from "#src/lib/plan-destination.js";
 import type { Plan, Task } from "#src/lib/plan.js";
-import { projectInboxPlan } from "#src/lib/panel-graph.js";
-import { createSlowLaneCatalog, runSlowLaneWorker, threadSlowLane } from "#src/lib/read-model-slow-lane.js";
+import * as panelGraph from "#src/lib/panel-graph.js";
+import * as slowLane from "#src/lib/read-model-slow-lane.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import type { GitHub, PrRef } from "#src/lib/status.js";
-import { BOARD_CATALOG_WIRE_VERSION, type BoardCatalogReply, type BoardCatalogRequest } from "#src/lib/serve-plan-reload.js";
+import { BOARD_CATALOG_REFRESH_MS, BOARD_CATALOG_WIRE_VERSION, type BoardCatalogReply, type BoardCatalogRequest } from "#src/lib/serve-plan-reload.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const task = (id: string): Task => ({ id, title: `title of ${id}`, repo: "remudero", depends_on: [], type: "implement", risk: "medium",
   verify: "auto", status: "queued", attempts: 0 }) as Task;
@@ -39,8 +38,8 @@ function gateway(open: PrRef[]): GitHub {
   } as unknown as GitHub;
 }
 
-function ledgerWith(...lines: object[]): string {
-  const path = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ops-own-task-row-`)), "ledger.ndjson");
+function ledgerWith(t: TestContext, ...lines: object[]): string {
+  const path = join(ownedFixtureDir(t, "ops-own-task-row").dir, "ledger.ndjson");
   writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + (lines.length ? "\n" : ""));
   return path;
 }
@@ -50,39 +49,75 @@ const opsTask = task("W1-T9");
 const combined = planOf(task("W1-T1"), opsTask);
 const escalation = { ts: "2026-11-20T00:00:00Z", step: "escalation.issue_opened", task_id: "W1-T9", issue_url: ISSUE };
 
-test("W1-T14114 ops-filed own task row: an open PR whose task is only in the ok ops catalog resolves with that row's count", () => {
+test("W1-T14114 ops-filed own task row: an open PR whose task is only in the ok ops catalog resolves with that row's count", (t) => {
   // The live shape: no escalation line for the task in core's ledger, so core's projection has no row at all.
   const open = [pr(19691, "run-W1-T9-1795095230170", "Fix.\n\nRemudero-Task: W1-T9\n")];
-  const deps = { ledgerPath: ledgerWith(), statusGithub: gateway(open), inboxReferentPlan: (plan: Plan) => (plan === publicPlan ? combined : undefined) };
-  const read = projectInboxPlan(deps, publicPlan);
+  const root = ownedFixtureDir(t, "ops-own-task-classification").dir;
+  const state = join(root, "state");
+  mkdirSync(state);
+  writeFileSync(join(state, "inbox-proposals.json"), JSON.stringify({ proposals: [
+    { id: "board-review:escalation:#19691", summary: "Fixture escalation", evidenceAnchors: [] },
+  ] }));
+  let catalog: Plan | undefined;
+  const deps: panelGraph.PanelGraphDeps = {
+    root, inboxRoot: root, planPath: join(root, "tasks.yaml"), ledgerPath: ledgerWith(t),
+    github: { prView: () => null }, statusGithub: gateway(open),
+    ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40),
+    inboxReferentPlan: (plan) => plan === publicPlan ? catalog : undefined,
+  };
+  const unavailable = panelGraph.classifyAllProposalsMemo(deps, () => publicPlan);
+  assert.equal(unavailable.classifications[0]?.referentUnverified, true);
+  assert.notEqual(unavailable.classifications[0]?.state, "retired");
+  catalog = combined;
+  const classified = panelGraph.classifyAllProposalsMemo(deps, () => publicPlan);
+  assert.equal(classified.classifications[0]?.state, "retired", "the classifier observes the open PR's zero count");
+  assert.deepEqual([...classified.projection.keys()], ["W1-T1"]);
+
+  const read = panelGraph.projectInboxPlan(deps, publicPlan);
   assert.deepEqual(read.boardReferents.states.get("#19691"), { status: "open", unhandledEscalations: 0 });
   assert.equal(read.projection.has("W1-T9"), false, "the ops task's row never reaches the classifier's projection");
   assert.deepEqual([...read.projection.keys()], ["W1-T1"]);
   // With an open escalation the count is 1 (core's own taskless escalation row already carries it).
-  const escalated = projectInboxPlan({ ...deps, ledgerPath: ledgerWith(escalation) }, publicPlan);
+  const escalated = panelGraph.projectInboxPlan({ ...deps, ledgerPath: ledgerWith(t, escalation) }, publicPlan);
   assert.deepEqual(escalated.boardReferents.states.get("#19691"), { status: "open", unhandledEscalations: 1 });
 });
 
-test("W1-T14114 ops-filed own task row: without an ok catalog the escalation count stays unverified", () => {
+test("W1-T14114 ops-filed own task row: without an ok catalog the escalation count stays unverified", (t) => {
   const open = [pr(19691, "run-W1-T9-1795095230170", "Remudero-Task: W1-T9")];
   for (const inboxReferentPlan of [undefined, () => undefined, () => publicPlan]) {
-    const read = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway(open), inboxReferentPlan }, publicPlan);
+    const read = panelGraph.projectInboxPlan({ ledgerPath: ledgerWith(t), statusGithub: gateway(open), inboxReferentPlan }, publicPlan);
     assert.deepEqual(read.boardReferents.states.get("#19691"), { status: "open" }, "an unreadable or absent catalog cannot observe the row");
   }
 });
 
-test("W1-T14114 ops-filed own task row: a PR that claims no ops task takes no ops row, and its claimed row follows projectPlan's own association", () => {
+test("W1-T14114 ops-filed own task row: a PR that claims no ops task takes no ops row, and its claimed row follows projectPlan's own association", (t) => {
   const otherOps = task("W1-T8");
   const wide = planOf(task("W1-T1"), opsTask, otherOps);
-  const unclaimed = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway([pr(6, "dependabot/npm", "")]), inboxReferentPlan: () => wide }, publicPlan);
+  const unclaimed = panelGraph.projectInboxPlan({ ledgerPath: ledgerWith(t), statusGithub: gateway([pr(6, "dependabot/npm", "")]), inboxReferentPlan: () => wide }, publicPlan);
   assert.deepEqual(unclaimed.boardReferents.states.get("#6"), { status: "open" }, "an unclaimed PR stays unverified, as before");
   // The ops row is projected exactly as a public task's would be: its own run branch associates the PR (rung c3).
-  const owned = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway([pr(5, "run-W1-T8-1795095230170", "")]), inboxReferentPlan: () => wide }, publicPlan);
+  const owned = panelGraph.projectInboxPlan({ ledgerPath: ledgerWith(t), statusGithub: gateway([pr(5, "run-W1-T8-1795095230170", "")]), inboxReferentPlan: () => wide }, publicPlan);
   assert.deepEqual(owned.boardReferents.states.get("#5"), { status: "open", unhandledEscalations: 0 });
 });
 
-function catalogState(): string {
-  const state = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}ops-own-task-row-state-`)), "state");
+test("W1-T14114 ops-filed own task row: conflicting or unread claims leave the escalation count unverified", (t) => {
+  const head = "run-W1-T9-1795095230170";
+  const conflicting = pr(5, head, "Remudero-Task: W1-T8");
+  const anotherPr = pr(6, "feature/ops-task", "Remudero-Task: W1-T9");
+  const deps = { ledgerPath: ledgerWith(t), inboxReferentPlan: () => planOf(task("W1-T1"), task("W1-T8"), opsTask) };
+  for (const [label, open] of [
+    ["branch and trailer disagree", [conflicting]],
+    ["another PR claims the branch's task", [conflicting, anotherPr]],
+    ["a second trailer disagrees", [pr(5, head, "Remudero-Task: W1-T9\nRemudero-Task:\tW1-T8")]],
+    ["the PR body was unread", [{ ...pr(5, head, ""), body: undefined }]],
+  ] as const) {
+    const read = panelGraph.projectInboxPlan({ ...deps, statusGithub: gateway([...open]) }, publicPlan);
+    assert.deepEqual(read.boardReferents.states.get("#5"), { status: "open" }, label);
+  }
+});
+
+function catalogState(t: TestContext): string {
+  const state = join(ownedFixtureDir(t, "ops-own-task-row-state").dir, "state");
   mkdirSync(state);
   writeFileSync(join(state, "plan-destination.json"), JSON.stringify({ repository: "craigoley/remudero-ops", kinds: [] }));
   return state;
@@ -97,34 +132,58 @@ function catalogPacket(state: string, plan: Plan | undefined, clock: Clock, sequ
     sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
-const systemish: Clock = { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() };
 const opsOnly = planOf(opsTask);
 
-test("W1-T14114 ops-filed own task row: the slow lane's catalog asks the parent, waits for the reply, and supplies the combined plan only when ok", async () => {
-  const state = catalogState();
+test("W1-T14114 ops-filed own task row: the slow lane's catalog asks the parent, waits for the reply, and supplies the combined plan only when ok", async (t) => {
+  const state = catalogState(t);
   const requests: BoardCatalogRequest[] = [];
-  const catalog = createSlowLaneCatalog(true, (r) => requests.push(r), systemish, 5_000);
+  const catalog = slowLane.createSlowLaneCatalog(true, (r) => requests.push(r), systemClock, 5_000);
   const settled = catalog.settle(state);
   assert.deepEqual(requests, [{ type: "ops_catalog_read", version: 1, root: state }], "the pass asks the parent for a due catalog read");
-  catalog.accept(catalogPacket(state, opsOnly, systemish));
+  catalog.accept(catalogPacket(state, opsOnly, systemClock));
   await settled;
   const combinedPlan = catalog.referentPlan(publicPlan, state);
   assert.ok(combinedPlan?.byId.has("W1-T9") && combinedPlan.byId.has("W1-T1"), "an ok catalog supplies public plus ops");
   await catalog.settle(state);
   assert.equal(requests.length, 1, "a received catalog is not asked for again inside its refresh interval");
-  catalog.accept(catalogPacket(state, undefined, systemish, 2));
+  catalog.accept(catalogPacket(state, undefined, systemClock, 2));
   assert.equal(catalog.referentPlan(publicPlan, state), undefined, "an unreadable catalog supplies nothing");
 });
 
-test("W1-T14114 ops-filed own task row: the slow lane's catalog wait is bounded, and a lane without the bridge never waits", async () => {
-  const state = catalogState();
+test("W1-T14114 ops-filed own task row: an accepted catalog expires by observation age and a fresh reply restores the count", async (t) => {
+  const state = catalogState(t);
   const requests: BoardCatalogRequest[] = [];
-  const silent = createSlowLaneCatalog(true, (r) => requests.push(r), systemish, 30);
+  let now = Date.now();
+  const clock = clockFromMillisFn(() => now);
+  const catalog = slowLane.createSlowLaneCatalog(true, (request) => requests.push(request), clock);
+  const settled = catalog.settle(state);
+  catalog.accept(catalogPacket(state, opsOnly, fixedClock(now - BOARD_CATALOG_REFRESH_MS + 1_000)));
+  await settled;
+  const deps = { ledgerPath: ledgerWith(t), statusGithub: gateway([pr(5, "run-W1-T9-1795095230170", "")]),
+    inboxReferentPlan: (plan: Plan) => catalog.referentPlan(plan, state) };
+  const read = () => panelGraph.projectInboxPlan(deps, publicPlan).boardReferents.states.get("#5");
+  const verified = { status: "open", unhandledEscalations: 0 };
+  assert.deepEqual(read(), verified, "the 119-second-old observation is fresh when accepted");
+  now += 1_000;
+  assert.deepEqual(read(), { status: "open" }, "at 120 seconds the same observation is stale");
+  assert.equal(requests.length, 1, "expiry does not start a separate catalog read");
+  now += BOARD_CATALOG_REFRESH_MS;
+  const refreshed = catalog.settle(state);
+  assert.equal(requests.length, 2, "the shared refresh still requests the next observation");
+  catalog.accept(catalogPacket(state, opsOnly, clock, 2));
+  await refreshed;
+  assert.deepEqual(read(), verified);
+});
+
+test("W1-T14114 ops-filed own task row: the slow lane's catalog wait is bounded, and a lane without the bridge never waits", async (t) => {
+  const state = catalogState(t);
+  const requests: BoardCatalogRequest[] = [];
+  const silent = slowLane.createSlowLaneCatalog(true, (r) => requests.push(r), systemClock, 30);
   const started = Date.now();
   await silent.settle(state);
   assert.ok(Date.now() - started >= 25, "an unanswered request waits its bound");
   assert.equal(silent.referentPlan(publicPlan, state), undefined, "and the pass classifies without the catalog");
-  const disabled = createSlowLaneCatalog(false, (r) => requests.push(r), systemish, 5_000);
+  const disabled = slowLane.createSlowLaneCatalog(false, (r) => requests.push(r), systemClock, 5_000);
   await disabled.settle(state);
   assert.equal(disabled.referentPlan(publicPlan, state), undefined);
   assert.equal(requests.length, 1, "only the enabled lane asked");
@@ -141,7 +200,7 @@ parentPort.on("message", (msg) => {
 });\n`);
   const requests: BoardCatalogRequest[] = [];
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
-  const lane = threadSlowLane({ config: { intervalMs: 60_000 }, workerUrl: pathToFileURL(path), log: (step, extra) => logs.push({ step, extra }),
+  const lane = slowLane.threadSlowLane({ config: { intervalMs: 60_000 }, workerUrl: pathToFileURL(path), log: (step, extra) => logs.push({ step, extra }),
     onCatalogRequest: (request) => requests.push(request) });
   t.after(() => lane.close());
   lane.lease(true);
@@ -154,14 +213,14 @@ parentPort.on("message", (msg) => {
 });
 
 test("W1-T14114 ops-filed own task row: the slow lane worker hands a catalog reply to its inbox units' catalog", async (t) => {
-  const state = catalogState();
+  const state = catalogState(t);
   const posted: unknown[] = [];
   const handlers: Array<(msg: unknown) => void> = [];
   const port = { postMessage: (m: unknown) => posted.push(m), on: (_: "message", run: (msg: unknown) => void) => { handlers.push(run); } };
-  const worker = runSlowLaneWorker(port as never, { catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION, intervalMs: 60_000 },
+  const worker = slowLane.runSlowLaneWorker(port as never, { catalogBridgeVersion: BOARD_CATALOG_WIRE_VERSION, intervalMs: 60_000 },
     { schedule: () => () => {} });
   t.after(() => worker.stop());
   // A reply with no request held is ignored by the client; delivering it must not throw or reach any unit.
-  for (const run of handlers) run(catalogPacket(state, opsOnly, systemish));
+  for (const run of handlers) run(catalogPacket(state, opsOnly, systemClock));
   assert.equal(posted.filter((m) => (m as { type?: string }).type === "ops_catalog_read").length, 0, "no inbox unit, so nothing was asked");
 });

@@ -46,7 +46,7 @@ import type { Plan } from "./plan.js";
 import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
 import { startWorker } from "./child-entry-argv.js";
-import { BOARD_CATALOG_WIRE_VERSION, createWorkerBoardCatalogClient, isBoardCatalogReply, isBoardCatalogRequest,
+import { BOARD_CATALOG_REFRESH_MS, BOARD_CATALOG_WIRE_VERSION, createWorkerBoardCatalogClient, isBoardCatalogReply, isBoardCatalogRequest,
   type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
 import { collectDailyProgress, type DailyProgressCollectionConfig } from "./daily-progress-collector.js";
@@ -165,7 +165,9 @@ export function createSlowLaneCatalog(enabled: boolean, post: (request: BoardCat
     },
     referentPlan: (plan, root) => {
       const context = client.current(plan, root);
-      return context?.outcome === "ok" ? context.plan : undefined;
+      if (context?.outcome !== "ok") return undefined;
+      const age = clock.now() - Date.parse(context.observedAt);
+      return age >= 0 && age < BOARD_CATALOG_REFRESH_MS ? context.plan : undefined;
     },
     accept: (reply) => {
       client.accept(reply);
