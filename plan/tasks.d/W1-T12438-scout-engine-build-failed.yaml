@@ -5,18 +5,18 @@
   type: implement
   verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
-  priority: 2.97
   status: blocked
+  design: "NO-INVARIANTS: the symptom stopped recurring, so this task is retired without an implementation or new behavior"
   retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-11-18T22:35:20.690Z
   attempts: 0
   author_class: machine
   origin: "scout:engine.build_failed"
   files:
-    - src/lib/engine-tree.ts
-    - test/deploy/scout-engine-build-failed.test.ts
+    - plan/tasks.d/W1-T12438-scout-engine-build-failed.yaml
   acceptance:
-    - claim: "engine.build_failed stops recurring: its cause is fixed rather than its rows hidden"
-      proof: "grep: test(\"W1-T12438: engine.build_failed no longer recurs\" in test/deploy/scout-engine-build-failed.test.ts"
+    - claim: "every retired record in the shipped plan, this one included, stays status blocked, the one value that holds a retirement out of dispatch"
+      proof: "unit test: every retirement-bearing task in the shipped plan is"
+      kind: guard
   note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
   rationale: |
     The ledger step engine.build_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 7 in the newer.

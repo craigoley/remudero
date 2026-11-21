@@ -3,14 +3,15 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high  # Rule 19 span: widened to fix, run-task by a scope amendment for #19939
   band_meaning: span
   priority: 1.11
   # refusal-amendment (W1-T10581, run W1-T10581-1793126668014, 2026-10-27T19:52:08.143Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The code that emits the refusal is in `src/cli/commands/fix.ts` and `src/lib/proof-amendment.ts`, not in the declared `src/run-task.ts`, so no in-scope change can remedy this cause.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-21T15:03:59.836Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:fix_refusal:non-test-paths-need-scope-shard-drifted"
