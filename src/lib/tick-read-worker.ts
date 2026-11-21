@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, reviewStatusOwnerRun, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -609,12 +609,15 @@ export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefine
   return r?.startedAt;
 }
 
-/** W1-T14035: the run that owns the live `remudero-review` status, read off its own description ("owned by run <id>",
- *  which every pending post carries: a claim from postReviewPending, and a hold through publishReviewStatusLocked or the
- *  ops catalog poster). Absent or another wording is an unknown run, never a match. */
+/** W1-T14035: the claim shapes postReviewPending posts (a claim, and both takeover wordings), each opening with its own
+ *  writer. A hold's text can quote another run's "owned by run <id>)" (a refusal reason, a cut summary), so only a claim
+ *  shape names its writer by its wording; every other pending post is tied to a writer through the status history. */
+const REVIEW_CLAIM_SHAPE = /^(?:remudero-review: review in progress|pending) \(owned by run ([^\s)]+)\)/;
+
+/** W1-T14035: the run whose claim the live `remudero-review` status is, read off the claim's opening; absent for a hold. */
 export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
-  return reviewStatusOwnerRun(r?.description);
+  return REVIEW_CLAIM_SHAPE.exec(r?.description ?? "")?.[1];
 }
 
 /** W1-T14035: the redaction a reviewer deployed before every pending post named its run gave an ops hold: one text for every run. */
@@ -636,13 +639,14 @@ export function reviewStatusHistoryFromRest(rows: unknown): ReviewStatusHistoryE
   }));
 }
 
-/** W1-T14035: the run that published a live pending `remudero-review` status. Every pending post now names its run. A hold
- *  posted before that names none, and the same text can come from any run, a newer one included whose rows are not visible
- *  (a run posts its hold even when its own claim was refused, and writes its row only after GitHub accepts the post). Clocks
- *  cannot settle it: GitHub's and the host's differ, and posts share a second. So the claim is made from GitHub's own order.
- *  The unmarked hold belongs to run R only when the newest marked post in the head's history is R's claim, every post after
- *  it is an unmarked pending, there are exactly as many of them as R has `review.posted` pending rows since its claim row, no
- *  other run has a claim or hold row on this head after R's, and the live text is R's summary or the legacy ops redaction.
+/** W1-T14035: the run that published a live pending `remudero-review` status. A claim names its writer by its opening.
+ *  A hold may not: one posted before every pending post named its run names none, any hold's text can quote another run,
+ *  and the same text can come from any run, a newer one included whose rows are not visible (a run posts its hold even when
+ *  its own claim was refused, and writes its row only after GitHub accepts the post). Clocks cannot settle it: GitHub's and
+ *  the host's differ, and posts share a second. So a hold's writer is read from GitHub's own order. It is run R only when the
+ *  newest claim in the head's history is R's, every post after it is a pending hold, there are exactly as many of them as R
+ *  has `review.posted` pending rows since its claim row, no other run has a claim or hold row on this head after R's, a
+ *  trailing "owned by run" marker on the live hold names R, and the rest of its text is R's summary or the ops redaction.
  *  Anything else, an unread history included, is an unknown run, and an unknown run waits. */
 export function reviewPendingStatusRunId(
   rollup: RollupCheck[] | undefined,
@@ -652,12 +656,12 @@ export function reviewPendingStatusRunId(
   prUrl: string,
   headSha: string,
 ): string | undefined {
-  const named = reviewStatusRunIdFromRollup(rollup);
-  if (named !== undefined) return named;
+  const claimant = reviewStatusRunIdFromRollup(rollup);
+  if (claimant !== undefined) return claimant;
   const description = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.description;
   if (!description || history === undefined || history[0]?.description !== description) return undefined;
-  const claimAt = history.findIndex((entry) => reviewStatusOwnerRun(entry.description) !== undefined);
-  const run = claimAt > 0 ? reviewStatusOwnerRun(history[claimAt]!.description) : undefined;
+  const claimAt = history.findIndex((entry) => REVIEW_CLAIM_SHAPE.test(entry.description ?? ""));
+  const run = claimAt > 0 ? REVIEW_CLAIM_SHAPE.exec(history[claimAt]!.description!)?.[1] : undefined;
   if (run === undefined || history.slice(0, claimAt).some((entry) => entry.state !== "pending")) return undefined;
   let claimed = false;
   let holds: Array<Record<string, unknown>> = [];
@@ -669,8 +673,12 @@ export function reviewPendingStatusRunId(
     if (hold) holds.push(line);
     else { claimed = true; holds = []; }
   }
+  const trailing = / \(owned by run ([^\s)]+)\)$/.exec(description);
+  if (trailing !== null && trailing[1] !== run) return undefined;
+  const text = trailing === null ? description : description.slice(0, trailing.index);
   const summary = (holds.at(-1)?.decision_verdict as { summary?: unknown } | undefined)?.summary;
-  const wording = LEGACY_OPS_HOLD.test(description) || (typeof summary === "string" && summary.slice(0, 140) === description);
+  const wording = LEGACY_OPS_HOLD.test(text) || (typeof summary === "string" && text !== "" &&
+    (text === description ? summary.slice(0, 140) === text : summary.startsWith(text)));
   return claimed && holds.length === claimAt && wording ? run : undefined;
 }
 
@@ -2597,7 +2605,7 @@ export function* openPrViewSteps(
     const status = (pr.statusCheckRollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
     const description = status === undefined ? undefined : status.description;
     return reviewStateFromRollup(pr.statusCheckRollup) === "pending" && typeof description === "string" && description !== "" &&
-      reviewStatusOwnerRun(description) === undefined && holdHeads.has(pr.headRefOid);
+      reviewStatusRunIdFromRollup(pr.statusCheckRollup) === undefined && holdHeads.has(pr.headRefOid);
   }).map((pr) => ({ number: pr.number, headSha: pr.headRefOid })).slice(0, REVIEW_STATUS_HISTORY_READ_CAP);
   const reviewStatusHistories = byCandidate(historyCandidates, yield* perPrStageSteps(stageCtx, "review_status_history",
     historyCandidates, function* (c, read) {

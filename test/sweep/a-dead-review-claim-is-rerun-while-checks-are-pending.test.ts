@@ -342,7 +342,7 @@ test("W1-T14035 criterion 1: a production promise-harvest hold published by the 
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   let wording = "";
-  const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) => (wording = await publishHold(ledgerPath, DEAD)));
+  const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) => (wording = await publishHold(ledgerPath, DEAD)));
   assert.match(wording, /^remudero-review: promise-harvest-incomplete — promise harvest unavailable: /);
   assert.equal(pr.reviewPendingOwnerDead, true, "the producer proved the claiming run dead");
   assert.equal(pr.priorReviewAttemptsForInput ?? 0, 0, "the hold judged no input of this head");
@@ -359,7 +359,7 @@ test("W1-T14035 criterion 1: a production cannot-evaluate hold published by the 
   const adrDiff = "diff --git a/docs/adr/0001-cache.md b/docs/adr/0001-cache.md\n--- a/docs/adr/0001-cache.md\n" +
     "+++ b/docs/adr/0001-cache.md\n@@ -1 +1,2 @@\n # Cache\n+We will file a follow-up.\n";
   let wording = "";
-  const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) =>
+  const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) =>
     (wording = await publishHold(ledgerPath, DEAD, { verdictFor: () => judgeReview([], { diff: adrDiff, report: "" } as never) })));
   assert.match(wording, /^remudero-review: cannot-evaluate — /);
   assert.equal(pr.reviewPendingStatusRunId, DEAD);
@@ -371,7 +371,7 @@ test("W1-T14035 criterion 1: an ops hold the catalog poster redacted is released
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const codeSha of [undefined, "c".repeat(40)]) {
     let wording = "";
-    const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) =>
+    const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) =>
       (wording = await publishHold(ledgerPath, DEAD, { catalog: "ops", codeSha })));
     assert.equal(wording, `${OPS_HOLD} (owned by run ${DEAD})`, "the redaction replaced the summary and kept the owner");
     assert.equal(pr.reviewPendingStatusRunId, DEAD);
@@ -401,7 +401,7 @@ test("W1-T14035 criterion 2: runSweep records the dead-owner reason for a produc
   for (const catalog of [undefined, "ops"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const pr = await producedView(dir, { runId: DEAD }, (ledgerPath) => publishHold(ledgerPath, DEAD, { catalog }));
+    const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, (ledgerPath) => publishHold(ledgerPath, DEAD, { catalog }));
     const h = sweepHarness(t);
     const ledgerPath = join(dir, "ledger.ndjson");
     await runSweep([pr], { ...h.deps, ledgerPath }, DEFAULT_SWEEP_POLICY);
@@ -498,6 +498,32 @@ test("W1-T14035 criterion 3: a newer unmarked hold in the same second as the dea
     });
     assert.equal(pr.reviewPendingStatusRunId, undefined, `${label}: the live hold is bound to no run`);
     assert.equal(pr.reviewPendingOwnerDead, undefined, `${label}: no proof about the live status's owner`);
+    const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "wait", label);
+    assert.doesNotMatch(r.reason, /owner proven dead/, label);
+  }
+});
+
+test("W1-T14035 criterion 3: a live reviewer's newer pending status that quotes an older dead run waits", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // A live legacy reviewer whose claim was refused posts a hold quoting the refusal, which names the older dead run. The quote
+  // is not its writer: death is proven only for the run that posted the live status, never one its text names.
+  const refusal = `remudero-review is already pending for ddddddd (owned by run ${DEAD}) — no-op (W1-T913 idempotent-per-input)`;
+  const quoting = `remudero-review: cannot-evaluate — ${refusal}`.slice(0, 140);
+  const quotingAtEnd = `remudero-review: cannot-evaluate — ${"x".repeat(40)} ${refusal}`.slice(0, 140 - 40) + ` (owned by run ${DEAD})`;
+  const cases: Array<[string, string, boolean]> = [
+    ["the quote mid-text, the dead run with no hold row", quoting, false],
+    ["the quote mid-text, after the dead run's hold row", quoting, true],
+    ["the quote at the end, after the dead run's hold row", quotingAtEnd, true],
+  ];
+  for (const [label, live, deadHeld] of cases) {
+    const pr = await producedView(dir, { runId: DEAD, description: live, history: legacyHistory() }, async (ledgerPath) => {
+      if (deadHeld) await publishHold(ledgerPath, DEAD, { legacy: true });
+      return live;
+    });
+    assert.notEqual(pr.reviewPendingStatusRunId, DEAD, `${label}: a quoted run is not the live status's writer`);
+    assert.equal(pr.reviewPendingOwnerDead, undefined, `${label}: no death is proven for the live status's writer`);
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(r.disposition, "wait", label);
     assert.doesNotMatch(r.reason, /owner proven dead/, label);
