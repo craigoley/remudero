@@ -55,13 +55,14 @@ function fixture(t: TestContext, mode?: "enforce" | "advisory") {
 
 const slept = (sleeps: number[]): number => sleeps.reduce((sum, ms) => sum + ms, 0);
 
-/** W1-T12058 criterion 3, #19924 review: every pause is printed, just before it, with ITS OWN length.
- *  The printed numbers are the sleeps, one for one; only the first line of a read omits "more". */
-function assertEachPausePrinted(warnings: string[], sleeps: number[]): string[] {
+/** W1-T12058 criterion 3, #19924 review: one read prints ONE wait line, when its wait ends, and the
+ *  length it states is the sum of the sleeps it took, however many there were: never a forecast. */
+function assertOneWaitLine(warnings: string[], sleeps: number[]): string {
   const waits = warnings.filter((line) => line.startsWith("gh read cadence (wait"));
-  const printed = waits.map((line) => Number(/waiting ([0-9.]+)s /.exec(line)?.[1]));
-  assert.deepEqual(printed, sleeps.map((ms) => ms / 1000), `each pause printed with its length: ${JSON.stringify(waits)}`);
-  return waits;
+  assert.equal(waits.length, 1, `one wait line for the read: ${JSON.stringify(waits)}`);
+  const printed = Number(/waited ([0-9.]+)s /.exec(waits[0]!)?.[1]);
+  assert.equal(printed, slept(sleeps) / 1000, `the line states the whole wait, slept ${JSON.stringify(sleeps)}: ${waits[0]}`);
+  return waits[0]!;
 }
 
 test("W1-T12058 criterion 1: with no mode set, a hand-run command's first read inside the window waits its turn and then runs", async (t) => {
@@ -105,7 +106,7 @@ test("W1-T12058 criterion 3: the wait is printed once with its length, so the pe
   const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
   const seconds = (WINDOW_MS - AGE_MS) / 1000;
-  assert.match(waits[0]!, new RegExp(`waiting ${seconds}s for the 180s floor`));
+  assert.match(waits[0]!, new RegExp(`waited ${seconds}s for the 180s floor`));
 });
 
 test("W1-T12058 criterion 3: with one live ticket ahead, each pause is printed with its length and the last states the whole wait", async (t) => {
@@ -140,9 +141,8 @@ test("W1-T12058 criterion 3: with one live ticket ahead, each pause is printed w
   const total = (WINDOW_MS - AGE_MS + WINDOW_MS) / 1000;
   assert.equal(servedAt, start + WINDOW_MS - AGE_MS, "the ticket ahead took its slot when the floor came due");
   assert.equal(slept(f.sleeps) / 1000, total, "the read waited the floor and then the ticket's window");
-  const waits = assertEachPausePrinted(f.warnings, f.sleeps);
-  assert.match(waits[0]!, /waiting 175s for the 180s floor/);
-  assert.match(waits.at(-1)!, new RegExp(`more for .* \\(${total}s in all\\)`), `the last line states the whole ${total}s: ${waits.at(-1)}`);
+  const line = assertOneWaitLine(f.warnings, f.sleeps);
+  assert.match(line, new RegExp(`waited ${total}s for the 180s floor `), `the one line states the whole ${total}s: ${line}`);
 });
 
 test("W1-T12058 criterion 3: when the shared read gap outlasts the floor, the floor and the gap's extension are each printed with their length", async (t) => {
@@ -165,8 +165,9 @@ test("W1-T12058 criterion 3: when the shared read gap outlasts the floor, the fl
   }, f.env);
   const waited = slept(sleeps);
   assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read was admitted after the shared gap, slept ${JSON.stringify(sleeps)}`);
-  const waits = assertEachPausePrinted(f.warnings, sleeps);
-  assert.match(waits.at(-1)!, new RegExp(`\\(${waited / 1000}s in all\\)`), `the last line states the ${waited / 1000}s wait: ${waits.at(-1)}`);
+  // Round 5: the 0.5 s floor and the 1 s left of the gap printed two lines. One read prints one.
+  const line = assertOneWaitLine(f.warnings, sleeps);
+  assert.match(line, /waited 1\.5s for the 180s floor, then the 1\.5s shared read gap /, `one line for both phases: ${line}`);
 });
 
 test("W1-T12058 criterion 3: with a read ahead and a fresh advisory stamp, each pause is printed and together they state the whole wait", async (t) => {
@@ -205,8 +206,8 @@ test("W1-T12058 criterion 3: with a read ahead and a fresh advisory stamp, each 
   const total = (DEFAULT_GH_SHARED_READ_GAP_MS + WINDOW_MS) / 1000;
   assert.equal(servedAt, headSlot, "the head ticket took its slot after the shared gap");
   assert.equal(slept(f.sleeps) / 1000, total, `the read waited the gap and then the ticket's window, slept ${JSON.stringify(f.sleeps)}`);
-  const waits = assertEachPausePrinted(f.warnings, f.sleeps);
-  assert.match(waits.at(-1)!, new RegExp(`\\(${total}s in all\\)`), `the last line states the whole ${total}s wait: ${waits.at(-1)}`);
+  const line = assertOneWaitLine(f.warnings, f.sleeps);
+  assert.match(line, new RegExp(`waited ${total}s `), `the one line states the whole ${total}s wait: ${line}`);
 });
 
 test("W1-T12058 criterion 3: with the floor clear, a fresh advisory stamp's shared-gap pause is printed once with its length", async (t) => {
@@ -224,7 +225,7 @@ test("W1-T12058 criterion 3: with the floor clear, a fresh advisory stamp's shar
   assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read paused for the shared gap, slept ${JSON.stringify(sleeps)}`);
   const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
-  assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
+  assert.match(waits[0]!, new RegExp(`waited ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
 });
 
 test("W1-T12058 criterion 3: with the floor clear, the reserved slot a due lower-priority ticket is given is printed once with its length", async (t) => {
@@ -246,7 +247,7 @@ test("W1-T12058 criterion 3: with the floor clear, the reserved slot a due lower
   assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read gave the due ticket one shared gap, slept ${JSON.stringify(f.sleeps)}`);
   const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
-  assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
+  assert.match(waits[0]!, new RegExp(`waited ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
 });
 
 test("W1-T12058 criterion 3: a counted stamp ahead of the clock is printed with the whole wait to its deadline, not truncated", async (t) => {
@@ -262,7 +263,7 @@ test("W1-T12058 criterion 3: a counted stamp ahead of the clock is printed with 
   assert.equal(waited, WINDOW_MS + 500, `the read waited to the stamp's deadline, slept ${JSON.stringify(f.sleeps)}`);
   const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
-  assert.match(waits[0]!, /waiting 180\.5s for the 180s floor/, `the line states the 180.5s wait: ${waits[0]}`);
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 180\.5s for the 180s floor/, `the line states the 180.5s wait: ${waits[0]}`);
 });
 
 test("W1-T12058 criterion 3: a queued ticket that expires mid-wait leaves one line with the floor's real length, not a forecast", async (t) => {
@@ -279,9 +280,7 @@ test("W1-T12058 criterion 3: a queued ticket that expires mid-wait leaves one li
     applyGhReadCadence([...READ], deps);
   }, f.env);
   assert.equal(slept(f.sleeps), WINDOW_MS - AGE_MS, `the read waited only the floor, slept ${JSON.stringify(f.sleeps)}`);
-  const waits = assertEachPausePrinted(f.warnings, f.sleeps);
-  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(waits)}`);
-  assert.match(waits[0]!, /waiting 175s for the 180s floor/);
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 175s for the 180s floor on /);
 });
 
 test("W1-T12058 criterion 3: a reserved slot then a shared gap from an advisory stamp ahead of the clock prints each pause with its length", async (t) => {
@@ -299,9 +298,8 @@ test("W1-T12058 criterion 3: a reserved slot then a shared gap from an advisory 
     applyGhReadCadence([...READ], deps);
   }, f.env);
   assert.equal(slept(f.sleeps), 2 * DEFAULT_GH_SHARED_READ_GAP_MS, `the slot, then the gap, slept ${JSON.stringify(f.sleeps)}`);
-  const waits = assertEachPausePrinted(f.warnings, f.sleeps);
-  assert.match(waits[0]!, /waiting 1\.5s for a due queued read's reserved slot/);
-  assert.match(waits[1]!, /waiting 1\.5s more for the 1\.5s shared read gap .*\(3s in all\)/);
+  const line = assertOneWaitLine(f.warnings, f.sleeps);
+  assert.match(line, /waited 3s for a due queued read's reserved slot \(W1-T10271\), then the 1\.5s shared read gap /);
 });
 
 test("W1-T12058 criterion 3: a later read in the same burst that pauses for the shared gap prints its pause", async (t) => {
@@ -320,6 +318,46 @@ test("W1-T12058 criterion 3: a later read in the same burst that pauses for the 
     applyGhReadCadence([...READ], deps);
   }, f.env);
   assert.equal(slept(f.sleeps), DEFAULT_GH_SHARED_READ_GAP_MS, `the burst read paused for the gap, slept ${JSON.stringify(f.sleeps)}`);
-  const waits = assertEachPausePrinted(f.warnings, f.sleeps);
-  assert.match(waits[0]!, /waiting 1\.5s for the 1\.5s shared read gap/);
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 1\.5s for the 1\.5s shared read gap/);
+});
+
+test("W1-T12058 criterion 3: on the blocking path, the floor's last 0.5 s and the shared gap after it print one line with the 1.5 s waited", async (t) => {
+  // Reviewer's counterexample (#19924 round 5), on applyGhReadCadence: two sleeps, 0.5 s and 1 s, two lines.
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(ghGatedStampPath(f.stamp), "1\n", start - (WINDOW_MS - 500));
+  stampGhRead(f.stamp, ghAdvisoryStampText(start - (WINDOW_MS - 500)), start);
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], f.deps);
+  }, f.env);
+  assert.deepEqual(f.sleeps, [500, 1_000], "the floor's last 0.5 s, then the rest of the shared gap");
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 1\.5s for the 180s floor, then the 1\.5s shared read gap /);
+});
+
+test("W1-T12058 criterion 1: a search floor longer than a queue ticket's life is slept in slices that keep the waiter's ticket live", async (t) => {
+  // Reviewer's counterexample (#19924 round 5): a search stamp 45 s ahead makes a 225 s floor. One 225 s
+  // sleep outlived the waiter's 210 s ticket (a window plus the lock-stale bound), so a sibling reaped it
+  // and an enforce read took its slot. The waiter must refresh its ticket before it can age out.
+  const f = fixture(t);
+  const search = ghReadCadenceStampPath(f.env, "search")!;
+  const start = f.now();
+  stampGhRead(search, "", start + 45_000);
+  const ticketLifeMs = WINDOW_MS + 30_000;
+  const sleep = f.deps.sleepSync!;
+  const stale: number[] = [];
+  const deps: GhReadCadenceDeps = {
+    ...f.deps,
+    sleepSync: (ms) => {
+      sleep(ms);
+      // What a sibling's reap pass sees as the sleep ends: a ticket nobody refreshed for its whole life.
+      for (const ticket of readGhReadTickets(search)) if (f.now() - ticket.refreshedMs > ticketLifeMs) stale.push(f.now() - start);
+    },
+  };
+  await withGhTransportFloor(() => {
+    applyGhReadCadence(["search", "prs", "is:open"], deps);
+  }, f.env);
+  assert.equal(slept(f.sleeps), WINDOW_MS + 45_000, `the read waited to the stamp's deadline, slept ${JSON.stringify(f.sleeps)}`);
+  assert.deepEqual(stale, [], `the waiter's ticket went stale mid-wait, slept ${JSON.stringify(f.sleeps)}`);
+  assert.ok(readGhReadCadenceStampMs(search)! >= start + WINDOW_MS + 45_000, "the read ran and stamped its turn");
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 225s for the 180s floor /);
 });
