@@ -20302,6 +20302,9 @@ export function createSweepFixAdmissionController(input: {
   refresh();
   let fixesAdmitted = 0;
   let fixesRefused = 0;
+  // W1-T13990: one id per controller, so a reader keys each running count to the controller that wrote it, never to a
+  // run and surface that many passes share.
+  const controllerId = randomUUID();
   const snapshot = (): SweepFixCapacitySnapshot => ({
     surface: input.surface,
     queueDepth: input.queueDepth,
@@ -20317,6 +20320,7 @@ export function createSweepFixAdmissionController(input: {
   const emit = (order?: Record<string, unknown>): void => {
     const state = snapshot();
     input.log?.("sweep.fix_capacity", {
+      controller_id: controllerId,
       surface: state.surface,
       queue_depth: state.queueDepth,
       host_worker_budget: state.hostWorkerBudget,

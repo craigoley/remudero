@@ -102,7 +102,7 @@ export function deriveMovableStuckOwnedCount(
 
 /** W1-T13990: the fix lane's admissions since a time. */
 export interface FixRoundAdmissions {
-  /** Dispatch, retrigger and worker-signal receipts for rounds the fix lane ran. */
+  /** Dispatch, retrigger and worker receipts (a signal, a refused commit, turns taken) for rounds the fix lane ran. */
   admitted: number;
   /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
    *  `fixes_refused`), abandoned memory admissions, and dispatches refused later or lost. */
@@ -117,6 +117,14 @@ export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined
 const FIX_ROUND_RAN_STEPS = new Set(["fix.dispatch", "fix.retrigger"]);
 const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "fix.done", "sweep.fix_capacity", "sweep.fix.dispatch_failed"];
 
+/** W1-T13990: a `fix.done` row a worker that ran wrote: ended by a signal, its result refused at commit (fix.ts writes that
+ *  receipt after the worker and before any `fix.dispatch`), or one that took turns. An abandoned admission spawned none. */
+function fixDoneRecordsWorker(line: Record<string, unknown>): boolean {
+  if (line.subtype === "admission_abandoned" || line.worker_exit === "not_spawned") return false;
+  return line.worker_exit === "signal" || line.subtype === "commit_refused" ||
+    (typeof line.num_turns === "number" && line.num_turns > 0);
+}
+
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
   const admitted: number[] = [];
@@ -124,7 +132,8 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
   const admittedRounds = new Map<string, number>();
   const abandonedRounds = new Set<unknown>();
   const dispatchFailures: { line: Record<string, unknown>; ts: number }[] = [];
-  // Each controller (one per pass, keyed by run and surface) writes its running refusal count from 0.
+  // Each controller (one per pass, keyed by its controller_id, or by run and surface on older rows) writes its running
+  // refusal count from 0.
   const controllerRefused = new Map<string, number>();
   // A controller whose first row read already counts refusals opened before these lines: its count has no baseline.
   const unbaselined: number[] = [];
@@ -134,7 +143,7 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
     const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
     if (!Number.isFinite(ts)) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : "";
-    if (FIX_ROUND_RAN_STEPS.has(line.step) || (line.step === "fix.done" && line.worker_exit === "signal")) {
+    if (FIX_ROUND_RAN_STEPS.has(line.step) || (line.step === "fix.done" && fixDoneRecordsWorker(line))) {
       if (typeof line.round_id === "string") {
         admittedRounds.set(line.round_id, Math.max(admittedRounds.get(line.round_id) ?? ts, ts));
       } else {
@@ -148,7 +157,8 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
     } else if (line.step === "sweep.fix_capacity") {
       const count = line.fixes_refused;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
-      const key = `${runId}\0${String(line.surface)}`;
+      // A controller's own id when its row carries one: passes sharing a run and surface are separate counters.
+      const key = typeof line.controller_id === "string" ? `id\0${line.controller_id}` : `${runId}\0${String(line.surface)}`;
       if (!controllerRefused.has(key) && count > 0) unbaselined.push(ts);
       const prior = controllerRefused.get(key) ?? 0;
       // A fall means a new controller, whose whole count is new.

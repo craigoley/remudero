@@ -623,6 +623,41 @@ test("W1-T13990 criterion 2: an abandoned memory admission releases focus with o
   }
 });
 
+test("W1-T13990 criterion 2: two light controllers under one run count their own refusals, and a late release recounts none", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    const h = unionHarness(dir);
+    const ageing = { stuck: 12, movable: 12 };
+    const on = enter(h);
+    const log = (step: string, extra?: Record<string, unknown>) =>
+      h.passes.append([{ ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", task_id: "SWEEP", step, ...extra }]);
+    // Each light pass opens its own controller under the daemon's one run id and the one surface.
+    const open = () => createSweepFixAdmissionController({ surface: "light", queueDepth: 2, hostWorkerBudget: 2, activeWorkers: 1,
+      readActiveWorkers: () => 1, reviewReservations: 0, log });
+    h.consult(ageing, 2 * MIN);
+    const first = open();
+    const grant = first.claim({ prNumber: 13 } as OpenPrView);
+    assert.equal(grant.admitted, true, "the first controller admits one claim");
+    assert.equal(first.claim({ prNumber: 14 } as OpenPrView).admitted, false, "and refuses the next: one capacity refusal");
+    h.consult(ageing, 2 * MIN);
+    open();
+    h.consult(ageing, 2 * MIN);
+    if (grant.admitted) grant.release?.();
+    const capacity = h.passes.lines().filter((line) => line.step === "sweep.fix_capacity");
+    assert.deepEqual(capacity.map((line) => line.fixes_refused), [0, 0, 1, 0, 1],
+      "the first controller's late release snapshot repeats its count after the second controller opened at 0");
+    assert.equal(new Set(capacity.map((line) => line.controller_id)).size, 2, "each controller names itself on its rows");
+    h.passes.append([{ ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", task_id: "W1-T1", step: "fix.done",
+      round_id: `DAEMON-1:1:${on}`, head_sha: "a1", subtype: "admission_abandoned", worker_exit: "not_spawned" }]);
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS - 6 * MIN)?.tier, "focus");
+    await h.union.settled();
+    assert.equal(h.consult(ageing, MIN), undefined, "a dwell with no round run releases the hold");
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 2],
+      "one capacity refusal and one abandoned memory admission");
+  });
+});
+
 // ── criterion 3 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 test("W1-T13990 criterion 3: the focus rows and the FOCUS flag carry the stuck count and the movable count", async () => {
@@ -796,6 +831,33 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — a settled work
     assert.deepEqual(adaptiveWip.fixRoundReaderFor([terminal, dispatch])(on), { admitted: 1, refused: 0 },
       "a signal receipt and the dispatch for the same round count once");
   });
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs hold focus through a dwell whose worker's commit was refused", async () => {
+  for (const row of [
+    { round_id: "r1", subtype: "commit_refused" },
+    { site: "rung.land_push", subtype: "commit_refused" },
+    { round_id: "r2", subtype: "round_yielded", num_turns: 14 },
+  ]) {
+    await withTempDir("focus-movable", async (dir) => {
+      const h = unionHarness(dir, undefined, () => 0);
+      const ageing = { stuck: 12, movable: 12 };
+      const on = enter(h);
+      // The worker ran; its result was refused at commit, and fix.ts writes this fix.done before any fix.dispatch.
+      h.passes.append([{ ts: new Date(on + 20 * MIN).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", step: "fix.done",
+        head_sha: "a1", ...row }]);
+      assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch"), false, "the dwell holds no fix.dispatch row");
+      assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
+      for (let i = 0; i < 2; i++) {
+        await h.union.settled();
+        assert.equal(h.consult(ageing, MIN)?.tier, "focus", `12 ageing PRs above the leave bound hold, as on origin/main (${row.subtype})`);
+      }
+      assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], "no release: a worker used the fix capacity");
+      assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
+    });
+  }
+  assert.deepEqual(adaptiveWip.fixRoundReaderFor([{ ts: new Date(T0).toISOString(), step: "fix.done", subtype: "admission_abandoned",
+    worker_exit: "not_spawned", num_turns: 0, round_id: "r3" }])(T0), { admitted: 0, refused: 1 }, "an abandoned admission spawned no worker");
 });
 
 test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the FOCUS file's restore at boot and its release by hand are unchanged", async () => {
