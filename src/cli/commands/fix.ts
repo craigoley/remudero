@@ -2356,6 +2356,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   failedApproaches?: readonly string[];
   /** W1-T13991: the new failure the sweep handed this round while it waited on CI for its own push, taken once per wait. */
   liveRoundHandoff?: () => LiveRoundHandoff | undefined;
+  waitForOwnHeadCi?: (
+    prUrl: string,
+    log: Parameters<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>[1],
+    ownHead: string | undefined,
+  ) => ReturnType<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>;
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -3979,8 +3984,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
+    const criterionIndices = handedReview?.review === review ? handedReview.criterionIndices
+      : review === opts.initialReview ? opts.initialCriterionIndices : undefined;
     const rawUnmet = review.criteria.map((c, index) => {
-      const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
+      const criterionIndex = criterionIndices?.[index] ?? index + 1;
       return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
     }).filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
@@ -5485,25 +5492,17 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
     if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
-    const waited = await deps.waitForCiGreen(opts.prUrl, (step, extra) => {
+    const waited = await (opts.waitForOwnHeadCi ?? deps.waitForCiGreen)(opts.prUrl, (step, extra) => {
       if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
         deps.branchClaim?.holdForWait === undefined) return deps.log(step, extra);
-      deps.branchClaim.holdForWait();
+      if (deps.branchClaim.holdForWait() !== undefined) return deps.log(step, extra);
       deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: deps.branchClaim.id() });
-    });
+    }, pushedHead);
     const resumed = opts.liveRoundHandoff?.();
     const ci = resumed?.failure === "check" && host.ciGateState(waited) !== "red"
       ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
-    const ciHead = ciGateSha(ci);
-    const foreign = deps.branchClaim?.holdForWait === undefined ? undefined :
-      branchAuthorshipStandDownReason(pushedHead, { ok: true, headSha: ciHead });
-    if (foreign) {
-      deps.log("fix.stood_down", { site: "rung.ci_wait_head", head_sha: pushedHead, current_head_sha: foreign.headSha,
-        strike: strikes, reason: foreign.reason });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: foreign.reason, standDownReason: foreign.reason };
-    }
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return claimLostAfterCi;
     if (resumed) {
