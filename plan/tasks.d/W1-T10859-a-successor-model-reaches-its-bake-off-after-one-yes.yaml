@@ -6,7 +6,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 40.00
+  budget_usd: 4.50
   risk: high
   band_meaning: span
   origin: "operator ruling, Craig 2026-10-27: \"Lean into automation and self improvement\" — every step after the operator's yes is automated; GPT-6.1 Terra (2026-10-26) and the open-weight sweep each took a session of hand work from announcement to bake-off"
