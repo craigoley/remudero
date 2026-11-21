@@ -186,7 +186,7 @@ test("W1-T14140 criterion 3: a lesson the knowledge gardener retires is no longe
   assert.deepEqual([merged.bindingErrors, unselected(merged.entries)], [[], []]);
 
   // THE REAL learnings/ci.yaml: the gardener retires one of its filed lessons, and the generated suite's two checks pass
-  // over the result exactly as they pass over main's corpus, the retired entry no longer among the lessons checked.
+  // over the result exactly as they pass over the checkout's corpus, the retired entry no longer among the lessons checked.
   const [real] = ciLessonReach(loadLearningsCorpus(join(REPO_ROOT, "learnings")));
   const realRetired = corpusWithLesson(file, [], [], undefined, [{ class: "retire", target: real!.entry.id, reason: "never cited" }]);
   assert.deepEqual(realRetired.gardened.map(([path]) => path), ["learnings/ci.yaml"]);
