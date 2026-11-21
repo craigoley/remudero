@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 4.50
   risk: medium  # one concern, how the broker creates its cache directory at startup; caching, pacing and serving are unchanged
   band_meaning: blast-radius
   origin: "coordinator brief f1021b item 14 (2026-10-21), from the broker unit's journal after the operator's GitHub-access ruling (~20:00Z)"
