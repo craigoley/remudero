@@ -775,15 +775,17 @@ test("W1-T13850 criterion 4: a published FAIL stays quoted whatever its PR shows
   const at = "2026-11-19T12:00:00.000Z";
   const later = "2026-11-19T13:00:00.000Z";
   const fleet = { login: "remudero-fleet[bot]", type: "Bot" };
-  const filed = (clause: string) => {
+  const filed = (clause: string, catalog: "public" | "ops" = "public") => {
     const prUrl = `${PULL}/${prSeq}`;
     const headSha = fake(prUrl);
     const digest = `v2:${headSha.padEnd(64, "0")}`;
-    const reasons = [`proof executed and PASSED — (semantic downgrade): ${clause}`];
+    // An ops FAIL with no downgrade: its clause is its unmet claim, which its record lists without reasons.
+    const reasons = catalog === "ops" ? [] : [`proof executed and PASSED — (semantic downgrade): ${clause}`];
+    const unmet = catalog === "ops" ? [clause] : [];
     const record = (state: "success" | "failure", inputDigest: string, published: string[]) => renderReviewEvidenceRecord({
       pr_url: prUrl, head_sha: headSha, review_input_digest: inputDigest, state, reviewer_code_sha: sha, capped: false,
-      plan_only: false, partially_executed: false, decision_verdict: { criteria: [] }, unmet_criteria: [], reasons: published }, "public");
-    const row = verdict(sha, SOL, "failure", { task_id: `W1-T${prSeq}`, head_sha: headSha, review_input_digest: digest, reasons });
+      plan_only: false, partially_executed: false, decision_verdict: { criteria: [] }, unmet_criteria: unmet, reasons: published }, catalog);
+    const row = verdict(sha, SOL, "failure", { task_id: `W1-T${prSeq}`, head_sha: headSha, review_input_digest: digest, reasons, unmet_criteria: unmet });
     return { row, prUrl, fail: record("failure", digest, reasons), pass: record("success", `v2:${"5".repeat(64)}`, []) };
   };
   const comment = (id: number, body: string, extra: Row = {}) => ({ id, body, created_at: at, updated_at: at, user: fleet, ...extra });
@@ -791,12 +793,14 @@ test("W1-T13850 criterion 4: a published FAIL stays quoted whatever its PR shows
   const edited = filed("PRIVATE record edited after it was posted");
   const forged = filed("PRIVATE record posted by another login");
   const tampered = filed("PRIVATE record whose checksum fails");
+  const opsUnmet = filed("PRIVATE unmet claim of an ops review", "ops");
   const comments = new Map<string, unknown[]>([
     // The same-commit PASS is newer than the FAIL, and the commit's status now reads SUCCESS (below).
     [bodyEdit.prUrl, [comment(201, bodyEdit.fail), comment(202, bodyEdit.pass, { created_at: later, updated_at: later })]],
     [edited.prUrl, [comment(203, edited.fail, { updated_at: later })]],
     [forged.prUrl, [comment(204, forged.fail, { user: { login: "someone-else", type: "User" } })]],
     [tampered.prUrl, [comment(205, tampered.fail.replace("PRIVATE record whose checksum fails", "PRIVATE record, altered"))]],
+    [opsUnmet.prUrl, [comment(206, opsUnmet.fail)]],
   ]);
   let statusReads = 0;
   const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args, options) => {
@@ -812,12 +816,12 @@ test("W1-T13850 criterion 4: a published FAIL stays quoted whatever its PR shows
   };
   const h = harness(t, undefined, readJson);
   await h.evaluate(null);
-  h.queue.push(...rows, bodyEdit.row, edited.row, forged.row, tampered.row);
+  h.queue.push(...rows, bodyEdit.row, edited.row, forged.row, tampered.row, opsUnmet.row);
   await h.evaluate(claudeShas.at(-1)!);
   assert.equal(h.created.length, 1);
   const { body } = h.created[0]!;
   assert.match(body, /quoted after a body edit posts a PASS on the same commit/, "the FAIL's own record published its clause");
-  assert.doesNotMatch(body, /PRIVATE/, "an edited, foreign or altered record publishes nothing");
+  assert.doesNotMatch(body, /PRIVATE/, "an edited, foreign, altered or reasonless record publishes nothing");
   assert.equal(statusReads, 0, "publication reads no status: nothing posted after the FAIL can unpublish it");
   assert.equal(h.steps("reviewer.model_divergence_evidence_unavailable").length, 0);
 });
