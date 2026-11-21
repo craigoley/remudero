@@ -254,6 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, retractLocalServePort } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -637,7 +638,7 @@ import {
 import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
-import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
+import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
@@ -929,7 +930,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -1957,15 +1958,14 @@ export type FreshTreeReviewSeams = {
     store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
-  /** Remove a tree this process cut for one attempt (`git worktree remove --force` through the
-   *  hardened leaf by default). Only ever handed a path whose `addWorktree` this process saw succeed. */
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
+  /** Remove a tree this process cut for one attempt through the async hardened Git leaf by default.
+   *  Only ever handed a path whose `addWorktree` this process saw succeed. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
   /**
-   * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
-   * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
-   * none proves a child would judge from the requested source revision. Optional only so the
-   * production implementation remains one small, real git-backed default while focused tests can
-   * name each preparation state without making a repository.
+   * Classify the stable reviewer path before an add. `unsafe` means a readable registered
+   * checkout with a wrong ref, a branch, or dirt. An unreadable registry or a registered checkout
+   * that Git cannot read throws into the preparation refusal. The optional seam lets focused
+   * tests name each preparation state without making a repository.
    */
   inspectExistingWorktree?: (
     repoDir: string,
@@ -2018,12 +2018,13 @@ function inspectFreshReviewerWorktree(
     .map((block) => block.split("\n"));
   const block = blocks.find((lines) => lines.some((line) => line.startsWith("worktree ") && canonicalPath(line.slice("worktree ".length)) === expectedPath));
   if (!block) return "absent";
+  // A registered checkout that Git cannot read must skip even when its registered HEAD differs.
+  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
   const listedHead = block.find((line) => line.startsWith("HEAD "))?.slice("HEAD ".length);
   // A `branch` line says it is not detached. A stale reviewer must never make an existing ref its
   // recovery surface even when the ref happens to resolve to the requested commit today.
   if (block.some((line) => line.startsWith("branch ")) || listedHead !== revision) return "unsafe";
-  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
-  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
   return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
 }
 
@@ -2072,28 +2073,55 @@ export function buildFreshTreeReviewRunner(
   const prepared = new Map<string, string>();
   return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
+    const review = (tree: string) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+    // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
+    // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
+    let ownTree = false;
+    const reviewInOwnTree = async (shared: unknown) => {
+      ownTree = true;
+      try {
+        return await inPerAttemptTree(repoDir, deps, "reviewer", sha, review);
+      } catch (err) {
+        // The skip names both causes: why the shared tree was not used, and why the own tree failed.
+        throw new Error(`${(shared as Error)?.message ?? String(shared)}; the review's own tree failed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    };
     try {
       let worktree = prepared.get(sha);
       if (worktree === undefined) {
         // The fetch is what makes origin/main resolvable here at all; the daemon's own freshness
         // read already fetched, but this must not DEPEND on that having happened.
         deps.git(["-C", repoDir, "fetch", "--quiet", "origin", "main"]);
-        worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
+        try {
+          worktree = prepareFreshOriginMainTree(repoDir, deps, "reviewer", sha);
+        } catch (err) {
+          // Often another child's cut that is still checking out (the cut race); nothing is cached.
+          if (!(err instanceof UnprovenFreshTreeError)) throw err;
+          return await reviewInOwnTree(err);
+        }
         prepared.set(sha, worktree);
       }
       // RMD_SELF_SYNC_DONE keeps the child from trying to sync a checkout of its own: it is
       // already AT origin/main, and a self-sync attempt there is a refusal and a wasted fetch.
       const reviewerTree = worktree;
+      let started = false;
       const run = async () => {
+        started = true;
         if (freshTreeInspector(deps)(repoDir, reviewerTree, sha) !== "reusable") {
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return deps.spawnReview(reviewerTree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+        return review(reviewerTree);
       };
-      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
+      try {
+        return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
+      } catch (err) {
+        // A live review in another process holds the shared tree and this action never ran.
+        if (started || !(err instanceof ReviewerWorktreeLeasedError)) throw err;
+        return await reviewInOwnTree(err);
+      }
     } catch (err) {
-      prepared.delete(sha);
+      if (!ownTree) prepared.delete(sha);
       // Never a verdict (see the doc above): swallow the failure, but carry WHY so a reader of
       // stderr — not just the caller's silent `undefined` — can tell a fetch/worktree/spawn
       // refusal from the ordinary "no runner wired" case. W1-T4055: and so can the ledger.
@@ -2127,6 +2155,11 @@ function perAttemptTreePath(deps: FreshTreeTools, prefix: string, sha: string): 
   return `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}-${process.pid}-${randomUUID().slice(0, 8)}`;
 }
 
+/** The stable tree is registered but not proven an exact clean detached checkout of the sha. */
+class UnprovenFreshTreeError extends RmdError {
+  constructor(message: string) { super("git", GENERIC_EXIT_CODE, message); }
+}
+
 function makeTreeRunnable(repoDir: string, deps: FreshTreeTools, prefix: string, worktree: string): void {
   if (!(deps.prepareWorktree ?? prepareWorktreeToolchain)(repoDir, worktree)) {
     throw new Error(`${prefix} worktree at ${worktree} has no runnable canonical node_modules link`);
@@ -2141,7 +2174,7 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
   const worktree = `${deps.worktreeRoot}/${prefix}-${sha.slice(0, 12)}`;
   const existing = freshTreeInspector(deps)(repoDir, worktree, sha);
   if (existing === "unsafe") {
-    throw new Error(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
+    throw new UnprovenFreshTreeError(`${prefix} worktree at ${worktree} is not an exact clean detached checkout of ${sha}`);
   }
   if (existing === "absent" && pathOccupied(worktree)) {
     const sibling = perAttemptTreePath(deps, prefix, sha);
@@ -2157,11 +2190,32 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
 
 /** Remove a per-attempt tree once its attempt settles. A failed removal never replaces the attempt's own outcome:
  *  the tree is registered and detached, so the general worktree reaper collects it on a later pass. */
-function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): void {
+async function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): Promise<void> {
   try {
-    (deps.removeWorktree ?? worktreeRemove)(repoDir, worktree);
+    await (deps.removeWorktree ?? worktreeRemoveAsync)(repoDir, worktree);
   } catch (error) {
-    process.stderr.write(`freshOriginMainTreeRunner: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+    process.stderr.write(`fresh origin/main tree: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
+  }
+}
+
+/** Cut `<prefix>-<sha12>-<pid>-<random>` at `sha`, lease it, prove it an exact clean detached checkout, run `action`
+ *  there, and remove the tree once `action` settles. Only a path whose add succeeded is removed (W1-T9065, W1-T14066). */
+async function inPerAttemptTree<T>(repoDir: string, deps: FreshTreeTools, prefix: string, sha: string,
+  action: (path: string) => Promise<T>): Promise<T> {
+  let cut: string | undefined;
+  try {
+    const path = perAttemptTreePath(deps, prefix, sha);
+    deps.addWorktree(repoDir, path, sha);
+    cut = path;
+    makeTreeRunnable(repoDir, deps, prefix, path);
+    return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
+      if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
+        throw new Error(`${prefix} worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
+      }
+      return action(path);
+    });
+  } finally {
+    if (cut !== undefined) await removePerAttemptTree(repoDir, deps, cut);
   }
 }
 
@@ -2182,24 +2236,14 @@ export function freshOriginMainTreeRunner(
   repoDir: string,
   deps: FreshTreeTools & { mainTip?: (repoDir: string) => Promise<string> },
 ): RatifyCliTree["freshTree"] {
+  // Preserve ratify's synchronous teardown so serve shutdown cannot interrupt the removal.
+  const treeTools = { ...deps, removeWorktree: deps.removeWorktree ?? worktreeRemove };
   return async (action) => {
-    let cut: string | undefined;
     try {
       const sha = await (deps.mainTip ?? mainTipViaGit)(repoDir);
-      const path = perAttemptTreePath(deps, "approve", sha);
-      deps.addWorktree(repoDir, path, sha);
-      cut = path; // only a path whose add succeeded is ever removed: this attempt made it
-      makeTreeRunnable(repoDir, deps, "approve", path);
-      return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(path, async () => {
-        if (freshTreeInspector(deps)(repoDir, path, sha) !== "reusable") {
-          throw new Error(`approve worktree at ${path} is no longer an exact clean detached checkout of ${sha}`);
-        }
-        return action({ path, sha });
-      });
+      return await inPerAttemptTree(repoDir, treeTools, "approve", sha, (path) => action({ path, sha }));
     } catch (err) {
       throw new Error(freshTreeFailureText(String((err as Error)?.message ?? err)));
-    } finally {
-      if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
     }
   };
 }
@@ -2934,7 +2978,7 @@ export function handedOffHeadRiskJudge(
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswer } from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
 import { healedReviewerTreeTools } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
@@ -8918,7 +8962,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
-  return runFixRungFromModule(asyncFixRungOptions(opts, hostWorktreeGitAsync), fixCommandHost());
+  const options = asyncFixRungOptions(opts, hostWorktreeGitAsync);
+  return runFixRungFromModule(options, fixCommandHost());
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
@@ -8958,6 +9003,36 @@ export function buildProofAmendmentGitOps(git: (worktreePath: string, args: stri
       return git(worktreePath, ["rev-parse", "HEAD"]).trim();
     },
   };
+}
+
+function requestFixScopeAmendment(
+  request: ScopeAmendmentRequest,
+  ...[params, io]: Parameters<typeof buildProofAmendmentWritePorts>
+): ScopeAmendmentOutcome {
+  const ports = buildProofAmendmentWritePorts(params, io);
+  if (io?.findShardFn || /^PR-\d+$/.test(request.taskId)) return requestScopeAmendment(request, ports);
+
+  const checkout = `${ports.worktreePathFor(request.taskId, request.prNumber)}-${randomUUID()}`;
+  try {
+    return requestScopeAmendment(request, {
+      ...ports,
+      // The writer probes after validating the ask and checking its ledger identity.
+      // Cut the tree here so the shard read sees the main revision worktreeAdd just fetched.
+      probeExisting: (branch) => {
+        const existing = ports.probeExisting(branch);
+        if (existing) return existing;
+        ports.worktreeAdd(ports.repoDir, checkout, branch);
+        return undefined;
+      },
+      findShard: (_dir, id) => ports.findShard(checkout, id),
+      worktreePathFor: () => checkout,
+      worktreeAdd: () => {},
+      worktreeRemove: () => {},
+    });
+  } finally {
+    // A shard can be refused before the writer reaches its own cleanup block.
+    if (existsSync(checkout)) ports.worktreeRemove(ports.repoDir, checkout);
+  }
 }
 
 /**
@@ -30693,9 +30768,7 @@ export async function serveCommand(
   let hosts: string[];
   let identity: ReturnType<typeof resolveServeIdentity>;
   try {
-    // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
-    // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
-    port = resolveServePort(rest, config.serve?.port);
+    port = resolveLocalServePort(rest, config.serve?.port, resolveServePort);
     hosts = resolveServeHosts(rest, process.env, config.serve?.host);
     // W1-T398: resolved here, side by side with host/port, so an install that enables identity
     // without declaring which proxy it trusts fails the SAME way an invalid --host does — a
@@ -31080,6 +31153,11 @@ export async function serveCommand(
   }
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+  try {
+    publishLocalServePort(config.root, port);
+  } catch (error) {
+    log("serve.port_publication_failed", { port, reason: (error as Error).message });
+  }
 
   // Start the projection only after a successful bind. The worker uses this process's one
   // GitHub gateway for facts and publishes complete snapshots; client reads never start a pass.
@@ -31098,6 +31176,12 @@ export async function serveCommand(
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       log("serve.stop", {});
+      // W1-T13238: a stopped serve must not stay the port an Inbox CLI dials first.
+      try {
+        retractLocalServePort(config.root, port);
+      } catch (error) {
+        log("serve.port_retraction_failed", { port, reason: (error as Error).message });
+      }
       stopServeReadModel(server);
       server.close(() => resolve());
     };
@@ -38294,7 +38378,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
 
   // W1-T12715: tasks held for an operator answer come first; the console reads the same gates.
-  const held = renderHeldTaskQuestions(projectHeldTaskQuestionGates(plan.tasks, (id) => taskInputAnswer(repoRoot, id), `${owner}/${repo}`));
+  const held = renderHeldTaskQuestions(projectHeldTaskQuestionGates(plan.tasks, taskInputAnswerWithLedger(repoRoot, ledgerPath), `${owner}/${repo}`));
   if (held) console.log(held);
   const registryPath = join(config.root, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -39730,27 +39814,42 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
-  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
-  const actions = buildInboxVerbActions(deps ?? {
-    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
-    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
-  }, causalScope);
-  return inboxVerbCommand(name, rest, actions);
+  let built: InboxVerbActions | undefined;
+  const inProcess = (): InboxVerbActions => built ??= (() => {
+    const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+    const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
+    const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
+    return buildInboxVerbActions(deps ?? {
+      root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+      github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+      ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
+    }, causalScope);
+  })();
+  if (deps) return inboxVerbCommand(name, rest, inProcess());
+  // W1-T13238: the running serve's write route first, as the Console does; in-process only when no serve answers.
+  return inboxVerbViaServe(name, rest, { ...config, resolveServePort }, inProcess);
+}
+
+/**
+ * W1-T13238: `rmd decline` and `rmd restore`, serve first. The in-process verdict preserves terminal verify-human
+ * decisions (W1-T10077) and can restore skill drafts whose decline is only in an archive (W1-T13859).
+ */
+function proposalVerdictServeFirst(kind: ProposalVerdictKind, rest: string[]): Promise<number> {
+  const config = loadConfig();
+  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config),
+    kind === "restore" && rest[0]?.startsWith(SKILL_DRAFT_ID_PREFIX));
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  const decide = () => proposalVerdictCommand(
+  const decide = () => proposalVerdictInProcess(
     kind,
     rest,
     (id) => {
+      const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+      const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
+      const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
       let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
       if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
@@ -45622,8 +45721,9 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await approveCommandMirrored(rest);
     },
   ],
-  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
-  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
+  // W1-T13238: the running serve's verdict route first, as the Console does; in-process only when no serve answers.
+  ["decline", (rest) => proposalVerdictServeFirst("decline", rest)],
+  ["restore", (rest) => proposalVerdictServeFirst("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [
@@ -46314,7 +46414,7 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
-function fixCommandHost(): FixCommandHost {
+export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
     get CENSUS_PUSH_CHECK() { return CENSUS_PUSH_CHECK; },
@@ -46336,6 +46436,7 @@ function fixCommandHost(): FixCommandHost {
     get buildImportClosureRead() { return buildImportClosureRead; },
     get buildProofAmendmentGitOps() { return buildProofAmendmentGitOps; },
     get buildProofAmendmentWritePorts() { return buildProofAmendmentWritePorts; },
+    get requestFixScopeAmendment() { return requestFixScopeAmendment; },
     get buildSweepEffects() { return buildSweepEffects; },
     get checkFixCensusSnapshotAsync() { return checkFixCensusSnapshotAsync; },
     get readInheritedCensusContextAsync() { return readInheritedCensusContextAsync; },

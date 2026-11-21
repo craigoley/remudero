@@ -20,6 +20,7 @@
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
     - "src/lib/ledger.ts"
     - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
+    - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -76,3 +77,8 @@
     the ledger for clean draft receipts, so that fixture breaks the receipt read as well. The test now injects a
     failing main-commit read, writes a real ledger with one clean inbox.drafted row, and asserts that the new
     proposal is still drafted while the clean one is not.
+    AMENDED (2026-11-21): test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts joins files. W1-T13863
+    (#19766) merged its criterion 4 test with an attempt key left for the one fitting proposal. Under this task a
+    clean draft retires its failed-attempt key, so after merging main the build expects no attempt keys and asserts
+    the fitting proposal's clean inbox.drafted row instead. The acceptance-author-gate refused #19786 at 54868c324
+    as canonical-task-scope-exceeded for that path.

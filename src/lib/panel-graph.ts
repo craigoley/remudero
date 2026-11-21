@@ -1,4 +1,5 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
+import { expiredSnoozeDetail, INBOX_TERMINAL_VERDICT_HEADER } from "./inbox-cli-serve.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /** Control-panel plan→task→PR routes (MASTER-PLAN §7B, api-client §7A).
  * Reuse feedback/trace/drain; only the daemon writes durably. `replyTo` files fresh feedback;
@@ -37,6 +38,7 @@ import {
   projectPlan,
   readLedgerLines,
   SERVE_KEEPS_CREDITS_IN_MEMORY,
+  taskIdFromRunBranch,
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -183,6 +185,8 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
+  /** W1-T14114: the ok ops catalog's combined plan, for the Inbox's board referents only. */
+  inboxReferentPlan?: (plan: Plan) => Plan | undefined;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
@@ -2081,7 +2085,7 @@ interface InboxPass {
   registryPath: string;
   proposals: Proposal[];
   ledgerLines: LedgerLines;
-  classifyOne: (proposal: Proposal) => InboxClassification;
+  classifyOne: (proposal: Proposal, lapseDeclines?: boolean) => InboxClassification;
 }
 
 /**
@@ -2135,8 +2139,9 @@ function prepareInboxPass(
     }
     return newestReceipts.get(proposalId);
   };
-  const classifyOne = (proposal: Proposal): InboxClassification => {
+  const classifyOne = (proposal: Proposal, lapseDeclines = true): InboxClassification => {
     const classified = classifyWith(proposal, verdicts.isDeclined);
+    if (!lapseDeclines) return classified;
     const declinedTask = classified.state === "declined" ? /^verify-human:([A-Za-z0-9-]+)$/.exec(proposal.id)?.[1] : undefined;
     const receipt = declinedTask ? newestReceiptOf(proposal.id) : undefined;
     const task = declinedTask ? plan.byId.get(declinedTask) : undefined;
@@ -2181,12 +2186,60 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
-function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: LedgerLines) {
+/** The Inbox's projection and board referents for one plan read. */
+export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan, ledgerLines?: LedgerLines) {
   let openPrs: readonly PrRef[] | undefined;
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
-    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }),
-    observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: inboxBoardReferents(projection, openPrs) };
+  const statusDeps = { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
+  const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
+  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, statusDeps) };
+}
+
+/** W1-T14114: an ops-only task verifies only the one open PR that owns it unambiguously (W1-T130), outside the
+ *  projection inboxBoardReferents walks and the classifier's (W1-T12211). */
+function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
+  openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): ReturnType<typeof inboxBoardReferents> {
+  const referents = inboxBoardReferents(projection, openPrs);
+  const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
+  if (!combined || combined === plan) return referents;
+  const claimsOf = (pr: PrRef): Set<string> => {
+    const ids = new Set<string>();
+    const head = taskIdFromRunBranch(pr.headRefName);
+    if (head) ids.add(head);
+    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) ids.add(match[1]);
+    return ids;
+  };
+  const claimants = new Map<string, number>();
+  for (const pr of openPrs!) for (const id of claimsOf(pr)) claimants.set(id, (claimants.get(id) ?? 0) + 1);
+  const owners = new Map<string, PrRef>();
+  for (const pr of openPrs!) {
+    const state = referents.states.get(`#${pr.number}`);
+    if (pr.body === undefined || state?.status !== "open") continue;
+    const ids = claimsOf(pr);
+    if (ids.size !== 1) continue;
+    const [id] = ids;
+    if (claimants.get(id) !== 1 || plan.byId.has(id)) continue;
+    const task = combined.byId.get(id);
+    if (task) owners.set(id, pr);
+  }
+  if (owners.size === 0) return referents;
+  const tasks = [...owners.keys()].map(id => combined.byId.get(id)!);
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
+  const states = new Map(referents.states);
+  for (const [id, pr] of owners) {
+    const key = `#${pr.number}`;
+    const prior = states.get(key)!;
+    const row = rows.get(id);
+    const usable = row !== undefined && row.taskId === id && (row.prNumber === undefined || row.prNumber === pr.number)
+      && !row.merged && !row.indeterminate && !row.githubUnobservableSince && !row.escalationUnverified
+      && (row.prState === undefined || row.prState === "OPEN");
+    if (!usable) {
+      if (prior.unhandledEscalations !== undefined) states.delete(key);
+      continue;
+    }
+    states.set(key, { status: "open", unhandledEscalations: Math.max(prior.unhandledEscalations ?? 0, row.needsHuman ? 1 : 0) });
+  }
+  return { kind: "ok", states };
 }
 
 /**
@@ -2196,7 +2249,8 @@ function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: Ledger
  * {@link classifyAllProposalsMemo}; this path shares only the per-commit anchor grep and the per-plan-object fragment
  * verdicts, both of which answer exactly what a recompute would.
  */
-function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan, only?: string): ClassifiedInbox {
+function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan,
+  only?: string, lapseDeclines = true): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
   const { projection, boardReferents } = projectInboxPlan(deps, plan);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
@@ -2204,7 +2258,7 @@ function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: strin
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
   // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
   const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
-  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(pass.classifyOne), ledgerLines, projection };
+  return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection };
 }
 
 /** The plan's change stamp when it is read off disk: tasks.yaml plus every entry of its shard directory. */
@@ -2323,7 +2377,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
-  const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
+  const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
   if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
 }
@@ -3963,6 +4017,8 @@ interface DeclineProposalInput {
   reason: string;
 }
 
+type ProposalVerdictActor = InboxVerbActor & { terminalVerdict?: boolean };
+
 function validateDeclineProposal(body: unknown): { error: string } | DeclineProposalInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
@@ -3975,10 +4031,10 @@ function proposalVerdictResponse(
   kind: ProposalVerdictKind,
   deps: PanelGraphDeps,
   input: DeclineProposalInput,
-  actor: InboxVerbActor,
+  actor: ProposalVerdictActor,
   respond: InboxVerbRespond,
 ): void {
-  const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId);
+  const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId, !actor.terminalVerdict);
   if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
@@ -3996,7 +4052,7 @@ function proposalVerdictResponse(
     respond(outcome.status, { error: outcome.error, detail: outcome.detail });
     return;
   }
-  clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
+  if (!actor.terminalVerdict) clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
   respond(200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
 }
 
@@ -4247,7 +4303,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       }
       const clock = deps.inboxClock ?? systemClock;
       if (input.until !== null && Date.parse(input.until) <= clock.now()) {
-        respond(400, { error: "invalid_request", detail: `until must be in the future (now is ${clock.iso()})` });
+        respond(400, { error: "invalid_request", detail: expiredSnoozeDetail(clock.iso()) });
         return;
       }
       const held = setInboxSnoozed(join(deps.inboxRoot, "state"), input.proposalId, input.until);
@@ -4334,12 +4390,16 @@ function buildInboxVerbRoute(name: InboxVerbName, deps: PanelGraphDeps): Route {
       const scopedActions = ctx.params?.inboxThreadRepository === undefined ? actions : buildInboxVerbActions(deps, {
         repository: ctx.params.inboxThreadRepository, instance: ctx.params.inboxThreadInstance,
       });
-      return jsonAction(body => ({ body }), ({ body }, request, response) =>
-        spec.perform(scopedActions, body, { origin: bearerTokenId(request), operator: operatorName(request) },
+      return jsonAction(body => ({ body }), ({ body }, request, response) => {
+        // Terminal verdicts use the recorded decline and preserve the existing triage marks.
+        const actor: ProposalVerdictActor = { origin: bearerTokenId(request), operator: operatorName(request),
+          terminalVerdict: request.headers[INBOX_TERMINAL_VERDICT_HEADER] === "1" };
+        return spec.perform(scopedActions, body, actor,
           (status, result, headers) => {
             for (const [key, value] of Object.entries(headers ?? {})) response.setHeader(key, value);
             sendJson(response, status, result);
-          }))(req, res);
+          });
+      })(req, res);
     },
   };
 }

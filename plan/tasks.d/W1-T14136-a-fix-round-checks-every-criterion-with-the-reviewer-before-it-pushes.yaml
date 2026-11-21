@@ -1,0 +1,158 @@
+- id: W1-T14136
+  title: "A fix round checks every criterion with the reviewer before it pushes: the same semantic review runs on the fix's own commit, the worker gets one more turn on what it did not clear, and the round records what stays uncleared"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # adds a reviewer run inside every reviewer-unmet fix strike, between commit and push, in fix.ts and the production fix host
+  origin: "operator-session#review-fix-loops-2026-11-21"
+  plan_refs:
+    - W1-T13886
+    - W1-T13865
+    - W1-T12146
+    - W1-T2263
+    - W1-T166
+    - W1-T76
+  files:
+    - src/lib/fix-self-check.ts
+    - src/cli/commands/fix.ts
+    - src/lib/prompt-render.ts
+    - src/run-task.ts
+    - src/lib/ledger.ts
+    - test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:self-check-judges-every-criterion — buildFixSelfCheckPrompt (src/lib/fix-self-check.ts) renders buildReviewPrompt's criteria block and reviewerVerdictContract for EVERY acceptance criterion of the task (met and unmet, holdout included, as the real review does), never only the unmet ones. With a 4-criterion fixture whose last review left only criterion 2 unmet, the prompt holds 4 numbered CLAIM lines and the contract asks for REVIEW_VERDICT 1..4, and it names the fix commit sha it judges"
+      kind: guard
+      proof: "grep: W1-T14136 criterion 1: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "decideFixSelfCheck reads the self-check transcript with parseReviewerVerdicts and parseReviewerVerdictClauses: all PASS gives state clear; a FAIL, an UNABLE, or a criterion with no REVIEW_VERDICT line each give state uncleared with that criterion's index and clause (a missing line is never a pass). The uncleared list it hands back for the worker holds visible criteria only: a holdout FAIL counts in uncleared_count but its claim and clause are not in the worker list"
+      kind: guard
+      proof: "grep: W1-T14136 criterion 2: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "invariant:no-push-before-self-check — in runFixRung with a fake FixCommandHost, a reviewer-unmet strike that commits calls host.runFixSelfCheck with the committed sha BEFORE deps.push. When the self-check is uncleared, the same worktree gets exactly one more worker turn whose prompt carries every visible uncleared claim and clause, then a second self-check, then one push. When the first self-check is clear, no extra turn runs and push follows at once. The recorded call order is asserted"
+      kind: guard
+      proof: "grep: W1-T14136 criterion 3: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "invariant:uncleared-items-are-recorded — each self-check writes one fix.self_check ledger row with round_id, strike, head_sha, attempt (1 or 2), state (clear, uncleared or unavailable), criteria_total, cleared_count, uncleared_count, uncleared_indices and duration_ms. When the second self-check is still uncleared the round still pushes (the posted review stays the only gate) and the row names the uncleared indices; the self-check never posts a GitHub status or comment"
+      kind: guard
+      proof: "grep: W1-T14136 criterion 4: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "A self-check that throws or passes FIX_SELF_CHECK_TIMEOUT_MS (15 minutes, above the review p90 of about 13) writes a fix.self_check row with state unavailable and the round pushes as it does on origin/main, with no extra worker turn and no extra strike. ci-log, merge-conflict, body-coverage and gate-fix rounds run no self-check"
+      proof: "grep: W1-T14136 criterion 5: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "invariant:met-criteria-stay-in-view — the reviewer-unmet fix prompt (renderFixPrompt) gains a KEEP MET section that lists the claim and proof of every visible criterion the last review passed, and says the self-check judges all of them before the push. Holdout criteria never appear in it. With the criterion 1 fixture the prompt lists criteria 1, 3 and 4 under KEEP MET and criterion 2 in the UNMET list"
+      kind: guard
+      proof: "grep: W1-T14136 criterion 6: in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts"
+    - claim: "The production fix host wires the self-check: fixCommandHost() in src/run-task.ts implements runFixSelfCheck with the review lane's reviewer spawn (same provider and model routing, read-only tools, the fix worktree at the committed sha), so a daemon fix round runs it"
+      proof: "grep: runFixSelfCheck( in src/run-task.ts"
+    - claim: "runFixRung calls the self-check before its strike push"
+      proof: "grep: host\\.runFixSelfCheck( in src/cli/commands/fix.ts"
+    - claim: "runFixRung builds the self-check prompt through the new module"
+      proof: "grep: buildFixSelfCheckPrompt( in src/cli/commands/fix.ts"
+    - claim: "runFixRung reads the self-check result through the new module"
+      proof: "grep: decideFixSelfCheck( in src/cli/commands/fix.ts"
+  rationale: |
+    WHY: pull requests loop through review, fix and review again for many rounds. Each round costs a fix
+    worker, 30 to 60 minutes of CI coverage shards and a new review (median about 8 minutes, p90 about 13).
+    MEASURED, read-only, on the Azure ledger (~/rmd-state2/state/ledger.ndjson plus the rotated
+    ledger.*.ndjson.gz files), 2026-11-19T08:20Z to 2026-11-21T12:25Z, review.posted rows for
+    remudero-review on craigoley/remudero: 679 verdict rows (374 failure, 255 success, 50 pending) from
+    594 review attempts. 301 distinct failed (PR, head) pairs. 81 PRs had a failed
+    first review; 54 of those 81 had more than one unmet criterion. Two PRs failed 18 rounds, and 30 PRs
+    failed 5 or more.
+    - The reviewer already judges every criterion every round. Each review.posted row carries
+      decision_verdict.criteria with one entry per acceptance criterion (met, preProofVerdict, proof_exec,
+      floorMet), and unmet_criteria lists all of them; only the status text is cut ("unmet: ... (+5 more)").
+      So the claim "the reviewer reports partial gaps" is false at the verdict level.
+    - 767 of 770 unmet criterion verdicts (99.6%) had floorMet true and proof_exec executed_pass (742) or
+      executed_stale (27): the proof passed and only the semantic reviewer failed the criterion
+      (src/lib/review.ts:776-777, "Semantic only downgrades"). The fix worker can run every proof and see it
+      pass, and still not know whether the reviewer will accept the change.
+    - 292 pairs of consecutive failed reviews on one PR. Over them: 559 criteria were unmet in both rounds,
+      121 were fixed, and 110 were met in the first round (the reviewer's own preProofVerdict was met in all
+      110) and unmet in the next. On a new head (242 pairs, a fix landed between): 449 repeated, 111 fixed,
+      93 newly unmet in 76 pairs. On the same head (50 pairs, no code change): 110 repeated, 10 fixed and
+      17 newly unmet, so the reviewer also changes its ruling on unchanged code about once per two pairs.
+      The main loss is repeats: a fix round clears about 1 in 5 of the criteria it is sent to fix. The
+      second loss is regressions or new reviewer findings on criteria that had passed (93 on new heads).
+    - Example #19873 (W1-T13940): 9 failed rounds. Round 8 to 9 kept 2 unmet, fixed 1 and newly failed 4
+      that the round before had passed (github-answer-still-releases among them), all with the proof passing.
+    HOW THE FIX ROUND USES THE REVIEW TODAY (origin/main dd829e355):
+    - src/cli/commands/fix.ts:3978-3982 builds the unmet list from review.criteria (visible criteria only),
+      and fix.ts:4393 hands it to the worker with the review summary and verified findings.
+    - src/lib/prompt-render.ts:878-890 renders it and says "Resolve ALL of them together in this ONE pass";
+      renderUnmetCriteria (prompt-render.ts:235) shows only the UNMET criteria, so the worker does not see
+      the criteria it must keep met.
+    - Nothing runs the reviewer's judgment before the push: the strike commits and calls deps.push
+      (fix.ts:5378 and 5452). The first semantic check of the fix is the posted review, after CI.
+    - buildReviewPrompt (review.ts:8120), reviewerVerdictContract (review.ts:8236), parseReviewerVerdicts
+      (review.ts:8304) and parseReviewerVerdictClauses (review.ts:8428) are pure and reusable.
+    EXISTING WORK: W1-T13886 (queued) escalates one criterion after N new-head semantic downgrades to an
+    Inbox decision. It stops a loop after it has happened; this task makes each round more likely to clear,
+    so the two do not overlap. W1-T13865 stops a fix round restarting on an unchanged ruling.
+  design: |
+    INVARIANT self-check-judges-every-criterion: before a reviewer-unmet fix round pushes, the same semantic review the posted review runs judges every acceptance criterion on the fix's own commit.
+    INVARIANT no-push-before-self-check: a reviewer-unmet strike that commits never pushes before its self-check has returned, failed or timed out.
+    INVARIANT uncleared-items-are-recorded: every self-check writes one fix.self_check row naming what it did not clear.
+    INVARIANT met-criteria-stay-in-view: the fix worker sees every visible criterion the last review passed, not only the unmet ones.
+    CHOICE: put the reviewer's own judgment inside the fix round, before the push. 99.6% of unmet verdicts
+    are semantic with the proof passing, so the worker's own proof run cannot tell it whether the round will
+    pass; only the reviewer's judgment can. A self-check costs one reviewer run (about 8 minutes) and saves
+    a CI cycle (30 to 60 minutes) and a posted review each time it catches a gap. Rejected:
+    - Making the reviewer report every criterion: it already does (see rationale).
+    - Blocking the push until the self-check is clear: the self-check is the same nondeterministic reviewer
+      (17 new rulings on 50 unchanged heads), so a hard block could hold a correct fix forever. The posted
+      review stays the only gate; the self-check only adds one worker turn and a record.
+    - More than one extra turn: unbounded inner loops move the loop, not end it. W1-T13886 handles a
+      criterion that keeps failing.
+    1. src/lib/fix-self-check.ts (new, pure):
+       - buildFixSelfCheckPrompt({ task, prUrl, owner, repo, commitSha, evidencePath, priorReasons }) calls
+         buildReviewPrompt with the task's full acceptance list and headSha = commitSha, and adds one
+         block: the commit is local and not pushed, read the diff from the worktree (git diff
+         <merge-base>..HEAD), and the last posted review's reason for each criterion (priorReasons, visible
+         criteria only) as earlier rulings to check again.
+       - decideFixSelfCheck(transcript, criteria) -> { state: "clear" | "uncleared", criteriaTotal,
+         clearedCount, unclearedIndices, workerItems: { criterionIndex, claim, clause }[] }, using
+         parseReviewerVerdicts, parseReviewerUnable and parseReviewerVerdictClauses. Missing line, FAIL or
+         UNABLE is uncleared. workerItems holds visible criteria only (visibleCriteria), so a holdout is
+         counted but never shown to the worker (W1-T166).
+       - export const FIX_SELF_CHECK_TIMEOUT_MS = 15 * 60_000 and FIX_SELF_CHECK_EXTRA_TURNS = 1.
+    2. src/cli/commands/fix.ts: add runFixSelfCheck(args: { worktreePath, commitSha, prompt, timeoutMs })
+       => Promise<{ transcript: string }> to FixCommandHost. In the strike, after the commit and before
+       landRoundPush at both rung.strike push sites, when the round's mode is reviewer-unmet: build the
+       prompt, call host.runFixSelfCheck, decide, log fix.self_check. If uncleared and no extra turn has
+       run, give the worker one more turn in the same worktree (the same dispatch path the strike already
+       uses, with a prompt that appends "SELF-CHECK UNCLEARED" and each workerItem's claim and clause),
+       commit, self-check again (attempt 2) and log it. Then push as today. A throw or timeout logs state
+       unavailable and pushes. The extra turn is not a new strike and does not touch the strike counters.
+    3. src/lib/prompt-render.ts: FixEvidence.review gains optional metCriteria ({ criterionIndex, claim,
+       proof }[]); fix.ts fills it from review.criteria where met, through visibleCriteria. The reviewer-unmet
+       prompt renders a KEEP MET section after the unmet list when it is non-empty: "These criteria passed
+       the last review. Keep them passing; the self-check judges all of them before the push." Other modes
+       are unchanged.
+    4. src/run-task.ts: fixCommandHost() implements runFixSelfCheck with the reviewer spawn the review lane
+       uses (provider and model routing for the review lane, read-only tools, the deny-floor that refuses
+       status posts), cwd the fix worktree, and the timeout. One self-check at a time per fix round, run in
+       sequence, so it adds no concurrent process beyond the fix slot it is in.
+    5. src/lib/ledger.ts: add "fix.self_check" to the retained-steps list with a comment (the next round and
+       the flow gardener read it).
+    6. Tests in test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts, titled
+       "W1-T14136 criterion N: ...". Criteria 1, 2 and 6 call the pure functions. Criteria 3 to 5 drive
+       runFixRung with a fake host and fake deps that record calls in order; no real reviewer, no network.
+    MEASURE AFTER DEPLOY: for 48 h, per fix.self_check row with state clear, count how often the next
+    review.posted on that head is failure; and the repeat count per failed-review pair (559 of the 680 criteria
+    unmet in the earlier review, in the window above). The task is worth keeping if repeats per pair fall.
+  falsifier: |
+    Origin/main has no fix-self-check.ts and no fix.self_check row: criteria 1 to 5 fail. Build the prompt
+    from the unmet list only: criterion 1 counts 1 CLAIM line, not 4. Treat a missing REVIEW_VERDICT line as
+    PASS: criterion 2's no-line case gives clear. Put a holdout clause in workerItems: criterion 2 finds it.
+    Call push before the self-check, or run two extra turns: criterion 3's call order differs. Block the push
+    when attempt 2 is uncleared: criterion 4 sees no push. Spend a strike on the extra turn, or skip the push
+    on a self-check throw: criterion 5 fails. Render only unmet criteria: criterion 6 finds no KEEP MET
+    section. Wire runFixSelfCheck only in tests: the src/run-task.ts grep finds nothing.
+  note: |
+    Id reserved for run-unfiled-1795265414729 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Not in scope: review requeue rules and the shared reviewer tree (sibling filings); changing what the
+    posted review judges; W1-T13886's escalation; the GitHub status text length.

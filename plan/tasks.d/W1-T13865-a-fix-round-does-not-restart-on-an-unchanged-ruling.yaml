@@ -17,7 +17,7 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "priorRoundHold returns a NEEDS_SCOPE hold when the task's newest fix.done at this head ruled NEEDS_SCOPE and no scope amendment for the task has merged and main's contract revision is unchanged since that round"

@@ -1,0 +1,44 @@
+- id: W1-T14120
+  title: A green head carries a dead-owner fact only when the live pending status is proven to be that run's
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the review re-run decision for every green PR with a pending review status
+  band_meaning: span
+  origin: operator-session#pr-backlog-sweep-2026-11-21
+  plan_refs: [W1-T14035, W1-T2844]
+  files:
+    - src/lib/tick-read-worker.ts
+    - test/review-status-pending.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Found while fixing #19922 (W1-T14035). On main, when a head's checks are GREEN, buildOpenPrViews in
+    src/lib/tick-read-worker.ts sets reviewPendingOwnerDead from a dead ledger row even when the live pending status
+    belongs to another run, or to an unknown one. The test "W1-T2844: buildOpenPrViews carries a dead-owner fact only
+    for the current pending head" in test/review-status-pending.test.ts pins that behaviour: a pending status with no description plus a dead row
+    reads as dead. A live replacement review can then be treated as dead and re-run. #19922 fixes this only on the
+    PENDING path.
+  design: |
+    On the green path, apply the same owner proof #19922 uses on the pending path: carry reviewPendingOwnerDead only
+    when the live pending status is proven to be the dead run's, either by an owner marker naming that run
+    ("owned by run <id>") or, for an unmarked hold, by GitHub status order binding it to that run. A status that names
+    another run, or an unmarked one that status order does not bind, carries no dead-owner fact. Update the W1-T2844
+    test so a pending status with no description and no binding no longer reads as dead.
+    AMENDED 2026-11-21 after #19922 (W1-T14035) merged: the binding is the same status-id check that #19922 adds
+    for the CI-pending lane. On green, the live remudero-review status id must equal the review history's newest
+    entry id (reuse RollupCheck.statusId from #19922) before reviewPendingOwnerDead is set.
+
+    INVARIANT green-dead-owner-is-proven: on a green head, reviewPendingOwnerDead is set only when the live pending status is proven to be the dead run's.
+  acceptance:
+    - claim: "On a green head, a live pending status owned by another run, or unmarked and not bound by status order, carries no dead-owner fact even with a dead ledger row"
+      proof: "grep: W1-T14120 criterion 1: in test/review-status-pending.test.ts"
+    - claim: "invariant:green-dead-owner-is-proven — a green head whose pending status is marked with the dead run, or bound to it by status order, still carries the dead-owner fact"
+      kind: guard
+      proof: "grep: W1-T14120 criterion 2: in test/review-status-pending.test.ts"
+  falsifier: |
+    Keep setting reviewPendingOwnerDead from the dead row alone on green: criterion 1's other-run and unmarked cases
+    read as dead and the test fails.
