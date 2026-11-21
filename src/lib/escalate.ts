@@ -1126,7 +1126,8 @@ const LAYOUT_SECTIONS = ["options", "recommendation", "details", "tail", "fields
 
 /** Open with the decision summary or the producer's summary, then Options, Recommendation, the raw
  * detail under Details, the footer and notices, and the machine fields last under their own heading.
- * The human text is shortened only to keep the issue deliverable at GitHub's body limit.
+ * A body that would not fit GitHub's body limit in this order is rendered in the fields-first order
+ * instead, byte for byte as before (see {@link renderLegacyIssueBody}): no detail is shortened.
  * W1-T972: always name Host.
  * TRAP: without Host, operators followed crash-loop reports to healthy machines.
  * Why: docs/forensics/escalate.md. */
@@ -1135,7 +1136,43 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
   const lead = decisionSummary
     ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`].join("\n")
     : e.summary.replace(/[\r\n\u2028\u2029]/g, " ");
-  const tail = [
+  const fields = escalationFieldLines(e);
+  const sections = [
+    [decisionSummary ? "card" : "summary", lead],
+    ["options", "\n\n## Options" + e.options.map((o) => `\n- **${o.label}** — ${o.detail}`).join("")],
+    ["recommendation", `\n\n## Recommendation\n${e.recommendation}`],
+    ["details", `\n\n## Details\n${e.detail}`],
+    ["tail", `\n\n${escalationTailLines(e, notices).join("\n")}`],
+    ["fields", `\n\n## Machine fields\n${fields.join("\n")}`],
+  ] as const;
+  // A real paragraph break ends the diagnostic before its hidden marker (for example, the
+  // one-line-per-check CI evidence). The nonce is a digest of the whole content.
+  const nonce = createHash("sha256").update(JSON.stringify(sections)).digest("hex").slice(0, 16);
+  const body = sections.map(([name, text]) =>
+    text + `${name === "details" ? "\n\n" : "\n"}<!-- rmd-escalation-layout:v1:${nonce}:${name} -->`).join("");
+  // The new order's headings and hidden lines are longer than the fields-first body. Rather than
+  // cut the detail (and with it, say, the only link to the PR the escalation is about), a body
+  // over the limit keeps the order and the exact bytes it had before this layout existed.
+  return body.length > GITHUB_ISSUE_BODY_LIMIT ? renderLegacyIssueBody(e, notices) : body;
+}
+
+function escalationFieldLines(e: Escalation): string[] {
+  return [
+    `**Class:** ${e.class}`,
+    `**Task:** ${e.taskId}`,
+    `**Host:** ${hostname()}`,
+    e.runId ? `**Run:** ${e.runId}` : undefined,
+    // W1-T195/W1-T3579: the composite dedup key's optional dimensions, omitted entirely (never a
+    // blank/placeholder line) when the caller didn't set them.
+    e.headSha ? `**Head:** ${e.headSha}` : undefined,
+    e.cause ? `**Cause:** ${e.cause}` : undefined,
+    e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
+    ...(escalationIssueTitle(e) !== unboundedEscalationTitle(e) ? [fullEscalationSummaryLine(e)] : []),
+  ].filter((l): l is string => l !== undefined);
+}
+
+function escalationTailLines(e: Escalation, notices: readonly string[]): string[] {
+  return [
     ...ISSUE_FOOTER,
     // W1-T4471: how to answer — QUESTION issues only (an ACTION is performed, not answered);
     // owner-only per G-6, see lib/escalation-answers.ts.
@@ -1149,82 +1186,96 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
       : []),
     ...notices.flatMap((notice) => ["", notice]),
   ];
-  const fields = [
-    `**Class:** ${e.class}`,
-    `**Task:** ${e.taskId}`,
-    `**Host:** ${hostname()}`,
-    e.runId ? `**Run:** ${e.runId}` : undefined,
-    // W1-T195/W1-T3579: the composite dedup key's optional dimensions, omitted entirely (never a
-    // blank/placeholder line) when the caller didn't set them.
-    e.headSha ? `**Head:** ${e.headSha}` : undefined,
-    e.cause ? `**Cause:** ${e.cause}` : undefined,
-    e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
-    ...(escalationIssueTitle(e) !== unboundedEscalationTitle(e) ? [fullEscalationSummaryLine(e)] : []),
-  ].filter((l): l is string => l !== undefined);
-  const summary = { prefix: "", text: lead };
-  const options = e.options.map((o) => ({ prefix: `\n- **${o.label}** — `, text: o.detail }));
-  const recommendation = { prefix: "\n\n## Recommendation\n", text: e.recommendation };
-  const details = { prefix: "\n\n## Details\n", text: e.detail };
-  const footer = { prefix: "\n\n", text: tail.join("\n") };
-  const sections = [
-    [decisionSummary ? "card" : "summary", [summary]],
-    ["options", [{ prefix: "\n\n## Options", text: "" }, ...options]],
-    ["recommendation", [recommendation]],
-    ["details", [details]],
-    ["tail", [footer]],
-    ["fields", [{ prefix: "\n\n## Machine fields\n", text: fields.join("\n") }]],
-  ] as const;
-  // A real paragraph break ends the diagnostic before its hidden marker (for example, the
-  // one-line-per-check CI evidence). Reserve the entire layout, including these hidden lines.
-  const format = (nonce: string) => sections.map(([name, parts]) =>
-    parts.map(({ prefix, text }) => prefix + text).join("")
-    + `${name === "details" ? "\n\n" : "\n"}<!-- rmd-escalation-layout:v1:${nonce}:${name} -->`).join("");
-  let excess = format("0".repeat(16)).length - GITHUB_ISSUE_BODY_LIMIT;
-  if (excess > 0) {
-    // Keep the machine fields, headings and option labels intact. Start with the longest prose
-    // so an oversized diagnostic does not consume the summary or the instructions for replying.
-    const prose = [details, summary, ...options, recommendation, footer].sort((a, b) => b.text.length - a.text.length);
-    for (const part of prose) {
-      if (excess <= 0) break;
-      const keep = Math.max(1, part.text.length - excess);
-      if (keep >= part.text.length) continue;
-      const shortened = part.text.slice(0, keep - 1).replace(/[\uD800-\uDBFF]$/, "") + "…";
-      excess -= part.text.length - shortened.length;
-      part.text = shortened;
-    }
-  }
-  const nonce = createHash("sha256").update(JSON.stringify(sections)).digest("hex").slice(0, 16);
-  return format(nonce);
 }
 
-/** A W1-T12041 body's own markers locate its sections. When the final marker is deleted, the
- *  tail marker and the machine heading together still identify the fields block. */
-function layoutOf(body: string): { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsAt: number; rest: string } | undefined {
-  // A legacy header owns its body even when later prose pastes an entire new-order issue.
-  const header = /^(?:\*\*[^:\r\n]+:\*\*[^\r\n]*\r?\n|\r?\n)+/.exec(body)?.[0];
-  if (header !== undefined && CLASS_LINE_RE.test(header) && TASK_LINE_RE.test(header)) return undefined;
+/** The fields-first body every escalation had before W1-T12041, with each notice appended after a
+ *  blank line exactly as createEscalationIssue appended it. W1-T313: a valid decision card precedes
+ *  the byte-identical detail; a malformed card falls back to raw-only. */
+export function renderLegacyIssueBody(e: Escalation, notices: readonly string[] = []): string {
+  const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
+  return [
+    ...escalationFieldLines(e),
+    "",
+    ...(decisionSummary
+      ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`, ""]
+      : []),
+    e.detail,
+    "",
+    "## Options",
+    ...e.options.map((o) => `- **${o.label}** — ${o.detail}`),
+    "",
+    "## Recommendation",
+    e.recommendation,
+    "",
+    ...escalationTailLines(e, notices),
+  ].join("\n");
+}
+
+/** The line that opens each section after the lead, in order. When a section's hidden marker has
+ *  been deleted, the section ends where the next one's line begins: the first such line for the
+ *  short producer sections, the last one for Details and the footer, which may quote either. */
+const SECTION_OPENERS: readonly { re: RegExp; last: boolean }[] = [
+  { re: /^## Options[ \t]*\r?$/gm, last: false },
+  { re: /^## Recommendation[ \t]*\r?$/gm, last: false },
+  { re: /^## Details[ \t]*\r?$/gm, last: false },
+  { re: /^_Opened automatically by Remudero /gm, last: true },
+  { re: /^## Machine fields[ \t]*\r?$/gm, last: true },
+];
+
+/** Locate a W1-T12041 body's sections. Each section ends at its own hidden marker (the markers that
+ *  share the last marker's nonce); a section whose marker was deleted ends where the next section's
+ *  opening line begins, so deleting any marker, or all of them, still finds the machine fields.
+ *  Undefined unless the lead (the text before Options) has the shape renderIssueBody writes: any
+ *  fields-first body is then read as before, whatever new-order issue its later prose pastes. */
+function layoutOf(body: string): { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsBody: number; fieldsAt: number; rest: string } | undefined {
   const markers = [...body.matchAll(LAYOUT_MARKER_RE)];
-  const last = markers.at(-1);
-  if (last?.[2] !== "fields" && last?.[2] !== "tail") return undefined;
-  const hasEnd = last[2] === "fields";
-  const own = markers.filter((m) => m[1] === last[1]);
-  const lead = own[0]?.[2];
-  const expected = hasEnd ? LAYOUT_SECTIONS : LAYOUT_SECTIONS.slice(0, -1);
-  if ((lead !== "card" && lead !== "summary") || own.slice(1).map((m) => m[2]).join() !== expected.join()) return undefined;
-  const eol = body.slice(last.index - 2, last.index) === "\r\n" ? "\r\n" : "\n";
+  const nonce = markers.at(-1)?.[1];
+  const own = markers.filter((m) => m[1] === nonce);
+  const names = ["lead", ...LAYOUT_SECTIONS] as const;
+  const slot = (m: RegExpMatchArray) => (m[2] === "card" || m[2] === "summary" ? 0 : names.indexOf(m[2] as typeof names[number]));
+  const at = own.map(slot);
+  if (at.some((s, i) => s < 1 && !(s === 0 && i === 0)) || at.some((s, i) => i > 0 && s <= at[i - 1]!)) return undefined;
+  const bySlot = new Map(own.map((m, i) => [at[i]!, m] as const));
+  const first = own[0];
+  const eol = first ? (body.slice(first.index! - 2, first.index!) === "\r\n" ? "\r\n" : "\n") : (body.includes("\r\n") ? "\r\n" : "\n");
   const texts: string[] = [];
-  let at = 0;
-  for (const m of hasEnd ? own.slice(0, -1) : own) {
-    const text = body.slice(at, m.index);
-    const separator = m[2] === "details" ? eol + eol : eol;
-    texts.push(text.endsWith(separator) ? text.slice(0, -separator.length) : text);
-    at = m.index + m[0].length;
+  let start = 0, fieldsStart = 0, fieldsAt = body.length, rest = "";
+  for (let k = 0; k < names.length; k++) {
+    const marker = bySlot.get(k);
+    if (k === names.length - 1) fieldsStart = start;
+    if (marker) {
+      const separator = names[k] === "details" ? eol + eol : eol;
+      const text = body.slice(start, marker.index);
+      texts.push(text.endsWith(separator) ? text.slice(0, -separator.length) : text);
+      if (k === names.length - 1) { fieldsAt = marker.index! - (text.endsWith(eol) ? eol.length : 0); rest = body.slice(marker.index! + marker[0].length); }
+      start = marker.index! + marker[0].length;
+      continue;
+    }
+    if (k === names.length - 1) {
+      const text = body.slice(start);
+      texts.push(text.endsWith(eol) ? text.slice(0, -eol.length) : text);
+      fieldsAt = start + texts.at(-1)!.length;
+      break;
+    }
+    const nextMarker = [...bySlot.entries()].filter(([s]) => s > k).sort(([a], [b]) => a - b)[0]?.[1];
+    const windowEnd = nextMarker ? nextMarker.index! : body.length;
+    const opener = SECTION_OPENERS[k]!;
+    const window = body.slice(start, windowEnd);
+    const hits = [...window.matchAll(opener.re)];
+    const hit = opener.last ? hits.at(-1) : hits[0];
+    if (!hit) return undefined;
+    const text = window.slice(0, hit.index).replace(/(?:\r?\n|[ \t])+$/, "");
+    texts.push(text);
+    start += text.length;
   }
-  const fieldsAt = hasEnd ? last.index : body.length;
-  const fields = body.slice(at, fieldsAt);
-  if (!hasEnd && !fields.startsWith(`${eol}${eol}## Machine fields${eol}**Class:** `)) return undefined;
-  texts.push(hasEnd && fields.endsWith(eol) ? fields.slice(0, -eol.length) : fields);
-  return { eol, card: lead === "card", texts, fieldsStart: at, fieldsAt, rest: hasEnd ? body.slice(last.index + last[0].length) : "" };
+  // renderIssueBody's lead is one line (the summary, newlines folded) or a card under its heading.
+  // A fields-first body's text before Options is neither, whatever issue its later prose pastes.
+  const lead = bySlot.get(0)?.[2];
+  const card = lead ? lead === "card" : texts[0]!.startsWith(`## Decision Summary${eol}`);
+  if (card ? !texts[0]!.startsWith(`## Decision Summary${eol}`) : /[\r\n]/.test(texts[0]!)) return undefined;
+  const heading = /^(?:[ \t]*\r?\n)*## Machine fields[ \t]*\r?\n/.exec(body.slice(fieldsStart, fieldsAt));
+  if (!heading || !body.startsWith("**Class:**", fieldsStart + heading[0].length)) return undefined;
+  return { eol, card, texts, fieldsStart, fieldsBody: fieldsStart + heading[0].length, fieldsAt, rest };
 }
 
 function withoutPrefix(text: string, ...prefixes: string[]): string {
@@ -1239,9 +1290,10 @@ export function escalationBodyInLegacyOrder(body: string | undefined): string | 
 export function escalationBodyInLegacyOrder(body: string | undefined): string | undefined {
   const layout = body === undefined ? undefined : layoutOf(body);
   if (layout === undefined) return body;
-  const { eol, card, texts: [lead, options, recommendation, details, tail, fields] } = layout;
+  const { eol, card, texts: [lead, options, recommendation, details, tail] } = layout;
   const gap = eol + eol;
-  return withoutPrefix(fields!, `${gap}## Machine fields${eol}`, gap) + gap + (card ? lead! + gap : "")
+  const fields = body!.slice(layout.fieldsBody, layout.fieldsAt);
+  return fields + gap + (card ? lead! + gap : "")
     + withoutPrefix(details!, `${gap}## Details${eol}`, gap) + options! + recommendation! + gap + withoutPrefix(tail!, gap) + layout.rest;
 }
 
@@ -1252,9 +1304,7 @@ export function escalationBodyInLegacyOrder(body: string | undefined): string | 
 export function editEscalationMachineFields(body: string, edit: (fields: string) => string): string {
   const layout = layoutOf(body);
   if (layout === undefined) return edit(body);
-  const { eol, fieldsStart, fieldsAt } = layout;
-  const heading = `${eol}${eol}## Machine fields${eol}`;
-  const start = body.startsWith(heading, fieldsStart) ? fieldsStart + heading.length : fieldsStart;
+  const { eol, fieldsBody: start, fieldsAt } = layout;
   const fields = body.slice(start, fieldsAt);
   const terminated = fields.endsWith(eol);
   const edited = edit(terminated ? fields : fields + eol);
