@@ -848,11 +848,17 @@ test("W1-T13867 criterion 1: every cohort row carries its calls' verified task o
     assert.equal(existsSync(join(stateDir, "benchmark-cohort-v1.json")), false, "positive control: the v1 index migrated");
     assert.deepEqual(migrated.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), joinedOnDisk);
     assert.deepEqual(onDisk(), joinedOnDisk, "the migrated index holds the rows the pass reported");
-    // A lock left by a writer that died holding it is broken once stale, after the rebuild waits for it.
+    // A rebuild that meets a held lock never blocks the pass: it publishes nothing, and the lock stays its writer's.
     writeFileSync(lockPath, "");
-    const nearlyStale = (Date.now() - 4_970) / 1000;
-    utimesSync(lockPath, nearlyStale, nearlyStale);
     rmSync(indexPath);
+    const blocked = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.ok(blocked.scannedSources > 0, "positive control: this pass rebuilds");
+    assert.equal(blocked.checkpointBytes, undefined, "a rebuild that met a held lock publishes nothing");
+    assert.equal(existsSync(indexPath), false);
+    assert.equal(existsSync(lockPath), true);
+    // A lock left by a writer that died holding it is broken once stale.
+    const stale = (Date.now() - 60_000) / 1000;
+    utimesSync(lockPath, stale, stale);
     const rebuilt = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
     assert.equal(rebuilt.state, "complete");
     assert.ok(rebuilt.scannedSources > 0, "positive control: this pass rebuilds");
