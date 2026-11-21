@@ -33,7 +33,7 @@ import { remedyFilesForFailingChecks, type RemedyFileForGate } from "../../lib/c
 import { isInPlanScope } from "../../lib/plan-architect.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../lib/plan-filing-fix-guard.js";
 import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
-import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
+import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
 import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
@@ -96,6 +96,10 @@ export interface FixCommandHost {
   readonly buildImportClosureRead: HostFn;
   readonly buildProofAmendmentGitOps: RunTaskCommandHost["buildProofAmendmentGitOps"];
   readonly buildProofAmendmentWritePorts: RunTaskCommandHost["buildProofAmendmentWritePorts"];
+  readonly requestFixScopeAmendment: (
+    request: ScopeAmendmentRequest,
+    ...args: Parameters<RunTaskCommandHost["buildProofAmendmentWritePorts"]>
+  ) => ScopeAmendmentOutcome;
   readonly buildSweepEffects: HostFn;
   readonly preserveInheritedCensusWork: RunTaskCommandHost["preserveInheritedCensusWork"];
   readonly readInheritedCensusContextAsync: RunTaskCommandHost["readInheritedCensusContextAsync"];
@@ -2605,15 +2609,16 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
       const trailers = [...body.matchAll(/^Remudero-Task:[ \t]*(\S+)[ \t]*$/gm)];
-      const ports = deps.scopeAmendmentWritePorts ?? host.buildProofAmendmentWritePorts({
-        taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
-        owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
-        ledgerLinesNow: (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), log: deps.log,
-        gitOps: host.buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
-      }, deps.scopeAmendmentPortsIo);
-      outcome = requestScopeAmendment({ taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
+      const request: ScopeAmendmentRequest = { taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
         headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined,
-        headRef: opts.branch }, ports);
+        headRef: opts.branch };
+      outcome = deps.scopeAmendmentWritePorts ? requestScopeAmendment(request, deps.scopeAmendmentWritePorts)
+        : host.requestFixScopeAmendment(request, {
+          taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
+          owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
+          ledgerLinesNow: (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), log: deps.log,
+          gitOps: host.buildProofAmendmentGitOps(), amendmentKind: "scope_amendment",
+        }, deps.scopeAmendmentPortsIo);
     } catch (error) {
       outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
     }
