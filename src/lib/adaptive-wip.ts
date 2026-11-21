@@ -15,10 +15,11 @@
  * The base `policy.wipLimit` stays the starting point; {@link WIP_BOUND_BACKSTOP_MULTIPLE} is a
  * SAFETY BACKSTOP only, never the mechanism.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 
 import { clockFromMillisFn, type Clock } from "./clock.js";
-import { readLedgerUnionRecords } from "./ledger-union.js";
+import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
+import { ledgerLivePath, readLedgerUnionRecords } from "./ledger-union.js";
 import { BLOCKER_SLO_MS, type PrBlocker } from "./pr-blocker.js";
 
 /** BACKSTOP ONLY: the adaptive bound never exceeds this multiple of the base limit. */
@@ -101,10 +102,10 @@ export function deriveMovableStuckOwnedCount(
 
 /** W1-T13990: the fix lane's admissions since a time. */
 export interface FixRoundAdmissions {
-  /** `fix.dispatch` and `fix.retrigger` rows: rounds the fix lane ran (a retrigger-shaped round writes only the second). */
+  /** Dispatch, retrigger and worker-signal receipts for rounds the fix lane ran. */
   admitted: number;
   /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
-   *  `fixes_refused`), and `sweep.fix.dispatch_failed` rows: dispatches refused later or lost. */
+   *  `fixes_refused`), abandoned memory admissions, and dispatches refused later or lost. */
   refused: number;
   /** Rounds the fix lane admitted that are still running now, from this process's fix registry: a round admitted in the
    *  window, or running at its start, has written no `fix.dispatch` yet. Absent when no registry was read. */
@@ -113,27 +114,37 @@ export interface FixRoundAdmissions {
 /** Undefined when the fix lane's rows have not been read, or a refusal count in the window has no baseline. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
-/** The rows that record a round the fix lane ran, as `priorStrikesFor` and the sweep's `dispatchStarted` read them. */
 const FIX_ROUND_RAN_STEPS = new Set(["fix.dispatch", "fix.retrigger"]);
-const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "sweep.fix_capacity", "sweep.fix.dispatch_failed"];
+const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "fix.done", "sweep.fix_capacity", "sweep.fix.dispatch_failed"];
 
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
   const admitted: number[] = [];
   const refused: number[] = [];
+  const admittedRounds = new Map<string, number>();
+  const abandonedRounds = new Set<unknown>();
+  const dispatchFailures: { line: Record<string, unknown>; ts: number }[] = [];
   // Each controller (one per pass, keyed by run and surface) writes its running refusal count from 0.
   const controllerRefused = new Map<string, number>();
   // A controller whose first row read already counts refusals opened before these lines: its count has no baseline.
   const unbaselined: number[] = [];
-  // A run child refused at its own admission also ends lost: that loss is the same refusal, counted once.
-  const refusedRuns = new Set<string>();
+  const refusedRuns = new Set<unknown>();
   for (const line of lines) {
     if (typeof line.step !== "string" || !FIX_ROUND_STEPS.includes(line.step)) continue;
     const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
     if (!Number.isFinite(ts)) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : "";
-    if (FIX_ROUND_RAN_STEPS.has(line.step)) {
-      admitted.push(ts);
+    if (FIX_ROUND_RAN_STEPS.has(line.step) || (line.step === "fix.done" && line.worker_exit === "signal")) {
+      if (typeof line.round_id === "string") {
+        admittedRounds.set(line.round_id, Math.max(admittedRounds.get(line.round_id) ?? ts, ts));
+      } else {
+        admitted.push(ts);
+      }
+    } else if (line.step === "fix.done") {
+      if (line.subtype !== "admission_abandoned" || abandonedRounds.has(line.round_id)) continue;
+      if (typeof line.round_id === "string") abandonedRounds.add(line.round_id);
+      if (runId !== "") refusedRuns.add(runId);
+      refused.push(ts);
     } else if (line.step === "sweep.fix_capacity") {
       const count = line.fixes_refused;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
@@ -145,9 +156,15 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       controllerRefused.set(key, count);
       for (let i = 0; i < fresh; i++) refused.push(ts);
       if (fresh > 0) refusedRuns.add(runId);
-    } else if (typeof line.child_run_id !== "string" || !refusedRuns.has(line.child_run_id)) {
-      refused.push(ts);
+    } else {
+      dispatchFailures.push({ line, ts });
     }
+  }
+  for (const ts of admittedRounds.values()) admitted.push(ts);
+  // A dispatch failure can report the same abandoned or refused child, in either ledger order.
+  for (const { line, ts } of dispatchFailures) {
+    if (abandonedRounds.has(line.round_id) || refusedRuns.has(line.child_run_id) || refusedRuns.has(line.admission_run_id)) continue;
+    refused.push(ts);
   }
   // A window holding such a first row cannot tell its refusals from the ones before it: unknown, never idle or inflated.
   return (sinceMs) => unbaselined.some((t) => t >= sinceMs) ? undefined
@@ -172,9 +189,8 @@ export async function readFixRoundUnionRows(stateDir: string, sinceMs: number): 
 /** W1-T13990: the focus gate's fix-round reader over the ledger union, for a gate that answers synchronously. */
 export interface FixRoundUnionReader {
   /** A reader for one consultation: the newest completed union read, joined once with the live `lines` the gate just
-   *  read (rows written after that read began). Each call starts the next read when none is in flight. Undefined
-   *  while no read has completed, when the newest was unreadable, or when it began before `sinceMs`. With `readRunning`,
-   *  an answer also carries the rounds running now. */
+   *  read. Undefined while no usable snapshot covers the window and the current live ledger generation. With
+   *  `readRunning`, an answer also carries the rounds running now. */
   readerFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader;
   /** Settles when the read in flight does. */
   settled(): Promise<void>;
@@ -184,7 +200,19 @@ export function createFixRoundUnionReader(
   stateDir: string, opts: { clock: Clock; read?: FixRoundUnionRead; readRunning?: () => number },
 ): FixRoundUnionReader {
   const read = opts.read ?? readFixRoundUnionRows;
-  let latest: { startedAtMs: number; rows: ReadonlyArray<Record<string, unknown>> | undefined } | undefined;
+  const livePath = ledgerLivePath(stateDir);
+  const liveGeneration = (): string | undefined => {
+    try {
+      const stat = statSync(livePath, { bigint: true });
+      // Rotation replaces the live inode under this lock, then drains late writes from the old inode.
+      if (existsSync(livePath + LEDGER_ROTATION_LOCK_SUFFIX)) return undefined;
+      return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+    } catch (error) {
+      void error; // An unreadable live identity cannot establish continuity.
+      return undefined;
+    }
+  };
+  let latest: { generation: string; startedAtMs: number; rows: ReadonlyArray<Record<string, unknown>> } | undefined;
   let inFlight: Promise<void> | undefined;
   const start = (sinceMs: number): void => {
     if (inFlight !== undefined) return;
@@ -192,19 +220,21 @@ export function createFixRoundUnionReader(
     // One window more before the dwell: a controller's `fixes_refused` is cumulative, so its rise in the dwell is read
     // against its last row before it. A controller with no row in that lookback is unknown (fixRoundReaderFor).
     const baselineSinceMs = sinceMs - Math.max(0, startedAtMs - sinceMs);
-    inFlight = Promise.resolve().then(() => read(stateDir, baselineSinceMs)).then(
-      (rows) => { latest = { startedAtMs, rows }; },
-      (error: unknown) => {
-        void error; // A failed read is no reading, so the dwell is unknown and the hold stands.
-        latest = { startedAtMs, rows: undefined };
-      },
-    ).finally(() => { inFlight = undefined; });
+    inFlight = Promise.resolve().then(async () => {
+      const generation = liveGeneration();
+      const rows = generation === undefined ? undefined : await read(stateDir, baselineSinceMs);
+      latest = generation === undefined || rows === undefined ? undefined : { generation, startedAtMs, rows };
+    }).catch((error: unknown) => {
+      void error; // A failed read is no reading, so the dwell is unknown and the hold stands.
+      latest = undefined;
+    }).finally(() => { inFlight = undefined; });
   };
   return {
     readerFor: (lines) => (sinceMs) => {
       const snapshot = latest;
       start(sinceMs);
-      if (snapshot?.rows === undefined || snapshot.startedAtMs < sinceMs) return undefined;
+      // A rotation since the snapshot started may have archived rows missing from both inputs. Wait for the refresh.
+      if (snapshot === undefined || snapshot.startedAtMs < sinceMs || snapshot.generation !== liveGeneration()) return undefined;
       const seen = new Set(snapshot.rows.map((row) => JSON.stringify(row)));
       const live = lines.filter((line) => typeof line.step === "string" && FIX_ROUND_STEPS.includes(line.step) &&
         !seen.has(JSON.stringify(line)));
