@@ -1043,7 +1043,8 @@ export function createNowView(opts: NowViewOptions): {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stateRoot = dirname(instance.ledgerDir);
-    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}`
+      : instance.name !== core && root ? `q:${mtimeOf(questionStorePath(root)) ?? "-"}` : "none";
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
@@ -1151,9 +1152,18 @@ export function createNowView(opts: NowViewOptions): {
     let storeLines: readonly unknown[] = [];
     let storeSkipped: string | undefined;
     const factAnswer = answeredByFact(db);
+    let heldUnread: string | undefined;
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
+      // The instance daemon's dispatch check reads its own checkout's store beside the ledger: the held list reads the same store.
+      const path = nowPlanPath(instance);
+      const store = path ? readQuestionStore(dirname(dirname(path))) : { reason: "the instance names no checkout, so its question store is unread" };
+      if ("reason" in store) heldUnread = store.reason;
+      else {
+        storeLines = store.lines;
+        if (store.skipped) storeSkipped = `the question store has ${store.skipped} malformed line(s)`;
+      }
     } else if (!instance.feedbackRoot) {
       reasons.grill = reasons.task_question = "no feedback root is configured";
     } else {
@@ -1213,7 +1223,9 @@ export function createNowView(opts: NowViewOptions): {
         ...(partial ? { reason: partial } : {}),
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     } else if (plan) {
-      sources.push({ name: "held-tasks", instance: instance.name, state: "complete", gates: held.map(decisionGate) });
+      const partial = heldUnread ?? storeSkipped;
+      sources.push({ name: "held-tasks", instance: instance.name, state: heldUnread ? "unavailable" : partial ? "partial" : "complete",
+        ...(partial ? { reason: partial } : {}), gates: held.map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({

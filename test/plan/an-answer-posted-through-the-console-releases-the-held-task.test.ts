@@ -159,7 +159,7 @@ async function kick(daemonRoot: string, ledgerPath: string): Promise<{ ran: stri
 interface Stepped extends Clock { set(ms: number): void }
 
 /** Serve's side: a read model over the shared ledger, serve's question root, and the now view over both. */
-function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient } = {}) {
+function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient; checkout?: true } = {}) {
   const root = readModelFixtureDir(t, "t13940").dir;
   // The answer writers stamp their ledger rows with the system clock; the read model must not see them as future rows.
   let nowMs = Date.now();
@@ -176,8 +176,12 @@ function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs
   projector.tick();
   const serveRoot = join(root, "serve-gen");
   mkdirSync(join(serveRoot, "plan"), { recursive: true });
+  // A secondary instance's own checkout: its daemon's question store, beside the plan the view reads.
+  const checkout = join(root, "instance-checkout");
+  if (plans.checkout) mkdirSync(join(checkout, "plan"), { recursive: true });
   const view = createNowView({
-    instances: [instance === "core" ? { name: "core", ledgerDir, feedbackRoot: serveRoot } : { name: instance, ledgerDir }], coreInstance: "core", clock, readPlan: () => plans.readPlan ?? PLAN, listGrilling: () => [],
+    instances: [instance === "core" ? { name: "core", ledgerDir, feedbackRoot: serveRoot }
+      : { name: instance, ledgerDir, ...(plans.checkout ? { planPath: join(checkout, "plan", "tasks.yaml") } : {}) }], coreInstance: "core", clock, readPlan: () => plans.readPlan ?? PLAN, listGrilling: () => [],
     ...(plans.catalogs ? { catalogs: plans.catalogs } : {}),
     github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: null, state: "fresh" } }),
     hostProbe: { rateLimit: () => 4321, diskFree: () => 1 },
@@ -198,7 +202,7 @@ function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs
     const gates = composed.humanGates.gates.filter((g) => g.kind === "task_question");
     return { held, gates, composed };
   };
-  return { ledgerPath, serveRoot, needsYou, projector };
+  return { ledgerPath, serveRoot, checkout, needsYou, projector };
 }
 
 test("W1-T13940 criterion 1: an answer through the real answer route, written to serve's own folder, releases the task on the daemon's next dispatch pass", async (t) => {
@@ -303,6 +307,25 @@ test("W1-T13940 criterion 4: the Inbox lists the held task exactly when the disp
     const listed = box.needsYou().held.length === 1;
     assert.equal(refused, fixture.refused, `${fixture.name}: the dispatch check`);
     assert.equal(listed, refused, `${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
+  }
+  // A secondary instance's daemon reads its own checkout's store; the Inbox reads that same store for its held list.
+  const secondary: Array<{ name: string; refused: boolean; store?: string }> = [
+    { name: "a secondary checkout's store answer, with no ledger row", refused: false, store: "Use 5 passes." },
+    { name: "a secondary checkout's blank store answer", refused: true, store: "  " },
+    { name: "a secondary checkout with no answer", refused: true },
+  ];
+  for (const fixture of secondary) {
+    const wreck = inbox(t, "wreck", { checkout: true });
+    if (fixture.store !== undefined) {
+      writeFileSync(join(wreck.checkout, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: fixture.store, origin: "issue#501:comment:9001" })}\n`);
+    }
+    assert.equal(answerRows(wreck.ledgerPath).length, 0, `${fixture.name}: control: no ledger answer row`);
+    const refused = refusal(wreck.checkout, wreck.ledgerPath) !== undefined;
+    const { held, composed } = wreck.needsYou();
+    assert.equal(refused, fixture.refused, `${fixture.name}: the dispatch check`);
+    assert.equal(held.length === 1, refused, `${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
+    assert.equal(composed.humanGates.sources.find((source) => source.name === "held-tasks" && source.instance === "wreck")?.state, "complete",
+      `${fixture.name}: the held-task source read the checkout's store`);
   }
 
   const root = tempDir(t, "writers");
