@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: { tdd: strict }
-  budget_usd: 6.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern, the backup alarm's issue closing on recovery; no verdict, receipt, cadence or revalidation-garden change
   band_meaning: span
   priority: 3

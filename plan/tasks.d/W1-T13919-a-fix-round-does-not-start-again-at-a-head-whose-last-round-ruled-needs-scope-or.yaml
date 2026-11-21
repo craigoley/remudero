@@ -3,7 +3,6 @@
   repo: remudero
   depends_on:
     - W1-T13865
-  priority: 2
   type: implement
   verify: auto
   principles:
@@ -18,7 +17,9 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # answered: W1-T13865 (#19767) merged and shipped the criterion this held
+  superseded_by: W1-T13865
   attempts: 0
   acceptance:
     - claim: invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds
@@ -52,7 +53,10 @@
   falsifier: |
     Remove the priorRoundHold call from the sweep: criterion 4's fixture spawns a second fix worker at the same head
     after a FLAKE round and the test fails.
-  needs_input:
-    question: 'Pull request https://github.com/craigoley/remudero/pull/19767 (task W1-T13865) cannot meet these criteria without your input. "invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds". What it needs: fix stall on review:invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds: 4 rounds left it unmet with the same failure'
-    source_pr: https://github.com/craigoley/remudero/pull/19767
-    asked_at: 2026-11-20T07:46:21.655Z
+  note: |
+    WITHDRAWN 2026-11-21 (operator session): W1-T13865 supersedes W1-T13919. The question this task held is
+    answered: https://github.com/craigoley/remudero/pull/19767 (W1-T13865) merged at 03:06Z with this criterion in
+    its acceptance. On main, priorRoundHold returns no hold for a new head, a check completed after a FLAKE round,
+    a merged scope amendment after a NEEDS_SCOPE round (by merged_at, or by the live merge time when a receipt has
+    none), a changed contract, and FIXED or NOT_LANDED rounds. The W1-T13865 criterion 3 tests cover each case.
+    This task is no longer queued, so the fleet cannot build the same change again.
