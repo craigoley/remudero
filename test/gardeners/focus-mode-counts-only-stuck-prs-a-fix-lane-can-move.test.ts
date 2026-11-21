@@ -237,13 +237,17 @@ test("W1-T13990 criterion 2: a hold restored at boot is released after one dwell
 
 test("W1-T13990 criterion 2: fixRoundReaderFor reads admitted and refused fix rounds since a time from the gate's ledger lines", () => {
   const at = (m: number) => new Date(T0 + m * MIN).toISOString();
+  const spawned = (m: number, run: string) => fixWorkerStart(T0 + m * MIN, run, 13, `${run}:0`);
   const read = adaptiveWip.fixRoundReaderFor([
-    { ts: at(-5), step: "fix.dispatch" }, { ts: at(1), step: "fix.dispatch" }, { ts: at(2), step: "sweep.fix.dispatch_failed" },
-    { ts: at(3), step: "sweep.fix.dispatch_failed" }, { ts: at(4), step: "fix.done" }, { ts: at(5), step: "fix.retrigger" },
+    spawned(-6, "R1"), { ts: at(-5), run_id: "R1", step: "fix.dispatch", round_id: "R1:0" },
+    spawned(1, "R2"), { ts: at(1), run_id: "R2", step: "fix.dispatch", round_id: "R2:0" }, { ts: at(2), step: "sweep.fix.dispatch_failed" },
+    { ts: at(3), step: "sweep.fix.dispatch_failed" }, { ts: at(4), step: "fix.done" },
+    spawned(5, "R3"), { ts: at(5), run_id: "R3", step: "fix.retrigger", round_id: "R3:0" },
     { ts: "garbage", step: "fix.dispatch" }, { step: "sweep.fix.dispatch_failed" },
   ]);
-  assert.deepEqual(read(T0), { admitted: 2, refused: 2, refusedCauses: { dispatch_failed: 2 } }, "a retrigger round ran; a fix.done without evidence of a worker does not count");
-  assert.deepEqual(read(T0 - 10 * MIN), { admitted: 3, refused: 2, refusedCauses: { dispatch_failed: 2 } });
+  assert.deepEqual(read(T0), { admitted: 2, refused: 3, refusedCauses: { dispatch_failed: 2, no_worker_start: 1 } },
+    "a retrigger round ran; a fix.done with no spawned worker is a refusal");
+  assert.deepEqual(read(T0 - 10 * MIN), { admitted: 3, refused: 3, refusedCauses: { dispatch_failed: 2, no_worker_start: 1 } });
   assert.deepEqual(read(T0 + 10 * MIN), { admitted: 0, refused: 0 });
 });
 
@@ -537,7 +541,8 @@ test("W1-T13990 criterion 2: the union reader answers from a read begun inside t
     await union.settled();
     assert.deepEqual(union.readerFor(lines())(T0), { admitted: 0, refused: 2, refusedCauses: { capacity: 1, dispatch_failed: 1 } },
       "the pass's rise inside the window and the lost child, each once, though the live file holds them too");
-    fixture.append([{ ts: at(nowMs + MIN), run_id: "DAEMON-1", step: "fix.retrigger", round_id: "r1" }]);
+    fixture.append([fixWorkerStart(nowMs + MIN, "DAEMON-1", 13, "r1"),
+      { ts: at(nowMs + MIN), run_id: "DAEMON-1", step: "fix.retrigger", round_id: "r1" }]);
     nowMs += 2 * MIN;
     assert.deepEqual(union.readerFor(lines())(T0 + 2 * MIN), { admitted: 1, refused: 2, refusedCauses: { capacity: 1, dispatch_failed: 1 } },
       "a round the live file shows after the read began counts");
@@ -856,6 +861,7 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
     // fix.dispatch for it (W1-T2403), so the retrigger row is the round's only record.
     fixture.append([
       { ts: new Date(nowMs + 2 * MIN).toISOString(), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_admitted: 1, fixes_refused: 0 },
+      fixWorkerStart(nowMs + 3 * MIN, "work-fix-1", 13, "r1"),
       { ts: new Date(nowMs + 20 * MIN).toISOString(), run_id: "work-fix-1", task_id: "W1-T1", step: "fix.retrigger", round_id: "r1", retrigger: 1, strike: 0 },
     ]);
     assert.equal(lines().some((line) => line.step === "fix.dispatch"), false, "the dwell holds no fix.dispatch row");
@@ -879,6 +885,7 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
       // round has written no fix.dispatch.
       assert.equal(h.passes.controller({ free: true })(13), true, "the capacity controller admits the claim");
       startFixChild();
+      h.passes.append([fixWorkerStart(h.now(), "work-fix-dispatch-R1", 13, "r1")]);
       assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch" || line.step === "fix.retrigger"), false);
       await h.union.settled();
       assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
@@ -908,7 +915,8 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — a settled work
     const ts = new Date(on + 20 * MIN).toISOString();
     const terminal = { ts, run_id: "work-fix-dispatch-R1", task_id: "W1-T1", step: "fix.done", round_id: "r1",
       head_sha: "a1", subtype: "signal_terminated", worker_exit: "signal", worker_exit_signal: "SIGTERM" };
-    h.passes.append([terminal]);
+    const spawned = fixWorkerStart(on + 5 * MIN, "work-fix-dispatch-R1", 13, "r1");
+    h.passes.append([spawned, terminal]);
     await h.union.settled();
     assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
     await h.union.settled();
@@ -918,7 +926,7 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — a settled work
     assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
 
     const dispatch = { ...terminal, step: "fix.dispatch" };
-    assert.deepEqual(adaptiveWip.fixRoundReaderFor([terminal, dispatch])(on), { admitted: 1, refused: 0 },
+    assert.deepEqual(adaptiveWip.fixRoundReaderFor([spawned, terminal, dispatch])(on), { admitted: 1, refused: 0 },
       "a signal receipt and the dispatch for the same round count once");
   });
 });
@@ -934,8 +942,9 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
       const ageing = { stuck: 12, movable: 12 };
       const on = enter(h);
       // The worker ran; its result was refused at commit, and fix.ts writes this fix.done before any fix.dispatch.
-      h.passes.append([{ ts: new Date(on + 20 * MIN).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", step: "fix.done",
-        head_sha: "a1", ...row }]);
+      h.passes.append([fixWorkerStart(on + 5 * MIN, "work-fix-dispatch-R1", 13, row.round_id),
+        { ts: new Date(on + 20 * MIN).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", step: "fix.done",
+          head_sha: "a1", ...row }]);
       assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch"), false, "the dwell holds no fix.dispatch row");
       await h.union.settled();
       assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
@@ -982,6 +991,62 @@ test("W1-T13990 criterion 2: a fix.stood_down before any fix worker started is a
     assert.equal(released.length, 1);
     assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count, released[0].fields.refused_causes],
       ["fix_lane_refused", 3, { capacity: 2, stood_down: 1 }]);
+  });
+});
+
+/** A dwell with 12 ageing PRs, one sweep claim refused for capacity, and one fix round's rows written at `on + 7 min`. */
+async function replayBesideACapacityRefusal(dir: string, round: (atMs: number) => Array<Record<string, unknown>>) {
+  const h = unionHarness(dir, undefined, () => 0);
+  const ageing = { stuck: 12, movable: 12 };
+  const on = enter(h);
+  await h.union.settled();
+  h.consult(ageing, 5 * MIN);
+  h.passes.pass([14]);
+  h.passes.append(round(on + 7 * MIN));
+  const read = adaptiveWip.fixRoundReaderFor(h.passes.lines())(on);
+  await h.union.settled();
+  const gate = h.consult(ageing, focus.FOCUS_DWELL_MS - 5 * MIN);
+  return { read, gate, released: h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP) };
+}
+
+test("W1-T13990 criterion 2: a body-only repair spawns no fix worker, so beside a capacity refusal the dwell releases focus", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    // fix.ts's body-only repair: the PR body is rewritten and the strike is spent as a fix.dispatch, with no worker spawned.
+    const { read, gate, released } = await replayBesideACapacityRefusal(dir, (atMs) => [
+      { ts: new Date(atMs).toISOString(), run_id: "work-fix-dispatch-B1", task_id: "W1-T1", step: "fix.dispatch", strike: 1,
+        strike_cap: 3, unmet_count: 0, round: "resume", mode: "body-repair", defect: "bare-proof-title", verdict_regime: "executed",
+        head_sha: "a1" },
+    ]);
+    assert.deepEqual(read, { admitted: 0, refused: 2, refusedCauses: { capacity: 1, body_repair_only: 1 } });
+    assert.equal(gate, undefined, "no fix worker held a slot in the dwell: focus releases");
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count, released[0].fields.refused_causes],
+      ["fix_lane_refused", 2, { capacity: 1, body_repair_only: 1 }]);
+  });
+});
+
+test("W1-T13990 criterion 2: a merge that did not start spawns no fix worker, so beside a capacity refusal the dwell releases focus", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    // fix.ts's pre-spawn merge refusal: the strike is spent as fix.dispatch, fix.commit_refused and fix.done, one round id.
+    const { read, gate, released } = await replayBesideACapacityRefusal(dir, (atMs) => {
+      const ts = new Date(atMs).toISOString();
+      const run = "work-fix-dispatch-M1";
+      const roundId = `${run}:merge-refused:1:${atMs}`;
+      return [
+        { ts, run_id: run, task_id: "W1-T1", step: "fix.merge_start_failed", strike: 1, reason: "merge refused" },
+        { ts, run_id: run, task_id: "W1-T1", step: "fix.dispatch", round_id: roundId, strike: 1, strike_cap: 3, unmet_count: 1,
+          round: "resume", mode: "merge", verdict_regime: "executed", head_sha: "a1", reason: "merge refused" },
+        { ts, run_id: run, task_id: "W1-T1", step: "fix.commit_refused", round_id: roundId, head_sha: "a1", strike: 1,
+          mode: "merge", merge_start_failed: true, reason: "merge refused" },
+        { ts, run_id: run, task_id: "W1-T1", step: "fix.done", round_id: roundId, head_sha: "a1", strike: 1, mode: "merge",
+          subtype: "commit_refused" },
+      ];
+    });
+    assert.deepEqual(read, { admitted: 0, refused: 2, refusedCauses: { capacity: 1, merge_refused: 1 } }, "the round's rows, once");
+    assert.equal(gate, undefined, "no fix worker held a slot in the dwell: focus releases");
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count, released[0].fields.refused_causes],
+      ["fix_lane_refused", 2, { capacity: 1, merge_refused: 1 }]);
   });
 });
 
@@ -1042,7 +1107,7 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
       // The controller admitted the claim and the worker started; the round ended with no fix.dispatch and no fix.done.
       h.passes.append([
         { ts: new Date(on + 2 * MIN).toISOString(), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_admitted: 1, fixes_refused: 0 },
-        fixWorkerStart(on + 3 * MIN, "work-fix-dispatch-R1"),
+        fixWorkerStart(on + 3 * MIN, "work-fix-dispatch-R1", 13, "r1"),
         { ts: new Date(on + 20 * MIN).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", ...row },
       ]);
       assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch" || line.step === "fix.done"), false);

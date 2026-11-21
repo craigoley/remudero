@@ -102,12 +102,13 @@ export function deriveMovableStuckOwnedCount(
 
 /** W1-T13990: the fix lane's admissions since a time. */
 export interface FixRoundAdmissions {
-  /** Rounds whose fix worker started (its `worker.assignment` row, or a receipt only a worker that ran writes), however
-   *  the round ended: a round that used its slot in the window. */
+  /** Rounds whose fix worker was spawned and held a slot (its {@link FIX_WORKER_START_STEP} row), however the round
+   *  ended: a round that used its slot in the window. */
   admitted: number;
-  /** Claims refused with no fix worker started for them: by the capacity controller (each rise of a `sweep.fix_capacity`
-   *  row's `fixes_refused`), by review precedence before the controller was consulted, by an abandoned memory admission,
-   *  and rounds that ended or were lost before their worker started. */
+  /** Claims and rounds no fix worker was spawned for: refused by the capacity controller (each rise of a
+   *  `sweep.fix_capacity` row's `fixes_refused`), by review precedence before the controller was consulted, by an abandoned
+   *  memory admission; a body-only repair, a merge that did not start, and any other round that ended or was lost before
+   *  its worker spawned. */
   refused: number;
   /** W1-T13990: {@link refused} by cause, present when any was refused. */
   refusedCauses?: Partial<Record<FixRoundRefusalCause, number>>;
@@ -118,32 +119,33 @@ export interface FixRoundAdmissions {
 /** Undefined when the fix lane's rows have not been read, or a refusal count in the window has no baseline. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
-/** W1-T13990: why a fix claim was refused. A round's own end before its worker started is named by that end. */
+/** W1-T13990: why no fix worker was spawned for a claim or a round. A round's own end names it. */
 export type FixRoundRefusalCause = "capacity" | "review_precedence" | "memory_admission_abandoned" | "dispatch_failed" |
-  "stood_down" | "superseded" | "spawn_abandoned" | "round_yielded";
+  "stood_down" | "superseded" | "spawn_abandoned" | "round_yielded" | "body_repair_only" | "merge_refused" | "no_worker_start";
 
-/** The one fact a round is judged on: did its fix worker start. `worker.assignment` with `worker_rung: "fix"` is written
- *  as the worker is assigned, before its provider call (worker.ts emitWorkerSelectionAssignment, run-task.ts
- *  fixWorkerReceipt), under the fix run's `run_id` with the round as `repair_round_id`. */
+/** The one fact a round is judged on: was its fix worker spawned. `worker.assignment` with `worker_rung: "fix"` is the one
+ *  row a spawn writes, after the worker's admission and before its provider call (worker.ts emitWorkerSelectionAssignment
+ *  through run-task.ts fixWorkerReceipt, every fix rung spawn's wrapper), under the fix run's `run_id` with the round as
+ *  `repair_round_id`. No other row is a start: `fix.dispatch` and `fix.done` are also written by rounds that spawned no
+ *  worker (fix.ts's body-only repair, and its merge that did not start). */
 export const FIX_WORKER_START_STEP = "worker.assignment";
-/** Receipts only a fix worker that ran writes, after it returns: a start too, for a round whose start row is not read. */
-const FIX_WORKER_RECEIPT_STEPS = new Set(["fix.dispatch", "fix.retrigger"]);
-/** A round's ends that say nothing about its worker: a refusal when no worker started for its run, else a round run. */
+/** A round's rows that say nothing about its worker: part of a spawned round's run, else that round's refusal. */
 const FIX_ROUND_END_CAUSES: ReadonlyMap<string, FixRoundRefusalCause> = new Map([
+  ["fix.dispatch", "no_worker_start"], ["fix.retrigger", "no_worker_start"], ["fix.done", "no_worker_start"],
   ["fix.stood_down", "stood_down"], ["fix.superseded", "superseded"], ["fix.spawn_abandoned", "spawn_abandoned"],
-  ["fix.round_yielded", "round_yielded"],
+  ["fix.round_yielded", "round_yielded"], ["sweep.fix.dispatch_failed", "dispatch_failed"],
 ]);
 /** The refusal review precedence makes before the capacity controller is consulted (sweep.ts countedYieldingFixClaim). */
 export const FIX_CLAIM_YIELDED_STEP = "sweep.fix.claim_yielded";
-const FIX_ROUND_STEPS: readonly string[] = [FIX_WORKER_START_STEP, ...FIX_WORKER_RECEIPT_STEPS, ...FIX_ROUND_END_CAUSES.keys(),
-  "fix.done", "sweep.fix_capacity", "sweep.fix.dispatch_failed", FIX_CLAIM_YIELDED_STEP];
+const FIX_ROUND_STEPS: readonly string[] = [FIX_WORKER_START_STEP, ...FIX_ROUND_END_CAUSES.keys(), "sweep.fix_capacity",
+  FIX_CLAIM_YIELDED_STEP];
 
-/** W1-T13990: a `fix.done` row a worker that ran wrote: ended by a signal, its result refused at commit (fix.ts writes that
- *  receipt after the worker and before any `fix.dispatch`), or one that took turns. An abandoned admission spawned none. */
-function fixDoneRecordsWorker(line: Record<string, unknown>): boolean {
-  if (line.subtype === "admission_abandoned" || line.worker_exit === "not_spawned") return false;
-  return line.worker_exit === "signal" || line.subtype === "commit_refused" ||
-    (typeof line.num_turns === "number" && line.num_turns > 0);
+/** A round end's own cause when no worker was spawned for it: fix.ts names a body-only repair by its `mode` and a merge that
+ *  did not start by its round id (`<run>:merge-refused:...`). */
+function unstartedCause(line: Record<string, unknown>, cause: FixRoundRefusalCause): FixRoundRefusalCause {
+  if (line.mode === "body-repair") return "body_repair_only";
+  if (typeof line.round_id === "string" && line.round_id.includes(":merge-refused:")) return "merge_refused";
+  return cause;
 }
 
 const text = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
@@ -154,47 +156,58 @@ const prOfUrl = (value: unknown): number | undefined => {
 
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
-  // Each round whose worker started, keyed by its round id (else its run), at its latest row: it used its slot until then.
+  const stamp = (line: Record<string, unknown>): number => typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
+  // Each round whose fix worker was spawned, keyed by its round id (else its run), at its latest row: it held its slot
+  // until then. Read first, since a spawn and its round's other rows can be read in either order.
   const started = new Map<string, number>();
+  const startedRound = new Set<string>();
   const startedRunUnit = new Map<string, string>();
   const startedPr = new Map<number, { unit: string; ts: number }[]>();
+  lines.forEach((line, index) => {
+    const ts = stamp(line);
+    if (line.step !== FIX_WORKER_START_STEP || line.worker_rung !== "fix" || !Number.isFinite(ts)) return;
+    const roundId = text(line.repair_round_id);
+    const runId = text(line.run_id);
+    const unit = roundId !== undefined ? `round\0${roundId}` : runId !== undefined ? `run\0${runId}` : `row\0${index}`;
+    started.set(unit, Math.max(started.get(unit) ?? ts, ts));
+    if (roundId !== undefined) startedRound.add(roundId);
+    if (runId !== undefined) startedRunUnit.set(runId, unit);
+    const pr = prOfUrl(line.repair_pr_url);
+    if (pr !== undefined) startedPr.set(pr, [...(startedPr.get(pr) ?? []), { unit, ts }]);
+  });
+  // The spawned round a row belongs to: its round's, its run's, or, for an in-process dispatch's loss that names no run,
+  // the latest spawn for its pull request at or before it.
+  const startedUnitOf = (line: Record<string, unknown>, ts: number): string | undefined => {
+    if (typeof line.round_id === "string") return startedRound.has(line.round_id) ? `round\0${line.round_id}` : undefined;
+    const lost = line.step === "sweep.fix.dispatch_failed";
+    for (const run of [line.child_run_id, line.admission_run_id, lost ? undefined : line.run_id]) {
+      const unit = typeof run === "string" ? startedRunUnit.get(run) : undefined;
+      if (unit !== undefined) return unit;
+    }
+    if (!lost || line.child_run_id !== undefined || line.admission_run_id !== undefined) return undefined;
+    const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
+    return pr === undefined ? undefined : startedPr.get(pr)?.filter((s) => s.ts <= ts).at(-1)?.unit;
+  };
   const refused: { ts: number; cause: FixRoundRefusalCause }[] = [];
   const abandonedRounds = new Set<unknown>();
-  // Rows judged once every start is known, since a start and its round's end can be read in either order.
-  const ends: { line: Record<string, unknown>; ts: number; cause: FixRoundRefusalCause }[] = [];
+  const refusedRounds = new Set<string>();
+  const dispatchFailures: { line: Record<string, unknown>; ts: number }[] = [];
   // Each controller (one per pass, keyed by its controller_id, or by run and surface on older rows) writes its running
   // refusal count from 0.
   const controllerRefused = new Map<string, number>();
   // A controller whose first row read already counts refusals opened before these lines: its count has no baseline.
   const unbaselined: number[] = [];
   const refusedRuns = new Set<unknown>();
-  const start = (line: Record<string, unknown>, ts: number, roundId: string | undefined, index: number): void => {
-    const runId = text(line.run_id);
-    const unit = roundId !== undefined ? `round\0${roundId}` : runId !== undefined ? `run\0${runId}` : `row\0${index}`;
-    started.set(unit, Math.max(started.get(unit) ?? ts, ts));
-    if (runId !== undefined) startedRunUnit.set(runId, unit);
-    const pr = prOfUrl(line.repair_pr_url) ?? (typeof line.pr_number === "number" ? line.pr_number : undefined);
-    if (pr !== undefined) startedPr.set(pr, [...(startedPr.get(pr) ?? []), { unit, ts }]);
-  };
-  lines.forEach((line, index) => {
-    if (typeof line.step !== "string" || !FIX_ROUND_STEPS.includes(line.step)) return;
-    const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
-    if (!Number.isFinite(ts)) return;
+  for (const line of lines) {
+    if (typeof line.step !== "string" || line.step === FIX_WORKER_START_STEP || !FIX_ROUND_STEPS.includes(line.step)) continue;
+    const ts = stamp(line);
+    if (!Number.isFinite(ts)) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : "";
-    if (line.step === FIX_WORKER_START_STEP) {
-      if (line.worker_rung === "fix") start(line, ts, text(line.repair_round_id), index);
-    } else if (FIX_WORKER_RECEIPT_STEPS.has(line.step) || (line.step === "fix.done" && fixDoneRecordsWorker(line))) {
-      start(line, ts, text(line.round_id), index);
-    } else if (line.step === "fix.done") {
-      if (line.subtype !== "admission_abandoned" || abandonedRounds.has(line.round_id)) return;
-      if (typeof line.round_id === "string") abandonedRounds.add(line.round_id);
-      if (runId !== "") refusedRuns.add(runId);
-      refused.push({ ts, cause: "memory_admission_abandoned" });
-    } else if (line.step === FIX_CLAIM_YIELDED_STEP) {
+    if (line.step === FIX_CLAIM_YIELDED_STEP) {
       refused.push({ ts, cause: "review_precedence" });
     } else if (line.step === "sweep.fix_capacity") {
       const count = line.fixes_refused;
-      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return;
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
       // A controller's own id when its row carries one: passes sharing a run and surface are separate counters.
       const key = typeof line.controller_id === "string" ? `id\0${line.controller_id}` : `${runId}\0${String(line.surface)}`;
       if (!controllerRefused.has(key) && count > 0) unbaselined.push(ts);
@@ -205,31 +218,31 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       for (let i = 0; i < fresh; i++) refused.push({ ts, cause: "capacity" });
       if (fresh > 0) refusedRuns.add(runId);
     } else {
-      ends.push({ line, ts, cause: FIX_ROUND_END_CAUSES.get(line.step) ?? "dispatch_failed" });
+      const unit = startedUnitOf(line, ts);
+      // A round whose worker was spawned held its slot however it ended: it ran, until its last row.
+      if (unit !== undefined) {
+        started.set(unit, Math.max(started.get(unit) ?? ts, ts));
+      } else if (line.step === "sweep.fix.dispatch_failed") {
+        dispatchFailures.push({ line, ts });
+      } else if (line.step === "fix.done" && line.subtype === "admission_abandoned") {
+        if (abandonedRounds.has(line.round_id)) continue;
+        if (typeof line.round_id === "string") abandonedRounds.add(line.round_id);
+        if (runId !== "") refusedRuns.add(runId);
+        refused.push({ ts, cause: "memory_admission_abandoned" });
+      } else {
+        // One refusal per round, however many of its rows were read.
+        if (typeof line.round_id === "string") {
+          if (refusedRounds.has(line.round_id)) continue;
+          refusedRounds.add(line.round_id);
+        }
+        refused.push({ ts, cause: unstartedCause(line, FIX_ROUND_END_CAUSES.get(line.step) ?? "no_worker_start") });
+      }
     }
-  });
-  // The started round an end belongs to: its run's, or, for an in-process dispatch's loss that names no run, the latest
-  // start for its pull request at or before it.
-  const startedUnitOf = (line: Record<string, unknown>, ts: number): string | undefined => {
-    for (const run of [line.child_run_id, line.admission_run_id, line.step === "sweep.fix.dispatch_failed" ? undefined : line.run_id]) {
-      const unit = typeof run === "string" ? startedRunUnit.get(run) : undefined;
-      if (unit !== undefined) return unit;
-    }
-    if (line.step !== "sweep.fix.dispatch_failed" || line.child_run_id !== undefined || line.admission_run_id !== undefined) return undefined;
-    const pr = typeof line.pr_number === "number" ? line.pr_number : undefined;
-    return pr === undefined ? undefined : startedPr.get(pr)?.filter((s) => s.ts <= ts).at(-1)?.unit;
-  };
-  for (const { line, ts, cause } of ends) {
-    const unit = startedUnitOf(line, ts);
-    // A round whose worker started used its slot however it ended: it ran, until its end.
-    if (unit !== undefined) {
-      started.set(unit, Math.max(started.get(unit) ?? ts, ts));
-      continue;
-    }
-    // A dispatch failure can report the same abandoned or refused child, in either ledger order.
-    if (cause === "dispatch_failed" &&
-      (abandonedRounds.has(line.round_id) || refusedRuns.has(line.child_run_id) || refusedRuns.has(line.admission_run_id))) continue;
-    refused.push({ ts, cause });
+  }
+  // A dispatch failure can report the same abandoned or refused child, in either ledger order.
+  for (const { line, ts } of dispatchFailures) {
+    if (abandonedRounds.has(line.round_id) || refusedRuns.has(line.child_run_id) || refusedRuns.has(line.admission_run_id)) continue;
+    refused.push({ ts, cause: "dispatch_failed" });
   }
   // A window holding such a first row cannot tell its refusals from the ones before it: unknown, never idle or inflated.
   return (sinceMs) => {
