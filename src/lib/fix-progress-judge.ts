@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { baseReproductionFiles } from "./base-reproduction.js";
-import { PR_TERMINAL_STEP } from "./ledger-carry.js";
+import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 
 export const FIX_BUDGET_JUDGE_SITES = [
   { name: "diagnose-retry", file: "src/lib/classify.ts", formerCeiling: 2 },
@@ -360,6 +360,16 @@ export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr
   return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
     ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
 }
+/** W1-T13865: whether the owner's {@link unfiledScopeGrant} was answered after the PR's newest round at `headSha`
+ * (its `fix.done` under `taskId`): a grant answered before that round's ruling was spent on it. */
+export function unfiledScopeGrantAfterRound(ledger: readonly Record<string, unknown>[],
+  pr: { prNumber: number; taskId: string | undefined; headSha: string }): boolean {
+  const grant = unfiledScopeGrant(ledger, pr);
+  if (grant === undefined) return false;
+  const ruled = ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === pr.taskId && row.head_sha === pr.headSha);
+  return ledger.slice(ruled + 1).some(row => row.step === "panel.question_answered" &&
+    row.task_id === `PR-${pr.prNumber}` && row.origin === grant.origin);
+}
 const grantHint = (paths: readonly unknown[]): string =>
   `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;
 /** Checks that only roll other checks up (ci.yml's `ci` over the shard matrix, ci-gate.yml's `ci-gate`, sweep.ts
@@ -683,7 +693,7 @@ export interface FixProgressWitness {
  * Keep this key separate from the escalation latch: that latch still owns its contract-refresh handshake.
  * Old rows lacking these witnesses are conservatively judged once before becoming reusable. */
 type FixProgressResolveOptions = FixProgressWitness & { judge?: FixProgressJudge; firstRound?: boolean };
-type FixProgressReceipt = { step: "fix.progress_judged" | "fix.progress_reused"; input_key: string; judged_at?: string };
+type FixProgressReceipt = { step: "fix.progress_judged" | "fix.progress_reused"; input_key: string; judged_at?: string; contract_revision?: string };
 export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
   opts: FixProgressResolveOptions & { reask: true }): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }>;
 export function resolveFixProgress(input: FixProgressInput, ledger: readonly Record<string, unknown>[],
@@ -693,6 +703,7 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
 ): Promise<{ decision: FixProgressReaskResult; receipt: FixProgressReceipt }> {
   const inputKey = createHash("sha256").update(JSON.stringify({ input,
     reviewInputDigest: opts.reviewInputDigest, contractRevision: opts.contractRevision })).digest("hex");
+  const witness = typeof opts.contractRevision === "string" ? { contract_revision: opts.contractRevision } : {};
   const readable = Boolean(opts.reviewInputDigest?.trim()) && opts.contractRevision !== undefined &&
     (opts.contractRevision === null || opts.contractRevision.trim().length > 0);
   const newest = ledger.findLast(row => row.step === "fix.progress_judged" && row.pr_number === input.prNumber &&
@@ -702,12 +713,125 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
       typeof newest.ts === "string" && Number.isFinite(Date.parse(newest.ts))) {
     const decision = parseFixProgressVerdict(JSON.stringify(newest));
     if (decision?.verdict === "continue" || decision?.verdict === "change-approach") {
-      return { decision, receipt: { step: "fix.progress_reused", input_key: inputKey, judged_at: newest.ts } };
+      return { decision, receipt: { step: "fix.progress_reused", input_key: inputKey, judged_at: newest.ts, ...witness } };
     }
   }
   const decision = (opts.firstRound ? firstFixRoundVerdict(input) : undefined) ??
     (opts.reask ? await judgeFixProgress(input, opts.judge, { reask: true }) : await judgeFixProgress(input, opts.judge));
-  return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey } };
+  return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey, ...witness } };
+}
+
+/** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too. */
+export interface PriorRoundHold { hold: "NEEDS_SCOPE" | "FLAKE"; since: string; roundId?: string; contractRevision?: string; reason: string;
+  /** A merged-amendment receipt newer than the ruling that no merge time dates: it releases nothing (fail closed). */
+  undatedAmendmentReceipt?: true }
+export const PRIOR_ROUND_HOLD_FIELD = "prior_round_hold";
+export interface PriorRoundFacts {
+  taskId: string | undefined; headSha: string; contractRevision?: string;
+  checkCompletions?: readonly { name: string; completedAt?: string }[];
+  /** Live merge times of the task's amendment PRs, keyed by lowercase {@link prUrlKey}; null is read and unmerged. */
+  amendmentMergedAt?: ReadonlyMap<string, string | null>;
+}
+const validTs = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+const scopeAmendmentKey = (row: Record<string, unknown>) => prUrlKey(row.amendment_url ?? row.amendmentUrl)?.toLowerCase();
+/** The task's amendment PRs whose merge time no pr.terminal row records: the sweep reads these live. A receipt's
+ *  own ts is written after the fact, and reconciliation never discovers an amendment no pr_url row names. */
+export function scopeAmendmentsWithoutMergeTime(ledger: readonly Record<string, unknown>[], taskId: string | undefined): string[] {
+  if (taskId === undefined) return [];
+  const timed = new Set(ledger.flatMap(row => row.step === PR_TERMINAL_STEP && row.state === "merged" && validTs(row.merged_at)
+    ? [prUrlKey(row.pr_url)?.toLowerCase()] : []));
+  const urls = new Map<string, string>();
+  for (const row of ledger) {
+    if (row.step !== "fix.scope_amendment" || row.task_id !== taskId) continue;
+    const key = scopeAmendmentKey(row);
+    if (key !== undefined && !timed.has(key)) urls.set(key, String(row.amendment_url ?? row.amendmentUrl));
+  }
+  return [...urls.values()];
+}
+const newestRoundIndex = (ledger: readonly Record<string, unknown>[], taskId: string | undefined, headSha: string) =>
+  taskId === undefined ? -1 : ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === taskId && row.head_sha === headSha);
+/** The ruling of the task's newest fix.done at this head, whatever it is; the sweep reads live inputs only for a ruling
+ *  that waits on them, before it asks {@link priorRoundHold} whether one changed. */
+export function priorRoundRuling(ledger: readonly Record<string, unknown>[], taskId: string | undefined, headSha: string): string | undefined {
+  return stringValue(ledger[newestRoundIndex(ledger, taskId, headSha)]?.fix_outcome);
+}
+export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts): PriorRoundHold | undefined {
+  if (facts.taskId === undefined) return undefined;
+  const doneIndex = newestRoundIndex(ledger, facts.taskId, facts.headSha);
+  const done = ledger[doneIndex];
+  const outcome = done?.fix_outcome;
+  if ((outcome !== "NEEDS_SCOPE" && outcome !== "FLAKE") || typeof done?.ts !== "string") return undefined;
+  const since = done.ts, sinceMs = Date.parse(since);
+  if (!Number.isFinite(sinceMs)) return undefined;
+  const after = (ts: unknown) => typeof ts === "string" && Date.parse(ts) > sinceMs;
+  const roundId = stringValue(done.round_id);
+  const head = facts.headSha.slice(0, 7);
+  if (outcome === "FLAKE") {
+    if (facts.checkCompletions?.some(check => after(check.completedAt))) return undefined;
+    return { hold: "FLAKE", since, roundId, reason: `the last fix round at ${head} ruled FLAKE at ${since} and no required ` +
+      "check has completed on this head since — no fix round until one does" };
+  }
+  const amendments = ledger.filter(row => row.step === "fix.scope_amendment" && row.task_id === facts.taskId);
+  const amendmentKey = scopeAmendmentKey;
+  const amendmentKeys = new Set(amendments.map(amendmentKey).filter(key => key !== undefined));
+  const mergeTimes = new Map<string, string>();
+  for (const row of ledger) {
+    if (row.step !== PR_TERMINAL_STEP || row.state !== "merged") continue;
+    const key = prUrlKey(row.pr_url)?.toLowerCase();
+    // A receipt's ts is written after the merge, at any later time, so only merged_at dates the merge.
+    if (key !== undefined && amendmentKeys.has(key) && validTs(row.merged_at)) {
+      if (after(row.merged_at)) return undefined;
+      mergeTimes.set(key, row.merged_at);
+    }
+  }
+  for (const [key, mergedAt] of facts.amendmentMergedAt ?? []) {
+    if (!amendmentKeys.has(key) || mergeTimes.has(key)) continue;
+    if (mergedAt === null || !validTs(mergedAt)) {
+      // Read live and not merged: no receipt for it can date a merge.
+      mergeTimes.set(key, "");
+      continue;
+    }
+    if (after(mergedAt)) return undefined;
+    mergeTimes.set(key, mergedAt);
+  }
+  let undated = false;
+  if (amendments.some(row => {
+    const outcome = row.outcome ?? row.kind ?? row.state;
+    if (outcome !== "merged" && outcome !== "amendment_merged") return false;
+    let key = amendmentKey(row);
+    if (key === undefined) {
+      // A local merge receipt can omit its URL. Only a unique amendment recorded for this task supplies it.
+      const number = Number(row.amendmentNumber ?? row.amendment_number);
+      const candidates = [...amendmentKeys].filter(candidate => candidate.endsWith(`#${number}`));
+      if (candidates.length === 1) key = candidates[0];
+    }
+    const known = key === undefined ? undefined : mergeTimes.get(key);
+    if (known === "") return false;
+    // Only a merge time dates a merge: a receipt's own ts is when it was adopted, at any time after the merge.
+    const mergedAt = known ?? (validTs(row.merged_at) ? row.merged_at : undefined);
+    if (mergedAt === undefined) {
+      if (after(row.ts)) undated = true;
+      return false;
+    }
+    return after(mergedAt);
+  })) return undefined;
+  const latched = ledger.findLast(row => row.step === "sweep.disposed" &&
+    row.task_id === facts.taskId && row.head_sha === facts.headSha &&
+    row[PRIOR_ROUND_HOLD_FIELD] === "NEEDS_SCOPE" && row.prior_round_hold_since === since);
+  // A run-task round can leave its contract in the rung's own progress receipt before its fix.done.
+  const roundRevision = stringValue(done.contract_revision) ?? (typeof done.run_id === "string" ?
+    stringValue(ledger.findLast((row, index) => index < doneIndex && row.run_id === done.run_id &&
+      row.task_id === facts.taskId && row.head_sha === facts.headSha &&
+      (row.step === "fix.progress_judged" || row.step === "fix.progress_reused") &&
+      (row.site === "fix-strike" || row.site === "fix-retrigger" || row.site === "rung.parked"))?.contract_revision) : undefined);
+  const currentRevision = facts.contractRevision;
+  const standingOn = roundRevision ?? stringValue(latched?.prior_round_hold_contract_revision) ?? currentRevision;
+  if (standingOn !== undefined && currentRevision !== undefined && standingOn !== currentRevision) return undefined;
+  return { hold: "NEEDS_SCOPE", since, roundId, ...(standingOn !== undefined ? { contractRevision: standingOn } : {}),
+    reason: `the last fix round at ${head} ruled NEEDS_SCOPE at ${since}; no scope amendment has merged and the task ` +
+      "contract is unchanged since — no fix round until one changes" + (undated ? "; a merged-amendment receipt newer than the " +
+      "ruling carries no merge time and none was read live, so it releases nothing" : ""),
+    ...(undated ? { undatedAmendmentReceipt: true as const } : {}) };
 }
 
 /** W1-T12710: the remedies a stalled criterion gets, in this order. */
