@@ -29,7 +29,7 @@ import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
 import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
+import { PlanError, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, loadLocalReleasePlan, publicReleaseDependencyError, readReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
 
 type Row = Record<string, unknown>;
@@ -464,7 +464,7 @@ export async function readApproveRelease(
       return { outcome: "unreadable", reason: "public-replay-record-unverified" };
     }
     const read = await readOps(options.stateDir, options.api, options.opsSnapshot);
-    return resolvePublicReplay(taskId, view.plan, read);
+    return (await resolvePublicReplay(taskId, view.plan, read, expectedPublicDigest, () => readStrictReplayPlan(publicRoot))).release;
   }
   const lookup = { ...options };
   let publicCommit: string | undefined;
@@ -482,12 +482,11 @@ export async function readApproveRelease(
     return view;
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
-  if (release?.outcome !== "held") {
-    // Only a held record answers from a plan with an unresolved dependency; any other release refuses as origin/main does.
+  if (release?.outcome !== "held" || (publicPlan && !publicPlan.byId.has(release.hold.task))) {
     const localError = publicReleaseDependencyError(localPlan);
-    if (localError) throw localError;
-    if (publicPlan && publicReleaseDependencyError(publicPlan)) {
-      // Match the strict ref loader's working-tree fallback for an unresolved public dependency.
+    if (localError && release?.outcome !== "held") throw localError;
+    if (!localError && publicPlan && publicReleaseDependencyError(publicPlan)) {
+      // An ops-only hold may be caused by a dependency the strict fallback supplies. Compose with the same ops snapshot.
       release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
     }
   }
@@ -532,8 +531,7 @@ async function readOps(stateDir?: string, api?: OpsCatalogApi, snapshot?: OpsCat
   return snapshot ?? readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
 }
 
-/** The probe and the retry require the same release decision over a verified public record. */
-function resolvePublicReplay(taskId: string, plan: Plan, read: OpsRead): TaskReleasePlan {
+function publicReplayPlan(taskId: string, plan: Plan, read: OpsRead): TaskReleasePlan {
   if (read.outcome !== "off") {
     if (read.outcome !== "ok" || read.plan === undefined) return { outcome: "unreadable", reason: "public-replay-ops-unreadable" };
     const composition = composeSecondaryPlan(plan, read.plan);
@@ -545,6 +543,35 @@ function resolvePublicReplay(taskId: string, plan: Plan, read: OpsRead): TaskRel
     return { outcome: "unreadable", reason: "public-replay-plan-invalid" };
   }
   return { outcome: "found", catalog: "public", plan };
+}
+
+async function readStrictReplayPlan(publicRoot: string): Promise<Plan | undefined> {
+  try {
+    return (await readReleasePublicPlan(publicRoot)).plan;
+  } catch (error) {
+    // Both views failed strict validation. Keep the original plan-invalid decision.
+    if (error instanceof PlanError) return undefined;
+    throw error;
+  }
+}
+
+/** The probe and retry verify the record in each public view they use, with one ops snapshot. */
+async function resolvePublicReplay(
+  taskId: string, plan: Plan, read: OpsRead, expectedDigest: string | undefined, readStrict?: () => Promise<Plan | undefined>,
+): Promise<{ release: TaskReleasePlan; digest?: string }> {
+  const release = publicReplayPlan(taskId, plan, read);
+  if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { release };
+  const record = plan.byId.get(taskId);
+  const moved = record === undefined && read.outcome === "ok" ? read.plan?.byId.get(taskId) : undefined;
+  const digest = record ? publicRecordDigest(record) : moved ? opsRecordDigest(moved) : undefined;
+  if (record === undefined || digest !== expectedDigest) {
+    return { release: { outcome: "unreadable", reason: "public-replay-record-unverified" }, digest };
+  }
+  if (release.outcome === "unreadable" && release.reason === "public-replay-plan-invalid" && readStrict) {
+    const strictPlan = await readStrict();
+    if (strictPlan !== undefined) return resolvePublicReplay(taskId, strictPlan, read, expectedDigest);
+  }
+  return { release, digest };
 }
 
 /** The ops main commit, for the `ops-main` clearing event; undefined when there is no ops catalog or it cannot be read. */
@@ -573,6 +600,7 @@ export async function fixDispatchCauseProbe(cause: string, opts: { stateDir: str
 /** Each registered class's probe: the read that proves its cause gone, over the same reads the refused action makes. */
 export function productionStuckStateProbe(opts: {
   stateDir: string; publicPlan: (item: HeldItem) => Plan | undefined | Promise<Plan | undefined>; api: OpsCatalogApi; destinationRead: () => Promise<unknown>;
+  strictPublicPlan?: () => Promise<Plan | undefined>;
 }): (item: HeldItem) => Promise<ProbeResult> {
   return async (item) => {
     if (item.className === "garden-filing-destination-unreadable") {
@@ -588,12 +616,9 @@ export function productionStuckStateProbe(opts: {
     if (item.publicRelease && (read.outcome === "off" || (read.outcome === "ok" && read.plan !== undefined))) {
       const plan = await opts.publicPlan(item);
       if (plan === undefined) return { present: true, reason: "origin-main-unreadable" };
-      const record = plan.byId.get(item.taskId!);
-      const moved = record === undefined && read.outcome === "ok" ? read.plan?.byId.get(item.taskId!) : undefined;
-      const digest = record ? publicRecordDigest(record) : moved ? opsRecordDigest(moved) : undefined;
-      const release = resolvePublicReplay(item.taskId!, plan, read);
-      if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { present: true, reason: release.reason };
-      return release.outcome === "found" ? { present: false, digest } : { present: true, digest, reason: "reason" in release ? release.reason : release.outcome };
+      const { release, ...observed } = await resolvePublicReplay(item.taskId!, plan, read, item.digest, opts.strictPublicPlan);
+      return release.outcome === "found" ? { present: false, ...observed }
+        : { present: true, ...observed, reason: "reason" in release ? release.reason : release.outcome };
     }
     if (read.outcome !== "ok" || read.plan === undefined) return { present: true, reason: `ops-${read.outcome}` };
     const publicPlan = await opts.publicPlan(item);
@@ -673,6 +698,6 @@ export function productionStuckStatePorts(ctx: {
       const view = await readReleasePublicPlan(ctx.publicRoot, { keepUnseenDependencies: item.className === "release-compose" });
       return item.publicRelease?.publicCommit !== undefined && view.read === "working_tree" ? undefined : view.plan;
     },
-      api, destinationRead: ctx.destinationRead }),
+      strictPublicPlan: () => readStrictReplayPlan(ctx.publicRoot), api, destinationRead: ctx.destinationRead }),
   };
 }

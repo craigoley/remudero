@@ -123,9 +123,9 @@ function publicMain(t: TestContext, text: string) {
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
-async function refusalFixture(t: TestContext, opsBranch = "main") {
+async function refusalFixture(t: TestContext, opsBranch = "main", bootText = PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record")) {
   const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"), opsBranch);
-  const main = publicMain(t, PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record"));
+  const main = publicMain(t, bootText);
   main.publish(PUBLIC_TEXT);
   const rows: Row[] = [];
   let now = NOW;
@@ -231,9 +231,11 @@ test("W1-T13785 criterion 4: the ops clearing event follows the catalog's defaul
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
-test("W1-T13785 criterion 4: a public replay waits while an unrelated public-to-ops edge remains, as origin/main's strict loader refuses that plan, and runs once it is gone", async t => {
+test("W1-T13785 criterion 4: a public replay waits while both public views fail strict validation", async t => {
   const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
-  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  const invalid = PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]);
+  main.publish(invalid);
+  writeFileSync(main.planPath, invalid);
   fx.set(record("OPS-GOOD"));
   const [item] = scanStuckState(rows).open;
   assert.ok(item);
@@ -250,6 +252,50 @@ test("W1-T13785 criterion 4: a public replay waits while an unrelated public-to-
   await pass();
   assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+});
+
+test("W1-T13785 criterion 4: clearing the duplicate replays the unchanged public record from the strict fallback", async t => {
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t, "main", PUBLIC_TEXT);
+  const invalidTip = PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]);
+  main.publish(invalidTip);
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.publicRelease?.publicCommit);
+  const strict = await readReleasePublicPlan(main.dir);
+  assert.equal(strict.read, "working_tree");
+  const current = strict.plan.byId.get("PUB-2")!;
+  const digest = publicRecordDigest(current);
+  assert.equal(item.digest, digest);
+  assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "held" });
+  await pass();
+
+  fx.set(record("OPS-GOOD"));
+  assert.equal(await readApproveRelease("PUB-2", strict.plan, main.dir, fx.lookup, row => rows.push(row)), undefined,
+    "ordinary approve uses the valid working-tree record");
+  assert.deepEqual(await ports.probe(item), { present: false, digest });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => row.exit_code), [0]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+});
+
+test("W1-T13785 criterion 4: the probe and retry reject a changed record in the strict fallback", async t => {
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t, "main", PUBLIC_TEXT);
+  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  await pass();
+  fx.set(record("OPS-GOOD"));
+  assert.deepEqual(await ports.probe(item), { present: false, digest: item.digest });
+
+  writeFileSync(main.planPath, PUBLIC_TEXT.replace("held public fixture PUB-2", "edited after the probe"));
+  const fallback = loadPlan(main.planPath).byId.get("PUB-2")!;
+  assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, fx.lookup, row => rows.push(row), item.digest),
+    { outcome: "unreadable", reason: "public-replay-record-unverified" });
+  await pass();
+  await pass();
+  assert.deepEqual(approved, []);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed").map(row => row.current_digest), [publicRecordDigest(fallback)]);
 });
 
 test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only edit or switching the destination off", async t => {
@@ -415,7 +461,9 @@ test("W1-T13785 criterion 4: a public retry checks the digest and catalog again 
   main.unpublish();
   assert.deepEqual(await ports.probe(item!), { present: true, reason: "origin-main-unreadable" });
   assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-record-unverified" });
-  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  const invalid = PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]);
+  main.publish(invalid);
+  writeFileSync(main.planPath, invalid);
   rmSync(join(fx.stateDir, "plan-destination.json"));
   assert.deepEqual(await ports.probe(item!), { present: true, digest: expected, reason: "public-replay-plan-invalid" });
   assert.deepEqual(await retry(), { outcome: "unreadable", reason: "public-replay-plan-invalid" });
@@ -453,4 +501,31 @@ test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-ca
   assert.equal(heldSeen, 3 + 3 + 2, `the held records the worlds name (${heldSeen})`);
   // The sound ones: five per world, less the duplicated id in its world.
   assert.equal(soundSeen, 5 + 4 + 5 + 5, `the sound records the worlds name (${soundSeen})`);
+});
+
+test("W1-T13785 criterion 5: approve uses the strict fallback for ops releases beside an unrelated public-to-ops edge", async t => {
+  const main = publicMain(t, PUBLIC_TEXT + record("PUB-BOOT") + record("PUB-DUP"));
+  main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  const fx = opsCatalog(t, SOUND_OPS + BAD_OPS + record("PUB-DUP") +
+    record("OPS-ON-BOOT", ["PUB-BOOT"]) + record("OPS-ON-DUP", ["PUB-DUP"]) + record("OPS-ON-REV", ["PUB-REV"]));
+  const opsSnapshot = await fx.read();
+  assert.equal(opsSnapshot.outcome, "ok");
+  const strict = await readReleasePublicPlan(main.dir);
+  assert.equal(strict.read, "working_tree");
+  const deferred = await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true });
+  assert.equal(deferred.read, "origin/main");
+  const strictComposition = composeSecondaryPlan(strict.plan, opsSnapshot.plan!);
+  const deferredComposition = composeSecondaryPlan(deferred.plan, opsSnapshot.plan!);
+  assert.equal(strictComposition.outcome, "ok");
+  assert.equal(deferredComposition.outcome, "ok");
+  assert.deepEqual(deferredComposition.held.get("OPS-ON-BOOT"), { reason: BAD_EDGE, task: "OPS-ON-BOOT", dependsOn: "PUB-BOOT" });
+  const approve = (id: string) => readApproveRelease(id, strict.plan, main.dir, { ...fx.lookup, opsSnapshot }, () => undefined);
+
+  const sound = await approve("OPS-ON-BOOT");
+  assert.equal(sound?.outcome, "found", JSON.stringify(sound));
+  assert.equal(sound.catalog, "ops");
+  assert.deepEqual(sound.plan, strictComposition.plan);
+  assert.deepEqual(await approve("OPS-CHILD"), { outcome: "held", hold: { reason: BAD_EDGE, task: "OPS-BAD", dependsOn: MISSING } });
+  assert.deepEqual(await approve("OPS-ON-DUP"), { outcome: "held", hold: { reason: "duplicate_task_id", task: "PUB-DUP" } });
+  assert.deepEqual(await approve("OPS-ON-REV"), { outcome: "held", hold: REV_HOLD });
 });

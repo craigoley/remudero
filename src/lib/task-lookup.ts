@@ -200,8 +200,8 @@ export type TaskReleasePlan =
  * W1-T13785: a public hit while a destination is named reads the ops catalog too, because the tick holds public
  * records as well (a duplicate's public copy, a public task naming an ops id, and their dependants). A public task
  * the composition holds is `held`. A sound public hit, an off destination, an unreadable ops catalog or a
- * malformed composition keeps the public plan. Approve's file-loading path validates deferred dependencies
- * before writing a release.
+ * malformed composition keeps the public plan. Approve checks for public holds before applying the strict loader's
+ * working-tree fallback for unresolved dependencies. It composes again against the fallback before releasing.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
   const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });
@@ -229,8 +229,7 @@ async function readReleaseComposition(publicPlan: Plan, sources: TaskLookupOptio
 
 /**
  * W1-T13785: the strict public loader's dependency check over a plan read with deferred dependencies. Deferring lets a
- * record the composition holds reach its held answer. Any other release from such a plan refuses with the error
- * origin/main's strict loader raises, so a sound public neighbour of a public-to-ops edge is not released.
+ * public hold reach its held answer. The strict loader's fallback may still supply a valid plan for a sound neighbour.
  */
 export function publicReleaseDependencyError(plan: Plan): PlanError | undefined {
   for (const task of plan.tasks) {
