@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: low # narrows one startup escalation; provider selection is unchanged
   origin: "operator-session#pr-backlog-round5-2026-11-20"
   plan_refs:

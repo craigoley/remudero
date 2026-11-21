@@ -21,7 +21,7 @@
     - src/run-task.ts
     - src/lib/reviewer-worktree-lease.ts
     - test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:fresh-code-only — when the lease on <worktreeRoot>/reviewer-<sha12> refuses with ReviewerWorktreeLeasedError, buildFreshTreeReviewRunner cuts one tree at <worktreeRoot>/reviewer-<sha12>-<pid>-<8 hex> with addWorktree at the same origin/main sha, proves it an exact clean detached checkout of that sha, calls spawnReview with that path only, returns the child's exit code, and calls removeWorktree once for that path after the child settles; spawnReview is never called with the shared path"

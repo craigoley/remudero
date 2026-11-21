@@ -883,6 +883,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(infrastructureRerun) && files.some((f) => infrastructureRerunEdges.includes(f))) {
     pathReaders.push(infrastructureRerun);
   }
+  // W1-T10644: recorded miss on coverage run 40212330452, PR #14196.
+  const cancelledCheckRequeue = suitePath("test/a-plan-only-pr-requeues-its-cancelled-check.test.ts");
+  const cancelledCheckRequeueEdges = [
+    "src/lib/sweep.ts",
+    suitePath("test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts"),
+  ];
+  if (input.files.has(cancelledCheckRequeue) && cancelledCheckRequeueEdges.some((edge) => changedSet.has(edge))) {
+    pathReaders.push(cancelledCheckRequeue);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
