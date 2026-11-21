@@ -9,7 +9,8 @@
 // complete, so a stream that must show the spill on outputRetention.stdout spills a tool call instead.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -185,6 +186,84 @@ test("W1-T13960 criterion 2: a spill replaced by a directory at EOF reads unread
     assert.equal(result.subtype, "error_codex");
     assert.equal(result.isError, true);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13960 criterion 2: spill read I/O failures return an unreadable Codex result", async (t) => {
+  const stages = { scan: 1, tail: 2, head: 3, escapeBoundary: 4 };
+  const cases = [
+    ["scan", "open", "eof"],
+    ["scan", "stat", "eof"],
+    ["scan", "read", "eof"],
+    ["scan", "read", "newline"],
+    ["scan", "close", "eof"],
+    ["tail", "read", "eof"],
+    ["head", "read", "eof"],
+    ["escapeBoundary", "read", "eof"],
+  ] as const;
+  for (const [stage, operation, ending] of cases) {
+    await t.test(`${stage} ${operation} at ${ending}`, async (t) => {
+      const child = codexRun();
+      try {
+        child.start();
+        await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n${TURN_COMPLETED}`);
+        const line = oversizedToolCall();
+        await child.write(line);
+        await child.spillHolds(Buffer.byteLength(line));
+
+        const file = child.spillFile();
+        const descriptors = new Map<number, number>();
+        const { openSync, fstatSync, readSync, closeSync } = fs;
+        const reason = `EIO: spill ${stage} ${operation} failed`;
+        let opened = 0;
+        let faults = 0;
+        const fail = (ordinal: number | undefined, call: typeof operation) => {
+          if (ordinal === stages[stage] && call === operation && faults === 0) {
+            faults++;
+            throw Object.assign(new Error(reason), { code: "EIO" });
+          }
+        };
+        t.mock.method(fs, "openSync", (...args: Parameters<typeof openSync>) => {
+          const [path, flags] = args;
+          if (path !== file || (flags !== "r" && flags !== (fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW))) {
+            return openSync(...args);
+          }
+          fail(++opened, "open");
+          const fd = openSync(...args);
+          descriptors.set(fd, opened);
+          return fd;
+        });
+        t.mock.method(fs, "fstatSync", (...args: Parameters<typeof fstatSync>) => {
+          fail(descriptors.get(args[0]), "stat");
+          return fstatSync(...args);
+        });
+        t.mock.method(fs, "readSync", (fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
+          fail(descriptors.get(fd), "read");
+          return readSync(fd, buffer, offset, length, position);
+        });
+        t.mock.method(fs, "closeSync", (fd: number) => {
+          const ordinal = descriptors.get(fd);
+          descriptors.delete(fd);
+          closeSync(fd);
+          fail(ordinal, "close");
+        });
+        syncBuiltinESMExports();
+        try {
+          if (ending === "newline") await child.write("\n");
+        } finally { child.end(""); }
+        const result = await child.run;
+        assert.equal(faults, 1);
+        assert.equal(descriptors.size, 0);
+        assert.deepEqual(outcome(result), { completion: "complete", stdout: "unreadable", subtype: "error_codex", isError: true });
+        assert.equal(result.outputRetention?.stdout?.reason, reason);
+        assert.equal(result.outputTruncation?.spilledBytes, Buffer.byteLength(line));
+        assert.equal(result.text, FINAL);
+      } finally {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+        rmSync(child.home, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 /** What decides a run's fate, per variant, so one red names every variant that went wrong. */

@@ -2631,9 +2631,7 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string; tex
   let escaped = false;
   let captured: number[] = [];
   let start = 0;
-  let fd: number;
-  try { fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
-  catch (_error) { /* readBoundedFileTail reports open errors. */ return out; }
+  const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     if (!fstatSync(fd).isFile()) return out;
     const buf = Buffer.alloc(64 * 1024);
@@ -2787,6 +2785,30 @@ function withoutDanglingJsonEscape(text: string): string {
   return backslashesAtEnd(text) % 2 === 1 ? text.slice(0, -1) : text;
 }
 
+function readCodexSpill(file: string, lineBytes: number): {
+  tail: FileTail;
+  agentPayload?: number;
+  reconstruction?: { head: string; skip: number };
+} {
+  let tail: FileTail | undefined;
+  try {
+    const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(file) : {};
+    // W1-T13951: the cap binds the retained payload. Read the whole line when the ends could overlap.
+    const payload = types.textBytes ?? Infinity;
+    const agent = types.type === "item.completed" && types.itemType === "agent_message"
+      && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
+    tail = readBoundedFileTail(file, agent || lineBytes <= 320 * 1024 ? lineBytes : 256 * 1024);
+    if (tail.state !== "truncated") return { tail, agentPayload: agent ? payload : undefined };
+    const head = withoutDanglingJsonEscape(readSpillHead(file, 64 * 1024));
+    const skip = escapeSkipAt(file, tail.fileBytes! - Buffer.byteLength(tail.text), tail.text);
+    return { tail, reconstruction: { head, skip } };
+  } catch (error) {
+    const state = !tail && (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable";
+    return { tail: { ...tail, state, text: "", bytesRead: tail?.bytesRead ?? 0,
+      reason: String((error as Error)?.message ?? error) } };
+  }
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 export class CodexJsonlAccumulator {
   private sessionId = "";
@@ -2874,25 +2896,17 @@ export class CodexJsonlAccumulator {
     let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
       const lineBytes = this.spilledBytes - this.spillStart;
-      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(this.pendingFile!) : {};
-      // W1-T13951: the cap binds the payload retained, not its envelope.
-      const payload = types.textBytes ?? Infinity;
-      const agent = types.type === "item.completed" && types.itemType === "agent_message"
-        && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
-      if (agent) this.reclaimFor(payload);
-      // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
-      const whole = agent || lineBytes <= 320 * 1024;
-      const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
+      const { tail, agentPayload, reconstruction } = readCodexSpill(this.pendingFile!, lineBytes);
+      if (agentPayload !== undefined) this.reclaimFor(agentPayload);
       // W1-T13960: a veto only.
       if (tail.fileBytes !== lineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
-      if (tail.state === "truncated") {
+      if (reconstruction) {
         // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
         // validates the envelope; a partial line can never certify a complete report.
         // W1-T13951: never cut inside an escape.
-        const head = withoutDanglingJsonEscape(readSpillHead(this.pendingFile!, 64 * 1024));
-        const skip = escapeSkipAt(this.pendingFile!, tail.fileBytes! - Buffer.byteLength(text), text);
+        const { head, skip } = reconstruction;
         const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
         const marker = JSON.stringify(this.truncationMarker(omitted)).slice(1, -1);
         line = head + marker + text.slice(skip);
