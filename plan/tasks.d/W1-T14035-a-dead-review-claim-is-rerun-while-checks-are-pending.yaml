@@ -7,14 +7,16 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 10.00
-  risk: medium # widens one sweep disposition row to a dead pending claim; the one-review-per-input rule is unchanged
+  budget_usd: 4.50
+  risk: high # Rule 19 sizing: the sweep's alongside-CI row and the tick-read-worker view producer that carries the run ids
+  band_meaning: span
   origin: "operator-session#pr-backlog-round5-2026-11-20"
   plan_refs:
     - W1-T12994
     - W1-T13951
   files:
     - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
     - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts
   status: queued
   attempts: 0
@@ -57,3 +59,8 @@
     Remove the new match and criterion 1's fixture is disposed wait, as #19791 was at 15:38:37Z.
   note: |
     Id reserved for run-unfiled-1795192209733 with rmd next-task-id on the host.
+    Scope amendment 2026-11-21 for PR 19922 (review round 2): telling a dead pending claim from a live
+    replacement needs run identity, not timestamps. Counterexample 1 (an undated status, or one stamped after the
+    dead run's row) and counterexample 3 (a live run posting in the same second) need opposite answers on the same
+    timestamp evidence. The view producer in tick-read-worker.ts must carry the pending ledger row's runId and the
+    live remudero-review status's 'owned by run <id>' id onto OpenPrView, so the sweep can compare the two ids.
