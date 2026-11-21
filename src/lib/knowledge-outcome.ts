@@ -1,4 +1,4 @@
-import { AMBIGUOUS_LEARNING_CONTENT, LEARNING_CONTENT_IDENTITY_RE } from "./learnings.js";
+import { AMBIGUOUS_LEARNING_CONTENT, LEARNING_CONTENT_IDENTITY_RE, learningIdRecord } from "./learnings.js";
 import { fixDispatchCountByRun } from "./retro.js";
 
 /**
@@ -25,6 +25,8 @@ import { fixDispatchCountByRun } from "./retro.js";
  * `content_ids` (learnings.ts's `learningContentIdentity`) for every contested entry, and the fold
  * groups by {id, revision}. An observation whose revision cannot be named is excluded and counted in
  * `excludedRevision`. It is never given the current corpus's bytes: this fold reads the ledger only.
+ * A learning id is free corpus text (`__proto__` and `constructor` load), so every id-keyed lookup
+ * here is a Map or an own-property read, and a produced id-keyed record has no prototype.
  */
 
 /** Propensities outside [TRIM, 1 - TRIM] are excluded: an inverse weight of 20+ lets one run
@@ -56,10 +58,12 @@ export interface LearningOutcomeReport {
   runs: number;
   excludedNoVerdict: number;
   excludedMasked: number;
-  /** Entry observations outside the propensity trim (of an exposure that does not conflict). */
+  /** Entry observations outside the propensity trim. Only an observation whose revision and arm both
+   *  resolve can land here: see {@link foldLearningOutcomes}'s counting rule. */
   excludedTrimmed: number;
-  /** W1-T11115: entry observations that name no single revision, by reason. `conflicting` counts
-   *  every observation of a conflicting exposure, trimmed or not; the others count inside the trim. */
+  /** W1-T11115: entry observations that name no single revision, by reason. Every reason is checked
+   *  BEFORE the trim, so a trimmed observation is counted here under its reason, never only as
+   *  trimmed, and `ambiguous: 0` means no contested row named an ambiguous identity. */
   excludedRevision: RevisionExclusions;
   learnings: LearningOutcome[];
 }
@@ -80,11 +84,12 @@ export interface RevisionExclusions {
   unresolved: number;
 }
 
-/** Keep only the entries the budget cut decided (0 < p < 1); `undefined` when none were. */
+/** Keep only the entries the budget cut decided (0 < p < 1); `undefined` when none were. The result
+ *  is a learnings.ts `learningIdRecord` (no prototype), so an id such as `__proto__` stays a key. */
 export function contestedPropensities(propensity: Record<string, number> | undefined): Record<string, number> | undefined {
   if (propensity === undefined) return undefined;
   const contested = Object.entries(propensity).filter(([, p]) => p > 0 && p < 1);
-  return contested.length > 0 ? Object.fromEntries(contested) : undefined;
+  return contested.length > 0 ? learningIdRecord(contested) : undefined;
 }
 
 interface Observation {
@@ -122,11 +127,14 @@ export function estimateLearningOutcome(id: string, contentId: string, obs: Obse
 
 type Revision = { contentId: string } | { excluded: Exclude<keyof RevisionExclusions, "conflicting"> };
 
-/** The revision one row's `content_ids` names for `id`, or why it names none. */
+/** The revision one row's `content_ids` names for `id`, or why it names none. It reads an OWN
+ *  property only: a parsed row has `Object.prototype`, so `content_ids["__proto__"]` or
+ *  `["constructor"]` would otherwise read an inherited member, and a missing digest would read as
+ *  `malformed` instead of `unresolved`. */
 function revisionOf(contentIds: unknown, id: string): Revision {
   if (contentIds === undefined) return { excluded: "legacy" };
   if (contentIds === null || typeof contentIds !== "object" || Array.isArray(contentIds)) return { excluded: "malformed" };
-  const value = (contentIds as Record<string, unknown>)[id];
+  const value = Object.hasOwn(contentIds, id) ? (contentIds as Record<string, unknown>)[id] : undefined;
   if (value === undefined) return { excluded: "unresolved" };
   if (value === AMBIGUOUS_LEARNING_CONTENT) return { excluded: "ambiguous" };
   return typeof value === "string" && LEARNING_CONTENT_IDENTITY_RE.test(value) ? { contentId: value } : { excluded: "malformed" };
@@ -165,9 +173,16 @@ function revisionClaimsByExposure(all: readonly Record<string, unknown>[]): Map<
 }
 
 /** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
- *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. An
- *  observation is checked in order: a conflicting exposure (over all of the run's rows), then
- *  trimmed, then its own revision, then arm. Each exclusion counts once. */
+ *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted.
+ *
+ *  THE COUNTING RULE: each contested entry observation of an unmasked run with a verdict lands in
+ *  exactly ONE place, the first of these that applies:
+ *  1. `excludedRevision.conflicting`: the exposure (over EVERY row of the run) names more than one claim;
+ *  2. `excludedRevision.{legacy, malformed, ambiguous, unresolved}`: the row names no single revision;
+ *  3. `excludedRevision.unresolved`: the entry is not listed in exactly one of selected and dropped;
+ *  4. `excludedTrimmed`: its propensity is outside [trim, 1 - trim];
+ *  5. its {id, revision} cohort.
+ *  Identity comes before the trim, so a trimmed row can never hide an unresolved identity. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -222,10 +237,6 @@ export function foldLearningOutcomes(
         report.excludedRevision.conflicting++;
         continue;
       }
-      if (p < trim || p > 1 - trim) {
-        report.excludedTrimmed++;
-        continue;
-      }
       const revision = revisionOf(r.content_ids, id);
       if ("excluded" in revision) {
         report.excludedRevision[revision.excluded]++;
@@ -234,6 +245,10 @@ export function foldLearningOutcomes(
       const { contentId } = revision;
       if (selected.has(id) === dropped.has(id)) {
         report.excludedRevision.unresolved++;
+        continue;
+      }
+      if (p < trim || p > 1 - trim) {
+        report.excludedTrimmed++;
         continue;
       }
       const key = `${id}\u0000${contentId}`;

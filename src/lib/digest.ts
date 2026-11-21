@@ -5,7 +5,7 @@ import { gunzipSync as nodeGunzipSync } from "node:zlib";
 
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import type { KnowledgeGapReport } from "./knowledge-gaps.js";
-import { foldLearningUsage, leastUsefulLearnings, learningValue } from "./knowledge-value.js";
+import { foldLearningUsage, leastUsefulLearnings, learningValue, type LearningUsage } from "./knowledge-value.js";
 import { readLedgerLines } from "./status.js";
 import { ledgerRotationEntries, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-grep.js";
 import { notify, type NotifyChannel, type NotifyDeps } from "./notify.js";
@@ -613,7 +613,12 @@ function revisionLabel(contentId: unknown): string {
 export function summarizeLearningOutcomes(lines: LedgerLine[]): LearningOutcomeSummary | undefined {
   const report = foldLearningOutcomes(lines);
   if (report.runs === 0 && report.excludedNoVerdict === 0) return undefined;
-  const usage = foldLearningUsage(lines.filter((l) => l.step === "learnings.used") as Array<Record<string, unknown>>);
+  // W1-T11115: the usage counts are keyed by learning id, so they start with no prototype. On `{}`, a
+  // `__proto__` id would fold into Object.prototype, and `constructor` would read an inherited member.
+  const usage = foldLearningUsage(
+    lines.filter((l) => l.step === "learnings.used") as Array<Record<string, unknown>>,
+    Object.create(null) as LearningUsage,
+  );
   const disagreements: LearningOutcomeSummary["disagreements"] = [];
   for (const l of report.learnings) {
     if (l.verdict !== "helps" && l.verdict !== "hurts") continue;

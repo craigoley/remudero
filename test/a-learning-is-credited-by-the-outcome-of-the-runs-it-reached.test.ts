@@ -18,7 +18,9 @@ import { test } from "node:test";
 import { learningsInjectedRow } from "#src/cli/commands/run-task-verb.js";
 import { renderKnowledgeMeasured, renderLearningOutcomes, summarizeKnowledgeMeasured, summarizeLearningOutcomes } from "#src/lib/digest.js";
 import { contestedPropensities, foldLearningOutcomes, OUTCOME_ARM_FLOOR, OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
-import { seedOf } from "#src/lib/knowledge-value.js";
+import { readLearningUsage, seedOf } from "#src/lib/knowledge-value.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { ledgerLivePath, readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import {
   AMBIGUOUS_LEARNING_CONTENT,
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -26,6 +28,7 @@ import {
   LEARNING_PROPENSITY_DRAWS,
   learningContentIdentities,
   learningContentIdentity,
+  learningIdRecord,
   loadLearningsCorpus,
   propensitySeed,
   recordingSelectLearnings,
@@ -98,7 +101,8 @@ test("W1-T4241: contested entries carry a propensity and selection is unchanged"
   const noUsage = selectLearnings([...tied, strong], files, 700, { seed: 42, propensityDraws: 64 }).propensity!;
   assert.ok(Object.values(noUsage).every((v) => v === 0 || v === 1));
   assert.equal(contestedPropensities(noUsage), undefined);
-  assert.deepEqual(contestedPropensities({ x: 0, y: 0.5, z: 1 }), { y: 0.5 });
+  // W1-T11115: the record has no prototype, so an id such as `__proto__` stays a key.
+  assert.deepEqual(contestedPropensities({ x: 0, y: 0.5, z: 1 }), { __proto__: null, y: 0.5 });
 });
 
 test("W1-T4241: outcomes are weighted by inverse propensity with a per-arm floor", () => {
@@ -177,8 +181,13 @@ const PRODUCER_RUN_ID = "T-LEARN-REVISION-1785100000000";
 /** Written into every producer fact; it must never appear in a ledger row. */
 const RAW_FACT_SENTINEL = "RAW-FACT-SENTINEL";
 
+/** Ids that name `Object.prototype` members. The YAML loader accepts each as a learning id, so every
+ *  id-keyed record on the producer and fold path must hold each one as an ordinary key. */
+const PROTOTYPE_MEMBER_IDS = ["__proto__", "constructor", "toString", "hasOwnProperty"];
+
 interface ProducerRun {
-  /** The `learnings.injected` row the producer builds for the draw, after a ledger JSON round trip. */
+  /** The `learnings.injected` row the producer builds for the draw, written to and read back from a
+   *  real ledger. */
   row: Row;
   /** The same row for a masked wipe-test arm B. */
   maskedRow: Row;
@@ -196,49 +205,66 @@ function deepFreeze<T>(value: T): T {
 
 /** The producer path of an implement dispatch (run-task-verb.ts's runTaskBody), over a real corpus on
  *  disk: the layered load, the real selector wrapped by `recordingSelectLearnings`, the production
- *  budget, draw count and run seed, then the producer's own `learningsInjectedRow`. 30 equal-strength
- *  ~430-char lines overflow the 8,148-char budget, so about 19 fit and the seeded draw decides which.
+ *  budget, draw count and run seed, then the producer's own `learningsInjectedRow`, appended with
+ *  `appendLedger` and read back through the ledger union. 30 equal-strength ~430-char lines overflow
+ *  the 8,148-char budget, so about 19 fit and the seeded draw decides which.
  *  `userLayerCopyOf` also writes a user-overall layer holding a second, different copy of that id,
- *  whose glob the task never matches, as a real cross-layer corpus can. */
-function producerRun(opts: { userLayerCopyOf?: string } = {}): ProducerRun {
+ *  whose glob the task never matches, as a real cross-layer corpus can. `userLayerIds` writes
+ *  user-overall entries that DO match, as equal-strength rivals. `oversized` adds a project entry of
+ *  ~7,700 chars: it fits only when the draw ranks it first, so its propensity is a few 64ths.
+ *  The usage store is written and read with the producer's own reader. It holds a no-history count,
+ *  the same prior an absent id gets, for every fixture id. An absent `__proto__` or `constructor`
+ *  would read an inherited member in knowledge-value.ts's `learningValue`, outside this task. */
+function producerRun(opts: { userLayerCopyOf?: string; userLayerIds?: readonly string[]; oversized?: string; runId?: string } = {}): ProducerRun {
+  const runId = opts.runId ?? PRODUCER_RUN_ID;
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-corpus-"));
   const userDir = mkdtempSync(join(tmpdir(), "rmd-lcr-user-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-lcr-state-"));
   try {
-    writeFileSync(
-      join(dir, "revision.yaml"),
-      Array.from({ length: 30 }, (_, i) => {
-        const id = `lcr-${String(i).padStart(2, "0")}`;
-        return [`- id: ${id}`, `  fact: "${RAW_FACT_SENTINEL}-${id} ${"x".repeat(380)}"`, '  src: "lcr-fixture"', `  files: ["${PRODUCER_TASK_FILE}"]`].join("\n");
-      }).join("\n") + "\n",
-    );
-    if (opts.userLayerCopyOf !== undefined) {
-      writeFileSync(
-        join(userDir, "revision.yaml"),
-        [`- id: ${opts.userLayerCopyOf}`, `  fact: "${RAW_FACT_SENTINEL}-user-layer-revision"`, '  src: "lcr-fixture"', '  files: ["docs/never-in-this-task.md"]'].join("\n") + "\n",
-      );
+    const line = (id: string, fact: string, glob: string) =>
+      [`- id: ${JSON.stringify(id)}`, `  fact: "${fact}"`, '  src: "lcr-fixture"', `  files: ["${glob}"]`].join("\n");
+    const project = Array.from({ length: 30 }, (_, i) => `lcr-${String(i).padStart(2, "0")}`);
+    const projectLines = project.map((id) => line(id, `${RAW_FACT_SENTINEL}-${id} ${"x".repeat(380)}`, PRODUCER_TASK_FILE));
+    if (opts.oversized !== undefined) {
+      project.push(opts.oversized);
+      projectLines.push(line(opts.oversized, `${RAW_FACT_SENTINEL}-${opts.oversized} ${"y".repeat(7700)}`, PRODUCER_TASK_FILE));
     }
-    const usage = {};
+    writeFileSync(join(dir, "revision.yaml"), projectLines.join("\n") + "\n");
+    const userIds = [...(opts.userLayerIds ?? [])];
+    const userLines = userIds.map((id) => line(id, `${RAW_FACT_SENTINEL}-user-${id} ${"x".repeat(380)}`, PRODUCER_TASK_FILE));
+    if (opts.userLayerCopyOf !== undefined) {
+      userIds.push(opts.userLayerCopyOf);
+      userLines.push(line(opts.userLayerCopyOf, `${RAW_FACT_SENTINEL}-user-layer-revision`, "docs/never-in-this-task.md"));
+    }
+    const withUserLayer = userLines.length > 0;
+    if (withUserLayer) writeFileSync(join(userDir, "revision.yaml"), userLines.join("\n") + "\n");
+    const usagePath = join(stateDir, "learning-usage.json");
+    writeFileSync(usagePath, JSON.stringify(learningIdRecord([...project, ...userIds].map((id) => [id, { offered: 0, used: 0 }] as const))));
+    const usage = readLearningUsage(usagePath);
     const input = {
       homes: {
         projectDir: dir,
-        userOverallDir: opts.userLayerCopyOf === undefined ? join(dir, "no-user-layer") : userDir,
+        userOverallDir: withUserLayer ? userDir : join(dir, "no-user-layer"),
         globalArtifactPath: join(dir, "no-global-layer", "artifact.yaml"),
       },
       taskFiles: [PRODUCER_TASK_FILE],
-      selectionContext: { text: ["prove the producer names the exact learning revision it drew"], usage, seed: seedOf(PRODUCER_RUN_ID), propensityDraws: LEARNING_PROPENSITY_DRAWS },
+      selectionContext: { text: ["prove the producer names the exact learning revision it drew"], usage, seed: seedOf(runId), propensityDraws: LEARNING_PROPENSITY_DRAWS },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     };
-    const rowForArm = (arm: "A" | "B"): Row => {
+    for (const arm of ["A", "B"] as const) {
       const draw = recordingSelectLearnings();
       const result = computeMatchedLearningsForArm(arm, input, { ...REAL_LEARNINGS_INJECTION_DEPS, selectLearnings: draw.selectLearnings });
       const fields = learningsInjectedRow(result, draw.contentIds(), arm === "B", usage);
-      return JSON.parse(JSON.stringify({ step: "learnings.injected", run_id: PRODUCER_RUN_ID, ts: ts(), ...fields })) as Row;
-    };
-    const corpus = [...loadLearningsCorpus(dir), ...(opts.userLayerCopyOf === undefined ? [] : loadLearningsCorpus(userDir))];
-    return { row: rowForArm("A"), maskedRow: rowForArm("B"), corpus };
+      appendLedger(ledgerLivePath(stateDir), { step: "learnings.injected", run_id: runId, task_id: "T-LEARN-REVISION", ts: ts(), ...fields });
+    }
+    const rows = readLedgerUnionRecordsSync(stateDir).rows.filter((r) => r.step === "learnings.injected");
+    assert.equal(rows.length, 2, "both arms' rows come back from the ledger");
+    const corpus = [...loadLearningsCorpus(dir), ...(withUserLayer ? loadLearningsCorpus(userDir) : [])];
+    return { row: rows.find((r) => r.masked === false)!, maskedRow: rows.find((r) => r.masked === true)!, corpus };
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(userDir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
   }
 }
 
@@ -290,8 +316,8 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
 
   // A DUPLICATE ID IN ONE SNAPSHOT: identical copies resolve; conflicting copies are ambiguous, never
   // either one; an id the snapshot never held stays unresolved rather than invented.
-  assert.deepEqual(learningContentIdentities([base, { ...base }], ["r"]), { r: id0 });
-  assert.deepEqual(learningContentIdentities([base, { ...base, fact: "another fact" }], ["r", "absent"]), { r: AMBIGUOUS_LEARNING_CONTENT });
+  assert.deepEqual(learningContentIdentities([base, { ...base }], ["r"]), { __proto__: null, r: id0 });
+  assert.deepEqual(learningContentIdentities([base, { ...base, fact: "another fact" }], ["r", "absent"]), { __proto__: null, r: AMBIGUOUS_LEARNING_CONTENT });
 
   // A SAME-ID COPY THE TASK NEVER MATCHED, through the real draw. The copy is not a candidate, so it
   // moves no propensity, but it is in the snapshot the draw read: the dropped entry's id has two
@@ -338,6 +364,59 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   const layeredFold = foldLearningOutcomes([layered.row, { step: "verdict", run_id: layered.row.run_id, ts: ts(), verdict: "merged" }]);
   assert.equal(layeredFold.excludedRevision.ambiguous, 1);
   assert.equal(layeredFold.learnings.some((l) => l.id === layeredId), false, `${layeredId} is credited to no revision`);
+
+  // IDS THAT NAME Object.prototype MEMBERS. A learning id is free corpus text, and the YAML loader
+  // accepts `__proto__`. On an ordinary object, `contentIds["__proto__"] = digest` called the inherited
+  // setter and dropped the digest, so the row carried the id's propensity and arm but no revision.
+  // Every id-keyed record the seam and the draw produce has no prototype.
+  const memberSnapshot = PROTOTYPE_MEMBER_IDS.map((pid) => entry(pid));
+  const memberIdentities = learningContentIdentities(memberSnapshot, PROTOTYPE_MEMBER_IDS);
+  assert.equal(Object.getPrototypeOf(memberIdentities), null);
+  assert.deepEqual(Object.keys(memberIdentities), PROTOTYPE_MEMBER_IDS);
+  for (const e of memberSnapshot) assert.equal(memberIdentities[e.id], learningContentIdentity(e), `${e.id}: an own key holding its digest`);
+  assert.equal(Object.getPrototypeOf(drawn.propensity), null, "the draw's propensities have no prototype");
+  assert.equal(Object.getPrototypeOf(drawn.contentIds), null, "nor do its content identities");
+
+  // THROUGH THE PRODUCER AND A REAL LEDGER. The user-overall layer holds the four ids as equal-strength
+  // rivals. Across runs the draw contests each one on both arms. After `appendLedger` and the union
+  // read, every contested entry of every row still names its source revision as an own key.
+  const memberRuns = Array.from({ length: 8 }, (_, i) => producerRun({ userLayerIds: PROTOTYPE_MEMBER_IDS, runId: `${PRODUCER_RUN_ID}-member-${i}` }));
+  const memberArms = new Map<string, Set<string>>(PROTOTYPE_MEMBER_IDS.map((pid) => [pid, new Set<string>()]));
+  for (const { row: memberRow, corpus: memberCorpus } of memberRuns) {
+    const memberP = memberRow.propensity as Record<string, number>;
+    const memberIds = memberRow.content_ids as Record<string, string>;
+    assert.deepEqual(Object.keys(memberIds).sort(), Object.keys(memberP).sort(), "every contested entry, and only those, carries a revision");
+    for (const pid of PROTOTYPE_MEMBER_IDS) {
+      if (!Object.hasOwn(memberP, pid)) continue;
+      assert.ok(Object.hasOwn(memberIds, pid), `${pid}: the revision survives the ledger as an own key`);
+      assert.equal(memberIds[pid], learningContentIdentity(memberCorpus.find((e) => e.id === pid)!), `${pid}: the source entry's revision`);
+      memberArms.get(pid)!.add((memberRow.matched_ids as string[]).includes(pid) ? "selected" : "dropped");
+    }
+  }
+  for (const pid of PROTOTYPE_MEMBER_IDS) assert.deepEqual([...memberArms.get(pid)!].sort(), ["dropped", "selected"], `${pid} is contested on both arms`);
+  // The fold credits each to its own revision on both arms: never `malformed`, never `unresolved`.
+  const memberFold = foldLearningOutcomes(memberRuns.flatMap(({ row: r }) => [r, { step: "verdict", run_id: r.run_id, ts: ts(), verdict: "merged" }]));
+  assert.deepEqual(memberFold.excludedRevision, { legacy: 0, malformed: 0, ambiguous: 0, conflicting: 0, unresolved: 0 });
+  for (const pid of PROTOTYPE_MEMBER_IDS) {
+    const cohorts = memberFold.learnings.filter((l) => l.id === pid);
+    assert.equal(cohorts.length, 1, `${pid}: one cohort`);
+    assert.equal(cohorts[0]!.contentId, learningContentIdentity(memberRuns[0]!.corpus.find((e) => e.id === pid)!));
+    assert.ok(cohorts[0]!.injected > 0 && cohorts[0]!.dropped > 0, `${pid}: both arms are credited`);
+  }
+
+  // THE DIGEST looks usage up by id too. Each id hurts while workers claim to use it, so each is a
+  // disagreement that names its revision, and folding its `learnings.used` rows writes nothing onto
+  // Object.prototype or any other inherited member.
+  const memberDigestRows: Row[] = PROTOTYPE_MEMBER_IDS.flatMap((pid) => [
+    ...Array.from({ length: 20 }, (_, i) => run(`${pid}-digest-${i}`, 0.5, i < 10, i < 10 ? "blocked_ci" : "merged", 0, pid, learningContentIdentity(entry(pid)))).flat(),
+    ...Array.from({ length: 12 }, (_, i) => ({ step: "learnings.used", run_id: `${pid}-used-${i}`, injected_ids: [pid], used_ids: [pid] })),
+  ]);
+  const memberSummary = summarizeLearningOutcomes(memberDigestRows)!;
+  assert.equal(Object.hasOwn(Object.prototype, "offered"), false, "no usage count lands on Object.prototype");
+  assert.deepEqual(
+    memberSummary.disagreements.map((d) => [d.id, d.contentId, d.verdict, d.usedMean.toFixed(2)]),
+    [...PROTOTYPE_MEMBER_IDS].sort().map((pid) => [pid, learningContentIdentity(entry(pid)), "hurts", "0.93"]),
+  );
 });
 
 test("W1-T11115: learning outcome revision separates opposite effects under one learning id", () => {
@@ -488,6 +567,53 @@ test("W1-T11115: learning outcome revision reports unresolved exposure identitie
   // Two rows of one run that both name no revision do not conflict: each keeps its own reason.
   const neither = foldLearningOutcomes([injectedRow("neither", { content_ids: undefined }), injectedRow("neither", { content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } }), verdict("neither")]);
   assert.deepEqual(neither.excludedRevision, { ...zero, legacy: 1, ambiguous: 1 });
+
+  // IDENTITY BEFORE THE TRIM. Each observation lands in ONE counter, the first that applies (the rule
+  // is foldLearningOutcomes's). An unresolved identity is counted under its reason even outside the
+  // trim, so `ambiguous: 0` cannot hide an emitted ambiguous identity. Only a resolved one is trimmed.
+  const outsideTrim = 1 / 64;
+  const identityFirst = foldLearningOutcomes(
+    [
+      { propensity: { L: outsideTrim }, content_ids: undefined },
+      { propensity: { L: outsideTrim }, content_ids: { L: "lc1:short" } },
+      { propensity: { L: outsideTrim }, content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } },
+      { propensity: { L: 1 - outsideTrim }, content_ids: {} },
+      { propensity: { L: outsideTrim }, matched_ids: [], dropped: [] },
+      { propensity: { L: outsideTrim } },
+    ].flatMap((over, i) => [injectedRow(`identity-first-${i}`, over), verdict(`identity-first-${i}`)]),
+  );
+  assert.deepEqual(identityFirst.excludedRevision, { ...zero, legacy: 1, malformed: 1, ambiguous: 1, unresolved: 2 });
+  assert.equal(identityFirst.excludedTrimmed, 1, "only the observation whose revision and arm resolve is trimmed");
+  assert.deepEqual(identityFirst.learnings, []);
+
+  // THE PRODUCER at a trimmed propensity. An oversized project entry fits only when the draw ranks it
+  // first, and the user-overall layer holds a different copy that the task never matches. The real row
+  // ledgers that id ambiguous at a few 64ths, and the fold counts it as ambiguous, not as trimmed.
+  const oversized = "lcr-oversized";
+  let trimmedDraw: Row | undefined;
+  for (let i = 0; i < 16 && trimmedDraw === undefined; i++) {
+    const { row: candidate } = producerRun({ oversized, userLayerCopyOf: oversized, runId: `${PRODUCER_RUN_ID}-trim-${i}` });
+    const candidateP = candidate.propensity as Record<string, number> | undefined;
+    if (candidateP && Object.hasOwn(candidateP, oversized) && candidateP[oversized]! < OUTCOME_PROPENSITY_TRIM) trimmedDraw = candidate;
+  }
+  assert.ok(trimmedDraw !== undefined, "a seeded draw contests the oversized entry below the trim");
+  assert.equal((trimmedDraw.content_ids as Record<string, string>)[oversized], AMBIGUOUS_LEARNING_CONTENT, "the producer names no single revision");
+  const trimmedRows = [trimmedDraw, verdict(String(trimmedDraw.run_id))];
+  const trimmedFold = foldLearningOutcomes(trimmedRows);
+  assert.equal(trimmedFold.excludedRevision.ambiguous, 1, "the emitted ambiguous identity is counted");
+  assert.equal(trimmedFold.excludedTrimmed, 0, "and never only as trimmed");
+  const trimmedLine = renderLearningOutcomes(summarizeLearningOutcomes(trimmedRows)!);
+  assert.ok(trimmedLine.includes("0 trimmed, 1 without a single revision (ambiguous 1)"), trimmedLine);
+
+  // AN OWN KEY ONLY. A ledgered row without the digest of an id that names an Object.prototype member
+  // names no revision for it: `unresolved`, never `malformed` from reading the inherited member.
+  const missingMember = foldLearningOutcomes(
+    PROTOTYPE_MEMBER_IDS.flatMap((pid) => [
+      JSON.parse(JSON.stringify(injectedRow(`missing-${pid}`, { matched_ids: [pid], propensity: { [pid]: 0.5 }, content_ids: {} }))) as Row,
+      verdict(`missing-${pid}`),
+    ]),
+  );
+  assert.deepEqual(missingMember.excludedRevision, { ...zero, unresolved: 4 });
 
   // A HISTORICAL knowledge.measured row (pooled by id, before revisions) is labelled legacy, never
   // shown as if it measured today's content.

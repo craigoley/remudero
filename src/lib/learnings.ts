@@ -1684,6 +1684,18 @@ export const LEARNING_CONTENT_IDENTITY_RE = /^lc1:[0-9a-f]{16}$/;
 /** Stands in for an identity when one snapshot held an id more than once with different content. */
 export const AMBIGUOUS_LEARNING_CONTENT = "ambiguous";
 
+/** W1-T11115: a record keyed by learning id, with NO prototype. An id is free corpus text, and the
+ *  YAML loader accepts `id: "__proto__"`. On an ordinary object, `out["__proto__"] = v` calls the
+ *  inherited setter and drops `v`, and `out["constructor"]` reads an inherited member. Here every
+ *  id is an ordinary own key. `JSON.stringify` writes it, and `JSON.parse` reads it back as an own
+ *  property, so a ledger round trip keeps it. A parsed row has a prototype again, so its reader
+ *  checks `Object.hasOwn`. */
+export function learningIdRecord<V>(entries: Iterable<readonly [string, V]> = []): Record<string, V> {
+  const out = Object.create(null) as Record<string, V>;
+  for (const [id, value] of entries) out[id] = value;
+  return out;
+}
+
 const canonicalSet = (values: readonly string[] | undefined): string[] => [...new Set(values ?? [])].sort();
 const canonicalMultiset = (values: readonly string[] | undefined): string[] => [...(values ?? [])].sort();
 
@@ -1703,7 +1715,8 @@ export function learningContentIdentity(entry: LearningEntry): string {
 
 /** Each of `ids` resolved against ONE snapshot: the identity of its single revision, or
  *  {@link AMBIGUOUS_LEARNING_CONTENT} when copies disagree. An id the snapshot does not hold is
- *  left out, so the outcome fold counts it as unresolved instead of being given an invented identity. */
+ *  left out, so the outcome fold counts it as unresolved instead of being given an invented identity.
+ *  The result is a {@link learningIdRecord}, so an id such as `__proto__` keeps its digest. */
 export function learningContentIdentities(snapshot: readonly LearningEntry[], ids: Iterable<string>): Record<string, string> {
   const wanted = new Set(ids);
   const revisions = new Map<string, Set<string>>();
@@ -1713,7 +1726,7 @@ export function learningContentIdentities(snapshot: readonly LearningEntry[], id
     seen.add(learningContentIdentity(entry));
     revisions.set(entry.id, seen);
   }
-  const out: Record<string, string> = {};
+  const out = learningIdRecord<string>();
   for (const id of wanted) {
     const seen = revisions.get(id);
     if (seen) out[id] = seen.size === 1 ? [...seen][0]! : AMBIGUOUS_LEARNING_CONTENT;
@@ -1970,11 +1983,12 @@ export function selectLearnings<T extends LearningEntry>(
   const draws = context?.propensityDraws ?? 0;
   if (draws <= 0) return result;
   // W1-T4241: 0 < share < 1 means the budget cut, not match strength, decided the entry.
-  const hits: Record<string, number> = Object.fromEntries(matched.map((r) => [r.entry.id, 0]));
+  // W1-T11115: the counts live in a Map and the shares in a {@link learningIdRecord}, so every id is a key.
+  const hits = new Map<string, number>(matched.map((r) => [r.entry.id, 0]));
   for (let k = 0; k < draws; k++) {
-    for (const entry of selectWith(propensitySeed(seed, k)).selected) hits[entry.id] += 1;
+    for (const entry of selectWith(propensitySeed(seed, k)).selected) hits.set(entry.id, hits.get(entry.id)! + 1);
   }
-  const propensity = Object.fromEntries(Object.entries(hits).map(([id, n]) => [id, n / draws]));
+  const propensity = learningIdRecord([...hits].map(([id, n]) => [id, n / draws] as const));
   // W1-T11115: the revision of every contested entry, selected AND dropped, resolved against EVERY
   // entry of the snapshot this draw read: matched or not, active or not. A same-id copy the task
   // never matched is still a second revision of that id in the source, so the id reads ambiguous
