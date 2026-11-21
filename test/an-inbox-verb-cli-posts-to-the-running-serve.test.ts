@@ -5,10 +5,11 @@
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, globalAgent, type Server } from "node:http";
-import { Socket, type AddressInfo } from "node:net";
+import { Agent, createServer, type Server } from "node:http";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Duplex } from "node:stream";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
@@ -32,15 +33,50 @@ function root(t: Ctx, token: string | null = TOKEN): string {
   return dir;
 }
 
+const SERVE_PORT = 4417;
+const STALE_PORT = 4400;
+
+/** Use Node's HTTP client and server over paired streams, with an explicit refusal at unbound ports. */
+function useHttpEndpoints(t: Ctx, endpoints = new Map<number, Server>()) {
+  const sockets: Duplex[] = [];
+  t.after(() => { for (const socket of sockets) socket.destroy(); });
+  t.mock.method(Agent.prototype, "createConnection", ({ port }: { port: string }) => {
+    const server = endpoints.get(Number(port));
+    if (!server) {
+      const socket = Object.assign(new Socket(), { connecting: true });
+      globalThis.setImmediate(() => socket.destroy(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })));
+      return socket;
+    }
+    const endpoint = (peer: () => Duplex) => Object.assign(new Duplex({
+      read() {},
+      write(chunk, _encoding, done) { peer().push(chunk); done(); },
+      final(done) { peer().push(null); done(); },
+    }), {
+      setTimeout() { return this; },
+      setNoDelay() { return this; },
+      setKeepAlive() { return this; },
+      ref() { return this; },
+      unref() { return this; },
+      destroySoon(this: Duplex) { this.end(); },
+      remoteAddress: "127.0.0.1",
+    });
+    const client: Duplex = endpoint(() => peer);
+    const peer = endpoint(() => client);
+    sockets.push(client, peer);
+    server.emit("connection", peer);
+    return client;
+  });
+}
+
 /** A serve stand-in: each verb route answers through `actions`, and every request is recorded. */
-async function serve(t: Ctx, actions: InboxVerbActions) {
-  const seen: Array<{ path: string; auth: string | undefined; body: unknown }> = [];
+function serve(actions: InboxVerbActions) {
+  const seen: Array<{ method: string | undefined; path: string; auth: string | undefined; body: unknown }> = [];
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-      seen.push({ path: req.url ?? "", auth: req.headers.authorization, body });
+      seen.push({ method: req.method, path: req.url ?? "", auth: req.headers.authorization, body });
       const spec = INBOX_VERBS.find((verb) => verb.path === req.url);
       if (!spec) { res.writeHead(404).end("{}"); return; }
       void actions[spec.name](body, { origin: "token:write" }, (status, result) => {
@@ -48,18 +84,7 @@ async function serve(t: Ctx, actions: InboxVerbActions) {
       });
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
-  return { port: (server.address() as AddressInfo).port, seen };
-}
-
-/** A port with nothing listening on it. */
-async function closedPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
+  return { server, seen };
 }
 
 /** Runs one CLI call and returns its exit code and what it printed. */
@@ -85,17 +110,20 @@ function fakeActions(): InboxVerbActions & { calls: InboxVerbName[] } {
 
 test("W1-T13238 criterion 1: rmd archive posts to the running serve's write route with the write token and prints its answer", async (t) => {
   const actions = fakeActions();
-  const { port, seen } = await serve(t, actions);
+  const { server, seen } = serve(actions);
+  const port = SERVE_PORT;
+  useHttpEndpoints(t, new Map([[port, server]]));
   const config = { root: root(t), serve: { port } } as unknown as Config;
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
   assert.equal(result.code, 0);
   assert.deepEqual(result.out, [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })]);
   assert.deepEqual(result.err, [], "no in-process fallback was taken");
-  assert.deepEqual(seen, [{ path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+  assert.deepEqual(seen, [{ method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
 });
 
 test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process and says so on stderr", async (t) => {
-  const port = await closedPort();
+  const port = SERVE_PORT;
+  useHttpEndpoints(t);
   const local = fakeActions();
   let built = 0;
   const actions = serveFirstInboxActions({ url: `http://127.0.0.1:${port}`, token: TOKEN }, () => { built++; return local; });
@@ -117,42 +145,47 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
 });
 
-test("W1-T13238: the CLI prefers RMD_SERVE_PORT, then the configured port, then serve's default", (t) => {
+test("W1-T13238: the CLI uses the configured port, then RMD_SERVE_PORT, then serve's default", (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
   const base = { root: root(t) };
   const configured = { ...base, serve: { port: 9 } };
 
   process.env.RMD_SERVE_PORT = "4400";
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:4400", token: TOKEN, alternates: ["http://127.0.0.1:9"] });
-  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN, alternates: [`http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`] });
-  process.env.RMD_SERVE_PORT = "9";
   assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN });
+  process.env.RMD_SERVE_PORT = "invalid";
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(base), { reason: "serve port must be an integer 1-65535" });
 
   delete process.env.RMD_SERVE_PORT;
   assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
   assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
 });
 
-test("W1-T13238 criterion 1: with RMD_SERVE_PORT naming another port, rmd archive still reaches serve on its configured port", async (t) => {
+test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale RMD_SERVE_PORT answers 404", async (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
-  const { port, seen } = await serve(t, fakeActions());
-  const elsewhere = await closedPort();
-  process.env.RMD_SERVE_PORT = String(elsewhere);
+  const { server, seen } = serve(fakeActions());
+  const port = SERVE_PORT;
+  const staleRequests: Array<string | undefined> = [];
+  const stale = createServer((req, res) => {
+    staleRequests.push(req.headers.authorization);
+    res.writeHead(404).end(JSON.stringify({ error: "other_listener" }));
+  });
+  useHttpEndpoints(t, new Map([[port, server], [STALE_PORT, stale]]));
+  process.env.RMD_SERVE_PORT = String(STALE_PORT);
   const config = { root: root(t), serve: { port } } as unknown as Config;
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
+  assert.deepEqual(staleRequests, [], "the stale listener received no request or bearer");
   assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
-  assert.deepEqual(seen, [{ path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+  const request = { method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } };
+  assert.deepEqual(seen, [request]);
 
-  // Neither address answers: the fallback line names both, and the verb runs in-process once.
-  const unused = await closedPort();
-  const none = { root: root(t), serve: { port: unused } } as unknown as Config;
-  const local = fakeActions();
-  const fallback = await captured(t, () => inboxVerbViaServe("archive", ["P7"], none, () => local));
-  assert.equal(fallback.code, 0);
-  assert.deepEqual(local.calls, ["archive"]);
-  assert.deepEqual(fallback.err, [`rmd archive: no serve answered at http://127.0.0.1:${elsewhere} (ECONNREFUSED) or http://127.0.0.1:${unused} (ECONNREFUSED); running in-process`]);
+  process.env.RMD_SERVE_PORT = String(port);
+  const viaEnv = await captured(t, () => inboxVerbViaServe("archive", ["P7"], { root: config.root }, () => assert.fail("ran in-process")));
+  assert.deepEqual(viaEnv, result);
+  assert.deepEqual(seen, [request, request]);
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
@@ -172,17 +205,19 @@ test("W1-T13238: without a serve write token, the CLI warns once and returns the
   assert.equal(existsSync(join(config.root, "state", "service-tokens.json")), false);
 });
 
-test("W1-T13238: a stalled serve connection falls back at the two-second connect deadline", async (t) => {
+test("W1-T13238 criterion 2: a stalled serve connection has one two-second deadline despite a stale override", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  process.env.RMD_SERVE_PORT = String(STALE_PORT);
   const socket = Object.assign(new Socket(), { connecting: true });
   t.after(() => { socket.destroy(); });
-  const connect = t.mock.method(globalAgent, "createConnection", () => socket);
+  const connect = t.mock.method(Agent.prototype, "createConnection", () => socket);
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
   const local = fakeActions();
-  const url = "http://127.0.0.1:1";
-  const actions = serveFirstInboxActions({ url, token: TOKEN }, () => local);
+  const config = { root: root(t), serve: { port: SERVE_PORT } };
   const result = await captured(t, async () => {
-    const run = inboxVerbCommand("snooze", ["P3", "--wake"], actions);
+    const run = inboxVerbViaServe("snooze", ["P3", "--wake"], config, () => local);
     await setImmediate(); // Let the HTTP request attach the pending socket before advancing the clock.
     assert.equal(connect.mock.callCount(), 1);
     t.mock.timers.tick(1_999);
@@ -192,17 +227,21 @@ test("W1-T13238: a stalled serve connection falls back at the two-second connect
     return run;
   });
   assert.equal(result.code, 0);
+  assert.equal(connect.mock.callCount(), 1);
   assert.deepEqual(local.calls, ["snooze"]);
-  assert.deepEqual(result.err, [`rmd snooze: no serve answered at ${url} (CONNECT_TIMEOUT); running in-process`]);
+  assert.deepEqual(result.err, [`rmd snooze: no serve answered at http://127.0.0.1:${SERVE_PORT} (CONNECT_TIMEOUT); running in-process`]);
 });
 
 test("W1-T13238 criterion 3: invariant:same-answer-either-path — archive, snooze and decline print the same and exit the same through serve or in-process", async (t) => {
-  const { port } = await serve(t, fakeActions());
+  const { server } = serve(fakeActions());
+  const port = SERVE_PORT;
+  useHttpEndpoints(t, new Map([[port, server]]));
   const viaServe = serveFirstInboxActions({ url: `http://127.0.0.1:${port}`, token: TOKEN }, () => { throw new Error("must not run in-process"); });
   const cases: Array<[InboxVerbName, string[]]> = [];
   for (const id of ["P1", "refused", "invalid"]) {
     cases.push(["archive", [id]], ["snooze", [id, "--until", "2026-12-01T00:00:00Z"]], ["decline", [id, "--reason", "duplicate"]]);
   }
+  cases.push(["archive", [" \t"]], ["snooze", [" \t", "--wake"]]);
   for (const [name, args] of cases) {
     const local = await captured(t, () => inboxVerbCommand(name, args, fakeActions()));
     const remote = await captured(t, () => inboxVerbCommand(name, args, viaServe));
@@ -226,7 +265,7 @@ const verdictFind = (id: string) => id === "P1" ? { exists: true, classification
 test("W1-T13238: decline warns when the write token is missing and returns the local refusal", async (t) => {
   const config = { root: root(t, null) };
   const args = ["Pgone", "--reason", "duplicate"];
-  const connect = t.mock.method(globalAgent, "createConnection", () => assert.fail("attempted to connect without a token"));
+  const connect = t.mock.method(Agent.prototype, "createConnection", () => assert.fail("attempted to connect without a token"));
   const result = await captured(t, () => proposalVerdictViaServe("decline", args, config, () =>
     proposalVerdictCommand("decline", args, verdictFind, () => assert.fail("recorded a verdict for a missing proposal"))));
 
@@ -246,7 +285,7 @@ test("W1-T13238: restore warns when serve refuses the connection and records the
   const args = ["Pd", "--reason", "reconsidered"];
   const socket = Object.assign(new Socket(), { connecting: true });
   t.after(() => { socket.destroy(); });
-  const connect = t.mock.method(globalAgent, "createConnection", () => socket);
+  const connect = t.mock.method(Agent.prototype, "createConnection", () => socket);
   const recorded: Array<[string, string, string]> = [];
   const result = await captured(t, async () => {
     const run = proposalVerdictViaServe("restore", args, config, () =>
@@ -265,9 +304,26 @@ test("W1-T13238: restore warns when serve refuses the connection and records the
   assert.deepEqual(recorded, [["panel.proposal_restored", "Pd", "reconsidered"]]);
 });
 
+test("W1-T13238 criterion 2: after connection refusal, decline still records a ready age-only proposal", async (t) => {
+  const port = SERVE_PORT;
+  useHttpEndpoints(t);
+  const config = { root: root(t), serve: { port } };
+  const args = [AGE.id, "--reason", "noise"];
+  const recorded: Array<[string, string, string]> = [];
+  const result = await captured(t, () => proposalVerdictViaServe("decline", args, config, () =>
+    proposalVerdictInProcess("decline", args, ageVerdictFind, (...row) => { recorded.push(row); })));
+
+  assert.deepEqual(result, {
+    code: 0,
+    out: [`rmd decline: ${AGE.id} DECLINED — take it back with rmd restore ${AGE.id} --reason "<text>"`],
+    err: [`rmd decline: no serve answered at http://127.0.0.1:${port} (ECONNREFUSED); running in-process`],
+  });
+  assert.deepEqual(recorded, [["panel.proposal_declined", AGE.id, "noise"]]);
+});
+
 /** A serve stand-in for the verdict routes, answering as panel-graph.ts's route does from applyProposalVerdict. */
-async function verdictServe(t: Ctx) {
-  const server: Server = createServer((req, res) => {
+function verdictServe(): Server {
+  return createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -279,13 +335,11 @@ async function verdictServe(t: Ctx) {
       res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
-  return (server.address() as AddressInfo).port;
 }
 
 test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same through serve as the in-process command", async (t) => {
-  const port = await verdictServe(t);
+  const port = SERVE_PORT;
+  useHttpEndpoints(t, new Map([[port, verdictServe()]]));
   const config = { root: root(t), serve: { port } } as unknown as Config;
   for (const [kind, id] of [["decline", "P1"], ["decline", "Pd"], ["decline", "Pgone"], ["restore", "Pd"], ["restore", "P1"]] as const) {
     const args = [id, "--reason", "duplicate"];
@@ -299,6 +353,22 @@ test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same
   assert.equal(ran, 1);
 });
 
+test("W1-T13238 criterion 3: decline and restore reject whitespace-only IDs before HTTP or local lookup", async (t) => {
+  const config = { root: root(t), serve: { port: 1 } };
+  const connect = t.mock.method(Agent.prototype, "createConnection", () => assert.fail("connected with a blank proposal ID"));
+  const args = [" \t", "--reason", "duplicate"];
+  for (const kind of ["decline", "restore"] as const) {
+    const inProcess = () => proposalVerdictInProcess(kind, args,
+      () => assert.fail("looked up a blank proposal ID"),
+      () => assert.fail("recorded a verdict for a blank proposal ID"));
+    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, inProcess));
+    const local = await captured(t, async () => inProcess());
+    assert.deepEqual(local, { code: 2, out: [], err: [`rmd ${kind}: a proposal id and a non-empty --reason are required — usage: rmd ${kind} <proposalId> --reason "<text>"`] });
+    assert.deepEqual(remote, local);
+  }
+  assert.equal(connect.mock.callCount(), 0);
+});
+
 test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no serve token or no serve answers", async (t) => {
   const args = ["P1", "--reason", "duplicate"];
   let ran = 0;
@@ -308,7 +378,8 @@ test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no
   assert.deepEqual(bare, { code: 0, out: [], err: ["rmd decline: no serve write token (ENOENT); running in-process"] });
   assert.equal(ran, 1);
 
-  const port = await closedPort();
+  const port = SERVE_PORT;
+  useHttpEndpoints(t);
   const config = { root: root(t), serve: { port } } as unknown as Config;
   const refused = await captured(t, () => proposalVerdictViaServe("restore", args, config, inProcess));
   assert.deepEqual(refused, { code: 0, out: [],
@@ -319,7 +390,10 @@ test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no
 /** serve's real verdict routes over a registry holding one age-only observation, as test/console-api's write test builds them. */
 const AGE = { id: "board-review:stale:PR-7", originatingItemId: "PR-7", summary: "board-review: PR-7 has sat open 30.0h, past the 24h depth threshold",
   evidenceAnchors: [{ description: "age", pattern: "pattern-age" }] };
-async function realVerdictServe(t: Ctx): Promise<{ root: string; port: number; ledgerPath: string }> {
+const ageVerdictFind = (id: string) => id === AGE.id
+  ? { exists: true, classification: { proposalId: AGE.id, state: "ready" as const, reasons: [] }, proposal: AGE } : { exists: false };
+
+function realVerdictServe(t: Ctx): { root: string; port: number; ledgerPath: string } {
   const repo = gitRepo({ seedCommit: false, kind: "inbox-cli-age-only" });
   const dir = repo.dir;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -343,28 +417,22 @@ async function realVerdictServe(t: Ctx): Promise<{ root: string; port: number; l
     inboxGrepAnchor: () => true,
   };
   const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(deps) });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
-  return { root: dir, port: (server.address() as AddressInfo).port, ledgerPath };
+  useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
+  return { root: dir, port: SERVE_PORT, ledgerPath };
 }
 
-test("W1-T13238 criterion 3: an age-only Inbox observation is refused the same by serve's real route and in-process", async (t) => {
-  const world = await realVerdictServe(t);
-  const config = { root: world.root, serve: { port: world.port } } as unknown as Config;
-  const find = (id: string) => id === AGE.id ? { exists: true, classification: { proposalId: AGE.id, state: "ready" } as never, proposal: AGE } : { exists: false };
+test("W1-T13238 criterion 3: the CLI preserves age-only verdicts when serve's real route declines to act", async (t) => {
+  const world = realVerdictServe(t);
+  const config = { root: world.root, serve: { port: world.port } };
   for (const kind of ["decline", "restore"] as const) {
     const args = [AGE.id, "--reason", "noise"];
-    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, () => { throw new Error("must not run in-process"); }));
-    const local = await captured(t, async () => proposalVerdictInProcess(kind, args, find, () => assert.fail("recorded a verdict on an observation")));
-    assert.deepEqual(remote, { code: 1, out: [], err: [`rmd ${kind}: This age observation is readable information, not an operator decision or work request.`] });
-    assert.deepEqual(local, remote, kind);
+    const recorded: Array<[string, string, string]> = [];
+    const inProcess = () => proposalVerdictInProcess(kind, args, ageVerdictFind, (...row) => { recorded.push(row); });
+    const local = await captured(t, async () => inProcess());
+    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, inProcess));
+    assert.deepEqual(remote, local, kind);
+    assert.equal(remote.code, kind === "decline" ? 0 : 1);
+    assert.deepEqual(recorded, kind === "decline" ? Array(2).fill(["panel.proposal_declined", AGE.id, "noise"]) : []);
   }
-  assert.equal(readFileSync(world.ledgerPath, "utf8"), "", "neither path recorded a verdict");
-
-  // Positive control: an ordinary proposal still records through the in-process command, and usage errors still come first.
-  const recorded: string[] = [];
-  const ordinary = await captured(t, async () => proposalVerdictInProcess("decline", ["P1", "--reason", "duplicate"], verdictFind, (step) => { recorded.push(step); }));
-  assert.equal(ordinary.code, 0);
-  assert.deepEqual(recorded, ["panel.proposal_declined"]);
-  assert.equal((await captured(t, async () => proposalVerdictInProcess("decline", [AGE.id], find, () => {}))).code, 2);
+  assert.equal(readFileSync(world.ledgerPath, "utf8"), "", "the serve routes recorded no verdict");
 });

@@ -930,7 +930,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { INBOX_VERBS, inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -39786,19 +39786,18 @@ export async function inboxActionCliCommand(name: InboxVerbName, rest: string[],
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  // W1-T13238: with serve's informational-only guard, so the answer is the same through serve or in-process.
   return proposalVerdictInProcess(
     kind,
     rest,
     (id) => {
+      const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+      const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
+      const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
       const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
-      return { exists: proposal !== undefined, classification, proposal };
+      return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
       // W1-T10077: a decline of a verify-human proposal records the state it was given on.

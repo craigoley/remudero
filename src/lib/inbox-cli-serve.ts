@@ -1,16 +1,13 @@
 /**
  * W1-T13238: the Inbox verb CLI (`rmd reply`, `archive`, `snooze`, `keep`) posts to the running serve's write route, as
  * the Console does, so a verb answers from serve's held plan instead of projecting the whole plan with live gh
- * in-process (400 s from the Azure host on 2026-11-16). In-process runs only when no serve accepts the connection.
+ * in-process (400 s from the Azure host on 2026-11-16).
  * It lives outside run-task.ts so its test does not import the CLI hub (the affected-suite reach ratchet).
  */
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
-import { RmdError } from "./errors.js";
-import type { InboxClassification } from "./inbox.js";
-import { isAgeOnlyInboxInformation, type InboxOwnershipEvidence } from "./inbox-owner.js";
 import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
 
 /** serve.ts's DEFAULT_SERVE_PORT and serviceTokensPath, restated so this CLI stays out of serve's import cycle. */
@@ -20,23 +17,18 @@ const inboxCliTokensPath = (root: string): string => join(root, "state", "servic
 /** W1-T13238: how long an Inbox verb waits to connect to the running serve before it runs in-process instead. */
 export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
 
-/** W1-T13238: where the running serve's write routes listen, and the write token they take. `alternates` are tried in
- *  order when `url` refuses the connection. */
-export interface InboxCliServeTarget { url: string; token: string; alternates?: string[] }
+/** W1-T13238: where the running serve's write routes listen, and the write token they take. */
+export interface InboxCliServeTarget { url: string; token: string }
 
 const validPort = (port: number): boolean => Number.isInteger(port) && port >= 1 && port <= 65_535;
 
 /**
- * The local write endpoint uses the launcher override, then the configured port, or serve's default.
- * `rmd serve` itself binds the configured port unless the launcher passes RMD_SERVE_PORT as --port, so with both set
- * the CLI tries the override first and the configured port second.
- * The CLI only reads the existing write token, and keeps it out of diagnostics.
+ * A configured port identifies the local serve. When absent, use the launcher's port or the default.
+ * Resolve one address before sending the write token so a stale override cannot receive the bearer.
  */
 export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">): InboxCliServeTarget | { reason: string } {
-  const configured = Number(config.serve?.port || INBOX_CLI_DEFAULT_SERVE_PORT);
-  const port = Number(process.env.RMD_SERVE_PORT || configured);
+  const port = config.serve?.port ?? Number(process.env.RMD_SERVE_PORT || INBOX_CLI_DEFAULT_SERVE_PORT);
   if (!validPort(port)) return { reason: "serve port must be an integer 1-65535" };
-  const alternates = validPort(configured) && configured !== port ? [`http://127.0.0.1:${configured}`] : [];
   let write: unknown;
   try {
     write = (JSON.parse(readFileSync(inboxCliTokensPath(config.root), "utf8")) as { write?: unknown }).write;
@@ -44,20 +36,7 @@ export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">): Inb
     return { reason: `no serve write token (${(error as NodeJS.ErrnoException).code ?? "unreadable"})` };
   }
   if (typeof write !== "string" || !/^[0-9a-f]{64}$/.test(write)) return { reason: "no serve write token (malformed)" };
-  return { url: `http://127.0.0.1:${port}`, token: write, ...(alternates.length > 0 ? { alternates } : {}) };
-}
-
-/** Posts to each of the target's addresses in turn until one accepts the connection. An unreachable answer names every
- *  address tried, so the fallback line says where no serve answered. */
-async function postToServe(target: InboxCliServeTarget, path: string, body: unknown, connectMs: number):
-  Promise<{ status: number; body: unknown } | { unreachable: string } | { failed: string }> {
-  const tried: string[] = [];
-  for (const url of [target.url, ...(target.alternates ?? [])]) {
-    const answer = await postInboxVerb(`${url}${path}`, target.token, body, connectMs);
-    if (!("unreachable" in answer)) return answer;
-    tried.push(`${url} (${answer.unreachable})`);
-  }
-  return { unreachable: tried.join(" or ") };
+  return { url: `http://127.0.0.1:${port}`, token: write };
 }
 
 /** W1-T13238: errors that mean no serve answered the connect, so nothing was sent and in-process is safe. */
@@ -75,9 +54,9 @@ export function serveFirstInboxActions(target: InboxCliServeTarget, inProcess: (
   const connectMs = opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS;
   const entries = INBOX_VERBS.map((spec) => [spec.name, async (body: unknown, actor: Parameters<InboxVerbActions[InboxVerbName]>[1],
     respond: Parameters<InboxVerbActions[InboxVerbName]>[2]) => {
-    const answer = await postToServe(target, spec.path, body, connectMs);
+    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs);
     if ("unreachable" in answer) {
-      warn(`rmd ${spec.name}: no serve answered at ${answer.unreachable}; running in-process`);
+      warn(`rmd ${spec.name}: no serve answered at ${target.url} (${answer.unreachable}); running in-process`);
       return inProcess()[spec.name](body, actor, respond);
     }
     if ("failed" in answer) { respond(502, { error: "serve_request_failed", detail: answer.failed }); return; }
@@ -91,7 +70,8 @@ function postInboxVerb(url: string, token: string, body: unknown, connectMs: num
   const payload = Buffer.from(JSON.stringify(body));
   return new Promise((resolve) => {
     let connected = false;
-    const req = httpRequest(url, { method: "POST", headers: { "content-type": "application/json", "content-length": payload.length,
+    // Use a direct loopback connection even when Node's global agent is configured for a proxy.
+    const req = httpRequest(url, { agent: false, method: "POST", headers: { "content-type": "application/json", "content-length": payload.length,
       authorization: `Bearer ${token}` } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -147,56 +127,36 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
   const proposalId = rest[0];
   const reason = rest.length === 3 && rest[1] === "--reason" ? rest[2] : undefined;
   // Anything but `<id> --reason <text>` is the in-process command's to refuse with its own usage line.
-  if (!proposalId || proposalId.startsWith("--") || reason === undefined || reason.trim() === "") return inProcess();
+  if (proposalId === undefined || proposalId.trim() === "" || proposalId.startsWith("--") || reason === undefined || reason.trim() === "") return inProcess();
   const target = inboxCliServeTarget(config);
   if ("reason" in target) {
     console.error(`rmd ${kind}: ${target.reason}; running in-process`);
     return inProcess();
   }
   const spec = INBOX_VERBS.find((verb) => verb.name === kind)!;
-  const answer = await postToServe(target, spec.path, { proposalId, reason }, opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS);
+  const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, { proposalId, reason }, opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS);
   if ("unreachable" in answer) {
-    console.error(`rmd ${kind}: no serve answered at ${answer.unreachable}; running in-process`);
+    console.error(`rmd ${kind}: no serve answered at ${target.url} (${answer.unreachable}); running in-process`);
     return inProcess();
   }
   if ("failed" in answer) { console.error(`rmd ${kind}: serve request failed: ${answer.failed}`); return 1; }
   if (answer.status >= 200 && answer.status < 300) { console.log(proposalVerdictReceipt(kind, proposalId)); return 0; }
-  const detail = (answer.body as { detail?: unknown; error?: unknown } | undefined)?.detail ?? (answer.body as { error?: unknown } | undefined)?.error;
+  const refusal = answer.body as { detail?: unknown; error?: unknown } | undefined;
+  // Serve's informational guard answers before recording a verdict. An explicit terminal verdict
+  // uses the legacy local decision in that case, whether or not serve was reachable.
+  if (answer.status === 409 && refusal?.error === "informational_only") return inProcess();
+  const detail = refusal?.detail ?? refusal?.error;
   console.error(`rmd ${kind}: ${typeof detail === "string" ? detail : `serve answered ${answer.status}`}`);
   return 1;
 }
 
-/** W1-T13238: serve's verdict route refuses an age-only observation with this detail (panel-graph.ts's
- *  refuseInformationalProposal); restated so the in-process command answers the same without importing serve's routes. */
-export const INBOX_INFORMATIONAL_ONLY_DETAIL = "This age observation is readable information, not an operator decision or work request.";
-
-class InformationalVerdictRefused extends RmdError {
-  constructor() {
-    super("usage", 1, INBOX_INFORMATIONAL_ONLY_DETAIL); // a refused verdict on information is a usage refusal, exit 1 as before
-  }
-}
-
-/**
- * W1-T13238 invariant:same-answer-either-path: `rmd decline` and `rmd restore` in-process, with serve's route's guard.
- * The route refuses an age-only Inbox observation before it records a verdict, so the in-process command refuses it the
- * same way: the route's detail on stderr and exit 1, with nothing recorded. Usage errors still come first, as on serve.
- */
+/** Treat a whitespace-only ID as missing before the legacy verdict parser can look it up. */
 export function proposalVerdictInProcess(
   kind: "decline" | "restore",
   rest: string[],
-  find: (proposalId: string) => { exists: boolean; classification?: InboxClassification; proposal?: InboxOwnershipEvidence },
+  find: Parameters<typeof proposalVerdictCommand>[2],
   record: (step: string, proposalId: string, reason: string) => void,
 ): number {
-  try {
-    return proposalVerdictCommand(kind, rest, (id) => {
-      const found = find(id);
-      const requiresReview = found.classification?.retirement?.state === "restored_for_review";
-      if (found.proposal && found.classification && isAgeOnlyInboxInformation({ ...found.proposal, requiresReview })) throw new InformationalVerdictRefused();
-      return { exists: found.exists, classification: found.classification };
-    }, record);
-  } catch (error) {
-    if (!(error instanceof InformationalVerdictRefused)) throw error;
-    console.error(`rmd ${kind}: ${error.message}`);
-    return error.exitCode;
-  }
+  const args = rest[0] && !rest[0].trim() ? ["", ...rest.slice(1)] : rest;
+  return proposalVerdictCommand(kind, args, find, record);
 }
