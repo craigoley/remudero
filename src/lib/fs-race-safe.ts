@@ -4,6 +4,7 @@ import fs, { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, r
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { sameHost } from "./host-identity.js";
 
@@ -498,7 +499,7 @@ export function defaultGetProcessStartTime(
       // Whole-second btime can put the answer up to 1 s before the true start.
       const startMs = hz === null ? NaN : fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
       // A start after now or before boot is a misread record, not a process: ask ps.
-      if (startMs <= Date.now() && startMs >= fields.btimeSec * 1000) return startMs;
+      if (startMs <= systemClock.now() && startMs >= fields.btimeSec * 1000) return startMs;
     }
   }
   let raw: string;
