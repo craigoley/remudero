@@ -11521,6 +11521,7 @@ export async function postReviewStatus(
     sha: string;
     state: PostableReviewState;
     description?: string;
+    targetUrl?: string;
   },
   retryOpts: PostReviewStatusRetryOpts = {},
 ): Promise<void> {
@@ -11535,6 +11536,7 @@ export async function postReviewStatus(
     `state=${opts.state}`,
   ];
   if (opts.description) args.push("-f", `description=${opts.description.slice(0, 140)}`);
+  if (opts.targetUrl) args.push("-f", `target_url=${opts.targetUrl}`);
   const reviewerToken = process.env[REVIEWER_TOKEN_ENV];
   const env = reviewerToken ? { ...process.env, GH_TOKEN: reviewerToken, GITHUB_TOKEN: reviewerToken } : process.env;
 
@@ -11553,6 +11555,13 @@ export async function postReviewStatus(
       await sleep(backoffMs(attempt));
     }
   }
+}
+
+/** A pending hold links back to its PR with an opaque run marker independent of the public description. */
+export function pendingReviewRunTargetUrl(prUrl: string, headSha: string, runId: string): string {
+  const pr = prUrl.split(/[?#]/, 1)[0];
+  const marker = createHash("sha256").update(JSON.stringify([pr, headSha, runId])).digest("hex");
+  return `${pr}#rmd-review-run-${marker}`;
 }
 
 // ── W1-T228: the status CHANNEL is last-write-wins across uncoordinated posters ──────────────
@@ -12209,13 +12218,7 @@ export interface PostReviewStatusGuardedOpts {
   readRequiredContexts?: RequiredStatusContextsReader;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
-  post?: (o: {
-    owner: string;
-    repo: string;
-    sha: string;
-    state: PostableReviewState;
-    description?: string;
-  }) => void | Promise<void>;
+  post?: (o: Parameters<typeof postReviewStatus>[0]) => void | Promise<void>;
   /** Injectable issue transport for the one cannot-evaluate escalation per head. */
   issues?: ReviewIssueGateway;
   /** Files the one cannot-evaluate escalation per head and returns its issue URL. Injected because escalate.ts's graph
@@ -12540,7 +12543,10 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
       writeReviewOutboxEntry(opts, statusDescription, true);
     }
     try {
-      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription });
+      const targetUrl = opts.state === "pending" && opts.verdict !== undefined && opts.prUrl !== undefined
+        ? pendingReviewRunTargetUrl(opts.prUrl, opts.sha, opts.runId) : undefined;
+      await post({ owner: opts.owner, repo: opts.repo, sha: opts.sha, state: opts.state, description: statusDescription,
+        ...(targetUrl !== undefined ? { targetUrl } : {}) });
     } catch (e) {
       // W1-T135 exhaustion path: ledger-and-continue, never crash the run.
       const message = e instanceof Error ? e.message : String(e);

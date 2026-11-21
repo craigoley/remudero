@@ -8487,9 +8487,8 @@ export interface OpenPrView {
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. */
   reviewPendingOwnerRunId?: string;
-  /** W1-T14035 — the run that published the live `remudero-review` status: the one a claim names ("owned by run <id>"),
-   *  or, for a hold that names none, the run whose `review.posted` pending row posted that description
-   *  (tick-read-worker's reviewPendingStatusRunId); absent when unknown. */
+  /** W1-T14035 — the run that published the live `remudero-review` status, identified by its claim wording
+   *  or its pending hold's target URL. Absent when unknown. */
   reviewPendingStatusRunId?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub

@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, pendingReviewRunTargetUrl, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -569,6 +569,7 @@ export interface RollupCheck {
   completedAt?: string;
   /** A status context's own description, verbatim from REST (`securityMergePolicyRefusal` reads it). */
   description?: string;
+  targetUrl?: string;
 }
 
 export interface RawOpenPr {
@@ -609,39 +610,18 @@ export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefine
   return r?.startedAt;
 }
 
-/** W1-T14035: the run that owns the live `remudero-review` status, read off its own description ("owned by run <id>",
- *  which every claim postReviewPending posts carries). Absent or another wording is an unknown run, never a match. */
-export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
-  const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
-  return /\(owned by run ([^)\s]+)\)/.exec(r?.description ?? "")?.[1];
-}
-
-/** W1-T14035: the run that published a live pending `remudero-review` status. A claim names its run in the description.
- *  A hold (a pending verdict: promise harvest, cannot-evaluate, host load) names none, so it is bound to the run whose
- *  `review.posted` pending row is the newest pending publication on this PR and head, and only while that row's own
- *  summary is the live description. Anything else is an unknown run: no row, another run's row, a newer claim row, or a
- *  description the row did not post. WRITE ORDER: a review run writes its claim row after GitHub accepts the claim, and
- *  posts any hold later still; the rollup is read before the ledger, so a hold another run published before the rollup
- *  read has that run's claim row (when it claimed) visible here, and the newest-row rule then names that run. */
-export function reviewPendingStatusRunId(
+/** Claims name their run. Holds carry the publishing run's marker in the target URL, which survives ops redaction. */
+function reviewPendingStatusRunId(
   rollup: RollupCheck[] | undefined,
-  ledger: ReadonlyArray<Record<string, unknown>>,
-  taskKey: string,
   prUrl: string,
   headSha: string,
+  claimRunId: string | undefined,
 ): string | undefined {
-  const named = reviewStatusRunIdFromRollup(rollup);
-  if (named !== undefined) return named;
-  const description = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.description;
-  if (!description) return undefined;
-  let newest: Record<string, unknown> | undefined;
-  for (const line of ledger) {
-    if (line.head_sha !== headSha || !reviewRowNamesPr(line, taskKey, prUrl)) continue;
-    if (line.step === "review.pending_posted" || (line.step === "review.posted" && line.state === "pending")) newest = line;
+  const status = rollup?.find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  if (status?.targetUrl !== undefined) {
+    return claimRunId && status.targetUrl === pendingReviewRunTargetUrl(prUrl, headSha, claimRunId) ? claimRunId : undefined;
   }
-  if (newest?.step !== "review.posted" || typeof newest.run_id !== "string" || newest.run_id === "") return undefined;
-  const summary = (newest.decision_verdict as { summary?: unknown } | undefined)?.summary;
-  return typeof summary === "string" && summary !== "" && summary.slice(0, 140) === description ? newest.run_id : undefined;
+  return /^(?:remudero-review: review in progress|pending) \(owned by run ([^)\s]+)\)/.exec(status?.description ?? "")?.[1];
 }
 
 /** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
@@ -2661,7 +2641,7 @@ export function* openPrViewSteps(
       // W1-T14035: the dead row's run and the live status's run, so the sweep releases a claim only when they are one run.
       reviewPendingOwnerRunId: currentPendingRecord?.runId ? currentPendingRecord.runId : undefined,
       reviewPendingStatusRunId: reviewState === "pending"
-        ? reviewPendingStatusRunId(pr.statusCheckRollup, ledger, unmetKey, pr.url, pr.headRefOid) : undefined,
+        ? reviewPendingStatusRunId(pr.statusCheckRollup, pr.url, pr.headRefOid, currentPendingRecord?.runId) : undefined,
       reviewVerdictPostedAt,
       checksState,
       // W1-T13195: a failed rollup read is carried so the sweep waits instead of reading "none".
