@@ -450,7 +450,7 @@ export function recordRoutingPolicyEstimates(opts: { stateDir: string; today?: s
   for (const estimate of estimateRoutingPolicies(read.rows, today).cells) {
     if (written.has(estimate.cellKey)) continue;
     appendLedger(join(opts.stateDir, LEDGER_FILENAME), { run_id: `ROUTING-POLICY-${estimate.cellKey}-${today}`,
-      task_id: "ROUTING-POLICY", step: ROUTING_POLICY_ESTIMATE_STEP, cell_key: estimate.cellKey, day: today, estimate });
+      task_id: "FLEET", step: ROUTING_POLICY_ESTIMATE_STEP, cell_key: estimate.cellKey, day: today, estimate });
     recorded.push(estimate);
   }
   return recorded;
