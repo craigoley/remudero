@@ -6,7 +6,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium
+  risk: high # raised 2026-11-21 with the files amendment: the task now spans the census precheck and the rejected-capture test (Rule 19)
   band_meaning: span
   origin: "operator-session#mac-author-preflight-2026-11-16"
   plan_refs:
