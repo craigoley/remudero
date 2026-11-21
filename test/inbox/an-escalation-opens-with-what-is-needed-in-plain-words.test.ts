@@ -4,28 +4,33 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
+  classifyAsk,
+  editEscalationMachineFields,
   escalate,
+  escalationBodyInLegacyOrder,
   escalationContractRevision,
   escalationHeadSha,
   escalationIssueCause,
   escalationIssueTitle,
   escalationTaskId,
-  MACHINE_FIELD_LINE_RE,
   matchDuplicateEscalation,
+  prReferentFromIssueText,
   renderIssueBody,
-  SECTION_HEADING_LINE_RE,
-  SUMMARY_HEADING_WORD_RE,
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
+import { createEscalationConversationReader, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
 import {
-  createEscalationConversationReader,
-  MACHINE_FIELDS_RE,
-  parseEscalationConversationSource,
-  QUOTED_MACHINE_FIELD_LINE_RE,
-} from "#src/lib/escalation-conversation.js";
-import { issueTaskId, supersededDuplicates } from "#src/lib/issue-revalidation-garden.js";
+  duplicateEscalationKey,
+  evidenceNames,
+  issueEscalationCause,
+  issueEscalationClass,
+  issueTaskId,
+  supersededDuplicates,
+  terminalRulePr,
+} from "#src/lib/issue-revalidation-garden.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
+import { validateDecisionSummary } from "#src/lib/feedback.js";
 import { taskInputAnswer } from "#src/lib/worker.js";
 
 const prUrl = "https://github.com/fixture/repo/pull/12345";
@@ -54,8 +59,13 @@ const fields = [
   "**Contract:** rev-42",
 ];
 
+/** The body as GitHub shows it: the hidden layout markers (HTML comments) removed. */
+function visible(body: string): string {
+  return body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, "");
+}
+
 test("W1-T12041 criterion 1: the body opens with the summary and choices and ends with machine fields", (t) => {
-  const body = renderIssueBody(escalation);
+  const body = visible(renderIssueBody(escalation));
   assert.ok(body.startsWith([
     escalation.summary,
     "",
@@ -78,6 +88,8 @@ test("W1-T12041 criterion 1: the body opens with the summary and choices and end
     options: escalation.options.map(({ label, detail }) => ({ label, consequence: detail })),
   } });
   assert.ok(summarized.startsWith("## Decision Summary\nThe release needs a decision\n"));
+  assert.ok(summarized.indexOf("## Recommendation") < summarized.indexOf("## Details"));
+  assert.ok(summarized.indexOf(escalation.detail) < summarized.indexOf("## Machine fields"));
   assert.ok(summarized.indexOf("## Options") < summarized.indexOf("## Machine fields"));
 
   const directory = mkdtempSync(join(tmpdir(), "rmd-escalation-layout-"));
@@ -96,7 +108,8 @@ test("W1-T12041 criterion 1: the body opens with the summary and choices and end
   });
   assert.match(delivered, /Degraded: label\(s\) escalation-blocked/);
   assert.match(delivered, /Non-conforming operator message/);
-  assert.ok(delivered.endsWith(["## Machine fields", ...fields].join("\n")));
+  assert.ok(visible(delivered).endsWith(["## Machine fields", ...fields].join("\n")));
+  assert.ok(visible(delivered).indexOf("Non-conforming operator message") < visible(delivered).indexOf("## Machine fields"));
 });
 
 function sourceOf(body: string, subject = escalation) {
@@ -188,19 +201,6 @@ function repeatOutcome(t: TestContext, request: Escalation, body: string): "reus
   return opened ? "opened" : "reused";
 }
 
-/** The fields-first body the writer produced before W1-T12041, for the same escalation. */
-function legacyBodyOf(e: Escalation): string {
-  return [
-    `**Class:** ${e.class}`, `**Task:** ${e.taskId}`, `**Host:** ${hostname()}`, `**Run:** ${e.runId}`,
-    `**Head:** ${e.headSha}`, `**Cause:** ${e.cause}`, `**Contract:** ${e.contractRevision}`,
-    ...(escalationIssueTitle(e).endsWith("…") ? [`**Full summary (JSON):** ${JSON.stringify(e.summary)}`] : []),
-    "", e.detail, "", "## Options", ...e.options.map((o) => `- **${o.label}** — ${o.detail}`), "",
-    "## Recommendation", e.recommendation, "",
-    "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
-    "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
-  ].join("\n");
-}
-
 test("W1-T12041 criterion 1: a bare PR in Details and a PR link in Options open issues exactly as the fields-first order did", (t) => {
   // The reviewer's case: bare PR #12345 in Details, a full link to PR #54321 in Options. The legacy
   // matcher read #54321 (a full link outranks a bare reference), so a repeat opened another issue.
@@ -211,47 +211,15 @@ test("W1-T12041 criterion 1: a bare PR in Details and a PR link in Options open 
   };
   for (const summary of [subject.summary, subject.summary + " x".repeat(150)]) {
     const request = { ...subject, summary };
-    assert.equal(repeatOutcome(t, request, legacyBodyOf(request)), "opened");
+    assert.equal(repeatOutcome(t, request, legacyRender(request)), "opened");
     assert.equal(repeatOutcome(t, request, renderIssueBody(request)), "opened");
     // Two full links: the fields-first order read Details first, and so does the new order.
     const linked = { ...request, detail: `The release is blocked on ${prUrl}.` };
-    assert.equal(repeatOutcome(t, linked, legacyBodyOf(linked)), "reused");
+    assert.equal(repeatOutcome(t, linked, legacyRender(linked)), "reused");
     assert.equal(repeatOutcome(t, linked, renderIssueBody(linked)), "reused");
     const other = { ...request, detail: `The release is blocked on ${otherPrUrl}.` };
     assert.equal(matchDuplicateEscalation(other, [{ number: 42, url: issueUrl, title: escalationIssueTitle(request), body: renderIssueBody(linked) }]), undefined);
   }
-});
-
-test("the machine fields matcher requires the exact heading after a blank line", () => {
-  assert.equal(MACHINE_FIELDS_RE.test(renderIssueBody(escalation)), true);
-  assert.equal(MACHINE_FIELDS_RE.test("Summary\r\n\r\n## Machine fields\r\n**Class:** BLOCKED"), true);
-  assert.equal(MACHINE_FIELDS_RE.test("Summary\n\n## Machine fields (example)\n**Class:** BLOCKED"), false);
-  assert.equal(MACHINE_FIELDS_RE.test("Summary\n## Machine fields\n**Class:** BLOCKED"), false);
-});
-
-test("section heading quoting matches reserved headings and rejects lookalikes", () => {
-  assert.equal(SECTION_HEADING_LINE_RE.test("## Details\t"), true);
-  assert.equal(SECTION_HEADING_LINE_RE.test("## Details from the prior run"), false);
-});
-
-test("machine field quoting matches fields at the start of a line", () => {
-  assert.equal(MACHINE_FIELD_LINE_RE.test("Compare **Task:** PR-54321"), false);
-  assert.equal(MACHINE_FIELD_LINE_RE.test("**Task owner:** Operator"), false);
-  assert.equal(MACHINE_FIELD_LINE_RE.test("**Task:** PR-54321"), true);
-  assert.equal(MACHINE_FIELD_LINE_RE.test('  **Full summary (JSON):** "Prior summary"'), true);
-});
-
-test("summary quoting recognizes reserved heading words within the summary", () => {
-  assert.equal(SUMMARY_HEADING_WORD_RE.test("See ## Prior recommendation"), false);
-  assert.equal(SUMMARY_HEADING_WORD_RE.test("See ## recommendation"), true);
-  SUMMARY_HEADING_WORD_RE.lastIndex = 0;
-});
-
-test("machine field unquoting requires a leading space before a machine field label", () => {
-  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("**Head:** prior-head"), false);
-  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("  **Head count:** 3"), false);
-  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("  **Head:** prior-head"), true);
-  QUOTED_MACHINE_FIELD_LINE_RE.lastIndex = 0;
 });
 
 test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body order", async (t) => {
@@ -267,6 +235,7 @@ test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body
   assert.ok(escalationIssueTitle(clipped).endsWith("/123…"));
   await assertReaders(t, body, subject, "OPEN");
   assert.match(body, /\n## Machine fields\n\*\*Class:\*\* BLOCKED/);
+  assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
   // The escalation conversation reader takes its fields from the trailing block and its detail from
   // under "## Details", so field-shaped lines quoted in the detail never become its identity.
   assertConversation(body, subject, subject.detail);
@@ -274,9 +243,9 @@ test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body
   const crlf = body.replaceAll("\n", "\r\n");
   const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body: crlf };
   assert.equal(escalationTaskId(crlf), subject.taskId);
-  assert.equal(matchDuplicateEscalation(subject, [issue]), issue);
-  assert.equal(conversationOf(body.replace("\n## Details\n", "\n## Elsewhere\n"), clipped), undefined);
-  assert.equal(conversationOf(body.replace("\n## Machine fields\n", "\n## Elsewhere\n"), clipped), undefined);
+  // A CRLF body (edited on GitHub) deduplicates exactly as the same edit of the fields-first body did.
+  const legacyCrlf = { ...issue, body: legacyRender(subject).replaceAll("\n", "\r\n") };
+  assert.equal(matchDuplicateEscalation(subject, [issue])?.number, matchDuplicateEscalation(subject, [legacyCrlf])?.number);
 });
 
 test("W1-T12041 criterion 3: reconciliation, answers and dedup still read a legacy body", async (t) => {
@@ -368,8 +337,9 @@ test("W1-T12041 criterion 1: quoted section headings in an option cannot divert 
   });
   assert.equal(delivered, issueUrl);
   assert.deepEqual(commented, [issueUrl]);
-  assert.equal(conversationOf(body, subject)?.identity.prRef, "12345");
-  assert.equal(conversationOf(body, subject)?.detail, subject.detail);
+  // The conversation reader refuses this body exactly as it refused the fields-first one: two
+  // `## Recommendation` lines make it no supported native source in either order.
+  assert.deepEqual(conversationOf(body, subject), conversationOf(legacyRender(subject), subject));
 });
 
 test("W1-T12041 criterion 2: a PR in the title does not outrank the PR in Details for reconciliation", () => {
@@ -404,7 +374,7 @@ test("W1-T12041 criterion 2: a Task quoted in Details cannot make the revalidati
   const issue = issueOf(42, subject, renderIssueBody(subject));
   assert.equal(issueTaskId(issue), "W1-T12041");
   assert.equal(supersededDuplicates([issue, issueOf(43, unrelated, renderIssueBody(unrelated))], () => 0).size, 0);
-  assert.equal(supersededDuplicates([issue, issueOf(43, unrelated, legacyBodyOf(unrelated))], () => 0).size, 0);
+  assert.equal(supersededDuplicates([issue, issueOf(43, unrelated, legacyRender(unrelated))], () => 0).size, 0);
   // The detail still reads back as written.
   assert.equal(conversationOf(issue.body, subject)?.detail, subject.detail);
 });
@@ -444,4 +414,237 @@ test("W1-T12041 criterion 3: an old body led by another field keeps its own fiel
   assert.equal(escalationHeadSha(legacyBody), subject.headSha);
   await assertReaders(t, legacyBody, subject, "MERGED");
   assertConversation(legacyBody, subject, `${escalation.detail}\n\n## Machine fields\n**Head:** prior-head`);
+});
+
+const FOOTER = [
+  "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
+  "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+].join("\n");
+
+/** origin/main's renderIssueBody plus createEscalationIssue's appended notices, verbatim: the
+ *  fields-first body the same escalation produced before W1-T12041. */
+function legacyRender(e: Escalation, notices: readonly string[] = [], footer = FOOTER): string {
+  const card = validateDecisionSummary(e.decisionSummary ?? null);
+  const clippedTitle = escalationIssueTitle(e) !== `[${e.class}] ${e.taskId}: ${e.summary}`;
+  const summaryJson = JSON.stringify(e.summary).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+  return [
+    `**Class:** ${e.class}`, `**Task:** ${e.taskId}`, `**Host:** ${hostname()}`,
+    e.runId ? `**Run:** ${e.runId}` : undefined,
+    e.headSha ? `**Head:** ${e.headSha}` : undefined,
+    e.cause ? `**Cause:** ${e.cause}` : undefined,
+    e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
+    ...(clippedTitle ? [`**Full summary (JSON):** ${summaryJson}`] : []),
+    "",
+    ...(card ? ["## Decision Summary", card.headline, "", card.what_happened, "", `**Decision:** ${card.decision}`, ""] : []),
+    e.detail, "", "## Options", ...e.options.map((o) => `- **${o.label}** — ${o.detail}`), "",
+    "## Recommendation", e.recommendation, "",
+    footer,
+    ...(classifyAsk(e) === "question"
+      ? ["", "**To answer:** reply on this issue (repository owner only — every other reply is",
+        "counted and ignored) or reply in the console's escalation panel. Either lands in the",
+        "same place the next fix round reads."]
+      : []),
+  ].filter((l): l is string => l !== undefined).join("\n") + notices.map((n) => `\n\n${n}`).join("");
+}
+
+function reconciled(body: string, title: string): Array<[number | undefined, boolean | undefined]> {
+  const issue = { number: 42, url: issueUrl, title, body };
+  return buildEscalationReconcileCandidates("fixture", "repo", { tasks: [], byId: new Map() }, "unused", undefined, {
+    issues: { listOpen: () => [issue] },
+    evidenceRootFor: () => undefined,
+    github: {
+      prByRef: (ref) => Number(ref) === 12345
+        ? { number: 12345, url: prUrl, state: "OPEN" }
+        : { number: 54321, url: otherPrUrl, state: "MERGED" },
+      findMergedByTrailer: () => null,
+      headRefName: () => undefined,
+      prBody: () => undefined,
+    },
+  }).map(({ derived }) => [derived.prNumber, derived.merged]);
+}
+
+test("W1-T12041 criterion 1: the detail is written byte for byte and a no-PR repeat opens issues as before", () => {
+  // Review of 627460ded3: a fenced `**Head:**` diagnostic was indented, and a `**Cause:** ci` line in a
+  // no-PR, no-cause detail let the legacy body absorb a repeat that the new body turned into a second issue.
+  const first = {
+    ...escalation, summary: "Release checks failed", headSha: undefined, cause: undefined, contractRevision: undefined,
+    detail: "The release is blocked.\n\n```\n**Head:** old-head\n**Cause:** ci\n```",
+  };
+  assert.ok(renderIssueBody(first).includes(first.detail), "the detail renders exactly as written");
+  const repeat = { ...first, summary: "Release checks failed again", detail: "Still blocked." };
+  const issueOf = (body: string) => ({ number: 42, url: issueUrl, title: escalationIssueTitle(first), body });
+  assert.equal(matchDuplicateEscalation(repeat, [issueOf(legacyRender(first))])?.number, 42);
+  assert.equal(matchDuplicateEscalation(repeat, [issueOf(renderIssueBody(first))])?.number, 42);
+});
+
+test("W1-T12041 criterion 2: a body with its footer removed reconciles against the PR in Details on both orders", () => {
+  // Review of 627460ded3: open PR #12345 in Details, merged PR #54321 in Options, footer deleted.
+  const subject = {
+    ...escalation,
+    options: [{ label: "retry", detail: `Compare the checks with ${otherPrUrl}.` }, escalation.options[1]!],
+  };
+  const title = escalationIssueTitle(subject);
+  for (const body of [legacyRender(subject), renderIssueBody(subject)]) {
+    assert.ok(body.includes(FOOTER));
+    assert.deepEqual(reconciled(body, title), [[12345, false]]);
+    assert.deepEqual(reconciled(body.replace(FOOTER, ""), title), [[12345, false]]);
+  }
+});
+
+test("W1-T12041 criterion 3: an edited fields-first body keeps its Task and Head over a quoted Machine fields block", async (t) => {
+  // Review of 627460ded3: a blank line between Class and Task, and a quoted `## Machine fields` in the detail.
+  const subject = {
+    ...escalation,
+    options: [{ label: "retry", detail: `Compare ${otherPrUrl} before retrying.` }, escalation.options[1]!],
+    detail: `${escalation.detail}\n\n## Machine fields\n**Head:** prior-head`,
+  };
+  const edited = legacyRender(subject).replace("**Class:** BLOCKED\n", "**Class:** BLOCKED\n\n");
+  assert.ok(edited.startsWith("**Class:** BLOCKED\n\n**Task:** W1-T12041\n"));
+  assert.equal(escalationTaskId(edited), subject.taskId);
+  assert.equal(escalationHeadSha(edited), subject.headSha);
+  assert.equal(escalationIssueCause(edited), subject.cause);
+  await assertReaders(t, edited, subject, "MERGED");
+});
+
+/** Text that imitates every structure a reader of the body keys on. */
+const FRAGMENTS = [
+  "plain words", "**Task:** PR-54321", "**Class:** MANUAL", "**Head:** prior-head", "  **Head:** indented-head",
+  "**Cause:** review", "**Contract:** prior-revision", '**Full summary (JSON):** "PR #54321 needs a decision"',
+  "## Options", "## Recommendation", "## Details", "## Machine fields", "## Decision Summary", "- **pause** — quoted option",
+  FOOTER, "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy)", prUrl, otherPrUrl, "PR #777",
+  "<!-- Strike-Ladder-PR: 888 -->", "The CLARIFICATION-QUESTION rung asked", "**Raised-by:** conflict-evidence-missing",
+  "<!-- rmd-escalation-layout:v1:0123456789abcdef:fields -->", "<!-- rmd-escalation-layout:v1:0123456789abcdef:summary -->",
+  "```", "`src/lib/escalate.ts`", "", "trailing\r", "line\u2028separated", "crlf\r\nline",
+];
+
+/** A deterministic generator, so a red names a reproducible case. */
+function generator(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function generatedEscalations(count: number): Array<{ e: Escalation; notices: string[] }> {
+  const random = generator(12041);
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
+  const text = (): string => Array.from({ length: Math.floor(random() * 6) }, () => pick(FRAGMENTS)).join(pick(["\n", "\n\n", " "]));
+  return Array.from({ length: count }, (_, i) => {
+    const options = Array.from({ length: Math.floor(random() * 4) }, (_, n) => ({ label: n === 0 ? "retry" : pick(["pause", "edit-it", "Ship"]), detail: text() }));
+    const e: Escalation = {
+      class: pick(["BLOCKED", "MANUAL", "GRILL"] as const),
+      taskId: pick(["W1-T12041", "PR-12345", "TRIAGE-abc"]),
+      summary: random() < 0.2 ? "x".repeat(260) + text() : `Release checks failed ${i} ${text()}`,
+      detail: text(),
+      options,
+      recommendation: random() < 0.5 ? "retry" : text(),
+      ...(random() < 0.6 ? { runId: "run-42" } : {}),
+      ...(random() < 0.6 ? { headSha: "abc123" } : {}),
+      ...(random() < 0.6 ? { cause: pick(["ci", "review", "stage-stall"] as const) } : {}),
+      ...(random() < 0.4 ? { contractRevision: "rev-42" } : {}),
+      ...(random() < 0.3 ? { decisionSummary: {
+        headline: `Decide on release ${i}`, what_happened: `It happened. ${text()}`.slice(0, 600), decision: `Choose ${text()}`.slice(0, 280),
+        options: [{ label: "retry", consequence: "The checks run again." }, { label: "pause", consequence: "The release waits." }],
+      } } : {}),
+    };
+    const notices = random() < 0.3 ? ["_Degraded: label(s) x could not be provisioned._", text() || "note"].slice(0, 1 + Math.floor(random() * 2)) : [];
+    return { e, notices };
+  });
+}
+
+const CASES = generatedEscalations(400);
+
+test("W1-T12041 criterion 2: every generated body reads back as the exact fields-first text of the same escalation", () => {
+  let cards = 0;
+  for (const { e, notices } of CASES) {
+    const body = renderIssueBody(e, notices);
+    const legacy = legacyRender(e, notices);
+    if (/^## Decision Summary\n/.test(body)) cards++;
+    assert.equal(escalationBodyInLegacyOrder(body), legacy);
+    // Editing on GitHub turns every newline into CRLF; an edit that drops the footer or adds to the
+    // detail moves with its section.
+    assert.equal(escalationBodyInLegacyOrder(body.replaceAll("\n", "\r\n")), legacy.replaceAll("\n", "\r\n"));
+    const nonce = /:([0-9a-f]{16}):fields -->$/.exec(body)![1];
+    const detailsEnd = `\n<!-- rmd-escalation-layout:v1:${nonce}:details -->`;
+    assert.equal(body.split(detailsEnd).length, 2);
+    assert.equal(escalationBodyInLegacyOrder(body.replace(`${detailsEnd}\n\n${FOOTER}`, `${detailsEnd}\n\n`)), legacyRender(e, notices, ""));
+    const appended = `${e.detail}\n\nAn operator note with ${otherPrUrl}.`;
+    assert.equal(escalationBodyInLegacyOrder(body.replace(`\n## Details\n${e.detail}${detailsEnd}`, `\n## Details\n${appended}${detailsEnd}`)),
+      legacyRender({ ...e, detail: appended }, notices));
+  }
+  assert.ok(cards > 20, `only ${cards} generated bodies carried a decision card`);
+});
+
+test("W1-T12041 criterion 3: every fields-first body, edited or not, reads exactly as it did before", () => {
+  for (const { e, notices } of CASES) {
+    const legacy = legacyRender(e, notices);
+    for (const body of [legacy, legacy.replace("**Class:** ", "**Status:** waiting\n**Class:** "), legacy.replace("\n**Task:**", "\n\n**Task:**"),
+      legacy.replaceAll("\n", "\r\n"), `${legacy}\n\n${renderIssueBody(escalation)}`.slice(0, legacy.length + 40)]) {
+      assert.equal(escalationBodyInLegacyOrder(body), body);
+      assert.equal(editEscalationMachineFields(body, (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved")),
+        body.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved"));
+    }
+  }
+});
+
+/** What every body reader in the fleet reads off one issue. */
+function readings(body: string, e: Escalation): unknown {
+  const title = escalationIssueTitle(e);
+  const issue = { number: 42, url: issueUrl, title, body };
+  const garden = { ...issue, labels: [], createdAt: "2026-11-20T00:00:00.000Z", updatedAt: "2026-11-20T00:00:00.000Z" };
+  const probes = [e, { ...e, cause: "review" as const }, { ...e, headSha: "other" }, { ...e, contractRevision: "other" },
+    { ...e, summary: "Release checks failed", detail: "No pull request named." }, { ...e, detail: `See ${otherPrUrl}.` },
+    { ...e, detail: "See PR #777." }, { ...e, headDedup: "independent" as const }];
+  return {
+    task: escalationTaskId(body), head: escalationHeadSha(body), cause: escalationIssueCause(body),
+    contract: escalationContractRevision(body), pr: prReferentFromIssueText(body),
+    dedup: probes.map((probe) => matchDuplicateEscalation(probe, [issue])?.number),
+    answers: [...e.options.map((o) => answerTextFor(`${o.label} please`, body)), reactionAnswerText("+1", body), reactionAnswerText("-1", body)],
+    conversation: conversationOf(body, e),
+    garden: [issueTaskId(garden), issueEscalationClass(garden), issueEscalationCause(garden), duplicateEscalationKey(garden),
+      terminalRulePr(garden), evidenceNames(garden)],
+    reconciled: reconciled(body, title),
+  };
+}
+
+test("W1-T12041 criterion 2: every reader finds the same fields, PR, answers and duplicates in either order", () => {
+  let tasks = 0;
+  for (const { e, notices } of CASES.slice(0, 150)) {
+    const legacy = readings(legacyRender(e, notices), e);
+    assert.deepEqual(readings(renderIssueBody(e, notices), e), legacy);
+    if ((legacy as { task?: string }).task !== undefined) tasks++;
+  }
+  assert.equal(tasks, 150);
+});
+
+test("W1-T12041 criterion 2: a field rewrite reaches the machine fields, never a line quoted in the detail", () => {
+  const subject = { ...escalation, detail: "```\n**Head:** old-head\n**Contract:** prior-revision\n```", cause: undefined };
+  const body = renderIssueBody(subject);
+  const moved = editEscalationMachineFields(body, (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** new-head")
+    .replace(/^\*\*Contract:\*\*.*\n/m, ""));
+  assert.ok(moved.includes(subject.detail));
+  assert.equal(escalationHeadSha(moved), "new-head");
+  assert.equal(escalationContractRevision(moved), "prior-revision");
+  assert.equal(escalationBodyInLegacyOrder(moved),
+    legacyRender(subject).replace("**Head:** abc123", "**Head:** new-head").replace("**Contract:** rev-42\n", ""));
+  // A CRLF body and one whose heading an edit removed keep the rewrite inside the fields.
+  const crlf = editEscalationMachineFields(body.replaceAll("\n", "\r\n"), (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** new-head"));
+  assert.equal(escalationHeadSha(crlf), "new-head");
+  assert.ok(crlf.includes(subject.detail.replaceAll("\n", "\r\n")));
+  const headless = editEscalationMachineFields(body.replace("\n## Machine fields\n", "\n"), (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** new-head"));
+  assert.equal(escalationHeadSha(headless), "new-head");
+});
+
+test("W1-T12041 criterion 2: a body quoting a whole other escalation still reads its own sections", () => {
+  const quoted = renderIssueBody({ ...escalation, taskId: "W1-T99999", detail: `Quoted ${otherPrUrl}` });
+  const subject = { ...escalation, detail: `The earlier issue said:\n\n${quoted}` };
+  const body = renderIssueBody(subject);
+  assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
+  assert.equal(escalationTaskId(body), "W1-T12041");
+  // A body whose own markers an edit removed is read exactly as any other body is.
+  const stripped = body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:fields -->$/, "");
+  assert.notEqual(stripped, body);
+  assert.equal(escalationBodyInLegacyOrder(stripped), stripped);
 });

@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationIssuePrReferent, escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue } from "./escalate.js";
+import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -3364,8 +3364,9 @@ export function buildEscalationReconcileCandidates(
     // Unreadable PRs stay indeterminate and keep their issues open; never close on a read failure.
     if (!task) {
       const synthetic = /^PR-(\d+)$/.exec(taskId);
-      // impl-DY (#707/#775): unknown non-PR-<n> ids can still resolve through the issue's PR link.
-      const bodyReferent = synthetic ? undefined : escalationIssuePrReferent(issue);
+      // impl-DY (#707/#775): unknown non-PR-<n> ids can still resolve through renderIssueBody's PR URL.
+      // Fall back to the title URL if an edited/truncated body lost it; never strand the receipt.
+      const bodyReferent = synthetic ? undefined : prReferentFromIssueText(issue.body) ?? prReferentFromIssueText(issue.title);
       if (!synthetic && bodyReferent === undefined) {
         intake.droppedNoReferent++;
         continue; // no task, no PR anywhere — genuinely human territory

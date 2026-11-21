@@ -146,7 +146,7 @@ export interface Escalation {
   /** W1-T3579: current authoritative taskContractRevision distinguishes newly authorized repairs
    *  on an unchanged head. Like head/cause, absent on either side preserves legacy dedup. */
   contractRevision?: string;
-  /** W1-T313: summarizeEscalation's birth-time card above raw detail. */
+  /** W1-T313: summarizeEscalation's birth-time card, which opens the issue body. */
   decisionSummary?: DecisionSummary | null;
   /** W1-T2498: inaction consequence; missing is annotated, never held. Explicit `null` counts as
    *  present (docs/operator-message-standard.md); see withExplicitConsequence for normalization. */
@@ -494,7 +494,7 @@ export function primaryShadowOperatorChannel(opts: {
   };
   const close = async (s: PrimaryShadowSelection, open: OpenIssue[], reason: string) => {
     const matching = open.filter(i => i.body?.includes(identity(s))
-      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(i.body)))?.[1] ?? ""));
     if (matching.length && !issues.closeWithComment) throw new Error("primary shadow alert cannot close with a recovery citation");
     // Record the positively observed recovery before its transport effect; a failed close retries.
     const current = await state(s);
@@ -503,7 +503,7 @@ export function primaryShadowOperatorChannel(opts: {
     for (const issue of matching) {
       await issues.closeWithComment!(issue.url, reason);
       appendLedger(opts.ledgerPath, { run_id: opts.runId,
-        task_id: TASK_LINE_RE.exec(normalizeCandidateBody(issue.body!))![1],
+        task_id: TASK_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(issue.body!)))![1],
         step: "primary_shadow.issue_closed", issue_url: issue.url, reason });
     }
     const recovered = await state(s);
@@ -512,7 +512,7 @@ export function primaryShadowOperatorChannel(opts: {
   const publish = async (selected: PrimaryShadowSelection, current: State, boundary: boolean, firstNotice = false): Promise<void> => {
     const open = await list();
     const existing = open.find(i => i.body?.includes(identity(selected))
-      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(i.body))?.[1] ?? ""));
+      && /^PRIMARY-SHADOW-[a-f0-9]{64}$/.test(TASK_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(i.body)))?.[1] ?? ""));
     const begin = "<!-- primary-shadow-observation:start -->", end = "<!-- primary-shadow-observation:end -->";
     const observation = [begin, identity(selected), `Instance: ${selected.instance}`,
       `Selection path: ${JSON.stringify(selected.sourcePath)}`, `Selection digest: ${selected.digest}`,
@@ -521,8 +521,8 @@ export function primaryShadowOperatorChannel(opts: {
     if (existing) {
       const body = existing.body ?? "", start = body.indexOf(begin), stop = body.indexOf(end, start);
       if (start < 0 || stop < start) throw new Error("primary shadow alert observation section is unavailable");
-      const updated = (body.slice(0, start) + observation + body.slice(stop + end.length))
-        .replace(/^(\*\*Task:\*\*[ \t]*)\S+/m, `$1${key(selected)}`);
+      const updated = editEscalationMachineFields(body.slice(0, start) + observation + body.slice(stop + end.length),
+        (fields) => fields.replace(/^(\*\*Task:\*\*[ \t]*)\S+/m, `$1${key(selected)}`));
       if (updated !== body) {
         if (!boundary) return;
         // Only the ordinary pass boundary flushes pending edits, through the existing awaited gateway.
@@ -1088,7 +1088,7 @@ export function realEscalationJudge(opts: {
  * INVARIANT: require a FULL `/pull/<n>` URL; bare `#707` may name an unrelated sibling issue.
  * Why: docs/forensics/escalate.md. */
 export function prReferentFromIssueText(text: string | undefined): number | undefined {
-  const m = /\/pull\/(\d+)/.exec(text ?? "");
+  const m = /\/pull\/(\d+)/.exec(escalationBodyInLegacyOrder(text) ?? "");
   if (!m) return undefined;
   const n = Number(m[1]);
   return Number.isSafeInteger(n) && n > 0 ? n : undefined;
@@ -1111,56 +1111,29 @@ function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
   return `**Full summary (JSON):** ${text}`;
 }
 
-const MACHINE_FIELDS_HEADING = "## Machine fields";
-const DETAILS_HEADING = "## Details";
-const ISSUE_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_";
+const ISSUE_FOOTER = [
+  "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
+  "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+];
 
-/** Text placed ABOVE "## Details" must not open a line with one of the body's own section
- *  headings: readers split the body at them, so a quoted heading would move the Details boundary
- *  and the PR identity read from it. A backslash keeps the quoted text visible verbatim. */
-export const SECTION_HEADING_LINE_RE = /^(?=## (?:Decision Summary|Options|Recommendation|Details|Machine fields)[ \t\r]*$)/gm;
-function quoteSectionHeadings(text: string): string {
-  return text.replace(SECTION_HEADING_LINE_RE, "\\");
-}
+/** The hidden line that ends each section of a W1-T12041 body. Its nonce is a digest of the whole
+ *  body's content, so no summary, option, detail or notice can carry a marker of the body it sits
+ *  in: it would have to contain its own digest. Markers of another body (a quoted issue) differ. */
+const LAYOUT_MARKER_RE = /<!-- rmd-escalation-layout:v1:([0-9a-f]{16}):([a-z]+) -->/g;
+const LAYOUT_SECTIONS = ["options", "recommendation", "details", "tail", "fields"] as const;
 
-/** Text placed ABOVE "## Machine fields" must not open a line with one of those fields' labels:
- *  readers outside this module (the revalidation garden, sweep's head rewrite) take the FIRST such
- *  line, which in the fields-first order was always the producer's. One more leading space keeps
- *  the line rendered the same; escalation-conversation.ts removes it again when it reads the detail. */
-export const MACHINE_FIELD_LINE_RE = /^(?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
-function quoteMachineFieldLines(text: string): string {
-  return text.replace(MACHINE_FIELD_LINE_RE, " ");
-}
-
-/** The summary is the only text this layout newly places above "## Options" and "## Recommendation".
- *  The answer reader finds those headings by an unanchored `##\s*<name>\s*\n`, so a summary ending in
- *  one would capture the next section; `#\#` renders the same and no longer reads as `##`. */
-export const SUMMARY_HEADING_WORD_RE = /##(?=\s*(?:Decision Summary|Options|Recommendation|Details|Machine fields))/gi;
-function quoteSummaryLine(summary: string): string {
-  return quoteSectionHeadings(summary.replace(/[\r\n\u2028\u2029]/g, " ").replace(SUMMARY_HEADING_WORD_RE, "#\\#"));
-}
-
-/** Open with the decision summary or the producer's summary, then the choices. Keep the raw detail
- * intact for diagnostics and always name Host so operators can identify the affected machine. */
+/** Open with the decision summary or the producer's summary, then Options, Recommendation, the raw
+ * detail under Details, the footer and notices, and the machine fields last under their own heading.
+ * Detail, options and recommendation are written as the caller gave them. W1-T972: always name Host.
+ * TRAP: without Host, operators followed crash-loop reports to healthy machines.
+ * Why: docs/forensics/escalate.md. */
 export function renderIssueBody(e: Escalation, notices: readonly string[] = []): string {
   const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
-  const q = quoteSectionHeadings;
-  const lines = [
-    ...(decisionSummary
-      ? ["## Decision Summary", q(decisionSummary.headline), "", q(decisionSummary.what_happened), "", `**Decision:** ${q(decisionSummary.decision)}`]
-      : [quoteSummaryLine(e.summary)]),
-    "",
-    "## Options",
-    ...e.options.map((o) => `- **${q(o.label)}** — ${q(o.detail)}`),
-    "",
-    "## Recommendation",
-    q(e.recommendation),
-    "",
-    DETAILS_HEADING,
-    e.detail,
-    "",
-    ISSUE_FOOTER,
-    "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+  const lead = decisionSummary
+    ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`].join("\n")
+    : e.summary.replace(/[\r\n\u2028\u2029]/g, " ");
+  const tail = [
+    ...ISSUE_FOOTER,
     // W1-T4471: how to answer — QUESTION issues only (an ACTION is performed, not answered);
     // owner-only per G-6, see lib/escalation-answers.ts.
     ...(classifyAsk(e) === "question"
@@ -1174,17 +1147,82 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
     ...notices.flatMap((notice) => ["", notice]),
   ];
   const fields = [
-    MACHINE_FIELDS_HEADING,
     `**Class:** ${e.class}`,
     `**Task:** ${e.taskId}`,
     `**Host:** ${hostname()}`,
     e.runId ? `**Run:** ${e.runId}` : undefined,
+    // W1-T195/W1-T3579: the composite dedup key's optional dimensions, omitted entirely (never a
+    // blank/placeholder line) when the caller didn't set them.
     e.headSha ? `**Head:** ${e.headSha}` : undefined,
     e.cause ? `**Cause:** ${e.cause}` : undefined,
     e.contractRevision ? `**Contract:** ${e.contractRevision}` : undefined,
     ...(escalationIssueTitle(e) !== unboundedEscalationTitle(e) ? [fullEscalationSummaryLine(e)] : []),
   ].filter((l): l is string => l !== undefined);
-  return `${quoteMachineFieldLines(lines.join("\n"))}\n\n${fields.join("\n")}`;
+  const sections: Array<[string, string]> = [
+    [decisionSummary ? "card" : "summary", lead],
+    ["options", ["", "", "## Options", ...e.options.map((o) => `- **${o.label}** — ${o.detail}`)].join("\n")],
+    ["recommendation", `\n\n## Recommendation\n${e.recommendation}`],
+    ["details", `\n\n## Details\n${e.detail}`],
+    ["tail", `\n\n${tail.join("\n")}`],
+    ["fields", `\n\n## Machine fields\n${fields.join("\n")}`],
+  ];
+  const nonce = createHash("sha256").update(JSON.stringify(sections)).digest("hex").slice(0, 16);
+  return sections.map(([name, text]) => `${text}\n<!-- rmd-escalation-layout:v1:${nonce}:${name} -->`).join("");
+}
+
+/** A W1-T12041 body's sections, located by its own markers: the LAST marker is its fields marker,
+ *  and the five before it with the same nonce come once each, in the writer's order. `undefined`
+ *  for any other body (fields-first, hand-written, or one whose markers an edit removed). */
+function layoutOf(body: string): { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsAt: number; rest: string } | undefined {
+  const markers = [...body.matchAll(LAYOUT_MARKER_RE)];
+  const last = markers.at(-1);
+  if (last?.[2] !== "fields") return undefined;
+  const own = markers.filter((m) => m[1] === last[1]);
+  const lead = own[0]?.[2];
+  if ((lead !== "card" && lead !== "summary") || own.slice(1).map((m) => m[2]).join() !== LAYOUT_SECTIONS.join()) return undefined;
+  const eol = body.slice(last.index - 2, last.index) === "\r\n" ? "\r\n" : "\n";
+  const texts: string[] = [];
+  let at = 0;
+  for (const m of own) {
+    const text = body.slice(at, m.index);
+    texts.push(text.endsWith(eol) ? text.slice(0, -eol.length) : text);
+    if (m !== last) at = m.index + m[0].length;
+  }
+  return { eol, card: lead === "card", texts, fieldsStart: at, fieldsAt: last.index, rest: body.slice(last.index + last[0].length) };
+}
+
+function withoutPrefix(text: string, ...prefixes: string[]): string {
+  const prefix = prefixes.find((p) => text.startsWith(p));
+  return prefix === undefined ? text : text.slice(prefix.length);
+}
+
+/** The fields-first text the SAME escalation rendered before W1-T12041 (fields, decision card,
+ *  detail, Options, Recommendation, footer and notices), rebuilt from a W1-T12041 body; any other
+ *  body is returned unchanged. EVERY reader of an escalation body reads through this, with the rules
+ *  it had before the reorder, so the new order cannot change what any reader finds, which open
+ *  issue a repeat reuses, or how many issues open. An edit inside one section stays in it. */
+export function escalationBodyInLegacyOrder(body: string): string;
+export function escalationBodyInLegacyOrder(body: string | undefined): string | undefined;
+export function escalationBodyInLegacyOrder(body: string | undefined): string | undefined {
+  const layout = body === undefined ? undefined : layoutOf(body);
+  if (layout === undefined) return body;
+  const { eol, card, texts: [lead, options, recommendation, details, tail, fields] } = layout;
+  const gap = eol + eol;
+  return withoutPrefix(fields!, `${gap}## Machine fields${eol}`, gap) + gap + (card ? lead! + gap : "")
+    + withoutPrefix(details!, `${gap}## Details${eol}`, gap) + options! + recommendation! + gap + withoutPrefix(tail!, gap) + layout.rest;
+}
+
+/** Apply `edit` to the producer's machine-field lines only: a W1-T12041 body's fields block (each
+ *  line still ends with a newline), or the whole of any other body, as before. A writer that
+ *  rewrites a field (a stall's `**Head:**`, a primary-shadow `**Task:**`) then never rewrites a
+ *  same-labelled line quoted in the detail above the fields. */
+export function editEscalationMachineFields(body: string, edit: (fields: string) => string): string {
+  const layout = layoutOf(body);
+  if (layout === undefined) return edit(body);
+  const { eol, fieldsStart, fieldsAt } = layout;
+  const heading = `${eol}${eol}## Machine fields${eol}`;
+  const start = body.startsWith(heading, fieldsStart) ? fieldsStart + heading.length : fieldsStart;
+  return body.slice(0, start) + edit(body.slice(start, fieldsAt)) + body.slice(fieldsAt);
 }
 
 /** Summarize ONE escalation into a {@link DecisionSummary}, FAIL-OPEN like feedback.ts's
@@ -1325,36 +1363,23 @@ export function taskSemanticRevision(task: {
 
 export const CONTRACT_REVISION_LINE_RE = /^\*\*Contract:\*\*\s*(\S+)\s*$/m;
 
-/** Prefer the trailing producer fields to similarly labelled lines in the issue's prose. */
-function machineFields(body = ""): string | undefined {
-  body = body.replaceAll("\r\n", "\n");
-  // Every fields-first body names its Task in its first paragraph, whatever field leads it; the new
-  // order's first paragraph never does (quoteMachineFieldLines), so a quoted heading lower down in an
-  // old body's prose cannot stand in for the fields that body opens with.
-  if (/^\*\*Task:\*\*/m.test(body.split("\n\n", 1)[0]!)) return undefined;
-  const marker = `\n\n${MACHINE_FIELDS_HEADING}\n`;
-  const start = body.lastIndexOf(marker);
-  return start === -1 ? undefined : body.slice(start + marker.length).split("\n\n", 1)[0];
-}
-
 /** The `**Head:** <sha>` sha an already-open issue's body carries, or `undefined` (W1-T2799). Reads
  *  through the SAME {@link HEAD_SHA_LINE_RE} {@link findDuplicateEscalation} matches on — ONE parser,
  *  so a caller asking "is this issue about the head I am about to strike against?" can never disagree
  *  with `escalate()`'s dedup. Exported because the fix rung's pre-strike gate must be STRICTER:
  *  {@link matchesOptionalDimension} is permissive on an absent dimension, the wrong polarity there. */
 export function escalationHeadSha(body: string | undefined): string | undefined {
-  return HEAD_SHA_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return HEAD_SHA_LINE_RE.exec(escalationBodyInLegacyOrder(body) ?? "")?.[1];
 }
 
 export function escalationIssueCause(body: string | undefined): string | undefined {
-  const normalized = normalizeCandidateBody(body ?? "");
-  return CAUSE_LINE_RE.exec(machineFields(normalized) ?? normalized)?.[1];
+  return CAUSE_LINE_RE.exec(normalizeCandidateBody(escalationBodyInLegacyOrder(body) ?? ""))?.[1];
 }
 
 /** The `**Task:** <id>` an already-open issue's body carries, or `undefined` (W1-T4471) — via the
  *  SAME {@link TASK_LINE_RE} dedup matches on, so lib/escalation-answers.ts reuses one parser. */
 export function escalationTaskId(body: string | undefined): string | undefined {
-  return TASK_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return TASK_LINE_RE.exec(escalationBodyInLegacyOrder(body) ?? "")?.[1];
 }
 
 /** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).
@@ -1363,7 +1388,7 @@ export function escalationTaskId(body: string | undefined): string | undefined {
  *  rung's pre-strike gate can compare a candidate's RECORDED contract against the CURRENT one it
  *  is about to strike against. */
 export function escalationContractRevision(body: string | undefined): string | undefined {
-  return CONTRACT_REVISION_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+  return CONTRACT_REVISION_LINE_RE.exec(escalationBodyInLegacyOrder(body) ?? "")?.[1];
 }
 
 /** Does an OPTIONAL composite-key dimension veto a dedup match? Only when BOTH sides carry a value
@@ -1376,45 +1401,11 @@ function matchesOptionalDimension(wanted: string | undefined, candidate: string 
 function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefined, body: string): boolean {
   const raw = unboundedEscalationTitle(e);
   if (title === raw) return true;
-  const fields = machineFields(body) ?? body;
-  return title === escalationIssueTitle(e) && fields.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
-}
-
-/** A machine-fields-last body's sections: the lead (summary or decision card), the choices
- *  (Options and Recommendation), the raw detail under "## Details" and the tail (footer and
- *  notices) up to "## Machine fields". `undefined` when the body is fields-first or its Details
- *  section cannot be located. */
-function machineFieldsLastSections(body: string, fields: string | undefined): { lead: string; choices: string; detail: string; tail: string } | undefined {
-  if (fields === undefined) return undefined;
-  const marker = `\n\n${DETAILS_HEADING}\n`;
-  const optionsAt = body.indexOf("\n\n## Options\n");
-  const detailsAt = body.indexOf(marker, body.indexOf("\n\n## Recommendation\n"));
-  const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`);
-  const fieldsAt = body.lastIndexOf(`\n\n${MACHINE_FIELDS_HEADING}\n`);
-  if (detailsAt === -1 || footerAt <= detailsAt || fieldsAt < footerAt) return undefined;
-  return {
-    lead: optionsAt === -1 || optionsAt > detailsAt ? "" : body.slice(0, optionsAt),
-    choices: body.slice(optionsAt === -1 || optionsAt > detailsAt ? 0 : optionsAt, detailsAt),
-    detail: body.slice(detailsAt + marker.length, footerAt),
-    tail: body.slice(footerAt, fieldsAt),
-  };
-}
-
-/** The fields-first body the SAME escalation rendered before W1-T12041: fields, decision card,
- *  detail, choices, then footer and notices. The producer's summary line is left out, as the old
- *  body never carried it (the title does). PR identity is read from this text with the unchanged
- *  legacy rules, so the new order never changes which open issue a repeat reuses or reconciles to,
- *  nor how many issues open. A body whose sections cannot be located is returned unchanged. */
-function legacyOrderedBody(body: string): string {
-  const fields = machineFields(body);
-  const sections = machineFieldsLastSections(body, fields);
-  if (sections === undefined) return body;
-  const card = sections.lead.startsWith("## Decision Summary\n") ? `${sections.lead}\n\n` : "";
-  return `${fields}\n\n${card}${sections.detail}${sections.choices}${sections.tail}`;
+  return title !== raw && title === escalationIssueTitle(e) && body.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
 /** Only the producer's header may replace a clipped title when reading its PR referent. */
-function legacyCandidatePrRef(title: string | undefined, body: string): string | undefined {
+function candidatePrRef(title: string | undefined, body: string): string | undefined {
   const header = body.split("\n\n", 1)[0]!;
   const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
   if (line) {
@@ -1436,17 +1427,6 @@ function legacyCandidatePrRef(title: string | undefined, body: string): string |
   // A clipped numeric token is not an identity when its full producer metadata is unavailable.
   if (/(?:\/pull\/|\bPR\s*#?\s*)\d+…$/i.test(title ?? "")) return undefined;
   return extractPrRef(`${title ?? ""}\n${body}`);
-}
-
-function candidatePrRef(title: string | undefined, body: string): string | undefined {
-  return legacyCandidatePrRef(title, legacyOrderedBody(body));
-}
-
-/** The reconciler requires a full link. Both layouts scan the body before the title, in the
- *  fields-first order ({@link legacyOrderedBody}), so reordering the body never changes which PR
- *  an issue is reconciled against. */
-export function escalationIssuePrReferent({ title, body }: Pick<OpenIssue, "title" | "body">): number | undefined {
-  return prReferentFromIssueText(legacyOrderedBody(normalizeCandidateBody(body ?? ""))) ?? prReferentFromIssueText(title);
 }
 
 function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {
@@ -1483,6 +1463,7 @@ export function clearedConflictEscalationCause(
   body: string | undefined,
   current: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): string | undefined {
+  body = escalationBodyInLegacyOrder(body);
   const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
   if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
     return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
@@ -1517,9 +1498,10 @@ export function openEscalationStandDownReason(
   if (pendingAnswer && !pendingAnswer.spent) return undefined;
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
   // The sweep writes the question immediately after its clarification context paragraph.
-  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  const body = escalationBodyInLegacyOrder(candidate.body ?? "");
+  const question = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]*\n\n([^\n]*)/.exec(body)?.[1];
   if (question?.startsWith("PR stage stalled:")) return undefined;
-  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(candidate.body ?? "")?.[1];
+  const summary = /(?:^|\n)The CLARIFICATION-QUESTION rung [^\n]* to BLOCKED-AMBIGUOUS: ([^\n]*)/.exec(body)?.[1];
   const metadataChecks = /^metadata-only required checks (.+?) need title\/body repair:/.exec(summary ?? "")?.[1].split(", ");
   if (metadataChecks && redCheckNames?.some(name => !metadataChecks.includes(name))) return undefined;
   const candidateHead = escalationHeadSha(candidate.body);
@@ -1553,7 +1535,7 @@ export function openEscalationStandDownReason(
  * Preserve `\n` so honest metadata still parses (criterion 2); never normalize renderIssueBody,
  * whose new issue detail must remain byte-identical (criterion 3; summarizeCiFailure, run-task.ts). */
 function normalizeCandidateBody(body: string): string {
-  return body.replaceAll("\r\n", "\n").replace(/\r|\u2028|\u2029/g, " ");
+  return body.replace(/\r|\u2028|\u2029/g, " ");
 }
 
 /** Scan an already-fetched OPEN-issue list for a duplicate of `e` — the pure matching predicate
@@ -1562,25 +1544,24 @@ function normalizeCandidateBody(body: string): string {
 export function matchDuplicateEscalation(e: EscalationDedupKey, open: OpenIssue[]): OpenIssue | undefined {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   return open.find((issue) => {
-    const body = normalizeCandidateBody(issue.body ?? "");
-    const fields = machineFields(body) ?? body;
-    if (TASK_LINE_RE.exec(fields)?.[1] !== e.taskId) return false;
-    const candidateCause = CAUSE_LINE_RE.exec(fields)?.[1];
+    const body = normalizeCandidateBody(escalationBodyInLegacyOrder(issue.body ?? ""));
+    if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) return false;
     if (prRef) {
       // W1-T195: taskId + PR must match; head/cause veto only when both values exist and disagree.
       if (candidatePrRef(issue.title, body) !== prRef) return false;
-      const candidateHead = HEAD_SHA_LINE_RE.exec(fields)?.[1];
+      const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
       if (matchesHeadDimension(e, candidateHead, issue.title, body) === false) return false;
-      if (!matchesOptionalDimension(e.cause, candidateCause)) return false;
+      if (!matchesOptionalDimension(e.cause, CAUSE_LINE_RE.exec(body)?.[1])) return false;
       // W1-T3579: contract disagreements permit a new issue; missing revisions preserve legacy dedup.
       // Keep the named predicate: absence and disagreement must not collapse into `!chain?.`.
-      const candidateContract = CONTRACT_REVISION_LINE_RE.exec(fields)?.[1];
+      const candidateContract = CONTRACT_REVISION_LINE_RE.exec(body)?.[1];
       if (!matchesOptionalDimension(e.contractRevision, candidateContract)) return false;
       return true;
     }
     // W1-T345: without a PR, match taskId/class and permissive cause. With no causes, the rendered
     // title distinguishes producers while deduping a producer's repeated firing.
-    if (CLASS_LINE_RE.exec(fields)?.[1] !== e.class) return false;
+    if (CLASS_LINE_RE.exec(body)?.[1] !== e.class) return false;
+    const candidateCause = CAUSE_LINE_RE.exec(body)?.[1];
     if (e.cause !== undefined || candidateCause !== undefined) {
       return matchesOptionalDimension(e.cause, candidateCause);
     }
@@ -1759,11 +1740,10 @@ function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIss
   if (!e.headSha) return;
   const newIssueRef = issueRefFromUrl(newIssueUrl);
   for (const issue of open) {
-    const body = normalizeCandidateBody(issue.body ?? "");
-    const fields = machineFields(body) ?? body;
-    if (TASK_LINE_RE.exec(fields)?.[1] !== e.taskId) continue;
+    const body = normalizeCandidateBody(escalationBodyInLegacyOrder(issue.body ?? ""));
+    if (TASK_LINE_RE.exec(body)?.[1] !== e.taskId) continue;
     if (candidatePrRef(issue.title, body) !== prRef) continue;
-    const candidateHead = HEAD_SHA_LINE_RE.exec(fields)?.[1];
+    const candidateHead = HEAD_SHA_LINE_RE.exec(body)?.[1];
     if (!candidateHead || candidateHead === e.headSha) continue;
     const comment =
       `Superseded by ${newIssueRef} (head \`${e.headSha}\`) — a newer push moved this task/PR forward, so ` +

@@ -9,6 +9,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import type { FeedbackEntry } from "./feedback.js";
 import { CONSOLE_CORRECTION_KIND, CONSOLE_CORRECTION_VERSION } from "./console-feedback.js";
+import { escalationBodyInLegacyOrder } from "./escalate.js";
 
 const MAX_SOURCE_BYTES = 65_536;
 const MAX_HISTORY_MESSAGES = 100;
@@ -89,39 +90,14 @@ function sourceOf(raw: unknown, issueUrl: string): EscalationIssueSource | undef
   return { html_url: issueUrl, title: r.title, body: r.body, state: r.state, updated_at: r.updated_at };
 }
 
-export const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/;
-
-/**
- * Where the native writer put its machine fields. A body whose first paragraph names a `**Task:**`
- * is the old order (fields first), whatever field leads it. Otherwise the fields follow the LAST
- * "## Machine fields" heading (W1-T12041), so a same-named heading quoted in the prose above cannot
- * replace them; the new writer quotes field-shaped lines above that heading, so its first paragraph
- * never names a Task.
- */
-function sourceLayout(body: string): { order: "fields-first" | "machine-fields-last"; header: string; fieldsAt: number } {
-  const [first = ""] = body.split(/\r?\n\r?\n/, 1);
-  if (/^\*\*Task:\*\*/m.test(first)) return { order: "fields-first", header: first, fieldsAt: 0 };
-  const last = [...body.matchAll(new RegExp(MACHINE_FIELDS_RE, "g"))].at(-1);
-  if (last === undefined) return { order: "fields-first", header: first, fieldsAt: 0 };
-  const [fields = ""] = body.slice(last.index + last[0].length).split(/\r?\n\r?\n/, 1);
-  return { order: "machine-fields-last", header: fields, fieldsAt: last.index };
-}
-
-/** Undo the new writer's quoting of field-shaped lines above its machine fields (escalate.ts
- *  quoteMachineFieldLines adds exactly one leading space to each), so the detail reads back as written. */
-export const QUOTED_MACHINE_FIELD_LINE_RE = /^ (?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
-function unquoteMachineFieldLines(text: string): string {
-  return text.replace(QUOTED_MACHINE_FIELD_LINE_RE, "");
-}
-
 /** Parse only the native writer's anchored metadata and sections, never instructions from prose. */
 export function parseEscalationConversationSource(source: EscalationIssueSource): {
   identity: ThreadIdentity; headline: string; detail: string; recommendation: string | null;
-  decisionSummary?: string;
   options: EscalationConversation["options"];
 } | undefined {
-  const layout = sourceLayout(source.body);
-  const header = layout.header;
+  // W1-T12041: read a machine-fields-last body in the fields-first order these rules were written for.
+  source = { ...source, body: escalationBodyInLegacyOrder(source.body) };
+  const [header = ""] = source.body.split(/\r?\n\r?\n/, 1);
   const field = (name: string): string | undefined => {
     const matches = [...header.matchAll(new RegExp(`^\\*\\*${name}:\\*\\* (.+)$`, "gm"))];
     return matches.length === 1 ? matches[0]![1]!.trim() : undefined;
@@ -148,25 +124,10 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   if (optionsHeaders.length !== 1 || recommendationHeaders.length !== 1) return undefined;
   const optionsAt = optionsHeaders[0]!.index!, recommendationAt = recommendationHeaders[0]!.index!;
   if (optionsAt >= recommendationAt) return undefined;
-  const afterRecommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length);
-  let detail: string, recommendationText: string, decisionSummary: string | undefined;
-  if (layout.order === "machine-fields-last") {
-    // W1-T12041: the summary leads, the raw detail sits under its own heading after the recommendation.
-    const details = /^## Details\r?$/m.exec(afterRecommendation);
-    if (!details || layout.fieldsAt <= recommendationAt) return undefined;
-    recommendationText = unquoteMachineFieldLines(afterRecommendation.slice(0, details.index));
-    const tail = afterRecommendation.slice(details.index + details[0].length, layout.fieldsAt - (recommendationAt + recommendationHeaders[0]![0].length));
-    const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
-    detail = unquoteMachineFieldLines(footer === -1 ? tail : tail.slice(0, footer)).trim();
-    if (source.body.startsWith("## Decision Summary\n") || source.body.startsWith("## Decision Summary\r\n")) {
-      decisionSummary = unquoteMachineFieldLines(source.body.slice(0, optionsAt).trimEnd());
-    }
-  } else {
-    detail = source.body.slice(header.length, optionsAt).trim();
-    recommendationText = afterRecommendation;
-  }
+  const detail = source.body.slice(header.length, optionsAt).trim();
   // The footer is the native writer's source annotation, not recommendation text.
-  const recommendation = recommendationText.split(/\r?\n_Opened automatically by Remudero /, 1)[0]!.trim() || null;
+  const recommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length)
+    .split(/\r?\n_Opened automatically by Remudero /, 1)[0]!.trim() || null;
   const optionsText = source.body.slice(optionsAt + optionsHeaders[0]![0].length, recommendationAt);
   const options = [...optionsText.matchAll(/^- \*\*(.+)\*\* — (.+)$/gm)]
     .map((match) => ({ label: match[1]!, detail: match[2]!, executable: false as const }));
@@ -174,8 +135,7 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   // These are the native producer's PR referent rules, exercised against its real writer in tests.
   const text = `${headline}\n${detail}`;
   const prRef = /\/pull\/(\d+)\b/.exec(text)?.[1] ?? /\bPR\s*#(\d+)\b/i.exec(text)?.[1] ?? /\bPR\s+(\d+)\b/i.exec(text)?.[1];
-  return { identity: { taskId, class: cls, ...(cause ? { cause } : {}), ...(prRef ? { prRef } : {}) },
-    headline, detail, recommendation, options, ...(decisionSummary === undefined ? {} : { decisionSummary }) };
+  return { identity: { taskId, class: cls, ...(cause ? { cause } : {}), ...(prRef ? { prRef } : {}) }, headline, detail, recommendation, options };
 }
 
 export function boundedMessages(messages: ThreadMessage[]): EscalationConversation["messages"] | undefined {
@@ -282,6 +242,7 @@ export function createEscalationConversationReader(opts: {
     const { evidence, stale } = loaded;
     const source = evidence.source;
     const parsed = parseEscalationConversationSource(source);
+    const legacyBody = escalationBodyInLegacyOrder(source.body);
     if (!parsed) return { state: "unavailable", reason: "invalid_source", detail: "This issue has no supported native escalation identity. It cannot be used as a reply destination." };
     const receiptKey = `${issueUrl}|${parsed.identity.taskId}|${parsed.identity.class}`;
     let known = nativeReceipts.has(receiptKey);
@@ -307,9 +268,9 @@ export function createEscalationConversationReader(opts: {
     const candidates = stored?.status === "ok" ? [...stored.threads].filter(([id, messages]) => typeof id === "string"
       && id.startsWith(prefix) && /^(?:-|[1-9][0-9]*)$/.test(id.slice(prefix.length))
       && messages.some(m => m?.role === "escalation" && typeof m.body === "string"
-        && m.body.startsWith(`${parsed.headline}\n\n`) && source.body.includes(m.body.slice(parsed.headline.length + 2)))) : [];
+        && m.body.startsWith(`${parsed.headline}\n\n`) && legacyBody.includes(m.body.slice(parsed.headline.length + 2)))) : [];
     const selected = candidates.length === 1 ? candidates[0] : undefined;
-    if (!selected && /^## Decision Summary\r?$/m.test(source.body)) {
+    if (!selected && /^## Decision Summary\r?$/m.test(legacyBody)) {
       return { state: "unavailable", reason: "invalid_source", detail: "The source includes generated context, but no saved native identity could distinguish it from the original escalation. No reply destination is confirmed." };
     }
     const identity: ThreadIdentity = selected ? { taskId: parsed.identity.taskId, class: parsed.identity.class,
@@ -368,9 +329,8 @@ export function createEscalationConversationReader(opts: {
     // and generated summaries cannot supply an unstored native PR referent.
     const canStartConversation = !stale && source.state === "open" && history === "absent"
       && Boolean(opts.threadStorePath && existsSync(opts.threadStorePath))
-      && !/^## Decision Summary\r?$/m.test(source.body);
+      && !/^## Decision Summary\r?$/m.test(legacyBody);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
-    const whatHappened = parsed.decisionSummary ? `${parsed.decisionSummary}\n\n${parsed.detail}` : parsed.detail;
     const acceptedText = parsed.recommendation ? `I accept this recommendation: ${parsed.recommendation}` : undefined;
     const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && (messages === undefined || messages.every(message => message.from !== "operator")) && acceptedText ? {
       ...(acceptedText.length <= 4000 ? { accept: acceptedText } : {}),
@@ -380,11 +340,11 @@ export function createEscalationConversationReader(opts: {
       version: 1, issueUrl, repository: location.repository, identity, threadId,
       revision: digest([sourceRevision, threadId, messages ?? history, attention, canStartConversation, recommendationReplies ?? null,
         activeQuestion ? [activeQuestion.issueUrl, activeQuestion.feedbackId, activeQuestion.revision, activeQuestion.seq] : null]), headline: parsed.headline,
-      whatHappened, recommendation: parsed.recommendation, options: parsed.options,
+      whatHappened: parsed.detail, recommendation: parsed.recommendation, options: parsed.options,
       source: { state: stale ? "stale" : "current", observedAt: evidence.observedAt, updatedAt: source.updated_at, revision: sourceRevision },
       history, attention, messages: messages ?? [], canReply, canStartConversation,
       ...(activeQuestion ? { activeQuestion } : {}),
-      ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${whatHappened}` } : {}),
+      ...(canStartConversation ? { initialMessage: `${parsed.headline}\n\n${parsed.detail}` } : {}),
       ...(recommendationReplies ? { recommendationReplies } : {}),
       wordingCorrection: { kind: CONSOLE_CORRECTION_KIND, version: CONSOLE_CORRECTION_VERSION },
       ...(!canReply && !canStartConversation ? { replyUnavailableReason: questionFailure === "invalid" ? "The current question no longer matches this conversation. Refresh before answering."
