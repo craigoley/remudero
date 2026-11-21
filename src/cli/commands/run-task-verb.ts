@@ -94,7 +94,8 @@ import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
 import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_WITHHOLDING_SHARE, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
@@ -5282,16 +5283,20 @@ export function claimRunTaskFixBranch(input: {
   });
 }
 
-/** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
- *  with a staged retirement offered only on that share. */
-export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "type" | "files">, runId: string): ObservedSkillSelection {
+/** The implement lane's skill selection: each eligible skill withheld on its seeded share of tasks, and a skill
+ *  with a staged retirement offered only on that share. W1-T14137: drawn per task, so every run of the task, and
+ *  its fix rounds, land in one arm. */
+export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "id" | "type" | "files">): ObservedSkillSelection {
   const staged = stagedSkillRetirements(join(stateRoot, "state", "inbox-proposals.json"));
   return observeSkillSelection(
     loadInjectableSkills(join(repoRoot, ".claude", "skills")),
     task.type,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     task.files,
-    (skillName) => skillWithheldUnderRetirement(runId, skillName, staged),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: task.id, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, staged),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
 }
 
@@ -6747,9 +6752,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       "CLAUDE.md",
     );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
-    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = selectImplementSkills(config.root, repoRoot, task, runId);
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of tasks
+    // (taskArmWithheld, W1-T14137), so buildSkillEffectivenessReport has a randomized control cohort.
+    const skillSelection = selectImplementSkills(config.root, repoRoot, task);
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
     // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the
