@@ -10714,6 +10714,8 @@ function isIntroducingCensusGate(diff: string, diffFiles: string[], scriptFile: 
 const INSTRUMENT_STRICTER_DIRECTION: ReadonlyArray<{ re: RegExp; stricter: "lower" | "higher" }> = [
   { re: /^scripts\/mutation-baseline\.json$/, stricter: "higher" },
   { re: /^scripts\/coverage-baseline\.json$/, stricter: "higher" },
+  // Every field is a minimum an automatic promotion must clear (src/lib/promotion-bars.ts); its ceilings sibling takes the default.
+  { re: /^scripts\/promotion-floors-baseline\.json$/, stricter: "higher" },
   { re: /^scripts\/[^/]*-baseline\.json$/, stricter: "lower" },
 ];
 

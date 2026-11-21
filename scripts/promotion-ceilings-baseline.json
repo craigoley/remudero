@@ -1,0 +1,11 @@
+{
+  "_comment": "AUTOMATIC-PROMOTION CEILINGS: LOWER IS STRICTER. The fleet promotes its own changes with no person in the loop (config-gardener canaries, judge cash moves and model switches, the judge shadow pool), and these are the maximums that decide it. src/lib/promotion-bars.ts reads them at runtime; scripts/baseline-monotonic-check.mjs holds every field with direction \"decrease\" against origin/main, so a higher value is refused unless bumpRationale is changed to a fresh string naming the PR or task that reviewed it. judgeMaxNoAnswerShare: the most shadow calls with no usable answer a judge may show and still move to cash or switch model (JUDGE_CASH_BAR, JUDGE_SWITCH_BAR; W1-T12187). judgeMaxBrier: the Brier ceiling a scored shadow model must stay under to switch (JUDGE_SWITCH_BAR, W1-T12417). poolMaxRejectedShare / poolMaxMedianCaseUsd: the rejected-case share and median settled cost per case a member's judge replay may show and still join a shadow: auto pool (judge-shadow JUDGE_SHADOW_POOL_BAR, W1-T12422). canaryMaxCostRatio / canaryMaxMergeRateDrop: how many times the rest's cost per merged task, and how far below the rest's merge rate, a canary cohort may run before it breaches (experiment-promotion CANARY_GUARD_BAR, W1-T4113). Never raise one to let a promotion through; lower one when evidence shows the bar admits a bad change.",
+  "capturedAt": "2026-11-21",
+  "judgeMaxNoAnswerShare": 0.02,
+  "judgeMaxBrier": 0.1,
+  "poolMaxRejectedShare": 0.1,
+  "poolMaxMedianCaseUsd": 0.003,
+  "canaryMaxCostRatio": 1.25,
+  "canaryMaxMergeRateDrop": 0.15,
+  "bumpRationale": "CAPTURED, NOT MOVED: every value is the src/lib constant it replaces, byte for byte (config-gardener W1-T12187, W1-T12417; judge-shadow W1-T12422; experiment-promotion W1-T4113), so no promotion decides differently. A later raise must replace this text with its own reviewed reason naming its PR or task."
+}

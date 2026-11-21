@@ -1,0 +1,11 @@
+{
+  "_comment": "AUTOMATIC-PROMOTION FLOORS: HIGHER IS STRICTER. The fleet promotes its own changes with no person in the loop (config-gardener budget canaries, judge cash moves and model switches, the skill-eval held-out gate), and these are the minimums that decide it. src/lib/promotion-bars.ts reads them at runtime; scripts/baseline-monotonic-check.mjs holds every field with direction \"increase\" against origin/main, so a lower value is refused unless bumpRationale is changed to a fresh string naming the PR or task that reviewed it. canaryMinTasksPerSide: settled tasks a canary needs on BOTH sides before it is judged (config-gardener CANARY_DENOMINATOR_FLOOR, W1-T4113). judgeMinPaired / judgeMinAgreeShare: paired shadow answers and agreement share a judge's shadow must show before its row moves to cash or switches model (JUDGE_CASH_BAR, JUDGE_SWITCH_BAR; W1-T12187, W1-T12417). skillEvalHeldOutTasks / skillEvalTrialsPerArm: K held-out tasks and R trials per arm a skill draft is attempted on (operator ruling 2026-10-13). skillEvalMinMeanGain: the mean with-skill minus without-skill pass rate a draft must EXCEED (0 = any gain at all). Never lower one to let a promotion through; raise one when evidence shows the bar admits a bad change.",
+  "capturedAt": "2026-11-21",
+  "canaryMinTasksPerSide": 5,
+  "judgeMinPaired": 200,
+  "judgeMinAgreeShare": 0.98,
+  "skillEvalHeldOutTasks": 3,
+  "skillEvalTrialsPerArm": 2,
+  "skillEvalMinMeanGain": 0,
+  "bumpRationale": "CAPTURED, NOT MOVED: every value is the src/lib constant it replaces, byte for byte (config-gardener W1-T4113, W1-T12187, W1-T12417; skill-eval operator ruling 2026-10-13), so no promotion decides differently. A later lowering must replace this text with its own reviewed reason naming its PR or task."
+}

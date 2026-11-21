@@ -39,6 +39,21 @@ export const SCORE_TABLE = [
   { path: "scripts/cycle-baseline.json", field: "maxCycles", direction: "decrease" },
   { path: "scripts/claude-md-budget-baseline.json", field: "capBytes", direction: "decrease" },
   { path: "scripts/learnings-budget-baseline.json", field: "capChars", direction: "decrease" },
+  // THE AUTOMATIC-PROMOTION BARS (src/lib/promotion-bars.ts reads them). The fleet promotes its own changes with no
+  // person in the loop, so a bar grades the fleet the way a score floor grades a falsifier: loosening it lets a worse
+  // change through. One row per field the loader reads; the promotion-bar suite fails on a field with no row here.
+  { path: "scripts/promotion-floors-baseline.json", field: "canaryMinTasksPerSide", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "judgeMinPaired", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "judgeMinAgreeShare", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalHeldOutTasks", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalTrialsPerArm", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalMinMeanGain", direction: "increase" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "judgeMaxNoAnswerShare", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "judgeMaxBrier", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "poolMaxRejectedShare", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "poolMaxMedianCaseUsd", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "canaryMaxCostRatio", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "canaryMaxMergeRateDrop", direction: "decrease" },
 ];
 
 const PR_REFERENCE_RE = /(#\d+|W1-T\d+)/;
