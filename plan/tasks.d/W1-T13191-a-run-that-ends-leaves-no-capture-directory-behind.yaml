@@ -18,6 +18,7 @@
   files:
     - scripts/census-precheck.mjs
     - test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts
+    - test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -28,6 +29,9 @@
     - claim: "invariant:evidence-of-a-stopped-run-is-kept — a capture retained for a stopped, rejected or custody-unknown child is never removed by this change, and no directory another process owns is touched"
       proof: "grep: W1-T13191 criterion 3 in test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts"
   rationale: |
+    AMENDED (2026-11-21): files adds test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts. The
+    fix now removes capture directories with fs.rmdirSync, so that test's cleanup-fault injection must hook rmdirSync
+    instead of rmSync (PR #19890).
     COUNTED 2026-11-16 on the operator Mac and the fleet host, by the operator session and the builder of W1-T13146.
 
     - Before that day's reboot the Mac's temp root held 1,190 `rmd-*` / `remudero-*` entries: 506 `rmd-containment-test-*`, 450 `rmd-census-capture-*`, 63 `rmd-cow-wt-*` and others. The reboot emptied it. Seventy minutes later it held 234: 110 `rmd-containment-test-*`, 100 `rmd-census-capture-*`. So the leak runs at about three entries a minute while author preflights run.
