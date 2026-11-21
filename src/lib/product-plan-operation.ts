@@ -4,7 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { link, open, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -303,9 +303,8 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       continue;
     }
     const before = liveIdentity();
-    // A rotation is named after its snapshot, and its rows can be future-stamped. Apply a legacy refusal's upper
-    // bound to evidence rows in correlateLedger, scanning later sources that can still contain in-window rows.
-    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
+    const untilTs = subject.untilMs === undefined ? undefined : new Date(subject.untilMs).toISOString();
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, untilTs, refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
     if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
@@ -494,7 +493,7 @@ export class ProductPlanOperationService {
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
       let reusable = journal.operations[operationId];
       for (const entry of reusable ? [] : sameBrief) {
-        const seen = await this.readEvidence(paths, journal, entry);
+        const seen = await this.readEvidence(paths, entry);
         const state = this.observeWith(entry, product, head, seen).state;
         if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
           reusable = entry;
@@ -540,7 +539,7 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const seen = selectedEvidence ?? await this.readEvidence(paths, journal, record);
+    const seen = selectedEvidence ?? await this.readEvidence(paths, record);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };
@@ -637,7 +636,7 @@ export class ProductPlanOperationService {
    * answer that arrives past the deadline is "expired" whatever it holds. Evidence is answered as final only once it is
    * durably kept: a failed write refuses the request instead of answering from memory a restart would not have.
    */
-  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<EvidenceRead> {
+  private async readEvidence(paths: Paths, record: Record_): Promise<EvidenceRead> {
     if (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.inFlight(record.operationId)) {
       return { exited: false, failed: false };
     }
@@ -650,18 +649,22 @@ export class ProductPlanOperationService {
     });
     const pastDeadline = () => deadlineReached || performance.now() >= deadline;
     try {
-      const kept = await Promise.race([this.readKept(paths), expired]);
-      if (kept === "expired" || pastDeadline()) return "expired";
-      const known = kept?.evidence[record.operationId];
+      const operationId = record.operationId;
+      const file = join(paths.directory, `${paths.ownerKey}.${operationId}.evidence.json`);
+      const known = await Promise.race([this.readKept(paths, operationId, file, pastDeadline), expired]);
+      if (known === "expired" || pastDeadline()) return "expired";
       if (known) return known;
       const seen = await this.ledger(record, expired, pastDeadline);
       if (pastDeadline()) return "expired";
       if (typeof seen === "string") return seen;
-      const { opened, exited, failed } = seen;
+      const { opened, failed } = seen;
+      // The gateway can save a nonzero exit after its ledger append fails. Give a complete read the chance to find
+      // an opened proposal first, then keep the saved exit even when it has no corresponding row.
+      const exited = seen.exited || (!failed && record.handoff?.outcome === "exited" && this.options.ledgerPath !== undefined);
       const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
         : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
       if (final === undefined) return seen;
-      const saved = await Promise.race([this.keep(paths, journal, kept, record.operationId, final, pastDeadline), expired]);
+      const saved = await Promise.race([this.keep(paths, file, operationId, final, pastDeadline), expired]);
       return pastDeadline() ? "expired" : saved;
     } catch (error) {
       // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
@@ -676,11 +679,22 @@ export class ProductPlanOperationService {
     return record.handoff?.outcome === "refused" && record.handoff.beforeLaunch !== true && !this.inFlight(record.operationId);
   }
 
-  /** The kept final evidence, read without blocking serve's loop; undefined only when no file exists yet. */
-  private async readKept(paths: Paths): Promise<Kept | undefined> {
+  private async readKept(paths: Paths, operationId: string, file: string, pastDeadline: () => boolean): Promise<LedgerEvidence | undefined> {
+    const current = await this.readKeptFile(paths, file);
+    if (current) {
+      const final = current.evidence[operationId];
+      if (final === undefined || Object.keys(current.evidence).length !== 1) throw new Fault("corrupt");
+      return final;
+    }
+    if (pastDeadline()) return undefined;
+    return (await this.readKeptFile(paths, paths.kept))?.evidence[operationId];
+  }
+
+  /** Reads both the old aggregate and immutable per-operation evidence. */
+  private async readKeptFile(paths: Paths, file: string): Promise<Kept | undefined> {
     let handle: Awaited<ReturnType<typeof open>>;
     try {
-      handle = await open(paths.kept, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error) {
       if (errno(error, "ENOENT")) return undefined;
       // An unreadable kept file is never "nothing kept": reading the ledger again, then rewriting it, would drop it.
@@ -689,7 +703,9 @@ export class ProductPlanOperationService {
     try {
       const info = await handle.stat();
       const limit = PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes;
-      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
+      // The per-operation file may still hold its private staging link when a publisher is delayed or crashes.
+      const links = file === paths.kept ? 1 : 2;
+      if (!info.isFile() || info.nlink > links || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
       const buffer = Buffer.alloc(info.size);
       let size = 0;
       while (size < buffer.length) {
@@ -709,32 +725,37 @@ export class ProductPlanOperationService {
     }
   }
 
-  /** Flush a private stage asynchronously, then publish it only while this attempt still owns the journal lock. */
-  private async keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence,
+  /** Publish one immutable result. A link already submitted at expiry can never replace a retry's result. */
+  private async keep(paths: Paths, file: string, operationId: string, final: LedgerEvidence,
     pastDeadline: () => boolean): Promise<LedgerEvidence | "expired"> {
-    // Only operations the journal still holds, so the file stays within operations x one entry.
-    const evidence = Object.fromEntries(Object.entries({ ...kept?.evidence, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
-    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence });
+    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence: { [operationId]: final } });
     if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let staged = false;
-    let renamed = false;
+    let published = false;
     try {
       const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       staged = true;
       try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
       finally { await handle.close(); }
       if (pastDeadline()) return "expired";
-      // Keep the deadline check and publish in one turn. A queued rename could overwrite a later attempt after timeout.
-      renameSync(temporary, paths.kept);
-      renamed = true;
+      try {
+        await link(temporary, file);
+        published = true;
+      } catch (error) {
+        if (!errno(error, "EEXIST")) throw error;
+        if (pastDeadline()) return "expired";
+        const winner = await this.readKept(paths, operationId, file, pastDeadline);
+        if (winner === undefined) throw new Fault("unavailable");
+        return winner;
+      }
       const directory = await open(paths.directory, constants.O_RDONLY);
       try { await directory.sync(); } finally { await directory.close(); }
       return final;
     } catch (error) {
-      throw Object.assign(new Fault(renamed ? "outcome_unknown" : "unavailable"), { cause: error });
+      throw Object.assign(new Fault(published ? "outcome_unknown" : "unavailable"), { cause: error });
     } finally {
-      if (staged && !renamed) {
+      if (staged) {
         try { await unlink(temporary); } catch (error) { void error; /* an unremovable private stage is reaped with the directory */ }
       }
     }

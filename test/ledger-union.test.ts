@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { readLedgerKeyManifest } from "#src/lib/ledger-key-manifest.js";
 import {
   auditLedgerUnion,
   openLedgerUnion,
@@ -406,6 +407,32 @@ test("strict ledger readers distinguish a readable empty directory from an actua
       assert.deepEqual("rows" in result ? result.rows : result.rawLines, []);
     }
   }
+});
+
+test("an async raw union uses row bounds for both ends of an inclusive ledger window", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ts = (day: number) => `2026-01-0${day}T00:00:00.000Z`;
+  const line = (marker: string, day: number) => JSON.stringify({ marker, ts: ts(day) });
+  const archive = (day: number) => join(dir, `ledger.${ts(day).replace(/[:.]/g, "-")}.ndjson`);
+  const before = archive(1);
+  const overlapping = archive(2);
+  const after = archive(8);
+  const stale = archive(9);
+  writeFileSync(before, line("old", 2));
+  writeFileSync(overlapping, `${line("future", 7)}\n${line("start", 3)}\n`);
+  writeFileSync(after, line("new", 6));
+  writeFileSync(stale, line("previous data", 8));
+  for (const path of [before, overlapping, after, stale]) {
+    assert.equal((await readLedgerKeyManifest(dir, { path, form: "plain" })).kind, "built");
+  }
+  writeFileSync(stale, `${line("inside replacement", 4)}\n`);
+  writeFileSync(join(dir, LEDGER_FILENAME), `{torn\n${line("end", 5)}\n${line("late live", 6)}\n`);
+  const result = await readLedgerUnionRawLinesAsync(dir, { sinceTs: ts(3), untilTs: ts(5), refuseIncomplete: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.archiveFiles, [before, overlapping, after, stale], "the full listing still guards against rotation races");
+  assert.equal(result.filesRead, 3, "only the overlapping, replaced and live files supplied rows");
+  assert.deepEqual(result.rawLines, [line("start", 3), line("inside replacement", 4), line("end", 5)]);
 });
 
 

@@ -1013,8 +1013,12 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
  * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
+ * With `untilTs`, filter rows to the inclusive time window and use validated row bounds to skip disjoint archives.
  */
-export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
+export async function readLedgerUnionRawLinesAsync(
+  stateDir: string,
+  opts: LedgerUnionRawReadOptions & { untilTs?: string } = {},
+): Promise<LedgerUnionRawRead> {
   const unread: string[] = [];
   const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs, (path) => {
     if (opts.refuseIncomplete) unread.push(path);
@@ -1023,7 +1027,20 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
-  const { rawLines, scan } = rawLineCollector(opts);
+  const until = Date.parse(opts.untilTs ?? "");
+  const bounded = Number.isFinite(until);
+  const inWindow = (line: string): boolean => {
+    if (opts.keep && !opts.keep(line)) return false;
+    try {
+      const ts = parseObject(line)?.ts;
+      const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+      return at >= (minimumTs ?? -Infinity) && at <= until;
+    } catch (error) {
+      void error;
+      return false; // A torn row cannot prove a timestamp inside the window.
+    }
+  };
+  const { rawLines, scan } = rawLineCollector(bounded ? { ...opts, keep: inWindow } : opts);
   let filesRead = 0;
 
   const scanInSlices = async (buf: Buffer): Promise<void> => {
@@ -1034,7 +1051,18 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   };
 
   const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
-    if (rotationBeforeWindow(entry, minimumTs)) return;
+    if (bounded) {
+      // Rotation names describe the cut. Only a validated archive manifest can exclude out-of-order rows.
+      const indexed = await readLedgerKeyManifest(stateDir, entry);
+      if (indexed.kind === "hit" || indexed.kind === "built") {
+        const { minTs, maxTs } = indexed.manifest;
+        if (minTs !== undefined && maxTs !== undefined) {
+          const first = Date.parse(minTs);
+          const last = Date.parse(maxTs);
+          if (first <= last && (first > until || last < (minimumTs ?? -Infinity))) return;
+        }
+      }
+    } else if (rotationBeforeWindow(entry, minimumTs)) return;
     let buf: Buffer;
     try {
       const raw = await nodeReadFile(entry.path);
