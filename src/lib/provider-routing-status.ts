@@ -4,6 +4,7 @@
  * probes and provider credentials therefore never cross into the console process.
  */
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
@@ -447,11 +448,27 @@ function probedRecord(target: string): Record<string, unknown> | undefined {
   }
 }
 
+const require = createRequire(import.meta.url);
+
 /** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
  *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
  *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
 export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
-  const target = providerRoutingStatusPath(root);
+  // Serialize the snapshot read and rename across workers. SQLite releases the lock on process exit.
+  const lockDir = join(root, "local");
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const lock = new DatabaseSync(join(lockDir, "provider-routing-status.lock.sqlite"), { timeout: 1_000 });
+  try {
+    lock.exec("BEGIN IMMEDIATE");
+    publishStatus(providerRoutingStatusPath(root), input);
+    lock.exec("COMMIT");
+  } finally {
+    lock.close();
+  }
+}
+
+function publishStatus(target: string, input: ProviderRoutingWriteInput): void {
   let record: ProviderRoutingStatus | Record<string, unknown>;
   if (input.state === "invalidate-credits") {
     const kept = probedRecord(target);

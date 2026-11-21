@@ -2256,13 +2256,12 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     let hasUnresetWindow = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
-      credits: CodexCredits | undefined): CodexRateLimitWindow | string | null => {
+      creditsSpendable: boolean): CodexRateLimitWindow | string | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
           typeof reset !== "number" || !Number.isFinite(reset) || reset * 1000 <= now) return null;
       const elapsed = current.readAt - (reset * 1000 - duration * 60_000);
-      // A malformed window invalidates the whole reading. A reserve refusal applies to its bucket.
       if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100 || elapsed < 0 || (elapsed === 0 && used > 0))
         throw new Error("unreadable quota window");
       let burn = elapsed > 0 ? used / elapsed : 0;
@@ -2271,15 +2270,14 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
-      // A generic bucket's reserve refusal leaves independent model windows usable.
-      if (projected >= 100 - reserve && !codexCreditsSpendable(credits)) return "projected burn reaches the reserve";
+      if (projected >= 100 - reserve && !creditsSpendable) return "projected burn reaches the reserve";
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
     const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
       if (b == null) return b;
-      const { credits } = codexCreditsFor(b, carriedRates);
-      const primary = project(b.primary, old?.primary, credits);
-      const secondary = project(b.secondary, old?.secondary, credits);
+      const creditsSpendable = codexCreditsSpendable(codexCreditsFor(b, carriedRates).credits);
+      const primary = project(b.primary, old?.primary, creditsSpendable);
+      const secondary = project(b.secondary, old?.secondary, creditsSpendable);
       if (typeof primary !== "string" && typeof secondary !== "string") {
         hasUnresetWindow ||= primary !== null || secondary !== null;
         return { ...b, primary, secondary };
@@ -2296,7 +2294,10 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     if (!selected.readable) {
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     }
-    const rescued = providerEligibility(selected, reserve).lane === "codex-credits"
+    const onCredits = providerEligibility(selected, reserve).lane === "codex-credits";
+    // A reserve refusal still bars subscription carry. Another model can carry on funded credits.
+    if (rejectedWindow && !onCredits) throw new Error(rejectedWindow);
+    const rescued = onCredits
       ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
     return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },
       detail: `Codex capacity carried forward ${ageMs}ms from ${fixedClock(current.readAt).iso()}; ${failure.detail ?? "probe unavailable"}` };

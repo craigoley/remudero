@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync, type PathLike } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -251,28 +252,41 @@ test("borrowed credits project from the generic bucket's own history", async (t)
   assert.equal(providerEligibility(carriedSol, 5).lane, "codex-credits");
 });
 
-test("W1-T13855 criterion 9: an unfunded generic window past the reserve leaves a model with its own headroom on subscription", async (t) => {
-  for (const generic of [{ credits: null }, { credits: { hasCredits: true, unlimited: false, balance: "0" } }]) {
+test("W1-T13855 criterion 9: an unfunded generic window preserves the carried reserve refusal", async (t) => {
+  const funded = { hasCredits: true, unlimited: false, balance: BALANCE };
+  for (const [label, generic] of [
+    ["absent", { credits: null }],
+    ["zero", { credits: { ...funded, balance: "0" } }],
+    ["blocked", { credits: funded, spendControlReached: true }],
+    ["projected depletion", { credits: { ...funded, balance: "10" } }],
+  ] as const) {
     const account = codexAccount(t);
-    Object.assign(account.state.extras, generic);
     account.state.buckets.sol = { limitName: SOL.id,
       primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset } };
+    if (label === "projected depletion") {
+      account.state.balance = "20";
+      assert.equal((await account.read()).credits?.balance, 20);
+      account.state.now += 3_600_000;
+    }
+    Object.assign(account.state.extras, generic);
     const fresh = await account.read();
     assert.equal(fresh.readable, true);
     assert.equal(fresh.windows[0]?.usedPercent, 40);
     assert.equal(providerEligibility(fresh, 5).lane, undefined, "control: the fresh read is subscription headroom");
 
-    account.fail();
+    account.fail(label === "projected depletion" ? 6 * 3_600_000 : undefined);
     const capacity = await account.read();
-    assert.equal(capacity.readable, true, `the model's own window carries without any credits: ${capacity.detail}`);
-    assert.equal(capacity.model, SOL.id);
-    assert.equal(providerEligibility(capacity, 5).lane, undefined, "subscription headroom, not the credits lane");
-    assert.equal(capacity.creditsRescue, undefined, "no credits rescued a reading with headroom");
+    assert.equal(capacity.readable, false, `${label}: ${capacity.detail}`);
+    assert.equal(capacity.probeFailure, "timeout", label);
+    assert.match(capacity.detail ?? "", /projected burn reaches the reserve/, label);
     const routed = await routeSpawn(account);
-    assert.equal(routed.decision?.rule === "cash-fallback", false, "subscription headroom is never sent to cash");
-    assert.equal(routed.cashSpawns, 0);
-    assert.equal(routed.codexSpawns, 1);
-    assert.equal(routed.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue, undefined);
+    assert.equal(routed.decision?.rule, "cash-fallback", label);
+    assert.equal(routed.cashSpawns, 1, label);
+    assert.equal(routed.codexSpawns, 0, label);
+    assert.equal(routed.decision?.considered.find((entry) => entry.provider === "codex")?.failureKind, "timeout", label);
+    const withClaude = await routeSpawn(account, 60);
+    assert.equal(withClaude.assignments.at(-1)?.selected.provider, "claude", label);
+    assert.equal(withClaude.cashSpawns, 0, label);
   }
 });
 
@@ -296,6 +310,7 @@ test("W1-T13855 criterion 9: a carried model with its own headroom is chosen bef
   const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
   const credits = { hasCredits: true, unlimited: false, balance: "10" };
   const other = { limitName: SOL61.id, primary: { ...primary, usedPercent: 40 } };
+  account.state.used = 40;
   account.state.balance = "0";
   account.state.models.push(SOL61);
   account.state.buckets = {
@@ -949,4 +964,54 @@ test("W1-T13855 criterion 7 (creditsLaneRoom from review-capacity): a cash fallb
   assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
   assert.deepEqual(readProviderRoutingStatus(root, { now: () => newerAt }), newer,
     "a fallback cannot invalidate a more recent credits observation");
+});
+
+test("W1-T13855 criterion 7: a funded publication racing fallback invalidation keeps the review credits lane", async (t) => {
+  const account = codexAccount(t);
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const first = await routeSpawn(account, 99, { root, write: true });
+  assert.equal(first.decision?.rule, "codex-credits");
+  account.state.now += 5_000;
+  account.state.balance = "0";
+  const newerAt = account.state.now + 1_000;
+  const publishFunded = () => statusFor(root, newerAt, [claudeAt(99), creditsCodex()]);
+
+  const target = providerRoutingStatusPath(root);
+  const rename = fs.renameSync;
+  const realNow = Date.now;
+  let interleaved = false;
+  let queued = false;
+  const hook = t.mock.method(fs, "renameSync", (from: PathLike, to: PathLike) => {
+    if (to === target && !interleaved) {
+      interleaved = true;
+      // Distinct staging paths model separate worker processes, even within the same millisecond.
+      const clock = t.mock.method(Date, "now", () => realNow() + 60_000);
+      try { publishFunded(); }
+      catch (error) {
+        if ((error as { errcode?: number }).errcode !== 5) throw error;
+        queued = true;
+      } finally {
+        clock.mock.restore();
+      }
+    }
+    rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+  } finally {
+    hook.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.equal(interleaved, true, "publication was attempted after fallback staged its update");
+  if (queued) {
+    const invalidated = readProviderRoutingStatus(root, { now: () => newerAt });
+    assert.equal(routingStatus.creditsLaneRoom(invalidated, newerAt), false);
+    publishFunded();
+  }
+  const status = readProviderRoutingStatus(root, { now: () => newerAt });
+  assert.equal(status.observedAt, new Date(newerAt).toISOString());
+  assert.equal(routingStatus.creditsLaneRoom(status, newerAt), true);
+  assert.equal(reviewProviderObservation(status, newerAt).creditsLane, true);
 });
