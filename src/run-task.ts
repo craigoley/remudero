@@ -1060,8 +1060,10 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
+  inboxDraftLaneForMount,
   decideDraftDeferral,
   type ProposalVerdictKind,
   deferralFromOutcomes,
@@ -1105,7 +1107,9 @@ import {
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
   captureInboxDraftSnapshot,
+  inboxDraftGeneration,
   commitInboxDraftOutcomes,
+  readDraftCashResumes,
   parseDraftedCandidate,
   lintDraftedFragment,
   stageBundleProposals,
@@ -1114,8 +1118,10 @@ import {
   writeDraftAttemptPair,
   type DraftAttemptCache,
   type DraftCache,
+  type DraftCashResumes,
   type DraftSelectionContext,
   type DraftRungOutcome,
+  type DraftSpawnContext,
   type DraftWorkerResult,
   type EvidenceAnchor,
   type BatchApproveResult,
@@ -1142,7 +1148,8 @@ import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } fr
 import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
-import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError } from "./lib/worker-provider.js";
+import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
+  cashDraftFit } from "./lib/worker-provider.js";
 import { createDraftStatsSession, DRAFT_STATS_SLICE, readDraftStats, type DraftStats } from "./lib/draft-routing.js";
 import { correctionEvidenceOf, parseReplayPackets, type ReplayPacket } from "./lib/console-feedback.js";
 import {
@@ -1647,6 +1654,10 @@ import {
   skillsInjectedEvent,
   skillWithheldForRun,
   stageSkillDrafts,
+  expireUnansweredSkillDrafts,
+  readSkillDraftVerdicts,
+  reportSkillDraftExpiry,
+  withSkillDraftVerdictLock,
   stageSkillLifecycleProposal,
   withdrawSkillLifecycleProposal,
   workerAllowlistFromCapabilityContext,
@@ -24401,8 +24412,8 @@ async function retroCommand(
   const wrk = workerModel(config);
 
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+  const log = (step: string, extra: Record<string, unknown> = {}, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra }, { expectedLiveVersion });
 
   // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
   // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
@@ -24417,6 +24428,11 @@ async function retroCommand(
     log,
   );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  reportSkillDraftExpiry(
+    () => expireUnansweredSkillDrafts(followupRegistryPath, dirname(ledgerPath), log, systemClock),
+    log,
+    say,
+  );
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -37499,13 +37515,18 @@ export function buildInboxDraftSpawnArgs(args: {
   currentPlanText?: string;
   draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
   draftRoutingReadStats?: () => DraftStats | Promise<DraftStats>;
+  cashFit?: NonNullable<SpawnWorkerArgs["draftRouting"]>["cashFit"];
+  paidCashDeployments?: readonly string[];
+  cashRetry?: DraftSpawnContext["cashRetry"];
   avoidModels?: readonly string[];
 }): SpawnWorkerArgs {
   const registryIntent = selectedRegistryIntentForConfig(args.config), registryRecord = args.draftRoutingLog;
+  const cashRetry = args.cashRetry;
   return {
     // The one worktree below is shared by every draft lane, so enforce the read-only tool
     // surface at the spawn boundary rather than asking the worker to respect prose.
     ...buildInboxDraftWorkerArgs({ ...args, maxBudgetUsd: DEFAULT_BUDGET_USD, tools: INBOX_DRAFT_WORKER_TOOLS }),
+    ...(cashRetry ? { promptFor: ({ provider }) => provider === "cash" ? cashRetry.prompt : args.prompt } : {}),
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
     ...(registryRecord && args.proposalId ? { draftRouting: {
       lane: "inbox-draft",
@@ -37513,6 +37534,9 @@ export function buildInboxDraftSpawnArgs(args: {
       log: registryRecord,
       // With no batch session, the spawn awaits the process's slice read: still no union on the loop (W1-T13185).
       readStats: args.draftRoutingReadStats ?? (() => readInboxDraftStats(join(args.config.root, "state"), "inbox-draft")),
+      cashFit: args.cashFit,
+      paidCashDeployments: args.paidCashDeployments,
+      cashAvoidModels: cashRetry?.avoidModels,
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
@@ -37621,6 +37645,10 @@ export async function draftProposalBatch(
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   rawSpawn: typeof spawnWorker = spawnWorker,
+  providerRouting?: SpawnWorkerArgs["providerRouting"],
+  mount?: Mount,
+  cashResumes?: DraftCashResumes,
+  subscriptionRetryIds?: ReadonlySet<string>,
 ): Promise<DraftRungOutcome[]> {
   if (toDraft.length === 0) return [];
   const causalScope = { repository: `${owner}/${repo}` };
@@ -37632,8 +37660,9 @@ export async function draftProposalBatch(
   // it to plan authorship's tier. It rides its OWN mount (`synthesis.inbox_draft`, mounts.yaml),
   // never `architectModel`'s `architect:` row. `assertArchitectAboveWorker` is deliberately NOT
   // called here any more — see the identical note at the retro call site.
-  const mountsTable = loadMounts(mountsPath(repoRoot));
-  const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  const mounts = loadMounts(mountsPath(repoRoot));
+  const inboxDraftMount = mount ?? mounts.synthesis.inbox_draft;
+  const lane = inboxDraftLaneForMount(inboxDraftMount, mounts.capabilities);
   const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log, readInboxDraftStats);
 
   const settingsFile = renderWorkerSettings({
@@ -37660,6 +37689,7 @@ export async function draftProposalBatch(
       {
         repoFacts: checkoutRepoFacts(worktreePath),
         causalScope,
+        lane,
         spawn: async (proposal, prompt, ctx) => {
           const spawnArgs = { ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
@@ -37672,6 +37702,9 @@ export async function draftProposalBatch(
             currentPlanText: planText,
             draftRoutingLog: routingStats.log,
             draftRoutingReadStats: routingStats.readStats,
+            cashFit: ctx?.cashFit,
+            paidCashDeployments: ctx?.paidCashDeployments,
+            cashRetry: ctx?.cashRetry,
             avoidModels: ctx?.avoidModels,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
@@ -37680,20 +37713,28 @@ export async function draftProposalBatch(
           }), onSelectionAssignment: undefined };
           const requestedModel = spawnArgs.model ?? null;
           ctx?.onRequestedModel?.(requestedModel);
-          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)(spawnArgs), requestedModel };
+          return { ...await benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({
+            ...spawnArgs,
+            providerRouting,
+            ...(inboxDraftMount.provider === "cash" && spawnArgs.draftRouting && subscriptionRetryIds?.has(proposal.id) ? {
+              draftRouting: { ...spawnArgs.draftRouting, subscriptionRetry: true },
+            } : {}),
+            onModelFallbackAttempt: attempt => {
+              if (attempt.result) ctx?.onCashFallback?.(attempt.model, attempt.result);
+            },
+          }), requestedModel };
         },
         ...(inboxDraftMount.provider === "cash" ? {
-          escalate: (proposal: Proposal, prompt: string) => spawnEscalatedInboxDraft({
-            cwd: worktreePath,
-            settingsFile,
-            mount: inboxDraftMount,
-            config,
-            prompt,
-            proposal,
-            currentPlanText: planText,
-            disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS,
-          }, benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)),
+          escalate: async (proposal, prompt) => {
+            const args = { cwd: worktreePath, settingsFile, mount: inboxDraftMount, config, prompt, proposal,
+              currentPlanText: planText, disallowedTools: INBOX_DRAFT_DISALLOWED_TOOLS };
+            const spawn = benchmarkNonDispatchSpawn("inbox-draft", rawSpawn);
+            const readClaude = providerRouting?.readClaude;
+            return spawnEscalatedInboxDraft(args, spawn, readClaude && (() => readClaude({ forceRefresh: true })));
+          },
         } : {}),
+        cashFit: input => cashDraftFit(config, input),
+        cashResumes,
         log,
       },
       runId,
@@ -37908,14 +37949,7 @@ export function buildInboxDraftHook(
   config: Config,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  draftBatch: (
-    toDraft: Proposal[],
-    config: Config,
-    owner: string,
-    repo: string,
-    runId: string,
-    log: (step: string, extra?: Record<string, unknown>) => void,
-  ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
+  draftBatch: typeof draftProposalBatch = draftProposalBatch,
   grepAnchor?: (ref: string, anchor: EvidenceAnchor) => boolean,
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
   grepAnchorAsync?: (ref: string, anchor: EvidenceAnchor) => Promise<boolean>,
@@ -37935,6 +37969,8 @@ export function buildInboxDraftHook(
       : (ref: string, anchor: EvidenceAnchor) => gitGrepAnchorTrueAsync(repoRoot, ref, anchor));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
+  const cashDeferred = new Map<string, { generation: string; batch: number }>();
+  let draftBatchNumber = 0;
   const anchorGrepCache = createAnchorGrepCache();
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
@@ -38019,7 +38055,15 @@ export function buildInboxDraftHook(
       // The ordinary cadence never selects a saved improvement: only its daemon-owned handoff names it here.
       const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
         : proposals.filter(proposal => proposal.id === onlyProposalId);
-      const due = draftsDueOnDaemon(population, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftSelection, draftLane);
+      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
+      const eligibleIds = new Set(eligible.map(proposal => proposal.id));
+      for (const id of cashDeferred.keys()) if (!eligibleIds.has(id)) cashDeferred.delete(id);
+      // Keep fit refusals due, behind fresh work and in least-recently-refused order.
+      const selected = eligible.map(proposal => {
+        const deferred = cashDeferred.get(proposal.id);
+        return { proposal, batch: deferred && deferred.generation === inboxDraftGeneration(proposal) ? deferred.batch : 0 };
+      }).sort((a, b) => a.batch - b.batch).slice(0, DAEMON_DRAFT_BATCH_CAP);
+      const due = selected.map(({ proposal }) => proposal);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -38029,7 +38073,6 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -38121,7 +38164,9 @@ export function buildInboxDraftHook(
       let outcomes: DraftRungOutcome[];
       const snapshots = due.map(proposal => captureInboxDraftSnapshot(proposal, causalScope));
       try {
-        outcomes = await draftBatch(due, config, owner, repo, runId, log);
+        const cashResumes = readDraftCashResumes(join(inboxRoot, "state"));
+        const subscriptionRetryIds = new Set(selected.filter(({ batch }) => batch > 0).map(({ proposal }) => proposal.id));
+        outcomes = await draftBatch(due, config, owner, repo, runId, log, undefined, undefined, undefined, cashResumes, subscriptionRetryIds);
       } finally {
         // ⚠ W1-T2569 CORRECTION — THIS CLAIM WAS FALSE AND COST $123.30. It used to read "Only one
         // draft rung runs at a time (this hook is awaited to completion by the daemon's own serial
@@ -38177,6 +38222,14 @@ export function buildInboxDraftHook(
       // and persist completion before publication. Never spread an old whole-cache snapshot
       // over unrelated writes or mark newer direction attempted when an older worker finishes.
       commitInboxDraftOutcomes({ stateDir: join(inboxRoot, "state"), scope: causalScope, snapshots, outcomes, lane: draftLane, log });
+      draftBatchNumber++;
+      for (const outcome of outcomes) {
+        if (!outcome.ok && outcome.cashDeferred && outcome.snapshot) {
+          cashDeferred.set(outcome.proposalId, { generation: outcome.snapshot.generation, batch: draftBatchNumber });
+        } else {
+          cashDeferred.delete(outcome.proposalId);
+        }
+      }
       } finally { storeLock?.release(); }
       } finally {
         draftLock.release();
@@ -39785,12 +39838,28 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  return proposalVerdictCommand(
+  const decide = () => proposalVerdictCommand(
     kind,
     rest,
     (id) => {
-      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
+      let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
+      if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
+        const verdicts = readSkillDraftVerdicts(dirname(ledgerPath));
+        if ("unmeasured" in verdicts) {
+          // The normal classifier can already have a live or retained verdict. It is the path restore used
+          // before the union read, so a held rotation lock or an unreadable archive falls back to it.
+          const liveClassifierUsable = verdicts.archivesUnreadable || verdicts.rotationLockHeld;
+          if (!liveClassifierUsable || (classification?.state !== "declined" && classification?.state !== "ratified")) {
+            throw new Error(`rmd restore: ${verdicts.unmeasured}`);
+          }
+        } else {
+          const declinedReason = verdicts.isDeclined(id);
+          if (verdicts.isRatified(id)) classification = { proposalId: id, state: "ratified", reasons: [] };
+          else if (declinedReason !== undefined) classification = { proposalId: id, state: "declined", reasons: [], declinedReason };
+          else if (classification?.state === "declined") classification = undefined;
+        }
+      }
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
@@ -39802,6 +39871,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
         (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
     },
   );
+  return withSkillDraftVerdictLock(dirname(ledgerPath), rest[0], decide);
 }
 
 /**
@@ -40450,8 +40520,14 @@ export async function approveCommand(
         payload: { proposalId, fragmentYaml: "", stampLine: "" },
       };
     } else {
-      result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
-        approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus }));
+      result = withSkillDraftVerdictLock(dirname(ledgerPath), proposalId, () => {
+        const current = proposal.skillFile
+          ? loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot).classification
+          : classification;
+        if (!current) throw new Error(`rmd approve: ${proposalId} left the active registry`);
+        return withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
+          approveProposal(current, gateway, { ledgerPath, runId, duplicateCorpus }));
+      });
     }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —

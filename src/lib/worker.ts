@@ -216,6 +216,10 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
+  CashDraftSkippedError,
+  CashDraftResumeBlockedError,
+  type CashDraftFit,
+  type CashDraftFitInput,
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
@@ -282,6 +286,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  /** Characters in the rendered prompt supplied to the provider adapter. */
+  promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
   providerExchange?: ProviderExchangeReceiptV1;
   outputRetention?: {
@@ -1338,6 +1344,10 @@ export interface SpawnWorkerArgs {
     /** W1-T13185: the lane's stats, read off the daemon loop: a batch's loaded snapshot, or an awaited slice read. */
     readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
+    cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
+    paidCashDeployments?: readonly string[];
+    cashAvoidModels?: readonly string[];
+    subscriptionRetry?: boolean;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -1345,7 +1355,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall" | "cash-draft-fit";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -2358,7 +2368,7 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 /** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
- * on failed output contracts (W1-T4067). `OpenWeightUnsupportedResponseFormatError` names the remedy.
+ * on failed output contracts (W1-T4067) or a draft's whole-run fit refusal.
  * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
  * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
  * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
@@ -2367,7 +2377,7 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall" | "cash-draft-fit"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
@@ -2399,13 +2409,15 @@ export async function runOpenWeightWalkingLadder(
       }
       return result;
     } catch (err) {
-      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
+      const skippedDraft = err instanceof CashDraftSkippedError;
+      if (skippedDraft && err.fit.reason === "allowance" && err.fit.leftUsd === null) throw err;
+      if (!skippedDraft && !(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
       // NAME THE FALL-THROUGH. A silent downgrade would make a run that landed on rung 3
       // indistinguishable from one that led there, and the point of this walk is that the record
       // can say which deployments were unusable and why.
-      console.error(JSON.stringify({
+      if (!skippedDraft) console.error(JSON.stringify({
         event: "worker.openweight.rung_refused",
         deployment: model,
         reason: err.message.slice(0, 200),
@@ -2414,7 +2426,7 @@ export async function runOpenWeightWalkingLadder(
         of: rungs.length,
       }));
       if (next) {
-        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "unsupported-response-format" }); }
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: skippedDraft ? "cash-draft-fit" : "unsupported-response-format" }); }
         catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
       }
       if (!next) break;
@@ -2621,6 +2633,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // one worker's advisory status read must not switch another's home.
   const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  const paidCashDeployments = args.draftRouting?.paidCashDeployments ?? [];
+  const cashAvoidModels = args.draftRouting?.cashAvoidModels ?? args.avoidModels ?? [];
+  const subscriptionRetry = args.draftRouting?.subscriptionRetry === true;
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
@@ -2717,9 +2732,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     throw new ProviderCapacityBlockedError([capacity]);
   }
+  const claudeOnlyWithoutAuction = providers.length === 1 && providers[0] === "claude" && !subscriptionRetry;
   if (
-    providers.length === 1 &&
-    providers[0] === "claude" &&
+    claudeOnlyWithoutAuction &&
     (args.model !== undefined || routingPolicy.provenance === "overridden" || routingPolicy.fallback)
   ) {
     try {
@@ -2736,7 +2751,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
     }
   }
-  if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
+  if (!args.mountProvider && !claudeOnlyWithoutAuction) {
     const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
       (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
         requestedModel: args.model,
@@ -2837,8 +2852,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
-      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
-        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      // Inbox drafts use the stronger whole-run gate on the actual ladder and log its refusals there.
+      const checkDraftFit = args.draftRouting?.cashFit;
+      const allowanceRefusal = (models: readonly string[]) => checkDraftFit ? undefined
+        : cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
+          fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
       const plainCashModels = () => {
         const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
           { config, runId: args.runId, taskId: args.taskId, cashSqueezed: true, modelApprovals: config.modelApprovals,
@@ -2846,7 +2864,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         return [choice.model, ...choice.alternatives];
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
-      const deferred = args.cashDeferred !== undefined;
+      const deferred = args.cashDeferred !== undefined || subscriptionRetry;
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2880,7 +2898,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         const sonnetEnv = args.env ?? process.env;
         const canTrySonnet = requestedCapability === "balanced" &&
           !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-        if (refusal === undefined) {
+        const avoided = cashAvoidModels;
+        if (refusal === undefined && (!checkDraftFit || avoided.length > 0 || paidCashDeployments.length > 0)) {
           let models: string[];
           try { models = plainCashModels(); }
           catch (selectionError) {
@@ -2889,10 +2908,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             models = [];
           }
           if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt, config, args));
-          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
+          const candidates = models.filter(model => !avoided.includes(model));
+          const eligible = candidates.filter(model => !paidCashDeployments.includes(model));
+          const held = checkDraftFit
+            ? (eligible.length === 0 ? "no eligible cash deployment" : undefined)
+            : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
             publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
             error.message += `; ${held}`;
             throw error;
           }
@@ -3038,6 +3062,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        result.promptChars = execution.prompt.length;
         result.continuation = execution.receipt;
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
@@ -3119,6 +3144,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     try {
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
@@ -3131,6 +3157,17 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   if (args.mountProvider === "cash") {
     if (subscriptionOnly && !(args.cashOpusEmergency === true && args.cashSqueezed === true && args.routingFallback?.rule === "cash-opus-fallback")) {
       throw new SubscriptionOnlyRefusedError(args.model!);
+    }
+    // A draft refused on the previous poll can use subscription headroom before retrying its cash mount.
+    if (subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders)) {
+      try {
+        return await spawnWorker({
+          ...args,
+          mountProvider: undefined,
+        });
+      } catch (error) {
+        if (!(error instanceof ProviderCapacityBlockedError)) throw error;
+      }
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     const execution = executionFor("cash");
@@ -3171,10 +3208,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
-    const remaining = [openWeight.model, ...openWeight.alternatives]
-      .filter((model) => !(args.avoidModels ?? []).includes(model));
+    const unpaid = [openWeight.model, ...openWeight.alternatives]
+      .filter(model => !paidCashDeployments.includes(model));
+    const remaining = unpaid.filter(model => !cashAvoidModels.includes(model));
     const avoidExhausted = remaining.length === 0;
-    if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
+    const eligible = avoidExhausted ? unpaid : remaining;
+    if (eligible.length > 0) openWeight = { ...openWeight, model: eligible[0]!, alternatives: eligible.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
     let stats: DraftStats | undefined;
@@ -3190,7 +3229,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     // W1-T13672: ordinary mount work runs on cash first only while its measured cost fits its share of the day; otherwise
     // the Claude and Codex auction runs it, and a blocked auction hands it back to this route unchanged.
-    if (cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
+    if (!subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
       const deferral = cashDeferral(config, args, [openWeight.model, ...openWeight.alternatives], executionPrompt, stats);
       if (deferral) {
         console.error(JSON.stringify({ event: "worker.provider.cash_deferred", ...deferral }));
@@ -3207,6 +3246,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         }
       }
     }
+    if (eligible.length === 0) throw new CashDraftResumeBlockedError();
     if (args.draftRouting) {
       if (stats) {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
@@ -3267,10 +3307,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             },
           });
           cashController.signal.throwIfAborted();
+          const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: executionPrompt.length,
+            promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
+            atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
+          if (fit && !fit.fits) throw new CashDraftSkippedError(fit);
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           cashController.signal.throwIfAborted();
+          rung.promptChars = executionPrompt.length;
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
@@ -3677,6 +3722,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         teardownOnce,
       );
       result.provider = "claude";
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
