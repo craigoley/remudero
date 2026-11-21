@@ -19034,7 +19034,8 @@ export function openEscalationStandDownSince(
 }
 
 const OPEN_ESCALATION_HISTORY_STEPS: readonly string[] = ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"];
-const OPEN_ESCALATION_STEP_LINE = new RegExp(OPEN_ESCALATION_HISTORY_STEPS.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+const OPEN_ESCALATION_ARCHIVED_ROW = Symbol("open escalation archived row");
+type OpenEscalationRow = Record<string, unknown> & { [OPEN_ESCALATION_ARCHIVED_ROW]?: Record<string, unknown> };
 /** One state directory's open-escalation memo and the rotations each of the last two sweep passes reached. */
 interface OpenEscalationHistoryState { memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string> }
 const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>();
@@ -19043,13 +19044,33 @@ const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>(
  *  keeps every rotation this pass or the one before reached. The union of one pass's windows is what the next pass
  *  needs, so an older window's rotations are kept one pass and no longer. A rotation's own size and mtime still
  *  decide every hit. */
-function retainingTheLastTwoPasses(state: OpenEscalationHistoryState): LedgerRotationMemo {
-  return { ...state.memo, pass: (opts) => {
-    const pass = state.memo.pass(opts);
-    return { ...pass,
-      rotationRecords: (entry, parse) => { state.reached.add(entry.path); return pass.rotationRecords(entry, parse); },
-      complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous]) };
-  } };
+function openEscalationReadMemo(state: OpenEscalationHistoryState, needle: string, seen: Set<string>): LedgerRotationMemo {
+  const attempted = new Set<string>();
+  return { ...state.memo,
+    load: (entries) => {
+      for (const { path } of entries) attempted.add(path);
+      return state.memo.load(entries);
+    },
+    pass: () => {
+      seen.clear();
+      const pass = state.memo.pass();
+      const retry: LedgerCorpusEntry[] = [];
+      return {
+        rotationRecords: (entry) => {
+          state.reached.add(entry.path);
+          const read = pass.rotationRecords(entry, () => {
+            // Retry a failed load off the loop once per read. A second failure is reported as unread.
+            if (!attempted.has(entry.path)) retry.push(entry);
+            throw new Error(`unread escalation history rotation: ${entry.path}`);
+          });
+          const tornLines = read.tornLines.filter((line) => line.includes(needle));
+          return { rows: read.rows, torn: tornLines.length, tornLines };
+        },
+        missing: () => [...pass.missing(), ...retry],
+        complete: (retain) => retry.length === 0 && pass.complete([...(retain ?? []), ...state.reached, ...state.previous]),
+      };
+    },
+  };
 }
 
 /**
@@ -19085,27 +19106,38 @@ export function openEscalationHistoryHeld(ledgerPath: string): { rotations: numb
  * answered from a rotation memo the sweep keeps across passes, so a repeated pass over unchanged rotations reads
  * no archive bytes on the loop (a rotation is loaded off the loop once, and again only when its size or mtime changes,
  * or after a pass that no read reached it; see {@link beginOpenEscalationHistoryPass}). MEASURED 2026-11-20: this read, then synchronous per PR and per pass, held the daemon loop 97.5 s in a day.
- * The rows equal readLedgerUnionRecordsSync's with the task's JSON-quoted id as `pattern`: a ledger line is
- * JSON.stringify's output, so that pattern matches the line exactly when it matches the row's own serialisation.
+ * Keep the original text for the task filter and exact replay dedupe, including rows written with different
+ * whitespace or JSON escapes.
  */
 export async function readOpenEscalationHistory(ledgerPath: string, taskId: string, since: string | undefined,
   fsDeps: LedgerGrepFsDeps = realLedgerFs): Promise<LedgerUnionRecordRead> {
   const stateDir = dirname(ledgerPath);
   let state = openEscalationHistoryStates.get(stateDir);
   if (state === undefined) {
-    const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
-      { holder: "sweep.open-escalation-history", pattern: OPEN_ESCALATION_STEP_LINE });
+    const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)), {
+      holder: "sweep.open-escalation-history",
+      projectLine: (row, raw) => ({ step: row.step, ts: row.ts, raw, [OPEN_ESCALATION_ARCHIVED_ROW]: row }),
+    });
     openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set() });
   }
   const needle = JSON.stringify(taskId);
-  return readLedgerUnionRecordsMemoized(stateDir, retainingTheLastTwoPasses(state), {
+  const seen = new Set<string>();
+  let liveLine = "";
+  const result = await readLedgerUnionRecordsMemoized(stateDir, openEscalationReadMemo(state, needle, seen), {
     step: [...OPEN_ESCALATION_HISTORY_STEPS],
     since,
-    // The memo is shared by every task, so its rows carry no task filter: the task is matched on each row instead.
-    pattern: OPEN_ESCALATION_STEP_LINE,
-    where: (row) => row.task_id === taskId || JSON.stringify(row).includes(needle),
+    pattern: new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    dedupe: false,
+    keep: (line) => { liveLine = line; return !seen.has(line); },
+    where: (row: OpenEscalationRow) => {
+      const raw = row[OPEN_ESCALATION_ARCHIVED_ROW] === undefined ? liveLine : row.raw as string;
+      if (!raw.includes(needle) || seen.has(raw)) return false;
+      seen.add(raw);
+      return true;
+    },
     refuseIncomplete: true,
   }, fsDeps);
+  return { ...result, rows: result.rows.map((row: OpenEscalationRow) => row[OPEN_ESCALATION_ARCHIVED_ROW] ?? row) };
 }
 
 /** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */

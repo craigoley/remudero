@@ -181,13 +181,22 @@ function sourceSignature(root, version) {
   return JSON.stringify([RECIPE_VERSION, version, files]);
 }
 
-/** One memo entry per root; a concurrent edit refuses the launch rather than caching a hash of a moving tree. */
-export function memoizedSourceHash(root, stats, hash = sourceHash) {
+function sourceSignatureForHash(root, version, requireStable) {
+  try {
+    return sourceSignature(root, version);
+  } catch (error) {
+    if (requireStable) throw error;
+    return undefined; // Currency can still be judged from the bytes read, without caching the hash.
+  }
+}
+
+/** One memo entry per root. Launch callers require a stable tree; currency judges the bytes it read. */
+export function memoizedSourceHash(root, stats, hash = sourceHash, { requireStable = true } = {}) {
   root = resolve(root);
   const version = loadEsbuild(root).version;
-  const signature = sourceSignature(root, version);
+  const signature = sourceSignatureForHash(root, version, requireStable);
   const cached = sourceHashes.get(root);
-  if (cached?.signature === signature) {
+  if (cached && cached.signature === signature) {
     stats.reused++;
     return cached.hash;
   }
@@ -196,8 +205,11 @@ export function memoizedSourceHash(root, stats, hash = sourceHash) {
   stats.computed++;
   try {
     const value = hash(root, version, stats);
-    if (sourceSignature(root, version) !== signature) throw new Error("source changed while hashing child entry");
-    sourceHashes.set(root, { signature, hash: value });
+    if (signature !== undefined && sourceSignatureForHash(root, version, requireStable) === signature) {
+      sourceHashes.set(root, { signature, hash: value });
+    } else if (requireStable) {
+      throw new Error("source changed while hashing child entry");
+    }
     return value;
   } finally {
     stats.ms += performance.now() - started;
@@ -384,7 +396,7 @@ export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, ha
  * the daemon loop 115 s in a day (engine-tree's bundleIsCurrent and spawnRunChild's newestCurrentEngine).
  */
 const currencyHashStats = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
-const currencySourceHash = (root) => memoizedSourceHash(root, currencyHashStats);
+const currencySourceHash = (root) => memoizedSourceHash(root, currencyHashStats, sourceHash, { requireStable: false });
 
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
 function judgeChildEntry(root, name, outDir, treeHash, hashSource) {
