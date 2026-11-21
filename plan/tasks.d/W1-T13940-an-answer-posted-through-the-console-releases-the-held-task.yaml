@@ -34,6 +34,9 @@
     - test/human-gate-surface-counts.test.ts
     - test/human-gate-operator-items.test.ts
     - test/human-gate-dependency-verification.test.ts
+    - src/lib/repo-location.ts # amended 2026-11-21 for PR 19873 (review round 4): the target record's question-store root
+    - test/dispatch/an-operator-verb-in-a-consumer-daemon-resolves-its-target-plan.test.ts
+    - test/the-terminal-can-decline-a-proposal.test.ts
     - test/now-view.test.ts
     - test/the-needs-you-view-is-a-view-of-views.test.ts
     - test/the-operator-reaches-the-fleet-over-mcp.test.ts
@@ -166,3 +169,4 @@
     Scope amendment 2026-11-21 for PR 19873 (review round 3): display.more is exact when every source that produced a gate the list leaves out is complete; needsYou.inbox stays a lower bound while any source is partial.
     files adds src/lib/human-gate.ts (consumeHumanGateCounts computes display.more), src/lib/needs-you-view.ts (its caller), the
     three human-gate count tests whose expectations may move, and src/lib/instance-gateway.ts, which the PR already changes.
+    Scope amendment 2026-11-21 for PR 19873 (review round 4): the daemon records its question-store root on its target record so the Inbox reads the same store dispatch reads.
