@@ -33,4 +33,13 @@ test("W1-T14165 criterion 2: the same shape with a high row, a mismatched title,
   assert.deepEqual(classify(run(19651, TITLE_19651, SECURITY_ONLY_19651.replace(TOO_LARGE, TOO_LARGE + '\n\n' + TOO_LARGE))), UNKNOWN, 'the note twice');
   assert.deepEqual(classify(run(19651, TITLE_19651, SECURITY_ONLY_19651.replace('\n\n\n' + TOO_LARGE, '\n\n\n\n' + TOO_LARGE))), UNKNOWN, 'an extra blank line');
   assert.deepEqual(classify(run(19651, TITLE_19651, SECURITY_ONLY_19651.replace(TOO_LARGE, '_Alerts were suppressed by policy._'))), UNKNOWN, 'an unknown paragraph');
+  // The extra blank line is accepted only when Security Alerts is the sole section: after an Other or Non-security
+  // Alerts section, with or without a Security Alerts section before it, the base read it as unknown and still does.
+  const otherOnly = (heading: string) => '### New alerts in code changed by this pull request\n\n' + heading + ' Alerts:\n * 2 warnings\n\n\n' +
+    TOO_LARGE + '\n\nSee annotations below for details.\n\n' + link(19651);
+  for (const heading of ['Other', 'Non-security']) {
+    assert.deepEqual(classify(run(19651, '2 new alerts', otherOnly(heading))), UNKNOWN, `${heading} Alerts only, extra blank line`);
+    const both = SECURITY_ONLY_19651.replace(' * 2 medium\n\n\n', ' * 2 medium\n\n' + heading + ' Alerts:\n * 2 warnings\n\n\n');
+    assert.deepEqual(classify(run(19651, '4 new alerts including 2 medium severity security vulnerabilities', both)), UNKNOWN, `Security and ${heading} Alerts, extra blank line`);
+  }
 });

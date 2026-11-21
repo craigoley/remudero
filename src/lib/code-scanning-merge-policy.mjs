@@ -16,12 +16,14 @@ export const CODEQL_CONFIGURATION_NOT_FOUND = 'codeql-configuration-not-found';
 export const isCodeqlConfigurationWarning = check => check?.status === 'completed' && check.conclusion === 'neutral' &&
   typeof check.output?.title === 'string' && /^[1-9][0-9]* configurations? not found$/.test(check.output.title);
 // GitHub's real wording: a plural level above 1, 'Other Alerts:', and one exact optional 'too large' paragraph.
-// A Security Alerts section with no Other Alerts section after it is followed by one extra blank line, then that paragraph.
+// Only a Security Alerts section with no other section after it is followed by one extra blank line, then that paragraph
+// (SECURITY_ONLY_TOO_LARGE); every other section layout keeps SECTIONED's exact tail.
 const HEAD = String.raw`^### New alerts in code changed by this pull request\n\n`, QUALITY_ROW = String.raw` \* [1-9][0-9]* (?:error|warning|note)s?\n`;
 const TOO_LARGE = String.raw`_Alerts not introduced by this pull request might have been detected because the code changes were too large\._\n\n`;
 const TAIL = String.raw`See annotations below for details\.\n\n(\[View all branch alerts\].*)$`;
 const QUALITY_ONLY = new RegExp(String.raw`${HEAD}((?:${QUALITY_ROW})+)\n(?:${TOO_LARGE})?${TAIL}`);
-const SECTIONED = new RegExp(String.raw`${HEAD}(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:((?:Other|Non-security) Alerts:\n(?:${QUALITY_ROW})+)\n)?(?:\n${TOO_LARGE}|\n|${TOO_LARGE})?${TAIL}`);
+const SECTIONED = new RegExp(String.raw`${HEAD}(?:(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n)?(?:((?:Other|Non-security) Alerts:\n(?:${QUALITY_ROW})+)\n)?(?:\n|${TOO_LARGE})?${TAIL}`);
+const SECURITY_ONLY_TOO_LARGE = new RegExp(String.raw`${HEAD}(Security Alerts:\n(?: \* [1-9][0-9]* (?:low|medium)\n)+)\n\n${TOO_LARGE}${TAIL}`);
 
 function completeBelowThresholdSections(sections, title) {
   const declared = /^([1-9][0-9]*) new alerts?(?: including ([1-9][0-9]*) (low|medium) severity security vulnerabilit(?:y|ies))?$/.exec(title ?? '');
@@ -80,7 +82,8 @@ export function classifyCodeScanningMergePolicy(input) {
   }
   // Security policy is not a quality ratchet: positively enumerated low/medium or
   // quality-only findings do not become an unbounded hold. Unknown formats stay UNKNOWN.
-  const sections = summary.match(SECTIONED);
+  const securityOnly = summary.match(SECURITY_ONLY_TOO_LARGE);
+  const sections = summary.match(SECTIONED) ?? (securityOnly && [securityOnly[0], securityOnly[1], undefined, securityOnly[2]]);
   if (['success','failure'].includes(latest.conclusion) && sections && (sections[1] || sections[2]) && sections[3] === link &&
       completeBelowThresholdSections(sections, latest.output.title)) {
     return {state:'safe',mergeAllowed:true,reason:'trusted-complete-exact-head-below-security-threshold'};
