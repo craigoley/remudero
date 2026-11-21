@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import "#src/lib/live-analytics-snapshot-cache.js";
@@ -10,22 +10,29 @@ import { fixedClock, type Clock } from "#src/lib/clock.js";
 import { runDaemon } from "#src/lib/daemon.js";
 import { createDaemonMemoryGovernor } from "#src/lib/daemon-memory-policy.js";
 import { renderIssueBody, type Escalation, type OpenIssue } from "#src/lib/escalate.js";
+import { writeClassificationSnapshot } from "#src/lib/fleet-lane.js";
 import { readEscalationAnswers, type EscalationAnswerGateway } from "#src/lib/escalation-answers.js";
 import { appendThreadMessage } from "#src/lib/inbox-thread.js";
+import { inboxViewBodies } from "#src/lib/inbox-view.js";
 import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { composeNeedsYou } from "#src/lib/needs-you-view.js";
+import { NOW_DECISIONS_CAP } from "#src/lib/now-decisions.js";
 import { createNowView, NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowViewContext, type NowViewData } from "#src/lib/now-view.js";
 import { buildAnswerQuestionRoute, buildEscalationReplyRoute, type PanelActionDeps } from "#src/lib/panel-actions.js";
+import { inboxLanes } from "#src/lib/panel-graph.js";
 import { unfiledScopeGrant } from "#src/lib/fix-progress-judge.js";
 import { assertRunnable, loadPlanFromYaml, TaskAdmissionError, type Plan } from "#src/lib/plan.js";
+import { policyPath } from "#src/lib/policy.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { BoardCatalogClient, BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
 import { createService } from "#src/lib/service.js";
+import type { GitHub } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { viewEtag, type ViewBodyEntry } from "#src/lib/views.js";
+import { viewEtag, type ViewBodyEntry, type ViewSource } from "#src/lib/views.js";
 import { taskInputAnswerWithLedger } from "#src/lib/worker.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
@@ -447,7 +454,8 @@ test("W1-T13940 criterion 3: past the decisions cap, the needs-you count says ho
   const listed = composed.decisions.filter((d) => d.kind === "task_question");
   assert.equal(gates.length, 51, "every held task is a gate");
   assert.equal(listed.length, 50, "the list keeps its cap");
-  // The core store reader attests no malformed-line completeness, so core's count is a lower bound (`atLeast`).
+  // This fixture's GitHub, feedback-age and Inbox sources are partial, so the count is a lower bound; the next test makes every source complete.
+  assert.equal(composed.humanGates.sources.find((source) => source.name === "task-questions")?.state, "complete", "an absent store is a complete source");
   assert.deepEqual(composed.needsYou.inbox, { atLeast: 51 });
   assert.deepEqual(composed.needsYou.display, { shown: 50, more: { atLeast: 1 } }, "the count names the one the list leaves out");
   assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.atLeast ?? 0), gates.length, "the count and the list agree");
@@ -464,7 +472,7 @@ test("W1-T13940 criterion 4: an array answer row counts as no answer in both the
   }
 });
 
-test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer is the store's answer once the ledger row is gone", (t) => {
+test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer is not copied again, and the task stays answered once the ledger row is gone", (t) => {
   const daemonRoot = tempDir(t, "daemon");
   const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
   const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -479,9 +487,11 @@ test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer
   row(1000, "Use 5 passes.", "issue#501:comment:9001");
   assert.equal(read(), "Use 5 passes.", "control: the newer GitHub answer wins");
   row(2000, "Use 3 passes.", "tok", { answer_id: "a-2" });
-  assert.equal(read(), "Use 3 passes.", "the repeated route answer is newest");
+  assert.equal(read(), "Use 3 passes.", "the repeated route answer is newest while its row is live");
+  // The design skips a copy when the store holds the same answer id or the same origin and text: a-1's copy has both.
+  assert.equal(storeLines(daemonRoot).filter((line) => line.origin === "tok").length, 1, "the repeated answer is not copied a second time");
   writeFileSync(ledgerPath, "");
-  assert.equal(read(), "Use 3 passes.", "the store kept the newest answer after the ledger row is gone");
+  assert.equal(read(), "Use 5 passes.", "once the row is gone the store's newest answer answers, so the task stays released");
   const lines = storeLines(daemonRoot).length;
   read();
   assert.equal(storeLines(daemonRoot).length, lines, "a later read copies nothing");
@@ -508,7 +518,7 @@ test("W1-T13940 criterion 2: a GitHub reply whose store line and ledger row stra
   assert.equal(answerRows(ledgerPath).length, 2, "no pass writes a ledger row");
 });
 
-test("W1-T13940 criterion 4: a newer answer row with the same text but another id or origin is copied, so its identity outlives the ledger row", (t) => {
+test("W1-T13940 criterion 4: a newer answer row with the same text but another origin is copied once, and a row whose origin and text the store holds is not", (t) => {
   const daemonRoot = tempDir(t, "daemon");
   const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
   const at = (ms: number) => new Date(T0 + ms).toISOString();
@@ -527,9 +537,9 @@ test("W1-T13940 criterion 4: a newer answer row with the same text but another i
   writeFileSync(ledgerPath, "");
   assert.equal(read(), "Use 5 passes.", "the store still answers once the rows are gone");
   const ids = storeLines(daemonRoot).filter((line) => line.source === "ledger").map((line) => [line.answer_id, line.origin, line.author_login ?? null, line.ts]);
-  assert.deepEqual(ids, [["a-1", "tok", "craigoley", at(1000)], ["a-2", "tok", null, at(2000)]], "each newer row is copied with its own id and origin");
+  assert.deepEqual(ids, [["a-1", "tok", "craigoley", at(1000)]], "the row with a new origin is copied; a-2's origin and text are already in the store");
   read();
-  assert.equal(storeLines(daemonRoot).length, 3, "a later read copies nothing");
+  assert.equal(storeLines(daemonRoot).length, 2, "a later read copies nothing");
 });
 
 test("W1-T13940 criterion 4: the answer route and the escalation reply route stamp the store line and the answer row from the one injected clock", async (t) => {
@@ -550,4 +560,100 @@ test("W1-T13940 criterion 4: the answer route and the escalation reply route sta
   const daemonRoot = tempDir(t, "daemon");
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: new Date(T0 + 1000).toISOString(), run_id: "RUN-1", task_id: TASK, step: "panel.question_answered", origin: "issue#501:comment:9001", answer: "Use 5 passes." })}\n`);
   assert.equal(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), "Use 5 passes.", "the newer GitHub answer wins");
+});
+
+/** A core now body whose every source is complete: a policy, a daemon boot, a fresh GitHub, measured feedback age, and
+ *  `store` as the question store's text; composed with a real, empty Inbox needsYou page. */
+function completeCoreNeedsYou(t: TestCtx, plan: Plan, store: string) {
+  const root = readModelFixtureDir(t, "t13940-complete").dir;
+  const nowMs = Date.parse("2026-11-20T12:00:00.000Z");
+  const iso = (ms: number) => new Date(nowMs + ms).toISOString();
+  const clock = fixedClock(nowMs);
+  const ledgerDir = join(root, "state");
+  const planPath = join(root, "checkout", "plan", "tasks.yaml");
+  mkdirSync(ledgerDir, { recursive: true });
+  mkdirSync(dirname(planPath), { recursive: true });
+  writeFileSync(join(dirname(planPath), "policy.yaml"), readFileSync(policyPath(REPO_ROOT), "utf8"));
+  writeFileSync(join(dirname(planPath), "questions.ndjson"), store);
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), [{ ts: iso(-7_200_000), step: "daemon.boot", head_sha: "a".repeat(40) },
+    { ts: iso(-1000), step: "daemon.freshness_not_stale", arm: "up_to_date" }].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  // Consenting, enrolled feedback-age evidence over a window that holds now: one triaged entry, every ledger form read.
+  const ageDir = join(root, "feedback-age");
+  mkdirSync(ageDir, { recursive: true });
+  const window = { from: iso(-3_600_000), through: iso(3_600_000) };
+  writeFileSync(join(ageDir, "ledger.ndjson"), [{ ts: window.from, step: "daemon.poll" }, { ts: iso(-1_800_000), step: "triage.start", feedback_id: "fb-1" },
+    { ts: window.through, step: "daemon.poll" }].map((row) => `${JSON.stringify(row)}\n`).join(""));
+  const db = openProjectorReadModel(join(root, "read-model"), "core", clock);
+  onReadModelClose(t, () => db.close());
+  const lease = acquireLease(db, { clock, ttlMs: 1e12 });
+  assert.ok(lease.ok);
+  createLedgerProjector({ ledgerDir, db, lease: lease.lease, clock }).tick();
+  const github = { readFailed: () => false, prByRef: () => null, findMergedByTrailer: () => null, findMergedByHeadBranch: () => [], listMergedHeadBranches: () => [],
+    listOpenHeadBranches: () => [], listOpenPrs: () => [], headRefName: () => undefined, prBody: () => undefined, issueByUrl: () => null } as unknown as GitHub;
+  const view = createNowView({ instances: [{ name: "core", ledgerDir, planPath, feedbackRoot: dirname(dirname(planPath)) }], coreInstance: "core", clock,
+    readPlan: () => plan, planBehind: () => ({ commits: 0 }), listGrilling: () => [],
+    feedbackAgeObservation: { window, roots: [{ instance: "core", ledgerDir: ageDir, enrolled: true, consent: true, coverage: [window],
+      entries: [{ id: "fb-1", status: "accepted", ts: iso(-2_400_000), raw: "a triaged entry", attachments: [], origin: "cli", proposal_pr: null }] }] },
+    github: () => ({ github, generation: "known", source: { asOf: clock.iso(), state: "fresh" } }),
+    hostProbe: { readLive: () => [], diskFree: () => 1000, rateLimit: () => 5000 } });
+  const [body] = view.materialize({ now: clock.now(), switches: { views: { now: "serve" } }, instances: [{ db, state: { instance: "core",
+    generation: Number(db.meta("generation")), lease: "held", failures: 0, tickedAt: clock.now(), newestTs: null } }] });
+  assert.ok(body, "a core now body");
+  const now: ViewBodyEntry = { view: NOW_VIEW_NAME, key: "instance=core", version: NOW_VIEW_VERSION, generation: 1, etag: "now",
+    body: { view: NOW_VIEW_NAME, version: NOW_VIEW_VERSION, generatedAt: clock.iso(), asOf: clock.iso(), stale: false, sources: body.sources, data: body.data } };
+  writeClassificationSnapshot(ledgerDir, [], clock);
+  const lanes = inboxLanes({ proposals: [], classifications: [], ledgerLines: Object.assign([], { torn: 0, present: true }) }, root);
+  const source: ViewSource = { name: "inbox-store:core", instance: "core", asOf: clock.iso(), state: "fresh" };
+  const page = inboxViewBodies(lanes, source, "a".repeat(64)).find((b) => b.key === "section=needsYou")!;
+  const inboxBody: ViewBodyEntry = { view: "inbox", key: page.key, version: 1, generation: 1, etag: "inbox",
+    body: { view: "inbox", version: 1, generatedAt: clock.iso(), asOf: clock.iso(), stale: false, sources: page.sources, data: page.data } };
+  return composeNeedsYou(new Map([["now", now], ["inbox", inboxBody]]), ["core"]).data;
+}
+
+test("W1-T13940 criterion 3: with a fully readable, valid core question store, past the cap the needs-you count of held tasks left out is exact", (t) => {
+  const ids = Array.from({ length: NOW_DECISIONS_CAP + 1 }, (_, i) => `W1-T9${String(2000 + i)}`);
+  const many: Plan = loadPlanFromYaml(ids.map((id, i) => `- id: ${id}
+  title: "held fixture ${i}"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  origin: architect
+  files: [src/lib/plan.ts]
+  needs_input:
+    question: "question ${i}?"
+    asked_at: "2026-11-14T20:${String(i).padStart(2, "0")}:00Z"
+`).join(""), "plan/tasks.d/W1-T92000-many.yaml");
+  // A valid store: an answered question for a task outside the plan, every line whole.
+  const valid = [{ ts: "2026-11-14T19:00:00Z", task: "W1-T99999", question: "an old question?" }, { ts: "2026-11-14T19:05:00Z", task: "W1-T99999", answer: "done", origin: "tok" }]
+    .map((line) => `${JSON.stringify(line)}\n`).join("");
+  const composed = completeCoreNeedsYou(t, many, valid);
+  assert.deepEqual(composed.needsYou.uncertain, [], "control: every source is complete, the question store among them");
+  const listed = composed.decisions.filter((d) => d.kind === "task_question");
+  assert.equal(listed.length, NOW_DECISIONS_CAP, "the list keeps its cap");
+  assert.deepEqual(composed.needsYou.inbox, { count: NOW_DECISIONS_CAP + 1 });
+  assert.deepEqual(composed.needsYou.display, { shown: NOW_DECISIONS_CAP, more: { count: 1 } }, "the count of held tasks the list leaves out is exact");
+  // The same store with one torn line is partial, and the count is then a lower bound.
+  const torn = completeCoreNeedsYou(t, many, `${valid}{"task":"W1-T9\n`);
+  assert.deepEqual(torn.needsYou.uncertain.map((source) => [source.name, source.state]), [["task-questions", "partial"]]);
+  assert.deepEqual(torn.needsYou.display, { shown: NOW_DECISIONS_CAP, more: { atLeast: 1 } });
+});
+
+test("W1-T13940 criterion 4: a ledger answer whose origin and text the store already holds, under another answer id, adds no second store entry", (t) => {
+  const daemonRoot = tempDir(t, "daemon");
+  const ledgerPath = join(tempDir(t, "state"), "ledger.ndjson");
+  const at = (ms: number) => new Date(T0 + ms).toISOString();
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  appendFileSync(join(daemonRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: at(0), task: TASK, answer: "Use 5 passes.", origin: "tok", answer_id: "a-1" })}\n`);
+  appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(1000), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "Use 5 passes.", answer_id: "a-2" })}\n`);
+  for (const pass of [1, 2]) {
+    assert.equal(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), "Use 5 passes.", `pass ${pass}: the task is answered`);
+    assert.equal(storeLines(daemonRoot).length, 1, `pass ${pass}: the store already holds that origin and text, so nothing is copied`);
+  }
+  // Control: a row with a new origin and the same text is copied.
+  appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(2000), run_id: "PANEL-2", task_id: TASK, step: "panel.question_answered", origin: "tok-2", answer: "Use 5 passes.", answer_id: "a-3" })}\n`);
+  taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
+  assert.deepEqual(storeLines(daemonRoot).map((line) => line.answer_id), ["a-1", "a-3"]);
 });

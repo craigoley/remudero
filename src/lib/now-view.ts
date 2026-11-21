@@ -1149,6 +1149,7 @@ export function createNowView(opts: NowViewOptions): {
     const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
     let storeLines: readonly unknown[] = [];
+    let storeSkipped: string | undefined;
     const factAnswer = answeredByFact(db);
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
@@ -1182,7 +1183,10 @@ export function createNowView(opts: NowViewOptions): {
       }
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
-      else storeLines = store.lines;
+      else {
+        storeLines = store.lines;
+        if (store.skipped) storeSkipped = `the question store has ${store.skipped} malformed line(s)`;
+      }
     }
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
     // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
@@ -1203,9 +1207,10 @@ export function createNowView(opts: NowViewOptions): {
     if (instance.name === core) {
       const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
       sources.push(feedback);
-      // The legacy question reader skips malformed lines without attesting complete coverage.
-      sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
-        reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
+      // The question reader counts the malformed lines it skips: complete only when it skipped none.
+      const partial = reasons.task_question ?? storeSkipped ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
+      sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : partial ? "partial" : "complete",
+        ...(partial ? { reason: partial } : {}),
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     } else if (plan) {
       sources.push({ name: "held-tasks", instance: instance.name, state: "complete", gates: held.map(decisionGate) });

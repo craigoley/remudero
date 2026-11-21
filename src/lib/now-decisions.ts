@@ -187,7 +187,7 @@ export function questionStorePath(root: string): string {
 }
 
 /** The store's lines and its mtime; an absent store has no questions, an unreadable one says why. */
-export function readQuestionStore(root: string): { lines: QuestionStoreLine[]; mtimeMs?: number } | { reason: string } {
+export function readQuestionStore(root: string): { lines: QuestionStoreLine[]; mtimeMs?: number; skipped?: number } | { reason: string } {
   const path = questionStorePath(root);
   let text: string;
   let mtimeMs: number;
@@ -203,14 +203,15 @@ export function readQuestionStore(root: string): { lines: QuestionStoreLine[]; m
     if (fd !== undefined) closeSync(fd);
   }
   const lines: QuestionStoreLine[] = [];
+  let skipped = 0;
   for (const raw of text.split("\n")) {
     if (raw.trim() === "") continue;
     try {
       lines.push(JSON.parse(raw) as QuestionStoreLine);
     } catch {
-      // deliberate: a torn or hand-edited line is skipped; every whole line around it still counts.
-      continue;
+      // deliberate: a torn or hand-edited line is skipped and counted, so the source says it is partial.
+      skipped++;
     }
   }
-  return { lines, mtimeMs };
+  return { lines, mtimeMs, ...(skipped > 0 ? { skipped } : {}) };
 }

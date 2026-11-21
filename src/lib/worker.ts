@@ -5081,11 +5081,10 @@ export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string):
     if (row === undefined) return newestTaskAnswer(lines, taskId);
     const origin = typeof row.origin === "string" ? row.origin : "ledger";
     const answerId = typeof row.answer_id === "string" ? row.answer_id : undefined;
-    // The store holds this row when an entry has its answer_id, or, for a row with none (the daemon's own GitHub reply), its origin and text.
+    // The store holds this row when an entry has its answer_id, or the same origin and text (the daemon's own GitHub reply).
     const copied = lines.some((value) => {
       const line = typeof value === "object" && value !== null ? value as Partial<QuestionAnswerEntry> : {};
-      return line.task === taskId && (answerId !== undefined ? line.answer_id === answerId
-        : line.answer_id === undefined && line.origin === origin && line.answer === row.answer);
+      return line.task === taskId && ((answerId !== undefined && line.answer_id === answerId) || (line.origin === origin && line.answer === row.answer));
     });
     if (!copied) {
       appendQuestionAnswer(repoRoot, { ts: row.ts, task: taskId, answer: row.answer, origin,
