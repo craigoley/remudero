@@ -70,6 +70,7 @@ import {
   ghIssueGatewayAsync,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
+  readEscalationIssueSections,
   renderIssueBody,
   splitConcatenatedJsonPages,
   tryEscalateAsync,
@@ -370,17 +371,16 @@ export function isOwnerReaction(r: EscalationIssueReaction, ownerLogin: string):
 /** The option labels an issue's own `## Options` section names, in the exact form {@link
  *  "./escalate.js".renderIssueBody} rendered them (`- **label** — detail`). */
 function parseOptionLabels(issueBody: string): string[] {
-  const section = /##\s*Options\s*\n([\s\S]*?)(?=\n##\s|$)/i.exec(issueBody)?.[1] ?? "";
+  const section = readEscalationIssueSections(issueBody)?.options
+    ?? /##\s*Options\s*\n([\s\S]*?)(?=\n##\s|$)/i.exec(issueBody)?.[1] ?? "";
   return [...section.matchAll(/^-\s*\*\*(.+?)\*\*/gm)].map((m) => m[1].trim());
 }
 
-/** The `## Recommendation` line {@link "./escalate.js".renderIssueBody} rendered — one option's
- *  own label (`Escalation.recommendation` "must be one of options[].label", escalate.ts), never
- *  a multi-line block, so ONLY the line right after the heading is read (the heading's section
- *  runs to the body's end, unlike {@link parseOptionLabels}'s `## Options`, since Recommendation
- *  is renderIssueBody's LAST heading — reading to "the next `##`" would swallow the footer too). */
+/** Reactions use the first line of the writer's Recommendation, including on older issues. */
 function parseRecommendation(issueBody: string): string {
-  return /##\s*Recommendation\s*\n([^\n]*)/i.exec(issueBody)?.[1]?.trim() ?? "";
+  const recommendation = readEscalationIssueSections(issueBody)?.recommendation.split("\n", 1)[0]
+    ?? /##\s*Recommendation\s*\n([^\n]*)/i.exec(issueBody)?.[1];
+  return recommendation?.trim() ?? "";
 }
 
 /**

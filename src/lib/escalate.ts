@@ -1112,26 +1112,33 @@ function fullEscalationSummaryLine(e: Pick<Escalation, "summary">): string {
 }
 
 const MACHINE_FIELDS_HEADING = "## Machine fields";
-const DETAILS_HEADING = "## Details";
+const OPTIONS_SECTION = "## Options\n";
+const RECOMMENDATION_SECTION = "## Recommendation\n";
+const DETAILS_SECTION = "## Details\n";
+const SECTION_OFFSETS_COMMENT = "<!-- remudero:escalation-sections ";
 const ISSUE_FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_";
 
 /** Open with the decision summary or the producer's summary, then the choices. Keep the raw detail
  * intact for diagnostics and always name Host so operators can identify the affected machine. */
 export function renderIssueBody(e: Escalation, notices: readonly string[] = []): string {
   const decisionSummary = validateDecisionSummary(e.decisionSummary ?? null);
+  const summary = decisionSummary
+    ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`].join("\n")
+    : e.summary.replace(/[\r\n\u2028\u2029]/g, " ");
+  const options = OPTIONS_SECTION + e.options.map((o) => `- **${o.label}** — ${o.detail}`).join("\n");
+  const recommendation = RECOMMENDATION_SECTION + e.recommendation;
+  const lfLength = (section: string) => section.replaceAll("\r\n", "\n").length;
+  const optionsAt = lfLength(summary) + 2;
+  const recommendationAt = optionsAt + lfLength(options) + 2;
+  const detailsAt = recommendationAt + lfLength(recommendation) + 2;
   const lines = [
-    ...(decisionSummary
-      ? ["## Decision Summary", decisionSummary.headline, "", decisionSummary.what_happened, "", `**Decision:** ${decisionSummary.decision}`]
-      : [e.summary.replace(/[\r\n\u2028\u2029]/g, " ")]),
+    summary,
     "",
-    "## Options",
-    ...e.options.map((o) => `- **${o.label}** — ${o.detail}`),
+    options,
     "",
-    "## Recommendation",
-    e.recommendation,
+    recommendation,
     "",
-    DETAILS_HEADING,
-    e.detail,
+    DETAILS_SECTION + e.detail,
     "",
     ISSUE_FOOTER,
     "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
@@ -1147,6 +1154,8 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
       : []),
     ...notices.flatMap((notice) => ["", notice]),
     "",
+    SECTION_OFFSETS_COMMENT + `${optionsAt} ${recommendationAt} ${detailsAt} -->`,
+    "",
     MACHINE_FIELDS_HEADING,
     `**Class:** ${e.class}`,
     `**Task:** ${e.taskId}`,
@@ -1158,6 +1167,32 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
     ...(escalationIssueTitle(e) !== unboundedEscalationTitle(e) ? [fullEscalationSummaryLine(e)] : []),
   ].filter((l): l is string => l !== undefined);
   return lines.join("\n");
+}
+
+/** Writer offsets in LF-normalized text keep quoted headings in their own prose sections. */
+export function readEscalationIssueSections(body: string): {
+  summary: string; options: string; recommendation: string; detail: string;
+} | undefined {
+  body = body.replaceAll("\r\n", "\n");
+  const marker = body.lastIndexOf(`\n\n${SECTION_OFFSETS_COMMENT}`);
+  if (marker === -1) return undefined;
+  const offsets = /^(\d+) (\d+) (\d+) -->\n\n## Machine fields\n/.exec(body.slice(marker + 2 + SECTION_OFFSETS_COMMENT.length));
+  if (!offsets) return undefined;
+  const optionsAt = Number(offsets[1]), recommendationAt = Number(offsets[2]), detailsAt = Number(offsets[3]);
+  const optionsStart = optionsAt + OPTIONS_SECTION.length;
+  const recommendationStart = recommendationAt + RECOMMENDATION_SECTION.length;
+  const detailsStart = detailsAt + DETAILS_SECTION.length;
+  const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`, marker);
+  if (optionsAt < 2 || recommendationAt < optionsStart + 2 || detailsAt < recommendationStart + 2 || footerAt < detailsStart
+      || !body.startsWith(`\n\n${OPTIONS_SECTION}`, optionsAt - 2)
+      || !body.startsWith(`\n\n${RECOMMENDATION_SECTION}`, recommendationAt - 2)
+      || !body.startsWith(`\n\n${DETAILS_SECTION}`, detailsAt - 2)) return undefined;
+  return {
+    summary: body.slice(0, optionsAt - 2),
+    options: body.slice(optionsStart, recommendationAt - 2),
+    recommendation: body.slice(recommendationStart, detailsAt - 2),
+    detail: body.slice(detailsStart, footerAt),
+  };
 }
 
 /** Summarize ONE escalation into a {@link DecisionSummary}, FAIL-OPEN like feedback.ts's
@@ -1327,6 +1362,10 @@ export function escalationTaskId(body: string | undefined): string | undefined {
   return TASK_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
 }
 
+export function escalationIssueClass(body: string | undefined): string | undefined {
+  return CLASS_LINE_RE.exec(machineFields(body) ?? body ?? "")?.[1];
+}
+
 /** The `**Contract:** <revision>` an already-open issue's body carries, or `undefined` (W1-T3579).
  *  Reads through the SAME {@link CONTRACT_REVISION_LINE_RE} {@link findDuplicateEscalation}
  *  matches on — ONE parser, exactly like {@link escalationHeadSha} beside it. Exported so the fix
@@ -1350,13 +1389,18 @@ function titleCarriesSameSummary(e: EscalationDedupKey, title: string | undefine
   return title === escalationIssueTitle(e) && fields.split("\n").find(line => line.startsWith("**Full summary (JSON):** ")) === fullEscalationSummaryLine(e);
 }
 
-/** The producer's summary and Details carry its PR. Choice links can refer to other PRs. */
-function candidatePrText(title: string | undefined, body: string, fields: string | undefined): string | undefined {
-  const marker = `\n\n${DETAILS_HEADING}\n`;
-  const detailsAt = fields === undefined ? -1 : body.indexOf(marker, body.indexOf("\n\n## Recommendation\n"));
+/** Read pre-offset bodies with the original headings. */
+function issueDetails(body: string): string | undefined {
+  const sections = readEscalationIssueSections(body);
+  if (sections) return sections.detail;
+  const marker = `\n\n${DETAILS_SECTION}`;
+  const detailsAt = body.indexOf(marker, body.indexOf(`\n\n${RECOMMENDATION_SECTION}`));
   const footerAt = body.lastIndexOf(`\n\n${ISSUE_FOOTER}`);
-  const detail = detailsAt !== -1 && footerAt > detailsAt ? body.slice(detailsAt + marker.length, footerAt) : body;
-  const header = fields ?? body.split("\n\n", 1)[0]!;
+  return detailsAt !== -1 && footerAt > detailsAt ? body.slice(detailsAt + marker.length, footerAt) : undefined;
+}
+
+/** The producer's summary and Details carry its PR. Choice links can refer to other PRs. */
+function candidatePrText(title: string | undefined, detail: string, header: string): string | undefined {
   const line = header.split("\n").find(row => row.startsWith("**Full summary (JSON):** "));
   if (line) {
     let summary: unknown;
@@ -1380,7 +1424,9 @@ function candidatePrText(title: string | undefined, body: string, fields: string
 }
 
 function candidatePrRef(title: string | undefined, body: string): string | undefined {
-  const text = candidatePrText(title, body, machineFields(body));
+  const fields = machineFields(body);
+  const detail = fields === undefined ? body : issueDetails(body) ?? body;
+  const text = candidatePrText(title, detail, fields ?? body.split("\n\n", 1)[0]!);
   return text === undefined ? undefined : extractPrRef(text) ?? extractPrRef(body);
 }
 
@@ -1388,9 +1434,9 @@ function candidatePrRef(title: string | undefined, body: string): string | undef
 export function escalationIssuePrReferent({ title, body }: Pick<OpenIssue, "title" | "body">): number | undefined {
   const normalized = normalizeCandidateBody(body ?? "");
   const fields = machineFields(normalized);
-  return fields === undefined
-    ? prReferentFromIssueText(body) ?? prReferentFromIssueText(title)
-    : prReferentFromIssueText(candidatePrText(title, normalized, fields));
+  if (fields === undefined) return prReferentFromIssueText(body) ?? prReferentFromIssueText(title);
+  const detail = issueDetails(normalized) ?? normalized;
+  return prReferentFromIssueText(detail) ?? prReferentFromIssueText(candidatePrText(title, "", fields));
 }
 
 function matchesHeadDimension(e: EscalationDedupKey, candidate: string | undefined, title: string | undefined, body: string): boolean {

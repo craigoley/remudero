@@ -382,7 +382,7 @@ test("W1-T313 criterion 2: renderIssueBody opens with the decision summary and k
   // Without a decisionSummary, the producer's summary opens the body. Choices and the
   // recommendation come before the unchanged detail, and machine-readable fields trail it.
   assert.equal(
-    withoutSummary,
+    withoutSummary.replace(/\n\n<!-- remudero:escalation-sections \d+ \d+ \d+ -->/, ""),
     [
       e.summary,
       "",

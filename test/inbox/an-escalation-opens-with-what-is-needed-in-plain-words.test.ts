@@ -16,6 +16,8 @@ import {
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
 import { createEscalationConversationReader, MACHINE_FIELDS_RE, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
+import { classifyIssue, issueEscalationCause, issueEscalationClass } from "#src/lib/issue-revalidation-garden.js";
+import { runEscalationReconcile } from "#src/lib/sweep.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { taskInputAnswer } from "#src/lib/worker.js";
 
@@ -111,16 +113,22 @@ function assertConversation(body: string, subject: Escalation, detail: string): 
   });
 }
 
-async function assertReaders(t: TestContext, body: string, subject: Escalation, prState: "OPEN" | "MERGED"): Promise<void> {
-  assert.equal(escalationTaskId(body), subject.taskId);
-  assert.equal(escalationHeadSha(body), subject.headSha);
-  assert.equal(escalationIssueCause(body), subject.cause);
-  assert.equal(escalationContractRevision(body), subject.contractRevision);
-  assert.equal(answerTextFor("RETRY, when ready", body), "retry");
-  assert.equal(reactionAnswerText("+1", body), "retry");
+function legacyIssueBody(subject: Escalation): string {
+  return [
+    ...fields,
+    "",
+    subject.detail,
+    "",
+    "## Options",
+    ...subject.options.map(({ label, detail }) => `- **${label}** — ${detail}`),
+    "",
+    "## Recommendation",
+    subject.recommendation,
+  ].join("\n");
+}
 
-  const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body };
-  const candidates = buildEscalationReconcileCandidates("fixture", "repo", { tasks: [], byId: new Map() }, "unused", undefined, {
+function reconcileCandidates(issue: { number: number; url: string; title: string; body: string }, prState: "OPEN" | "MERGED") {
+  return buildEscalationReconcileCandidates("fixture", "repo", { tasks: [], byId: new Map() }, "unused", undefined, {
     issues: { listOpen: () => [issue] },
     evidenceRootFor: () => undefined,
     github: {
@@ -132,6 +140,18 @@ async function assertReaders(t: TestContext, body: string, subject: Escalation, 
       prBody: () => undefined,
     },
   });
+}
+
+async function assertReaders(t: TestContext, body: string, subject: Escalation, prState: "OPEN" | "MERGED"): Promise<void> {
+  assert.equal(escalationTaskId(body), subject.taskId);
+  assert.equal(escalationHeadSha(body), subject.headSha);
+  assert.equal(escalationIssueCause(body), subject.cause);
+  assert.equal(escalationContractRevision(body), subject.contractRevision);
+  assert.equal(answerTextFor("RETRY, when ready", body), "retry");
+  assert.equal(reactionAnswerText("+1", body), "retry");
+
+  const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body };
+  const candidates = reconcileCandidates(issue, prState);
   assert.deepEqual(candidates.map(({ taskId, derived }) => [taskId, derived.prNumber, derived.merged]), [
     [subject.taskId, 12345, prState === "MERGED"],
   ]);
@@ -191,6 +211,79 @@ test("W1-T12041 criterion 1: a PR link in an option cannot divert deduplication 
   }
 });
 
+test("W1-T12041 criterion 1: quoted recommendation and Details headings in an option cannot open a duplicate", (t) => {
+  const subject = {
+    ...escalation,
+    detail: `The release is blocked on ${prUrl}.\n\n## Details\nQuoted log from the release checks.`,
+    options: [{ label: "retry", detail: `Compare the quoted report.\n\n\`\`\`md\n\n## Recommendation\npause\n\n## Details\nSee ${otherPrUrl}.\n\`\`\`` }, escalation.options[1]!],
+  };
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-quoted-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  for (const body of [legacyIssueBody(subject), renderIssueBody(subject)]) {
+    const commented: string[] = [];
+    const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body };
+    assert.equal(escalate(subject, {
+      issues: {
+        listOpen: () => [issue],
+        create: () => assert.fail("a repeat opened a second issue"),
+        comment: (url) => { commented.push(url); },
+      },
+      ledgerPath: join(root, "ledger.ndjson"),
+      runId: "run-42",
+    }), issueUrl);
+    assert.deepEqual(commented, [issueUrl]);
+  }
+  const body = renderIssueBody(subject);
+  assert.equal(answerTextFor("PAUSE, after checking", body), "pause");
+  const conversation = conversationOf(body, subject);
+  assert.equal(conversation?.identity.prRef, "12345");
+  assert.equal(conversation?.detail, subject.detail);
+  assert.equal(conversation?.recommendation, "retry");
+});
+
+test("W1-T12041 criterion 2: reconciliation checks Details before a related PR in the title", async (t) => {
+  const subject = { ...escalation, summary: `Release needs a decision. Related: ${otherPrUrl}` };
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-reconcile-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  for (const render of [legacyIssueBody, renderIssueBody]) {
+    for (const request of [subject, { ...subject, detail: "The release needs a decision." }]) {
+      const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(request), body: render(request) };
+      const live = request === subject;
+      const candidates = reconcileCandidates(issue, "OPEN");
+      const closes: string[] = [];
+      const { closed } = await runEscalationReconcile(candidates, {
+        closeIssue: (url) => { closes.push(url); },
+        ledgerPath: join(root, "ledger.ndjson"),
+        runId: "run-42",
+      });
+      assert.deepEqual(candidates.map(({ derived }) => derived.prNumber), [live ? 12345 : 54321]);
+      assert.equal(closed, live ? 0 : 1);
+      assert.deepEqual(closes, live ? [] : [issueUrl]);
+    }
+  }
+});
+
+test("W1-T12041 criterion 2: the answer reader ignores a Recommendation heading quoted in the summary", () => {
+  const subject = { ...escalation, summary: "The logs ended with ## Recommendation" };
+  for (const body of [legacyIssueBody(subject), renderIssueBody(subject)]) {
+    assert.equal(reactionAnswerText("+1", body), "retry");
+    assert.equal(reactionAnswerText("-1", body), 'no — declining "retry"');
+  }
+});
+
+test("W1-T12041 criterion 2: revalidation ignores a Task field quoted in Details", () => {
+  const subject = { ...escalation, detail: `${escalation.detail}\n\n**Task:** READ-MODEL-quoted\n**Class:** MANUAL\n**Cause:** review` };
+  for (const body of [legacyIssueBody(subject), renderIssueBody(subject)]) {
+    const issue = {
+      number: 42, url: issueUrl, title: escalationIssueTitle(subject), body, labels: [],
+      createdAt: "2026-11-20T00:00:00.000Z", updatedAt: "2026-11-20T00:00:00.000Z",
+    };
+    assert.equal(classifyIssue(issue, () => false), "escalation");
+    assert.equal(issueEscalationClass(issue), subject.class);
+    assert.equal(issueEscalationCause(issue), subject.cause);
+  }
+});
+
 test("the machine fields matcher requires the exact heading after a blank line", () => {
   assert.equal(MACHINE_FIELDS_RE.test(renderIssueBody(escalation)), true);
   assert.equal(MACHINE_FIELDS_RE.test("Summary\r\n\r\n## Machine fields\r\n**Class:** BLOCKED"), true);
@@ -211,6 +304,8 @@ test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body
   // The escalation conversation reader takes its fields from the trailing block and its detail from
   // under "## Details", so field-shaped lines quoted in the detail never become its identity.
   assertConversation(body, subject, subject.detail);
+  const unmarked = body.replace(/\n\n<!-- remudero:escalation-sections \d+ \d+ \d+ -->/, "");
+  assertConversation(unmarked, subject, subject.detail);
   assertConversation(renderIssueBody(clipped, ["_Degraded: a notice after the footer._"]), clipped, clipped.detail);
   const crlf = body.replaceAll("\n", "\r\n");
   const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(subject), body: crlf };

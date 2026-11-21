@@ -31,7 +31,8 @@ import type { Config } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages, type AsyncIssueGateway,
+  escalationHeadSha, escalationIssueCause, escalationIssueClass, escalationTaskId, ghIssueGatewayAsync,
+  prReferentFromIssueText, splitConcatenatedJsonPages, type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
@@ -168,17 +169,17 @@ export type IssueClass =
 
 /** The `**Task:**` an escalation body names ({@link "./escalate.js".renderIssueBody}), if any. */
 export function issueTaskId(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return escalationTaskId(issue.body);
 }
 
 /** The `**Class:**` an escalation body names: MANUAL, GRILL, BLOCKED, HARD_STOP... */
 export function issueEscalationClass(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Class:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return escalationIssueClass(issue.body);
 }
 
 /** The `**Cause:**` an escalation body names: stage-stall, review, ci, conflict... */
 export function issueEscalationCause(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Cause:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return escalationIssueCause(issue.body);
 }
 
 /** Classify one issue. Producer classes are named by the task id their producer mints; an escalation

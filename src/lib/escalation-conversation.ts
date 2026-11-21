@@ -9,6 +9,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import type { FeedbackEntry } from "./feedback.js";
 import { CONSOLE_CORRECTION_KIND, CONSOLE_CORRECTION_VERSION } from "./console-feedback.js";
+import { readEscalationIssueSections } from "./escalate.js";
 
 const MAX_SOURCE_BYTES = 65_536;
 const MAX_HISTORY_MESSAGES = 100;
@@ -105,6 +106,32 @@ function sourceLayout(body: string): { order: "fields-first" | "machine-fields-l
   return { order: "machine-fields-last", header: fields, fieldsAt: last.index };
 }
 
+function conversationSections(body: string, layout: ReturnType<typeof sourceLayout>): ReturnType<typeof readEscalationIssueSections> {
+  if (layout.order === "machine-fields-last") {
+    if (/^## (?:Options|Recommendation)\r?$/m.test(body.slice(layout.fieldsAt))) return undefined;
+    const sections = readEscalationIssueSections(body);
+    if (sections) return sections;
+  }
+  const optionsHeaders = [...body.matchAll(/^## Options\r?$/gm)];
+  const recommendationHeaders = [...body.matchAll(/^## Recommendation\r?$/gm)];
+  if (optionsHeaders.length !== 1 || recommendationHeaders.length !== 1) return undefined;
+  const [options] = optionsHeaders, [recommendation] = recommendationHeaders;
+  if (options!.index >= recommendation!.index) return undefined;
+  const optionsText = body.slice(options!.index + options![0].length, recommendation!.index);
+  const afterRecommendation = recommendation!.index + recommendation![0].length;
+  if (layout.order === "fields-first") {
+    return { summary: "", options: optionsText, detail: body.slice(layout.header.length, options!.index),
+      recommendation: body.slice(afterRecommendation).split(/\r?\n_Opened automatically by Remudero /, 1)[0]! };
+  }
+  const details = /^## Details\r?$/m.exec(body.slice(afterRecommendation, layout.fieldsAt));
+  if (!details) return undefined;
+  const detailsAt = afterRecommendation + details.index;
+  const tail = body.slice(detailsAt + details[0].length, layout.fieldsAt);
+  const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
+  return { summary: body.slice(0, options!.index), options: optionsText, detail: footer === -1 ? tail : tail.slice(0, footer),
+    recommendation: body.slice(afterRecommendation, detailsAt) };
+}
+
 /** Parse only the native writer's anchored metadata and sections, never instructions from prose. */
 export function parseEscalationConversationSource(source: EscalationIssueSource): {
   identity: ThreadIdentity; headline: string; detail: string; recommendation: string | null;
@@ -134,32 +161,12 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
       return undefined;
     }
   }
-  const optionsHeaders = [...source.body.matchAll(/^## Options\r?$/gm)];
-  const recommendationHeaders = [...source.body.matchAll(/^## Recommendation\r?$/gm)];
-  if (optionsHeaders.length !== 1 || recommendationHeaders.length !== 1) return undefined;
-  const optionsAt = optionsHeaders[0]!.index!, recommendationAt = recommendationHeaders[0]!.index!;
-  if (optionsAt >= recommendationAt) return undefined;
-  const afterRecommendation = source.body.slice(recommendationAt + recommendationHeaders[0]![0].length);
-  let detail: string, recommendationText: string, decisionSummary: string | undefined;
-  if (layout.order === "machine-fields-last") {
-    // W1-T12041: the summary leads, the raw detail sits under its own heading after the recommendation.
-    const details = /^## Details\r?$/m.exec(afterRecommendation);
-    if (!details || layout.fieldsAt <= recommendationAt) return undefined;
-    recommendationText = afterRecommendation.slice(0, details.index);
-    const tail = afterRecommendation.slice(details.index + details[0].length, layout.fieldsAt - (recommendationAt + recommendationHeaders[0]![0].length));
-    const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
-    detail = (footer === -1 ? tail : tail.slice(0, footer)).trim();
-    if (source.body.startsWith("## Decision Summary\n") || source.body.startsWith("## Decision Summary\r\n")) {
-      decisionSummary = source.body.slice(0, optionsAt).trimEnd();
-    }
-  } else {
-    detail = source.body.slice(header.length, optionsAt).trim();
-    recommendationText = afterRecommendation;
-  }
-  // The footer is the native writer's source annotation, not recommendation text.
-  const recommendation = recommendationText.split(/\r?\n_Opened automatically by Remudero /, 1)[0]!.trim() || null;
-  const optionsText = source.body.slice(optionsAt + optionsHeaders[0]![0].length, recommendationAt);
-  const options = [...optionsText.matchAll(/^- \*\*(.+)\*\* — (.+)$/gm)]
+  const sections = conversationSections(source.body, layout);
+  if (!sections) return undefined;
+  const detail = sections.detail.trim();
+  const recommendation = sections.recommendation.trim() || null;
+  const decisionSummary = /^## Decision Summary\r?\n/.test(sections.summary) ? sections.summary.trimEnd() : undefined;
+  const options = [...sections.options.matchAll(/^- \*\*(.+)\*\* — (.+)$/gm)]
     .map((match) => ({ label: match[1]!, detail: match[2]!, executable: false as const }));
   if (!headline || options.length > 24) return undefined;
   // These are the native producer's PR referent rules, exercised against its real writer in tests.
