@@ -1794,6 +1794,11 @@ interface GhReadCadencePlan {
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
   leaveQueue(): void;
+  /** Names the phase the NEXT pause waits for, when it is not the one `turnRemainingMs` named. */
+  notePauseReason(reason: "gap" | "floor-recheck"): void;
+  /** W1-T12058 criterion 3: called with the length of EVERY cadence sleep, just before it runs. In wait
+   *  mode it prints one line naming that length and why; every other mode stays silent. */
+  announcePause(ms: number): void;
 }
 
 function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): GhReadCadencePlan {
@@ -1819,7 +1824,6 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   let gatedFirst = false;
   /** A gated first read in wait mode that must wait: its floor, or a ticket queued ahead of it. */
   let waiter = false;
-  let floorWaitMs = 0;
   let ticket: GhReadTicket | undefined;
   let actor: string | undefined;
 
@@ -1879,8 +1883,35 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     return head === undefined || head.yielded || floorRemainingAt(nowMs) > 0 ? undefined : head;
   };
   const warnLine = (line: string) => (deps.warn ?? ((l: string) => void process.stderr.write(`${l}\n`)))(line);
-  /** Seconds, ROUNDED UP to a tenth: a printed wait is never shorter than the one sat through. */
-  const waitS = (ms: number): number => Math.ceil(ms / 100) / 10;
+  /** W1-T12058 criterion 3: what the next pause waits for, and how long this read has paused so far.
+   *  A wait line is printed AT EACH PAUSE, with the length the read is about to sleep, never as a total
+   *  predicted up front: a queued ticket can expire mid-wait, a sibling's stamp can move the gap, and a
+   *  later read in the burst can pause again, so any forecast disagreed with the sleep (#19924 review).
+   *  The first pause of a read prints "waiting Ns for <why>"; a later phase that extends it prints one
+   *  more line, "waiting Ns more for <why> (Ts in all)". A pause of one phase is one sleep, so a single
+   *  phase prints once. Not announced: the cadence LOCK's 25 ms retries, bounded at 1 s in all
+   *  (GH_CADENCE_LOCK_MAX_WAIT_MS); a line per retry would bury the real wait. */
+  let pauseReason: "floor" | "queue" | "slot" | "gap" | "floor-recheck" = "floor";
+  let queueAhead = 0;
+  let pausedMs = 0;
+  /** Exact seconds, to the millisecond: the printed number IS the sleep. */
+  const pauseS = (ms: number): number => Math.ceil(ms) / 1000;
+  const announcePause = (ms: number): void => {
+    if (mode !== "wait" || ms <= 0) return;
+    const why = {
+      floor: `the ${windowS}s floor`,
+      queue: `${queueAhead} queued gated read(s) ahead to take its slot (W1-T10271)`,
+      slot: `a due queued read's reserved slot (W1-T10271)`,
+      gap: `the ${pauseS(sharedReadGapMs)}s shared read gap`,
+      "floor-recheck": `the ${windowS}s floor, which a newer gated read restarted`,
+    }[pauseReason];
+    const first = pausedMs === 0;
+    pausedMs += ms;
+    warnLine(
+      `gh read cadence (wait, W1-T7957): waiting ${pauseS(ms)}s ${first ? "" : "more "}for ${why} on ${stampPath}` +
+        (first ? "" : ` (${pauseS(pausedMs)}s in all)`),
+    );
+  };
 
   const evaluate = (): GhReadCadenceDecision => {
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
@@ -1900,7 +1931,6 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     });
     const ahead = gatedFirst && windowS > 0 ? queuedAhead(liveTickets(nowMs)).length : 0;
     waiter = gatedFirst && mode === "wait" && (decision.paced || ahead > 0);
-    floorWaitMs = waiter ? floorDeadlineRemainingMs(decision.paced, lastReadMs, nowMs) : 0;
     // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
     // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
     // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
@@ -1913,36 +1943,10 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
-    // W1-T12058 criterion 3: ONE wait line per hand-run read, printed HERE, up front, with the TOTAL the
-    // read will sit through, computed from the same deadlines its wait loop uses. Up front rather than
-    // at each phase: a phase-by-phase line would print twice (the floor, then the gap), and a line at
-    // only the first phase would understate a wait made of several. Every source in wait mode is summed:
-    // - the floor, to its deadline (the counted stamp plus a window, even for a stamp ahead of the clock);
-    // - one window per queued read ahead: each takes its slot when due, so restarts the window for this one;
-    // - the shared read gap from the newest shared stamp, which runs in the same wait as the floor: the
-    //   first slot (this read's, or the head ticket's) is taken when BOTH have passed;
-    // - for a read the floor admits, the reserved slot it gives a due ticket behind it, which also runs
-    //   in the same wait as the gap: the gap is re-read after the yield, so the two overlap.
-    // A sibling that reads or queues ahead AFTER this line is a new wait the line cannot foresee.
-    const gapNowMs = gatedFirst && mode === "wait" && stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
-    if (waiter) {
-      const expectedMs = Math.max(floorWaitMs, gapNowMs) + ahead * decision.windowS * 1000;
-      warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${waitS(expectedMs)}s ` +
-          (ahead > 0
-            ? `(${waitS(floorWaitMs)}s for the ${decision.windowS}s floor, then ${decision.windowS}s for each of ` +
-              `${ahead} queued gated read(s) ahead, W1-T10271) on ${stampPath}`
-            : `for the ${decision.windowS}s floor on ${stampPath}`),
-      );
-    } else if (gatedFirst && mode === "wait" && stampPath !== undefined && (gapNowMs > 0 || headOwedSlot(nowMs) !== undefined)) {
-      const slotMs = headOwedSlot(nowMs) !== undefined ? sharedReadGapMs : 0;
-      warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${waitS(Math.max(slotMs, gapNowMs))}s ` +
-          (slotMs > 0
-            ? `(a ${waitS(sharedReadGapMs)}s reserved slot for a due queued read, W1-T10271, and the shared read gap) on ${stampPath}`
-            : `for the ${waitS(sharedReadGapMs)}s shared read gap on ${stampPath}`),
-      );
-    } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
+    // W1-T12058 criterion 3: a wait-mode read prints NOTHING here. Its wait lines are printed by
+    // `announcePause`, at each real sleep, with that sleep's length (#19924 review: every up-front total
+    // was wrong once a ticket expired, a stamp moved, or a later read in the burst paused).
+    if (!waiter && decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
       warnLine(
         `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
@@ -1981,6 +1985,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
           : { ...mine, refreshedMs: nowMs, yielded: onDisk?.yielded ?? mine.yielded };
         writeGhReadTicket(stampPath, ticket);
         // Behind a due head, look again after one shared gap: the head takes its slot within it.
+        pauseReason = floor > 0 ? "floor" : "queue";
+        queueAhead = ahead.length;
         return floor > 0 ? floor : Math.max(sharedReadGapMs, GH_CADENCE_LOCK_WAIT_MS);
       }
       // THE RESERVED SLOT. The first reader to find a due head ticket gives it one shared gap, outside the
@@ -1989,6 +1995,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       if (head === undefined) return 0;
       writeGhReadTicket(stampPath, { ...head, yielded: true });
       ghReadCadenceCounts.slotsYielded += 1;
+      pauseReason = "slot";
       return sharedReadGapMs;
     },
     floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
@@ -2015,6 +2022,10 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       else ghCadenceOwnStampMs.set(ownKey(path), stampedAt);
     },
     leaveQueue,
+    notePauseReason: (reason) => {
+      pauseReason = reason;
+    },
+    announcePause,
   };
 }
 
@@ -2033,7 +2044,10 @@ function ghReadCadenceTurn(
     // The shared lock can fail open or be reclaimed during the gap. A newer gated read still
     // owns the floor, so recheck before granting this invocation its read and burst.
     const floor = plan.floorWaitRemainingMs();
-    if (floor > 0) return floor;
+    if (floor > 0) {
+      plan.notePauseReason("floor-recheck");
+      return floor;
+    }
     plan.stampAfterGap(stampPath);
     return 0;
   };
@@ -2042,6 +2056,7 @@ function ghReadCadenceTurn(
     plan.stampAfterGap(stampPath);
     return 0;
   }
+  plan.notePauseReason("gap");
   const slept = gapSleep(gap);
   return slept instanceof Promise ? slept.then(finish) : finish();
 }
@@ -2073,7 +2088,12 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   }
   const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
   // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
-  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapLoopBoundMs);
+  // W1-T12058 criterion 3: every cadence sleep is announced with its own length, after the loop's
+  // refusal check (an announced sleep always runs). A lock wait is not wrapped: see `announcePause`.
+  const sleepSync = loopSafeGhSleep((ms) => {
+    plan.announcePause(ms);
+    blockingSleep(ms);
+  }, plan.sharedReadGapLoopBoundMs);
   // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
   const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
   // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
@@ -2112,6 +2132,11 @@ export async function applyGhReadCadenceAsync(
   const stampPath = plan.coordinatedStampPath;
   if (stampPath === undefined) return plan.evaluate();
   const sleep = deps.sleep ?? defaultTimerSleep;
+  // W1-T12058 criterion 3: the cadence sleeps are announced with their own length; lock waits are not.
+  const cadenceSleep = async (ms: number): Promise<void> => {
+    plan.announcePause(ms);
+    await sleep(ms);
+  };
   return await withGhCadenceQueueAsync(stampPath, async () => {
     let decision: GhReadCadenceDecision | undefined;
     try {
@@ -2119,9 +2144,9 @@ export async function applyGhReadCadenceAsync(
       do {
         waitMs = await withGhCadenceLockAsync(stampPath, sleep, async () => {
           decision ??= plan.evaluate();
-          return await ghReadCadenceTurn(plan, stampPath, sleep);
+          return await ghReadCadenceTurn(plan, stampPath, cadenceSleep);
         });
-        if (waitMs > 0) await sleep(waitMs);
+        if (waitMs > 0) await cadenceSleep(waitMs);
       } while (waitMs > 0);
       return decision!;
     } finally {
