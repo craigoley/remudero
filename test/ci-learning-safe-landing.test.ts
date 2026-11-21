@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import {
   CI_LEARNING_LESSONS_FILE,
   type CiLearningShardDraft,
 } from "../src/lib/measurement-cadence.js";
+import { readMergedCiLessons, readMergedCiLessonsAsync } from "#src/lib/ci-lesson-recurrence.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -642,4 +643,22 @@ test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the f
     ciLearningShardYaml({ ...draft(base), prs: [4200, 4300] }, "W1-T9021"));
   assert.deepEqual(await cadence(checkout), [], "an unreadable fetched plan does not authorize a reopen from a partial view");
   assert.deepEqual(manual(checkout), []);
+});
+
+test("W1-T14140 criterion 6: both lesson reads of origin/main find no lesson where main files none, and read unknown when the grep itself fails", async (t) => {
+  // Both callers' reads really shell out to git: the scheduled rung's async read and the hand-run verb's sync one.
+  const checkout = cloneRoot(makeBareOrigin());
+  // origin/main holds no lesson shard: `git grep -l` exits 1, which is an empty set, never an unreadable one.
+  assert.deepEqual(readMergedCiLessons(checkout), { status: "measured", lessons: [] });
+  assert.deepEqual(await readMergedCiLessonsAsync(checkout), { status: "measured", lessons: [] });
+
+  // Any other grep failure is not an empty set: a shard directory outside the repository makes git refuse the pathspec.
+  const outside = mkdtempSync(join(tmpdir(), "rmd-ci-learning-outside-plan-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "layout.json"), JSON.stringify({ planDir: outside }));
+  for (const read of [readMergedCiLessons(checkout), await readMergedCiLessonsAsync(checkout)]) {
+    assert.equal(read.status, "unreadable");
+    assert.match(read.status === "unreadable" ? read.reason ?? "" : "", /outside repository/);
+  }
 });
