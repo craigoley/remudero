@@ -373,6 +373,49 @@ test("W1-T13859 criterion 6: rmd restore skips an unrelated malformed live line 
   assert.deepEqual(readdirSync(skills), ["existing.md"]);
 });
 
+test("W1-T13859 criterion 6: a second rmd restore after a one-second backward clock correction is refused with no duplicate row", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-clock-back-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const ledgerPath = ledgerLivePath(stateDir);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  mkdirSync(stateDir);
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  assert.deepEqual(writeDaemonTargetRecord(stateDir, {
+    owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: root,
+  }), { written: true });
+  const expired = "skill-draft:expired";
+  const clock = fixedClock(Date.parse("2026-11-19T12:00:00Z"));
+  t.mock.method(systemClock, "now", clock.now);
+  const markdown = "---\nname: proc\n---\n";
+  writeFileSync(registryPath, JSON.stringify({ proposals: [{ id: expired, summary: markdown, evidenceAnchors: [], skillFile: { name: "proc", markdown } }] }));
+  writeFileSync(inboxFirstSeenPath(stateDir), JSON.stringify({
+    backfill: "2026-10-13", answered: "2026-11-01", [expired]: "2026-11-01",
+  }));
+  appendLedger(ledgerPath, { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" });
+  const log = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { step, task_id: "RETRO", run_id: "RETRO", ...extra }, { expectedLiveVersion });
+  assert.deepEqual(expireUnansweredSkillDrafts(registryPath, stateDir, log, clock).expired, [expired]);
+  // The clock is corrected one second backwards: the restore sorts before the expiry by time, after it in the ledger.
+  t.mock.method(systemClock, "now", () => clock.now() - 1000);
+  const config = { root } as never;
+  const restore = () => proposalVerdictCliCommand("restore", [expired, "--reason", "keep open"], config);
+  const restores = () => readLedgerLines(ledgerPath).filter((r) => r.step === "panel.proposal_restored" && r.task_id === expired);
+  assert.equal(restore(), 0);
+  const ts = (step: string) => readLedgerLines(ledgerPath).find((r) => r.step === step && r.task_id === expired)?.ts as string;
+  assert.ok(Date.parse(ts("panel.proposal_restored")) < Date.parse(ts("panel.proposal_declined")), "the fixture's restore sorts first by time");
+  assert.equal(restores().length, 1);
+  const ledger = readFileSync(ledgerPath);
+  const savedError = console.error;
+  console.error = () => {};
+  let second: number;
+  try { second = restore(); } finally { console.error = savedError; }
+  assert.notEqual(second, 0, "an open draft cannot be restored again");
+  assert.deepEqual(readFileSync(ledgerPath), ledger);
+  assert.equal(restores().length, 1);
+});
+
 test("W1-T13859 criterion 6: rmd restore reopens a live operator decline while the ledger rotation lock is held", (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-rotation-lock-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -1774,10 +1774,14 @@ function skillDraftVerdicts(rows: SkillDraftLedgerRows): ReturnType<typeof ledge
   return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
 }
 
-/** Restore can need an archived expiry receipt before the slow lane has retained it. */
-export function readSkillDraftVerdicts(stateDir: string): ReturnType<typeof skillDraftVerdicts> | UnmeasuredSkillDraftLedger {
+/**
+ * Restore can need an archived expiry receipt before the slow lane has retained it. Restore reads the draft's
+ * state in ledger order, as the Inbox does: a restore that is last in the ledger reopens the draft whatever its
+ * timestamp, so a second restore is refused. Only expiry adds the time-order reading, to stay off a draft.
+ */
+export function readSkillDraftVerdicts(stateDir: string): ReturnType<typeof ledgerProposalVerdicts> | UnmeasuredSkillDraftLedger {
   const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS, true);
-  return "unmeasured" in union ? union : skillDraftVerdicts(union.rows);
+  return "unmeasured" in union ? union : ledgerProposalVerdicts(union.rows);
 }
 
 /** Called after checking the current verdict. A restore can outlive a failed close-record write. */
