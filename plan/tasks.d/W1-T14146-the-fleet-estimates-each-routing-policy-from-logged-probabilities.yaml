@@ -14,6 +14,8 @@
     - src/lib/routing-policy-estimate.ts
     - src/run-task.ts
     - src/lib/ledger-steps.ts
+    - src/lib/benchmark-run.ts
+    - src/cli/commands/review.ts
     - test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts
   status: queued
   attempts: 0
@@ -32,6 +34,13 @@
       Algorithms", WSDM 2011). The repo already ships a self-normalised (Hajek) estimator for learnings (src/lib/knowledge-outcome.ts:72-93).
     - Only provider choice has support. A provider's model and effort follow its mount row deterministically, so a target policy
       can change the provider and nothing else.
+    READ at origin/main 81d0a105c (2026-11-21), after two reviews of PR #20048.
+    - The review lane spawns its reviewer through ledgeredNonDispatchSpawn("review") (src/cli/commands/review.ts:1126). Its receipt
+      is built from nonDispatchBenchmarkWork (src/lib/benchmark-run.ts:348-350), which records shape only, with the reason
+      "non-dispatch-lane-has-no-task-record". So no review assignment carries benchmark_run.work.taskClass.
+    - Review 1 refused dropping those rows, because the daily estimate then has no review pipeline. Review 2 refused borrowing the class
+      from the task's run.start, because a cell is then built from a receipt that recorded no class. Both are right: the receipt has to
+      record the class at assignment. That fix lives in the producer, outside the four files this task first named.
   design: |
     1. The population is worker.assignment rows whose propensity method is the auction draw or the fix-learner mix, with both
        providers above zero. Single-candidate, preference, fallback and unavailable rows are excluded and counted. The cell is
@@ -49,6 +58,10 @@
        - A concluded row is frozen for its day.
     5. The measurement cadence in src/run-task.ts writes one `routing.policy.estimate` row per cell per day, registered in
        src/lib/ledger-steps.ts. Nothing routes on it. W1-T12143, as amended, is its reader.
+    6. A review assignment records the reviewed task's class when it is made. benchmark-run.ts lets a non-dispatch spawn carry the
+       work its caller knows. The review lane passes deriveTaskClass (src/lib/task-class.ts) of the PR's plan task, the class the
+       implement run records. The estimate keys a cell only on a class its receipt recorded. A receipt with none, such as a PR with
+       no plan task, stays unplaced and is counted, and its class is never borrowed from another row.
 
     INVARIANT within-support: a row never values a provider that the logged policy gave probability 0 in that cell.
   acceptance:
