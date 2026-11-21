@@ -62,7 +62,6 @@ import {
   type FeedbackAgeRoot,
   type HumanGateCountSummary,
   type HumanGateObservation,
-  projectHeldTaskQuestionGates,
   type HumanGateProjection,
   type HumanGateSource,
   type OperatorItemProjection,
@@ -78,12 +77,13 @@ import {
   questionStorePath,
   readQuestionStore,
   taskQuestionDecisions,
+  heldTaskDecisions,
   type NowDecision,
   type QuestionStoreLine,
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { newestTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
+import { answerRecords, publishAnswers, sharedAnswerEvidence, sharedAnswersPath, unmetDependencies, type AnswerRecord, type Plan, type AcceptanceCriterion, type SharedAnswerEvidence } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -564,13 +564,17 @@ function mtimeOf(path: string): number | undefined {
 
 const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
-/** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
-function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
-  const query = db.prepare("SELECT max(ts) AS ts FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
-  return (taskId) => {
-    const ts = query.get(taskId)?.ts;
-    return typeof ts === "string" ? ts : undefined;
-  };
+/** A task's nonblank `panel.question_answered` facts, by its task index, which keeps a row rotation dropped. */
+function answerFacts(db: ReadModelDb): (taskId: string) => AnswerRecord[] {
+  // The daemon's answerText decides; SQLite would return an array answer as its JSON text, so only a text answer is read.
+  const text = (key: string) => `CASE json_type(body, '$.${key}') WHEN 'text' THEN json_extract(body, '$.${key}') END AS ${key}`;
+  const query = db.prepare(`SELECT ts, ${text("answer")}, ${text("origin")}, ${text("answer_id")} FROM fact WHERE task_id = ? AND step = 'panel.question_answered'`);
+  return (taskId) => answerRecords((query.all(taskId) as Array<Record<string, unknown>>).map((row) => ({ ...row, task: taskId })), taskId);
+}
+
+/** A task's newest answer fact time: the route ledgers one even when its store write failed. */
+function answeredByFact(facts: (taskId: string) => AnswerRecord[]): (taskId: string) => string | undefined {
+  return (taskId) => facts(taskId).reduce<string | undefined>((newest, fact) => newest === undefined || fact.ts > newest ? fact.ts : newest, undefined);
 }
 
 const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
@@ -1029,6 +1033,8 @@ export function createNowView(opts: NowViewOptions): {
   const feedbackListings = new Map<string, { key: string; entries: FeedbackEntry[] }>();
   const reconciledFeedback = new Map<string, { key: string; entries: FeedbackEntry[] }>();
   const dependencySources = new Map<string, { db: ReadModelDb; key: string; sources: HumanGateSource[] }>();
+  // W1-T13940: each instance's shared answer evidence, read from where the last build stopped.
+  const answerEvidence = new Map<string, () => SharedAnswerEvidence>();
   const feedbackKey = (instance: NowInstance): string => instance.name === core && instance.feedbackRoot
     ? JSON.stringify([feedbackFileIdentities(feedbackDir(instance.feedbackRoot)), feedbackFileIdentities(queuedFeedbackDir(dirname(instance.ledgerDir)))]) : "none";
   const feedbackAge = opts.feedbackAgeObservation ? measureFeedbackAge(opts.feedbackAgeObservation.roots, opts.feedbackAgeObservation.window) : undefined;
@@ -1039,7 +1045,8 @@ export function createNowView(opts: NowViewOptions): {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stateRoot = dirname(instance.ledgerDir);
-    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+    const answers = mtimeOf(sharedAnswersPath(join(instance.ledgerDir, LEDGER_FILENAME))) ?? "-";
+    const stores = `${instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none"}:${answers}`;
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
@@ -1138,13 +1145,22 @@ export function createNowView(opts: NowViewOptions): {
       deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, index: LedgerIndex, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, index: LedgerIndex, now: number, statusGithub: GitHub, plan: Plan | undefined, keys: NowBuild["keys"], generation: number, catalog?: BoardCatalogContext): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const lap = decisionsLap(instance.name);
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     const feedbackLap = decisionsLap(instance.name, "feedback");
     let feedbackEntries: FeedbackEntry[] = [];
-    let heldTaskGates: HumanGateObservation[] = [];
+    let storeLines: readonly unknown[] = [];
+    let storeSkipped: string | undefined;
+    const facts = answerFacts(db);
+    const factAnswer = answeredByFact(facts);
+    // The held list decides from the evidence the daemon's dispatch check decides from, never a checkout path.
+    // Only a held candidate needs that evidence, so an instance with none attests its empty held list.
+    const heldCandidates = ((catalog?.plan ?? plan)?.tasks ?? []).some((task) => task.needs_input !== undefined && task.status === "queued");
+    const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
+    if (heldCandidates && !answerEvidence.has(ledgerPath)) answerEvidence.set(ledgerPath, sharedAnswerEvidence(ledgerPath));
+    const evidence: SharedAnswerEvidence = heldCandidates ? answerEvidence.get(ledgerPath)!() : { lines: [], rows: () => [] };
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
@@ -1178,11 +1194,25 @@ export function createNowView(opts: NowViewOptions): {
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
       else {
-        all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
-        // W1-T12715: a task held for a needs_input answer asks through the same source.
-        heldTaskGates = projectHeldTaskQuestionGates(plan?.tasks ?? [], (taskId) => newestTaskAnswer(store.lines, taskId), instance.repo);
+        storeLines = store.lines;
+        if (store.skipped) storeSkipped = `the question store has ${store.skipped} malformed line(s)`;
       }
     }
+    // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
+    // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
+    // Answered from the live rows, the published answers, the indexed facts and serve's store; an answer the daemon cannot see is published.
+    const answered = (taskId: string): boolean => {
+      const live = [...answerRecords(evidence.rows(taskId), taskId), ...answerRecords(evidence.lines, taskId)];
+      const own = [...facts(taskId), ...answerRecords(instance.name === core ? storeLines : [], taskId)];
+      if (evidence.answersUnreadable === undefined && evidence.ledgerUnreadable === undefined) publishAnswers(ledgerPath, own, [...live]);
+      return live.length + own.length > 0;
+    };
+    const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [], answered, catalog?.opsIds, instance.name === core);
+    const heldIds = new Set(held.map((decision) => decision.taskId));
+    if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
+      all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));
+    }
+    all.push(...held);
     lap("feedback");
     const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
     const sources: HumanGateSource[] = [{
@@ -1193,10 +1223,14 @@ export function createNowView(opts: NowViewOptions): {
     if (instance.name === core) {
       const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
       sources.push(feedback);
-      // The legacy question reader skips malformed lines without attesting complete coverage.
-      sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
-        reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
-        gates: [...all.filter((decision) => decision.kind === "task_question").map(decisionGate), ...heldTaskGates] });
+      // The question reader counts the malformed lines it skips: complete only when it skipped none.
+      const partial = reasons.task_question ?? storeSkipped ?? evidence.partial ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
+      sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : partial ? "partial" : "complete",
+        ...(partial ? { reason: partial } : {}),
+        gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
+    } else if (plan) {
+      sources.push({ name: "held-tasks", instance: instance.name, state: evidence.partial ? "partial" : "complete",
+        ...(evidence.partial ? { reason: evidence.partial } : {}), gates: held.map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({
@@ -1342,7 +1376,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.index!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.index!, b.now, b.h!.gateway.github, b.plan, b.keys, b.state.generation, b.catalog))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: recentActivityEntries(h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
