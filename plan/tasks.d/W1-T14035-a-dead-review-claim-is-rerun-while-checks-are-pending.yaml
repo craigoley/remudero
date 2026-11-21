@@ -17,6 +17,8 @@
   files:
     - src/lib/sweep.ts
     - src/lib/tick-read-worker.ts
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
     - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts
   status: queued
   attempts: 0
@@ -64,3 +66,8 @@
     dead run's row) and counterexample 3 (a live run posting in the same second) need opposite answers on the same
     timestamp evidence. The view producer in tick-read-worker.ts must carry the pending ledger row's runId and the
     live remudero-review status's 'owned by run <id>' id onto OpenPrView, so the sweep can compare the two ids.
+    Scope amendment 2026-11-21 for PR 19922 (review round 4): a pending hold (a promise-harvest or cannot-evaluate
+    verdict) is posted with its summary as the description, and the ops publisher catalogReviewPoster in
+    src/cli/commands/review.ts replaces it with redacted text that names no run and is recorded on no ledger row.
+    So the live status cannot be tied to the dead run. Every pending post must carry its own 'owned by run <id>'
+    marker: publishReviewStatusLocked in src/lib/review.ts for holds, and catalogReviewPoster for the ops text.
