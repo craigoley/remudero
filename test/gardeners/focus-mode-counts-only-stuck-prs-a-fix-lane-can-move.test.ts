@@ -951,6 +951,83 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
     worker_exit: "not_spawned", num_turns: 0, round_id: "r3" }])(T0), { admitted: 0, refused: 1, refusedCauses: { memory_admission_abandoned: 1 } }, "an abandoned admission spawned no worker");
 });
 
+/** The row a fix worker's start writes (run-task.ts fixWorkerReceipt): its assignment, under the fix run, naming the round. */
+function fixWorkerStart(atMs: number, runId: string, pr = 13, roundId = `${runId}:0:${atMs}`) {
+  return { ts: new Date(atMs).toISOString(), run_id: runId, task_id: "W1-T1", step: adaptiveWip.FIX_WORKER_START_STEP,
+    worker_rung: "fix", worker_run_id: `${runId}-fix0-${atMs}`, repair_pr_url: `https://github.com/o/r/pull/${pr}`,
+    repair_round_id: roundId, worker_assignment: { id: `assignment-${atMs}` } };
+}
+
+test("W1-T13990 criterion 2: a fix.stood_down before any fix worker started is a refusal, and the dwell releases focus", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    const h = unionHarness(dir, undefined, () => 0);
+    const ageing = { stuck: 12, movable: 12 };
+    const on = enter(h);
+    await h.union.settled();
+    h.consult(ageing, 5 * MIN);
+    // Every sweep fix claim is refused for capacity.
+    h.passes.pass([13, 14]);
+    // A build's own fix rung stands down at its branch claim, before it starts a fix worker. The build's implement worker
+    // started, but no fix worker did.
+    h.passes.append([
+      { ...fixWorkerStart(on + 6 * MIN, "BUILD-7"), worker_rung: "implement" },
+      { ts: new Date(on + 7 * MIN).toISOString(), run_id: "BUILD-7", task_id: "W1-T7", step: "fix.stood_down",
+        site: "rung.branch_claim", head_sha: "c3", reason: "fix branch ownership unavailable" },
+    ]);
+    assert.deepEqual(adaptiveWip.fixRoundReaderFor(h.passes.lines())(on),
+      { admitted: 0, refused: 3, refusedCauses: { capacity: 2, stood_down: 1 } }, "no round's worker started");
+    await h.union.settled();
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS - 5 * MIN), undefined, "the dwell's slots went unused: focus releases");
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count, released[0].fields.refused_causes],
+      ["fix_lane_refused", 3, { capacity: 2, stood_down: 1 }]);
+  });
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — a fix worker started and then killed before its result used the dwell", async () => {
+  resetChildWork();
+  try {
+    await withTempDir("focus-movable", async (dir) => {
+      const h = unionHarness(dir, undefined, fixRoundsInFlight);
+      const ageing = { stuck: 12, movable: 12 };
+      const on = enter(h);
+      await h.union.settled();
+      h.consult(ageing, 5 * MIN);
+      assert.equal(h.passes.controller({ free: true })(13), true, "the capacity controller admits the claim");
+      startFixChild();
+      h.passes.append([fixWorkerStart(on + 6 * MIN, "work-fix-dispatch-R1")]);
+      // The worker is killed before its result: the run rethrows, the sweep writes sweep.fix.error, and the lost child
+      // writes sweep.fix.dispatch_failed. No fix.dispatch and no fix.done is written.
+      h.consult(ageing, 14 * MIN);
+      settleChildWork("work-fix-dispatch-R1");
+      h.passes.append([
+        { ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", task_id: "SWEEP", step: "sweep.fix.error", pr_number: 13,
+          error: "worker terminated by SIGKILL", signal: "SIGKILL" },
+        { ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", task_id: "SWEEP", step: "sweep.fix.dispatch_failed",
+          pr_number: 13, head_sha: "a1", child_run_id: "work-fix-dispatch-R1", error: "worker terminated by SIGKILL" },
+      ]);
+      assert.equal(fixRoundsInFlight(), 0, "the round has settled");
+      assert.deepEqual(adaptiveWip.fixRoundReaderFor(h.passes.lines())(on), { admitted: 1, refused: 0 },
+        "the started round ran, however it ended");
+      for (const advance of [focus.FOCUS_DWELL_MS - 19 * MIN, MIN]) {
+        await h.union.settled();
+        assert.equal(h.consult(ageing, advance)?.tier, "focus", "12 ageing PRs above the leave bound hold, as on origin/main");
+      }
+      assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], "no release: the worker used its slot");
+      assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
+    });
+  } finally {
+    resetChildWork();
+  }
+  // An in-process dispatch's loss names no child run: the latest start for its pull request is its round.
+  const at = (ms: number) => new Date(ms).toISOString();
+  assert.deepEqual(adaptiveWip.fixRoundReaderFor([fixWorkerStart(T0 + MIN, "DAEMON-1"),
+    { ts: at(T0 + 9 * MIN), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", pr_number: 13, head_sha: "a1", error: "killed" },
+    { ts: at(T0 + 9 * MIN), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", pr_number: 14, head_sha: "b1", error: "lost" },
+  ])(T0), { admitted: 1, refused: 1, refusedCauses: { dispatch_failed: 1 } }, "#13 started and ran; #14 never started");
+});
+
 test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs hold focus through a dwell whose only round ended before its receipt", async () => {
   for (const row of [
     { step: "fix.superseded", condition: "head_moved", old_head: "a1", new_head: "b2", strike_spent: false },
@@ -965,6 +1042,7 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
       // The controller admitted the claim and the worker started; the round ended with no fix.dispatch and no fix.done.
       h.passes.append([
         { ts: new Date(on + 2 * MIN).toISOString(), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_admitted: 1, fixes_refused: 0 },
+        fixWorkerStart(on + 3 * MIN, "work-fix-dispatch-R1"),
         { ts: new Date(on + 20 * MIN).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", ...row },
       ]);
       assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch" || line.step === "fix.done"), false);
@@ -975,6 +1053,8 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
       assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], `no release: the round used its slot (${row.step})`);
       assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
       assert.deepEqual(adaptiveWip.fixRoundReaderFor(h.passes.lines())(on), { admitted: 1, refused: 0 }, row.step);
+      const withoutStart = h.passes.lines().filter((line) => line.step !== adaptiveWip.FIX_WORKER_START_STEP);
+      assert.equal(adaptiveWip.fixRoundReaderFor(withoutStart)(on)?.admitted, 0, `with no worker start, ${row.step} is no round run`);
     });
   }
 });
