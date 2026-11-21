@@ -20956,6 +20956,8 @@ export function createSweepFixAdmissionController(input: {
   readResidents?: () => FixAdmissionResidents;
   readActiveWorkers?: () => number;
   readPressure?: () => FixHostPressure;
+  /** W1-T13990: names this controller on its `sweep.fix_capacity` rows. Production passes mint one per controller. */
+  controllerId?: string;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   reviewQueue?: readonly FixAdmissionWaiter[]; // W1-T9582: the planned reviews, each with when its PR began waiting.
   waitSinceMs?: (pr: OpenPrView) => number; // W1-T9582: when a claiming PR began waiting.
@@ -21081,9 +21083,9 @@ export function createSweepFixAdmissionController(input: {
   refresh();
   let fixesAdmitted = 0;
   let fixesRefused = 0;
-  // W1-T13990: one id per controller, so a reader keys each running count to the controller that wrote it, never to a
-  // run and surface that many passes share.
-  const controllerId = randomUUID();
+  // W1-T13990: the caller's id for this controller, so a reader keys each running count to the controller that wrote it,
+  // never to a run and surface that many passes share. Absent, the rows carry none and read as before.
+  const controllerId = input.controllerId;
   const snapshot = (): SweepFixCapacitySnapshot => ({
     surface: input.surface,
     queueDepth: input.queueDepth,
@@ -21099,7 +21101,7 @@ export function createSweepFixAdmissionController(input: {
   const emit = (order?: Record<string, unknown>): void => {
     const state = snapshot();
     input.log?.("sweep.fix_capacity", {
-      controller_id: controllerId,
+      ...(controllerId === undefined ? {} : { controller_id: controllerId }),
       surface: state.surface,
       queue_depth: state.queueDepth,
       host_worker_budget: state.hostWorkerBudget,
@@ -22908,6 +22910,7 @@ export async function runSweep(
       ? undefined
       : createSweepFixAdmissionController({
           surface: "full",
+          controllerId: randomUUID(),
           queueDepth: fullReviewQueueDepth,
           ...sweepFixAdmissionReaders(deps, policy),
           activeWorkers: fullRepairActiveWorkers,
@@ -29867,6 +29870,7 @@ async function runSweepLightPassCore(
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
+    controllerId: randomUUID(),
     queueDepth,
     ...sweepFixAdmissionReaders(deps, policy),
     activeWorkers,

@@ -46113,7 +46113,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     log: ports.log ?? log,
     stageClock,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
-      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      surface: "full", controllerId: randomUUID(), queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
       activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
       readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
       readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),

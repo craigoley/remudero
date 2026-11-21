@@ -631,8 +631,10 @@ test("W1-T13990 criterion 2: two light controllers under one run count their own
     const log = (step: string, extra?: Record<string, unknown>) =>
       h.passes.append([{ ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", task_id: "SWEEP", step, ...extra }]);
     // Each light pass opens its own controller under the daemon's one run id and the one surface.
-    const open = () => createSweepFixAdmissionController({ surface: "light", queueDepth: 2, hostWorkerBudget: 2, activeWorkers: 1,
-      readActiveWorkers: () => 1, reviewReservations: 0, log });
+    // As the light pass mints it: one id per controller.
+    let opened = 0;
+    const open = () => createSweepFixAdmissionController({ surface: "light", controllerId: `light-${++opened}`, queueDepth: 2,
+      hostWorkerBudget: 2, activeWorkers: 1, readActiveWorkers: () => 1, reviewReservations: 0, log });
     h.consult(ageing, 2 * MIN);
     const first = open();
     const grant = first.claim({ prNumber: 13 } as OpenPrView);
