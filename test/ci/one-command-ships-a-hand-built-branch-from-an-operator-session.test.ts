@@ -1712,9 +1712,13 @@ async function cliUnderGate(t: TestContext, argv: string[], deps: NonNullable<Pa
   installUnhandledRejectionGuard();
   const errs: string[] = [];
   const logs: string[] = [];
-  t.mock.method(process, "exit", ((code?: number): never => { throw new CliExit(code); }) as typeof process.exit);
-  t.mock.method(console, "error", (...a: unknown[]) => { errs.push(a.map(String).join(" ")); });
-  t.mock.method(console, "log", (...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+  // Replaced and put back by THIS call, never through t.mock: a test that drives the CLI several
+  // times would stack t.mock wrappers, and restoring them in creation order leaves a later wrapper
+  // installed, so the runner's own closing process.exit (--test-force-exit) would throw.
+  const real = { exit: process.exit, error: console.error, log: console.log };
+  process.exit = ((code?: number): never => { throw new CliExit(code); }) as typeof process.exit;
+  console.error = (...a: unknown[]) => { errs.push(a.map(String).join(" ")); };
+  console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   process.env.HOME = join(scratch, "home");
   delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
   delete process.env.RMD_INSTANCE_REGISTRY;
@@ -1723,6 +1727,9 @@ async function cliUnderGate(t: TestContext, argv: string[], deps: NonNullable<Pa
   try {
     await cliMain(deps).catch((error: unknown) => { caught = error; });
   } finally {
+    process.exit = real.exit;
+    console.error = real.error;
+    console.log = real.log;
     process.argv = saved.argv;
     for (const [key, value] of [["HOME", saved.HOME], ["RMD_SELECTED_INSTANCE_REGISTRY", saved.a], ["RMD_INSTANCE_REGISTRY", saved.b]] as const) {
       if (value === undefined) delete process.env[key];
@@ -1765,6 +1772,7 @@ test("W1-T12169 criterion 5: a behind checkout with an overlapping edit still st
 });
 
 test("W1-T12169 criterion 5: ship, worktree creation and every other stop shape still exit at the gate on that checkout", async (t) => {
+  const realExit = process.exit;
   for (const argv of [
     ["hand-worktree", "ship", "--title", "fix(example): ship", "--body-file", "body.md"],
     ["hand-worktree", "ship"],
@@ -1794,4 +1802,6 @@ test("W1-T12169 criterion 5: ship, worktree creation and every other stop shape 
   }
   assert.equal(handShipStopRunId("hand-worktree", ["ship", "stop", liveRunId]), liveRunId);
   assert.equal(handShipStopRunId("doctor", ["ship", "stop", liveRunId]), undefined);
+  // Nine CLI runs later, the process's own exit is the real one again — the runner calls it last.
+  assert.equal(process.exit, realExit, "every CLI run put the real process.exit back");
 });
