@@ -510,6 +510,18 @@ test("W1-T14087 criterion 2: a listed row whose state is Z yields no markers, wh
   assert.deepEqual(calls, [LISTING_ARGS], "the state comes from the same one listing, no extra spawn");
 });
 
+test("W1-T14087 criterion 2: on a host with no /proc, signal 0 alone decides whether a listed row's markers stand", () => {
+  const procs = hostProcs();
+  const reads: string[] = [];
+  const noProc = (path: string): Buffer => { reads.push(path); throw errno("ENOENT"); };
+  const { report, killedPids } = withPsRecorded(fakePs(procs), () =>
+    sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin", noProc), [101, 107], procs), procs);
+  assert.deepEqual(reads, ["/proc/101/stat"], "control: the state was asked for the listed row with markers, and could not be read");
+  assert.deepEqual(report.killed.map((k) => k.pid), [101], "alive to signal 0, so the listed markers stand");
+  assert.deepEqual(report.leftAlone, [{ pid: 107, reason: "unattributable" }]);
+  assert.deepEqual(killedPids, [101]);
+});
+
 test("W1-T14087 criterion 2: a candidate that became a zombie after the candidate listing yields undefined on the /proc path", () => {
   const procs = hostProcs();
   procs.set(101, { ...procs.get(101)!, environ: "zombie" });
