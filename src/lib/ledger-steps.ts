@@ -118,6 +118,12 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["running", "concluded", "underpowered"],
   },
   {
+    step: "routing.policy.estimate",
+    meaning: "A daily estimate for one routed cell (capability, effort and task class) of how always-Claude, always-Codex and the logged policy would have done in each pipeline, from the probabilities the headroom auction and the fix learner logged. Hajek weights, a 0.05 trim, task-cluster bootstrap intervals and effective sample sizes; excluded rows are counted by reason. It reads concluded only past the experiments' decision rule and floor. One row per cell per day; nothing routes on it.",
+    writer: ["recordRoutingPolicyEstimates"],
+    outcomes: ["running", "concluded", "underpowered"],
+  },
+  {
     step: "recycle.inflight_reclaimed",
     meaning: "The recycle script moved an inflight lock to inflight/reclaimed/ because a process on this same host wrote it and that process is gone: its pid is dead, or the pid now belongs to a process that started after the lock. A lock whose process is alive with the lock's start time is never moved, whatever its age.",
     writer: ["reclaim_dead_inflight_locks"],
