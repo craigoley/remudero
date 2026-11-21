@@ -20533,6 +20533,15 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+/** W1-T13990: the fix rounds this process admitted that have not ended: waiting for the work host to start their run child,
+ *  running in process (their memory admission included), or running as a run child. A claim the capacity controller refuses
+ *  releases its key before it reaches any of these; a round leaves them when its dispatch settles, done, refused or lost. */
+export function fixRoundsInFlight(): number {
+  let n = queuedHostFixes.size + childWorkCount("fix-dispatch");
+  for (const action of detachedSweepActions.values()) if (action.actionKind === "fix-dispatch") n++;
+  return n;
+}
+
 export type SweepRepairSurface = "full" | "light";
 
 /**
@@ -30634,6 +30643,8 @@ export interface QueueGovernorFlow {
   /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
   trailingOpenedCount?: number;
   stuckOwnedCount?: number;
+  /** W1-T13990: the stuck owned PRs a fix lane can move (adaptive-wip.ts); carried for focus, never subtracted. */
+  movableStuckOwnedCount?: number;
   adaptiveBound?: number;
   headroomFraction?: number;
 }
@@ -30670,6 +30681,7 @@ export interface QueueGovernorResult {
   trailingOpenedCount?: number;
   baseWipLimit?: number;
   stuckOwnedCount?: number;
+  movableStuckOwnedCount?: number;
   headroomFraction?: number;
 }
 
@@ -30711,9 +30723,11 @@ export function checkQueueGovernor(
   // #10510's adaptive bound wins when wired; W1-T7243's measured bound otherwise; the old bound is the stand-in.
   const limit = flow.adaptiveBound ?? measuredBound ?? policy.wipLimit;
   const stuckOwnedCount = Math.min(openPrCount, Math.max(0, flow.stuckOwnedCount ?? 0));
+  const movable = flow.movableStuckOwnedCount;
   const common = {
     observedOpenCount: openPrCount, wipLimit: limit, observedForeignCount, trailingMergedCount, trailingOpenedCount,
     baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction, measuredBound, pressure,
+    ...(movable === undefined ? {} : { movableStuckOwnedCount: Math.min(stuckOwnedCount, Math.max(0, movable)) }),
   };
   if (!pressureHeld && openPrCount - stuckOwnedCount < limit) return { deferred: false, tier: "under_limit", ...common };
   // "Draining" needs REAL trailing activity (design ii): a silent window (0 merges, 0 opens — a
@@ -30776,6 +30790,7 @@ export function logQueueGovernorDeferral(
     trailing_opened_count: result.trailingOpenedCount ?? 0,
     base_wip_limit: result.baseWipLimit ?? result.wipLimit,
     stuck_owned_count: result.stuckOwnedCount ?? 0,
+    ...(result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: result.movableStuckOwnedCount }),
     headroom_fraction: result.headroomFraction ?? null,
     measured_bound: result.measuredBound,
     pressure_available_mib: result.pressure?.availableMib,

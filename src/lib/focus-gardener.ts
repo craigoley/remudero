@@ -20,6 +20,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import type { FixRoundReader } from "./adaptive-wip.js";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { QueueGovernorResult } from "./sweep.js";
@@ -35,6 +36,8 @@ export const FOCUS_FLAG_FAILED_STEP = "focus.flag_failed";
 
 export interface FocusReading {
   stuckOwnedCount: number;
+  /** W1-T13990: the stuck PRs a fix lane can move. Focus enters and leaves on it; absent, on the full count. */
+  movableStuckOwnedCount?: number;
   observedOpenCount: number;
   baseWipLimit: number;
 }
@@ -55,6 +58,7 @@ export interface FocusFlag {
   since: string;
   reason: string;
   stuck_owned_count: number;
+  movable_stuck_owned_count?: number;
   observed_open_count: number;
   base_wip_limit: number;
 }
@@ -68,8 +72,11 @@ export function focusBounds(baseWipLimit: number): { enterAt: number; exitAt: nu
 /** PURE: the next focus state for one reading. */
 export function decideFocus(state: FocusState, reading: FocusReading, nowMs: number, dwellMs = FOCUS_DWELL_MS): FocusDecision {
   const { enterAt, exitAt } = focusBounds(reading.baseWipLimit);
-  const stuck = Math.max(0, reading.stuckOwnedCount);
-  const counts = `${stuck} stuck of ${reading.observedOpenCount} owned open PRs (enter at ${enterAt}, leave at ${exitAt})`;
+  const all = Math.max(0, reading.stuckOwnedCount);
+  // W1-T13990: parked PRs wait on a person, so the capacity focus frees cannot move them.
+  const stuck = reading.movableStuckOwnedCount === undefined ? all : Math.min(all, Math.max(0, reading.movableStuckOwnedCount));
+  const counted = reading.movableStuckOwnedCount === undefined ? `${stuck} stuck` : `${stuck} movable stuck, ${all - stuck} parked,`;
+  const counts = `${counted} of ${reading.observedOpenCount} owned open PRs (enter at ${enterAt}, leave at ${exitAt})`;
   const wantsFlip = state.on ? stuck <= exitAt : stuck >= enterAt;
   if (!wantsFlip) return { on: state.on, changed: false, reason: counts };
   const since = state.pendingSinceMs ?? nowMs;
@@ -101,50 +108,84 @@ export interface FocusGateOptions {
   log: (step: string, fields: Record<string, unknown>) => void;
   clock?: Clock;
   dwellMs?: number;
+  /** W1-T13990: the fix lane's rounds run and refused since a time, from the ledger union and the gate's own live read.
+   *  Absent or unread, a hold is never released for an unused fix lane. */
+  readFixRounds?: FixRoundReader;
 }
 
 /**
  * Wrap the new-task queue gate. Every consultation is judged from the reading the gate just made (its deferral, or
  * the admission behind an undefined answer). While focus is on, an admitting reading is answered with a deferral of
  * tier `focus` and no admission is offered for lane sizing; a deferring reading passes through unchanged.
+ *
+ * W1-T13990: a hold exists to turn build slots into fix capacity. When a whole dwell of it passes with no fix round
+ * admitted (every dispatch refused for memory or capacity, or none attempted), those slots went unused: the hold is
+ * released with one `focus.released` row, and re-entry waits a full dwell again.
  */
 export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate {
   const clock = opts.clock ?? systemClock;
+  const dwellMs = opts.dwellMs ?? FOCUS_DWELL_MS;
   let state: FocusState = { on: readFocusFlag(opts.stateDir) !== undefined };
+  // A hold restored at boot is judged on this process's own dwell, never on the flag's older `since`.
+  let onSinceMs = state.on ? clock.now() : undefined;
   let held = false;
+  const setFlag = (on: boolean, counts: Record<string, number>, reason: string): void => {
+    const path = focusFilePath(opts.stateDir);
+    try {
+      if (on) {
+        const flag = { owner: FOCUS_OWNER, since: clock.iso(), reason, ...counts } as FocusFlag;
+        writeAtomic(path, JSON.stringify(flag, null, 2));
+      } else {
+        rmSync(path, { force: true });
+      }
+    } catch (error) {
+      opts.log(FOCUS_FLAG_FAILED_STEP, { ...counts, on, error: String((error as Error)?.message ?? error) });
+    }
+  };
   const focused = (): QueueGovernorResult | undefined => {
     const deferred = gate();
     held = false;
     const reading = deferred ?? gate.readAdmission();
     if (reading === undefined) return deferred;
-    const counts = {
+    const counts: Record<string, number> = {
       stuck_owned_count: reading.stuckOwnedCount ?? 0,
+      ...(reading.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: reading.movableStuckOwnedCount }),
       observed_open_count: reading.observedOpenCount,
       base_wip_limit: reading.baseWipLimit ?? reading.wipLimit,
     };
     if (state.on && readFocusFlag(opts.stateDir) === undefined) {
       // The file is the hold: removed by hand, it is released, and re-entry waits a full dwell again.
       state = { on: false };
+      onSinceMs = undefined;
       opts.log(FOCUS_RELEASED_STEP, { ...counts, reason: `${FOCUS_FILE} was removed while focus held` });
     }
+    const nowMs = clock.now();
+    // The idle dwell is judged on the hold this consultation found, before any exit the reading below may make.
+    const rounds = state.on && onSinceMs !== undefined && nowMs - onSinceMs >= dwellMs
+      ? opts.readFixRounds?.(nowMs - dwellMs) : undefined;
     const decision = decideFocus(state, {
-      stuckOwnedCount: counts.stuck_owned_count, observedOpenCount: counts.observed_open_count, baseWipLimit: counts.base_wip_limit,
-    }, clock.now(), opts.dwellMs);
-    if (decision.changed) {
-      const path = focusFilePath(opts.stateDir);
-      try {
-        if (decision.on) {
-          const flag: FocusFlag = { owner: FOCUS_OWNER, since: clock.iso(), reason: decision.reason, ...counts };
-          writeAtomic(path, JSON.stringify(flag, null, 2));
-        } else {
-          rmSync(path, { force: true });
-        }
-      } catch (error) {
-        opts.log(FOCUS_FLAG_FAILED_STEP, { ...counts, on: decision.on, error: String((error as Error)?.message ?? error) });
+      stuckOwnedCount: counts.stuck_owned_count, movableStuckOwnedCount: reading.movableStuckOwnedCount,
+      observedOpenCount: counts.observed_open_count, baseWipLimit: counts.base_wip_limit,
+    }, nowMs, dwellMs);
+    // A round admitted and still running holds the hold: its `fix.dispatch` is written only when its worker returns.
+    if (rounds !== undefined && rounds.admitted === 0 && (rounds.running ?? 0) === 0) {
+      // One release, even when the leave bound matured too: the row names the unused hold and the stack it left on.
+      const reason = `no fix round was admitted in ${dwellMs / 60_000} minutes of focus (${rounds.refused} refused): ` +
+        `the build slots it held went unused${decision.changed ? `; ${decision.reason}` : ""}`;
+      setFlag(false, counts, reason);
+      state = { on: false };
+      onSinceMs = undefined;
+      opts.log(FOCUS_RELEASED_STEP, {
+        ...counts, cause: rounds.refused > 0 ? "fix_lane_refused" : "fix_lane_idle", refused_count: rounds.refused, reason,
+      });
+    } else {
+      if (decision.changed) {
+        setFlag(decision.on, counts, decision.reason);
+        onSinceMs = decision.on ? nowMs : undefined;
+        opts.log(decision.on ? FOCUS_ENTERED_STEP : FOCUS_EXITED_STEP, { ...counts, reason: decision.reason });
       }
-      opts.log(decision.on ? FOCUS_ENTERED_STEP : FOCUS_EXITED_STEP, { ...counts, reason: decision.reason });
+      state = { on: decision.on, ...(decision.pendingSinceMs === undefined ? {} : { pendingSinceMs: decision.pendingSinceMs }) };
     }
-    state = { on: decision.on, ...(decision.pendingSinceMs === undefined ? {} : { pendingSinceMs: decision.pendingSinceMs }) };
     if (deferred !== undefined || !state.on) return deferred;
     held = true;
     return { ...reading, deferred: true, tier: "focus" };
