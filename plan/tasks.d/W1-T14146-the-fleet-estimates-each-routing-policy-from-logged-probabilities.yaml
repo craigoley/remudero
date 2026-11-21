@@ -1,0 +1,70 @@
+- id: W1-T14146
+  title: From logged routing probabilities, the fleet estimates how always-Claude and always-Codex would have done in each routed cell
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # a new daily estimate across the cadence and the step registry; nothing routes on it until W1-T12143 reads it
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T4617, W1-T12142, W1-T12143, W1-T4241]
+  files:
+    - src/lib/routing-policy-estimate.ts
+    - src/run-task.ts
+    - src/lib/ledger-steps.ts
+    - test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - Every worker.assignment row carries the probability its provider was chosen with (RoutingPropensity,
+      src/lib/worker-provider.ts:670-700, W1-T4617).
+    - The headroom auction gives every eligible provider a weight above zero (:582-641), and the fix learner mixes in that auction
+      (:664-668). So ordinary dispatch randomizes between Claude and Codex every day.
+    - Nothing estimates from those probabilities: the only readers are the definitions, knowledge-outcome.ts and
+      field-trials-controlled-release.ts:450, which reads the method only.
+    - The randomized experiments need 392 tasks per arm (src/lib/routing-experiment-result.ts:57-68). W1-T12143 measured 35 and 53
+      build tasks over two weeks, so they will end underpowered.
+    - Replaying logged decisions with inverse-propensity weights gives an unbiased value for a target policy within the logged
+      support (Li, Chu, Langford, Wang, "Unbiased Offline Evaluation of Contextual-bandit-based News Article Recommendation
+      Algorithms", WSDM 2011). The repo already ships a self-normalised (Hajek) estimator for learnings (src/lib/knowledge-outcome.ts:72-93).
+    - Only provider choice has support. A provider's model and effort follow its mount row deterministically, so a target policy
+      can change the provider and nothing else.
+  design: |
+    1. The population is worker.assignment rows whose propensity method is the auction draw or the fix-learner mix, with both
+       providers above zero. Single-candidate, preference, fallback and unavailable rows are excluded and counted. The cell is
+       capability × effort × task class (benchmark_run.work.taskClass).
+    2. The outcome is the ledger-only terminal join routing-experiment-result.ts already uses (:107-167), per task and pipeline.
+    3. Per cell, estimate the value of always-claude, always-codex and the logged policy:
+       - Hajek weights 1/selectedProbability;
+       - trim below 0.05 and above 0.95, with the exclusions counted;
+       - a 2,000-draw, task-cluster bootstrap interval, seeded from the cell;
+       - effective sample size reported.
+    4. Use the experiments' decision rule: a minimum difference of 0.10 at 95%.
+       - concluded: the always-codex minus always-claude interval excludes 0, the difference is at least 0.10, and each arm's weighted
+         count meets the floor.
+       - Otherwise running or underpowered, with the reason.
+       - A concluded row is frozen for its day.
+    5. The measurement cadence in src/run-task.ts writes one `routing.policy.estimate` row per cell per day, registered in
+       src/lib/ledger-steps.ts. Nothing routes on it. W1-T12143, as amended, is its reader.
+
+    INVARIANT within-support: a row never values a provider that the logged policy gave probability 0 in that cell.
+  acceptance:
+    - claim: "Rows without positive probability for both providers are excluded from a cell and counted by reason"
+      proof: "grep: W1-T14146 criterion 1: in test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts"
+    - claim: "On synthetic logs with known probabilities and a known provider effect, the estimate recovers the effect within tolerance across seeds"
+      proof: "grep: W1-T14146 criterion 2: in test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts"
+    - claim: "The interval resamples tasks, so one task's attempts move together"
+      proof: "grep: W1-T14146 criterion 3: in test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts"
+    - claim: "A cell reads concluded only past the experiments' decision rule and floor, and otherwise names why it is running or underpowered"
+      proof: "grep: W1-T14146 criterion 4: in test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts"
+    - claim: "invariant:within-support — no row values a provider whose logged probability in that cell was 0"
+      kind: guard
+      proof: "grep: W1-T14146 criterion 5: in test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts"
+    - claim: "The measurement cadence writes the estimate"
+      proof: "grep: recordRoutingPolicyEstimates( in src/run-task.ts"
+  falsifier: |
+    Weight by the experiment's assigned 0.5 instead of the selected probability and criterion 2 must fail. Value a zero-support
+    provider and criterion 5 must fail. Restore and require all to pass.

@@ -1,0 +1,65 @@
+- id: W1-T14142
+  title: A judge moves to cash only when the disagreements whose outcome is known favour the shadow, not on agreement alone
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the bar the config gardener promotes a judge switch on
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T12187, W1-T12417, W1-T12425, W1-T12414]
+  files:
+    - src/lib/config-gardener.ts
+    - src/lib/judge-calibration.ts
+    - src/lib/judge-shadow.ts
+    - src/lib/typed-answer-scores.ts
+    - test/routing/a-judge-moves-to-cash-only-when-its-known-outcome-disagreements-favour-it.test.ts
+    - test/routing/a-cash-model-shadows-each-low-stakes-judge.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - The config gardener switches a judge to cash on agreement with the judge it replaces: JUDGE_CASH_BAR and JUDGE_SWITCH_BAR
+      (src/lib/config-gardener.ts:171-178), at least 98% agreement over at least 200 calls. The Brier ceiling is "new and unmeasured …
+      no shadow answer has a known outcome yet".
+    - judgeShadowTypedAnswers builds every row with `outcome: null` and no head (config-gardener.ts:740-768, :751), so no outcome
+      can join.
+    - Outcomes exist. verdict_calibration.outcome rows (reverted, followup_fixed or clean; src/lib/verdict-calibration.ts:705-724,
+      W1-T12425) join to typed answers by head through TYPED_ANSWER_OUTCOME_MAP (src/lib/judge-calibration.ts:98-100). That map has
+      one role, `risk`. The switchable roles are ci-judge, fix-progress, decision-summary, refresh-value, head-rehome and typed-judgment
+      (config-gardener.ts:182-184, :816), so none of them has an outcome today.
+    - Agreement with the incumbent cannot tell a better shadow from a worse one. When the two disagree, the incumbent's own answer
+      was the one acted on, which hides what the other answer would have done. So a role needs an outcome defined from recorded
+      rows before its disagreements can be scored.
+  design: |
+    1. Give judgeShadowTypedAnswers the head of each decision (row.head_sha, else the head named by its decision key). Join
+       verdict_calibration.outcome by head the way typedAnswersWithOutcomes does (judge-calibration.ts:819-831). Add the outcome
+       step to CONFIG_GARDEN_LEDGER_STEPS (:349-364).
+    2. RECON first: for each switchable role, find whether its decision and recorded rows define an unambiguous right answer.
+       Add a TYPED_ANSWER_OUTCOME_MAP entry only where they do, and state each mapping, or why a role has none, in the pull request.
+       Expected candidates:
+       - fix-progress: `continue` was right when the PR then merged clean within the window.
+       - ci-judge: not widening was wrong when the merged head was reverted or follow-up-fixed for a failure in a suite it did not add.
+    3. Per role and model, count the disagreements whose outcome is known: shadow right versus primary right.
+    4. For a role with an outcome map, the switch needs at least JUDGE_OUTCOME_DISAGREEMENT_FLOOR (10) of those disagreements, with
+       the shadow right at least as often as the primary. A role with no map keeps today's bar, and its candidate's reason says
+       "no outcome evidence". If scripts/promotion-floors-baseline.json exists at head, the floor lives there.
+
+    INVARIANT mapped-roles-need-outcomes: a role with an outcome map never switches on agreement alone.
+  acceptance:
+    - claim: "A judge shadow's typed answers carry their decision's head and join the newest verdict_calibration.outcome by that head"
+      proof: "grep: W1-T14142 criterion 1: in test/routing/a-judge-moves-to-cash-only-when-its-known-outcome-disagreements-favour-it.test.ts"
+    - claim: "A role with an outcome map is refused a switch when, among its disagreements with a known outcome, the primary was right more often than the shadow"
+      proof: "grep: W1-T14142 criterion 2: in test/routing/a-judge-moves-to-cash-only-when-its-known-outcome-disagreements-favour-it.test.ts"
+    - claim: "invariant:mapped-roles-need-outcomes — a mapped role with fewer than the floor of outcome-joined disagreements is refused even at 100% agreement"
+      kind: guard
+      proof: "grep: W1-T14142 criterion 3: in test/routing/a-judge-moves-to-cash-only-when-its-known-outcome-disagreements-favour-it.test.ts"
+    - claim: "A role with no outcome map is judged by today's bar, and its candidate says no outcome evidence"
+      proof: "grep: W1-T14142 criterion 4: in test/routing/a-judge-moves-to-cash-only-when-its-known-outcome-disagreements-favour-it.test.ts"
+    - claim: "The switch candidate reads the outcome-joined count"
+      proof: "grep: outcomeDisagreement in src/lib/config-gardener.ts"
+  falsifier: |
+    Switch a mapped role at 100% agreement with no joined disagreements and criterion 3 must fail. Ignore which side was right
+    and criterion 2 must fail. Restore and require all to pass.

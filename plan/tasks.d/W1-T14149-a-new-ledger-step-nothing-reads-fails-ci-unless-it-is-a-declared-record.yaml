@@ -1,0 +1,69 @@
+- id: W1-T14149
+  title: A new ledger step that nothing reads fails CI unless it declares itself a record with a reason
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # a new ratchet in the light-gates job, folded into a required check
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T2735, W1-T12142, W1-T3055]
+  files:
+    - scripts/write-only-ledger-step-ratchet.mjs
+    - scripts/write-only-ledger-step-baseline.json
+    - package.json
+    - .github/workflows/ci.yml
+    - test/a-new-ledger-step-nothing-reads-fails-ci.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21). Two self-improvement loops were found closed in code and open in effect:
+    - `routing.experiment.result` is written daily and read only by its own writer (src/lib/routing-experiment-result.ts:220-231;
+      src/lib/ledger-steps.ts:115).
+    - `lesson_recurrences` is read only by a hand-run script (src/lib/daemon.ts:6916; scripts/private-routing-daily-review.mjs:229).
+    A decision row nothing reads is how a loop silently stops. No check catches it:
+    - src/lib/ledger-steps.ts registers 51 steps. src emits far more: `log("a.b"` has 1,961 hits in 109 files, `step: "a.b"` 388,
+      and `step: X_STEP` 229.
+    - The gate the module's own doc names (scripts/ledger-steps-check.mjs, scripts/ledger-steps-baseline.json) is not on main.
+    - unwired-gate (W1-T2735) catches an unwired gate script, not an unread row.
+    The closest model is console-parity: scripts/console-parity-ratchet.mjs with its baseline. It runs as a light-gates step folded
+    into the required comment-load-ratchet report (.github/workflows/ci.yml:1402-1409, :1544), so it needs no new job key and no
+    REQUIRED edit.
+  design: |
+    1. scripts/write-only-ledger-step-ratchet.mjs statically lists every step src emits, then lists the steps read anywhere in src
+       outside the step's writer file.
+       - Emitted: `log("a.b"`, `step: "a.b"`, and `step: X_STEP` with the constant resolved from its declaration.
+       - Read: `.step === "x"` or `!==` with a literal or constant, `.has(row.step)` over a set of literals or constants, `*_READ_STEPS`
+         and similar arrays, raw `"step":"x"` patterns, and `.step.startsWith("prefix")` prefixes. test/ledger-rotation.test.ts:111-130
+         is prior art.
+    2. A step emitted and read nowhere else is write-only. scripts/write-only-ledger-step-baseline.json records today's write-only
+       set as pre-existing debt, plus a `recordOnly` map of step to reason.
+    3. The check fails when:
+       - a write-only step is in neither the baseline nor recordOnly;
+       - a baseline entry is no longer write-only and was not removed (shrink-only against the merge base, `$GATE_BASE` in the
+         merge queue);
+       - a recordOnly entry has an empty reason.
+    4. Add an npm script and a light-gates step (`continue-on-error: true`, SOURCE class only) folded into the existing
+       comment-load-ratchet report line, as console-parity is. Script and step land together, because unwired-gate refuses an
+       uninvoked gate.
+
+    INVARIANT no-silent-loop: a step newly written in src with no reader outside its writer fails the check unless it is declared record-only with a reason.
+  acceptance:
+    - claim: "invariant:no-silent-loop — a step newly written in src that no other file reads fails the check"
+      kind: guard
+      proof: "grep: W1-T14149 criterion 1: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+    - claim: "A step read in another file through an equality, a set, a read-steps array or a prefix passes"
+      proof: "grep: W1-T14149 criterion 2: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+    - claim: "A step declared record-only with a reason passes, and one with an empty reason fails"
+      proof: "grep: W1-T14149 criterion 3: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+    - claim: "A baseline entry that gained a reader must be removed, so the baseline only shrinks"
+      proof: "grep: W1-T14149 criterion 4: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+    - claim: "A step emitted through a named constant is resolved and counted"
+      proof: "grep: W1-T14149 criterion 5: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+    - claim: "The light-gates job runs the ratchet"
+      proof: "grep: write-only-ledger-step in .github/workflows/ci.yml"
+  falsifier: |
+    Drop the reader scan and criterion 2 must fail. Accept a new unread step and criterion 1 must fail. Restore and require all
+    to pass.
