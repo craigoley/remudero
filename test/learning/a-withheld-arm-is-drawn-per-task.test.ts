@@ -7,15 +7,18 @@ import { test } from "node:test";
 
 import { selectImplementSkills } from "#src/cli/commands/run-task-verb.js";
 import type { Config } from "#src/lib/config.js";
+import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
 import {
   buildSkillEffectivenessReport,
   renderSkillEffectivenessReport,
+  SKILL_EFFECTIVENESS_LEDGER_STEPS,
   SKILL_WITHHOLDING_SHARE,
 } from "#src/lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 // W1-T14137: the skill arm was drawn per run id. A task's implement run (`<task>-<ms>`) and its later fix rounds
@@ -294,6 +297,137 @@ test("W1-T14137 criterion 3, fenced clock: legacy merges dated after the newest 
   // Legacy PRs handed off before the change and merged a day after it.
   const withLegacy = [...current, ...legacyMerges(T0 - 30 * HOUR, T0 + 30 * HOUR)];
   assert.equal(JSON.stringify(comparison(withLegacy)), JSON.stringify(comparison(current)));
+});
+
+// Every row of a run counted apart is fenced, not only its verdict: a legacy run can write fix.done before any
+// verdict, and a thrown run's verdict omits the PR its pr.opened names, so a later merge of that PR is logged under
+// another run id. The implement lane's logger stamps every row with the run's id and task (run-task-verb.ts).
+const LEGACY_TASK = "W1-T9301";
+const LEGACY_RUN = `${LEGACY_TASK}-1794000000000`;
+const LEGACY_PR = `${PR}901`;
+const legacySelection = selectionRow(LEGACY_RUN, true, { ts: iso(T0 - 30 * HOUR), taskId: LEGACY_TASK });
+const legacyRow = (step: string, ms: number, fields: Record<string, unknown> = {}): Row =>
+  ({ ts: iso(ms), run_id: LEGACY_RUN, task_id: LEGACY_TASK, step, lane: "run-task", ...fields });
+/** A fix round of the legacy run as fix.ts's logFixDoneRow writes it: its PR by `repair_pr_url`, when it names one. */
+const legacyFixDone = (ms: number, pr: Record<string, unknown> = { repair_pr_url: LEGACY_PR }): Row =>
+  legacyRow("fix.done", ms, { round_id: "r1", fix_outcome: "FIXED", total_cost_usd: 0.4, ...pr });
+const LATER = iso(T0 + 30 * HOUR);
+/** The PR's terminal facts as their producers write them, none under the legacy run's own run and task. */
+const legacyPrTerminals: Row[] = [
+  // sweep.ts runPrTerminalReconcile: the pass's run id, task SWEEP.
+  { ts: LATER, run_id: SWEEP_RUN, task_id: "SWEEP", step: "pr.terminal", pr_url: LEGACY_PR, pr_number: 901, state: "merged", merged_at: LATER, source: "sweep.pr_terminal" },
+  { ts: LATER, run_id: SWEEP_RUN, task_id: "SWEEP", step: "pr.terminal", pr_url: LEGACY_PR, pr_number: 901, state: "closed", closed_at: LATER, source: "sweep.pr_terminal" },
+  // sweep.ts credit backfill: the pass's run id, the credited task.
+  { ts: LATER, run_id: SWEEP_RUN, task_id: LEGACY_TASK, step: "verdict.merged", verdict: "merged", pr_number: 901, pr_url: LEGACY_PR, source: "sweep.credit_backfill" },
+  // arm-auto-merge.ts direct merge: the merging run's logger, task SWEEP.
+  { ts: LATER, run_id: LEGACY_RUN, task_id: "SWEEP", step: "pr.terminal", pr_url: LEGACY_PR, pr_number: 901, state: "merged", merged_at: LATER, source: "automerge.direct_merge" },
+];
+const directMerges = Array.from({ length: 10 }, (_, i) => verdict(`direct-${i}`, "merged", { ts: iso(T0), pr_url: `${PR}${300 + i}` }));
+
+/** Ten treated and ten control newest-epoch runs handed off at `ms`, PRs open, beside ten direct merges no skill row
+ *  names: a zero settle window, so each run pends until a compared row dated after it is read. */
+const pendingArms = (ms: number): Row[] => [
+  ...directMerges,
+  ...Array.from({ length: 10 }, (_, i) => [false, true].flatMap((withheld) => {
+    const runId = `${withheld ? "c" : "t"}-${i}`;
+    return [selectionRow(runId, withheld, { epoch: SKILL_ARM_EPOCH, ts: iso(ms) }),
+      verdict(runId, "handed_off", { ts: iso(ms), pr_url: `${PR}${(withheld ? 200 : 100) + i}` })];
+  })).flat(),
+];
+
+test("W1-T14137 apart run rows: a legacy fix.done before any verdict moves neither the clock nor a newest-epoch control", () => {
+  const current = pendingArms(T0 + 5 * HOUR);
+  const before = buildSkillEffectivenessReport(current, "proc");
+  assert.equal(before.settle_window_ms, 0);
+  assert.equal(before.selected.pending_merge_runs, 10);
+  assert.equal(before.control.pending_merge_runs, 10);
+  // A day after every compared row, and the run has no verdict yet.
+  const legacy = [legacySelection, legacyFixDone(T0 + 30 * HOUR)];
+  for (const rows of [[...current, ...legacy], [...legacy].reverse().concat(current), [...current, ...legacy].reverse()]) {
+    const report = buildSkillEffectivenessReport(rows, "proc");
+    assert.equal(report.control.pending_merge_runs, 10, "the control PRs stay pending");
+    assert.equal(report.selected.pending_merge_runs, 10);
+    assert.equal(JSON.stringify(comparison(rows)), JSON.stringify(comparison(current)));
+    assert.deepEqual(report.apart, [{ design: "run-keyed", eligible_runs: 1, terminal_runs: 0 }]);
+  }
+});
+
+test("W1-T14137 apart run rows: a legacy fix round naming no PR, or a PR a compared run names, is fenced by its run", () => {
+  const current = pendingArms(T0 + 5 * HOUR);
+  // fix.ts's commit-refused fix.done names no PR; c-0's PR is compared, so only the row's own run can fence it.
+  for (const pr of [{}, { repair_pr_url: `${PR}200` }]) {
+    const fixDone = legacyFixDone(T0 + 30 * HOUR, pr);
+    for (const rows of [[...current, legacySelection, fixDone], [fixDone, ...current, legacySelection]]) {
+      assert.equal(JSON.stringify(comparison(rows)), JSON.stringify(comparison(current)), JSON.stringify(pr));
+    }
+  }
+});
+
+test("W1-T14137 apart run rows: a merge or close under another run id, of a PR only a legacy fix round names, moves nothing", () => {
+  const current = pendingArms(T0 + 5 * HOUR);
+  for (const terminal of legacyPrTerminals) {
+    const label = `${terminal.source as string} ${terminal.step} ${(terminal.state as string | undefined) ?? ""}`;
+    const legacy = [legacySelection, legacyFixDone(T0 - 29 * HOUR), terminal];
+    for (const rows of [[...current, ...legacy], [...legacy].reverse().concat(current)]) {
+      assert.equal(buildSkillEffectivenessReport(rows, "proc").control.pending_merge_runs, 10, `${label}: the controls pend`);
+      assert.equal(JSON.stringify(comparison(rows)), JSON.stringify(comparison(current)), label);
+    }
+  }
+});
+
+test("W1-T14137 apart run rows: a legacy run whose thrown verdict omits its PR keeps that PR's later sweep merge out", (t) => {
+  // The reviewer's replay: ten newest-epoch treated runs pend against five merged controls, INSUFFICIENT EVIDENCE.
+  const current = [...pendingComparison(T0 + 5 * HOUR, T0 + 5 * HOUR), ...directMerges];
+  const thrown: Row[] = [
+    legacySelection,
+    legacyRow("pr.opened", T0 - 29 * HOUR, { pr_url: LEGACY_PR, head_sha: "e".repeat(40) }),
+    // endThrownRun after CI polling throws: verdict failed, and no pr_url.
+    legacyRow("verdict", T0 - 28 * HOUR, {
+      verdict: "failed", reason: "gh pr checks: HTTP 502", stage: "run.error", cause: "unknown", cost_usd: 1.2,
+      model: null, served_model: null,
+    }),
+    legacyPrTerminals[0]!,
+  ];
+  // Through the report's own step filter, so the pr.opened row is read at all.
+  const read = (rows: Row[]): Row[] => {
+    const union = readLedgerUnionRecordsSync(writeLedger(rows, { scope: t }).dir, { step: SKILL_EFFECTIVENESS_LEDGER_STEPS, refuseIncomplete: true });
+    assert.ok(union.ok);
+    return union.rows as Row[];
+  };
+  const before = buildSkillEffectivenessReport(read(current), "proc");
+  assert.equal(before.status, "INSUFFICIENT EVIDENCE");
+  assert.equal(before.selected.pending_merge_runs, 10);
+  for (const order of [[...current, ...thrown], [...thrown].reverse().concat(current)]) {
+    for (const rows of [order, read(order)]) {
+      assert.ok(rows.some((row) => row.step === "pr.opened"));
+      const report = buildSkillEffectivenessReport(rows, "proc");
+      assert.equal(report.status, "INSUFFICIENT EVIDENCE");
+      assert.equal(report.selected.pending_merge_runs, 10, "the newest epoch's treated runs stay pending");
+      assert.equal(JSON.stringify(comparison(rows)), JSON.stringify(comparison(current)));
+      assert.deepEqual(report.apart, [{ design: "run-keyed", eligible_runs: 1, terminal_runs: 1 }]);
+    }
+  }
+});
+
+test("W1-T14137 apart run rows: a sweep pass's PR facts are fenced by their PR, never by the pass's other tasks", () => {
+  // A fix-type report. The pass fixed one task under a retired design, so every selection under its run id is apart;
+  // its terminal reconcile and credit backfill still log the merge of a compared run's PR under that same run id.
+  const asFix = (row: Row): Row => ({ ...row, task_type: "fix" });
+  const comparedRun = "W1-T9402-1795300000000";
+  const rows: Row[] = [
+    asFix(selectionRow(SWEEP_RUN, true, { ts: iso(T0 - 30 * HOUR), taskId: "W1-T9401" })),
+    asFix(selectionRow(comparedRun, false, { epoch: SKILL_ARM_EPOCH, ts: iso(T0), taskId: "W1-T9402" })),
+    verdict(comparedRun, "handed_off", { ts: iso(T0), task_id: "W1-T9402", pr_url: `${PR}950` }),
+  ];
+  const facts: Row[] = [
+    { ts: LATER, run_id: SWEEP_RUN, task_id: "SWEEP", step: "pr.terminal", pr_url: `${PR}950`, pr_number: 950, state: "merged", merged_at: LATER, source: "sweep.pr_terminal" },
+    { ts: LATER, run_id: SWEEP_RUN, task_id: "W1-T9402", step: "verdict.merged", verdict: "merged", pr_number: 950, pr_url: `${PR}950`, source: "sweep.credit_backfill" },
+  ];
+  for (const fact of facts) {
+    const report = buildSkillEffectivenessReport([...rows, fact], "proc", "fix");
+    assert.deepEqual(report.selected.outcomes, { merged: 1 }, `${fact.source as string}: the compared run's PR merged`);
+    assert.deepEqual(report.apart, [{ design: "run-keyed", eligible_runs: 1, terminal_runs: 0 }]);
+  }
 });
 
 test("the task arm is a pure function of its four inputs, pinned to its published hash", () => {

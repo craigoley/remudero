@@ -962,8 +962,9 @@ export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
  *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
  *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
  *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
- *  `pr.terminal` row the direct merge writes, which is the only record of most merges. */
-export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done"];
+ *  `pr.terminal` row the direct merge writes, which is the only record of most merges. W1-T14137: `pr.opened` names
+ *  the PR of a run whose verdict omits it, so a run counted apart keeps that PR's later merge out of the comparison. */
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done", "pr.opened"];
 /** Bootstrap draws for the cost comparison, the count retireCertainties uses. */
 export const SKILL_COST_BOOTSTRAP_DRAWS = 400;
 /** One-sided confidence for the cost rule and the percentile of verdict-to-merge time that settles a run. */
@@ -1066,7 +1067,7 @@ export interface SkillEffectivenessReport {
    *  rows began last); null when no row carries one, and the run-keyed or observational rows are compared as before. */
   arm_epoch: string | null;
   /** Eligible rows of every other assignment design, counted here and never pooled into the arms above. Their
-   *  verdicts, and PRs only they name, feed nothing compared: not the settle window, the clock or a merge. */
+   *  runs' rows, and PRs only those rows name, feed nothing compared: not the settle window, the clock or a merge. */
   apart: SkillEffectivenessApartRows[];
   /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
    *  versions were recorded. The comparison above pools every version listed here. */
@@ -1192,36 +1193,45 @@ export function buildSkillEffectivenessReport(
   const inArm = (o: SelectionObservation, treated: boolean): boolean =>
     compared(o) && (randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated);
   const isApart = (o: SelectionObservation): boolean => !inArm(o, true) && !inArm(o, false);
-  const selectionsByRun = new Map<string, SelectionObservation[]>();
-  for (const o of selectionByKey.values()) selectionsByRun.set(o.runId, [...(selectionsByRun.get(o.runId) ?? []), o]);
-  // A verdict of a run counted apart feeds nothing compared: not the settle window, not the clock, not a merge.
-  const verdictIsApart = (row: SkillLedgerRow): boolean => {
-    const own = selectionByKey.get(runTaskKey(row));
-    if (own !== undefined) return isApart(own);
-    const ofRun = selectionsByRun.get(row.run_id as string);
-    return ofRun !== undefined && ofRun.every(isApart);
+  const runApart = new Map<string, boolean>();
+  for (const o of selectionByKey.values()) runApart.set(o.runId, (runApart.get(o.runId) ?? true) && isApart(o));
+  // Every row a run of this skill wrote, whatever its step, takes its selection's side, joined as terminalOf joins:
+  // its own run+task key's, else (naming a task) its run's task-less one, never another task's; a row naming no
+  // task is apart when every selection of its run is. Undefined: no such run (a sweep's `pr.terminal`, task SWEEP).
+  const apartOf = (row: SkillLedgerRow): boolean | undefined => {
+    if (typeof row.run_id !== "string") return undefined;
+    const namesTask = typeof row.task_id === "string";
+    const own = selectionByKey.get(runTaskKey(row)) ?? (namesTask ? selectionByKey.get(`${row.run_id}\0`) : undefined);
+    return own !== undefined ? isApart(own) : namesTask ? undefined : runApart.get(row.run_id);
   };
+  // A PR takes the side of every attributed row naming it, read before any outcome so read order never matters:
+  // a thrown run's verdict omits the PR its `pr.opened` names, and a fix round names it by `repair_pr_url`.
+  const rowApart = rows.map(apartOf);
+  const rowPrKey = rows.map((row) =>
+    row.step === "fix.done" ? effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url) : effectivenessPrKey(row));
+  const apartPrKeys = new Set<string>();
+  const comparedPrKeys = new Set<string>();
+  rowPrKey.forEach((prKey, i) => {
+    if (prKey !== undefined && rowApart[i] !== undefined) (rowApart[i] ? apartPrKeys : comparedPrKeys).add(prKey);
+  });
+  // A run counted apart feeds nothing compared, and a PR only such runs name is theirs: not the settle window, the
+  // clock, a merge, a close or a fix cost.
+  const fenced = rowPrKey.map((prKey, i) =>
+    rowApart[i] === true || (prKey !== undefined && apartPrKeys.has(prKey) && !comparedPrKeys.has(prKey)));
 
   type Terminal = { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined };
   const verdictByKey = new Map<string, Terminal>();
   const verdictByRun = new Map<string, Terminal>();
   const anyVerdictKeys = new Set<string>();
   const anyVerdictRuns = new Set<string>();
-  const apartPrKeys = new Set<string>();
-  const comparedPrKeys = new Set<string>();
-  for (const row of rows) {
+  for (const [i, row] of rows.entries()) {
     if (row.step !== "verdict" || typeof row.run_id !== "string" || typeof row.verdict !== "string") continue;
-    const prKey = effectivenessPrKey(row);
     anyVerdictKeys.add(runTaskKey(row));
     anyVerdictRuns.add(row.run_id);
-    if (verdictIsApart(row)) {
-      if (prKey !== undefined) apartPrKeys.add(prKey);
-      continue;
-    }
-    const terminal = { verdict: row.verdict, prKey, ms: rowMs(row), cost: rowCostUsd(row) };
+    if (fenced[i]) continue;
+    const terminal = { verdict: row.verdict, prKey: rowPrKey[i], ms: rowMs(row), cost: rowCostUsd(row) };
     verdictByKey.set(runTaskKey(row), terminal);
     verdictByRun.set(row.run_id, terminal);
-    if (prKey !== undefined) comparedPrKeys.add(prKey);
   }
   // A row naming a task joins its own verdict, else its run's task-less one, never another task's; a row naming
   // no task joins any verdict of its run.
@@ -1229,18 +1239,14 @@ export function buildSkillEffectivenessReport(
     verdictByKey.get(key) ?? (o.namesTask ? verdictByKey.get(`${o.runId}\0`) : verdictByRun.get(o.runId));
   const hasAnyVerdict = (key: string, o: SelectionObservation): boolean =>
     anyVerdictKeys.has(key) || (o.namesTask ? anyVerdictKeys.has(`${o.runId}\0`) : anyVerdictRuns.has(o.runId));
-  // A PR only an apart run names is that run's evidence: its merge, close and fix cost stay out of the comparison.
-  const apartOnlyPr = (prKey: string | undefined): boolean => prKey !== undefined && apartPrKeys.has(prKey) && !comparedPrKeys.has(prKey);
 
   const mergedAtMs = new Map<string, number | undefined>();
   const timedClosedPrKeys = new Set<string>();
   const fixCostByPr = new Map<string, number>();
   let latestMs: number | undefined;
-  for (const row of rows) {
-    if (isSkillSelection(row) && isApart(selectionByKey.get(runTaskKey(row))!)) continue;
-    if (row.step === "verdict" && typeof row.run_id === "string" && verdictIsApart(row)) continue;
-    const prKey = row.step === "fix.done" ? effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url) : effectivenessPrKey(row);
-    if (apartOnlyPr(prKey)) continue;
+  for (const [i, row] of rows.entries()) {
+    if (fenced[i]) continue;
+    const prKey = rowPrKey[i];
     const ms = rowMs(row);
     if (ms !== undefined && (latestMs === undefined || ms > latestMs)) latestMs = ms;
     if (isMergedLedgerRow(row) && prKey !== undefined) {
