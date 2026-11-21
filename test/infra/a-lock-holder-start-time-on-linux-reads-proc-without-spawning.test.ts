@@ -250,6 +250,31 @@ test("W1-T11457 criterion 2: a numeric second line cannot shift vsize into a liv
   assert.equal(defaultGetProcessStartTime(PID, sys), start, "the malformed record returns today's ps result");
 });
 
+test("W1-T11457 criterion 2: a single-line numeric shift takes the ps path and keeps a live holder", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  for (const { daysSinceBoot, rssLimit, label } of [
+    { daysSinceBoot: 0, rssLimit: "18446744073709551615", label: "rss overflows even when itrealvalue is zero" },
+    { daysSinceBoot: 10, rssLimit: "536870912", label: "itrealvalue is nonzero even when rss fits" },
+  ]) {
+    const start = (BTIME_SEC + daysSinceBoot * 86_400) * 1000;
+    const fields = pidStatFields(daysSinceBoot * 86_400 * 100);
+    fields[22] = rssLimit;
+    fields.splice(1, 1); // Drop ppid, moving vsize into starttime and rsslim into rss.
+    fields.push("0"); // Keep the original field count with a numeric exit_code on the same line.
+    const files = {
+      "/proc/stat": procStat(),
+      "/proc/1/stat": pidStat(0, "init", 1),
+      [`/proc/${PID}/stat`]: pidStatLine(fields),
+    };
+    const { sys, execCalls } = linuxSeam(files, formatEtime((LONG_UPTIME_NOW - start) / 1000));
+    const held = { pid: PID, startedAt: new Date(start).toISOString() };
+    const opts = { isPidAlive: () => true, getProcessStartTime: (pid: number) => defaultGetProcessStartTime(pid, sys) };
+    assert.equal(isHolderStale(held, opts), false, label);
+    assert.deepEqual(execCalls, [GETCONF_CALL, ["ps", PS_ARGS, { encoding: "utf8" }]], label);
+    assert.equal(defaultGetProcessStartTime(PID, sys), start, `${label}: today's ps result`);
+  }
+});
+
 test("W1-T11457 criterion 2: a stat record with a non-numeric field in the middle takes the ps path", (t) => {
   t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
   for (const at of [5, 13, 20, 35]) {

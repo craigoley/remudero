@@ -464,6 +464,10 @@ function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { 
   if (fields.length !== PROC_PID_STAT_FIELDS_AFTER_COMM || !/^[A-Ztx]$/.test(fields[0])) return undefined;
   // Linux prints every field after the state as a decimal integer (nice may be negative): any other is a misread.
   if (!fields.slice(1).every((field) => /^-?\d+$/.test(field))) return undefined;
+  // Field 21 (itrealvalue) is always zero. A shift can also put the unsigned rsslim into signed rss.
+  if (fields[18] !== "0") return undefined;
+  const rssPages = BigInt(fields[21]); // Field 24 is a signed long, at most 64 bits.
+  if (BigInt.asIntN(64, rssPages) !== rssPages) return undefined;
   const startTicksText = fields[19];
   if (!/^\d+$/.test(startTicksText)) return undefined;
   const startTicks = Number(startTicksText);
