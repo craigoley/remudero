@@ -18,6 +18,7 @@ import { judgeReview, postReviewPending, postReviewStatusGuarded, recoverPromise
 import { catalogReviewPoster } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
+import { buildRereadPrAtAct } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
@@ -183,6 +184,8 @@ async function producedView(
     history?: (live: string) => Array<{ id?: number; state: string; description: string }> },
   /** Runs after the dead run's claim row is written; a returned string is the live status description. */
   afterClaim?: (ledgerPath: string) => Promise<string | undefined>,
+  /** Build through run-task's single-PR re-read at act time instead of the whole-board producer. */
+  via: "board" | "reread" = "board",
 ): Promise<OpenPrView> {
   const ledgerPath = join(dir, "ledger.ndjson");
   const sha = "d".repeat(40);
@@ -196,15 +199,15 @@ async function producedView(
   });
   const held = afterClaim === undefined ? undefined : await afterClaim(ledgerPath);
   if (held !== undefined) liveStatus = { ...liveStatus, description: held };
-  const [pr] = await buildOpenPrViewsAsync("o", "r", ledgerPath, {
+  const row = { number: 19791, html_url: prUrl, head: { ref: "run-W1-T14035-1795190000000", sha },
+    updated_at: minutesAgo(42), created_at: minutesAgo(60), body, auto_merge: null, state: "open" };
+  const views = {
     requiredContexts: () => ["ci-gate"],
-    assessPendingOwner: (record) => record.runId === "review-PR19791-dead" ? "dead" : "active",
-    fetchAsync: async (args) => {
+    assessPendingOwner: (record: { runId: string }) => record.runId === "review-PR19791-dead" ? "dead" as const : "active" as const,
+  };
+  const fetchAsync = async (args: string[]): Promise<unknown> => {
       const path = args.at(-1)!;
-      if (path.includes("state=open")) return [{
-        number: 19791, html_url: prUrl, head: { ref: "run-W1-T14035-1795190000000", sha },
-        updated_at: minutesAgo(42), created_at: minutesAgo(60), body, auto_merge: null, state: "open",
-      }];
+      if (path.includes("state=open")) return [row];
       if (path.includes("/statuses")) {
         if (liveStatus.history === undefined) throw new Error("status history unreadable");
         return liveStatus.history(liveStatus.description!).map((entry) => ({ context: "remudero-review", ...entry }));
@@ -215,10 +218,12 @@ async function producedView(
         description: liveStatus.description ?? `remudero-review: review in progress (owned by run ${liveStatus.runId})`,
         ...(liveStatus.createdAt !== undefined ? { created_at: liveStatus.createdAt } : {}),
       }] };
-      if (path.endsWith("/pulls/19791")) return { mergeable: true, mergeable_state: "blocked" };
+      if (path.endsWith("/pulls/19791")) return { ...row, mergeable: true, mergeable_state: "blocked" };
       return [];
-    },
-  });
+  };
+  const pr = via === "reread"
+    ? await buildRereadPrAtAct("o", "r", ledgerPath, { fetchAsync, views })({ prNumber: 19791 } as OpenPrView)
+    : (await buildOpenPrViewsAsync("o", "r", ledgerPath, { ...views, fetchAsync }))[0];
   assert.ok(pr);
   return pr;
 }
@@ -615,4 +620,48 @@ test("W1-T14035 criterion 3: a live hold that names itself and then quotes a dea
   assert.equal(reviewLiveStatusWriterRun(`pending (owned by run ${LIVE}) — took over run ${DEAD}: owner proven dead`), LIVE,
     "a takeover claim's writer is its opening run, not the run it took over");
   assert.equal(reviewLiveStatusWriterRun(`${OPS_HOLD} (owned by run ${LIVE})`), LIVE, "a marked hold names its writer");
+});
+
+test("W1-T14035 criterion 1: the single-PR re-read at act time carries the dead owner's proof for its own legacy hold", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // run-task's buildRereadPrAtAct builds the rollup through a read that keeps no status id; the producer reads the combined
+  // status again for the id, so the same history and ledger that bind the owner on the board bind it here too.
+  for (const via of ["board", "reread"] as const) {
+    const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) => {
+      await publishHold(ledgerPath, DEAD, { catalog: "ops", legacy: true });
+      return OPS_HOLD;
+    }, via);
+    assert.equal(pr.reviewPendingStatusRunId, DEAD, `${via}: the hold is bound to the dead run's claim`);
+    assert.equal(pr.reviewPendingOwnerDead, true, via);
+    assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review", via);
+  }
+});
+
+test("W1-T14035 criterion 3: a live claim the fresh ledger gains after the view was built waits at action time", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) => {
+    await publishHold(ledgerPath, DEAD, { catalog: "ops", legacy: true });
+    return OPS_HOLD;
+  });
+  assert.equal(pr.reviewPendingOwnerDead, true, "the view was built with the dead owner's proof");
+  assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+  // A live reviewer replaces the dead owner on this head after the view was built; the sweep's fresh read sees its claim.
+  const ledgerPath = join(dir, "ledger.ndjson");
+  appendLedger(ledgerPath, {
+    run_id: "review-PR19791-live", task_id: "W1-T14035", step: "review.pending_posted", ts: minutesAgo(1),
+    head_sha: pr.headSha, pr_url: pr.prUrl, review_input_digest: pr.reviewInputDigest,
+    host: hostname(), owner_pid: process.pid, owner_started_at: minutesAgo(1), took_over_run_id: DEAD,
+  });
+  const h = sweepHarness(t);
+  await runSweep([pr], { ...h.deps, ledgerPath }, DEFAULT_SWEEP_POLICY);
+  const lines = readLedgerLines(ledgerPath);
+  const row = lines.findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
+  assert.ok(row, "the sweep disposed the head");
+  assert.equal(row.disposition, "wait");
+  assert.equal(row.acted, false);
+  assert.match(String(row.reason), /review-PR19791-live/);
+  assert.equal(h.posted.length, 0, "no review is admitted from the old death proof");
+  assert.equal(lines.some((r) => r.step === "sweep.review_admitted" && r.pr_number === 19791), false);
 });

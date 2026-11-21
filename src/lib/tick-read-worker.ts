@@ -98,10 +98,14 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
 /** W1-T14035: the live `remudero-review` status's own GitHub id, kept beside its rollup entry so an owner proof read off the
  *  head's status history binds to that one post, never to another with the same text. Absent when GitHub gave none. */
 export function attachReviewStatusId<T extends object>(rollup: T[], response: unknown): void {
-  const id = (response as { statuses?: Array<{ context?: unknown; id?: unknown }> } | undefined)?.statuses
-    ?.find((status) => status?.context === REVIEW_CTX)?.id;
-  const entry = rollup.find((c) => (c as { context?: string }).context === REVIEW_CTX);
-  if (entry !== undefined && typeof id === "number") (entry as T & { statusId?: number }).statusId = id;
+  const status = (response as { statuses?: Array<{ context?: unknown; id?: unknown; description?: unknown }> } | undefined)
+    ?.statuses?.find((candidate) => candidate?.context === REVIEW_CTX);
+  const entry = rollup.find((c) => (c as { context?: string }).context === REVIEW_CTX) as (T & { statusId?: number;
+    description?: string }) | undefined;
+  // A combined status read apart from the rollup's own lends its id only to the same wording.
+  if (entry !== undefined && typeof status?.id === "number" && (status.description ?? undefined) === entry.description) {
+    entry.statusId = status.id;
+  }
 }
 
 /** Only the failing log's explicit `Run 'npm run <name>' and commit the result.` qualifies;
@@ -2628,6 +2632,12 @@ export function* openPrViewSteps(
   const reviewStatusHistories = byCandidate(historyCandidates, yield* perPrStageSteps(stageCtx, "review_status_history",
     historyCandidates, function* (c, read) {
       try {
+        // W1-T14035: a producer whose rollup kept no status id (run-task's single-PR re-read) reads the combined status
+        // again, before the history, so the history's newest post is compared with a post GitHub named current.
+        const rollup = byNumber.get(c.number)?.statusCheckRollup;
+        if (rollup !== undefined && rollup.find((r) => r.context === REVIEW_CTX)?.statusId === undefined) {
+          attachReviewStatusId(rollup, yield* step(() => read(["api", `repos/${owner}/${repo}/commits/${c.headSha}/status`])));
+        }
         return reviewStatusHistoryFromRest(yield* step(() => read(["api", `repos/${owner}/${repo}/commits/${c.headSha}/statuses?per_page=100`])));
       } catch {
         // An unreadable history is not an empty one: it names no owner, so the head waits.

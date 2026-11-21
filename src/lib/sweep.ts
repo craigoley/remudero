@@ -6904,6 +6904,30 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
     age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
 }
 
+/** W1-T14035 — the death proof is a snapshot of the ledger the view was built from. At action time a newer claim or hold
+ *  row on this head by any other run than the named owner is a live reviewer the proof never saw, so the head waits
+ *  (invariant live-claim-waits). With no owner named (a view no producer built), the alongside-CI lane's view waits on any
+ *  claim newer than the judged one; a green-check view keeps main's behaviour. Names that run; undefined when it stands. */
+export function deadOwnerProofSuperseded(
+  pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId" | "reviewPendingSince" | "headSha" |
+    "prUrl" | "taskId" | "checksState">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true) return undefined;
+  if (pr.reviewPendingOwnerRunId === undefined && pr.checksState !== "pending") return undefined;
+  let newest: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    if (line.head_sha !== pr.headSha || (line.pr_url !== undefined ? line.pr_url !== pr.prUrl : line.task_id !== pr.taskId)) continue;
+    if (line.step === "review.pending_posted" || (line.step === "review.posted" && line.state === "pending")) newest = line;
+  }
+  if (newest === undefined) return undefined;
+  const run = typeof newest.run_id === "string" ? newest.run_id : "an unnamed run";
+  if (pr.reviewPendingOwnerRunId !== undefined) return newest.run_id === pr.reviewPendingOwnerRunId ? undefined : run;
+  const at = Date.parse(typeof newest.ts === "string" ? newest.ts : "");
+  const since = Date.parse(pr.reviewPendingSince ?? "");
+  return newest.step === "review.pending_posted" && !(Number.isFinite(at) && Number.isFinite(since) && at <= since) ? run : undefined;
+}
+
 /** W1-T14035 — the hold a dead claim also carries, named beside the dead owner in the alongside-CI reason. */
 function alongsideCiHoldNote(pr: Pick<OpenPrView, "reviewPendingOwnerGone" | "reviewPendingOwnerGoneReason">): string | undefined {
   return pr.reviewPendingOwnerGone === "promise-harvest-incomplete" ? "its promise harvest did not complete"
@@ -23741,7 +23765,7 @@ export async function runSweep(
   async function claimReview(
     reviewKey: string, pr: OpenPrView,
   ): Promise<{ ok: true; release: () => void; restore?: { judgedHeadSha: string; regressionKey: string } } |
-    { ok: false; deduped: boolean; reason: string; cause?: ReviewDedupCause }> {
+    { ok: false; deduped: boolean; reason: string; cause?: ReviewDedupCause; wait?: true }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
@@ -23769,6 +23793,15 @@ export async function runSweep(
       }
       // A re-post that a refusal or a backoff holds back is still a delivered key: it dedups, as it did before the shared rule.
       const deliveredDedups = deliveredRule.dedups || restore !== undefined;
+      // W1-T14035: a review the old death proof admits waits when the fresh ledger shows a live claim it never saw.
+      const liveRun = deliveredDedups || durableRefusal || retryBackoff !== undefined
+        ? undefined : deadOwnerProofSuperseded(pr, freshLines);
+      if (liveRun !== undefined) {
+        claimedReviewKeys.delete(reviewKey);
+        return { ok: false, deduped: false, wait: true,
+          reason: `remudero-review owner proof superseded — the fresh ledger holds a newer claim or hold by ${liveRun} on this ` +
+            "head; waiting, re-deriving next sweep" };
+      }
       if (deliveredDedups || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -28246,9 +28279,9 @@ export async function runSweep(
       await finalizeDisposition(
         job.index,
         job.pr,
-        jobDisposition,
+        claim.wait ? "wait" : jobDisposition,
         // W1-T12994: the walk asked for this review and the claim's fresh read refused it.
-        claim.deduped && claim.cause !== undefined
+        claim.wait ? claim.reason : claim.deduped && claim.cause !== undefined
           ? reviewNotStarted(job.pr, jobDisposition, job.reason, job.reviewKey, claim.cause, claim.reason, "claim") : job.reason,
         job.question,
         false,
