@@ -231,23 +231,47 @@ test("W1-T11457 criterion 2: a stat record with ppid removed and a non-numeric e
   assertTakesPs(pidStatLine([...noPpid, "x"]), "ppid removed, non-numeric exit_code appended");
 });
 
-test("W1-T11457 criterion 2: a numeric second line cannot shift vsize into a live holder's start time", (t) => {
+test("W1-T11457 criterion 2: a shifted numeric stat record keeps a live holder via ps", (t) => {
   t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
   const elapsedSec = 20 * 86_400;
   const start = LONG_UPTIME_NOW - elapsedSec * 1000;
   const startTicks = (start / 1000 - BTIME_SEC) * 100; // linuxSeam reports CLK_TCK=100
+  // Dropping ppid moves vsize into starttime and the unsigned rsslim into signed rss.
   const noPpid = pidStatFields(startTicks).filter((_, i) => i !== 1);
-  const files = {
-    "/proc/stat": procStat(),
-    "/proc/1/stat": pidStat(0, "init", 1),
-    [`/proc/${PID}/stat`]: `${pidStatLine(noPpid)}0\n`,
-  };
-  const { sys, execCalls } = linuxSeam(files, formatEtime(elapsedSec));
+  const shiftedWithFiniteRssLimit = [...noPpid, "0"];
+  shiftedWithFiniteRssLimit[21] = "1024";
   const held = { pid: PID, startedAt: new Date(start).toISOString() };
-  const opts = { isPidAlive: () => true, getProcessStartTime: (pid: number) => defaultGetProcessStartTime(pid, sys) };
-  assert.equal(isHolderStale(held, opts), false, "the fallback keeps the live holder");
-  assert.deepEqual(execCalls, [GETCONF_CALL, ["ps", PS_ARGS, { encoding: "utf8" }]]);
-  assert.equal(defaultGetProcessStartTime(PID, sys), start, "the malformed record returns today's ps result");
+  const malformedRecords = {
+    "numeric second line": `${pidStatLine(noPpid)}0\n`,
+    "same field count on one line": pidStatLine([...noPpid, "0"]),
+    "same field count and a finite rsslim": pidStatLine(shiftedWithFiniteRssLimit),
+  };
+  for (const [label, record] of Object.entries(malformedRecords)) {
+    const { sys, execCalls } = linuxSeam({
+      "/proc/stat": procStat(),
+      "/proc/1/stat": pidStat(0, "init", 1),
+      [`/proc/${PID}/stat`]: record,
+    }, formatEtime(elapsedSec));
+    const opts = { isPidAlive: () => true, getProcessStartTime: (pid: number) => defaultGetProcessStartTime(pid, sys) };
+    assert.equal(isHolderStale(held, opts), false, `${label}: the fallback keeps the live holder`);
+    assert.deepEqual(execCalls, [GETCONF_CALL, ["ps", PS_ARGS, { encoding: "utf8" }]], label);
+    assert.equal(defaultGetProcessStartTime(PID, sys), start, `${label}: today's ps result`);
+  }
+});
+
+test("W1-T11457 criterion 2: rss outside the signed 64-bit range takes the ps path", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  const fields = pidStatFields(123_456);
+  for (const rss of ["9223372036854775808", "-9223372036854775809"]) {
+    fields[21] = rss;
+    assertTakesPs(pidStatLine(fields), `rss ${rss}`);
+  }
+  for (const rss of ["9223372036854775807", "-9223372036854775808"]) {
+    fields[21] = rss;
+    const { sys, execCalls } = linuxSeam({ ...healthy(), [`/proc/${PID}/stat`]: pidStatLine(fields) });
+    assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 1_234_560, `rss ${rss}`);
+    assert.deepEqual(execCalls, [GETCONF_CALL]);
+  }
 });
 
 test("W1-T11457 criterion 2: a stat record with a non-numeric field in the middle takes the ps path", (t) => {
