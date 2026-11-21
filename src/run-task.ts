@@ -254,7 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, verdictMayDifferOnServe } from "./lib/inbox-cli-serve.js";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, resolveLocalServePort, verdictMayDifferOnServe } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30785,9 +30785,7 @@ export async function serveCommand(
   let hosts: string[];
   let identity: ReturnType<typeof resolveServeIdentity>;
   try {
-    // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
-    // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
-    port = resolveServePort(rest, config.serve?.port);
+    port = resolveLocalServePort(rest, config.serve?.port, resolveServePort);
     hosts = resolveServeHosts(rest, process.env, config.serve?.host);
     // W1-T398: resolved here, side by side with host/port, so an install that enables identity
     // without declaring which proxy it trusts fails the SAME way an invalid --host does — a

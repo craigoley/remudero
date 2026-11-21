@@ -565,6 +565,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_RUN_CHILD_GIT_SOCKET", "Carries the run child's own git credential socket to its worker spawns.", ["src/run-child-main.ts", "src/lib/secret-boundary.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
+  envEntry("RMD_SERVE_PORT", "Selects the deployment port or the local serve and Inbox CLI port when serve.port is unset.", ["src/lib/inbox-cli-serve.ts", "deploy/serve-container.sh", "deploy/host-update.sh"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),
   envEntry("RMD_SERVE_HANDOFF", "Set to off to make the serve supervisor answer a handoff request with today's drain and container restart.", ["src/lib/serve-supervisor.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
