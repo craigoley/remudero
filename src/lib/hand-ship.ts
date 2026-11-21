@@ -4,8 +4,9 @@ import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, r
 import { stripTypeScriptTypes } from "node:module";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { parse, tokenizer, type CallExpression, type Node } from "acorn";
+import { parse, tokenizer, type CallExpression, type ConditionalExpression, type IfStatement, type Node, type ThrowStatement } from "acorn";
 import { systemClock } from "./clock.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError } from "./drain-lock.js";
 import { gitPushRunBranchAsync, worktreePushExecAsync } from "./git-push.js";
@@ -24,7 +25,8 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean; declaration?: string;
+interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean;
+  failureIdentity?: string; failureSite?: { location: string; code: string };
   /** The test's TAP ancestry, outermost first, each name as TAP wrote it: read from the report's subtest nesting,
    *  never from `title`, whose ` > ` separator a test's own name can contain. Empty for a whole-file row. */
   path?: string[];
@@ -147,8 +149,11 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
     const result = /^( *)(not ok|ok) [0-9]+ - (.*)$/.exec(lines[i]!);
     if (!result) continue;
     const fields: Record<string, string> = {};
+    let topFrame: string | undefined;
     for (let j = i + 1; j < lines.length && lines[j]!.startsWith(`${result[1]}  `) && !/^\s*\.\.\.$/.test(lines[j]!); j += 1) {
-      const field = /^\s+(type|location|failureType): '?(.*?)'?$/.exec(lines[j]!);
+      const diagnostic = lines[j]!.slice(result[1]!.length + 2);
+      const field = /^(type|location|failureType|code): '?(.*?)'?$/.exec(diagnostic);
+      if (diagnostic === "stack: |-") topFrame = lines[j + 1]?.trim();
       if (field) fields[field[1]!] = field[2]!;
     }
     const locationMatch = /^(.*):([0-9]+):([0-9]+)$/.exec(clean(fields.location ?? ""));
@@ -158,10 +163,14 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
       ? relativePath : fields.location === undefined ? fallbackFile ?? null : null;
     const fileLevel = file !== null && result[3]!.replace(/\\/g, "/").endsWith(file);
     const path = fileLevel ? [] : [...parents.slice(0, result[1]!.length / 4), result[3]!];
+    const frame = topFrame && /(?:^|\()(file:\/\/.*|\/.*):([0-9]+):([0-9]+)\)?$/.exec(topFrame);
+    const failureSite = frame && absolute && fields.failureType === "testCodeFailure" && fields.code &&
+      (clean(frame[1]!) === absolute || frame[1]!.replace(/^file:\/\/\/private(?=\/)/, "file://") === pathToFileURL(absolute).href)
+      ? { location: `${frame[2]}:${frame[3]}`, code: fields.code } : undefined;
     rows.push({ file, title: fileLevel ? "(whole file)" : path.join(" > "), path,
       location: locationMatch ? `${locationMatch[2]}:${locationMatch[3]}` : null,
       failed: result[2] === "not ok", ...(fields.type === "suite" || fields.failureType === "subtestsFailed" ? { suite: true } : {}),
-      ...(fields.type === "suite" ? { describeRow: true } : {}), fileLevel });
+      ...(fields.type === "suite" ? { describeRow: true } : {}), ...(failureSite ? { failureSite } : {}), fileLevel });
   }
   return rows;
 }
@@ -234,44 +243,106 @@ export function withTapPaths(receipt: ShipReceipt, tap: string, root: string): S
   }) } };
 }
 
-/** A unique registration expression can be matched across line shifts. Identical expressions
- * at different call sites are ambiguous even when only one of them registered on a given run. */
-function locateDeclarations(text: string) {
-  // Strip mode preserves the original offsets, including the locations in Node's TAP.
+const assertionOperands = new Map([
+  ["fail", 0] as const,
+  ...["assert", "ok"].map((name) => [name, 1] as const),
+  ...["equal", "notEqual", "strictEqual", "notStrictEqual", "deepEqual", "notDeepEqual", "deepStrictEqual",
+    "notDeepStrictEqual", "match", "doesNotMatch"].map((name) => [name, 2] as const),
+]);
+
+function locateFailures(text: string) {
+  // Strip mode preserves the offsets reported by TAP and the original stack.
   const stripped = stripTypeScriptTypes(text);
   const source = parse(stripped, { ecmaVersion: "latest", sourceType: "module", locations: true });
-  // A registration is its token sequence: whitespace, comments, quote style and type annotations do not
-  // change what a test runs, so a formatting-only edit leaves it the same registration on head and main.
-  const tokensOf = (start: number, end: number) => {
-    const span = stripped.slice(start, end);
-    return JSON.stringify([...tokenizer(span, { ecmaVersion: "latest" })].map((token) => [token.type.label,
-      // A string's value, so its quote style does not count; every other token as written.
-      token.type.label === "string" ? String((token as { value?: unknown }).value) : span.slice(token.start, token.end)]));
-  };
-  const calls = new Map<string, string | null>();
-  const counts = new Map<string, number>();
-  const remember = (node: Node, declaration: string) => {
-    const start = node.loc?.start;
-    if (!start) return;
-    const location = `${start.line}:${start.column + 1}`;
-    calls.set(location, calls.has(location) ? null : declaration);
-  };
-  const visit = (value: unknown) => {
-    if (Array.isArray(value)) { value.forEach(visit); return; }
-    if (!value || typeof value !== "object" || !("type" in value)) return;
-    if (value.type === "CallExpression") {
-      const call = value as CallExpression;
-      const declaration = tokensOf(call.start, call.end);
-      counts.set(declaration, (counts.get(declaration) ?? 0) + 1);
-      remember(call, declaration);
-      if (call.callee.type === "MemberExpression") remember(call.callee.property, declaration);
+  const assertions = new Map<string, string>();
+  for (const node of source.body) {
+    if (node.type !== "ImportDeclaration" || !/^(?:node:)?assert(?:\/strict)?$/.test(String(node.source.value))) continue;
+    for (const specifier of node.specifiers) {
+      assertions.set(specifier.local.name,
+        specifier.type === "ImportSpecifier" ? stripped.slice(specifier.imported.start, specifier.imported.end) : "assert");
     }
-    for (const child of Object.values(value)) visit(child);
+  }
+  const tokensOf = (node: Node, omit: readonly Node[] = []) => {
+    let span = "", start = node.start;
+    for (const part of omit) {
+      span += stripped.slice(start, part.start) + " __omitted__ ";
+      start = part.end;
+    }
+    span += stripped.slice(start, node.end);
+    return JSON.stringify([...tokenizer(span, { ecmaVersion: "latest" })].map((token) =>
+      token.type.label === "string" ? ["string", (token as { value?: unknown }).value] : span.slice(token.start, token.end)));
   };
-  visit(source);
-  return (location: string | null | undefined) => {
-    const declaration = location ? calls.get(location) : undefined;
-    return typeof declaration === "string" && counts.get(declaration) === 1 ? declaration : undefined;
+  const registrations = new Map<string, string | null>();
+  const sites: { start: number; end: number; key: string }[] = [];
+  const counts = new Map<string, number>();
+  const count = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
+  const remember = (node: Node, registration: string) => {
+    const start = node.loc!.start;
+    const location = `${start.line}:${start.column + 1}`;
+    registrations.set(location, registrations.has(location) ? null : registration);
+  };
+  const recordSite = (node: Node, end: number, scope: readonly string[], message?: Node) => {
+    const key = JSON.stringify(["site", scope, tokensOf(node, message ? [message] : [])]);
+    count(key);
+    sites.push({ start: node.start, end, key });
+  };
+  const visit = (value: unknown, scope: readonly string[]) => {
+    if (Array.isArray(value)) { value.forEach((child) => visit(child, scope)); return; }
+    if (!value || typeof value !== "object" || !("type" in value)) return;
+    const node = value as Node;
+    if (node.type === "CallExpression") {
+      const call = node as CallExpression;
+      const callbacks = call.arguments.flatMap((arg) =>
+        arg.type === "ArrowFunctionExpression" || arg.type === "FunctionExpression" ? [arg.body] : []);
+      const signature = tokensOf(call, callbacks);
+      const registration = JSON.stringify(["registration", scope, signature]);
+      count(registration);
+      remember(call, registration);
+      const callee = call.callee;
+      if (callee.type === "MemberExpression") remember(callee.property, registration);
+      const assertion = callee.type === "Identifier" ? assertions.get(callee.name)
+        : callee.type === "MemberExpression" && callee.object.type === "Identifier" &&
+          assertions.get(callee.object.name) === "assert" && !callee.computed && callee.property.type === "Identifier"
+          ? callee.property.name : undefined;
+      const arity = assertion === undefined ? undefined : assertionOperands.get(assertion);
+      const message = arity !== undefined && call.arguments.length === arity + 1 ? call.arguments[arity] : undefined;
+      recordSite(call, callee.end + 1, scope, message?.type === "Literal" && typeof message.value === "string" ? message : undefined);
+      visit(callee, scope);
+      visit(call.arguments, [...scope, signature]);
+      return;
+    }
+    if (node.type === "ThrowStatement") {
+      const statement = node as ThrowStatement;
+      const error = statement.argument;
+      const message = error.type === "NewExpression" && error.callee.type === "Identifier" && error.callee.name === "Error"
+        ? error.arguments[0] : undefined;
+      recordSite(statement, statement.end, scope, message?.type === "Literal" && typeof message.value === "string" ? message : undefined);
+    }
+    if (node.type === "IfStatement" || node.type === "ConditionalExpression") {
+      const condition = node as IfStatement | ConditionalExpression;
+      const branch = tokensOf(condition.test);
+      visit(condition.test, scope);
+      visit(condition.consequent, [...scope, branch, "then"]);
+      visit(condition.alternate, [...scope, branch, "else"]);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child, scope);
+  };
+  visit(source, []);
+  let offset = 0;
+  const lines = stripped.split("\n").map((line) => {
+    const start = offset;
+    offset += line.length + 1;
+    return start;
+  });
+  return ({ location, failureSite }: FailingTest) => {
+    if (!location || !failureSite) return undefined;
+    const registration = registrations.get(location);
+    const [line, column] = failureSite.location.split(":").map(Number);
+    const frame = lines[line! - 1]! + column! - 1;
+    const site = sites.findLast(({ start, end }) => start <= frame && frame < end);
+    return registration && counts.get(registration) === 1 && site && counts.get(site.key) === 1
+      ? JSON.stringify([registration, site.key, failureSite.code]) : undefined;
   };
 }
 
@@ -418,7 +489,7 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const rows = [];
   for (const test of exactHeadFailures) {
     const index = remainingMain.findIndex((other) => other.file === test.file && samePath(other.path, test.path) &&
-      test.declaration !== undefined && test.declaration === other.declaration);
+      test.failureIdentity !== undefined && test.failureIdentity === other.failureIdentity);
     const classification: FailureClass = index >= 0 ? "also failing on main" : "caused by the change";
     if (index >= 0) remainingMain.splice(index, 1);
     run.log(`${classification}: ${test.file} :: ${test.title}`);
@@ -781,7 +852,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
     };
     const node = (args: string[]) => priority === "low" ? ["/usr/bin/nice", "-n", "10", nodeExecutable, ...args] : [nodeExecutable, ...args];
     let baseCut = false;
-    const declarations = new Map<string, ReturnType<typeof locateDeclarations>>();
+    const failureSites = new Map<string, ReturnType<typeof locateFailures>>();
     return {
       async preflight(requested) {
         priority = requested;
@@ -868,12 +939,12 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           new Set(redTargets.map((row) => row.location)).size !== redTargets.length);
         if (redTargets.length > 0 && !ambiguous) {
           const path = join(cwd, file);
-          let identify = declarations.get(path);
+          let identify = failureSites.get(path);
           if (!identify) {
-            identify = locateDeclarations(await git(["show", `${sha}:${file}`], { cwd }));
-            declarations.set(path, identify);
+            identify = locateFailures(await git(["show", `${sha}:${file}`], { cwd }));
+            failureSites.set(path, identify);
           }
-          for (const row of redTargets) row.declaration = identify(row.location);
+          for (const row of redTargets) row.failureIdentity = identify(row);
         }
         return path === undefined ? results : pathRows(results, path, tree, file);
     }

@@ -57,7 +57,7 @@ function tapPath(title: string): string[] {
 }
 
 function rerunResults(titles: string[]) {
-  return titles.map((title, index) => ({ file, title, path: tapPath(title), location: `${index + 1}:1`, declaration: title, failed: true }));
+  return titles.map((title, index) => ({ file, title, path: tapPath(title), location: `${index + 1}:1`, failureIdentity: title, failed: true }));
 }
 
 function passingResults(titles: string[]): { file: string; title: string; path: string[]; location: null; failed: boolean }[] {
@@ -268,7 +268,7 @@ test("one occurrence on main accounts for only one same-location duplicate failu
   original.failureAttribution!.tests!.forEach((test) => { test.location = "7:3"; });
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => (tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"])
-    .map((title) => ({ file, title, path: [title], location: "7:3", declaration: title, failed: true }));
+    .map((title) => ({ file, title, path: [title], location: "7:3", failureIdentity: title, failed: true }));
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
@@ -282,7 +282,7 @@ test("a nested target comparison ignores sibling results from its selected paren
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => [
     { file, title: "parent", path: ["parent"], location: "9:1", failed: true, suite: true },
-    { file, title: "parent > leaf", path: ["parent", "leaf"], location: "10:1", declaration: "first registration", failed: true },
+    { file, title: "parent > leaf", path: ["parent", "leaf"], location: "10:1", failureIdentity: "first registration", failed: true },
     { file, title: "parent > sibling", path: ["parent", "sibling"], location: "11:1", failed: tree === "head" },
   ];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
@@ -297,8 +297,8 @@ test("different same-title failures at distinct source locations never become ba
   original.failureAttribution!.tests![1]!.location = "20:1";
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => tree === "head"
-    ? [{ file, title: "duplicate", path: ["duplicate"], location: "10:1", declaration: "first registration", failed: true }, { file, title: "duplicate", path: ["duplicate"], location: "20:1", declaration: "second registration", failed: true }]
-    : [{ file, title: "duplicate", path: ["duplicate"], location: "25:1", declaration: "different registration", failed: true }];
+    ? [{ file, title: "duplicate", path: ["duplicate"], location: "10:1", failureIdentity: "first registration", failed: true }, { file, title: "duplicate", path: ["duplicate"], location: "20:1", failureIdentity: "second registration", failed: true }]
+    : [{ file, title: "duplicate", path: ["duplicate"], location: "25:1", failureIdentity: "different registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.doesNotMatch(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
@@ -310,7 +310,7 @@ test("a failing test that only moved lines between main and head is also failing
   const original = redReceipt(["unchanged red"]);
   original.failureAttribution!.tests![0]!.location = "11:1";
   f.workspace.preflight = async () => original;
-  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", path: ["unchanged red"], location: tree === "head" ? "11:1" : "10:1", declaration: "same registration", failed: true }];
+  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", path: ["unchanged red"], location: tree === "head" ? "11:1" : "10:1", failureIdentity: "same registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: unchanged red/);
   assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
@@ -528,7 +528,7 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
       { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true },
     ]);
     assert.deepEqual(await workspace.rerun("head", file, source.head, ["existing red"]), [
-      { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true, declaration: undefined },
+      { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true, failureIdentity: undefined },
     ]);
     assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^existing red$"), "the isolated rerun selects the named failure");
     assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
@@ -672,12 +672,16 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
-  // No `+`: a plain fast-forward refspec, leased on the absent ref the gate read (an empty lease: the ref must not exist).
+  // No `+`: a plain fast-forward refspec, checked against the update advertised to the push.
   assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]], "no force option and no `+` refspec");
   assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
   await assert.rejects(defaults.push(source, run), new RegExp(`HEAD moved during verification: the checks ran on ${source.head} but HEAD now reads ${repo.git("rev-parse", "HEAD")}`));
   assert.equal(requests.length, 1);
+  const moved = await defaults.readSource(repo.dir, run);
+  repo.git("switch", "-c", "different-branch");
+  await assert.rejects(defaults.push(moved, run), /source branch, head or origin changed during verification/);
+  assert.equal(requests.length, 1, "the new branch points at the same commit and still cannot be pushed");
 });
 
 test("an operator checkout with Git's default hooks still runs every pre-push check and has no opt-out", async (t) => {
@@ -1547,21 +1551,25 @@ test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a 
   assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
 });
 
-test("W1-T12169 criterion 3: a test red on head and main stays also failing on main after a formatting-only edit to its registration", async (t) => {
+test("W1-T12169 criterion 3: a red assertion stays also failing on main after its diagnostic and formatting change", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   seedHandBranch(repo, true);
   mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
   writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
-  writeFileSync(join(repo.dir, file), 'import { test } from "node:test";\ntest("green", () => {});\ntest("same red", () => { throw new Error("red"); });\n');
+  const imports = ['import { test } from "node:test";', 'import assert from "node:assert/strict";'];
+  writeFileSync(join(repo.dir, file), [
+    ...imports, 'test("green", () => {});', 'test("same red", () => { assert.equal(1, 2, "old message"); });', "",
+  ].join("\n"));
   repo.git("add", file, "test/setup/tmp-hygiene.ts");
   repo.git("commit", "-m", "main: the test is red");
   const mainSha = repo.git("rev-parse", "HEAD");
-  // Whitespace, a comment, quote style and a type annotation change; no token that runs.
+  // The same assertion fails on both revisions, with a different diagnostic and location.
   writeFileSync(join(repo.dir, file), [
-    'import { test } from "node:test";', 'test("green", () => {});', "test(  'same red' ,", "  (): void => {", "    // still red", "    throw new Error( 'red' );", "  } );", "",
+    ...imports, 'test("green", () => {});', "test(  'same red' ,", "  (): void => {",
+    "    assert.equal(1, 2, 'new message');", "  } );", "",
   ].join("\n"));
-  repo.git("commit", "-am", "the hand change only reformats the red test");
+  repo.git("commit", "-am", "the hand change rewords the red assertion");
   const defaults = handShipEffects(() => 0);
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
   const source = await defaults.readSource(repo.dir, run);
@@ -1572,6 +1580,39 @@ test("W1-T12169 criterion 3: a test red on head and main stays also failing on m
   assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: same red$/m);
   assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
   assert.ok(f.calls.includes(`push ${source.head}`));
+});
+
+test("W1-T12169 criterion 3: a different failing assertion in the same registration is caused by the change", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  const tests = (change: boolean) => [
+    'import { test } from "node:test";',
+    'import { strictEqual as equal } from "node:assert";',
+    `const changed = ${change};`,
+    'test("same red", () => {',
+    '  equal(changed, true, "first assertion");',
+    '  equal(changed, false, "second assertion");',
+    '});',
+    "",
+  ].join("\n");
+  writeFileSync(join(repo.dir, file), tests(false));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "the first assertion fails on main");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, file), tests(true));
+  repo.git("commit", "-am", "the second assertion fails at head");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...linux, checkout: REPO_ROOT }, source, run);
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({ preflight: async () => realReceipt(repo, source.head, mainSha), rerun: real.rerun, close: () => real.close() });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
+  assert.match(f.lines.join("\n"), /caused by the change: test\/ci\/example\.test\.ts :: same red$/m);
+  assert.ok(!f.calls.includes(`push ${source.head}`));
 });
 
 test("W1-T12169 criterion 4: the push sends no force option, refuses a tip that moved after its gate, and a non-fast-forward never lands", async (t) => {
@@ -1586,12 +1627,20 @@ test("W1-T12169 criterion 4: the push sends no force option, refuses a tip that 
   repo.git("push", "-q", remote, `${verifiedHead}:refs/heads/objects`, `${base}:refs/heads/${branch}`);
   const tip = () => execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${branch}`], { encoding: "utf8" }).trim();
   // The race, inside the gate: after the gate read the tip, the remote advances to an ancestor of the head.
-  const mark = harnessGate(t, `cat > /dev/null; git --git-dir=${shellQuote(remote)} update-ref refs/heads/${branch} "$(cat ${shellQuote(join(f.root, "advance"))})"; ` +
-    'echo "open-pr-body-proof-precheck: SKIP -- this branch has no open pull request"; echo ran >> "$MARK"');
+  const mark = harnessGate(t, [
+    'read -r _ _ _ old',
+    'echo "$old" >> "$MARK"',
+    `[ "$old" = "${ancestor}" ] && { echo "open-pr-body-proof-precheck: this push NEWLY FALSIFIES a proof"; exit 1; }`,
+    `git --git-dir=${shellQuote(remote)} update-ref refs/heads/${branch} "$(cat ${shellQuote(join(f.root, "advance"))})"`,
+    'echo "open-pr-body-proof-precheck: 1 body proof(s) already failing at the old tip"',
+  ].join("\n"));
   const toRemote = (args: readonly string[]) => args.map((arg) => arg === "origin" ? remote : arg);
+  const setTip = (sha: string) => execFileSync("git", ["--git-dir", remote, "update-ref", `refs/heads/${branch}`, sha]);
   const pushes: string[][] = [];
+  let advanceAtTransport = false;
   const defaults = handShipEffects(() => 0, noOpenPull, async (cwd, args, options) => {
     pushes.push([...args]);
+    if (advanceAtTransport) setTip(ancestor);
     return hostWorktreeGitAsync(cwd, toRemote(args), options);
   });
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write,
@@ -1599,7 +1648,7 @@ test("W1-T12169 criterion 4: the push sends no force option, refuses a tip that 
   const source = await defaults.readSource(repo.dir, run);
   writeFileSync(join(f.root, "advance"), ancestor);
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /remote ref moved after the pre-push gate read it/);
-  assert.equal(readFileSync(mark, "utf8"), "ran\n");
+  assert.equal(readFileSync(mark, "utf8"), `${base}\n`);
   assert.deepEqual(pushes, [], "the gate judged the push from the base; a remote that moved since is not fast-forwarded on that result");
   assert.equal(tip(), ancestor);
   // A tip the head does not descend from is refused before the gate.
@@ -1614,11 +1663,19 @@ test("W1-T12169 criterion 4: the push sends no force option, refuses a tip that 
   // The argv the push sends, against that tip, is a non-fast-forward the remote itself refuses: nothing forces it.
   await assert.rejects(hostWorktreeGitAsync(repo.dir, ["push", remote, `${verifiedHead}:refs/heads/${branch}`]), /rejected|non-fast-forward|fetch first/);
   assert.equal(tip(), foreign);
-  // Positive control: an unmoved tip the head descends from takes the plain fast-forward.
-  execFileSync("git", ["--git-dir", remote, "update-ref", `refs/heads/${branch}`, base]);
+  setTip(base);
   writeFileSync(join(f.root, "advance"), base);
+  advanceAtTransport = true;
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /actual ref update differs from the update checked by the required gate/);
+  assert.deepEqual(pushes, [["push", "origin", `${verifiedHead}:refs/heads/${branch}`]], "the race happens after the final read");
+  assert.equal(tip(), ancestor, "the transport refuses a fast-forward from the unverified tip");
+  assert.equal(readFileSync(mark, "utf8"), `${base}\n${base}\n`, "the gate's verdict was measured against the old tip only");
+
+  // Positive control: an unmoved tip the head descends from takes the plain fast-forward.
+  setTip(base);
+  advanceAtTransport = false;
   await withLiveWritesAllowed(() => defaults.push(source, run));
-  assert.deepEqual(pushes, [["push", "origin", `${verifiedHead}:refs/heads/${branch}`]]);
+  assert.deepEqual(pushes, Array.from({ length: 2 }, () => ["push", "origin", `${verifiedHead}:refs/heads/${branch}`]));
   assert.ok(!pushes.flat().some((arg) => /^--force|^-f$|^\+/.test(arg)), "no force option and no `+` refspec");
   assert.equal(tip(), verifiedHead);
 });

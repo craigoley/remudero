@@ -972,10 +972,8 @@ export function worktreePushExecAsync(
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
-    // A required gate judged the push from the remote tip it read. The push carries no force option: Git and the
-    // remote refuse it unless it fast-forwards, and the gate checked that the tip it read is an ancestor of the head.
-    // The tip is read again just before the push and must still be the one the gate judged. That re-read is not
-    // atomic with the push; only a lease is, and a lease is a force option, so this narrows the window, no more.
+    // Refuse known drift before opening the push transport. The transport's hook also compares the actual
+    // update to the checked update, including on a credential retry with a new remote advertisement.
     if (gate?.sampled !== undefined) {
       const sampled = gate.sampled;
       const now = String(await read(sampled.args)).trim();
@@ -989,7 +987,10 @@ export function worktreePushExecAsync(
     await pushWithAuthRetry(async (env) => {
       try {
         signal?.throwIfAborted();
-        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, {
+          stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal,
+          expectedPushUpdate: requireGate ? gate?.input : undefined,
+        });
         signal?.throwIfAborted();
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);

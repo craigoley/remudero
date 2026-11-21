@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn as spawnChild } from "node:child_process";
-import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,6 +10,7 @@ import { performance } from "node:perf_hooks";
 import { execFileRouted, spawnRoute } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { DANGLING_REF_MAX_BUFFER, retryAfterDanglingRefRepair, retryAfterDanglingRefRepairAsync, type RepairGit } from "./git-fetch-retry.js";
+import { withTempDir } from "./tmp.js";
 
 /**
  * W1-T6106 — THE ONE WAY HOST CODE RUNS GIT WITH A WORKER WORKTREE AS ITS REPOSITORY.
@@ -610,10 +611,29 @@ function stoppableGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Om
 }
 
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
-export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
+export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[],
+  opts: HostWorktreeGitOptions & { expectedPushUpdate?: string } = {}): Promise<string> {
+  const expected = opts.expectedPushUpdate;
+  if (expected === undefined) return runHostGitAsync(worktreePath, args, opts);
+  // Git's advertisement binds the gate to the actual old and new object IDs. After the hook,
+  // receive-pack applies the update only while the old object ID still matches.
+  return withTempDir("push-update", (dir) => {
+    const hooks = realpathSync(dir);
+    writeFileSync(join(hooks, "pre-push.expected"), expected, { mode: 0o600 });
+    writeFileSync(join(hooks, "pre-push"), `#!/bin/sh
+/usr/bin/cmp -s "$0.expected" - && exit 0
+echo "pre-push: the actual ref update differs from the update checked by the required gate" >&2
+exit 1
+`, { mode: 0o700 });
+    return runHostGitAsync(worktreePath, args, opts, hooks);
+  });
+}
+
+async function runHostGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions, pushHooks?: string): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs, opts.signal);
-  const { stdio: _stdio, input, signal, ...spawn } = spawnOptions(pin, opts, overrides);
+  const { stdio: _stdio, input, signal, ...spawn } = spawnOptions(pin, opts,
+    pushHooks === undefined ? overrides : [...overrides, ["core.hooksPath", pushHooks]]);
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
     const route = spawnRoute(spawn);
