@@ -494,3 +494,86 @@ test("W1-T13951 criterion 3: the accumulator never holds more than the limit and
     assert.ok(held() <= CODEX_WORKER_STDOUT_MAX_BYTES);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("W1-T13951 criterion 1: an agent_message is classified from its whole line in any key order, and a decoy never is", async () => {
+  // The reviewer's counterexample: the `type` fields written after an 819,200-byte `text` hid the item from a
+  // 1 KiB head scan, and the line was cut to 327,647 bytes.
+  const text = "f".repeat(819_200);
+  const body = JSON.stringify(text);
+  const lines = [
+    `{"item":{"id":"item_9","text":${body},"type":"agent_message"},"type":"item.completed"}`,
+    `{"type":"item.completed","item":{"text":${body},"id":"item_9","type":"agent_message"}}`,
+    `{"item":{"type":"agent_message","text":${body}},"type":"item.completed"}`,
+    `{ "item" : { "text" : ${body} , "type" : "agent_message" } , "type" : "item.completed" }`,
+    `{"\\u0074ype":"item.completed","item":{"text":${body},"typ\\u0065":"agent_message"}}`,
+  ];
+  for (const line of lines) {
+    const kept = await filledBudget(line, [16]);
+    assert.ok(kept.text === text, `kept whole: ${line.slice(0, 40)}…${line.slice(-60)}`);
+    assert.equal(kept.retention, "complete");
+  }
+  const decoys = [
+    `{"type":"item.completed","item":{"meta":{"type":"agent_message"},"type":"command_execution","aggregated_output":${body}}}`,
+    `{"type":"item.started","item":{"type":"agent_message","text":${body}}}`,
+    `{"type":"item.completed","item":{"type":"command_execution","aggregated_output":${JSON.stringify(`"type":"agent_message"${text}`)}}}`,
+  ];
+  for (const decoy of decoys) {
+    const result = await filledBudget(decoy, [16]);
+    assert.ok(result.blocks[0] === "e".repeat(786_490), `a decoy reclaims nothing: ${decoy.slice(0, 60)}`);
+  }
+});
+
+test("W1-T13951 criterion 2: a spilled error whose head and tail would overlap counts each source byte once", async () => {
+  // The reviewer's counterexample: a 300,039-byte error event spilled under retention pressure joined a 64 KiB
+  // head and a 256 KiB tail that shared bytes, and its eviction counted them twice.
+  for (const size of [262_200, 300_039, 327_679, 327_680, 327_700, 400_000]) {
+    const child = reviewer();
+    try {
+      const earlier = "m".repeat(1_000_000);
+      child.message(earlier);
+      const envelope = Buffer.byteLength(JSON.stringify({ type: "error", error: { message: "" } }));
+      const message = "r".repeat(size - envelope);
+      child.raw(`${JSON.stringify({ type: "error", error: { message } })}\n`);
+      const final = "F".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 100);
+      child.message(final);
+      child.end();
+      const result = await child.run;
+      assert.ok(result.text === final, `size ${size}: the final message is retained whole`);
+      assert.equal(result.outputTruncation!.droppedBytes, earlier.length + message.length, `size ${size}: each source byte once`);
+    } finally { rmSync(child.home, { recursive: true, force: true }); }
+  }
+});
+
+test("W1-T13951 criterion 3: retainedBytes() stays within the limit after every push, mid-line spills included", () => {
+  // The reviewer's counterexample: a 65,536-byte spill head held beside 1,020,000 retained bytes read 1,085,536.
+  const big = "x".repeat(2 * 1024 * 1024);
+  const spilled = [
+    JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: big } }),
+    JSON.stringify({ type: "error", error: { message: big } }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: big } }),
+    JSON.stringify({ type: "item.completed", item: { text: "a".repeat(900_000), type: "agent_message" } }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "b".repeat(300_000) } }),
+  ];
+  for (const line of spilled) {
+    for (const lead of [1, 16, 65_536]) {
+      const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t13951-push-`));
+      try {
+        const accumulator = new CodexJsonlAccumulator(0, join(dir, "stdout-pending.jsonl"));
+        const held = () => Object.entries(accumulator).reduce((sum, [key, value]) => ["sessionId", "pendingFile"].includes(key) ? sum
+          : sum + [value].flat(2).reduce((n: number, item) => n + (typeof item === "string" ? Buffer.byteLength(item) : 0), 0), 0);
+        const check = (at: string) => {
+          assert.ok(accumulator.retainedBytes() <= CODEX_WORKER_STDOUT_MAX_BYTES, `${at}: ${accumulator.retainedBytes()} retained`);
+          assert.equal(accumulator.retainedBytes(), held(), `${at}: retainedBytes() counts everything held`);
+        };
+        accumulator.push(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "k".repeat(1_020_000) } })}\n`);
+        check("before the line");
+        const stream = line + "\n";
+        for (let offset = 0; offset < Math.min(lead, 64); offset++) { accumulator.push(stream[offset]!); check(`byte ${offset}`); }
+        for (let offset = Math.min(lead, 64); offset < stream.length; offset += 65_536) {
+          accumulator.push(stream.slice(offset, offset + 65_536));
+          check(`offset ${offset} of ${line.slice(0, 40)}`);
+        }
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    }
+  }
+});
