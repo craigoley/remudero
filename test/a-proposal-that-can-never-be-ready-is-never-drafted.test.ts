@@ -172,7 +172,8 @@ test("daemon readiness setup fails open and logs the unreadable readiness contex
     join(stateDir, "inbox-proposals.json"),
     JSON.stringify({ proposals: [proposal("P-UNREADABLE-CONTEXT"), clean] }),
   );
-  writeFileSync(join(stateDir, LEDGER_FILENAME), JSON.stringify({
+  mkdirSync(join(stateDir, LEDGER_FILENAME));
+  writeFileSync(join(stateDir, "ledger.2026-11-19T00-00-00-000Z.ndjson"), JSON.stringify({
     step: "inbox.drafted", proposal_id: clean.id, draft_input_key: draftInputKey(clean), lint_clean: true,
   }) + "\n");
 
@@ -188,15 +189,14 @@ test("daemon readiness setup fails open and logs the unreadable readiness contex
       drafted = due.map((p) => p.id);
       return due.map((p) => ({ proposalId: p.id, ok: false as const, error: "ordinary failure" }));
     },
-    undefined,
-    () => { throw new Error("main commit unavailable for readiness"); },
   );
 
   await hook();
 
   assert.deepEqual(drafted, ["P-UNREADABLE-CONTEXT"], "unreadable readiness keeps new inputs due and clean inputs retired");
   const unavailable = logs.filter((l) => l.step === "inbox.draft_readiness_unavailable");
-  assert.deepEqual(unavailable.map((l) => l.extra.error), ["main commit unavailable for readiness"]);
+  assert.equal(unavailable.length, 1);
+  assert.match(String(unavailable[0]?.extra.error), /EISDIR|illegal operation/);
 });
 
 test("manual inbox force still drafts a named proposal that daemon selection excludes", () => {

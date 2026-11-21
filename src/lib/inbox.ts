@@ -503,15 +503,13 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** Retain every clean input for each proposal, including inputs it has since moved away from. */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
-  const keys = new Map<string, Set<string>>();
+/** Fold receipts in ledger order, keeping the newest lint-clean input for each proposal. */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
+  const keys = new Map<string, string>();
   for (const row of rows) {
-    if (row.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
-      typeof row.draft_input_key !== "string") continue;
-    const seen = keys.get(row.proposal_id) ?? new Set<string>();
-    seen.add(row.draft_input_key);
-    keys.set(row.proposal_id, seen);
+    if (row.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string") continue;
+    if (typeof row.draft_input_key === "string") keys.set(row.proposal_id, row.draft_input_key);
+    else keys.delete(row.proposal_id);
   }
   return keys;
 }
@@ -569,10 +567,11 @@ export function draftsDueOnDaemon(
     const inputKey = draftInputKey(p);
     const cached = drafts[p.id];
     const cachedInput = cached?.completion?.snapshot?.proposal;
+    const initialRound = (p.reframeHistory ?? []).length === 0;
     const hasCurrentDraft = cachedInput
       ? draftInputKey(cachedInput) === inputKey
-      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors));
-    if (clean.get(p.id)?.has(inputKey)) {
+      : Boolean(cached && initialRound && !isDraftStale(cached, p.evidenceAnchors));
+    if (clean.get(p.id) === inputKey) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }

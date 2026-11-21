@@ -38020,28 +38020,6 @@ export function buildInboxDraftHook(
         catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
       }
       try {
-      const ledgerLines = readLedgerLines(ledgerPath);
-      // Read live before listing archives so a concurrent rotation cannot hide a receipt.
-      const draftReceipts = await readLedgerUnionRecordsMemoized(dirname(ledgerPath), draftHistory, {
-        step: receiptSteps,
-        refuseIncomplete: true,
-        readLiveRecords: () => ledgerLines.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step)),
-      });
-      if (!draftReceipts.ok) throw new Error(`incomplete inbox draft history: ${draftReceipts.unread.join(", ")}`);
-      const draftLedgerRows = draftReceipts.rows.filter(row => row.repository === undefined || row.repository === causalScope.repository);
-      const reportedMissing = new Set<string>();
-      for (const row of draftLedgerRows) {
-        if (row.step === "inbox.draft_cache_missing" && typeof row.proposal_id === "string" && typeof row.draft_input_key === "string") {
-          reportedMissing.add(JSON.stringify([row.proposal_id, row.draft_input_key]));
-        }
-      }
-      const onMissingCleanDraft = (proposalId: string, inputKey: string) => {
-        const key = JSON.stringify([proposalId, inputKey]);
-        if (reportedMissing.has(key)) return;
-        log("inbox.draft_cache_missing", { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository });
-        reportedMissing.add(key);
-      };
-
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(inboxRoot, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
@@ -38087,8 +38065,10 @@ export function buildInboxDraftHook(
 
       const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
       let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
-        grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)), draftLedgerRows, onMissingCleanDraft };
+        grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
+      let ledgerLines: Record<string, unknown>[] = [];
       try {
+        ledgerLines = readLedgerLines(ledgerPath); // ledger-read-intent: union — capture live before listing archives.
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
@@ -38101,6 +38081,28 @@ export function buildInboxDraftHook(
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
+
+      const draftReceipts = await readLedgerUnionRecordsMemoized(dirname(ledgerPath), draftHistory, {
+        step: receiptSteps,
+        readLiveRecords: () => ledgerLines.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step)),
+      });
+      if (draftReceipts.unread.length > 0) {
+        log("inbox.draft_readiness_unavailable", { error: `incomplete inbox draft history: ${draftReceipts.unread.join(", ")}` });
+      }
+      const draftLedgerRows = draftReceipts.rows.filter(row => row.repository === undefined || row.repository === causalScope.repository);
+      const reportedMissing = new Set<string>();
+      for (const row of draftLedgerRows) {
+        if (row.step === "inbox.draft_cache_missing" && typeof row.proposal_id === "string" && typeof row.draft_input_key === "string") {
+          reportedMissing.add(JSON.stringify([row.proposal_id, row.draft_input_key]));
+        }
+      }
+      draftSelection.draftLedgerRows = draftLedgerRows;
+      draftSelection.onMissingCleanDraft = (proposalId, inputKey) => {
+        const key = JSON.stringify([proposalId, inputKey]);
+        if (reportedMissing.has(key)) return;
+        log("inbox.draft_cache_missing", { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository });
+        reportedMissing.add(key);
+      };
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
       // Explicit saved-conversation drafting narrows selection; every cadence, retry, ownership and spend guard stays the same.
