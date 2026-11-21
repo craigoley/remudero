@@ -12253,6 +12253,19 @@ export function reviewStatusOwnerRun(description: string | undefined): string | 
   return run;
 }
 
+/** W1-T14035: the run that WROTE a live `remudero-review` status another run reads, never one its text quotes. A claim opens
+ *  with its writer (postReviewPending's claim and both takeover wordings); any other post names its writer only by a trailing
+ *  "owned by run <id>)" with no other run named anywhere in it. A legacy hold can name itself and then quote another run, and
+ *  a newer one quotes and then marks itself, so text naming two runs has no readable writer and its reader holds. */
+export function reviewLiveStatusWriterRun(description: string | undefined): string | undefined {
+  const text = description ?? "";
+  const claimant = /^(?:remudero-review: review in progress|pending) \(owned by run ([^\s)]+)\)/.exec(text)?.[1];
+  if (claimant !== undefined) return claimant;
+  const named = new Set([...text.matchAll(/owned by run ([^\s)]+)\)/g)].map((match) => match[1]));
+  const trailing = / \(owned by run ([^\s)]+)\)$/.exec(text)?.[1];
+  return trailing !== undefined && named.size === 1 ? trailing : undefined;
+}
+
 /** W1-T14035: a pending `remudero-review` description that names the run publishing it, within GitHub's 140 characters.
  *  The text is cut, never the marker: a hold (promise harvest, cannot-evaluate, host load, an ops redaction) names its
  *  run exactly as a claim does, so a reader that proves a run dead can tell that run's status from a newer one. */
@@ -13044,7 +13057,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
     if (status) liveStatus = { state: status.state === "error" ? "failure" : status.state, description: status.description };
     if (status?.state === "pending") {
-      const foreignRun = reviewStatusOwnerRun(status.description);
+      // W1-T14035: only the status's own writer is assessed; a run its text quotes is never taken over.
+      const foreignRun = reviewLiveStatusWriterRun(status.description);
       if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
       if (foreignRun !== opts.runId) {
         const claimedAtMs = Date.parse(status.created_at ?? "");

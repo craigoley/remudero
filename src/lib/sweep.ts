@@ -6855,7 +6855,7 @@ function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: numb
     // W1-T14035: a dead pending claim is a review demand only where the alongside-CI row would admit it, so the loop
     // backstop never pre-empts that row's CI-age guard (a 30 s pending waits) or the stale-CI row at the ceiling.
     (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none" ||
-      (deadClaimReviewable(pr) && alongsideCiReviewDue(pr, policy, now))) &&
+      (pendingClaimOwnerProvenDead(pr) && alongsideCiReviewDue(pr, policy, now))) &&
     loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP &&
     loop.postsSinceLastAdmission >= 1;
 }
@@ -6885,11 +6885,13 @@ function pendingClaimOwnerProvenDead(
   return pr.reviewState === "pending" && producerProvedOwnerDead(pr);
 }
 
-/** W1-T14035 — a dead claim is re-run alongside CI only where {@link reviewDemandLooping} can bound it: an explicit zero
- *  attempts and the input's digest and loop facts all read. Absent, the count is unknown, never zero, and the head waits. */
+/** W1-T14035 — a dead claim is re-run alongside CI unless the input's loop facts, where read, show it looping (the
+ *  {@link reviewDemandLooping} backstop's own test). The attempt count keeps the row's `?? 0` (design item 2); the loop
+ *  bound decides, so a looping input with no count waits instead of being admitted again. */
 function deadClaimReviewable(pr: SweepPrView): boolean {
-  return pendingClaimOwnerProvenDead(pr) && pr.priorReviewAttemptsForInput === 0 &&
-    pr.reviewInputDigest !== undefined && pr.reviewInputLoop !== undefined;
+  const loop = pr.reviewInputLoop;
+  return pendingClaimOwnerProvenDead(pr) &&
+    !(loop !== undefined && loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP && loop.postsSinceLastAdmission >= 1);
 }
 
 /** W1-T14035 — the alongside-CI post-review row's own guards over a head whose checks are pending: CI registered at least a

@@ -13,8 +13,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewInputDigest, reviewPendingDescriptionWithOwner,
-  reviewStatusOwnerRun, type ReviewVerdict } from "#src/lib/review.js";
+import { judgeReview, postReviewPending, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewInputDigest,
+  reviewLiveStatusWriterRun, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, type ReviewVerdict } from "#src/lib/review.js";
 import { catalogReviewPoster } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
@@ -557,16 +557,62 @@ test("W1-T14035 criterion 3: a newer hold with the dead run's text waits when th
 });
 
 test("W1-T14035 criterion 1: a dead claim with no attempt count, at an input admitted twice with a post since, is not re-run", () => {
-  // The alongside-CI lane takes a dead claim only where the reviewInputLoop backstop can bound it, which needs an explicit
-  // zero: an absent count is unknown, not zero, so the head waits instead of being admitted a third time.
+  // The loop bound decides, not whether the count was read: the reviewInputLoop facts show this input looping, so the head
+  // waits instead of being admitted a third time even though no attempt count names the earlier judgment.
   const loop = { admissions: 2, postsSinceLastAdmission: 1, posts: 1, lookedUpKey: "W1-T14035" };
   const unknown = deriveDisposition(deadClaimView({ priorReviewAttemptsForInput: undefined, reviewInputDigest: "e".repeat(64),
     reviewInputLoop: loop }), DEFAULT_SWEEP_POLICY, NOW);
-  assert.notEqual(unknown.disposition, "post-review", "an absent attempt count never reads as zero");
-  assert.equal(unknown.disposition, "wait");
-  for (const missing of [{ reviewInputDigest: undefined }, { reviewInputLoop: undefined }]) {
-    const r = deriveDisposition(deadClaimView({ reviewInputDigest: "e".repeat(64), reviewInputLoop: { ...loop, admissions: 0,
-      postsSinceLastAdmission: 0, posts: 0 }, ...missing }), DEFAULT_SWEEP_POLICY, NOW);
-    assert.equal(r.disposition, "wait", `${Object.keys(missing)[0]} absent: the loop bound cannot be read`);
+  assert.equal(unknown.disposition, "wait", "a looping input is not re-admitted for want of an attempt count");
+});
+
+test("W1-T14035 criterion 1: a dead claim with no attempt count and zero admissions is re-run alongside CI", () => {
+  // Design item 2 keeps the row's `(priorReviewAttemptsForInput ?? 0) === 0`, and the digest and loop facts are optional:
+  // with nothing showing a loop, a proven-dead claim at 42 minutes of pending CI is released.
+  const views = [
+    deadClaimView({ priorReviewAttemptsForInput: undefined, reviewInputDigest: undefined, reviewInputLoop: undefined }),
+    deadClaimView({ priorReviewAttemptsForInput: undefined,
+      reviewInputLoop: { admissions: 0, postsSinceLastAdmission: 0, posts: 0, lookedUpKey: "W1-T14035" } }),
+  ];
+  for (const pr of views) {
+    const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "post-review", `loop facts ${pr.reviewInputLoop === undefined ? "absent" : "zero"}`);
+    assert.match(r.reason, /^checks pending 42m, remudero-review owner proven dead — re-running one exact-input review alongside CI/);
   }
+});
+
+test("W1-T14035 criterion 3: a live hold that names itself and then quotes a dead run is never taken over", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-claim-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const sha = "d".repeat(40);
+  const prUrl = "https://github.com/o/r/pull/19791";
+  const LIVE = "review-PR19791-live";
+  // The dead run claimed this head before a body edit; the live run's legacy hold, posted 2 minutes ago, names itself first
+  // and then quotes the dead run. The body edit moves the input digest, so the reviewer reads the live status's owner.
+  appendLedger(ledgerPath, {
+    run_id: DEAD, task_id: "W1-T14035", step: "review.pending_posted", ts: new Date(Date.now() - 23 * 60_000).toISOString(),
+    head_sha: sha, pr_url: prUrl, review_input_digest: reviewInputDigest(sha, "Remudero-Task: W1-T14035"),
+    host: hostname(), owner_pid: 41, owner_started_at: new Date(Date.now() - 23 * 60_000).toISOString(),
+  });
+  const description = `remudero-review: cannot-evaluate — run ${LIVE} (owned by run ${LIVE}) found remudero-review ` +
+    `already pending (owned by run ${DEAD})`;
+  const assessed: string[] = [];
+  const posts: string[] = [];
+  const result = await postReviewPending({
+    owner: "o", repo: "r", sha, taskId: "W1-T14035", prUrl, runId: "review-PR19791-next", ledgerPath,
+    reviewInputDigest: reviewInputDigest(sha, "Remudero-Task: W1-T14035\n\nedited body"),
+    ownerIdentity: { pid: process.pid, startedAt: new Date().toISOString() },
+    fetchLifecycle: () => ({ merged: false, closed: false }),
+    fetchStatus: () => ({ statuses: [{ context: "remudero-review", state: "pending", description,
+      created_at: new Date(Date.now() - 2 * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z") }] }),
+    assessPendingOwner: (record) => { assessed.push(record.runId); return record.runId === DEAD ? "dead" : "active"; },
+    post: (status) => { posts.push(status.description ?? ""); },
+  });
+  assert.equal(result.posted, false, result.reason);
+  assert.deepEqual(posts, [], "no takeover claim is published over the live run's hold");
+  assert.ok(!assessed.includes(DEAD), "the quoted dead run is never assessed as the status's owner");
+  assert.equal(reviewLiveStatusWriterRun(description), undefined, "text naming two runs has no readable writer");
+  assert.equal(reviewLiveStatusWriterRun(`pending (owned by run ${LIVE}) — took over run ${DEAD}: owner proven dead`), LIVE,
+    "a takeover claim's writer is its opening run, not the run it took over");
+  assert.equal(reviewLiveStatusWriterRun(`${OPS_HOLD} (owned by run ${LIVE})`), LIVE, "a marked hold names its writer");
 });
