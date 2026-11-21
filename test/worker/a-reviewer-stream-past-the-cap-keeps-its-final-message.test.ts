@@ -35,6 +35,7 @@ function reviewer() {
     command: (output: string) => write(`${JSON.stringify({ type: "item.completed", item: {
       id: "item_7", type: "command_execution", command: "/bin/bash -lc 'cat src/lib/worker-provider.ts'",
       aggregated_output: output, exit_code: 0, status: "completed" } })}\n`),
+    close: () => { stdout.end(); proc.emit("exit", 0); },
     end: () => {
       stdout.end('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":25,"output_tokens":10}}\n');
       proc.emit("exit", 0);
@@ -457,7 +458,8 @@ test("W1-T13951 criterion 2: dropped bytes never exceed the source bytes and equ
     child.end();
     const result = await child.run;
     assert.ok(result.text === final);
-    const source = payloads.reduce((sum, payload) => sum + Buffer.byteLength(payload), 0);
+    // The messages were held whole, so each counts its decoded bytes, as an eviction always has.
+    const source = payloads.reduce((sum, payload) => sum + Buffer.byteLength(JSON.parse(`"${payload}"`) as string), 0);
     assert.equal(result.outputTruncation!.droppedBytes, source);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
@@ -576,4 +578,64 @@ test("W1-T13951 criterion 3: retainedBytes() stays within the limit after every 
       } finally { rmSync(dir, { recursive: true, force: true }); }
     }
   }
+});
+
+test("W1-T13951 criterion 1: a final message whose payload fits the limit is kept whole though its JSONL event does not", async () => {
+  // The reviewer's counterexample: an item of 1,048,564 serialized bytes in a 1,048,597-byte event; the cap
+  // was applied to the event and only 327,661 of the 1,048,530 text bytes were kept.
+  const child = reviewer();
+  try {
+    const itemOf = (text: string) => ({ type: "agent_message", text });
+    const text = "f".repeat(1_048_564 - Buffer.byteLength(JSON.stringify(itemOf(""))));
+    assert.equal(Buffer.byteLength(text), 1_048_530);
+    assert.equal(Buffer.byteLength(JSON.stringify(itemOf(text))), 1_048_564);
+    const line = JSON.stringify({ type: "item.completed", item: itemOf(text) });
+    assert.equal(Buffer.byteLength(line), 1_048_597);
+    child.command("c".repeat(2 * 1024 * 1024));
+    child.raw(line + "\n");
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === text, "the final message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    assert.ok(result.outputTruncation!.retainedBytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: evicting a diagnostic that never spilled counts its decoded bytes", async () => {
+  // The reviewer's counterexample: a diagnostic of 20,000 newlines was counted as its 40,000 escaped bytes.
+  const child = reviewer();
+  try {
+    const message = "\n".repeat(20_000);
+    child.raw(`${JSON.stringify({ type: "error", error: { message } })}\n`);
+    const final = "F".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 100);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === final);
+    assert.equal(result.outputTruncation!.droppedBytes, 20_000);
+    const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
+    assert.equal(receipt.output_truncation.droppedBytes, 20_000);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 3: unterminated whitespace at EOF is released, and the retained total stays within the limit", async () => {
+  // The reviewer's counterexample: a near-cap message, then 100 unterminated spaces left pending beside a 61-byte
+  // spill notice, reported 1,048,637 retained bytes.
+  const child = reviewer();
+  try {
+    const near = "n".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 100);
+    child.message(near);
+    // A short command line spills behind it and is read back whole: nothing is dropped, so the notice is added.
+    child.command("c".repeat(1000));
+    child.raw('{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n');
+    child.raw(" ".repeat(100));
+    child.close();
+    const result = await child.run;
+    assert.ok(result.text === near);
+    assert.equal(result.outputTruncation!.droppedBytes, 0);
+    assert.ok(result.blocks.some(block => block.includes("bytes spilled to disk")), "the spill notice is kept");
+    const blocks = result.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.ok(result.outputTruncation!.retainedBytes <= CODEX_WORKER_STDOUT_MAX_BYTES, `${result.outputTruncation!.retainedBytes} retained`);
+    assert.equal(result.outputTruncation!.retainedBytes, blocks);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
 });

@@ -2588,14 +2588,15 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
 /** W1-T13951: a spilled line's top-level `type` and `item.type`, by one streaming pass in any key order. */
-function spilledLineTypes(file: string): { type?: string; itemType?: string } {
-  const out: { type?: string; itemType?: string } = {};
+function spilledLineTypes(file: string): { type?: string; itemType?: string; textBytes?: number } {
+  const out: { type?: string; itemType?: string; textBytes?: number } = {};
   const keys: Array<string | undefined> = [];
   const objects: boolean[] = [];
   let expectKey = false;
   let inString = false;
   let escaped = false;
   let captured: number[] = [];
+  let start = 0;
   const fd = openSync(file, "r");
   try {
     const buf = Buffer.alloc(64 * 1024);
@@ -2613,9 +2614,11 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string } {
             expectKey = false;
           } else if (keys.length === 1 && keys[0] === "type") out.type = text;
           else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "type") out.itemType = text;
+          else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "text") out.textBytes = pos + k - start;
         } else if (b === 0x22) {
           inString = true;
           captured = [];
+          start = pos + k + 1;
         } else if (b === 0x7b || b === 0x5b) {
           objects.push(b === 0x7b);
           keys.push(undefined);
@@ -2686,6 +2689,10 @@ function rawPayload(line: string, path: readonly string[], text: string, cut?: {
   return { raw, marks: at >= 0 && raw.startsWith(cut!.marker, at) ? [{ at, len: cut!.marker.length }] : [] };
 }
 
+function unitBytes(raw: string, stream: boolean): number {
+  return Buffer.byteLength(stream ? raw : JSON.parse(`"${raw}"`) as string);
+}
+
 function rawUnitEnd(raw: string, i: number): number {
   if (raw[i] === "\\") {
     if (raw[i + 1] !== "u") return i + 2;
@@ -2752,6 +2759,9 @@ export class CodexJsonlAccumulator {
   private readonly errors: string[] = [];
   private readonly errorSource: boolean[] = [];
   private readonly errorMarkers: Array<Array<{ at: number; len: number }>> = [];
+  /** W1-T13951: an entry cut by a spill counts stream bytes, as its spill did; any other counts decoded bytes. */
+  private readonly blockStreamUnit: boolean[] = [];
+  private readonly errorStreamUnit: boolean[] = [];
   private spillStart = 0;
   private readonly reroutes: string[] = [];
   /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
@@ -2820,9 +2830,12 @@ export class CodexJsonlAccumulator {
     let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
       const lineBytes = this.spilledBytes - this.spillStart;
-      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES ? spilledLineTypes(this.pendingFile!) : {};
-      const agent = types.type === "item.completed" && types.itemType === "agent_message";
-      if (agent) this.reclaimFor(lineBytes);
+      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(this.pendingFile!) : {};
+      // W1-T13951: the cap binds the payload retained, not its envelope.
+      const payload = types.textBytes ?? Infinity;
+      const agent = types.type === "item.completed" && types.itemType === "agent_message"
+        && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
+      if (agent) this.reclaimFor(payload);
       // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
       const whole = agent || lineBytes <= 320 * 1024;
       const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
@@ -2866,7 +2879,7 @@ export class CodexJsonlAccumulator {
   }
 
   finish(): ParsedCodexEvents {
-    if (this.spilling || this.pending.trim()) this.consumePending();
+    if (this.spilling || this.pending) this.consumePending();
     for (const held of [this.blocks, this.errors]) held.splice(0, held.length, ...held.map(raw => JSON.parse(`"${raw}"`) as string));
     const text = this.blocks.at(-1) ?? "";
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
@@ -2929,13 +2942,14 @@ export class CodexJsonlAccumulator {
     this.errors.push(raw ?? JSON.stringify(text).slice(1, -1));
     this.errorSource.push(raw !== undefined);
     this.errorMarkers.push(marks);
+    this.errorStreamUnit.push(marks.length > 0);
     this.keptBytes += Buffer.byteLength(this.errors.at(-1)!);
   }
 
   private store(kind: "block" | "error") {
     return kind === "block"
-      ? { texts: this.blocks, sources: [] as boolean[], markers: this.blockMarkers }
-      : { texts: this.errors, sources: this.errorSource, markers: this.errorMarkers };
+      ? { texts: this.blocks, sources: [] as boolean[], markers: this.blockMarkers, units: this.blockStreamUnit }
+      : { texts: this.errors, sources: this.errorSource, markers: this.errorMarkers, units: this.errorStreamUnit };
   }
 
   private yieldErrorsTo(room: number): void {
@@ -2968,17 +2982,18 @@ export class CodexJsonlAccumulator {
   private boundBlock(index: number, limit: number): void { this.boundEntry("block", index, limit); }
 
   private evictEntry(kind: "block" | "error", index: number): void {
-    const { texts, sources, markers } = this.store(kind);
+    const { texts, sources, markers, units } = this.store(kind);
     const raw = texts.splice(index, 1)[0]!;
     const own = markers.splice(index, 1)[0] ?? [];
     const source = sources.splice(index, 1)[0] ?? kind === "block";
+    const stream = units.splice(index, 1)[0]!;
     this.retainedTruncated = true;
-    if (source) this.droppedBytes += Buffer.byteLength(raw) - own.reduce((sum, marker) => sum + marker.len, 0);
+    if (source) this.droppedBytes += unitBytes(raw, stream) - own.reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), stream), 0);
   }
 
   /** Keep an entry's head and tail within `limit` bytes, never splitting an escape or a marker. */
   private boundEntry(kind: "block" | "error", index: number, limit: number): void {
-    const { texts, sources, markers: allMarkers } = this.store(kind);
+    const { texts, sources, markers: allMarkers, units } = this.store(kind);
     const raw = texts[index]!;
     const total = Buffer.byteLength(raw);
     if (total <= limit) return;
@@ -3006,8 +3021,8 @@ export class CodexJsonlAccumulator {
       }
     }
     const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
-      .reduce((sum, marker) => sum + marker.len, 0);
-    const dropped = Buffer.byteLength(raw.slice(head, tail)) - covered;
+      .reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), units[index]!), 0);
+    const dropped = unitBytes(raw.slice(head, tail), units[index]!) - covered;
     if (kind === "block" || sources[index]) this.droppedBytes += dropped;
     const marker = JSON.stringify(this.truncationMarker(dropped)).slice(1, -1);
     texts[index] = raw.slice(0, head) + marker + raw.slice(tail);
@@ -3081,6 +3096,7 @@ export class CodexJsonlAccumulator {
       const { raw, marks } = rawPayload(line, ["item", "text"], event.item.text, cut);
       this.blocks.push(raw);
       this.blockMarkers.push(marks);
+      this.blockStreamUnit.push(marks.length > 0);
       this.lastBlockTruncated = cut !== undefined;
       if (cut !== undefined) this.retainedTruncated = true;
       this.keptBytes += Buffer.byteLength(raw);
