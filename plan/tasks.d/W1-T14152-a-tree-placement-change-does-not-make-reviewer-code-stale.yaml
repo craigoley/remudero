@@ -22,6 +22,7 @@
     - test/a-run-task-advance-is-classified-by-review-path.test.ts
     - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
     - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
+    - test/reviewer-worktree-lease.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -153,6 +154,11 @@
     5. Before shipping, run the classifier by hand on the real history and put the output in the
        PR body: reviewerCodeFreshnessAt for 93b21bd1b^ -> 93b21bd1b must be fresh with advance
        immaterial, and for 096ba3f2b^ -> 096ba3f2b and 593c2168d^ -> 593c2168d must stay stale.
+    6. Amendment (hand pre-build, 2026-11-21): test/reviewer-worktree-lease.test.ts has the test
+       "reviewer lease changes are material to the loaded reviewer code", which asserts
+       reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts"]) is true. Step 1 makes it false
+       on purpose (criterion 5), so that test changes to assert false with this task's ground. No
+       other test outside files asserts the lease path or the buildFreshTreeReviewRunner root.
     No new cap, constant bound, env var or config key. This task does not change src/run-task.ts,
     src/lib/review.ts or any listed material path, so its own merge does not make the reviewer
     code stale.
