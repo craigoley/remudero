@@ -184,8 +184,7 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
-  /** W1-T14114: the board's catalog-combined plan (public plus ops) for this pass's public plan, only when the ops
-   *  catalog read is ok. It feeds the Inbox's board referents alone; the classifier's projection stays public. */
+  /** W1-T14114: the ok ops catalog's combined plan, for the Inbox's board referents only. */
   inboxReferentPlan?: (plan: Plan) => Plan | undefined;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
@@ -2185,7 +2184,7 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
-/** The Inbox's projection and board referents for one plan read; exported for W1-T14114's test. */
+/** The Inbox's projection and board referents for one plan read. */
 export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan, ledgerLines?: LedgerLines) {
   let openPrs: readonly PrRef[] | undefined;
   const statusDeps = { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
@@ -2194,13 +2193,8 @@ export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "stat
   return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, statusDeps) };
 }
 
-/**
- * W1-T14114: an open PR whose own task is filed only in the ops catalog has no public projection row, so its
- * escalation could never be verified. With an ok catalog, project just those ops tasks and let each one verify ONLY
- * the open PR that owns it unambiguously. Ops rows never join the projection inboxBoardReferents walks: a row there
- * would verify whichever PR it associates, so a PR with an unread body or contradictory claims could read a false
- * zero (W1-T130). The classifier's projection never sees these rows (W1-T12211).
- */
+/** W1-T14114: an ops-only task verifies only the one open PR that owns it unambiguously (W1-T130), outside the
+ *  projection inboxBoardReferents walks and the classifier's (W1-T12211). */
 function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
   openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): ReturnType<typeof inboxBoardReferents> {
   const referents = inboxBoardReferents(projection, openPrs);
@@ -2215,15 +2209,14 @@ function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">
   };
   const claimants = new Map<string, number>();
   for (const pr of openPrs!) for (const id of claimsOf(pr)) claimants.set(id, (claimants.get(id) ?? 0) + 1);
-  // An owner: an open PR still unverified, whose body was read, claiming exactly one ops-only task no other PR claims.
   const owners = new Map<string, PrRef>();
   for (const pr of openPrs!) {
     const state = referents.states.get(`#${pr.number}`);
-    if (pr.body === undefined || state?.status !== "open" || state.unhandledEscalations !== undefined) continue;
+    if (pr.body === undefined || state?.status !== "open") continue;
     const ids = claimsOf(pr);
     if (ids.size !== 1) continue;
     const [id] = ids;
-    if (claimants.get(id) !== 1 || plan.byId.has(id) || projection.has(id)) continue;
+    if (claimants.get(id) !== 1 || plan.byId.has(id)) continue;
     const task = combined.byId.get(id);
     if (task) owners.set(id, pr);
   }
@@ -2232,11 +2225,17 @@ function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">
   const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
   const states = new Map(referents.states);
   for (const [id, pr] of owners) {
+    const key = `#${pr.number}`;
+    const prior = states.get(key)!;
     const row = rows.get(id);
-    if (!row || row.taskId !== id || row.prNumber !== undefined && row.prNumber !== pr.number) continue;
-    if (row.merged || row.indeterminate || row.githubUnobservableSince || row.escalationUnverified) continue;
-    if (row.prState !== undefined && row.prState !== "OPEN") continue;
-    states.set(`#${pr.number}`, { status: "open", unhandledEscalations: row.needsHuman ? 1 : 0 });
+    const usable = row !== undefined && row.taskId === id && (row.prNumber === undefined || row.prNumber === pr.number)
+      && !row.merged && !row.indeterminate && !row.githubUnobservableSince && !row.escalationUnverified
+      && (row.prState === undefined || row.prState === "OPEN");
+    if (!usable) {
+      if (prior.unhandledEscalations !== undefined) states.delete(key);
+      continue;
+    }
+    states.set(key, { status: "open", unhandledEscalations: Math.max(prior.unhandledEscalations ?? 0, row.needsHuman ? 1 : 0) });
   }
   return { kind: "ok", states };
 }

@@ -201,3 +201,25 @@ test("W1-T14114 ops-filed own task row: an ops task two open PRs claim verifies 
   assert.deepEqual(read.boardReferents.states.get("#10"), { status: "open" }, "the contradictory PR reads no false zero");
   assert.deepEqual(read.boardReferents.states.get("#9"), { status: "open" }, "a shared claim is not unambiguous ownership");
 });
+
+test("W1-T14114 ops-filed own task row: a public row that also names the PR never hides its own ops task's open escalation", () => {
+  const open = [pr(11, "run-W1-T9-1795095230170", "Remudero-Task: W1-T9")];
+  const github = { ...gateway(open), prByRef: (ref: string | number) => (String(ref) === "11" ? open[0] : null) } as unknown as GitHub;
+  const pointing = planOf({ ...task("W1-T1"), pr: 11 } as Task);
+  const read = projectInboxPlan({ ledgerPath: ledgerWith(escalation), statusGithub: github,
+    inboxReferentPlan: (plan: Plan) => planOf(...plan.tasks, opsTask) }, pointing);
+  assert.deepEqual(read.boardReferents.states.get("#11"), { status: "open", unhandledEscalations: 1 }, "the live escalation is not retired");
+  const quiet = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: github, inboxReferentPlan: (plan: Plan) => planOf(...plan.tasks, opsTask) }, pointing);
+  assert.deepEqual(quiet.boardReferents.states.get("#11"), { status: "open", unhandledEscalations: 0 });
+});
+
+test("W1-T14114 ops-filed own task row: an own ops task whose escalation cannot be verified leaves the PR unverified, whatever a public row counts", () => {
+  const open = [pr(12, "run-W1-T9-1795095230170", "Remudero-Task: W1-T9")];
+  const github = { ...gateway(open), prByRef: (ref: string | number) => (String(ref) === "12" ? open[0] : null) } as unknown as GitHub;
+  const unseen = { ...escalation, issue_url: "https://github.com/craigoley/remudero/issues/78" };
+  const withOps = (plan: Plan) => planOf(...plan.tasks, opsTask);
+  const pointing = projectInboxPlan({ ledgerPath: ledgerWith(unseen), statusGithub: github, inboxReferentPlan: withOps }, planOf({ ...task("W1-T1"), pr: 12 } as Task));
+  assert.equal(pointing.boardReferents.states.get("#12"), undefined, "a public zero is not the whole answer");
+  const alone = projectInboxPlan({ ledgerPath: ledgerWith(unseen), statusGithub: github, inboxReferentPlan: withOps }, publicPlan);
+  assert.notDeepEqual(alone.boardReferents.states.get("#12"), { status: "open", unhandledEscalations: 0 });
+});
