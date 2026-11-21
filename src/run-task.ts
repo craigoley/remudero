@@ -1062,6 +1062,7 @@ import {
   classifyProposal,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
+  indexInboxDraftReceipts,
   resolvedInboxDraftLane,
   inboxDraftLaneForMount,
   decideDraftDeferral,
@@ -1415,7 +1416,7 @@ import {
 import { prStateCommand } from "./lib/pr-state.js";
 import { previewPlanTaskMigration } from "./lib/plan-task-migration.js";
 import { movePlanTask } from "./lib/plan-task-move.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRowsFor, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -37909,17 +37910,9 @@ function createInboxBakeoffReplay(
  * The daemon's per-poll DRAFT rung (W1-T192, ratifies P25's autonomous half). Reachable from
  * the daemon's OWN `deps.sweep()` seam (daemon.ts:274) — wired into {@link buildSweepHook}
  * below, riding the SAME slot the W1-T150 credit-backfill rung already occupies, never a
- * second, separately-scheduled loop. Selects candidates via {@link draftsDueOnDaemon}: the
- * SAME {@link proposalsNeedingDraft} predicate `rmd inbox` classifies against, further
- * throttled so a 300s poll cadence never re-spawns the Architect for the SAME cause (one
- * invalidation ⇒ one attempt — see lib/inbox.ts's `draftAttemptKey` doc). Every attempted
- * proposal's key is recorded in `state/inbox-draft-attempts.json` regardless of outcome —
- * a FAILED attempt is also throttled, or a stuck cause would re-spawn every poll forever
- * (the exact spend leak W1-T177 exists to prevent). Wrapped in its own try/catch so a
- * registry-read hiccup or a worktree failure is logged (`inbox.draft_rung.error`) and
- * skipped, never thrown up into the sweep/daemon loop — an un-drafted proposal is the status
- * quo, not a regression; `rmd inbox` remains available to force a draft on demand in the
- * meantime.
+ * second, separately-scheduled loop. {@link draftsDueOnDaemon} skips inputs with clean
+ * receipts and throttles failures per input and lane using `state/inbox-draft-attempts.json`.
+ * Errors are recorded as `inbox.draft_rung.error`. `rmd inbox` can still force a draft.
  */
 // Exported, with `draftBatch` an injectable seam defaulting to the real draftProposalBatch
 // (logic UNCHANGED — same mirrors runTask's opts.github escape hatch, drainCommand's
@@ -37958,7 +37951,14 @@ export function buildInboxDraftHook(
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
   const inboxRoot = planningStore?.root ?? config.root;
+  const inboxState = join(inboxRoot, "state");
   const shardReader = createProposalShardReader(proposalShardDir(join(inboxRoot, "state", "inbox-proposals.json")), { log });
+  const receiptSteps = ["inbox.drafted", "inbox.draft_cache_missing"];
+  const draftHistory = createLedgerRotationMemo(rows => rows.filter(row => typeof row.step === "string" && receiptSteps.includes(row.step)), {
+    pattern: /"inbox\.(?:drafted|draft_cache_missing)"/,
+    holder: "inbox-clean-drafts",
+    durableDigest: { reducerVersion: "1" },
+  });
   return async () => {
     try {
       const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
@@ -37971,6 +37971,76 @@ export function buildInboxDraftHook(
       const draftsPath = join(inboxRoot, "state", "inbox-drafts.json");
       const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
+      // ── W1-T2569: THE RE-ENTRANCY GUARD ───────────────────────────────────────────────────
+      // THE BOUND STOPS AWAITING; IT DOES NOT CANCEL. `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`
+      // (559_000, lib/daemon.ts) abandons `await deps.sweep()` at 9.3 minutes, but the sweep — and
+      // this rung inside it — KEEPS RUNNING DETACHED. A draft batch is 3 sequential drafts at a
+      // measured 316s median, ~948s end to end, so it is un-awaited EVERY time and the next loop
+      // iteration starts a fresh sweep carrying a fresh batch.
+      //
+      // MEASURED 2026-09-01, six consecutive cycles, perfect alternation:
+      //   batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 ...
+      // with `daemon.sweep.abandoned` carrying `elapsed_ms: 559000, bound_ms: 559000` exactly.
+      // Cost: 16 Architect spawns across 5 distinct proposals, $123.30, drafts cache frozen at 62.
+      //
+      // THIS IS WHY `buildInboxDraftHook`'s OWN DOC WAS WRONG to say the hook is "awaited to
+      // completion by the daemon's serial sweep tick" — corrected at that doc; see it for the
+      // wider class, which is NOT confined to this rung.
+      //
+      // O_EXCL + reclaimStaleLock, REUSED not reinvented: `acquireDrainLock` is already
+      // path-parameterised and already applies the pid+host staleness rule (`isHolderStale`) that
+      // W1-T1067 settled for `drain.lock`. A SECOND staleness rule here would be a second thing to
+      // drift. The staleness bound is load-bearing in the other direction too: without it a killed
+      // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
+      // file over.
+      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
+      // Checked before the lock and receipt selection so a deferred poll skips both.
+      // The instant comes from
+      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
+      // measured real string was more accurate than the headroom governor's belief at that moment.
+      //
+      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
+      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
+      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
+      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
+      // own stated window is the prerequisite, not a nicety.
+      // A repository-specific planning store cannot bypass either provider refusal window.
+      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
+      const deferralPaths = [...new Set([deferralPath, join(inboxRoot, "state", "inbox-draft-deferred-until.json")])];
+      for (const path of deferralPaths) {
+        const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(path)), Date.now());
+        if (deferral.defer) {
+          log("inbox.draft_batch.deferred", {
+            until: new Date(deferral.untilMs).toISOString(), remaining_ms: deferral.remainingMs, matched: deferral.matched,
+          });
+          return;
+        }
+      }
+
+      const draftLockPath = join(config.root, "state", "inbox-draft.lock");
+      let draftLock: DrainLockHandle;
+      try {
+        draftLock = acquireDrainLock(draftLockPath);
+      } catch (e) {
+        // A LIVE holder is the expected, healthy outcome of an abandoned-but-still-running batch —
+        // it is a SKIP, never an error. Ledgered so a stuck lock is visible rather than looking
+        // like a rung that quietly stopped firing.
+        log("inbox.draft_batch.skipped", {
+          reason: "another draft batch holds the lock",
+          detail: String((e as Error)?.message ?? e),
+        });
+        return;
+      }
+      try {
+      // Hold the fleet lock first, then the selected store's native lock. A live holder of
+      // either keeps its slot; failure to acquire the second releases only our first lock.
+      let storeLock: DrainLockHandle | undefined;
+      const storeLockPath = join(inboxRoot, "state", "inbox-draft.lock");
+      if (resolve(storeLockPath) !== resolve(draftLockPath)) {
+        try { storeLock = acquireDrainLock(storeLockPath); }
+        catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
+      }
+      try {
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(inboxRoot, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
@@ -38017,28 +38087,69 @@ export function buildInboxDraftHook(
       const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
       let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
         grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
+      let ledgerLines: Record<string, unknown>[] | undefined;
+      let liveReadFailure: { error: string } | undefined;
       try {
-        const ledgerLines = readLedgerLines(ledgerPath);
+        // ledger-read-intent: union — seed receipts before listing archives so rotation cannot hide a receipt.
+        ledgerLines = readLedgerLines(ledgerPath);
+      } catch (error) {
+        log("inbox.draft_readiness_unavailable", { error: String((error as Error)?.message ?? error) });
+        try {
+          ledgerLines = await readLiveLedgerRowsOffLoop(ledgerPath);
+        } catch (retryError) {
+          liveReadFailure = { error: String(retryError) };
+        }
+      }
+      const liveRows = ledgerLines;
+      if (liveRows) try {
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftSelection = {
-          retirement: lifecycleContext,
+          ...draftSelection,
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
-          openProposalIds: new Set(proposals.map((p) => p.id)),
-          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+          isRatified: (id) => isRatifiedInLedger(liveRows, id),
+          isDeclined: declinedWithReceipts(liveRows, inboxState),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
+
+      const historyDir = dirname(ledgerPath);
+      const unread: string[] = liveReadFailure ? [ledgerPath] : [];
+      const corpusSnapshot = listedLedgerFiles(historyDir, realLedgerFs, path => unread.push(path));
+      const liveDraftRows = liveRows?.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step));
+      const draftReceipts = await readLedgerUnionRecordsMemoized(historyDir, draftHistory, {
+        step: receiptSteps,
+        corpusSnapshot,
+        readLiveRecords: () => liveDraftRows ?? [],
+      });
+      unread.push(...draftReceipts.unread);
+      if (unread.length > 0) log("inbox.draft_history_partial", { unread, repository: causalScope.repository, ...liveReadFailure });
+      const draftLedgerRows = indexInboxDraftReceipts(inboxState, causalScope.repository, draftReceipts.rows, log);
+      const reportedMissing = new Set<string>();
+      for (const row of draftLedgerRows) {
+        if (row.step === "inbox.draft_cache_missing" && typeof row.proposal_id === "string" && typeof row.draft_input_key === "string") {
+          reportedMissing.add(JSON.stringify([row.proposal_id, row.draft_input_key]));
+        }
+      }
+      const newMisses: Record<string, unknown>[] = [];
+      const onMissingCleanDraft = (proposalId: string, inputKey: string) => {
+        const key = JSON.stringify([proposalId, inputKey]);
+        if (reportedMissing.has(key)) return;
+        const fields = { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository };
+        log("inbox.draft_cache_missing", fields);
+        newMisses.push({ step: "inbox.draft_cache_missing", ...fields });
+        reportedMissing.add(key);
+      };
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
       // Explicit saved-conversation drafting narrows selection; every cadence, retry, ownership and spend guard stays the same.
       // The ordinary cadence never selects a saved improvement: only its daemon-owned handoff names it here.
       const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
         : proposals.filter(proposal => proposal.id === onlyProposalId);
-      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
+      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, { ...draftSelection, draftLedgerRows, onMissingCleanDraft }, draftLane);
+      if (newMisses.length > 0) indexInboxDraftReceipts(inboxState, causalScope.repository, newMisses, log);
       const eligibleIds = new Set(eligible.map(proposal => proposal.id));
       for (const id of cashDeferred.keys()) if (!eligibleIds.has(id)) cashDeferred.delete(id);
       // Keep fit refusals due, behind fresh work and in least-recently-refused order.
@@ -38049,13 +38160,7 @@ export function buildInboxDraftHook(
       const due = selected.map(({ proposal }) => proposal);
       if (due.length === 0) return;
 
-      // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
-      // DAEMON_DRAFT_BATCH_CAP proposals per poll, so on a large registry `due` is a SLICE and the
-      // rest are still due. A cap that shows up nowhere is the "tested, inert" shape this repo has
-      // shipped before: the queue would drain at a bounded rate with no way to see the backlog or
-      // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
-      // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
-      // not silence, so the row is written unconditionally.
+      // W1-T2561: report how much eligible work the cap leaves for a later poll.
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -38063,83 +38168,7 @@ export function buildInboxDraftHook(
         cap: DAEMON_DRAFT_BATCH_CAP,
       });
 
-      // W1-T193: the console must render a proposal as DRAFTING (with its spawn time) for the
-      // whole window an Architect worker is actually running for it — "never lies about its
-      // own state", the same bar W1-T156 set for liveness. Written BEFORE the batch spawns and
-      // cleared in the `finally` below regardless of outcome, so a crash mid-draft is the only
-      // way this file can go stale (self-corrects: a stuck entry is overwritten the next time
-      // ANY draft batch runs, since this rung always writes its own full `due` set, never
-      // merges onto a stale one).
-      // ── W1-T2569: THE RE-ENTRANCY GUARD ───────────────────────────────────────────────────
-      // THE BOUND STOPS AWAITING; IT DOES NOT CANCEL. `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`
-      // (559_000, lib/daemon.ts) abandons `await deps.sweep()` at 9.3 minutes, but the sweep — and
-      // this rung inside it — KEEPS RUNNING DETACHED. A draft batch is 3 sequential drafts at a
-      // measured 316s median, ~948s end to end, so it is un-awaited EVERY time and the next loop
-      // iteration starts a fresh sweep carrying a fresh batch.
-      //
-      // MEASURED 2026-09-01, six consecutive cycles, perfect alternation:
-      //   batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 ...
-      // with `daemon.sweep.abandoned` carrying `elapsed_ms: 559000, bound_ms: 559000` exactly.
-      // Cost: 16 Architect spawns across 5 distinct proposals, $123.30, drafts cache frozen at 62.
-      //
-      // THIS IS WHY `buildInboxDraftHook`'s OWN DOC WAS WRONG to say the hook is "awaited to
-      // completion by the daemon's serial sweep tick" — corrected at that doc; see it for the
-      // wider class, which is NOT confined to this rung.
-      //
-      // O_EXCL + reclaimStaleLock, REUSED not reinvented: `acquireDrainLock` is already
-      // path-parameterised and already applies the pid+host staleness rule (`isHolderStale`) that
-      // W1-T1067 settled for `drain.lock`. A SECOND staleness rule here would be a second thing to
-      // drift. The staleness bound is load-bearing in the other direction too: without it a killed
-      // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
-      // file over.
-      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
-      // Checked FIRST — before the lock, before the registry is even consulted — so a deferred
-      // poll costs nothing: no lock churn, no `deps.spawn`, no Architect. The instant comes from
-      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
-      // measured real string was more accurate than the headroom governor's belief at that moment.
-      //
-      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
-      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
-      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
-      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
-      // own stated window is the prerequisite, not a nicety.
-      // A repository-specific planning store cannot bypass either provider refusal window.
-      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
-      const deferralPaths = [...new Set([deferralPath, join(inboxRoot, "state", "inbox-draft-deferred-until.json")])];
-      for (const path of deferralPaths) {
-        const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(path)), Date.now());
-        if (deferral.defer) {
-          log("inbox.draft_batch.deferred", {
-            until: new Date(deferral.untilMs).toISOString(), remaining_ms: deferral.remainingMs, matched: deferral.matched,
-          });
-          return;
-        }
-      }
-
-      const draftLockPath = join(config.root, "state", "inbox-draft.lock");
-      let draftLock: DrainLockHandle;
-      try {
-        draftLock = acquireDrainLock(draftLockPath);
-      } catch (e) {
-        // A LIVE holder is the expected, healthy outcome of an abandoned-but-still-running batch —
-        // it is a SKIP, never an error. Ledgered so a stuck lock is visible rather than looking
-        // like a rung that quietly stopped firing.
-        log("inbox.draft_batch.skipped", {
-          reason: "another draft batch holds the lock",
-          detail: String((e as Error)?.message ?? e),
-        });
-        return;
-      }
-      try {
-      // Hold the fleet lock first, then the selected store's native lock. A live holder of
-      // either keeps its slot; failure to acquire the second releases only our first lock.
-      let storeLock: DrainLockHandle | undefined;
-      const storeLockPath = join(inboxRoot, "state", "inbox-draft.lock");
-      if (resolve(storeLockPath) !== resolve(draftLockPath)) {
-        try { storeLock = acquireDrainLock(storeLockPath); }
-        catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
-      }
-      try {
+      // W1-T193: expose DRAFTING before spawn and clear it when the batch exits.
       const inflightPath = join(inboxRoot, "state", "inbox-draft-inflight.json");
       const spawnedAt = new Date().toISOString();
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
@@ -38169,15 +38198,6 @@ export function buildInboxDraftHook(
       for (const outcome of outcomes) {
         const proposal = due.find((p) => p.id === outcome.proposalId);
         if (!proposal) continue; // unreachable — outcomes are 1:1 with `due`
-        // IDEMPOTENCE (W1-T192): mark this cause ATTEMPTED whether it succeeded or failed —
-        // see this function's own doc for why a failed attempt must be throttled too.
-        //
-        // W1-T2564: EXCEPT A REFUSAL, WHICH IS NOT AN ATTEMPT. W1-T192's argument is that a cause
-        // which was TRIED and failed must not be retried every poll. A run the account turned away
-        // was never tried, so keying it does not throttle a failure — it retires work that never
-        // ran, permanently, because a routed follow-up's key is the literal `::0` and can never
-        // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
-        // W1-T192's throttle is untouched (its own test pins that).
         if (!outcome.ok && outcome.refused) {
           refusedThisBatch.push(outcome.proposalId);
         }
