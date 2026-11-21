@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import {
   ContainmentError,
   EGRESS_ALLOWED_HOST_FALLBACK,
@@ -35,9 +34,10 @@ import {
 } from "#src/lib/containment.js";
 import type { Config } from "#src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
-function settingsFile(contents: unknown): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-test-"));
+function settingsFile(t: TestContext, contents: unknown): string {
+  const { dir } = ownedFixtureDir(t, "containment-test");
   const path = join(dir, "worker.json");
   writeFileSync(path, JSON.stringify(contents));
   return path;
@@ -89,9 +89,32 @@ const denyingExec = (token: string): Promise<ProbeExecResult> =>
     costUsd: 0,
   });
 
-test("probeContainment: a sandbox-ENGAGED run (outside write OS-denied) PASSES", async () => {
+test("W1-T13194 criterion 1: a containment test removes its settings directory at teardown", async (t) => {
+  const { dir } = ownedFixtureDir(t, "containment-cleanup-test");
+  mkdirSync(join(dir, "rmd-containment-test-existing"));
+  const settingsEntries = () => readdirSync(dir).filter((name) => name.startsWith("rmd-containment-test-"));
+  const before = settingsEntries();
+  const tempVar = process.platform === "win32" ? "TEMP" : "TMPDIR";
+  const previous = process.env[tempVar];
+  process.env[tempVar] = dir;
+  try {
+    await t.test("run a containment probe with a settings fixture", async (subtest) => {
+      const path = settingsFile(subtest, ENABLED);
+      assert.equal(settingsEntries().length, before.length + 1);
+      const result = await probeContainment({ settingsFile: path, exec: denyingExec, token: "abc123" });
+      assert.equal(result.contained, true);
+    });
+    // W1-T13194 criterion 2: the pre-existing entry survives test-owned fixture disposal.
+    assert.deepEqual(settingsEntries(), before);
+  } finally {
+    if (previous === undefined) delete process.env[tempVar];
+    else process.env[tempVar] = previous;
+  }
+});
+
+test("probeContainment: a sandbox-ENGAGED run (outside write OS-denied) PASSES", async (t) => {
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     exec: denyingExec,
     token: "abc123",
   });
@@ -99,12 +122,12 @@ test("probeContainment: a sandbox-ENGAGED run (outside write OS-denied) PASSES",
   assert.match(res.reason, /OS-DENIED/);
 });
 
-test("probeContainment: a sandbox-DISABLED settings file FAILS CLOSED (config gate, before any spawn)", async () => {
+test("probeContainment: a sandbox-DISABLED settings file FAILS CLOSED (config gate, before any spawn)", async (t) => {
   let spawned = false;
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile({ sandbox: { enabled: false, failIfUnavailable: true } }),
+        settingsFile: settingsFile(t, { sandbox: { enabled: false, failIfUnavailable: true } }),
         exec: async () => {
           spawned = true;
           return { transcript: "", outsideWriteCreated: false, insideWriteCreated: false };
@@ -116,11 +139,11 @@ test("probeContainment: a sandbox-DISABLED settings file FAILS CLOSED (config ga
   assert.equal(spawned, false, "the config gate fails closed BEFORE spawning a probe");
 });
 
-test("probeContainment: a silently-DROPPED sandbox (outside write landed) FAILS CLOSED", async () => {
+test("probeContainment: a silently-DROPPED sandbox (outside write landed) FAILS CLOSED", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "xyz",
         exec: async (token) => ({
           transcript: `touch ../${token}.txt   # succeeded, no error`,
@@ -132,11 +155,11 @@ test("probeContainment: a silently-DROPPED sandbox (outside write landed) FAILS 
   );
 });
 
-test("probeContainment: outside file absent but denial not tied to THIS token FAILS CLOSED", async () => {
+test("probeContainment: outside file absent but denial not tied to THIS token FAILS CLOSED", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "mytoken",
         exec: async () => ({
           // A denial phrase, but for some OTHER path — not our token ⇒ unproven.
@@ -158,14 +181,14 @@ test("containmentProbePrompt: attempts an OUTSIDE-cwd write then an INSIDE-cwd w
 
 // ── W1-T91/P23: structured guard-cause on the thrown ContainmentError ───────
 
-test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) round-trips as a NAMED sub-state, not the generic 'unproven' (W1-T1281)", async () => {
+test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) round-trips as a NAMED sub-state, not the generic 'unproven' (W1-T1281)", async (t) => {
   // The transcript never mentions the token at all, though the probe DID land
   // its inside-cwd write — that specific combination is `write-never-attempted`
   // (W1-T1281's classifyUnprovenState), not the collapsed literal "unproven".
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "mytoken",
         exec: async () => ({
           transcript: "some unrelated line: Operation not permitted on /elsewhere",
@@ -185,11 +208,11 @@ test("W1-T91 ACCEPTANCE: the UNPROVEN containment state (no OS-denial observed) 
   );
 });
 
-test("ContainmentError: the sandbox-dropped state (outside write LANDED) is a PROVEN-BROKEN observed string, not 'unproven'", async () => {
+test("ContainmentError: the sandbox-dropped state (outside write LANDED) is a PROVEN-BROKEN observed string, not 'unproven'", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "xyz",
         exec: async (token) => ({
           transcript: `touch ../${token}.txt   # succeeded, no error`,
@@ -226,11 +249,11 @@ test("assessContainment: credentialFailure ⇒ FAILS CLOSED with the spawn_crede
   assert.doesNotMatch(v.reason, /UNPROVEN/);
 });
 
-test("probeContainment: a seeded error-result carrying 'Not logged in · Please run /login' yields the credential-named reason, FAILS CLOSED", async () => {
+test("probeContainment: a seeded error-result carrying 'Not logged in · Please run /login' yields the credential-named reason, FAILS CLOSED", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "credtok",
         exec: async () => ({
           transcript: "Not logged in · Please run /login",
@@ -251,11 +274,11 @@ test("probeContainment: a seeded error-result carrying 'Not logged in · Please 
   );
 });
 
-test("probeContainment: a genuine no-write, no-denial, non-error run yields the NAMED write-never-attempted state, not the generic unproven (credential path does not swallow it)", async () => {
+test("probeContainment: a genuine no-write, no-denial, non-error run yields the NAMED write-never-attempted state, not the generic unproven (credential path does not swallow it)", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "mytoken",
         exec: async () => ({
           transcript: "some unrelated line: Operation not permitted on /elsewhere",
@@ -298,11 +321,11 @@ test("assessContainment: credentialExpired ⇒ FAILS CLOSED with the DISTINCT sp
   assert.doesNotMatch(v.reason, /UNPROVEN/);
 });
 
-test("probeContainment: a seeded error-result carrying 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue' (an EXPIRED copied token) yields the DISTINCT spawn_credential_expired reason, FAILS CLOSED", async () => {
+test("probeContainment: a seeded error-result carrying 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue' (an EXPIRED copied token) yields the DISTINCT spawn_credential_expired reason, FAILS CLOSED", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "expiredtok",
         exec: async () => ({
           transcript: "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue",
@@ -326,7 +349,7 @@ test("probeContainment: a seeded error-result carrying 'Failed to authenticate. 
   );
 });
 
-test("probeContainment: a seeded 'Not logged in · Please run /login' result still yields the UNMODIFIED W1-T237 spawn_credential_failure reason, not the new expired reason", async () => {
+test("probeContainment: a seeded 'Not logged in · Please run /login' result still yields the UNMODIFIED W1-T237 spawn_credential_failure reason, not the new expired reason", async (t) => {
   // Guards against the fix regressing W1-T237: a locked/logged-out probe (never
   // logged in at all) must keep reporting spawn_credential_failure, not the new
   // spawn_credential_expired symbol — the two demand different operator action
@@ -334,7 +357,7 @@ test("probeContainment: a seeded 'Not logged in · Please run /login' result sti
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "lockedtok",
         exec: async () => ({
           transcript: "Not logged in · Please run /login",
@@ -355,11 +378,11 @@ test("probeContainment: a seeded 'Not logged in · Please run /login' result sti
   );
 });
 
-test("probeContainment: an UNRELATED error-result that merely mentions 'expired' (rate-limit / session-window text) is NOT mislabelled a credential expiry — falls through to the NAMED probe-never-ran state", async () => {
+test("probeContainment: an UNRELATED error-result that merely mentions 'expired' (rate-limit / session-window text) is NOT mislabelled a credential expiry — falls through to the NAMED probe-never-ran state", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "ratelimittok",
         exec: async () => ({
           // Deliberately shares the word "expired" with the real signature but
@@ -388,11 +411,11 @@ test("probeContainment: an UNRELATED error-result that merely mentions 'expired'
   );
 });
 
-test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to the NAMED probe-never-ran state", async () => {
+test("probeContainment: isError alone (no credential-shaped text) does NOT trip the credential verdict — falls through to the NAMED probe-never-ran state", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "othererr",
         exec: async () => ({
           transcript: "some unrelated transport failure",
@@ -492,11 +515,11 @@ test("classifyUnprovenState: the recorded state is DERIVED from evidence, not th
   assert.equal(state, "probe-never-ran");
 });
 
-test("probeContainment: an unproven failure with the outside-write step reported but no denial phrase matched records 'no-denial-observed', still FAILS CLOSED", async () => {
+test("probeContainment: an unproven failure with the outside-write step reported but no denial phrase matched records 'no-denial-observed', still FAILS CLOSED", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile(ENABLED),
+        settingsFile: settingsFile(t, ENABLED),
         token: "reportedtok",
         exec: async (token) => ({
           // The token IS mentioned (the step was reported on) but nothing in the
@@ -518,7 +541,7 @@ test("probeContainment: an unproven failure with the outside-write step reported
   );
 });
 
-test("probeContainment: ALL THREE unproven sub-states still refuse the run (verdict unchanged, only the record changes — design part iv)", async () => {
+test("probeContainment: ALL THREE unproven sub-states still refuse the run (verdict unchanged, only the record changes — design part iv)", async (t) => {
   const fixtures: Array<{ label: string; result: ProbeExecResult; expected: string }> = [
     {
       label: "probe-never-ran",
@@ -548,7 +571,7 @@ test("probeContainment: ALL THREE unproven sub-states still refuse the run (verd
     await assert.rejects(
       () =>
         probeContainment({
-          settingsFile: settingsFile(ENABLED),
+          settingsFile: settingsFile(t, ENABLED),
           token: "fixture-token",
           exec: async (token) => ({
             ...result,
@@ -570,8 +593,8 @@ test("probeContainment: ALL THREE unproven sub-states still refuse the run (verd
 
 // ── defaultExecutor: the real-spawn path plumbs isError through (W1-T237) ──
 
-test("defaultExecutor: passes the real spawn's isError through to ProbeExecResult", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-executor-test-"));
+test("defaultExecutor: passes the real spawn's isError through to ProbeExecResult", async (t) => {
+  const { dir } = ownedFixtureDir(t, "containment-executor-test");
   const config = { root: dir } as Config;
   const fakeSpawn = async (_args: SpawnWorkerArgs): Promise<WorkerResult> =>
     ({
@@ -596,11 +619,11 @@ test("defaultExecutor: passes the real spawn's isError through to ProbeExecResul
   assert.equal(result.insideWriteCreated, false);
 });
 
-test("ContainmentError: the static config gate (sandbox disabled) names its own guard-cause", async () => {
+test("ContainmentError: the static config gate (sandbox disabled) names its own guard-cause", async (t) => {
   await assert.rejects(
     () =>
       probeContainment({
-        settingsFile: settingsFile({ sandbox: { enabled: false, failIfUnavailable: true } }),
+        settingsFile: settingsFile(t, { sandbox: { enabled: false, failIfUnavailable: true } }),
         exec: async () => ({ transcript: "", outsideWriteCreated: false, insideWriteCreated: false }),
         token: "t",
       }),
@@ -696,11 +719,11 @@ test("W1-T1265: the egress command carries its own timeout and writes a marker p
   assert.ok(cmd.includes(EGRESS_BLOCKED_MARKER) && cmd.includes(EGRESS_ALLOWED_MARKER));
 });
 
-test("W1-T1265: a reported egress attempt derives denial from the blocked curl outcome rather than silence", async () => {
+test("W1-T1265: a reported egress attempt derives denial from the blocked curl outcome rather than silence", async (t) => {
   // Drives probeContainment's OWN egress wiring (not just the pure verdict): an executor
   // must supply the blocked request's own failed curl outcome (W1-T11437).
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     token: "tok1265",
     exec: async (): Promise<ProbeExecResult> => ({
       transcript: "tok1265 touch: ../tok1265.txt: Operation not permitted\negress: Connection refused",
@@ -806,12 +829,12 @@ test("W1-T2211: the probe prompt asks for the token-read attempt and its outcome
   assert.match(prompt, /^tokenread: /m);
 });
 
-test("W1-T2211: a reported token-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
+test("W1-T2211: a reported token-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async (t) => {
   // Drives probeContainment's OWN read-arm wiring (not just the pure verdict): an
   // executor that REPORTS a read attempt must have `tokenReadDenialSeen` computed
   // from the transcript. The `undefined` arm is covered by the unobserved case above.
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     token: "tok2211",
     exec: async (): Promise<ProbeExecResult> => ({
       transcript:
@@ -832,9 +855,9 @@ test("W1-T2211: a reported token-read attempt derives the denial from the transc
   assert.equal(assessTokenReadContainment(res.evidence).contained, true);
 });
 
-test("W1-T2211: an UNRELATED permission-denied line that never mentions service-tokens.json does NOT satisfy tokenReadDenialSeen", async () => {
+test("W1-T2211: an UNRELATED permission-denied line that never mentions service-tokens.json does NOT satisfy tokenReadDenialSeen", async (t) => {
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     token: "tok2211b",
     exec: async (): Promise<ProbeExecResult> => ({
       transcript:
@@ -850,8 +873,8 @@ test("W1-T2211: an UNRELATED permission-denied line that never mentions service-
   assert.equal(assessTokenReadContainment(res.evidence).contained, false);
 });
 
-test("W1-T2211: defaultExecutor observes the read arm's markers via existsSync, exactly like the write and egress arms", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-readarm-test-"));
+test("W1-T2211: defaultExecutor observes the read arm's markers via existsSync, exactly like the write and egress arms", async (t) => {
+  const { dir } = ownedFixtureDir(t, "containment-readarm-test");
   const config = { root: dir } as Config;
   const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     // Simulate the sandbox DENYING the token read and ALLOWING the control read —
@@ -1062,12 +1085,12 @@ test("W1-T2344: the egress command adds no pacing, throttle or sleep, and still 
   assert.equal(probeCommandCount(cmd), 0);
 });
 
-test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async () => {
+test("W1-T2213: a reported operator-home-read attempt derives the denial from the transcript rather than from silence, wired through probeContainment", async (t) => {
   // Drives probeContainment's OWN wiring for this arm (not just the pure
   // verdict): an executor that REPORTS a read attempt must have
   // `operatorHomeReadDenialSeen` computed from the transcript.
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     token: "tok2213",
     exec: async (): Promise<ProbeExecResult> => ({
       transcript:
@@ -1087,9 +1110,9 @@ test("W1-T2213: a reported operator-home-read attempt derives the denial from th
   assert.equal(assessOperatorHomeReadContainment(res.evidence).contained, true);
 });
 
-test("W1-T2213: an UNRELATED permission-denied line that never mentions config/remudero does NOT satisfy operatorHomeReadDenialSeen", async () => {
+test("W1-T2213: an UNRELATED permission-denied line that never mentions config/remudero does NOT satisfy operatorHomeReadDenialSeen", async (t) => {
   const res = await probeContainment({
-    settingsFile: settingsFile(ENABLED),
+    settingsFile: settingsFile(t, ENABLED),
     token: "tok2213b",
     exec: async (): Promise<ProbeExecResult> => ({
       transcript:
@@ -1105,8 +1128,8 @@ test("W1-T2213: an UNRELATED permission-denied line that never mentions config/r
   assert.equal(assessOperatorHomeReadContainment(res.evidence).contained, false);
 });
 
-test("W1-T2213: defaultExecutor observes this arm's marker via existsSync, exactly like the write, egress and token-read arms", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-containment-operatorhomearm-test-"));
+test("W1-T2213: defaultExecutor observes this arm's marker via existsSync, exactly like the write, egress and token-read arms", async (t) => {
+  const { dir } = ownedFixtureDir(t, "containment-operatorhomearm-test");
   const config = { root: dir } as Config;
   const fakeSpawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     // Simulate the sandbox DENYING the operator-home read and ALLOWING the
