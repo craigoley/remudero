@@ -109,7 +109,8 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // W1-T9792 re-baselined fix: the footer now teaches the REFUSED: block grammar, so a round that
   // finds a criterion unmeetable reports it for the refusal drafter
   // (test/a-fix-rounds-refused-criterion-becomes-a-plan-amendment.test.ts pins the new text itself).
-  assert.equal(sha256(fix), "a12461c1915b9693ab7488203d7b9d5804a76758222601a381e4c60183d0febc");
+  // W1-T14167 re-baselined fix: the reviewer-unmet round carries FIX_CLASS_NOT_PROBE_LINES (test/fix-lane/a-fix-round-closes-the-class-of-its-finding.test.ts pins the text).
+  assert.equal(sha256(fix), "d3d7a6d2d7e09226a9da3da4b5a1f05bce0ec96b0caa052c1ba5b91d2ff12350");
   assert.equal(sha256(prerequisite), "802d1ed90dfcdf9bafe73c210c63c61a2856e36228cd268235bc412543518b2b");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted

@@ -18,17 +18,25 @@ const { evaluateGate } = await import(gateSpecifier) as {
 };
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { WorkerResult } from "#src/lib/worker.js";
-import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import { bindCanonicalOpsCriteria, openPullRequestCheckedAsync, PrOpenRefusedError, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
+import { loadPlanFromYaml, type AcceptanceCriterion } from "#src/lib/plan.js";
+import { bindCanonicalCoreCriteria, bindCanonicalOpsCriteria, openPullRequestCheckedAsync, PrOpenRefusedError, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner } from "#src/lib/pr-open.js";
 
 const ID = "W1-T900008", TITLE = "Publish the approved fixture contract", PRIVATE = [
   "PRIVATE_RATIONALE_12208", "PRIVATE_DESIGN_12208", "PRIVATE_FALSIFIER_12208",
   "PRIVATE_NOTE_12208", "PRIVATE_ORIGIN_12208",
 ];
 const criteria = [{ claim: "the fixture exports its public value", proof: "grep: publicValue in src/fixture.ts" }];
-function yaml(acceptance: readonly AcceptanceCriterion[] = criteria) {
+const CORE_TARGET = "remudero-console";
+const CORE_RECORD_PATH = "plan/tasks.d/public-record.yaml";
+const CORE_REFUSALS = {
+  "core-mismatch": /differs from the selected task/,
+  "core-unpinned-path": /has no readable source record path/,
+  "core-missing-source": /plan\/tasks.d\/missing.yaml/,
+  "core-missing-commit": /origin\/main\^\{commit\}/,
+};
+function yaml(acceptance: readonly AcceptanceCriterion[] = criteria, repo = "remudero") {
   const records = acceptance.map(c => `    - claim: ${JSON.stringify(c.claim)}\n      proof: ${JSON.stringify(c.proof)}${c.satisfied_by ? `\n      satisfied_by: ${JSON.stringify(c.satisfied_by)}` : ""}`).join("\n");
-  return `- id: ${ID}\n  title: ${TITLE}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test#${PRIVATE[4]}\n  files: [src/fixture.ts]\n  rationale: ${PRIVATE[0]}\n  design: ${PRIVATE[1]}\n  falsifier: ${PRIVATE[2]}\n  note: ${PRIVATE[3]}\n  acceptance:\n${records}\n`;
+  return `- id: ${ID}\n  title: ${TITLE}\n  repo: ${repo}\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  origin: test#${PRIVATE[4]}\n  files: [src/fixture.ts]\n  rationale: ${PRIVATE[0]}\n  design: ${PRIVATE[1]}\n  falsifier: ${PRIVATE[2]}\n  note: ${PRIVATE[3]}\n  acceptance:\n${records}\n`;
 }
 const result = (text: string): WorkerResult => ({
   sessionId: "fixture", costUsd: 0, numTurns: 1, text, blocks: [], stderr: "", subtype: "success",
@@ -36,20 +44,33 @@ const result = (text: string): WorkerResult => ({
   tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
 });
 
-async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write" | "target" | "body" | "race") {
+async function runFixture(t: TestContext, catalog: "ops" | "public" | "core", mode: "reported" | "created" = "reported", acceptance: readonly AcceptanceCriterion[] = criteria, refusal?: "ownership" | "normalization" | "slow-write" | "target" | "body" | "race" | keyof typeof CORE_REFUSALS) {
   const root = gitRepo({ scope: t }), origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t });
+  const targetRepo = catalog === "core" ? CORE_TARGET : "remudero";
   mkdirSync(join(seed.dir, "plan")); writeFileSync(join(seed.dir, "plan", "tasks.yaml"), catalog === "public" ? yaml(acceptance) : "[]\n");
+  // W1-T12936: a Core task lives only in Core's own plan (a separate repository with an origin/main); the target has none.
+  let corePlanPath: string | undefined, coreCommit: string | undefined;
+  if (catalog === "core") {
+    const coreOrigin = gitRepo({ bare: true, scope: t }), coreSeed = gitRepo({ scope: t });
+    mkdirSync(join(coreSeed.dir, "plan", "tasks.d"), { recursive: true }); writeFileSync(join(coreSeed.dir, "plan", "tasks.yaml"), "[]\n");
+    writeFileSync(join(coreSeed.dir, CORE_RECORD_PATH), yaml(acceptance, targetRepo));
+    coreSeed.git("add", "plan"); coreSeed.git("commit", "--quiet", "-m", "test: file the Core task");
+    coreSeed.addRemote("origin", coreOrigin.dir); coreSeed.git("push", "--quiet", "origin", "main");
+    const core = gitRepo({ cloneFrom: coreOrigin.dir, scope: t });
+    corePlanPath = join(core.dir, "plan", "tasks.yaml"); coreCommit = core.git("rev-parse", "origin/main").trim();
+    if (refusal === "core-missing-commit") core.git("update-ref", "-d", "refs/remotes/origin/main");
+  }
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: seed the actual public plan");
   seed.addRemote("origin", origin.dir); seed.git("push", "--quiet", "origin", "main");
   const repo = gitRepo({ cloneFrom: origin.dir, scope: t });
   repo.git("config", "user.name", "fixture"); repo.git("config", "user.email", "fixture@remudero.invalid");
-  mkdirSync(join(root.dir, "repos")); const checkout = join(root.dir, "repos", "remudero"); renameSync(repo.dir, checkout);
+  mkdirSync(join(root.dir, "repos")); const checkout = join(root.dir, "repos", targetRepo); renameSync(repo.dir, checkout);
   const planPath = join(root.dir, "tasks.yaml"); writeFileSync(planPath, catalog === "public" ? yaml(acceptance) : "[]\n");
   mkdirSync(join(root.dir, "state"), { recursive: true });
   if (catalog === "ops") writeFileSync(join(root.dir, "state", "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
   const now = Date.now(); t.mock.method(Date, "now", () => now);
   const branch = `run-${ID}-${now}`, url = refusal === "target"
-    ? "https://github.com/different-owner/remudero/pull/7" : "https://github.com/craigoley/remudero/pull/7";
+    ? `https://github.com/different-owner/${targetRepo}/pull/7` : `https://github.com/craigoley/${targetRepo}/pull/7`;
   const body = `Worker prose to preserve for a public task. ${PRIVATE.join(" ")}\n\nAcceptance:\n- old criterion | grep: old in src/fixture.ts\n\nRemudero-Task: ${ID}`;
   const bodyFile = join(root.dir, "public-pr-body.json");
   writeFileSync(bodyFile, JSON.stringify({ body }));
@@ -97,8 +118,10 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     }
   }, 5) : undefined;
   process.env.PATH = `${gh.dir}:${priorPath}`; mkdirSync(join(root.dir, "hooks")); process.env.RMD_HARNESS_HOOKS_DIR = join(root.dir, "hooks");
+  const prompts: Array<{ prompt: string }> = []; let workers = 0, workerRoot = "";
   t.after(() => {
     try {
+      if (refusal?.startsWith("core-")) assert.equal(workers, 0, "the refused source never starts a worker");
       if (refusal !== undefined) {
         const writes = gh.events().filter(event => event.phase === "start" && event.args[0] === "api"
           && event.args.some(arg => ["POST", "PATCH", "PUT", "DELETE"].includes(arg)));
@@ -113,10 +136,19 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
       rmSync(gh.dir, { recursive: true, force: true });
     }
   });
-  const prompts: Array<{ prompt: string }> = []; let workers = 0, workerRoot = "";
+  const sourceLabel = refusal === "core-unpinned-path" ? "snapshot"
+    : `origin/main:${refusal === "core-missing-source" ? "plan/tasks.d/missing.yaml" : CORE_RECORD_PATH}`;
   const outcome = await withLiveWritesAllowed(() => runTask(ID, {
     config: { claudeBin: "/bin/true", root: root.dir, installRoot: REPO_ROOT, workerProviders: { harnessCommitsImplement: true } },
-    skipGitSync: true, planPath, handOffAtPrOpen: true,
+    ...(corePlanPath === undefined ? { skipGitSync: true, planPath } : {
+      planPath: corePlanPath,
+      ...(refusal?.startsWith("core-") ? {
+        planSnapshot: () => ({ staleDispatch: false, plan: loadPlanFromYaml(yaml(refusal === "core-mismatch"
+          ? [{ claim: "a body-authored contract", proof: "grep: other in src/fixture.ts" }] : acceptance, targetRepo),
+          sourceLabel) }),
+      } : {}),
+    }),
+    handOffAtPrOpen: true,
     github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     claimReserver: { mintAnchor: () => "fixture-claim", attempt: () => "created", holder: () => undefined, drop: () => true },
     containmentExec: async token => ({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
@@ -143,7 +175,7 @@ async function runFixture(t: TestContext, catalog: "ops" | "public", mode: "repo
     const title = / -f title=([\s\S]*?)(?: -f body=|$)/.exec(a); return title ? [title[1]!] : [];
   });
   const rows = readFileSync(join(root.dir, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites, asyncPatchObserved,
+  return { outcome, bodies, titles, prompts, calls, rows, workerRoot, branch, originDir: origin.dir, publicWrites, asyncPatchObserved, coreCommit,
     sourceReads: calls.filter(a => a.some(x => x.startsWith(base))),
     sourceReadCount: () => gh.events().filter(e => e.phase === "start" && e.args.some(x => x.startsWith(base))).length };
 }
@@ -324,4 +356,48 @@ test("the async ops normalizer refuses mismatched identity, unreadable body and 
     await assert.rejects(runFixture(t, "ops", "reported", criteria, refusal),
       refusal === "race" ? /ops public PR normalization refused \(raced\)/ : /ops public PR normalization refused \(error\)/);
   });
+});
+
+test("Core public plan criteria: binds identity, destination, criteria, and source commit", async t => {
+  // W1-T12936 criterion 1: a task filed only in Core's public plan opens in the target with its pinned criteria.
+  const f = await runFixture(t, "core", "created");
+  assert.equal(f.sourceReads.length, 0, "a Core binding reads no private catalog");
+  const pinned = f.rows.find(row => row.step === "core_criteria.pinned"); assert.ok(pinned, "the run pinned Core's criteria");
+  assert.equal(pinned.source_commit, f.coreCommit); assert.equal(pinned.target, `craigoley/${CORE_TARGET}`);
+  const creates = f.publicWrites.filter(write => /^api (?:-X|--method) POST /.test(write));
+  assert.equal(creates.length, 1, "the run creates a single PR");
+  assert.match(creates[0]!, new RegExp(`^api (?:-X|--method) POST repos/craigoley/${CORE_TARGET}/pulls `));
+  assert.ok(f.bodies.length > 0, "the opener wrote a body"); assert.deepEqual(parseAcceptanceBlock(f.bodies.at(-1)!), criteria);
+  assert.match(f.bodies.at(-1)!, new RegExp(`Remudero-Task: ${ID}`));
+  const bound = bindCanonicalCoreCriteria(ID, TITLE, `craigoley/${CORE_TARGET}`, f.coreCommit, criteria);
+  assert.equal(bound.catalog, "core"); assert.ok(Object.isFrozen(bound.criteria));
+});
+
+test("Core public plan criteria: refuses mismatched source or destination pins", async t => {
+  // W1-T12936 criterion 1: missing or mismatched identity, target, or source refuses before effects.
+  for (const [refusal, reason] of Object.entries(CORE_REFUSALS)) {
+    await t.test(refusal, async t => {
+      await assert.rejects(runFixture(t, "core", "created", criteria, refusal as keyof typeof CORE_REFUSALS), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /^core public-plan criteria refused/);
+        assert.match(err.message, reason);
+        return true;
+      });
+    });
+  }
+  const f = openerFixture(t); let calls = 0; const runner: AsyncOpenPullRequestProofRunner = async () => { calls++; return { status: 0 }; };
+  const core = { ...f.canonical, catalog: "core" as const };
+  for (const contract of [{ ...core, taskId: "W1-T900009" }, { ...core, sourceCommit: "not-a-pin" },
+    { ...core, targetRepository: "craigoley/remudero-console" }, { ...core, criteria: [] }]) await assert.rejects(f.open(contract, runner), PrOpenRefusedError);
+  for (const pin of [undefined, "not-a-pin"]) assert.throws(() => bindCanonicalCoreCriteria(ID, TITLE, "craigoley/remudero", pin, criteria), PrOpenRefusedError);
+  assert.equal(calls, 0, "a refused Core binding never reaches proof execution");
+  assert.equal(await f.open(core, runner), f.body, "the matching Core binding opens");
+});
+
+test("Core public plan criteria: preserves destination-local precedence", async t => {
+  // W1-T12936 criterion 1: a task filed in the target keeps its local criteria over a competing Core binding.
+  const f = openerFixture(t, true);
+  const body = await f.open({ ...f.canonical, catalog: "core", criteria: [{ claim: "core must not replace local", proof: "grep: other in src/fixture.ts" }] },
+    async proof => { assert.equal(proof, criteria[0]!.proof); return { status: 0 }; });
+  assert.equal(body, f.body); assert.deepEqual(parseAcceptanceBlock(body), criteria);
 });
