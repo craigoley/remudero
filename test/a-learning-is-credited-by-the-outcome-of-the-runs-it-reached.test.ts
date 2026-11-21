@@ -17,7 +17,7 @@ import { test } from "node:test";
 
 import { learningsInjectedRow } from "#src/cli/commands/run-task-verb.js";
 import { renderKnowledgeMeasured, renderLearningOutcomes, summarizeKnowledgeMeasured, summarizeLearningOutcomes } from "#src/lib/digest.js";
-import { contestedPropensities, foldLearningOutcomes, OUTCOME_ARM_FLOOR } from "#src/lib/knowledge-outcome.js";
+import { contestedPropensities, foldLearningOutcomes, OUTCOME_ARM_FLOOR, OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
 import { seedOf } from "#src/lib/knowledge-value.js";
 import {
   AMBIGUOUS_LEARNING_CONTENT,
@@ -197,9 +197,12 @@ function deepFreeze<T>(value: T): T {
 /** The producer path of an implement dispatch (run-task-verb.ts's runTaskBody), over a real corpus on
  *  disk: the layered load, the real selector wrapped by `recordingSelectLearnings`, the production
  *  budget, draw count and run seed, then the producer's own `learningsInjectedRow`. 30 equal-strength
- *  ~430-char lines overflow the 8,148-char budget, so about 19 fit and the seeded draw decides which. */
-function producerRun(): ProducerRun {
+ *  ~430-char lines overflow the 8,148-char budget, so about 19 fit and the seeded draw decides which.
+ *  `userLayerCopyOf` also writes a user-overall layer holding a second, different copy of that id,
+ *  whose glob the task never matches, as a real cross-layer corpus can. */
+function producerRun(opts: { userLayerCopyOf?: string } = {}): ProducerRun {
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-corpus-"));
+  const userDir = mkdtempSync(join(tmpdir(), "rmd-lcr-user-"));
   try {
     writeFileSync(
       join(dir, "revision.yaml"),
@@ -208,9 +211,19 @@ function producerRun(): ProducerRun {
         return [`- id: ${id}`, `  fact: "${RAW_FACT_SENTINEL}-${id} ${"x".repeat(380)}"`, '  src: "lcr-fixture"', `  files: ["${PRODUCER_TASK_FILE}"]`].join("\n");
       }).join("\n") + "\n",
     );
+    if (opts.userLayerCopyOf !== undefined) {
+      writeFileSync(
+        join(userDir, "revision.yaml"),
+        [`- id: ${opts.userLayerCopyOf}`, `  fact: "${RAW_FACT_SENTINEL}-user-layer-revision"`, '  src: "lcr-fixture"', '  files: ["docs/never-in-this-task.md"]'].join("\n") + "\n",
+      );
+    }
     const usage = {};
     const input = {
-      homes: { projectDir: dir, userOverallDir: join(dir, "no-user-layer"), globalArtifactPath: join(dir, "no-global-layer", "artifact.yaml") },
+      homes: {
+        projectDir: dir,
+        userOverallDir: opts.userLayerCopyOf === undefined ? join(dir, "no-user-layer") : userDir,
+        globalArtifactPath: join(dir, "no-global-layer", "artifact.yaml"),
+      },
       taskFiles: [PRODUCER_TASK_FILE],
       selectionContext: { text: ["prove the producer names the exact learning revision it drew"], usage, seed: seedOf(PRODUCER_RUN_ID), propensityDraws: LEARNING_PROPENSITY_DRAWS },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -221,9 +234,11 @@ function producerRun(): ProducerRun {
       const fields = learningsInjectedRow(result, draw.contentIds(), arm === "B", usage);
       return JSON.parse(JSON.stringify({ step: "learnings.injected", run_id: PRODUCER_RUN_ID, ts: ts(), ...fields })) as Row;
     };
-    return { row: rowForArm("A"), maskedRow: rowForArm("B"), corpus: loadLearningsCorpus(dir) };
+    const corpus = [...loadLearningsCorpus(dir), ...(opts.userLayerCopyOf === undefined ? [] : loadLearningsCorpus(userDir))];
+    return { row: rowForArm("A"), maskedRow: rowForArm("B"), corpus };
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    rmSync(userDir, { recursive: true, force: true });
   }
 }
 
@@ -250,16 +265,26 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   }
   assert.equal(selectLearnings(snapshot, files, 700, { usage: {}, seed: 42 }).contentIds, undefined, "no draw, no contest, no revision");
 
-  // DETERMINISTIC AND CANONICAL: equal canonical bytes give one identity. Reordering or repeating a
-  // glob or symbol is not a revision, and neither is usage metadata or text that is never injected.
-  const base = { ...entry("r", ["src/a.ts", "src/b.ts"], "the fact"), symbols: ["x", "y"], errorSignatures: ["boom"] } as LearningEntry;
+  // DETERMINISTIC AND CANONICAL: equal canonical bytes give one identity. Reordering a glob, symbol or
+  // error signature is not a revision, and neither is repeating a glob (a task file matches a glob
+  // set once), usage metadata, or text that is never injected.
+  const base = { ...entry("r", ["src/a.ts", "src/b.ts"], "the fact"), symbols: ["x", "y"], errorSignatures: ["boom", "bang"] } as LearningEntry;
   const id0 = learningContentIdentity(base);
   assert.equal(learningContentIdentity({ ...base }), id0);
-  assert.equal(learningContentIdentity({ ...base, files: ["src/b.ts", "src/a.ts", "src/a.ts"], symbols: ["y", "x"] }), id0);
+  assert.equal(learningContentIdentity({ ...base, files: ["src/b.ts", "src/a.ts", "src/a.ts"], symbols: ["y", "x"], errorSignatures: ["bang", "boom"] }), id0);
   assert.equal(learningContentIdentity({ ...base, cited: "2026-11-01", citedCount: 9, evidence: "PR#1", src: "PR#2", subsystem: "other" }), id0);
   assert.equal(learningContentIdentity({ ...base, symbols: undefined }), learningContentIdentity({ ...base, symbols: [] }));
-  // A REAL change to what the worker reads, or to what admits the entry, is a new revision.
-  for (const changed of [{ fact: "the fact, edited" }, { files: ["src/a.ts"] }, { symbols: ["x"] }, { errorSignatures: ["bang"] }, { layer: "global" as const }]) {
+  // A REAL change to what the worker reads, or to what admits and ranks the entry, is a new revision.
+  // A repeated symbol or error signature is one: the selector counts each copy as a hit.
+  for (const changed of [
+    { fact: "the fact, edited" },
+    { files: ["src/a.ts"] },
+    { symbols: ["x"] },
+    { symbols: ["x", "y", "x"] },
+    { errorSignatures: ["bang"] },
+    { errorSignatures: ["boom", "bang", "boom"] },
+    { layer: "global" as const },
+  ]) {
     assert.notEqual(learningContentIdentity({ ...base, ...changed }), id0, `${Object.keys(changed)[0]} is part of the intervention`);
   }
 
@@ -267,6 +292,20 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   // either one; an id the snapshot never held stays unresolved rather than invented.
   assert.deepEqual(learningContentIdentities([base, { ...base }], ["r"]), { r: id0 });
   assert.deepEqual(learningContentIdentities([base, { ...base, fact: "another fact" }], ["r", "absent"]), { r: AMBIGUOUS_LEARNING_CONTENT });
+
+  // A SAME-ID COPY THE TASK NEVER MATCHED, through the real draw. The copy is not a candidate, so it
+  // moves no propensity, but it is in the snapshot the draw read: the dropped entry's id has two
+  // revisions there, so it reads ambiguous, never the matched copy's digest.
+  const droppedId = droppedContested[0]!.id;
+  const unmatchedCopy = entry(droppedId, ["docs/never-in-this-task.md"], "an unmatched revision of the same id");
+  const withCopy = selectLearnings([...snapshot, unmatchedCopy], files, 700, { usage: {}, seed: 42, propensityDraws: 64 });
+  assert.deepEqual(withCopy.propensity, drawn.propensity, "the unmatched copy is not a candidate");
+  assert.deepEqual(withCopy.dropped.map((e) => e.id), drawn.dropped.map((e) => e.id));
+  assert.equal(withCopy.contentIds![droppedId], AMBIGUOUS_LEARNING_CONTENT, `${droppedId}: one id, two revisions in the source draw`);
+  for (const id of contested.filter((c) => c !== droppedId)) assert.equal(withCopy.contentIds![id], drawn.contentIds![id], `${id} is unaffected`);
+  const selectedId = selectedContested[0]!.id;
+  const selectedCopy = selectLearnings([...snapshot, entry(selectedId, ["docs/never-in-this-task.md"])], files, 700, { usage: {}, seed: 42, propensityDraws: 64 });
+  assert.equal(selectedCopy.contentIds![selectedId], AMBIGUOUS_LEARNING_CONTENT, `${selectedId}: a selected entry is checked the same way`);
 
   // THE PRODUCER: the implement dispatch's row names the revision of every contested entry it drew.
   const { row, corpus } = producerRun();
@@ -285,6 +324,20 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
     assert.equal(source.length, 1);
     assert.equal(ids[id], learningContentIdentity(source[0]!), `${id}: the ledgered revision is the source entry's`);
   }
+
+  // THE PRODUCER, with the user-overall layer holding a second copy of a dropped contested id that
+  // the task never matches: the row ledgers that id ambiguous, and the fold credits it to no revision.
+  const layeredId = producerContested.find((id) => dropped.has(id) && p[id]! >= OUTCOME_PROPENSITY_TRIM && p[id]! <= 1 - OUTCOME_PROPENSITY_TRIM)!;
+  assert.ok(layeredId !== undefined, "a dropped contested entry inside the trim");
+  const layered = producerRun({ userLayerCopyOf: layeredId });
+  assert.equal(layered.corpus.filter((e) => e.id === layeredId).length, 2, "the draw's source holds the id twice");
+  assert.deepEqual(layered.row.propensity, row.propensity, "the unmatched copy is not a candidate");
+  const layeredIds = layered.row.content_ids as Record<string, string>;
+  assert.equal(layeredIds[layeredId], AMBIGUOUS_LEARNING_CONTENT, `${layeredId}: the producer names no single revision`);
+  for (const id of producerContested.filter((c) => c !== layeredId)) assert.equal(layeredIds[id], ids[id], `${id} is unaffected`);
+  const layeredFold = foldLearningOutcomes([layered.row, { step: "verdict", run_id: layered.row.run_id, ts: ts(), verdict: "merged" }]);
+  assert.equal(layeredFold.excludedRevision.ambiguous, 1);
+  assert.equal(layeredFold.learnings.some((l) => l.id === layeredId), false, `${layeredId} is credited to no revision`);
 });
 
 test("W1-T11115: learning outcome revision separates opposite effects under one learning id", () => {
@@ -306,6 +359,45 @@ test("W1-T11115: learning outcome revision separates opposite effects under one 
   const pooled = foldLearningOutcomes(helpsThenHurts(REV, REV)).learnings;
   assert.equal(pooled.length, 1);
   assert.equal(pooled[0]!.verdict, "no-detectable-effect");
+
+  // A REPEATED TRIGGER, through the real draw. The task text names `alpha`; the edit lists it twice.
+  // The selector counts each copy as a hit, so the edit ranks L higher and moves its propensity. The
+  // draw's own identity must move with it, or the two revisions share one cohort.
+  const triggerSnapshot = (l: Partial<LearningEntry>): LearningEntry[] => [
+    { ...entry("h", ["src/x.ts"], "h".repeat(650)), symbols: ["alpha", "beta"] },
+    { ...entry("s1", ["src/x.ts"], "s".repeat(150)), symbols: ["alpha", "beta"] },
+    { ...entry("s2", ["src/x.ts"], "t".repeat(150)), symbols: ["alpha", "beta"] },
+    { ...entry("L", ["src/x.ts"], "l".repeat(450)), symbols: ["alpha"], ...l },
+    { ...entry("c", ["src/x.ts"], "c".repeat(450)), symbols: ["alpha"] },
+  ];
+  const triggerDraw = (l: Partial<LearningEntry>) =>
+    selectLearnings(triggerSnapshot(l), ["src/x.ts"], 1000, { text: "touches alpha and beta", usage: {}, seed: 11, propensityDraws: 64 });
+  const once = triggerDraw({});
+  const twice = triggerDraw({ symbols: ["alpha", "alpha"] });
+  const pOnce = once.propensity!.L!;
+  const pTwice = twice.propensity!.L!;
+  assert.ok(pOnce > 0 && pOnce < 1 && pTwice > 0 && pTwice < 1, `both draws contest L (${pOnce}, ${pTwice})`);
+  assert.notEqual(pOnce, pTwice, "the repeated trigger changes the selector's propensity for L");
+  const revOnce = once.contentIds!.L!;
+  const revTwice = twice.contentIds!.L!;
+  assert.match(revOnce, LEARNING_CONTENT_IDENTITY_RE);
+  assert.match(revTwice, LEARNING_CONTENT_IDENTITY_RE);
+  assert.notEqual(revTwice, revOnce, "a change that moves the propensity is a new revision");
+  // A repeated GLOB moves nothing, so it is the same revision: stable bytes, stable identity.
+  const globTwice = triggerDraw({ files: ["src/x.ts", "src/x.ts"] });
+  assert.equal(globTwice.propensity!.L, pOnce);
+  assert.equal(globTwice.contentIds!.L, revOnce);
+  // Opposite synthetic effects at the draws' own propensities and identities stay two cohorts: the
+  // predecessor helps, the edit hurts, and neither verdict reaches the other.
+  const triggerRows = [
+    ...stratum("trigger-once", 20, pOnce, 10, (inj) => (inj ? "merged" : "blocked_ci"), revOnce),
+    ...stratum("trigger-twice", 20, pTwice, 10, (inj) => (inj ? "blocked_ci" : "merged"), revTwice),
+  ];
+  const triggerReport = foldLearningOutcomes(triggerRows);
+  assert.equal(triggerReport.learnings.length, 2, "one cohort per revision");
+  const byTrigger = Object.fromEntries(triggerReport.learnings.map((l) => [l.contentId, l]));
+  assert.deepEqual({ ...byTrigger[revOnce]!, se: undefined }, { id: "L", contentId: revOnce, injected: 10, dropped: 10, effect: 1, se: undefined, verdict: "helps" });
+  assert.deepEqual({ ...byTrigger[revTwice]!, se: undefined }, { id: "L", contentId: revTwice, injected: 10, dropped: 10, effect: -1, se: undefined, verdict: "hurts" });
 
   // A FRESH EDIT INHERITS NOTHING: three runs of a third revision read unmeasurable beside a helps.
   const third = learningContentIdentity(entry("L", ["src/x.ts"], "revision three"));
@@ -359,6 +451,43 @@ test("W1-T11115: learning outcome revision reports unresolved exposure identitie
   assert.ok(line.includes("0 measured, 1 unmeasurable"), line);
   const clean = renderLearningOutcomes(summarizeLearningOutcomes(stratum("only", 3, 0.5, 2, () => "merged"))!);
   assert.ok(!clean.includes("without a single revision"), clean);
+
+  // A CONFLICT ACROSS THE TRIM. One run's two draws name different valid revisions, the second at a
+  // propensity (1/64) the trim drops. The conflict is checked over EVERY row of the run before any
+  // observation is trimmed, so neither is credited, and both count as conflicting.
+  const zero = { legacy: 0, malformed: 0, ambiguous: 0, conflicting: 0, unresolved: 0 };
+  const across = foldLearningOutcomes([
+    injectedRow("across", {}),
+    injectedRow("across", { matched_ids: [], dropped: ["L"], propensity: { L: 1 / 64 }, content_ids: { L: other } }),
+    verdict("across"),
+  ]);
+  assert.deepEqual(across.excludedRevision, { ...zero, conflicting: 2 });
+  assert.equal(across.excludedTrimmed, 0, "a conflicting exposure is counted as conflicting, never as trimmed");
+  assert.deepEqual(across.learnings, [], "the row inside the trim is not credited to REV");
+  // Two rows that AGREE across the trim are no conflict: the trim applies, and the other row counts.
+  const agree = foldLearningOutcomes([
+    injectedRow("agree", {}),
+    injectedRow("agree", { matched_ids: [], dropped: ["L"], propensity: { L: 1 / 64 } }),
+    verdict("agree"),
+  ]);
+  assert.deepEqual(agree.excludedRevision, zero);
+  assert.equal(agree.excludedTrimmed, 1);
+  assert.deepEqual(agree.learnings, [{ id: "L", contentId: REV, injected: 1, dropped: 0, verdict: "unmeasurable" }]);
+  // A revision beside a row of the same run that names none (ambiguous, legacy, malformed, absent) is
+  // not a single revision either, inside the trim or outside it: the run cannot be pinned to REV.
+  const beside = foldLearningOutcomes(
+    [{ content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } }, { content_ids: undefined }, { content_ids: { L: "lc1:short" } }, { content_ids: {} }].flatMap((sibling, i) => [
+      injectedRow(`beside-${i}`, {}),
+      injectedRow(`beside-${i}`, { propensity: { L: i % 2 === 0 ? 1 / 64 : 0.5 }, ...sibling }),
+      verdict(`beside-${i}`),
+    ]),
+  );
+  assert.deepEqual(beside.excludedRevision, { ...zero, conflicting: 8 });
+  assert.equal(beside.excludedTrimmed, 0);
+  assert.deepEqual(beside.learnings, []);
+  // Two rows of one run that both name no revision do not conflict: each keeps its own reason.
+  const neither = foldLearningOutcomes([injectedRow("neither", { content_ids: undefined }), injectedRow("neither", { content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } }), verdict("neither")]);
+  assert.deepEqual(neither.excludedRevision, { ...zero, legacy: 1, ambiguous: 1 });
 
   // A HISTORICAL knowledge.measured row (pooled by id, before revisions) is labelled legacy, never
   // shown as if it measured today's content.

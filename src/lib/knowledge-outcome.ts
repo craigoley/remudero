@@ -56,9 +56,10 @@ export interface LearningOutcomeReport {
   runs: number;
   excludedNoVerdict: number;
   excludedMasked: number;
-  /** Entry observations outside the propensity trim. */
+  /** Entry observations outside the propensity trim (of an exposure that does not conflict). */
   excludedTrimmed: number;
-  /** W1-T11115: entry observations inside the trim that name no single revision, by reason. */
+  /** W1-T11115: entry observations that name no single revision, by reason. `conflicting` counts
+   *  every observation of a conflicting exposure, trimmed or not; the others count inside the trim. */
   excludedRevision: RevisionExclusions;
   learnings: LearningOutcome[];
 }
@@ -71,7 +72,9 @@ export interface RevisionExclusions {
   malformed: number;
   /** The draw's snapshot held this id more than once with different content. */
   ambiguous: number;
-  /** One run ledgered different revisions for the same entry. */
+  /** One run's rows for the same entry name more than one claim: two different revisions, or a
+   *  revision beside a row that names none. The check reads EVERY row of the run that contests the
+   *  entry, before the trim and every other exclusion, so a trimmed row still voids the exposure. */
   conflicting: number;
   /** No identity for the contested entry, or it is not listed in exactly one of selected and dropped. */
   unresolved: number;
@@ -131,9 +134,40 @@ function revisionOf(contentIds: unknown, id: string): Revision {
 
 const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+/** The claim a row without a single revision makes in an exposure's census. It is not an `lc1:`
+ *  identity, so it can never collide with one. */
+const NO_SINGLE_REVISION = "\u0000none";
+
+const isContested = (p: unknown): p is number => typeof p === "number" && p > 0 && p < 1;
+
+/** One run's draws of one entry. */
+const exposureKey = (runId: string, id: string): string => `${runId}\u0000${id}`;
+
+/** Every revision claim each exposure (one run's draws of one entry) received, from EVERY
+ *  `learnings.injected` row that contests the entry: trimmed, masked or verdict-less alike. Read
+ *  before any observation is withheld, so a conflict on a row the trim drops is still seen. */
+function revisionClaimsByExposure(all: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const claims = new Map<string, Set<string>>();
+  for (const r of all) {
+    if (r.step !== "learnings.injected" || typeof r.run_id !== "string") continue;
+    const propensity = r.propensity;
+    if (propensity === null || typeof propensity !== "object") continue;
+    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
+      if (!isContested(p)) continue;
+      const revision = revisionOf(r.content_ids, id);
+      const exposure = exposureKey(r.run_id, id);
+      const seen = claims.get(exposure) ?? new Set<string>();
+      seen.add("contentId" in revision ? revision.contentId : NO_SINGLE_REVISION);
+      claims.set(exposure, seen);
+    }
+  }
+  return claims;
+}
+
 /** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
  *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. An
- *  observation is checked in order: trimmed, then revision, then arm. Each exclusion counts once. */
+ *  observation is checked in order: a conflicting exposure (over all of the run's rows), then
+ *  trimmed, then its own revision, then arm. Each exclusion counts once. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -156,9 +190,9 @@ export function foldLearningOutcomes(
     excludedRevision: { legacy: 0, malformed: 0, ambiguous: 0, conflicting: 0, unresolved: 0 },
     learnings: [],
   };
-  // An exposure is one run's draw of one entry. Two rows naming it with different revisions conflict.
-  const pending: Array<{ exposure: string; id: string; contentId: string; obs: Observation }> = [];
-  const revisionsByExposure = new Map<string, Set<string>>();
+  // An exposure is one run's draws of one entry. Its claims are taken over every row first.
+  const claimsByExposure = revisionClaimsByExposure(all);
+  const byRevision = new Map<string, { id: string; contentId: string; obs: Observation[] }>();
   let from: string | undefined;
   let to: string | undefined;
   for (const r of all) {
@@ -183,7 +217,11 @@ export function foldLearningOutcomes(
     const selected = new Set(stringList(r.matched_ids));
     const dropped = new Set(stringList(r.dropped));
     for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
-      if (typeof p !== "number" || p <= 0 || p >= 1) continue;
+      if (!isContested(p)) continue;
+      if (claimsByExposure.get(exposureKey(r.run_id, id))!.size > 1) {
+        report.excludedRevision.conflicting++;
+        continue;
+      }
       if (p < trim || p > 1 - trim) {
         report.excludedTrimmed++;
         continue;
@@ -198,23 +236,11 @@ export function foldLearningOutcomes(
         report.excludedRevision.unresolved++;
         continue;
       }
-      const exposure = `${r.run_id}\u0000${id}`;
-      const seen = revisionsByExposure.get(exposure) ?? new Set<string>();
-      seen.add(contentId);
-      revisionsByExposure.set(exposure, seen);
-      pending.push({ exposure, id, contentId, obs: { injected: selected.has(id), propensity: p, clean } });
+      const key = `${id}\u0000${contentId}`;
+      const cohort = byRevision.get(key) ?? { id, contentId, obs: [] };
+      cohort.obs.push({ injected: selected.has(id), propensity: p, clean });
+      byRevision.set(key, cohort);
     }
-  }
-  const byRevision = new Map<string, { id: string; contentId: string; obs: Observation[] }>();
-  for (const o of pending) {
-    if (revisionsByExposure.get(o.exposure)!.size > 1) {
-      report.excludedRevision.conflicting++;
-      continue;
-    }
-    const key = `${o.id}\u0000${o.contentId}`;
-    const cohort = byRevision.get(key) ?? { id: o.id, contentId: o.contentId, obs: [] };
-    cohort.obs.push(o.obs);
-    byRevision.set(key, cohort);
   }
   if (from !== undefined && to !== undefined) report.window = { from, to };
   report.learnings = [...byRevision.values()]
