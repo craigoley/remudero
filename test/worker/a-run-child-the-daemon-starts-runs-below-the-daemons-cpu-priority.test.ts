@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { getPriority, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,7 +97,6 @@ function prioritySeams(refuse: { nice?: Error; ionice?: Error; ioniceHangs?: boo
         if (refuse.ioniceHangs) return new Promise<never>(() => {});
         return refuse.ionice ? Promise.reject(refuse.ionice) : Promise.resolve();
       },
-      alive: () => true,
       noted: new Set<string>(),
     },
   };
@@ -222,6 +221,89 @@ test("W1-T13968 criterion 2: by default each refusal kind is noted once for the 
   assert.deepEqual(rows, [`${DEGRADED}:nice`]);
 });
 
+/** The pid of a real child that has exited and been reaped: a signal-0 probe of it answers ESRCH. */
+async function goneChildPid(): Promise<number> {
+  const child = nodeSpawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(child, "exit");
+  assert.ok(child.pid !== undefined);
+  assert.throws(() => process.kill(child.pid!, 0), { code: "ESRCH" }, "the pid is gone");
+  return child.pid;
+}
+
+/** An ionice failure as execFileRouted rejects with it: the exit code in `code`, the reason on stderr. */
+const ioniceFailed = (stderr: string): Error =>
+  Object.assign(new Error(`Command failed: /usr/bin/ionice -c 2 -n 7 -p 1\n${stderr}`), { code: 1, stderr });
+
+test("W1-T13968 criterion 2: a permission refusal whose answer arrives after the run child exited still writes its row", async () => {
+  let real: ChildProcess | undefined;
+  const fx = spawnFixture("refused-after-exit", () => {
+    real = nodeSpawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { stdio: "ignore" });
+    live.push(real);
+    return real;
+  });
+  let goneWhenAnswered = false;
+  const ports = {
+    setPriority: () => {}, ionice: "/usr/bin/ionice", noted: new Set<string>(),
+    // ionice is refused while the child runs, and its answer is read only once the child has exited.
+    runIonice: async (_file: string, args: readonly string[]) => {
+      const child = real!;
+      assert.equal(args.at(-1), String(child.pid));
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+      goneWhenAnswered = (() => {
+        try {
+          process.kill(child.pid!, 0);
+          return false;
+        } catch (error) {
+          return (error as { code?: unknown }).code === "ESRCH";
+        }
+      })();
+      throw ioniceFailed("ionice: ioprio_set failed: Operation not permitted\n");
+    },
+  };
+  const launch = await launched(fx, { priority: ports });
+  assert.equal(launch.pid, real!.pid, "the run child started");
+  let notes: Array<Record<string, unknown>> = [];
+  for (let waited = 0; waited < 5_000 && notes.length === 0; waited += 25) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    notes = fx.rows.filter((r) => r.step === DEGRADED);
+  }
+  assert.ok(goneWhenAnswered, "the refusal's answer arrived after the child had exited");
+  assert.deepEqual(notes.map((r) => r.how), ["ionice"], "a permission refusal is the host refusing, whether or not the child still runs");
+  assert.match(String(notes[0]!.error), /Operation not permitted/);
+  assert.equal(notes[0]!.child_pid, launch.pid);
+});
+
+test("W1-T13968 criterion 2: each refusal is classed by its own error code, and only no such process is silent", async () => {
+  const pid = await goneChildPid();
+  const systemError = (code: string) => Object.assign(new Error(`A system error occurred: uv_os_setpriority returned ${code}`),
+    { code: "ERR_SYSTEM_ERROR", info: { code } });
+  const cases: Array<{ name: string; nice?: Error; ionice?: Error; rows: string[] }> = [
+    { name: "nice EPERM", nice: systemError("EPERM"), rows: ["nice"] },
+    { name: "nice EACCES", nice: systemError("EACCES"), rows: ["nice"] },
+    { name: "nice any other refusal", nice: systemError("EINVAL"), rows: ["nice"] },
+    { name: "nice ESRCH", nice: systemError("ESRCH"), rows: [] },
+    { name: "ionice Operation not permitted", ionice: ioniceFailed("ionice: ioprio_set failed: Operation not permitted\n"), rows: ["ionice"] },
+    { name: "ionice spawn EACCES", ionice: Object.assign(new Error("spawn /usr/bin/ionice EACCES"), { code: "EACCES" }), rows: ["ionice"] },
+    { name: "ionice any other exit", ionice: ioniceFailed("ionice: bad usage\n"), rows: ["ionice"] },
+    { name: "ionice No such process", ionice: ioniceFailed("ionice: ioprio_set failed: No such process\n"), rows: [] },
+    { name: "ionice ESRCH", ionice: Object.assign(new Error("ESRCH"), { code: "ESRCH" }), rows: [] },
+  ];
+  for (const c of cases) {
+    const rows: string[] = [];
+    await runChild.lowerRunChildPriority(pid, (step, extra) => { if (step === DEGRADED) rows.push(String(extra?.how)); }, {
+      setPriority: () => { if (c.nice) throw c.nice; },
+      ionice: "/usr/bin/ionice",
+      runIonice: () => (c.ionice ? Promise.reject(c.ionice) : Promise.resolve()),
+      noted: new Set(),
+    });
+    assert.deepEqual(rows, c.rows, `${c.name}, for a child already gone`);
+  }
+});
+
 test("W1-T13968 criterion 3: the run child's argv, env, pid, stderr file and reservation are unchanged, and the daemon is never reniced", async () => {
   const fx = spawnFixture("invariant");
   const seams = prioritySeams();
@@ -270,4 +352,44 @@ test("W1-T13968 criterion 3: a test child keeps its relative nice -n of TEST_RUN
   assert.equal(priorities.length, 1);
   assert.equal(priorities[0]![1], GARDEN_CHILD_NICENESS, "a garden child keeps its niceness");
   assert.equal(readFileSync(ioniceArgs, "utf8").trim(), `-c 3 -p ${priorities[0]![0]}`, "a garden child keeps the idle IO class");
+});
+
+test("W1-T13968 criterion 3: a run child whose pid is the daemon's own is never lowered, through any seam", async () => {
+  const own = getPriority();
+  const fx = spawnFixture("own-pid", () => {
+    const child = new FakeChild();
+    child.pid = process.pid; // the W1-T9085 reservation suite's fake spawn returns this process's pid
+    return child as unknown as ChildProcess;
+  });
+  const seams = prioritySeams();
+  const launch = await launched(fx, { priority: seams.ports });
+  assert.equal(launch.pid, process.pid, "the spawn still went on");
+  assert.deepEqual(fx.bound, [process.pid], "and its reservation bound");
+  await settleIonice();
+  assert.deepEqual(seams.niced, [], "no setPriority on this process");
+  assert.deepEqual(seams.ioniced, [], "no ionice on this process");
+  assert.deepEqual(fx.rows.filter((r) => r.step === DEGRADED), [], "a skipped pid is no refusal");
+  assert.equal(getPriority(), own, "the daemon keeps its niceness");
+  for (const pid of [0, -1, 1.5, Number.NaN]) {
+    const direct = prioritySeams();
+    const rows: string[] = [];
+    await runChild.lowerRunChildPriority(pid, (step) => { rows.push(step); }, direct.ports);
+    assert.deepEqual([direct.niced, direct.ioniced, rows], [[], [], []], `pid ${pid} is never lowered (0 is the caller itself)`);
+  }
+});
+
+// Last in the file: at a base without the guard, the real setPriority lowers this test process and cannot raise it back.
+test("W1-T13968 criterion 3: with the real default seams, a fake spawn returning this process's pid leaves its niceness unchanged", async () => {
+  const own = getPriority();
+  const fx = spawnFixture("own-pid-default", () => {
+    const child = new FakeChild();
+    child.pid = process.pid;
+    return child as unknown as ChildProcess;
+  });
+  const launch = await launched(fx, {});
+  assert.equal(launch.pid, process.pid);
+  await settleIonice();
+  assert.equal(getPriority(), own, "the real os.setPriority was never pointed at this process");
+  assert.equal(getPriority(process.pid), own);
+  assert.deepEqual(fx.rows.filter((r) => r.step === DEGRADED), []);
 });

@@ -727,34 +727,34 @@ export interface RunChildPriorityPorts {
   exists?: (path: string) => boolean;
   /** Runs ionice; default {@link execFileRouted} with a 5 s timeout. */
   runIonice?: (file: string, args: readonly string[]) => Promise<unknown>;
-  /** Whether the pid still runs; default a signal-0 probe. */
-  alive?: (pid: number) => boolean;
   /** The refusal kinds already noted; default this process's set. */
   noted?: Set<string>;
 }
 
+/** The errno of a refusal: `os.setPriority`'s SystemError carries it in `info.code`, a spawn error in `code`. */
 const noSuchProcess = (error: unknown): boolean => {
   const e = error as { code?: unknown; info?: { code?: unknown } } | null;
   return e?.code === "ESRCH" || e?.info?.code === "ESRCH";
 };
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !noSuchProcess(error); // EPERM: it runs, under another user.
-  }
-}
+/** ionice reports through its exit code and stderr, not an errno: only its "No such process" is a child already gone. */
+const ioniceNoSuchProcess = (error: unknown): boolean => {
+  const e = error as { stderr?: unknown; message?: unknown } | null;
+  return noSuchProcess(error) || /no such process/i.test(`${String(e?.stderr ?? "")}\n${String(e?.message ?? "")}`);
+};
 
 /**
  * W1-T13968: lowers a run child the daemon just started to a garden child's niceness ({@link GARDEN_CHILD_NICENESS}) and a test
  * child's IO class, so the builds, fixes and reviews it starts never compete with the daemon's one-threaded loop on equal terms.
  * Its descendants (worker CLIs, git, tests) inherit both, and a test child's own `nice -n` still lowers it further, relative to
  * this. Nice, not a cap: an idle CPU is still the child's. NEVER throws and never delays the spawn: the IO class change runs
- * beside it, and a refusal is logged once per kind as {@link RUN_CHILD_PRIORITY_DEGRADED_STEP}. A child already gone is no refusal.
+ * beside it, and a refusal is logged once per kind as {@link RUN_CHILD_PRIORITY_DEGRADED_STEP}. Each refusal is classed by its own
+ * error: only "no such process" (ESRCH, a child already gone) is silent; EPERM, EACCES and any other refusal are noted, even when
+ * the answer arrives after the child exited. It never lowers its own process: a pid that is this process, 0 (which setPriority
+ * reads as the caller) or not a positive integer is skipped without a call or a row, so the daemon keeps its niceness for any caller.
  */
 export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPriorityPorts = {}): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return Promise.resolve();
   const noted = opts.noted ?? notedPriorityRefusals;
   const refused = (how: "nice" | "ionice", error: unknown): void => {
     if (noted.has(how)) return;
@@ -774,7 +774,8 @@ export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPrior
   return new Promise<unknown>((resolve) => { resolve(run(ionice, [...RUN_CHILD_IONICE_CLASS, "-p", String(pid)])); }).then(
     () => undefined,
     (error: unknown) => {
-      if ((opts.alive ?? pidAlive)(pid)) refused("ionice", error);
+      // Classed by its own error, never by whether the pid still runs: a permission refusal read after the child exited is still one.
+      if (!ioniceNoSuchProcess(error)) refused("ionice", error);
     },
   );
 }
