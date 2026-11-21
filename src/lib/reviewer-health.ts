@@ -28,17 +28,18 @@
  * each model's FAIL rate against the other models' the same Wilson way. It is observe-only: it opens one
  * incident per diverged model and changes no route, verdict or sha judgment.
  */
+import { createHash } from "node:crypto";
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
 import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { ghJsonAsync } from "./github-transport.js";
+import { ghJsonAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
-import { readReviewEvidenceRecord } from "./review-evidence-record.js";
+import { REVIEWER_IDENTITY_ENV } from "./review.js";
 import { DOWNGRADE_UNCLASSIFIED } from "./review-outcome-class.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -718,40 +719,47 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
   return build(shown);
 }
 
-type EvidenceJsonReader = NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]>;
-type EvidenceIdentity = Required<Pick<Parameters<typeof readReviewEvidenceRecord>[0], "prUrl" | "headSha" | "reviewInputDigest">>;
+/** `gh api` JSON, read as src/lib/review-evidence-record.ts reads a PR's evidence comments. */
+type EvidenceJsonReader = (args: string[], options: GhJsonReadOptions) => Promise<unknown>;
 
-/** Select the comment's input before the shared reader checks the publisher, checksum and status. */
-function isEvidenceForInput(comment: unknown, expected: EvidenceIdentity): boolean {
-  const body = (comment as { body?: unknown } | null)?.body;
-  const header = "<!-- remudero-review-evidence:v1\n";
-  const end = "\n-->";
-  if (typeof body !== "string" || !body.startsWith(header) || !body.endsWith(end)) return false;
-  try {
-    const envelope = JSON.parse(body.slice(header.length, -end.length)) as {
-      evidence?: { pr_url?: unknown; head_sha?: unknown; review_input_digest?: unknown } | null;
-    } | null;
+const EVIDENCE_HEADER = "<!-- remudero-review-evidence:v1\n";
+const EVIDENCE_END = "\n-->";
+
+/** The clauses the fleet's own evidence records for exactly this FAIL (PR, head, review input, state failure)
+ *  put on its PR. Publication is a fact about those records alone. Nothing posted after them (a status, a
+ *  head, a review input or a verdict) can unpublish what they show, so no later state is read: whether the
+ *  FAIL is still the PR's CURRENT verdict is readReviewEvidenceRecord's question, not this one. A record
+ *  counts only as the publisher posted it: unedited, by the reviewer login, with its checksum intact.
+ *  An ops review's record carries no reasons, so it publishes no clause. */
+function publishedFailClauses(comments: readonly unknown[], fail: { prUrl: string; headSha: string; inputDigest: string }): Set<string> {
+  const publisher = process.env[REVIEWER_IDENTITY_ENV]?.trim().toLowerCase() || "remudero-fleet[bot]";
+  const approved = new Set<string>();
+  for (const raw of comments) {
+    const comment = raw as { body?: unknown; created_at?: unknown; updated_at?: unknown; user?: { login?: unknown } | null } | null;
+    const body = comment?.body;
+    if (typeof body !== "string" || !body.startsWith(EVIDENCE_HEADER) || !body.endsWith(EVIDENCE_END) ||
+        typeof comment?.user?.login !== "string" || comment.user.login.toLowerCase() !== publisher ||
+        typeof comment.created_at !== "string" || comment.updated_at !== comment.created_at) continue;
+    let envelope: { sha256?: unknown; evidence?: Record<string, unknown> | null } | null;
+    try {
+      envelope = JSON.parse(body.slice(EVIDENCE_HEADER.length, -EVIDENCE_END.length)) as typeof envelope;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      continue; // a malformed envelope identifies no publication
+    }
     const evidence = envelope?.evidence;
-    return evidence?.pr_url === expected.prUrl && evidence.head_sha === expected.headSha &&
-      evidence.review_input_digest === expected.reviewInputDigest;
-  } catch (error) {
-    if (error instanceof SyntaxError) return false; // a malformed envelope cannot identify a publication
-    throw error;
+    if (evidence == null || envelope!.sha256 !== createHash("sha256").update(JSON.stringify(evidence)).digest("hex") ||
+        evidence.pr_url !== fail.prUrl || evidence.head_sha !== fail.headSha ||
+        evidence.review_input_digest !== fail.inputDigest || evidence.state !== "failure" || strings(evidence.reasons).length === 0) continue;
+    for (const clause of failClauses(evidence)) approved.add(clause);
   }
+  return approved;
 }
 
-/** Look up a counted FAIL's publication even after the PR has a newer head or review input. */
-function readPublishedModelFail(expected: EvidenceIdentity, readJson: EvidenceJsonReader) {
-  return readReviewEvidenceRecord({ ...expected, reviewState: "failure" }, async (args, options) => {
-    const pages = await readJson(args, options);
-    if (args[1] === "graphql" || !Array.isArray(pages)) return pages;
-    return pages.map((page: unknown) => Array.isArray(page) ? page.filter((comment: unknown) => isEvidenceForInput(comment, expected)) : page);
-  });
-}
-
-/** Filed reviews can supply their own verified reasons. The ops producer removes those reasons. */
+/** Filed reviews can supply their own published reasons. The ops producer removes those reasons. */
 async function publishedModelFails(fails: readonly EvaluatorModelFail[], readJson: EvidenceJsonReader, log: ReviewerHealthLog): Promise<EvaluatorModelFail[]> {
   const published: EvaluatorModelFail[] = [];
+  const commentsOf = new Map<string, Promise<unknown[]>>();
   for (const fail of fails) {
     if (fail.published || fail.inputDigest === undefined || fail.clauses.length === 0) {
       published.push(fail);
@@ -762,9 +770,12 @@ async function publishedModelFails(fails: readonly EvaluatorModelFail[], readJso
     const headSha = fail.unit.slice(delimiter + 1);
     let clauses: string[] = [];
     try {
-      const evidence = await readPublishedModelFail({ prUrl, headSha, reviewInputDigest: fail.inputDigest }, readJson);
-      if (evidence?.row.reasons.length) {
-        const approved = new Set(failClauses(evidence.row));
+      const target = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(prUrl);
+      if (target) {
+        // One read per PR per delivery; a PR's FAILs share its comments.
+        if (!commentsOf.has(prUrl)) commentsOf.set(prUrl, readJson(["api", `repos/${target[1]}/${target[2]}/issues/${target[3]}/comments?per_page=100`,
+          "--paginate", "--slurp"], { fresh: true }).then((pages) => (pages as unknown[][]).flat()));
+        const approved = publishedFailClauses(await commentsOf.get(prUrl)!, { prUrl, headSha, inputDigest: fail.inputDigest });
         clauses = fail.clauses.filter((clause) => approved.has(clause));
       }
     } catch (error) {
