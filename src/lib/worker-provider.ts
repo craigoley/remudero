@@ -2431,11 +2431,9 @@ export interface CodexRetentionLoss {
   text: boolean;
   /** As text, for any block, or a block was dropped. */
   blocks: boolean;
-  /** The final turn's last message is intact; else no spill certifies. */
-  finalMessageIntact: boolean;
+  /** The last message arrived intact after every spill, then its turn.completed intact. */
+  finalMessageSealed: boolean;
   rebuiltLines: number;
-  /** Rebuilt lines not a valid event, or maybe a message. */
-  rejectedRebuiltLines: number;
   /** A budget cut is not a spill. */
   rebuiltDroppedBytes: number;
   /** Spill files not holding their line's bytes: a veto only. */
@@ -2443,7 +2441,7 @@ export interface CodexRetentionLoss {
 }
 
 /** W1-T13960: main's all-complete rule, or a narrow upgrade: a success with a complete final turn and stderr
- *  whose only loss is in valid, accounted, non-message rebuilt lines. Anything else keeps main's result. */
+ *  whose only loss is in accounted rebuilt lines before its final message. Anything else keeps main's result. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
@@ -2453,8 +2451,7 @@ export function codexResultRetentionComplete(
   const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
   if (retention.originalSubtype !== "success" || notComplete(rest) || stdout?.state !== "truncated") return false;
   const loss = parsed.retentionLoss;
-  return !loss.text && !loss.blocks && loss.finalMessageIntact
-    && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0 && loss.unaccountedSpills === 0
+  return loss.finalMessageSealed && loss.rebuiltLines > 0 && loss.unaccountedSpills === 0
     && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
 }
 
@@ -2620,35 +2617,6 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13960: a rebuilt line certifies only in the shape consumeLine reads. */
-function isCodexEventEnvelope(value: unknown): boolean {
-  const isObject = (candidate: unknown): candidate is Record<string, unknown> =>
-    typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
-  if (!isObject(value) || typeof value.type !== "string") return false;
-  const { type, item, usage } = value;
-  if (type.startsWith("item.")) {
-    if (!isObject(item) || typeof item.type !== "string" || (item.type === "agent_message" && typeof item.text !== "string")) return false;
-  } else if (item !== undefined && !isObject(item)) return false;
-  if (type !== "turn.completed" || usage === undefined) return true;
-  return isObject(usage) && (["input_tokens", "cached_input_tokens", "output_tokens"] as const)
-    .every((field) => usage[field] === undefined || (typeof usage[field] === "number" && Number.isFinite(usage[field])));
-}
-
-const CODEX_READ_EVENT_TYPES: ReadonlySet<string> = new Set(CODEX_EVENT_BYTE_KIND_KEYS.filter((key) => !key.includes(":") && key !== "malformed" && key !== "other"));
-const CODEX_ITEM_EVENT_TYPES: ReadonlySet<string> = new Set(["item.started", "item.updated", "item.completed"]);
-const CODEX_READ_NON_MESSAGE_ITEM_TYPES: ReadonlySet<string> = new Set(CODEX_EVENT_BYTE_KIND_KEYS
-  .flatMap((key) => key.startsWith("item.completed:") && key !== "item.completed:agent_message" ? [key.slice("item.completed:".length)] : []));
-
-/** W1-T13960: a rebuild can splice a type into a string: only read, non-message types, no agent_message token. */
-function couldBeCodexAgentMessage(event: CodexJsonEvent, line: string): boolean {
-  if (/"agent_message"/.test(line) || typeof event.type !== "string") return true;
-  if (CODEX_ITEM_EVENT_TYPES.has(event.type)) {
-    const itemType = event.item?.type;
-    return typeof itemType !== "string" || !CODEX_READ_NON_MESSAGE_ITEM_TYPES.has(itemType);
-  }
-  return !CODEX_READ_EVENT_TYPES.has(event.type);
-}
-
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 class CodexJsonlAccumulator {
   private sessionId = "";
@@ -2684,12 +2652,11 @@ class CodexJsonlAccumulator {
   private readonly blockLoss: boolean[] = [];
   private blocksCut = false;
   private rebuiltLines = 0;
-  private rejectedRebuiltLines = 0;
   private rebuiltDroppedBytes = 0;
   private unaccountedSpills = 0;
-  private messageUncertainSinceBlock = false;
-  private messageLikeRebuiltLines = 0;
-  private messageInFinalTurn = false;
+  private rebuiltSinceBlock = false;
+  /** W1-T13960: any spill resets it, as a spill after the last intact message could be the final one. */
+  private finalMessage: "none" | "open" | "sealed" = "none";
   /** W1-T13960: bytes written for the spilling line. */
   private spillLineBytes = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
@@ -2746,8 +2713,10 @@ class CodexJsonlAccumulator {
   private consumePending(): void {
     let line = this.pending;
     let sourceBytes: number | undefined;
-    let rebuilt = false;
+    let spill: "read" | "rebuilt" | undefined;
     if (this.spilling) {
+      spill = "read";
+      this.finalMessage = "none";
       const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
       // W1-T13960: a short or rewritten spill file only vetoes the upgrade.
       if (tail.fileBytes !== this.spillLineBytes) this.unaccountedSpills += 1;
@@ -2760,7 +2729,8 @@ class CodexJsonlAccumulator {
         line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
         this.droppedBytes += Math.max(0, omitted);
         this.rebuiltDroppedBytes += Math.max(0, omitted);
-        rebuilt = true;
+        spill = "rebuilt";
+        this.rebuiltSinceBlock = true;
         this.rebuiltLines += 1;
       } else {
         line = text;
@@ -2781,7 +2751,7 @@ class CodexJsonlAccumulator {
     this.spilling = false;
     this.spillHead = "";
     this.spillHeadFull = false;
-    this.consumeLine(line, sourceBytes, rebuilt);
+    this.consumeLine(line, sourceBytes, spill);
     if (this.pendingFile) this.boundRetained();
   }
 
@@ -2790,11 +2760,10 @@ class CodexJsonlAccumulator {
     const text = this.blocks.at(-1) ?? "";
     // Before the marker shifts blocks.
     const retentionLoss: CodexRetentionLoss = {
-      text: this.blockLoss.at(-1) === true || this.messageUncertainSinceBlock,
-      blocks: this.blocksCut || this.blockLoss.some(Boolean) || this.messageLikeRebuiltLines > 0,
-      finalMessageIntact: this.messageInFinalTurn && this.blockLoss.at(-1) === false && !this.messageUncertainSinceBlock,
+      text: this.blockLoss.at(-1) === true || this.rebuiltSinceBlock,
+      blocks: this.blocksCut || this.blockLoss.some(Boolean) || this.rebuiltSinceBlock,
+      finalMessageSealed: this.finalMessage === "sealed",
       rebuiltLines: this.rebuiltLines,
-      rejectedRebuiltLines: this.rejectedRebuiltLines,
       rebuiltDroppedBytes: this.rebuiltDroppedBytes,
       unaccountedSpills: this.unaccountedSpills,
     };
@@ -2890,23 +2859,18 @@ class CodexJsonlAccumulator {
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, rebuilt = false): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, spill?: "read" | "rebuilt"): void {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
-      if (rebuilt) this.rejectRebuiltLine(true);
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
       this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
       return;
-    }
-    if (rebuilt) {
-      const messageLike = couldBeCodexAgentMessage(event, line);
-      if (messageLike || !isCodexEventEnvelope(event)) this.rejectRebuiltLine(messageLike);
     }
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
@@ -2920,13 +2884,13 @@ class CodexJsonlAccumulator {
     if (event.type === "turn.started") {
       this.numTurns += 1;
       this.turnInProgress = true;
-      this.messageInFinalTurn = false;
+      this.finalMessage = "none";
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
-      this.blockLoss.push(rebuilt);
-      this.messageUncertainSinceBlock = false;
-      this.messageInFinalTurn = true;
+      this.blockLoss.push(spill === "rebuilt");
+      this.rebuiltSinceBlock = false;
+      if (!spill) this.finalMessage = "open";
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -2940,6 +2904,7 @@ class CodexJsonlAccumulator {
     const eventModel = cashResponseModel(event.model);
     if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
+      if (this.finalMessage === "open") this.finalMessage = "sealed";
       this.turnInProgress = false;
       this.completedTurns += 1;
       const input = event.usage?.input_tokens;
@@ -2969,14 +2934,6 @@ class CodexJsonlAccumulator {
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
-  }
-
-  /** W1-T13960: a message-like line also marks blocks, and text if last, truncated. */
-  private rejectRebuiltLine(messageLike: boolean): void {
-    this.rejectedRebuiltLines += 1;
-    if (!messageLike) return;
-    this.messageLikeRebuiltLines += 1;
-    this.messageUncertainSinceBlock = true;
   }
 
   /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
