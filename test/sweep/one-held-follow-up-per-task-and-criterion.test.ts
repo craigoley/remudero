@@ -10,9 +10,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -100,12 +101,16 @@ let minted = 0;
  * through the production reservation on the origin.
  */
 async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { id: string; text: string }; refuseParentEdit?: boolean;
-  listFails?: boolean; realReservation?: boolean } = {}) {
+  listFails?: boolean; realReservation?: boolean; planDir?: string } = {}) {
   const landingBranch = await taskFilesLandingBranchAsync({ owner: OWNER, repo: REPO });
   const root = tempRoot(t, "one-held-follow-up");
   const origin = gitRepo({ scope: t, bare: true, kind: "one-held-origin" });
   const seed = gitRepo({ scope: t, cloneFrom: origin.dir, kind: "one-held-seed" });
-  for (const [path, text] of [["plan/tasks.yaml", "[]\n"], [shardRel(TASK), shardOf(TASK)]] as const) {
+  // `planDir` places the target's plan by its own .remudero/layout.json, as a managed repository may.
+  const planDir = opts.planDir ?? "plan";
+  const seedFiles: Array<[string, string]> = [["plan/tasks.yaml", "[]\n"], [`${planDir}/tasks.d/${TASK}-fixture.yaml`, shardOf(TASK)],
+    ...(opts.planDir === undefined ? [] : [[".remudero/layout.json", `${JSON.stringify({ planDir: opts.planDir })}\n`] as [string, string]])];
+  for (const [path, text] of seedFiles) {
     mkdirSync(join(seed.dir, path, ".."), { recursive: true });
     writeFileSync(join(seed.dir, path), text);
   }
@@ -130,7 +135,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     });
   }
   if (opts.mainExtra !== undefined) {
-    const rel = `plan/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
+    const rel = `${planDir}/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
     writeFileSync(join(seed.dir, rel), opts.mainExtra.text);
     seed.git("add", "-A");
     seed.git("commit", "--quiet", "-m", `chore(plan): file ${opts.mainExtra.id}`);
@@ -189,7 +194,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     writeFileSync(`${abs}.meta.json`, `${JSON.stringify({ baseBlob: null, claim: "filed", proof: `grep: id: ${id} in ${rel}`,
       repository: `${OWNER}/${REPO}`, ...(prUrl === undefined ? {} : { prUrl }) })}\n`);
   };
-  return { act, reserved, landed, results, stage, host, production, origin, checkoutDir: repo.dir };
+  return { act, reserved, landed, results, stage, host, production, origin, root, checkoutDir: repo.dir };
 }
 
 /** The remedy module loaded again, as a restarted daemon loads it: a new claim token, so the old holder is gone. */
@@ -645,4 +650,136 @@ test("W1-T13944 criterion 6: a held file the landing refuses because other bytes
   context(rows));
   assert.ok(out.error !== undefined, out.reason);
   assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["refused", undefined]]);
+});
+
+/* Review findings of 2026-11-21 on head deca5b670, one test each. */
+
+test("W1-T13944 criterion 1: a held follow-up on origin/main whose title YAML folds is still matched, with an empty ledger and a lagging plan", async t => {
+  const folded = heldText("W1-T13919", TASK, [CLAIMS[1]!])
+    .replace(`  title: "Fixture task ${TASK} (held follow-up)"`, `  title: >-\n    Fixture task ${TASK} (held\n    follow-up)`);
+  assert.ok(!folded.includes("(held follow-up)"), "the raw text does not hold the title marker");
+  assert.equal(heldFollowUpsOfTaskText(folded)[0]?.title, `Fixture task ${TASK} (held follow-up)`, "the parsed title ends with it");
+  const w = await world(t, { mainExtra: { id: "W1-T13919", text: folded } });
+  const rows: Row[] = [];
+  const out = await w.act(rows, []);
+  assert.equal(out.error, undefined, out.reason);
+  assert.equal(out.heldTaskId, "W1-T13919");
+  assert.equal(w.reserved.length, 0, "no id is reserved");
+  assert.equal(w.landed.length, 0, "no task file lands");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", "W1-T13919", true]]);
+});
+
+test("W1-T13944 criterion 2: a queued held follow-up removed unmerged after a reuse stops no later split; its taken row stands for nothing", async t => {
+  const w = await world(t);
+  w.stage("W1-T13938");
+  const rows: Row[] = [];
+  const first = await w.act(rows, []);
+  assert.equal(first.heldTaskId, "W1-T13938", first.reason);
+  // The landing pull request closes unmerged and the staged file leaves the queue.
+  const abs = join(w.root, "state", "task-files-landing-pending", "plan/tasks.d/W1-T13938-fixture-task-held-follow-up.yaml");
+  rmSync(abs);
+  rmSync(`${abs}.meta.json`);
+  const next: Row[] = [];
+  const again = await w.act(next, rows);
+  assert.equal(again.error, undefined, again.reason);
+  assert.notEqual(again.heldTaskId, "W1-T13938", "no held follow-up is left, so the reused row does not answer");
+  assert.equal(w.reserved.length, 1, "the split files a held follow-up again");
+  assert.equal(again.heldTaskId, w.reserved[0]);
+  assert.equal(carries(w.landed.flat(), CLAIMS[1]!).length, 1);
+});
+
+test("W1-T13944 criterion 3: a pass whose claim snapshot is older than generations another pass wrote and removed holds no claim and reserves none", async t => {
+  const root = tempRoot(t, "one-held-stale-snapshot");
+  const f = fakeHost(root, []);
+  const files: TaskFileInput[] = [{ relPath: "plan/tasks.d/W1-T13990-fixture-task-held-follow-up.yaml", newFile: true,
+    content: heldText("W1-T13990", TASK, [CLAIMS[1]!]), claim: "filed", proof: "grep: id: W1-T13990 in plan/tasks.d" }];
+  const realLink = fs.linkSync;
+  let interfered = false;
+  // Between this pass's read of the empty claim and its link of generation 1, a pass in another process took the
+  // claim, wrote generations 1 to 3 (the last names its id) and removed 1 and 2.
+  fs.linkSync = ((existing: fs.PathLike, linked: fs.PathLike) => {
+    if (!interfered && String(linked).endsWith("/1.json")) {
+      interfered = true;
+      writeFileSync(join(dirname(String(linked)), "3.json"), `${JSON.stringify({ parent: TASK, claim: CLAIMS[1], id: "W1-T13990", files,
+        holder: { pid: process.ppid, token: "another-daemon" } })}\n`);
+    }
+    realLink(existing, linked);
+  }) as typeof fs.linkSync;
+  syncBuiltinESMExports();
+  let out;
+  try {
+    out = await takeParkedPrRemedy(subject(), split(), [], f.h, context([]));
+  } finally {
+    fs.linkSync = realLink;
+    syncBuiltinESMExports();
+  }
+  assert.ok(interfered, "the other pass wrote while this pass held its snapshot");
+  assert.match(String(out.error), /another pass changed the claim/, out.reason);
+  assert.deepEqual(f.reserved, [], "the pass with the old snapshot reserves no id");
+  assert.equal(claimRecord(root, TASK, CLAIMS[1]!)!.id, "W1-T13990", "the other pass's generation stays the newest");
+  const next = await takeParkedPrRemedy(subject(), split(), [], f.h, context([]));
+  assert.deepEqual([next.heldTaskId, f.reserved], ["W1-T13990", []], "the next pass lands the other pass's id");
+});
+
+test("W1-T13944 criterion 4: a restart whose reservation-ref read fails keeps the pending push and reserves no other id", async t => {
+  const w = await world(t);
+  const anchor = w.origin.git("commit-tree", w.origin.git("rev-parse", "main^{tree}").trim(), "-m", "reservation anchor").trim();
+  w.origin.git("update-ref", taskIdReservationRef("W1-T13951"), anchor);
+  writeClaim(w.root, TASK, CLAIMS[1]!, { holder: null, pending: [{ taskId: "W1-T13951", anchor, claims: [CLAIMS[1]] }] });
+  const url = execFileSync("git", ["-C", w.checkoutDir, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", w.checkoutDir, "remote", "set-url", "origin", join(w.root, "an-origin-that-cannot-be-reached")]);
+  const out = await w.act([], []);
+  assert.deepEqual(w.reserved, [], "a failed read reserves no other id");
+  assert.match(String(out.error), /cannot be read from origin/, out.reason);
+  assert.deepEqual(claimRecord(w.root, TASK, CLAIMS[1]!)!.pending, [{ taskId: "W1-T13951", anchor, claims: [CLAIMS[1]] }]);
+  execFileSync("git", ["-C", w.checkoutDir, "remote", "set-url", "origin", url]);
+  const rows: Row[] = [];
+  const again = await w.act(rows, []);
+  assert.equal(again.error, undefined, again.reason);
+  assert.deepEqual([again.heldTaskId, w.reserved], ["W1-T13951", []], "once origin answers, the pushed id lands");
+});
+
+test("W1-T13944 criterion 5: a split refused in part stands for no close-and-rebuild, which files its rebuild and closes the pull request", async t => {
+  const root = tempRoot(t, "one-held-partial-then-close");
+  const f = fakeHost(root, []);
+  const refusal = "the plan preflight refused it: lint-plan design-invariant-proof";
+  const partial: ParkedPrHost = { ...f.h, landTaskFiles: async files => ({ error: refusal,
+    staged: files.filter(file => file.newFile === true).map(file => file.relPath),
+    refused: files.filter(file => file.newFile !== true).map(file => ({ relPath: file.relPath, reason: refusal })) }) };
+  const rows: Row[] = [];
+  const first = await takeParkedPrRemedy(subject(), split(), [], partial, context(rows));
+  assert.equal(first.error, undefined, first.reason);
+  assert.match(String(remedyRows(rows)[0]!.partial_refusal), /design-invariant-proof/);
+  const closed: string[] = [];
+  const close = await takeParkedPrRemedy(subject(), { remedy: "close-and-rebuild", reason: "no part can merge",
+    inputCriteria: split().inputCriteria }, [...rows], { ...f.h, closePr: async url => { closed.push(url); } }, context(rows));
+  assert.equal(close.error, undefined, close.reason);
+  assert.equal(close.remedy, "close-and-rebuild", "the partial split row does not answer the close");
+  assert.deepEqual(closed, [subject().prUrl], "the pull request is closed");
+  assert.equal(f.reserved.length, 2, "the rebuild reserves its own id");
+  assert.equal(close.heldTaskId, f.reserved[1]);
+});
+
+test("W1-T13944 criterion 6: a pull request whose trailer now names another task files that task's own held follow-up for the same criterion", async t => {
+  const root = tempRoot(t, "one-held-trailer");
+  const f = fakeHost(root, []);
+  const rows: Row[] = [];
+  const first = await takeParkedPrRemedy(subject(TASK, 19767), split(), [], f.h, context(rows));
+  assert.equal(first.error, undefined, first.reason);
+  const moved = await takeParkedPrRemedy(subject(OTHER, 19767), split(), [...rows], f.h, context(rows));
+  assert.equal(moved.error, undefined, moved.reason);
+  assert.equal(f.reserved.length, 2, "the second parent files its own held follow-up");
+  assert.notEqual(moved.heldTaskId, first.heldTaskId);
+  assert.ok(f.landed.flat().some(file => file.newFile === true && heldFollowUpsOfTaskText(file.content)
+    .some(h => h.id === moved.heldTaskId && h.depends_on.includes(OTHER))), "its held file depends on the second parent");
+});
+
+test("W1-T13944 criterion 7: readHeldFollowUps: reads origin/main where the target's .remudero/layout.json places the plan", async t => {
+  const w = await world(t, { planDir: "backlog", mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) } });
+  const read = await w.host.readHeldFollowUps!({ owner: OWNER, repo: REPO, checkoutDir: w.checkoutDir });
+  assert.deepEqual(read.map(h => h.id), ["W1-T13919"], "the held follow-up under backlog/tasks.d is read");
+  const rows: Row[] = [];
+  const out = await w.act(rows, []);
+  assert.equal(out.heldTaskId, "W1-T13919", out.reason);
+  assert.equal(w.reserved.length, 0, "no id is reserved");
 });

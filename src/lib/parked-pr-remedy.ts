@@ -251,6 +251,14 @@ function advanceClaim(slot: ClaimSlot, parentId: string, record: Omit<ClaimRecor
   } finally {
     rmSync(tmp, { force: true });
   }
+  // A newer pass removes the generations below its own, so a pass with an old snapshot can link a removed number again.
+  // A newer generation beside the one just linked means another pass wrote after this snapshot: this pass lost, and its
+  // link is removed (no reader takes it, as the newer one outranks it).
+  if (claimGenerations(slot.dir).some(other => other > gen)) {
+    rmSync(join(slot.dir, `${gen}.json`), { force: true });
+    throw Object.assign(new Error(`another pass changed the claim on the held follow-up of ${parentId} first (${slot.dir}); ` +
+      "it reserves the one id (W1-T13944)"), { claimTaken: true });
+  }
   for (const old of claimGenerations(slot.dir)) if (old < gen) rmSync(join(slot.dir, `${old}.json`), { force: true });
   return { ...slot, gen, record: whole };
 }
@@ -434,11 +442,17 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     if (!written) ctx.append({ ...row, outcome: "taken", reason: decision.reason, ...observedFields(ctx.observed) });
     return { remedy: decision.remedy, reason: decision.reason };
   }
-  // W1-T13944: a split reuses a row only when that row's held task carries every criterion this split moves.
+  // W1-T13944: a split reuses a row only when that row's held task carries every criterion this split moves. With the
+  // plan and the landing queue in hand, a split reuses no row at all: a held follow-up stops the next one only while it
+  // exists there (or a claim names it), and a row outlives a held file removed unmerged, or a trailer that names another
+  // task. A row the earlier remedy paths never wrote (a reused split, or a split the plan preflight refused in part)
+  // stands for no other remedy, so close-and-rebuild after one files its rebuild as before.
   const asked = decision.inputCriteria.map(c => c.claim);
-  const prior = ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber && r.cause === ctx.cause &&
-    r.outcome === "taken" && typeof r.held_task_id === "string" && (decision.remedy !== "split-follow-up" ||
-      (Array.isArray(r.criteria) && asked.every(claim => (r.criteria as unknown[]).includes(claim)))));
+  const splitReadsPlan = decision.remedy === "split-follow-up" && host.readHeldFollowUps !== undefined;
+  const prior = splitReadsPlan ? undefined : ledger.findLast(r => r.step === PARKED_PR_REMEDY_STEP && r.pr_number === pr.prNumber &&
+    r.cause === ctx.cause && r.outcome === "taken" && typeof r.held_task_id === "string" && (decision.remedy !== "split-follow-up"
+      ? !(r.remedy === "split-follow-up" && (r.reused === true || r.partial_refusal !== undefined))
+      : Array.isArray(r.criteria) && asked.every(claim => (r.criteria as unknown[]).includes(claim))));
   if (prior !== undefined) {
     return { remedy: prior.remedy as ParkedPrRemedy, heldTaskId: prior.held_task_id as string,
       reason: `held task ${String(prior.held_task_id)} was filed for this pull request and cause; this pass reuses it` };

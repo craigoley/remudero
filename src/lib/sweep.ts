@@ -51,7 +51,7 @@ import {
   type RemoteReserveAsyncInput, type RemoteReserveDeps,
 } from "./task-id-reservation.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
@@ -5547,7 +5547,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T13944: the id is minted in the public repository, so its reservation ref is read there.
       reservationHeld: async (taskId, anchor) => {
         const listed = await planRepairGitRunAsync(repoDir)(["ls-remote", "origin", taskIdReservationRef(taskId)]);
-        return listed.status === 0 && listed.stdout.trim().split(/\s+/)[0] === anchor;
+        // A failed listing says nothing about the ref: the split is refused and keeps the pending push for the next pass,
+        // rather than reserve a second id beside one that may be held.
+        if (listed.status !== 0) {
+          throw new Error(`the reservation ref of ${taskId} cannot be read from origin (git ls-remote exited ${String(listed.status)}); ` +
+            "the pending push is kept for the next pass (W1-T13944)");
+        }
+        return listed.stdout.trim().split(/\s+/)[0] === anchor;
       },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
@@ -12222,12 +12228,34 @@ export async function reservePlanRepairTaskIdAsync(
  */
 async function heldFollowUpsAtRefAsync(checkoutDir: string, ref: string): Promise<HeldFollowUp[]> {
   const runGit = defaultGitRunnerAsync(checkoutDir);
-  const { planDir, planMonolith } = resolveRepoLayout("", () => undefined);
-  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", planMonolith, `${join(planDir, "tasks.d")}/`]);
+  // The target's own layout override places its plan: the one at `ref`, else the one in the working tree.
+  const rel = (path: string) => relative(checkoutDir, path).split(sep).join("/");
+  const overrideRel = rel(join(resolveRepoLayout(checkoutDir, () => undefined).stateDir, "layout.json"));
+  let layoutAtRef: string | undefined;
+  try {
+    layoutAtRef = await runGit(["show", `${ref}:${overrideRel}`]);
+  } catch {
+    layoutAtRef = undefined;
+  }
+  const layout = resolveRepoLayout(checkoutDir, (path) => layoutAtRef ?? (existsSync(path) ? readFileSync(path, "utf8") : undefined));
+  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", rel(layout.planMonolith), `${rel(join(layout.planDir, "tasks.d"))}/`]);
   const paths = listing.split("\n").map((l) => l.trim()).filter((l) => /\.ya?ml$/.test(l));
   const texts = await readBlobsAtRefAsync(runGit, ref, paths);
-  return texts.flatMap((text) => text.includes("(held follow-up)") ? heldFollowUpsOfTaskText(text) : []);
+  // Every file is parsed: a folded or escaped title shows "(held follow-up)" only once parsed. A parse is kept by the
+  // file's bytes, so a later pass parses only the files that changed.
+  const seen = new Map<string, HeldFollowUp[]>();
+  const held = texts.flatMap((text) => {
+    const key = createHash("sha256").update(text).digest("hex");
+    const parsed = heldFollowUpParses.get(key) ?? heldFollowUpsOfTaskText(text);
+    seen.set(key, parsed);
+    return parsed;
+  });
+  heldFollowUpParses = seen;
+  return held;
 }
+
+/** W1-T13944: the held follow-ups of each task file read at the last {@link heldFollowUpsAtRefAsync}, by the file's hash. */
+let heldFollowUpParses = new Map<string, HeldFollowUp[]>();
 
 /**
  * W1-T13944: `current` (origin/main and the landing queue) and the held follow-ups of `lagging` (the daemon's plans) for
