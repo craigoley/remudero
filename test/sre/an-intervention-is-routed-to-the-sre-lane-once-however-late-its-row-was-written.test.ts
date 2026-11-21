@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { test, type TestContext } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
@@ -271,7 +272,7 @@ test("W1-T14005 criterion 4: each intervention routes once with origin/main's ev
   assert.equal(lbook.incidents().length, 1, "one routed event across all four passes");
 });
 
-test("W1-T14005 criterion 1: on the upgrade, a late row origin/main already routed is not routed again, and one it never read routes once", async (t) => {
+test("W1-T14005 criterion 1: on the upgrade, a late row origin/main routed only keyless routes once more, and every row routes once", async (t) => {
   const root = tmp(t);
   const book = rowsAt();
   const late = pushRow("pr#15368@c9c0b40f8", NOW - 13 * DAY);
@@ -292,14 +293,15 @@ test("W1-T14005 criterion 1: on the upgrade, a late row origin/main already rout
   book.add(twin, NOW - 20_000);
   const legacyBefore = book.incidents().length;
   for (const at of [NOW, NOW + MIN, NOW + HOUR]) await lanePass(root, book, at);
-  const keyed = book.incidents().filter((r) => r.intervention_key !== undefined).map((r) => r.intervention_key);
-  assert.deepEqual(keyed, [interventionKey(twin), interventionKey(unread)],
-    "the new code routes only what origin/main never routed, each once; the late row base routed is not routed again");
-  assert.equal(book.incidents().length, legacyBefore + 2);
+  const keyed = book.incidents().filter((r) => r.intervention_key !== undefined).map((r) => [r.intervention_key, r.ts]);
+  // Round 4 (remudero-ops #240): a keyless routing proves nothing, so the late row base routed routes once more, keyed.
+  assert.deepEqual(keyed, [interventionKey(late), interventionKey(twin), interventionKey(unread)].map((k) => [k, iso(NOW)]),
+    "each row routes once, at the upgrade pass, carrying its key; the late row base routed keyless routes once more");
+  assert.equal(book.incidents().length, legacyBefore + 3, "and none routes again");
   assert.ok(memoryText(root).includes(JSON.stringify(interventionKey(late))), "the late key is remembered from then on");
 });
 
-test("W1-T14005 criterion 2: events origin/main routed without a key count once per intervention they name, so the upgrade re-files nothing", async (t) => {
+test("W1-T14005 criterion 2: events origin/main routed without a key count once per event, as on origin/main, and the upgrade adds one per late row", async (t) => {
   const root = tmp(t);
   const book = rowsAt();
   // Two late hand pushes of one class on one file: origin/main routed both on every pass, keyless (every 10 minutes here).
@@ -311,24 +313,25 @@ test("W1-T14005 criterion 2: events origin/main routed without a key count once 
   for (let at = NOW - 2 * HOUR; at < NOW; at += 10 * MIN) book.rows.push(legacyEvent(b, at));
   const fp = String(interventionIncidentEvent(a, NOW).fingerprint);
   const state = join(root, "state");
-  // origin/main filed it at its first count, 2, and its task is open.
-  writeFileSync(sreLaneStorePath(state), JSON.stringify({ [fp]: { ts: iso(NOW - 3 * HOUR), count: 2 } }) + "\n");
-  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  const over: Partial<SreLaneInput> = { mergedLastDay: () => 10, hasOpenTask: () => true, log: (step, extra) => logs.push({ step, extra }) };
-  assert.ok(book.incidents().length >= 30, "the repeat events are present (the condition under test)");
-  for (const at of [NOW, NOW + MIN, NOW + 15 * MIN]) assert.equal((await lanePass(root, book, at, over)).filed, undefined, `pass at +${(at - NOW) / MIN} min: no new intervention, nothing filed`);
-  assert.deepEqual(listFeedback(root).map((e) => e.id), [], "no -n<count> re-filing from origin/main's repeat events");
-  // New interventions do move it: a third is under double, a fourth doubles the filed 2 and re-files at exactly 4.
-  book.add(pushRow("pr#16240@aaaaaaaaa", NOW + 16 * MIN), NOW + 16 * MIN);
-  assert.equal((await lanePass(root, book, NOW + 17 * MIN, over)).filed, undefined);
-  book.add(pushRow("pr#16240@bbbbbbbbb", NOW + 18 * MIN), NOW + 18 * MIN);
-  assert.equal((await lanePass(root, book, NOW + 19 * MIN, over)).filed, fp);
-  assert.deepEqual(listFeedback(root).map((e) => e.id), [`${incidentFeedbackId(fp)}-n4`]);
-  assert.deepEqual(logs.filter((l) => l.step === "sre_lane.filed").map((l) => [l.extra!.count, l.extra!.prior_count]), [[4, 2]]);
-  // Round 3: a keyless event is told apart by its own fields, never by the rows read now. Three passes' repeats of one
-  // message are one intervention; two events of one message in one pass are two.
-  assert.equal(aggregateIncidents([0, 1, 2].map((i) => incidentEventFromLedgerRow(legacyEvent(a, NOW + i * MIN), "core")!))[0].count, 1);
-  assert.equal(aggregateIncidents([0, 0, 1, 1].map((i) => incidentEventFromLedgerRow(legacyEvent(a, NOW + i * MIN), "core")!))[0].count, 2);
+  const legacyCount = book.incidents().length;
+  assert.equal(legacyCount, 30, "the repeat events are present (the condition under test)");
+  assert.equal(aggregateIncidents(book.events())[0].count, legacyCount, "origin/main's count: one per keyless event");
+  // origin/main last filed it at that count, and its task is open.
+  writeFileSync(sreLaneStorePath(state), JSON.stringify({ [fp]: { ts: iso(NOW - MIN), count: legacyCount } }) + "\n");
+  const over: Partial<SreLaneInput> = { mergedLastDay: () => 10, hasOpenTask: () => true };
+  const counts: number[] = [];
+  for (const at of [NOW, NOW + MIN, NOW + 15 * MIN]) {
+    assert.equal((await lanePass(root, book, at, over)).filed, undefined, `pass at +${(at - NOW) / MIN} min: under double, nothing filed`);
+    counts.push(aggregateIncidents(book.events())[0].count);
+  }
+  // Round 4 (remudero-ops #240): the keyless events count as origin/main counts them, and each late row whose only
+  // routings are keyless routes once more at the upgrade, keyed, then never again.
+  assert.deepEqual(counts, [legacyCount + 2, legacyCount + 2, legacyCount + 2], "the upgrade adds one per late row, once");
+  assert.deepEqual(book.incidents().filter((r) => r.intervention_key !== undefined).map((r) => r.intervention_key), [interventionKey(a), interventionKey(b)]);
+  assert.deepEqual(listFeedback(root).map((e) => e.id), [], "no -n<count> re-filing");
+  // Round 4: a keyless event counts by itself, in one pass or across passes, as on origin/main.
+  assert.equal(aggregateIncidents([0, 1, 2].map((i) => incidentEventFromLedgerRow(legacyEvent(a, NOW + i * MIN), "core")!))[0].count, 3);
+  assert.equal(aggregateIncidents([0, 0, 1, 1].map((i) => incidentEventFromLedgerRow(legacyEvent(a, NOW + i * MIN), "core")!))[0].count, 4);
 });
 
 test("W1-T14005 criterion 3: a structured memory entry without a readable seen instant throws, so it never suppresses a routing", async (t) => {
@@ -368,30 +371,35 @@ function filePass(root: string, nowMs: number, over: Partial<SreLaneInput> = {})
   });
 }
 
-test("W1-T14005 criterion 1: on the upgrade, a late row whose earlier routings rotated out of the live file is not routed again", async (t) => {
-  const root = tmp(t);
-  const state = join(root, "state");
-  // The review's case: at 12 days old, ts one day old. origin/main routed it on every pass, keyless, and those events
-  // and the row itself are now in a rotation, not in the live file.
+test("W1-T14005 criterion 1: a late row whose keyed routing rotated out of the live file is not routed again; one routed only keyless routes once", async (t) => {
+  // The review's case: at 12 days old, ts one day old. Its routings and the row itself are now in a rotation, not in the
+  // live file, and the memory lost its key. Round 4 (remudero-ops #240): only a keyed routing proves it was routed.
   const late = pushRow("pr#15368@c9c0b40f8", NOW - 12 * DAY);
   const lateRow = { ...interventionLedgerLine(late), ts: iso(NOW - DAY) };
-  const routings = [NOW - DAY + 10 * MIN, NOW - DAY + 20 * MIN, NOW - 2 * HOUR].map((at) => legacyEvent(late, at));
-  // Written after origin/main's last pass, in the live file: one it never read, which must route once.
+  const keyless = [NOW - DAY + 10 * MIN, NOW - DAY + 20 * MIN].map((at) => legacyEvent(late, at));
+  const keyed = { ...legacyEvent(late, NOW - 2 * HOUR), intervention_key: interventionKey(late) };
+  // Written in the live file: one never routed, which must route once.
   const unread = pushRow("pr#16452@1b2c3d4e5", NOW - 10 * DAY);
-  writeLedger([{ ...interventionLedgerLine(unread), ts: iso(NOW - 30_000) }], {
-    dir: state, rotations: [{ at: iso(NOW - HOUR), rows: [lateRow, ...routings], gz: true }],
-  });
-  // origin/main's memory: bare keys, the late one pruned by its at.
-  writeFileSync(memoryPath(root), JSON.stringify({ routed: [] }) + "\n");
-  assert.equal(liveRows(state).filter((r) => r.step === "incident.event").length, 0, "fixture: no earlier routing is in the live file");
-  for (const at of [NOW, NOW + MIN, NOW + HOUR]) await filePass(root, at);
-  const routed = liveRows(state).filter((r) => r.step === "incident.event");
-  assert.deepEqual(routed.map((r) => r.intervention_key), [interventionKey(unread)],
-    "only the row origin/main never read is routed, once; the late row's rotated routings show it was routed");
-  assert.ok(memoryText(root).includes(JSON.stringify(interventionKey(late))), "the late key is remembered from then on");
+  const cases: Array<[string, Array<Record<string, unknown>>, string[]]> = [
+    ["keyed", [...keyless, keyed], [interventionKey(unread)]],
+    ["keyless only", keyless, [interventionKey(late), interventionKey(unread)]],
+  ];
+  for (const [name, routings, expected] of cases) {
+    const root = tmp(t);
+    const state = join(root, "state");
+    writeLedger([{ ...interventionLedgerLine(unread), ts: iso(NOW - 30_000) }], {
+      dir: state, rotations: [{ at: iso(NOW - HOUR), rows: [lateRow, ...routings], gz: true }],
+    });
+    writeFileSync(memoryPath(root), JSON.stringify({ routed: [] }) + "\n");
+    assert.equal(liveRows(state).filter((r) => r.step === "incident.event").length, 0, `${name}: fixture: no earlier routing is in the live file`);
+    for (const at of [NOW, NOW + MIN, NOW + HOUR]) await filePass(root, at);
+    const routed = liveRows(state).filter((r) => r.step === "incident.event");
+    assert.deepEqual(routed.map((r) => r.intervention_key), expected, `${name}: each row this pass must route is routed once, and nothing again`);
+    assert.ok(memoryText(root).includes(JSON.stringify(interventionKey(late))), `${name}: the late key is remembered from then on`);
+  }
 });
 
-test("W1-T14005 criterion 1: an unreadable routing history routes nothing and writes nothing, and the pass rejects naming it", async (t) => {
+test("W1-T14005 criterion 1: an unreadable routing history writes nothing for the row it would prove, and the pass goes on", async (t) => {
   const root = tmp(t);
   const state = join(root, "state");
   const late = pushRow("pr#15368@c9c0b40f8", NOW - 12 * DAY);
@@ -401,13 +409,15 @@ test("W1-T14005 criterion 1: an unreadable routing history routes nothing and wr
   writeFileSync(broken, Buffer.alloc(64, 0x21));
   const book = rowsAt();
   book.add(late, NOW - DAY);
-  const pass = () => filePass(root, NOW, { readFlowRows: book.read });
-  await assert.rejects(pass(), /Operator-intervention routing history unreadable: .*\.ndjson\.gz/);
-  assert.deepEqual(liveRows(state), [], "no incident.event: what was routed is unknown, so nothing is routed again");
-  assert.equal(memoryText(root), "", "and the memory is not written");
+  // Round 4 (review 10:11Z finding 3): the pass no longer rejects; only the row the history would prove waits.
+  const logs: string[] = [];
+  await filePass(root, NOW, { readFlowRows: book.read, log: (step) => logs.push(step) });
+  assert.deepEqual(liveRows(state), [], "no incident.event: what was routed is unknown, so it is not routed this pass");
+  assert.ok(!memoryText(root).includes(JSON.stringify(interventionKey(late))), "and it is not remembered as routed");
+  assert.deepEqual(logs, ["sre_lane.routing_deferred"]);
 });
 
-test("W1-T14005 criterion 2: a keyless event counts the same at its row's window boundary and after the row expires", async (t) => {
+test("W1-T14005 criterion 2: keyless events count once per event, the same at their row's window boundary and after it expires", async (t) => {
   const root = tmp(t);
   const book = rowsAt();
   const late = pushRow("pr#15368@c9c0b40f8", NOW - 13 * DAY);
@@ -420,11 +430,16 @@ test("W1-T14005 criterion 2: a keyless event counts the same at its row's window
   // Its row is still read the minute before it leaves the window, and is not read the minute after.
   await lanePass(root, book, rowTs + WINDOW - MIN, { runbookPass });
   await lanePass(root, book, rowTs + WINDOW + MIN, { runbookPass });
-  assert.equal(book.incidents().length, 4, "no pass routed anything new: the condition under test is only the row's expiry");
-  assert.deepEqual(seen, [[1, 1], [1, 1]], "one intervention, at the boundary and after its row expired: count and burn do not move");
+  // Round 4 (remudero-ops #240): the four keyless events count four, as on origin/main, and the row, routed only keyless,
+  // routes once more at the upgrade, keyed.
+  assert.equal(book.incidents().filter((r) => r.intervention_key !== undefined).length, 1, "the upgrade routed it once, keyed");
+  assert.equal(book.incidents().length, 5, "and the pass after its expiry routed nothing new");
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1], seen[0], "at the boundary and after its row expired: count and burn do not move");
+  assert.equal(seen[0]![0], 5);
 });
 
-test("W1-T14005 criterion 2: two late rows sharing one message count as two, so an open task filed at 2 is not re-filed", async (t) => {
+test("W1-T14005 criterion 2: two late rows of one message routed keyless count once per event, and the upgrade adds one per row", async (t) => {
   const root = tmp(t);
   const book = rowsAt();
   // Two records of one push target under two `at`s: one message, two interventions. origin/main routed both on each
@@ -436,22 +451,24 @@ test("W1-T14005 criterion 2: two late rows sharing one message count as two, so 
   for (const at of [NOW - 2 * HOUR, NOW - 90 * MIN, NOW - HOUR, NOW - 30 * MIN]) book.rows.push(legacyEvent(one, at), legacyEvent(two, at));
   assert.equal(book.incidents().length, 8, "fixture: eight keyless events of one message");
   const fp = String(interventionIncidentEvent(one, NOW).fingerprint);
-  writeFileSync(sreLaneStorePath(join(root, "state")), JSON.stringify({ [fp]: { ts: iso(NOW - 3 * HOUR), count: 2 } }) + "\n");
+  // origin/main filed it at its count of the eight events.
+  writeFileSync(sreLaneStorePath(join(root, "state")), JSON.stringify({ [fp]: { ts: iso(NOW - 3 * HOUR), count: 8 } }) + "\n");
   const counts: number[] = [];
   const logs: string[] = [];
   const over: Partial<SreLaneInput> = {
     mergedLastDay: () => 10, hasOpenTask: () => true, log: (step) => logs.push(step),
     runbookPass: async (incident) => { counts.push(incident.count); return { outcome: "held", fileFeedback: true }; },
   };
-  for (const at of [NOW, NOW + MIN]) assert.equal((await lanePass(root, book, at, over)).filed, undefined, "no new intervention: nothing filed");
+  for (const at of [NOW, NOW + MIN]) assert.equal((await lanePass(root, book, at, over)).filed, undefined, "under double: nothing filed");
   assert.deepEqual(listFeedback(root).map((e) => e.id), [], "no -n<count> re-filing");
-  assert.equal(book.incidents().length, 8, "nothing routed again");
-  // The control: the count the doubling rule reads is 2. Two new interventions double it and re-file at 4.
-  book.add(pushRow("pr#16240@aaaaaaaaa", NOW + 2 * MIN), NOW + 2 * MIN);
-  book.add(pushRow("pr#16240@bbbbbbbbb", NOW + 2 * MIN), NOW + 2 * MIN);
+  // Round 4 (remudero-ops #240): each row, routed only keyless, routes once more at the upgrade, keyed, then never again.
+  assert.equal(book.incidents().length, 10, "one keyed routing per row, once");
+  assert.equal(aggregateIncidents(book.events())[0].count, 10, "eight keyless events count eight, as on origin/main, plus one per keyed row");
+  // The control: six new interventions reach double the filed eight and re-file at 16.
+  for (const c of "abcdef") book.add(pushRow(`pr#16240@${c.repeat(9)}`, NOW + 2 * MIN), NOW + 2 * MIN);
   assert.equal((await lanePass(root, book, NOW + 3 * MIN, over)).filed, fp);
-  assert.deepEqual(counts.slice(-1), [4]);
-  assert.deepEqual(listFeedback(root).map((e) => e.id), [`${incidentFeedbackId(fp)}-n4`]);
+  assert.deepEqual(counts, [16]);
+  assert.deepEqual(listFeedback(root).map((e) => e.id), [`${incidentFeedbackId(fp)}-n16`]);
 });
 
 test("W1-T14005 criterion 4: a new row sharing its message and ts with an expired keyless event routes on its first read", async (t) => {
@@ -471,11 +488,148 @@ test("W1-T14005 criterion 4: a new row sharing its message and ts with an expire
   await lanePass(root, book, T + 2 * MIN);
   await lanePass(root, book, T + HOUR);
   assert.deepEqual(keyed(), [interventionKey(fresh)], "and never again");
-  // The rule directly: an event written after a row's first read, at or after its at, shows it; one at its ts does not.
+  // Round 4 (remudero-ops #240): a keyless event written after the row's first read proves nothing either: it routes once.
   const seenBefore = tmp(t);
   const sb = rowsAt();
   sb.add(fresh, T);
   sb.rows.push(legacyEvent(old, T + 30_000));
   await lanePass(seenBefore, sb, T + MIN);
-  assert.equal(sb.incidents().filter((r) => r.intervention_key !== undefined).length, 0, "origin/main's pass after the row was written routed it");
+  await lanePass(seenBefore, sb, T + 2 * MIN);
+  assert.equal(sb.incidents().filter((r) => r.intervention_key !== undefined).length, 1, "a keyless routing never stands for it");
+});
+
+// ── Round 4 (reviews 2026-11-21T05:56Z, 10:11Z and 13:45Z on daf40b02da; criteria 1 and 2 amended by remudero-ops #240) ──
+// A keyless incident.event names no intervention, so it never proves a row was routed and it counts once per event, as
+// on origin/main. Every routing this change writes carries its key, and a keyed routing is exact.
+
+test("W1-T14005 criterion 1: a late row whose only earlier routings are keyless routes once at the upgrade, whatever their ts", async (t) => {
+  // Finding 1 of each review: a keyless routing at the row's own ts did not count as proof and one a minute later did,
+  // so the row was routed again or not by an instant. A keyless routing now proves nothing, so every case is the same.
+  const late = pushRow("pr#15368@c9c0b40f8", NOW - 12 * DAY);
+  const rowTs = NOW - DAY;
+  const cases: Array<[string, number[]]> = [
+    ["at its ts only", [rowTs]], ["at its ts and after", [rowTs, rowTs + 10 * MIN, NOW - MIN]], ["after its ts only", [rowTs + MIN, NOW - MIN]],
+  ];
+  for (const [name, routings] of cases) {
+    const root = tmp(t);
+    const book = rowsAt();
+    book.add(late, rowTs);
+    for (const at of routings) book.rows.push(legacyEvent(late, at));
+    // origin/main's memory: bare keys, the late one pruned by its at.
+    writeFileSync(memoryPath(root), JSON.stringify({ routed: [] }) + "\n");
+    for (const at of [NOW, NOW + MIN, NOW + HOUR, NOW + DAY]) await lanePass(root, book, at);
+    const keyed = book.incidents().filter((r) => r.intervention_key !== undefined);
+    assert.deepEqual(keyed.map((r) => [r.intervention_key, r.ts]), [[interventionKey(late), iso(NOW)]],
+      `${name}: routed once, at the upgrade pass, carrying its key`);
+    assert.equal(book.incidents().length, routings.length + 1, `${name}: and never again`);
+    assert.ok(memoryText(root).includes(JSON.stringify(interventionKey(late))), `${name}: its key is remembered from then on`);
+  }
+});
+
+test("W1-T14005 criterion 2: two distinct keyless routings of one message count two, as origin/main counts them", async (t) => {
+  // Finding 2 of each review: two distinct hand pauses of core with one reason, routed by origin/main on separate passes,
+  // were read as one intervention re-routed, so a doubling from a filed count of one was missed.
+  const root = tmp(t);
+  const state = join(root, "state");
+  const book = rowsAt();
+  const pause = { step: "fleet.pause", scope: "instance", instance: "core", reason: "hand hold", actor: "operator_human" };
+  book.rows.push({ ...pause, ts: iso(NOW - 2 * HOUR), run_id: "FLEET-1" }, { ...pause, ts: iso(NOW - HOUR), run_id: "FLEET-2" });
+  const [p1, p2] = deriveControlInterventions(book.rows);
+  assert.ok(p1 && p2, "fixture: the real derivation reads two interventions");
+  book.add(p1, NOW - 2 * HOUR);
+  book.add(p2, NOW - HOUR);
+  book.rows.push(legacyEvent(p1, NOW - 2 * HOUR + MIN), legacyEvent(p2, NOW - HOUR + MIN));
+  assert.equal(legacyEvent(p1, 0).message, legacyEvent(p2, 0).message, "fixture: the two routings carry one message");
+  // origin/main remembered both (their at is inside the window), and filed the class at its first count, one.
+  writeFileSync(memoryPath(root), JSON.stringify({ routed: [interventionKey(p1), interventionKey(p2)] }) + "\n");
+  const fp = String(interventionIncidentEvent(p1, NOW).fingerprint);
+  writeFileSync(sreLaneStorePath(state), JSON.stringify({ [fp]: { ts: iso(NOW - 2 * HOUR + MIN), count: 1 } }) + "\n");
+  const seen: Array<[number, number]> = [];
+  const over: Partial<SreLaneInput> = {
+    mergedLastDay: () => 10, hasOpenTask: () => true,
+    runbookPass: async (incident) => { seen.push([incident.count, incident.burnPerHour]); return { outcome: "held", fileFeedback: true }; },
+  };
+  assert.equal((await lanePass(root, book, NOW, over)).filed, fp, "the second distinct pause doubles the filed count of one");
+  assert.deepEqual(seen, [[2, 2]], "count 2 and burn 2/hr, as origin/main reads the same two events");
+  assert.deepEqual(listFeedback(root).map((e) => e.id), [`${incidentFeedbackId(fp)}-n2`]);
+  assert.equal(book.incidents().length, 2, "nothing routed again: both keys are remembered");
+  // The rule directly: keyless events of one message count once per event, in one pass or across passes.
+  const keyless = (ms: number) => incidentEventFromLedgerRow(legacyEvent(p1, ms), "core")!;
+  assert.equal(aggregateIncidents([keyless(NOW), keyless(NOW + HOUR)])[0].count, 2);
+  assert.equal(aggregateIncidents([keyless(NOW), keyless(NOW)])[0].count, 2);
+  assert.equal(aggregateIncidents([keyless(NOW), keyless(NOW + MIN), keyless(NOW + 2 * MIN)])[0].count, 3);
+});
+
+test("W1-T14005 criterion 4: a keyless routing of one message never stands for another intervention of that message", async (t) => {
+  // Finding 3 at 13:45Z: origin/main's pass was interrupted after it wrote one event for two rows of one message, and
+  // before it wrote its memory. The recovery pass read that one event as proof for both and routed neither.
+  const root = tmp(t);
+  const book = rowsAt();
+  const one = pushRow("pr#16240@4dcacfa5e", NOW - 3 * DAY);
+  const two = pushRow("pr#16240@4dcacfa5e", NOW - 2 * DAY);
+  book.add(one, NOW - 2 * HOUR);
+  book.add(two, NOW - 2 * HOUR);
+  book.rows.push(legacyEvent(one, NOW - HOUR));
+  writeFileSync(memoryPath(root), JSON.stringify({ routed: [] }) + "\n");
+  for (const at of [NOW, NOW + MIN, NOW + HOUR]) await lanePass(root, book, at);
+  const keyed = () => book.incidents().filter((r) => r.intervention_key !== undefined).map((r) => r.intervention_key);
+  assert.deepEqual(keyed(), [interventionKey(one), interventionKey(two)], "each routes once, carrying its key; the unrouted one is routed");
+  // Finding 3 at 05:56Z: a new row stamped just before origin/main's pass, appended after its snapshot, shared the message
+  // of the earlier intervention that pass routed. It routes in the first pass that reads it.
+  const fresh = tmp(t);
+  const fb = rowsAt();
+  const earlier = pushRow("pr#16213@5c177ab9a", NOW - DAY);
+  fb.add(earlier, NOW - DAY);
+  const later = pushRow("pr#16213@5c177ab9a", NOW - 10 * MIN);
+  fb.add(later, NOW - 10 * MIN - 1_000);
+  fb.rows.push(legacyEvent(earlier, NOW - 10 * MIN));
+  writeFileSync(memoryPath(fresh), JSON.stringify({ routed: [interventionKey(earlier)] }) + "\n");
+  await lanePass(fresh, fb, NOW);
+  const routed = fb.incidents().filter((r) => r.intervention_key !== undefined);
+  assert.deepEqual(routed.map((r) => [r.intervention_key, r.ts]), [[interventionKey(later), iso(NOW)]], "routed in the pass that first reads it");
+  await lanePass(fresh, fb, NOW + MIN);
+  assert.equal(fb.incidents().length, 2, "and never again");
+});
+
+test("W1-T14005 criterion 4: an unreadable routing history defers only the rows it would prove, and the pass goes on", async (t) => {
+  // Finding 3 at 10:11Z: after a good flow read, an unreadable routing history aborted the whole pass, so a new control
+  // intervention was neither recorded nor routed and the runbook for an open exception never ran.
+  const root = tmp(t);
+  const state = join(root, "state");
+  const late = pushRow("pr#15368@c9c0b40f8", NOW - 12 * DAY);
+  writeLedger([], { dir: state, rotations: [{ at: iso(NOW - HOUR), rows: [legacyEvent(late, NOW - 2 * HOUR)], gz: true }] });
+  const broken = join(state, "ledger." + iso(NOW - HOUR).replace(/[:.]/g, "-") + ".ndjson.gz");
+  assert.ok(existsSync(broken), "fixture: the rotation is where the union looks");
+  writeFileSync(broken, Buffer.alloc(64, 0x21));
+  const book = rowsAt();
+  book.add(late, NOW - DAY);
+  book.rows.push({ ts: iso(NOW - MIN), step: "fleet.pause", scope: "instance", instance: "core", reason: "hand hold", actor: "operator_human", run_id: "FLEET-9" });
+  const [pause] = deriveControlInterventions(book.rows);
+  const exception: IncidentLedgerEvent = { fingerprint: "e".repeat(64), ts: NOW - 30 * MIN, kind: "exception", name: "TypeError", message: "boom", instance: "core" };
+  const ran: string[] = [];
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const over = (): Partial<SreLaneInput> => ({
+    readFlowRows: book.read, log: (step, extra) => logs.push({ step, extra }),
+    readEvents: () => [exception, exception, ...liveRows(state).flatMap((r) => r.step === "incident.event" ? [incidentEventFromLedgerRow(r, "core")!] : [])],
+    runbookPass: async (incident) => { ran.push(incident.fingerprint); return { outcome: "held", fileFeedback: false }; },
+  });
+  await filePass(root, NOW, over());
+  // appendLedger stamps its own host and actor fields; the row's own fields are origin/main's.
+  const line = interventionLedgerLine(pause!);
+  assert.deepEqual(liveRows(state).filter((r) => r.step === OPERATOR_INTERVENTION_STEP).map((r) => Object.fromEntries(Object.keys(line).map((k) => [k, r[k]]))),
+    [line], "the new control intervention is recorded");
+  assert.deepEqual(liveRows(state).filter((r) => r.step === "incident.event").map((r) => r.intervention_key), [interventionKey(pause!)],
+    "and routed; nothing is written for the late row the history would have proved");
+  assert.deepEqual(ran, ["e".repeat(64)], "the runbook step runs");
+  assert.ok(!memoryText(root).includes(JSON.stringify(interventionKey(late))), "the late row is not remembered as routed");
+  const deferred = logs.filter((l) => l.step === "sre_lane.routing_deferred");
+  assert.equal(deferred.length, 1, "the skip is logged");
+  assert.equal(deferred[0]!.extra!.deferred, 1);
+  assert.match(String(deferred[0]!.extra!.error), /Operator-intervention routing history unreadable: .*\.ndjson\.gz/);
+  // The next readable pass routes it, once.
+  writeFileSync(broken, gzipSync(Buffer.from(JSON.stringify(legacyEvent(late, NOW - 2 * HOUR)) + "\n")));
+  await filePass(root, NOW + MIN, over());
+  await filePass(root, NOW + 2 * MIN, over());
+  assert.deepEqual(liveRows(state).filter((r) => r.step === "incident.event").map((r) => r.intervention_key), [interventionKey(pause!), interventionKey(late)]);
+  assert.equal(logs.filter((l) => l.step === "sre_lane.routing_deferred").length, 1, "a readable history defers nothing");
 });
