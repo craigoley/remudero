@@ -5,8 +5,8 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
-import { anchorFingerprint, captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftAttemptKey, draftInputKey,
-  draftsDueOnDaemon, inboxDraftExampleFragmentYaml, MAX_DRAFT_LINT_ATTEMPTS, parseDraftAttemptCache, parseDraftCache,
+import { anchorFingerprint, captureInboxDraftSnapshot, cleanDraftInputKeys, commitInboxDraftOutcomes, draftAttemptKey, draftInputKey,
+  draftsDueOnDaemon, inboxDraftExampleFragmentYaml, indexInboxDraftReceipts, MAX_DRAFT_LINT_ATTEMPTS, parseDraftAttemptCache, parseDraftCache,
   reframeProposal, runDraftRung, type DraftLaneIdentity, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
 import { rotateLedger } from "#src/lib/ledger.js";
@@ -264,7 +264,7 @@ test("the daemon selects fresh work when both live ledger reads fail", async t =
   assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing").map(row => row.proposal_id), [bare.id, archived.id]);
 });
 
-test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning to an earlier clean input skips drafting", async t => {
+test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning to an earlier clean input drafts again", async t => {
   const moved: Proposal = { ...bare, evidenceAnchors: [{ pattern: "export function draftsDueOnDaemon", path: "src/lib/inbox.ts", description: "a live anchor" }] };
   const other = { ...bare, id: "P13864-R" };
   const reframed: Proposal = { ...other, reframeHistory: [{ feedback: "narrow it" }] };
@@ -280,18 +280,21 @@ test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning 
   fixture.append(cleanRow(moved));
   fixture.append(cleanRow(reframed));
 
+  // The newest clean input is `moved`'s: the older `bare` input is no longer retired, so going back to it drafts.
   fixture.setProposals([bare, reframed]);
   const restartedPoll = fixture.newHook();
   await restartedPoll();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id]);
+  // The current input is still the newest clean one after a restart: it is not drafted, and its miss is logged once.
   fixture.setProposals([moved, reframed]);
   await restartedPoll();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id]);
   const misses = fixture.logs.filter(row => row.step === "inbox.draft_cache_missing" && row.proposal_id === bare.id);
-  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(bare), draftInputKey(moved)]);
+  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(moved)]);
 });
 
-test("W1-T13864 criterion 2: all clean inputs stay retired regardless of receipt order or drafting lane", () => {
+test("W1-T13864 criterion 2: only the newest clean input stays retired regardless of receipt order or drafting lane", () => {
   const moved: Proposal = { ...bare, evidenceAnchors: anchors };
   const dirtyInput: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
   const rows: Row[] = [
@@ -303,10 +306,44 @@ test("W1-T13864 criterion 2: all clean inputs stay retired regardless of receipt
   const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>() };
   // The index may have found an older receipt after it had already recorded a newer one.
   for (const draftLedgerRows of [rows, [...rows].reverse()]) {
-    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
+    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [bare]);
     assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
     assert.deepEqual(draftsDueOnDaemon([dirtyInput], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [dirtyInput]);
+    assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, draftInputKey(moved)]]));
   }
+  // A row without a readable ts never outranks a timestamped one, and a later row wins a tie.
+  const tie = "2026-11-20T00:00:05.000Z";
+  assert.equal(cleanDraftInputKeys([{ ...cleanRow(moved), ts: tie }, cleanRow(bare)]).get(bare.id), draftInputKey(moved));
+  assert.equal(cleanDraftInputKeys([{ ...cleanRow(moved), ts: tie }, { ...cleanRow(bare), ts: tie }]).get(bare.id), draftInputKey(bare));
+});
+
+test("W1-T13864 criterion 2: a clean draft published before a reframe does not retire its older input after the cache is lost", async t => {
+  const scope = { repository: "o/r" };
+  const stateDir = ownedFixtureDir(t, "clean-draft-reframed").dir;
+  const ledgerPath = join(stateDir, LEDGER_FILENAME);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  const rows: Row[] = [];
+  const log = (step: string, extra: Record<string, unknown> = {}) => rows.push({ step, ...extra });
+  const publish = async (p: Proposal) => {
+    writeFileSync(registryPath, JSON.stringify({ proposals: [p] }));
+    const outcomes = await runDraftRung([p], "- id: W1-T1\n", { causalScope: scope, spawn: async () => worker(clean), log: () => {} }, "publish");
+    commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(p, scope)], outcomes, lane: laneA, log });
+  };
+  await publish(bare);
+  const drafts = parseDraftCache(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8"));
+  // The reframe operation `rmd reframe` calls moves the proposal to its next input.
+  const reframed = reframeProposal(bare, "narrow it", drafts, { ledgerPath, runId: "REFRAME-13864" }).proposal;
+  await publish(reframed);
+  const published = rows.filter(row => row.step === "inbox.drafted").map(row => [row.draft_input_key, row.lint_clean]);
+  assert.deepEqual(published, [[draftInputKey(bare), true], [draftInputKey(reframed), true]]);
+  assert.deepEqual([draftInputKey(bare), draftInputKey(reframed)].map(key => key.slice(-3)), ["::0", "::1"]);
+
+  // The drafts cache is lost; the daemon reads its receipts through the receipt index.
+  const draftLedgerRows = indexInboxDraftReceipts(stateDir, scope.repository, rows, log);
+  const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>(), draftLedgerRows };
+  assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, ctx, laneB), [bare], "the older clean input ::0 is due");
+  assert.deepEqual(draftsDueOnDaemon([reframed], {}, {}, 3, ctx, laneB), [], "the newest clean input ::1 is not");
+  assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, draftInputKey(reframed)]]));
 });
 
 test("W1-T13864 criterion 3: a legacy clean draft for an already reframed proposal survives both lane changes", () => {

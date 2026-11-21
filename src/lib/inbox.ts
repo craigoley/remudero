@@ -507,17 +507,22 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** Every keyed lint-clean input per proposal remains retired, including after a later input is drafted. */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
-  const clean = new Map<string, Set<string>>();
+/**
+ * Each proposal's draft_input_key from its NEWEST lint-clean inbox.drafted row, by `ts` (a later row wins a tie, and
+ * a row without a readable `ts` never outranks one with it). Design item 2: one key per proposal, so an older clean
+ * input the proposal has since moved past never suppresses a draft.
+ */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
+  const newest = new Map<string, { key: string; at: number }>();
   for (const row of rows) {
     if (row?.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
       typeof row.draft_input_key !== "string") continue;
-    const keys = clean.get(row.proposal_id) ?? new Set<string>();
-    keys.add(row.draft_input_key);
-    clean.set(row.proposal_id, keys);
+    const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    const at = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+    const prior = newest.get(row.proposal_id);
+    if (!prior || at >= prior.at) newest.set(row.proposal_id, { key: row.draft_input_key, at });
   }
-  return clean;
+  return new Map([...newest].map(([id, { key }]) => [id, key]));
 }
 
 function draftReceiptRow(row: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -660,7 +665,7 @@ export function draftsDueOnDaemon(
           (anchor.path === undefined || typeof anchor.path === "string")) &&
         (cachedInput.reframeHistory === undefined || Array.isArray(cachedInput.reframeHistory)) &&
         draftInputKey(cachedInput) === inputKey;
-    if (clean.get(p.id)?.has(inputKey)) {
+    if (clean.get(p.id) === inputKey) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }
