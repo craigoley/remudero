@@ -72,10 +72,13 @@ import { FLOW_LADDER, ladderOrigin, ownRedCauseKey } from "./flow-remedy-gardene
 export { judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
 import {
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLearningsCorpus,
   mineRevertedLearningSourcePrsFromGitDump,
   projectLearningsHome,
   revertRecall as recallRevertedLearnings,
+  selectLearnings,
+  type LearningEntry,
 } from "./learnings.js";
 import {
   classifyImprovementTier,
@@ -3175,10 +3178,17 @@ export function ciLearningReopenOf(findingId: string): number {
  *  flow-remedy ladder. Two reopened lessons that still did not hold are evidence a lesson is the wrong remedy. */
 export const CI_LEARNING_LADDER_REOPEN = 3;
 
-/** W1-T14140: the title test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts generates for the
- *  active ci-learning entry whose `src:` is `findingId` — the first proof of every lesson the rung drafts. */
-export function ciLessonSelectionTestTitle(findingId: string): string {
-  return `ci lesson ${findingId} is selected for its own check`;
+/** W1-T14140 (INVARIANT a-lesson-proves-reach): every ACTIVE ci-learning entry in `corpus` — one whose `src:` is a
+ *  ci-learning finding id — with the check that id names and whether selectLearnings selects it for a round whose
+ *  context names only that check. test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts asserts `selected`
+ *  for each one, so an entry no fix round of its own check is handed turns CI red. A superseded entry is never injected. */
+export function ciLessonReach<T extends LearningEntry>(corpus: T[]): { entry: T; gate: string; selected: boolean }[] {
+  return corpus.flatMap((entry) => {
+    const gate = entry.lifecycle === "active" ? ciLearningGateOf(entry.src) : undefined;
+    if (gate === undefined) return [];
+    const { selected } = selectLearnings(corpus, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS, { text: gate });
+    return [{ entry, gate, selected: selected.includes(entry) }];
+  });
 }
 
 /** THE SURFACE A REMEDY MUST NAME. `spawnWorker` passes `settingSources: []` (src/lib/worker.ts),
@@ -3675,9 +3685,7 @@ export function ciLearningShardYaml(draft: CiLearningShardDraft, taskId: string,
     `  design: ${q(machineShardDesign(undefined, { none: `the task adds one new learnings file, ${lessonsFile}, and its golden verdict fixture; no existing lesson, gate or code path changes` }))}`,
     "  acceptance:",
     `    - claim: ${q(`the lane that trips the ${draft.gate} gate is reached by a matched learnings entry rather than prose no dispatched worker reads`)}`,
-    // W1-T14140 (INVARIANT a-lesson-proves-reach): the generated test that SELECTS the entry for its own check, never
-    // a grep of its id — a `unit test:` title names no path, so the machine shard keeps its two-file scope.
-    `      proof: ${q(`unit test: ${ciLessonSelectionTestTitle(draft.findingId)}`)}`,
+    `      proof: ${q(`grep: ${draft.findingId} in ${lessonsFile}`)}`,
     `    - claim: ${q("the lesson carries the golden verdict prompt-surface-gate admits for a learnings path")}`,
     `      proof: ${q(`grep: ${draft.findingId} in ${fixturePath}`)}`,
     `  note: ${q(`Filed by the ci-learning rung from ${draft.findingId}. The ${draft.gate} gate went red on #${draft.pr} and was repaired; the repair touched ${draft.repairFiles.join(", ") || "no recorded file"}. Recommended action: ${draft.action ?? "unclear"}. Remedy surface: ${draft.remedySurface}. ${ciLessonEntryInstruction(draft)} prompt-surface-gate admits a learnings change only with a golden verdict under ${fixtureDir}/ — use the layout of test/fixtures/golden-verdicts/ci-clock-sweep-report-lesson/ and include ${draft.findingId} in ${fixturePath}. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes.`)}`,
@@ -3693,8 +3701,9 @@ function ciLessonEntryInstruction(draft: CiLearningShardDraft): string {
     ` This is reopen ${draft.reopen.n} of the ${draft.gate} lesson: ${draft.reopen.priorFindingId} landed and the gate still refused ` +
     `${draft.reopen.recurredPrs.map((n) => `#${n}`).join(", ")}, so write a different lesson rather than restating that one.`;
   return `Write the new entry with src: ${JSON.stringify(draft.findingId)} and error_signatures: [${JSON.stringify(draft.gate)}], ` +
-    `the check name that went red, so a fix round failing that check is handed the lesson; its first proof is the test ` +
-    `test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts generates for that src.${reopen}`;
+    `the check name that went red, so a fix round failing that check is handed the lesson: ` +
+    `test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts, which CI runs on every pull request, fails ` +
+    `unless the entry is selected for that check.${reopen}`;
 }
 
 /** W1-T12837: the hand-fix draft, through the same machine header as every machine shard — `verify: human` and

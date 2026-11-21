@@ -4,22 +4,18 @@
 // 2 for a context naming their own gate — the two whose error_signatures held the gate exactly.
 //
 // One test per ACTIVE ci-learning entry (an entry whose `src:` is a `ci-learning:<pr>:<gate>` finding id), generated
-// from the real corpus at load time, so a lesson a machine shard adds later is proved by the very title its shard
-// template names (`unit test: ci lesson <findingId> is selected for its own check`, ciLearningShardYaml). A
-// superseded entry gets no test: selectLearnings drops every non-active entry before matching, so it is never injected.
+// from the real corpus at load time by ciLessonReach, so a lesson a machine shard adds later is enforced here, in CI, on
+// its own pull request (INVARIANT a-lesson-proves-reach). A superseded entry gets no test: selectLearnings drops every
+// non-active entry before matching, so it is never injected.
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, learningsSourceFiles, loadLearningsCorpus, selectLearnings } from "#src/lib/learnings.js";
-import { ciLearningGateOf } from "#src/lib/measurement-cadence.js";
+import { learningsSourceFiles, loadLearningsCorpus } from "#src/lib/learnings.js";
+import { ciLessonReach } from "#src/lib/measurement-cadence.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const LEARNINGS_DIR = join(REPO_ROOT, "learnings");
-const corpus = loadLearningsCorpus(LEARNINGS_DIR);
-const lessons = corpus.flatMap((entry) => {
-  const gate = entry.lifecycle === "active" ? ciLearningGateOf(entry.src) : undefined;
-  return gate === undefined ? [] : [{ entry, gate }];
-});
+const lessons = ciLessonReach(loadLearningsCorpus(LEARNINGS_DIR));
 
 test("W1-T14140: the generated suite reads the ci-learning corpus it generates its tests from", () => {
   // POSITIVE CONTROL: a corpus read that found no lesson would generate no per-entry test and pass vacuously.
@@ -28,11 +24,10 @@ test("W1-T14140: the generated suite reads the ci-learning corpus it generates i
   assert.ok(lessons.length > 0, "no active ci-learning entry was read, so no per-entry test was generated");
 });
 
-for (const { entry, gate } of lessons) {
+for (const { entry, gate, selected } of lessons) {
   test(`ci lesson ${entry.src} is selected for its own check`, () => {
-    const { selected } = selectLearnings(corpus, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS, { text: gate });
     assert.ok(
-      selected.some((s) => s.id === entry.id),
+      selected,
       `${entry.id} is not selected for a round failing "${gate}"; its error_signatures are ` +
         `${JSON.stringify(entry.errorSignatures ?? [])} — add the check name exactly as it reads: error_signatures: [${JSON.stringify(gate)}]`,
     );

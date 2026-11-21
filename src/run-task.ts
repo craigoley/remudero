@@ -404,7 +404,7 @@ import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommend
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { CI_FRICTION_HALF_LIFE_MS, ciFrictionCauseKey, ciFrictionRoundMatchesCause, ciFrictionRoundsFromLedger, ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
-import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
+import { CI_LESSON_HANDOFF_STEP, flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
@@ -1442,7 +1442,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, type CiLessonLadderHandoff, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1454,6 +1454,7 @@ import {
   judgeCiLessonEfficacy,
   readFiledCiLessons,
   summarizeCiLessonRecurrences,
+  type FiledCiLesson,
   type FiledCiLessonsRead,
 } from "./lib/ci-lesson-recurrence.js";
 import {
@@ -15916,6 +15917,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    /** W1-T14140 — the plan's filed lessons the mint judges. Production reads the checkout's plan/tasks.d. */
+    loadLessons?: () => FiledCiLessonsRead;
     destinationSnapshot?: TaskIdDestinationSnapshot | null;
     destinationFailure?: string;
   } = {},
@@ -15999,7 +16002,11 @@ export function ciLearningCommand(
   // carries its finding id as its `origin:`, which is what makes the plan answerable here.
   // W1-T4190: unioned with what fetched origin/main holds — the checkout's plan can lag it.
   const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
-  const result = mintCiLearningShards(corpus, planOrigins);
+  const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(checkoutRoot, "plan", "tasks.d"));
+  const result = mintCiLearningShards(corpus, planOrigins, undefined, ciLearningMintLessons(filedLessons));
+  for (const h of handCiLessonsToLadder(root, `CI-LEARNING-${process.pid}`, result.ladder)) {
+    console.log(`  HANDED TO THE FLOW LADDER ${h.gate}: lesson ${h.findingId} recurred on ${h.recurredPrs.map((n) => `#${n}`).join(", ")} -> ${h.origin}`);
+  }
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
   if (result.unreadableShas.length > 0) {
@@ -27864,6 +27871,22 @@ export interface CiLearningCadenceRunnerResult extends CiLearningCadenceRunResul
   carryRefused: FeedbackRefusal[];
 }
 
+/** W1-T14140: the filed lessons the mint judges for a reopen, or none when the plan read is not measured — an unreadable
+ *  plan reopens nothing rather than judging a partial set. */
+export function ciLearningMintLessons(read: FiledCiLessonsRead): FiledCiLesson[] | undefined {
+  return read.status === "measured" ? read.lessons : undefined;
+}
+
+/** W1-T14140: hand each gate the lesson rung gave up on to the flow-remedy ladder, as the ledger row its inventory reads
+ *  beside the sweep's own (CI_LESSON_HANDOFF_STEP). Returns what it handed. */
+export function handCiLessonsToLadder(stateRoot: string, runId: string, handoffs: readonly CiLessonLadderHandoff[]): readonly CiLessonLadderHandoff[] {
+  for (const h of handoffs) {
+    appendLedger(join(stateRoot, "state", LEDGER_FILENAME), { run_id: runId, task_id: "DAEMON", step: CI_LESSON_HANDOFF_STEP,
+      gate: h.gate, cause: h.cause, origin: h.origin, finding_id: h.findingId, reopen: h.reopen, recurred_prs: h.recurredPrs });
+  }
+  return handoffs;
+}
+
 /**
  * THE SCHEDULED CI-LEARNING RUNG (W1-T3324) — extracted so the daemon's arm and a test drive the
  * SAME body, and so the four defects below are pinned by a falsifier rather than by inspection.
@@ -27923,8 +27946,9 @@ export function buildCiLearningCadenceRunner(deps: {
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
-    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix);
     const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
+    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix, ciLearningMintLessons(filedLessons));
+    handCiLessonsToLadder(deps.root, `CI-LEARNING-${at.getTime()}`, result.ladder);
     const lessonRecurrences =
       filedLessons.status === "measured"
         ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING, {

@@ -192,6 +192,9 @@ export const ladderOrigin = (kind: LadderKind, key: string, rung = 1): string =>
  *  the sweep's own-red reason `<check> failed on <sha>` (describeCiFailures, src/lib/sweep.ts). The ci-learning rung hands
  *  a check here when its reopened lessons keep recurring. */
 export const ownRedCauseKey = (check: string): string => `own-red:${reasonClass(`${check} failed on 0000000`)}`;
+/** W1-T14140: the ledger row the ci-learning rung writes when it hands a check to the flow ladder; its `cause` is an
+ *  {@link ownRedCauseKey}. The flow ladder reads it beside the sweep's own rows. */
+export const CI_LESSON_HANDOFF_STEP = "ci_learning.ladder_handoff";
 /** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
  *  `readOutcomes` asks GraphQL, so the bare login is the one a fleet merge actually carries (sweep's isFleetAppAuthor). */
 export const isFleet = (actor: string | undefined) =>
@@ -348,6 +351,9 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
   now: number, fileable?: LadderFileable): Inventory {
   const episodes = episodesOf(records, outcomes, now);
   const thresholds = markEligibility(episodes, now);
+  // W1-T14140: two reopened lessons did not stop a handed-over check, so its episodes are remedy candidates however they ended.
+  const handed = new Set(records.filter(r => r.step === CI_LESSON_HANDOFF_STEP && typeof r.cause === "string").map(r => r.cause));
+  for (const e of episodes) if (handed.has(e.key)) e.eligible = true;
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
 
@@ -597,7 +603,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   const inventory = (fileable?: LadderFileable): Inventory => {
-    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER);
+    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER, ["sweep.disposed", CI_LESSON_HANDOFF_STEP]);
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
