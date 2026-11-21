@@ -160,3 +160,62 @@ test("W1-T12058 criterion 3: when the shared read gap outlasts the floor, the on
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
   assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s wait: ${waits[0]}`);
 });
+
+test("W1-T12058 criterion 3: with a read ahead and a fresh advisory stamp, the one wait line adds the shared gap the head ticket waits", async (t) => {
+  // Reviewer's counterexample (#19924): no mode set, 0.5 s left on the floor, one live ticket ahead and a
+  // fresh advisory stamp. The head takes its slot only after the 1.5 s gap, so the read waits 181.5 s.
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(ghGatedStampPath(f.stamp), "1\n", start - (WINDOW_MS - 500));
+  stampGhRead(f.stamp, ghAdvisoryStampText(start - (WINDOW_MS - 500)), start);
+  const ahead = {
+    id: "ahead-gap", rank: 0, actor: "operator_human", seq: 1, pid: process.pid, host: hostname(),
+    createdMs: start - 1_000, refreshedMs: start - 1_000, yielded: false,
+  };
+  writeGhReadTicket(f.stamp, ahead);
+  const headSlot = start + DEFAULT_GH_SHARED_READ_GAP_MS;
+  let servedAt: number | undefined;
+  const sleep = f.deps.sleepSync!;
+  const deps: GhReadCadenceDeps = {
+    ...f.deps,
+    actor: () => "operator_ai",
+    sleepSync: (ms) => {
+      sleep(ms);
+      const head = readGhReadTickets(f.stamp)[0];
+      if (head?.id === ahead.id) writeGhReadTicket(f.stamp, { ...head, refreshedMs: f.now() });
+      if (servedAt === undefined && head?.id === ahead.id && f.now() >= headSlot) {
+        rmSync(join(ghReadTicketDir(f.stamp), `${ahead.id}.json`));
+        stampGhRead(ghGatedStampPath(f.stamp), "1\n", headSlot);
+        stampGhRead(f.stamp, "", headSlot);
+        servedAt = headSlot;
+      }
+    },
+  };
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  const total = (DEFAULT_GH_SHARED_READ_GAP_MS + WINDOW_MS) / 1000;
+  assert.equal(servedAt, headSlot, "the head ticket took its slot after the shared gap");
+  assert.equal(slept(f.sleeps) / 1000, total, `the read waited the gap and then the ticket's window, slept ${JSON.stringify(f.sleeps)}`);
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, new RegExp(`waiting ${total}s `), `the line states the whole ${total}s wait: ${waits[0]}`);
+});
+
+test("W1-T12058 criterion 3: with the floor clear, a fresh advisory stamp's shared-gap pause is printed once with its length", async (t) => {
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(ghGatedStampPath(f.stamp), "1\n", start - 2 * WINDOW_MS);
+  stampGhRead(f.stamp, ghAdvisoryStampText(start - 2 * WINDOW_MS), start);
+  const sleeps: number[] = [];
+  let now = start;
+  const deps: GhReadCadenceDeps = { ...f.deps, nowMs: () => now, sleep: async (ms) => { sleeps.push(ms); now += ms; } };
+  await withGhTransportFloor(async () => {
+    await applyGhReadCadenceAsync([...READ], deps);
+  }, f.env);
+  const waited = slept(sleeps);
+  assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read paused for the shared gap, slept ${JSON.stringify(sleeps)}`);
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
+});

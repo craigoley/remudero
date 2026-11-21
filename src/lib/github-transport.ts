@@ -1901,9 +1901,10 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     if (waiter) {
       // W1-T12058: one line, with the WHOLE expected wait. Each queued read ahead takes its slot when
       // its floor is due and so restarts the window for this one: the floor, then one window per read.
-      // The shared read gap runs in the same wait: with no read ahead, the read is admitted when BOTH the
-      // floor and the gap from the newest shared stamp have passed (#19924 review: a fresh advisory stamp).
-      const gapNowMs = ahead === 0 && stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
+      // The shared read gap runs in the same wait: the first slot (this read's, or the head ticket's) is
+      // taken when BOTH the floor and the gap from the newest shared stamp have passed, so it delays every
+      // later slot too (#19924 review: a fresh advisory stamp, with and without a read ahead).
+      const gapNowMs = stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
       const expectedS = (Math.max(floorWaitMs, gapNowMs) + ahead * decision.windowS * 1000) / 1000;
       warnLine(
         `gh read cadence (wait, W1-T7957): waiting ${expectedS}s ` +
@@ -1911,6 +1912,13 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
             ? `(${floorWaitMs / 1000}s for the ${decision.windowS}s floor, then ${decision.windowS}s for each of ` +
               `${ahead} queued gated read(s) ahead, W1-T10271) on ${stampPath}`
             : `for the ${decision.windowS}s floor on ${stampPath}`),
+      );
+    } else if (gatedFirst && mode === "wait" && stampPath !== undefined && sharedGapRemainingAt(stampPath, nowMs) > 0) {
+      // #19924 review: the floor is clear but a sibling's fresh stamp still holds the shared gap, so the
+      // read pauses for it; say so once, with its length.
+      warnLine(
+        `gh read cadence (wait, W1-T7957): waiting ${sharedGapRemainingAt(stampPath, nowMs) / 1000}s ` +
+          `for the ${sharedReadGapMs / 1000}s shared read gap on ${stampPath}`,
       );
     } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
