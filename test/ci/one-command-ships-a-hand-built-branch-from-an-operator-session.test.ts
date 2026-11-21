@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn, type SpawnOptions } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
-import { authorPushEligibility, pinnedNodeReexec } from "#scripts/preflight-author.mjs";
+import { authorPushEligibility, failingTestsFromTap, pinnedNodeReexec, testSummary } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
@@ -603,10 +603,12 @@ test("cancellation reaches both a local child and the SSH supervisor", async (t)
   }), /SSH control pipe failed/);
 });
 
-function harnessGate(t: TestContext, script: string): string {
+/** A stand-in harness hook. By default it reports a measured Rule 15 pass, as the harness hook's rule15-precheck prints. */
+function harnessGate(t: TestContext, script: string, rule15 = true): string {
   const hooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-hooks-`));
   const mark = join(hooks, "ran");
-  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${script.replaceAll("$MARK", mark)}\n`);
+  const measured = rule15 ? 'echo "rule15-precheck: OK -- no criterion field added or edited in the plan"\n' : "";
+  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${measured}${script.replaceAll("$MARK", mark)}\n`);
   chmodSync(join(hooks, "pre-push"), 0o755);
   const saved = { hooks: process.env.RMD_HARNESS_HOOKS_DIR, gates: process.env.RMD_PREPUSH_GATES };
   process.env.RMD_HARNESS_HOOKS_DIR = hooks;
@@ -960,4 +962,100 @@ test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or over
   mkdirSync(join(dirname(mark), "pre-push"));
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /refused this push \(spawn EACCES\)/);
   assert.deepEqual(requests, [], "a gate that cannot start stops the push");
+});
+
+test("W1-T12169 criterion 3: a nested test red on head and main is classified by its leaf, and its aggregate parent follows it", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), [
+    'import { test } from "node:test";',
+    'test("parent", async (context) => {',
+    '  await context.test("leaf", () => { throw new Error("red on both revisions"); });',
+    '  await context.test("sibling", () => {});',
+    '});',
+    'test("other", () => {});',
+    "",
+  ].join("\n"));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "the nested red is already on main");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  repo.git("commit", "--allow-empty", "-m", "the hand change");
+  // The author receipt's own failure list, from real Node TAP: the leaf AND its aggregate parent.
+  const tap = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"), file],
+    { cwd: repo.dir, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT" && key !== "NODE_OPTIONS")) });
+  const named = failingTestsFromTap(tap.stdout, realpathSync(repo.dir)) as { file: string; title: string }[];
+  assert.deepEqual(named.map((test) => test.title).sort(), ["parent", "parent > leaf"], `${tap.stdout}\n${tap.stderr}`);
+  const summary = testSummary(tap.stdout);
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const reruns: string[] = [];
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({
+    preflight: async () => ({
+      headSha: source.head, baseSha: mainSha, verdict: "failed",
+      steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
+        name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
+        testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
+      }],
+      failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
+    }),
+    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    close: () => real.close(),
+  });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
+  const log = f.lines.join("\n");
+  assert.doesNotMatch(log, /caused by the host/, "a parent rerun with its failing child filtered out is not evidence");
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: parent > leaf$/m);
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: parent$/m);
+  assert.deepEqual(reruns, ["head parent > leaf", "main parent > leaf"], "the aggregate parent is never rerun on its own");
+  assert.ok(f.calls.includes(`push ${source.head}`));
+});
+
+test("W1-T12169 criterion 4: a required pre-push gate refuses a push whose Rule 15 check was unreadable or not measured", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const quiet = async (push: () => Promise<void>) => {
+    const writes = { out: process.stdout.write, err: process.stderr.write };
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try { await push(); } finally { process.stdout.write = writes.out; process.stderr.write = writes.err; }
+  };
+  // The harness hook's exact line for an unreadable Rule 15 diff: it exits 0 and does not block.
+  harnessGate(t, 'cat > /dev/null; echo "pre-push: rule15-precheck could not read the diff — not blocking on an unreadable check" >&2; exit 0', false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 15/);
+  harnessGate(t, 'cat > /dev/null; echo "pre-push: scripts/rule15-precheck.mjs absent — skipped, NOT passed" >&2; exit 0', false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 15/);
+  harnessGate(t, "cat > /dev/null; exit 0", false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 15/);
+  assert.deepEqual(requests, [], "an unmeasured Rule 15 check never lets the push go");
+  harnessGate(t, "cat > /dev/null; exit 0");
+  await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.equal(requests.length, 1, "a measured Rule 15 pass lets the push go");
+});
+
+test("W1-T12169 criterion 5: a stop during a Git call settles only after the Git child's whole process group is gone", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const pidFile = join(f.root, "git-member.pid");
+  const controller = new AbortController();
+  const calling = hostWorktreeGitAsync(repo.dir,
+    ["-c", `alias.hang=!trap '' TERM; echo $$ > ${shellQuote(pidFile)}; exec sleep 60`, "hang"], { signal: controller.signal });
+  calling.catch(() => {});
+  while (!existsSync(pidFile) || !readFileSync(pidFile, "utf8").trim()) await delay(20);
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } });
+  controller.abort(new Error("stop requested"));
+  const stopped = await calling.then(() => undefined, (error: unknown) => error);
+  assert.equal(liveProcess(pid), false, "the Git child's SIGTERM-ignoring member is gone before the stop is reported");
+  assert.match(String((stopped as Error)?.message), /stop requested/);
 });

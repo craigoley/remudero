@@ -286,6 +286,16 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     const key = `${test.file}\0${test.title}`;
     groups.set(key, [...(groups.get(key) ?? []), test]);
   }
+  // A failure is classified by its leaf. Node also reports `not ok` for a `test` whose subtest failed, and the
+  // receipt names that parent too; rerun alone, with its failing child filtered out, it would read green. Such a
+  // parent is never rerun on its own: its leaves' reruns must show it red only because a subtest failed.
+  const aggregates = new Map<string, FailingTest[]>();
+  for (const [key, group] of groups) {
+    const parent = group[0]!;
+    if (tests.some((other) => other.file === parent.file && other.title.startsWith(`${parent.title} > `))) aggregates.set(key, group);
+  }
+  for (const key of aggregates.keys()) groups.delete(key);
+  const descends = (row: FailingTest, parent: FailingTest) => row.file === parent.file && row.title.startsWith(`${parent.title} > `);
   const unionRows = (runs: FailingTest[][]) => {
     const counts = new Map<string, { row: FailingTest; count: number }>();
     for (const rows of runs) {
@@ -331,6 +341,24 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     run.log(`test failure comparison unavailable: isolated head rerun did not account for ${target.file} :: ${target.title}`);
     return withEvidence;
   }
+  const aggregateHeadFailures: FailingTest[] = [];
+  for (const group of aggregates.values()) {
+    const parent = group[0]!;
+    const selected = headRows.filter((row) => row.file === parent.file && row.title === parent.title && !row.fileLevel);
+    // `suite` marks a row whose failureType is subtestsFailed: red only because a subtest failed.
+    if (selected.length === group.length && selected.every((row) => row.failed === true && row.suite === true &&
+      typeof row.location === "string" && /^\d+:\d+$/.test(row.location)) && exactHeadFailures.some((row) => descends(row, parent))) {
+      aggregateHeadFailures.push(...selected);
+      continue;
+    }
+    if (selected.length === group.length && selected.every((row) => row.failed === false)) {
+      hostCaused = true;
+      for (const test of group) run.log(`caused by the host: ${test.file} :: ${test.title}`);
+      continue;
+    }
+    run.log(`test failure comparison unavailable: isolated head reruns of its subtests did not account for ${parent.file} :: ${parent.title}`);
+    return withEvidence;
+  }
   const mainRows = await rerunGroups("main", receipt.baseSha);
   const mainFailures = [...groups.values()].flatMap((group) => {
     const target = group[0]!;
@@ -350,7 +378,20 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
     rows.push({ file: test.file, title: test.title, location: test.location,
       state: classification === "also failing on main" ? "also-red" : "only-head" });
   }
-  if (hostCaused || rows.length !== expectedFailureCount || exactHeadFailures.some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
+  const leafRows = [...rows];
+  const remainingMainParents = mainRows.filter((row) => row.failed === true && row.suite === true && !row.fileLevel);
+  for (const test of aggregateHeadFailures) {
+    // A parent is also failing on main only when every failing leaf under it is, and main reports it red the same way.
+    const index = remainingMainParents.findIndex((other) => other.file === test.file && other.title === test.title);
+    const leaves = leafRows.filter((row) => descends(row as FailingTest, test));
+    const classification: FailureClass = index >= 0 && leaves.length > 0 && leaves.every((row) => row.state === "also-red")
+      ? "also failing on main" : "caused by the change";
+    if (index >= 0) remainingMainParents.splice(index, 1);
+    run.log(`${classification}: ${test.file} :: ${test.title}`);
+    rows.push({ file: test.file, title: test.title, location: test.location,
+      state: classification === "also failing on main" ? "also-red" : "only-head" });
+  }
+  if (hostCaused || rows.length !== expectedFailureCount || [...exactHeadFailures, ...aggregateHeadFailures].some((test) => typeof test.location !== "string" || !/^\d+:\d+$/.test(test.location))) {
     run.log("test failure comparison unavailable: the preflight did not completely name its failures");
     return withEvidence;
   }

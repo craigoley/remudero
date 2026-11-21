@@ -1,9 +1,11 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn as spawnChild } from "node:child_process";
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { boundChildByLoopTime, execFileLoopBounded } from "./loop-bounded-child.js";
+import { systemClock } from "./clock.js";
 import { performance } from "node:perf_hooks";
 import { execFileRouted, spawnRoute } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -518,15 +520,101 @@ function directGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Omit<
   return childOutcomeWins(command, fed);
 }
 
+const GIT_STOP_GRACE_MS = 2_000;
+/** execFile's own default, kept for the stoppable child so a stop changes nothing else about the call. */
+const EXEC_FILE_MAX_BUFFER = 1024 * 1024;
+
+function signalGitGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try { process.kill(-pid, signal); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; }
+}
+
+/** W1-T12169 — a Git call its owner can stop. execFile's own `signal` rejects with ABORT_ERR the moment the stop
+ *  arrives, while the child it launched (and any transport child under it) may still be running. This child leads
+ *  its own process group: a stop signals the whole group, a member still there when the grace period ends is
+ *  killed, and the call rejects with the stop's reason only once every member is gone. Otherwise it settles as
+ *  execFile does: stdout on exit 0, else execFile's `Command failed: <cmd>` shape, or the loop-bounded timeout. */
+function stoppableGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Omit<ReturnType<typeof spawnOptions>, "stdio" | "input" | "signal">,
+  input: string | undefined, signal: AbortSignal): Promise<{ stdout: string }> {
+  signal.throwIfAborted();
+  const gitArgs = argv(pin, args);
+  const label = ["git", ...gitArgs].join(" ");
+  const maxBuffer = spawn.maxBuffer ?? EXEC_FILE_MAX_BUFFER;
+  return new Promise((resolveGit, rejectGit) => {
+    const child = spawnChild("git", gitArgs, { env: spawn.env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    const bound = spawn.timeout !== undefined && spawn.timeout > 0
+      ? boundChildByLoopTime(child, spawn.timeout, { killSignal: spawn.killSignal }) : undefined;
+    const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    const length = { stdout: 0, stderr: 0 };
+    let failure: unknown;
+    let stdinError: NodeJS.ErrnoException | undefined;
+    let stopping: number | undefined;
+    let force: NodeJS.Timeout | undefined;
+    const stop = (reason: unknown) => {
+      failure ??= reason;
+      if (stopping !== undefined || child.pid === undefined) return;
+      const pid = child.pid;
+      stopping = systemClock.now() + GIT_STOP_GRACE_MS;
+      signalGitGroup(pid, "SIGTERM");
+      // A member that ignores SIGTERM can hold the pipes open, so the kill cannot wait for them to close.
+      force = setTimeout(() => signalGitGroup(pid, "SIGKILL"), GIT_STOP_GRACE_MS);
+    };
+    const onAbort = () => stop(signal.reason);
+    for (const stream of ["stdout", "stderr"] as const) {
+      child[stream].on("data", (chunk: Buffer) => {
+        length[stream] += chunk.length;
+        if (length[stream] <= maxBuffer) out[stream].push(chunk);
+        else stop(Object.assign(new RangeError(`${stream} maxBuffer length exceeded`), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", cmd: label }));
+      });
+    }
+    let settled = false;
+    const settle = (code: number | null, killedBy: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(force);
+      bound?.cancel();
+      signal.removeEventListener("abort", onAbort);
+      const stdout = Buffer.concat(out.stdout).toString(spawn.encoding), stderr = Buffer.concat(out.stderr).toString(spawn.encoding);
+      if (signal.aborted) rejectGit(signal.reason);
+      else if (failure !== undefined) rejectGit(Object.assign(failure as object, { stdout, stderr }));
+      else if (bound?.timedOut) rejectGit(bound.timeoutError(label, { exitCode: code, signal: killedBy, stdout, stderr }));
+      else if (code !== 0) {
+        rejectGit(Object.assign(new Error(`Command failed: ${label}\n${stderr}`), { code, killed: killedBy !== null, signal: killedBy, cmd: label, stdout, stderr }));
+      } else if (stdinError !== undefined && stdinError.code !== "EPIPE") rejectGit(stdinError);
+      else resolveGit({ stdout });
+    };
+    child.on("error", (error) => {
+      failure ??= error;
+      if (child.pid === undefined) settle(null, null); // it never started, so there is no group to wait for
+    });
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => { stdinError ??= error; });
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code, killedBy) => {
+      if (stopping === undefined || child.pid === undefined) return settle(code, killedBy);
+      const pid = child.pid;
+      const reaped = stopping + GIT_STOP_GRACE_MS;
+      void (async () => {
+        while (signalGitGroup(pid, 0) && systemClock.now() < stopping!) await delay(50);
+        signalGitGroup(pid, "SIGKILL");
+        // A killed member leaves the group once it is reaped; the wait is bounded for a host whose init never reaps.
+        while (signalGitGroup(pid, 0) && systemClock.now() < reaped) await delay(20);
+      })().then(() => settle(code, killedBy), (error: unknown) => { failure ??= error; settle(code, killedBy); });
+    });
+    // execFile leaves stdin open when there is no input; so does this.
+    if (input !== undefined) child.stdin.end(input);
+  });
+}
+
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs);
-  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, overrides);
+  const { stdio: _stdio, input, signal, ...spawn } = spawnOptions(pin, opts, overrides);
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
     const route = spawnRoute(spawn);
-    const { stdout } = route.helper !== undefined && route.why === undefined
+    const { stdout } = signal !== undefined ? await stoppableGit(pin, args, spawn, input, signal)
+      : route.helper !== undefined && route.why === undefined
       ? await execFileRouted("git", argv(pin, args), { ...spawn, cwd: pin.worktree, ...(input === undefined ? {} : { input }) })
       : await directGit(pin, args, spawn, input, route);
     if (opts.stdio === "inherit-stdout") {
@@ -538,6 +626,8 @@ export async function hostWorktreeGitAsync(worktreePath: string, args: readonly 
   try {
     return await run();
   } catch (error) {
+    // A stopped call is not repaired and run again.
+    if (signal?.aborted) throw error;
     // The same repair as the sync leaf, off the loop; anything else rethrows.
     const { stdio: _repairStdio, ...repair } = spawnOptions(pin, {}, overrides);
     return retryAfterDanglingRefRepairAsync(async (a, timeout) =>
