@@ -507,18 +507,15 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** The newest keyed lint-clean receipt per proposal. Ledger order breaks timestamp ties. */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
-  const clean = new Map<string, string>();
-  const timestamps = new Map<string, number>();
+/** Every keyed lint-clean input per proposal remains retired, including after a later input is drafted. */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const clean = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row?.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
       typeof row.draft_input_key !== "string") continue;
-    const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-    const ts = Number.isFinite(parsed) ? parsed : -Infinity;
-    if (ts < (timestamps.get(row.proposal_id) ?? -Infinity)) continue;
-    timestamps.set(row.proposal_id, ts);
-    clean.set(row.proposal_id, row.draft_input_key);
+    const keys = clean.get(row.proposal_id) ?? new Set<string>();
+    keys.add(row.draft_input_key);
+    clean.set(row.proposal_id, keys);
   }
   return clean;
 }
@@ -645,11 +642,16 @@ export function draftsDueOnDaemon(
     const cached = drafts[p.id];
     const completion = cached?.completion;
     const cachedInput = completion?.snapshot?.proposal;
-    // Legacy drafts carry only anchors. The reframe write invalidates them before publishing new feedback.
-    const hasCurrentDraft = completion
-      ? completion.lintClean === true && cachedInput !== undefined && draftInputKey(cachedInput) === inputKey
-      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors));
-    if (clean.get(p.id) === inputKey) {
+    // Legacy drafts carry only anchors. A completion read from disk must identify a valid input.
+    const hasCurrentDraft = completion === undefined
+      ? Boolean(cached && !isDraftStale(cached, p.evidenceAnchors))
+      : completion?.lintClean === true && cachedInput?.id === p.id &&
+        Array.isArray(cachedInput.evidenceAnchors) &&
+        cachedInput.evidenceAnchors.every(anchor => typeof anchor?.pattern === "string" &&
+          (anchor.path === undefined || typeof anchor.path === "string")) &&
+        (cachedInput.reframeHistory === undefined || Array.isArray(cachedInput.reframeHistory)) &&
+        draftInputKey(cachedInput) === inputKey;
+    if (clean.get(p.id)?.has(inputKey)) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }

@@ -174,6 +174,43 @@ test("the daemon uses readable ledger receipts when its receipt index is malform
   assert.ok(fixture.logs.some(row => row.step === "inbox.draft_history_partial" && (row.unread as string[]).includes(indexPath)));
 });
 
+test("W1-T13864 criterion 6: a clean ledger receipt covers a null cached proposal while fresh work proceeds", async t => {
+  const fresh = { ...bare, id: "P-FRESH" };
+  const fixture = hookFixture(t, [bare, fresh], [cleanRow(bare)]);
+  const snapshot = captureInboxDraftSnapshot(bare, { repository: "o/r" });
+  writeFileSync(join(fixture.stateDir, "inbox-drafts.json"), JSON.stringify({
+    [bare.id]: { proposalId: bare.id, fragmentYaml: inboxDraftExampleFragmentYaml(), stampLine: "STAMP: draft input",
+      anchorFingerprint: anchorFingerprint(bare.evidenceAnchors),
+      completion: { snapshot: { ...snapshot, proposal: null }, lintClean: true, violations: [] } },
+  }));
+
+  await fixture.newHook()();
+
+  assert.deepEqual(fixture.drafted, [fresh.id]);
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing")
+    .map(row => [row.proposal_id, row.draft_input_key]), [[bare.id, draftInputKey(bare)]]);
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_rung.error"), []);
+});
+
+test("malformed completions leave a proposal due when there is no clean receipt", () => {
+  const snapshot = captureInboxDraftSnapshot(proposal, { repository: "o/r" });
+  const malformedInputs = [
+    { ...proposal, id: "P-OTHER" },
+    { ...proposal, evidenceAnchors: null },
+    { ...proposal, evidenceAnchors: [null] },
+    { ...proposal, evidenceAnchors: [{ ...anchors[0], path: ["README.md"] }] },
+    { ...proposal, reframeHistory: { length: 0 } },
+  ];
+  const completions = malformedInputs.map(input => ({ snapshot: { ...snapshot, proposal: input }, lintClean: true, violations: [] }));
+  for (const completion of [null, ...completions]) {
+    const drafts = parseDraftCache(JSON.stringify({
+      [proposal.id]: { proposalId: proposal.id, fragmentYaml: inboxDraftExampleFragmentYaml(), stampLine: "STAMP: draft input",
+        anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors), completion },
+    }));
+    assert.deepEqual(draftsDueOnDaemon([proposal], drafts, {}, 3, undefined, laneB), [proposal]);
+  }
+});
+
 test("W1-T13864 criterion 2: a transient live-ledger EIO does not hide a clean receipt after cache loss", async t => {
   const fresh = { ...bare, id: "P-FRESH" };
   const fixture = hookFixture(t, [bare, fresh], [cleanRow(bare)]);
@@ -227,7 +264,7 @@ test("the daemon selects fresh work when both live ledger reads fail", async t =
   assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing").map(row => row.proposal_id), [bare.id, archived.id]);
 });
 
-test("W1-T13864 criterion 4: anchor changes and reframes are due unless they match the newest clean input", async t => {
+test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning to an earlier clean input skips drafting", async t => {
   const moved: Proposal = { ...bare, evidenceAnchors: [{ pattern: "export function draftsDueOnDaemon", path: "src/lib/inbox.ts", description: "a live anchor" }] };
   const other = { ...bare, id: "P13864-R" };
   const reframed: Proposal = { ...other, reframeHistory: [{ feedback: "narrow it" }] };
@@ -246,26 +283,29 @@ test("W1-T13864 criterion 4: anchor changes and reframes are due unless they mat
   fixture.setProposals([bare, reframed]);
   const restartedPoll = fixture.newHook();
   await restartedPoll();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id], "only the newest clean input is retired");
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
   fixture.setProposals([moved, reframed]);
   await restartedPoll();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id]);
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
   const misses = fixture.logs.filter(row => row.step === "inbox.draft_cache_missing" && row.proposal_id === bare.id);
-  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(moved)]);
+  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(bare), draftInputKey(moved)]);
 });
 
-test("W1-T13864 criterion 2: only the newest clean input wins regardless of receipt order or drafting lane", () => {
+test("W1-T13864 criterion 2: all clean inputs stay retired regardless of receipt order or drafting lane", () => {
   const moved: Proposal = { ...bare, evidenceAnchors: anchors };
+  const dirtyInput: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
   const rows: Row[] = [
     { ...cleanRow(bare), ts: "2026-11-20T00:00:00.000Z" },
     { ...cleanRow(moved), ts: "2026-11-20T00:00:01.000Z" },
     { ...cleanRow(bare), lint_clean: false, ts: "2026-11-20T00:00:02.000Z" },
+    { ...cleanRow(dirtyInput), lint_clean: false, ts: "2026-11-20T00:00:03.000Z" },
   ];
   const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>() };
   // The index may have found an older receipt after it had already recorded a newer one.
   for (const draftLedgerRows of [rows, [...rows].reverse()]) {
-    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [bare]);
+    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
     assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
+    assert.deepEqual(draftsDueOnDaemon([dirtyInput], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [dirtyInput]);
   }
 });
 
