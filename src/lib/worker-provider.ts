@@ -2423,6 +2423,40 @@ export interface ParsedCodexEvents {
   completion: CodexCompletionEvidence;
   /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
   reroutes?: string[];
+  retentionLoss: CodexRetentionLoss;
+}
+
+export interface CodexRetentionLoss {
+  finalMessageSealed: boolean;
+  rebuiltLines: number;
+  rebuiltDroppedBytes: number;
+  unaccountedSpills: number;
+  invalidRebuiltLines: number;
+}
+
+/** W1-T13960: main's rule, else a success losing only valid rebuilt lines before its sealed final message. */
+export function codexResultRetentionComplete(
+  retention: NonNullable<CodexWorkerResult["outputRetention"]>,
+  parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
+): boolean {
+  const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
+  if (!notComplete(retention)) return true;
+  const loss = parsed.retentionLoss;
+  const { stdout, ...rest } = retention;
+  if (loss.rebuiltLines === 0 || retention.originalSubtype !== "success" || notComplete(rest)) return false;
+  return stdout?.state === "truncated" && loss.finalMessageSealed && loss.unaccountedSpills === 0
+    && loss.invalidRebuiltLines === 0 && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** W1-T13960: a rebuilt line's required shape. */
+export function isCodexEventEnvelope(event: unknown): boolean {
+  if (!isRecord(event) || typeof event.type !== "string") return false;
+  if (!event.type.startsWith("item.")) return event.item === undefined || isRecord(event.item);
+  if (!isRecord(event.item) || typeof event.item.type !== "string") return false;
+  return event.item.type !== "agent_message" || typeof event.item.text === "string";
 }
 
 export interface CodexOutputTruncation {
@@ -2597,8 +2631,11 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string; tex
   let escaped = false;
   let captured: number[] = [];
   let start = 0;
-  const fd = openSync(file, "r");
+  let fd: number;
+  try { fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
+  catch (error) { void error; return out; }
   try {
+    if (!fstatSync(fd).isFile()) return out;
     const buf = Buffer.alloc(64 * 1024);
     for (let pos = 0, read = 0; (read = readSync(fd, buf, 0, buf.length, pos)) > 0; pos += read) {
       for (let k = 0; k < read; k++) {
@@ -2790,6 +2827,13 @@ export class CodexJsonlAccumulator {
   private lastBlockTruncated = false;
   private retainedTruncated = false;
   private failed = false;
+  private rebuiltLines = 0;
+  private rebuiltDroppedBytes = 0;
+  private unaccountedSpills = 0;
+  private invalidRebuiltLines = 0;
+  /** W1-T13960: a rebuilt line resets both: it could be the final message. */
+  private messageOpen = false;
+  private messageSealed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -2839,6 +2883,8 @@ export class CodexJsonlAccumulator {
       // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
       const whole = agent || lineBytes <= 320 * 1024;
       const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
+      // W1-T13960: a veto only.
+      if (tail.fileBytes !== lineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
       if (tail.state === "truncated") {
@@ -2852,6 +2898,9 @@ export class CodexJsonlAccumulator {
         line = head + marker + text.slice(skip);
         cut = { at: head.length, marker };
         this.droppedBytes += omitted;
+        this.rebuiltDroppedBytes += omitted;
+        this.rebuiltLines += 1;
+        this.messageOpen = this.messageSealed = false;
       } else {
         line = text;
       }
@@ -2882,6 +2931,13 @@ export class CodexJsonlAccumulator {
     if (this.spilling || this.pending) this.consumePending();
     for (const held of [this.blocks, this.errors]) held.splice(0, held.length, ...held.map(raw => JSON.parse(`"${raw}"`) as string));
     const text = this.blocks.at(-1) ?? "";
+    const retentionLoss: CodexRetentionLoss = {
+      finalMessageSealed: this.messageSealed,
+      rebuiltLines: this.rebuiltLines,
+      rebuiltDroppedBytes: this.rebuiltDroppedBytes,
+      unaccountedSpills: this.unaccountedSpills,
+      invalidRebuiltLines: this.invalidRebuiltLines,
+    };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
       const note = `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`;
@@ -2914,6 +2970,7 @@ export class CodexJsonlAccumulator {
         droppedBytes: this.droppedBytes,
         spilledBytes: this.spilledBytes,
       } } : {}),
+      retentionLoss,
     };
   }
 
@@ -3080,6 +3137,7 @@ export class CodexJsonlAccumulator {
       return "malformed";
     }
     this.observeToolLineage?.(event);
+    if (cut !== undefined && !isCodexEventEnvelope(event)) this.invalidRebuiltLines += 1;
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
     const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
@@ -3091,6 +3149,7 @@ export class CodexJsonlAccumulator {
     if (event.type === "turn.started") {
       this.numTurns += 1;
       this.turnInProgress = true;
+      this.messageOpen = this.messageSealed = false;
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       const { raw, marks } = rawPayload(line, ["item", "text"], event.item.text, cut);
@@ -3099,6 +3158,7 @@ export class CodexJsonlAccumulator {
       this.blockStreamUnit.push(marks.length > 0);
       this.lastBlockTruncated = cut !== undefined;
       if (cut !== undefined) this.retainedTruncated = true;
+      if (cut === undefined) [this.messageOpen, this.messageSealed] = [true, false];
       this.keptBytes += Buffer.byteLength(raw);
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -3112,6 +3172,7 @@ export class CodexJsonlAccumulator {
     const eventModel = cashResponseModel(event.model);
     if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
+      if (this.messageOpen) [this.messageOpen, this.messageSealed] = [false, true];
       this.turnInProgress = false;
       this.completedTurns += 1;
       const input = event.usage?.input_tokens;
@@ -6932,7 +6993,7 @@ async function spawnCodexWorkerInPrivateTemp(
       completion: parsed.completion,
       originalSubtype: parsed.subtype,
     };
-    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
+    const incomplete = !codexResultRetentionComplete(outputRetention, parsed);
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;
