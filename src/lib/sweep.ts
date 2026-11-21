@@ -10,11 +10,12 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
   runtimeInstanceRegistryPrivateFile, runtimeInstanceRegistryDigest, type RegistryFileIO } from "./instance-registry-selection.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
-import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown,
+import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
+  scopeAmendmentsWithoutMergeTime, priorRoundRuling, unfiledScopeGrantAfterRound, type PriorRoundFacts,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
-  type FixProgressReaskResult } from "./fix-progress-judge.js";
+  type FixProgressReaskResult, type PriorRoundHold } from "./fix-progress-judge.js";
 import type { DispatchBreakJudge } from "./stall-verifier.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { createHeadRehomePorts, headIdentityRed, headRehomePlan, type HeadRehomePorts } from "./head-rehome.js";
@@ -201,6 +202,7 @@ import {
   loadCreditStore,
   readLedgerLines,
   readMergeCreditedTaskIdsAsync,
+  readRequiredStatusCheckContextsAsync,
   recordCreditBackfillReceipt,
   saveCreditStore,
   taskIdFromRunBranch,
@@ -2471,6 +2473,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "escalateInfrastructureCheck",
   "readCiGateRollup",
   "readCiGateRequired", // W1-T5979
+  "readRequiredCheckCompletions",
+  "readAmendmentMergedAt",
   "liveCiRunForHead",
   "refreshCiRunForHead",
   "reaggregateCiGate",
@@ -2720,6 +2724,9 @@ const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 /** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
 export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 
+/** W1-T13865: the checks a PR's base branch requires, each pinned to an App id or null; `complete` is false when one of
+ *  its requirement sources could not be read. */
+type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete: boolean };
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -2771,6 +2778,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "escalateInfrastructureCheck"
   | "readCiGateRollup"
   | "readCiGateRequired"
+  | "readRequiredCheckCompletions"
+  | "readAmendmentMergedAt"
   | "readPrHeadDiff"
   | "readPlanLaneCapacity"
   | "liveCiRunForHead"
@@ -2966,6 +2975,159 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     self: { owner, repo: localRepoName }, selfRoot: repoRoot, configRoot: config.root,
   });
   const requiredChecks = deps.ciGateRequired ?? readCiGateRequiredNames(ciGateSource, log);
+  // W1-T13865: keyed by the PR's own base branch; a requirement only another branch's protection names releases nothing.
+  const branchRequiredChecks = new Map<string, Promise<BaseRequiredChecks | undefined>>();
+  const readBranchRequiredChecks = async (branch: string): Promise<BaseRequiredChecks | undefined> => {
+    let checks: readonly { context: string; app_id: number | null }[] = [];
+    const protection = await readRequiredStatusCheckContextsAsync(owner, repo, encodeURIComponent(branch),
+      async args => {
+        const snapshot = await readJsonImpl(args) as { checks?: typeof checks } | undefined;
+        checks = snapshot?.checks ?? [];
+        return JSON.stringify(snapshot);
+      });
+    // Active rulesets that apply to the branch require checks too, beside (or instead of) classic protection.
+    let rules: { type?: string; parameters?: { required_status_checks?: { context?: unknown; integration_id?: unknown }[] } }[] | undefined;
+    try {
+      const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}?per_page=100`,
+        "--paginate", "--slurp"], { fresh: true }) as unknown;
+      rules = Array.isArray(pages) ? pages.flat() as typeof rules : undefined;
+      if (rules === undefined) throw new Error("unparseable rules payload");
+    } catch (error) {
+      log("sweep.prior_round_hold.rulesets_unreadable", { branch, error: String(error) });
+    }
+    // Each readable source names checks that are required; an unreadable one names none, so it releases nothing.
+    if (protection.kind === "unreadable" && rules === undefined) return undefined;
+    // A 404 answers "no classic protection"; any other failed read leaves the base's requirements partly unknown.
+    const protectionUnknown = protection.kind === "unreadable" && !/not protected|HTTP 404/i.test(protection.reason);
+    const required = new Map<string, number | null>();
+    const require = (name: string, pin: number | null) => {
+      const prior = required.get(name);
+      required.set(name, prior === null || pin === null ? null : prior ?? pin);
+    };
+    if (protection.kind === "contexts") for (const name of protection.contexts) required.set(name, null);
+    for (const check of checks) required.set(check.context, check.app_id);
+    for (const rule of rules ?? []) {
+      if (rule?.type !== "required_status_checks") continue;
+      for (const check of rule.parameters?.required_status_checks ?? []) {
+        if (typeof check?.context !== "string" || check.context.length === 0) continue;
+        require(check.context, typeof check.integration_id === "number" ? check.integration_id : null);
+      }
+    }
+    return { checks: required, complete: !protectionUnknown && rules !== undefined };
+  };
+  const readCiGateRollup = async (pr: OpenPrView, read = readJsonImpl): Promise<RollupCheckEntry[] | undefined> => {
+    try {
+      return await restRollupFor(owner, repo, pr.headSha, read);
+    } catch (e) {
+      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(e) });
+      return undefined;
+    }
+  };
+  /** The protection of the PR's own base branch, read fresh from the PR: undefined when the PR or its protection is
+   *  unreadable, so only ci-gate's own required list can release a hold. */
+  const readPrBaseRequiredChecks = async (pr: OpenPrView): Promise<BaseRequiredChecks | undefined> => {
+    if (deps.readRequiredContextsImpl) {
+      return { checks: new Map((deps.readRequiredContextsImpl(owner, repo) ?? []).map(name => [name, null])), complete: true };
+    }
+    let base: string | undefined;
+    try {
+      const view = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`], { fresh: true }) as
+        { base?: { ref?: unknown } } | undefined;
+      base = typeof view?.base?.ref === "string" && view.base.ref.length > 0 ? view.base.ref : undefined;
+    } catch (error) {
+      log("sweep.prior_round_hold.base_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
+      return undefined;
+    }
+    if (base === undefined) {
+      log("sweep.prior_round_hold.base_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, error: "no base ref" });
+      return undefined;
+    }
+    let read = branchRequiredChecks.get(base);
+    if (read === undefined) branchRequiredChecks.set(base, read = readBranchRequiredChecks(base));
+    return await read;
+  };
+  const readRequiredCheckCompletions = async (pr: OpenPrView): Promise<{ name: string; completedAt: string }[]> => {
+    const base = await readPrBaseRequiredChecks(pr);
+    const branchChecks = base?.checks;
+    // W1-T13865: ci-gate's list is required only through ci-gate, so it joins the set only when the PR's own base
+    // requires ci-gate, or when no readable source names any requirement of that base. A partly unreadable base whose
+    // readable source (a ruleset) names its requirements keeps that answer: an unreadable read never widens it.
+    const throughCiGate = base === undefined || base.checks.has(CI_GATE_CHECK_NAME) || (!base.complete && base.checks.size === 0);
+    const required = new Set([...(throughCiGate ? requiredChecks : []), ...(branchChecks?.keys() ?? [])]);
+    if (required.size === 0) return [];
+    let runs: { name: string; completedAt: string }[];
+    // A pinned requirement's App, as its check runs name it: a commit status carries its creator, not an App id.
+    const appBots = new Map<number, string>();
+    const botAppIds = new Map<string, number | undefined>();
+    const appIdOfBot = async (login: string): Promise<number | undefined> => {
+      for (const [id, bot] of appBots) if (bot === login) return id;
+      const slug = /^(.+)\[bot\]$/.exec(login)?.[1];
+      if (slug === undefined) return undefined;
+      if (!botAppIds.has(login)) {
+        try {
+          const app = await readJsonImpl(["api", `apps/${slug}`]) as { id?: unknown } | undefined;
+          botAppIds.set(login, typeof app?.id === "number" ? app.id : undefined);
+        } catch (error) {
+          log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "status-app", error: String(error) });
+          botAppIds.set(login, undefined);
+        }
+      }
+      return botAppIds.get(login);
+    };
+    try {
+      // Match ci-gate's paginated check-runs read. Any completed attempt can release this hold.
+      const pages = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/check-runs?per_page=100&filter=all`,
+        "--paginate", "--slurp"], { fresh: true }) as { check_runs: {
+          name: string; status: string; completed_at: string | null; app?: { id?: number; slug?: string } | null;
+        }[] }[];
+      for (const run of pages.flatMap(page => page.check_runs)) {
+        if (typeof run.app?.id === "number" && typeof run.app.slug === "string") appBots.set(run.app.id, `${run.app.slug}[bot]`.toLowerCase());
+      }
+      runs = pages.flatMap(page => page.check_runs.flatMap(run => {
+        const pin = branchChecks?.get(run.name);
+        return required.has(run.name) && run.status === "completed" && typeof run.completed_at === "string" &&
+          (pin == null || pin === -1 || pin === run.app?.id) ? [{ name: run.name, completedAt: run.completed_at }] : [];
+      }));
+    } catch (error) {
+      // The statuses below are a separate source: a red required status releases the hold on its own.
+      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "check-runs", error: String(error) });
+      runs = [];
+    }
+    // Branch protection also requires commit statuses (remudero-review). A status meets a requirement pinned to no App,
+    // or one pinned to the App whose bot created it.
+    const statusContexts = new Map([...(branchChecks ?? [])].map(([name, pin]) => [name, pin]));
+    if (statusContexts.size === 0) return runs;
+    try {
+      const statuses = (await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${pr.headSha}/statuses?per_page=100`,
+        "--paginate", "--slurp"], { fresh: true }) as { context: string; state: string; created_at?: string; updated_at?: string;
+          creator?: { login?: string } | null }[][]).flat();
+      const completed: { name: string; completedAt: string }[] = [...runs];
+      for (const status of statuses) {
+        const completedAt = status.updated_at ?? status.created_at;
+        if (!statusContexts.has(status.context) || status.state === "pending" || typeof completedAt !== "string") continue;
+        const pin = statusContexts.get(status.context);
+        const creator = status.creator?.login?.toLowerCase();
+        if (pin == null || pin === -1 || (creator !== undefined && await appIdOfBot(creator) === pin)) {
+          completed.push({ name: status.context, completedAt });
+        }
+      }
+      return completed;
+    } catch (error) {
+      log("sweep.ci_gate_rollup.error", { pr_number: pr.prNumber, head_sha: pr.headSha, read: "statuses", error: String(error) });
+      return runs;
+    }
+  };
+  const readAmendmentMergedAt = async (url: string): Promise<string | null | undefined> => {
+    const ref = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)$/i.exec(url.trim());
+    if (!ref) return undefined;
+    try {
+      const view = await readJsonImpl(["api", `repos/${ref[1]}/${ref[2]}/pulls/${ref[3]}`], { fresh: true }) as { merged_at?: unknown } | undefined;
+      return typeof view?.merged_at === "string" ? view.merged_at : view?.merged_at === null ? null : undefined;
+    } catch (error) {
+      log("sweep.prior_round_hold.amendment_unreadable", { amendment_url: url, error: String(error) });
+      return undefined;
+    }
+  };
   // W1-T10772: resolved per call (the store verifies its state directory's identity), never cached.
   const ladderNoteStore = () => operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${owner}/${repo}`, legacyRoot: repoRoot });
   // W1-T7096: ONE judge serves both the sweep's own next-round decision and the rung it dispatches.
@@ -3332,6 +3494,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       contractRevision = undefined;
     }
     return contractRevision ? { contractRevision } : {};
+  };
+  // W1-T13865: the hold at a head adopted after the sweep decided, read the way runSweep reads it.
+  const priorRoundHoldAtHead = async (pr: OpenPrView): Promise<PriorRoundHold | undefined> => {
+    const union = await readSweepRepairHistory(ledgerPath);
+    if (!union.ok) return undefined;
+    const rows = union.rows;
+    const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, ...contractRevisionFor(pr) };
+    return await readPriorRoundHold(rows, facts, { readAmendmentMergedAt, readCheckCompletions: () => readRequiredCheckCompletions(pr) });
   };
   // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
   // carry the landing too, so it never runs a real child against the checkout the test runs in.
@@ -4027,18 +4197,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T5979: a ci-gate timeout's rollup-sourced not-ready list is filtered to this list.
     readCiGateRequired: () => requiredChecks,
 
-    readCiGateRollup: async (pr) => {
-      try {
-        return await restRollupFor(owner, repo, pr.headSha, readJsonImpl);
-      } catch (e) {
-        log("sweep.ci_gate_rollup.error", {
-          pr_number: pr.prNumber,
-          head_sha: pr.headSha,
-          error: String((e as Error)?.message ?? e),
-        });
-        return undefined;
-      }
-    },
+    readCiGateRollup,
+    readRequiredCheckCompletions,
+    readAmendmentMergedAt,
 
     // W1-T2300 (design ii/iv) — re-drive `ci-gate`'s OWN check-run job: the SAME per-job Actions
     // route `requeueCheck` above already uses (`actions/jobs/{job_id}/rerun`, NEVER
@@ -4562,6 +4723,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
           log("sweep.fix.head_adopted", heads);
           return await dispatchFix(moved.adopted, moved.evidence, onPhase, control);
+        }
+        if (adoptedMovedFixHeads.has(pr) || childAdoptedFixHeads.has(pr)) {
+          const held = await priorRoundHoldAtHead(pr);
+          if (held !== undefined) {
+            log("sweep.fix.head_moved_deferred", { pr_number: pr.prNumber, to_head: pr.headSha, reason: "prior_round_hold",
+              [PRIOR_ROUND_HOLD_FIELD]: held.hold, prior_round_hold_since: held.since });
+            return { roundNotRun: true, reason: held.reason };
+          }
         }
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
@@ -5334,7 +5503,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               // it must reach this SAME "already acted" path, never the "wrote no fix.* row"
               // rethrow meant for a dispatch that never got this far.
               if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
-              log(s, { task_id: task.id, ...extra });
+              // The next sweep compares main to this revision. The worker's task above came from the PR head.
+              log(s, { task_id: task.id, ...extra,
+                ...(s === "fix.done" && extra?.fix_outcome === "NEEDS_SCOPE"
+                  ? { contract_revision: contractRevisionFor(pr).contractRevision } : {}) });
             },
             say,
             account: (r: WorkerResult) => r, // sweep meters nothing extra; the ledger carries per-spawn cost
@@ -16063,6 +16235,64 @@ export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | unde
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
 
 const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
+/** W1-T13865: the hold the sweep applies is {@link priorRoundHold}'s, on every path to a fix worker. An unfiled PR has no
+ *  task contract to amend: its owner's `revise-pr` grant ({@link unfiledScopeGrantAfterRound}) is the scope change its NEEDS_SCOPE
+ *  ruling waits for, so a grant answered after the ruling releases the hold and the granted round runs at the same head.
+ *  A grant answered before the ruling was already spent on that round, and releases nothing. */
+export function priorRoundHoldForSweep(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number }):
+  PriorRoundHold | undefined {
+  const held = priorRoundHold(ledger, facts);
+  if (held?.hold !== "NEEDS_SCOPE" || facts.taskId !== `PR-${facts.prNumber}`) return held;
+  return unfiledScopeGrantAfterRound(ledger, facts) ? undefined : held;
+}
+/** W1-T13865: {@link priorRoundHoldForSweep} with the live inputs its ruling waits on. A NEEDS_SCOPE ruling always reads
+ *  its amendments' live merge times, even when the ledger alone releases it: a local receipt's ts is not a merge time. */
+export async function readPriorRoundHold(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number },
+  reads: { readAmendmentMergedAt?: (url: string) => Promise<string | null | undefined>;
+    readCheckCompletions?: () => Promise<readonly { name: string; completedAt: string }[]> }): Promise<PriorRoundHold | undefined> {
+  if (reads.readAmendmentMergedAt !== undefined && priorRoundRuling(ledger, facts.taskId, facts.headSha) === "NEEDS_SCOPE") {
+    const amendmentMergedAt = await amendmentMergeTimes(ledger, facts.taskId, reads.readAmendmentMergedAt);
+    return priorRoundHoldForSweep(ledger, { ...facts, amendmentMergedAt });
+  }
+  const held = priorRoundHoldForSweep(ledger, facts);
+  if (held?.hold !== "FLAKE" || reads.readCheckCompletions === undefined) return held;
+  return priorRoundHoldForSweep(ledger, { ...facts, checkCompletions: await reads.readCheckCompletions() });
+}
+/** W1-T13865: live merge times for the task's amendment PRs that no pr.terminal row dates; unreadable ones are left out. */
+async function amendmentMergeTimes(rows: readonly Record<string, unknown>[], taskId: string | undefined,
+  read: (url: string) => Promise<string | null | undefined>): Promise<Map<string, string | null>> {
+  const times = new Map<string, string | null>();
+  for (const url of scopeAmendmentsWithoutMergeTime(rows, taskId)) {
+    const key = prUrlKey(url)?.toLowerCase();
+    const mergedAt = await read(url);
+    if (key !== undefined && mergedAt !== undefined) times.set(key, mergedAt);
+  }
+  return times;
+}
+
+/** W1-T13865: the union read (archives plus the live file, read after sweep entry) merged with the sweep's entry snapshot
+ *  in row-time order. A snapshot row the union already holds is dropped, so a round that landed after entry stays the
+ *  newest; each side keeps its own order, and a row with no readable ts is taken where it stands. */
+export function mergePriorRoundHistory(union: readonly Record<string, unknown>[], snapshot: readonly Record<string, unknown>[]):
+  Record<string, unknown>[] {
+  const seen = new Set(union.map(row => JSON.stringify(row)));
+  const extra = snapshot.filter(row => !seen.has(JSON.stringify(row)));
+  const time = (row: Record<string, unknown>) => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const merged: Record<string, unknown>[] = [];
+  let i = 0, j = 0;
+  while (i < union.length || j < extra.length) {
+    if (j >= extra.length) { merged.push(union[i++]!); continue; }
+    if (i >= union.length) { merged.push(extra[j++]!); continue; }
+    const a = time(union[i]!), b = time(extra[j]!);
+    // Equal or unordered times keep the union's row first: it was read later.
+    if (Number.isFinite(b) && (!Number.isFinite(a) ? false : b < a)) merged.push(extra[j++]!);
+    else merged.push(union[i++]!);
+  }
+  return merged;
+}
+
+/** A conflicted child's live head: dispatchFix reads the prior-round hold there, since the sweep judged another head. */
+const childAdoptedFixHeads = new WeakSet<OpenPrView>();
 
 export async function adoptMovedFixHead(
   pr: OpenPrView,
@@ -16766,6 +16996,10 @@ export interface SweepDeps {
   /** W1-T5979: ci-gate's REQUIRED list, which a timeout's rollup-sourced not-ready list is filtered
    *  to; `[]` is the reader's unreadable answer. Omitted, that list is the unfiltered rollup. */
   readCiGateRequired?: () => readonly string[];
+  /** Terminal completions required by branch protection or ci-gate for this exact head. */
+  readRequiredCheckCompletions?: (pr: OpenPrView) => Promise<readonly { name: string; completedAt: string }[]>;
+  /** W1-T13865: an amendment PR's live merge time; null when unmerged, undefined when unreadable. */
+  readAmendmentMergedAt?: (url: string) => Promise<string | null | undefined>;
   /** W1-T4586: whether another CI run for this PR's head is still queued or in progress. Omitted, the
    *  sweep never waits on one (the behaviour before this field existed). */
   liveCiRunForHead?: (pr: OpenPrView) => boolean | Promise<boolean>;
@@ -18608,7 +18842,8 @@ function readFixRoundArchiveRows(ledgerPath: string): ReadonlyArray<Record<strin
 
 const SWEEP_REFRESH_STEPS = ["fix.base_refreshed", BASE_RED_REFRESH_STEP, BASE_FIXED_REFRESH_STEP, REFRESH_CLEARANCE_STEP];
 const SWEEP_REPAIR_HISTORY_SLICE: EscalationTriageSlice = { holder: "sweep.repair-history",
-  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS] };
+  steps: [...SWEEP_REFRESH_STEPS, ...FIX_ROUND_ARCHIVE_STEPS, "fix.scope_amendment", PR_TERMINAL_STEP,
+    "fix.progress_judged", "fix.progress_reused", "panel.question_answered"] };
 const sweepRepairHistoryReaders = new Map<string, EscalationTriageHistoryReader>();
 
 /** W1-T12954: the repair rows across rotations and the live file, as a strict union read gives them (`ok` false
@@ -20178,6 +20413,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
   const envelope = rechecked.adopted ?? decided;
   if (rechecked.adopted) {
     deps.log("sweep.fix.child_head_adopted", { pr_number: decided.pr.prNumber, from_head: decided.pr.headSha, to_head: envelope.pr.headSha });
+    childAdoptedFixHeads.add(envelope.pr);
   }
   const refuseOnHold = (step: string): void => {
     let hold: string | undefined;
@@ -22765,6 +23001,31 @@ export async function runSweep(
     const union = await readRepairHistory();
     return union.ok ? union.rows : undefined;
   };
+  let priorRoundHistory: readonly Record<string, unknown>[] | undefined;
+  // W1-T13865: one live read per amendment PR per pass, shared by the hold and the pending-amendment wait below.
+  const amendmentMergeReads = new Map<string, Promise<string | null | undefined>>();
+  const readAmendmentMergedAt = deps.readAmendmentMergedAt === undefined ? undefined : (url: string) => {
+    let read = amendmentMergeReads.get(url);
+    if (read === undefined) amendmentMergeReads.set(url, read = deps.readAmendmentMergedAt!(url));
+    return read;
+  };
+  const readSweepPriorRoundHold = async (pr: OpenPrView) => {
+    if (priorRoundHistory === undefined) {
+      const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
+      priorRoundHistory = archived === undefined ? ledgerLines : mergePriorRoundHistory(archived, ledgerLines);
+    }
+    const taskId = fixLedgerTaskIdFor(pr);
+    // A FLAKE hold never reads the contract, so read it only for a NEEDS_SCOPE ruling.
+    const contractRevision = pr.taskId !== undefined && priorRoundRuling(priorRoundHistory, taskId, pr.headSha) === "NEEDS_SCOPE"
+      ? readWitnessContractRevision(pr.taskId) : undefined;
+    const readCompletions = deps.readRequiredCheckCompletions;
+    return await readPriorRoundHold(priorRoundHistory, { taskId, prNumber: pr.prNumber, headSha: pr.headSha, contractRevision },
+      { readAmendmentMergedAt,
+        readCheckCompletions: readCompletions === undefined ? undefined : () => readCompletions(pr) });
+  };
+  const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
+    ...(hold.contractRevision !== undefined ? { prior_round_hold_contract_revision: hold.contractRevision } : {}),
+    ...(hold.undatedAmendmentReceipt ? { prior_round_hold_undated_amendment: true } : {}) });
   const oldestRefreshRow = new Map<string, number>();
   for (const row of ledgerLines) {
     if (typeof row.step !== "string" || !refreshSteps.includes(row.step)) continue;
@@ -24678,6 +24939,13 @@ export async function runSweep(
           repair.reason = `plan-scoped round held by worker admission: ${workerAdmissionHoldReason(deps)}`;
         }
         else {
+          const hold = await readSweepPriorRoundHold(pr);
+          if (hold !== undefined) {
+            byDisposition.wait++;
+            await finalizeDisposition(prIndex, pr, "wait", hold.reason, undefined, false, false, undefined, hold.reason,
+              undefined, undefined, false, undefined, priorRoundHoldFields(hold));
+            continue;
+          }
           const claimed = claimFixDispatch({ ...pr, taskId: escalationTaskIdFor(pr) });
           if (!claimed.ok) {
             repair.reason = claimed.reason;
@@ -25555,6 +25823,14 @@ export async function runSweep(
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
       : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
+    const standDownForPriorRound = (hold: PriorRoundHold | undefined, remedy?: string) => {
+      if (hold === undefined) return false;
+      acted = false;
+      spent = false;
+      standDownReason = remedy === undefined ? hold.reason : `${hold.reason}; ${remedy}`;
+      extraDisposedFields = { ...extraDisposedFields, ...priorRoundHoldFields(hold) };
+      return true;
+    };
     if (emptyDiffSupersession) extraDisposedFields = { ...extraDisposedFields, empty_diff_superseded: true };
     if (settledView !== undefined) extraDisposedFields = { ...extraDisposedFields, review_view_settled: settledView.basis,
       review_view_settled_at: settledView.deliveredAt };
@@ -25776,6 +26052,7 @@ export async function runSweep(
                   standDownReason = reason;
                   break;
                 }
+                if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
                 const retryHold = await holdRepeatedFixClaimDecline(pr, dispatchCauseHolds.get(pr.prNumber), deps.escalate);
                 if (retryHold !== undefined) {
                   acted = false;
@@ -26244,6 +26521,7 @@ export async function runSweep(
               // below applies to a PR whose every required check is green.
               const codeqlAlert = repairableCodeqlBlocker(pr);
               if (codeqlAlert) {
+                if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
                 const hold = workerAdmissionHoldReason(deps);
                 if (hold) {
                   acted = false;
@@ -26357,11 +26635,24 @@ export async function runSweep(
                   break;
                 }
               }
+              const roundHold = await readSweepPriorRoundHold(pr);
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
                 row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
-              const amendmentTerminal = scopeAmendment && ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
-                Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              // W1-T13865: an amendment recorded only by its URL is found by that URL, and one no pr.terminal row
+              // names (reconciliation discovers only pr_url rows) by its live merge time.
+              const amendmentUrl = scopeAmendment?.amendment_url ?? scopeAmendment?.amendmentUrl;
+              const amendmentKey = prUrlKey(amendmentUrl)?.toLowerCase();
+              const amendmentNumber = Number(scopeAmendment?.amendmentNumber ?? scopeAmendment?.amendment_number ??
+                (typeof amendmentUrl === "string" ? /\/pull\/(\d+)$/.exec(amendmentUrl.trim())?.[1] : undefined));
+              const amendmentTerminal: Record<string, unknown> | undefined = scopeAmendment ? ledgerLines.findLast(row =>
+                row.step === PR_TERMINAL_STEP && (amendmentKey !== undefined && typeof row.pr_url === "string"
+                  ? prUrlKey(row.pr_url)?.toLowerCase() === amendmentKey : Number(row.pr_number) === amendmentNumber)) : undefined;
+              const pendingAmendment = scopeAmendment !== undefined &&
+                ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
+                !["merged", "closed"].includes(String(amendmentTerminal?.state));
+              const liveAmendmentMerged = pendingAmendment && typeof amendmentUrl === "string" && readAmendmentMergedAt !== undefined &&
+                typeof await readAmendmentMergedAt(amendmentUrl) === "string";
               const closedAmendment = amendmentTerminal?.state === "closed";
               if (scopeAmendment && closedAmendment && deps.fixProgressJudge) {
                 progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
@@ -26370,15 +26661,15 @@ export async function runSweep(
                 if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
                 if (!await askProgress()) break;
               }
-              if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
-                  !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
+              if (scopeAmendment && pendingAmendment && !liveAmendmentMerged) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
                 // The amendment is already the requested remedy. Keep its contract latch while it is
                 // pending, but ask a person only if the amendment writer ultimately refuses it.
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
-                standDownReason = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
-                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined)) ?? reason;
+                const amended = await refreshAmendedContract(ledgerLines.filter((line) => line.step === "sweep.disposed" &&
+                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.scope_amendment_red_checks !== undefined));
+                if (amended !== undefined || !standDownForPriorRound(roundHold)) standDownReason = amended ?? reason;
                 break;
               }
               if (scopeAmendment?.outcome === "refused") {
@@ -26599,7 +26890,8 @@ export async function runSweep(
                 ciFailuresForFix = ciFailuresForFix.filter((failure) => !handledNames.has(failure.name));
                 if (ciFailuresForFix.length === 0) {
                   acted = false;
-                  standDownReason = `failed CI infrastructure check(s): ${outcomes.join("; ")}`;
+                  const reason = `failed CI infrastructure check(s): ${outcomes.join("; ")}`;
+                  if (!standDownForPriorRound(roundHold, reason)) standDownReason = reason;
                   break;
                 }
               }
@@ -26658,7 +26950,8 @@ export async function runSweep(
                   deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
                 if (genuineFailures.length === 0) {
                   acted = false;
-                  standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  const reason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  if (!standDownForPriorRound(roundHold, reason)) standDownReason = reason;
                   break;
                 }
               }
@@ -26677,8 +26970,9 @@ export async function runSweep(
                 }
                 ciFailuresForFix = ciFailuresForFix.filter((f) => !deferredFailures.includes(f));
                 if (ciFailuresForFix.length === 0) {
+                  const retryReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
                   acted = false;
-                  standDownReason = `deferred requeue: ${notes.join("; ")} — no fix strike`;
+                  if (!standDownForPriorRound(roundHold, retryReason)) standDownReason = retryReason;
                   break;
                 }
               }
@@ -26785,7 +27079,7 @@ export async function runSweep(
                   const waited = ledgerLines.some(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber &&
                     row.head_sha === pr.headSha && row.stand_down_reason === progressParkedReason);
                   if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
-                  if (!await askProgress()) break;
+                  if (standDownForPriorRound(roundHold) || !await askProgress()) break;
                 } else {
                   acted = false;
                   standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
@@ -26798,7 +27092,7 @@ export async function runSweep(
                 proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
               if (deps.fixProgressJudge && proofRepairRoute && proofRepairState && !proofRepairActive) {
                 progressParkedReason = `proof-repair-refusals: proof-repair refused ${proofRepairState.refusals} times at this head`;
-                if (!await askProgress()) break;
+                if (standDownForPriorRound(roundHold) || !await askProgress()) break;
                 proofRepairActive = true;
               }
               const fixEvidence: FixDispatchEvidence = proofRepairActive
@@ -26922,6 +27216,12 @@ export async function runSweep(
               // The plan-shard correction is not another code-fix round. Every ordinary body-fix
               // dispatch after the first (W1-T10039), including one past its former ceiling, is judge-gated.
               const proofRepairFlagRung = proofRepairRoute !== undefined && !proofRepairActive;
+              // W1-T13865: the prior-round hold stops a round that would spawn a fix worker, before its judge is paid.
+              // The retries, worker-free repairs, stale-proof escalation and plan-shard repair keep their own paths:
+              // the plan-only route below is the same evidence `planRepairEvidence` dispatches without a worker.
+              const planOnlyRoute = deps.dispatchPlanOnlyRepair !== undefined && !proofRepairActive &&
+                (planShardRepairDue ? proofDiscrimination : staleProofs) !== undefined;
+              if (!planOnlyRoute && standDownForPriorRound(roundHold)) break;
               if (!planShardRepairDue && !proofRepairFlagRung && !await askProgress()) break;
               const stall = planShardRepairDue || proofRepairFlagRung ? undefined : await takeStallRemedy(pr, ledgerLines, policy, deps);
               if (stall?.kind === "hold") {
@@ -27063,6 +27363,7 @@ export async function runSweep(
                 standDownReason = deps.standDownReasonFor?.(disposition) ?? "deferred to full sweep (light pass)";
                 break;
               }
+              if (standDownForPriorRound(await readSweepPriorRoundHold(pr))) break;
               // The "conflicted" row already gated this on the admission predicates, so the
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are
@@ -31041,8 +31342,10 @@ export function closedPrFacts(
 }
 
 /** {@link closedPrFacts} for one gateway answer, e.g. `prByRef`; null or open is no fact. */
-export function closedPrFromRef(ref: { number: number; url: string; state: string } | null): ClosedPrFact | undefined {
-  return ref ? closedPrFacts([ref], new Map(), new Set())[0] : undefined;
+export function closedPrFromRef(ref: { number: number; url: string; state: string; mergedAt?: string } | null): ClosedPrFact | undefined {
+  if (!ref) return undefined;
+  const at = ref.state === "MERGED" && ref.mergedAt ? new Map([[ref.number, ref.mergedAt]]) : new Map<number, string>();
+  return closedPrFacts([ref], at, new Set())[0];
 }
 
 /** A url lookup over a closed set, keyed like every PR-keyed ledger read ({@link prUrlKey}). */
