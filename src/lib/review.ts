@@ -12255,6 +12255,37 @@ export interface PostReviewStatusGuardedResult {
 }
 
 /** The status description is the GitHub-visible verdict, so provenance must survive its hard cap. */
+/** W1-T14035: the run a `remudero-review` description names, the LAST "owned by run <id>)" in it, so a summary that
+ *  quotes another run's claim never outranks the marker its own publisher appended. Absent: the text names no run. */
+export function reviewStatusOwnerRun(description: string | undefined): string | undefined {
+  let run: string | undefined;
+  for (const match of (description ?? "").matchAll(/owned by run ([^\s)]+)\)/g)) run = match[1];
+  return run;
+}
+
+/** W1-T14035: the run that WROTE a live `remudero-review` status another run reads, never one its text quotes. A claim opens
+ *  with its writer (postReviewPending's claim and both takeover wordings); any other post names its writer only by a trailing
+ *  "owned by run <id>)" with no other run named anywhere in it. A legacy hold can name itself and then quote another run, and
+ *  a newer one quotes and then marks itself, so text naming two runs has no readable writer and its reader holds. */
+export function reviewLiveStatusWriterRun(description: string | undefined): string | undefined {
+  const text = description ?? "";
+  const claimant = /^(?:remudero-review: review in progress|pending) \(owned by run ([^\s)]+)\)/.exec(text)?.[1];
+  if (claimant !== undefined) return claimant;
+  const named = new Set([...text.matchAll(/owned by run ([^\s)]+)\)/g)].map((match) => match[1]));
+  const trailing = / \(owned by run ([^\s)]+)\)$/.exec(text)?.[1];
+  return trailing !== undefined && named.size === 1 ? trailing : undefined;
+}
+
+/** W1-T14035: a pending `remudero-review` description that names the run publishing it, within GitHub's 140 characters.
+ *  The text is cut, never the marker: a hold (promise harvest, cannot-evaluate, host load, an ops redaction) names its
+ *  run exactly as a claim does, so a reader that proves a run dead can tell that run's status from a newer one. */
+export function reviewPendingDescriptionWithOwner(description: string | undefined, runId: string): string {
+  const text = description ?? "remudero-review: pending";
+  if (reviewStatusOwnerRun(text.slice(0, 140)) === runId) return text.slice(0, 140);
+  const marker = ` (owned by run ${runId})`;
+  return `${text.slice(0, Math.max(0, 140 - marker.length))}${marker}`;
+}
+
 export function reviewDescriptionWithCodeProvenance(description: string | undefined, codeSha: string): string {
   const suffix = ` [review code ${codeSha}]`;
   const text = (description ?? "remudero-review verdict").replace(REVIEW_CODE_SUFFIX, "");
@@ -12412,8 +12443,11 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     });
     return { posted: false, reason: freshnessRefusal };
   }
+  // W1-T14035: every pending post names its own run, so a hold is told apart from a newer run's status by its owner.
   const statusDescription =
-    opts.state !== "pending" && opts.reviewerCodeFreshness?.status === "fresh"
+    opts.state === "pending"
+      ? reviewPendingDescriptionWithOwner(opts.description, opts.runId)
+      : opts.reviewerCodeFreshness?.status === "fresh"
       ? reviewDescriptionWithCodeProvenance(opts.description, opts.reviewerCodeFreshness.codeSha)
       : opts.description;
     // READ BEFORE WRITE, INSIDE THE LOCK — a read taken before acquiring the
@@ -13033,7 +13067,8 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     }
     if (status) liveStatus = { state: status.state === "error" ? "failure" : status.state, description: status.description };
     if (status?.state === "pending") {
-      const foreignRun = /owned by run ([^\s)]+)\)/.exec(status.description ?? "")?.[1];
+      // W1-T14035: only the status's own writer is assessed; a run its text quotes is never taken over.
+      const foreignRun = reviewLiveStatusWriterRun(status.description);
       if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
       if (foreignRun !== opts.runId) {
         const claimedAtMs = Date.parse(status.created_at ?? "");
