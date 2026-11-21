@@ -45,6 +45,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
+import { REVIEW_RUN_SETTLED_STEPS } from "../../lib/sweep.js";
 import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
@@ -125,14 +126,22 @@ const REVIEWER_RUN_ID = /^(?:dep-)?review-PR\d+-/;
  *  - a closed lifecycle;
  *  - a drained outbox;
  *  - a claim a dispatching lane posted for the review it hands off (the sweep's reviewer-code advance posts under its
- *    own SWEEP-* run, then admits this review).
- *  Returns a fixed reason naming the sanitised holder, which the caller returns instead of reviewing or posting. */
+ *    own SWEEP-* run, then admits this review);
+ *  - a holder whose run already settled this head: its newest claim or settle row here is a settle row
+ *    ({@link REVIEW_RUN_SETTLED_STEPS}), e.g. a completed hold it published. A holder with no row at all is a takeover
+ *    GitHub accepted before its ledger append, so it is still live.
+ *  `ledger` is the command's own ledger snapshot, read at its start. Returns a fixed reason naming the sanitised holder,
+ *  which the caller returns instead of reviewing or posting. */
 export function pendingClaimHeldByAnotherRun(
   result: { posted: boolean; reason?: string; lifecycle?: unknown; outbox?: unknown }, runId: string,
+  ledger: ReadonlyArray<Record<string, unknown>>, headSha: string,
 ): string | undefined {
   if (result.posted || result.lifecycle !== undefined || result.outbox !== undefined) return undefined;
   const holder = /\(owned by run ([^)]+)\)/.exec(result.reason ?? "")?.[1];
   if (holder === undefined || holder === runId || !REVIEWER_RUN_ID.test(holder)) return undefined;
+  const newest = ledger.findLast((line) => line.run_id === holder && line.head_sha === headSha &&
+    (line.step === "review.pending_posted" || (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step))));
+  if (newest !== undefined && newest.step !== "review.pending_posted") return undefined;
   // The holder id is read from GitHub and the ledger: only run-id characters reach a log line.
   return `another reviewer run (${holder.replace(/[^A-Za-z0-9._:-]/g, "")}) holds this head's remudero-review claim`;
 }
@@ -2645,7 +2654,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reviewInputDigest: inputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
-    }), runId);
+    }), runId, reviewLedger, view.headRefOid);
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }

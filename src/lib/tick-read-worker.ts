@@ -675,10 +675,14 @@ export function reviewPendingStatusRunId(
   prUrl: string,
   headSha: string,
 ): string | undefined {
-  const claimant = reviewStatusRunIdFromRollup(rollup);
-  if (claimant !== undefined) return claimant;
   const live = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
   const description = live?.description;
+  const claimant = reviewStatusRunIdFromRollup(rollup);
+  // W1-T14177: GitHub can accept a takeover while the combined status still serves the older claim, so a claim the head's
+  // status history was read against names its writer only while that history's newest id is the live status's own.
+  if (claimant !== undefined) {
+    return history !== undefined && live?.statusId !== undefined && history[0]?.id !== live.statusId ? undefined : claimant;
+  }
   // The history's newest post must BE the live status, by GitHub's id: equal text from another post proves nothing.
   if (!description || history === undefined || live?.statusId === undefined || history[0]?.id !== live.statusId ||
     history[0]?.description !== description) return undefined;
@@ -2620,14 +2624,14 @@ export function* openPrViewSteps(
   lap("ci_failures");
 
   // W1-T14035: a pending review status that names no run is a hold from a reviewer deployed before every pending post named
-  // its run; only GitHub's own order of the head's statuses can tie it to a run (reviewPendingStatusRunId). Read only for a
-  // head whose ledger holds a hold row, so a head with no hold costs nothing.
+  // its run; only GitHub's own order of the head's statuses can tie it to a run (reviewPendingStatusRunId). Read for a
+  // head whose ledger holds a hold row, and (W1-T14177) for every pending claim, whose writer the history's newest id decides.
   const holdHeads = new Set(ledger.filter((l) => l.step === "review.posted" && l.state === "pending").map((l) => l.head_sha));
   const historyCandidates = raw.filter((pr) => {
     const status = (pr.statusCheckRollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
     const description = status === undefined ? undefined : status.description;
     return reviewStateFromRollup(pr.statusCheckRollup) === "pending" && typeof description === "string" && description !== "" &&
-      reviewStatusRunIdFromRollup(pr.statusCheckRollup) === undefined && holdHeads.has(pr.headRefOid);
+      (reviewStatusRunIdFromRollup(pr.statusCheckRollup) !== undefined || holdHeads.has(pr.headRefOid));
   }).map((pr) => ({ number: pr.number, headSha: pr.headRefOid })).slice(0, REVIEW_STATUS_HISTORY_READ_CAP);
   const reviewStatusHistories = byCandidate(historyCandidates, yield* perPrStageSteps(stageCtx, "review_status_history",
     historyCandidates, function* (c, read) {
@@ -2726,7 +2730,13 @@ export function* openPrViewSteps(
     // status is the judged run's own post; the green-check rows keep reading it as they did before this task.
     const statusRunId = reviewState === "pending" ? reviewPendingStatusRunId(pr.statusCheckRollup,
       reviewStatusHistories.get(pr.number), ledger, unmetKey, pr.url, pr.headRefOid) : undefined;
-    const reviewPendingOwnerDead = currentPendingRecord &&
+    // W1-T14177: a status history read whose newest post is not the live status shows GitHub accepted a newer post (a
+    // takeover) the combined status does not serve yet, so no check state proves the owner of the older one dead.
+    const statusHistory = reviewStatusHistories.get(pr.number);
+    const liveReviewStatusId = (pr.statusCheckRollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.statusId;
+    const historyHasNewerPost = statusHistory !== undefined && liveReviewStatusId !== undefined &&
+      statusHistory[0]?.id !== liveReviewStatusId;
+    const reviewPendingOwnerDead = currentPendingRecord && !historyHasNewerPost &&
       (checksState !== "pending" || statusRunId === currentPendingRecord.runId) &&
       assessPendingOwner(currentPendingRecord) === "dead" ? true : undefined;
     // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}

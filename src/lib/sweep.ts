@@ -6906,7 +6906,8 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
 
 /** W1-T14177 — rows after which a review run holds no claim: it published (a hold included), stood down, was refused, or
  *  recorded its decision. */
-const REVIEW_RUN_SETTLED_STEPS = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
+/** W1-T14177: the rows by which a review run settles a head: after one, that run holds no claim on it. */
+export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
   "review.skipped_closed_lifecycle"]);
 
 /** W1-T14035/W1-T14177 — the death proof is a snapshot, proven about the run the view's ledger named for the live status the
