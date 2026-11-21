@@ -45,7 +45,7 @@
     The first sweep after a restart, the review command and the fix command each build the effects in a new process. Each pays the full read.
     CHECKED for overlap: W1-T12235 covers the lifetime history only. W1-T12236 (queued) covers the open pull request reads at a restart.
 
-    MOVED to W1-T14076 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19672 merges on the rest.
+    MOVED to W1-T14089 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19672 merges on the rest.
   design: |
     NO-INVARIANTS: This amendment names the files needed to meet existing parity and unread-history criteria; it adds no independent guarantee.
     Give `terminalUncreditableHeads` its rows from a reader that `createEscalationTriageHistoryReader` builds for a new slice:

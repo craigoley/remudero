@@ -140,6 +140,7 @@ export function assertRetentionSetsResolved(sets) {
 
 const UNION_CALL_RE =
   /resolveLedgerUnion(?:Async)?\(\s*[^,]+,\s*(new RegExp\([\s\S]{0,300}?\)|[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"]*")/g;
+const TRIAGE_SLICE_CALL_RE = /createEscalationTriageHistoryReader\(\s*\{\s*slice:\s*([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /** Every `"step":"…"` occurrence in a pattern, INCLUDING an alternation group.
  *
@@ -191,14 +192,67 @@ export function resolvePatternText(source, arg) {
   return decl ? decl[1] : undefined;
 }
 
+/** Resolve the raw-pattern steps on a named triage slice, including its declaration in another
+ *  source file. The slice reader uses the incremental ledger union under the hood, so its pattern
+ *  belongs in this census even when its caller does not spell `resolveLedgerUnion` directly. */
+export function resolveTriageSliceSteps(source, sliceName, sourceFiles = []) {
+  const declarationFor = (text) => {
+    const marker = `const ${sliceName}`;
+    const start = text.indexOf(marker);
+    if (start < 0) return null;
+    const afterName = start + marker.length;
+    if (/[A-Za-z0-9_$]/.test(text[afterName] ?? "")) return null;
+    const assignment = text.indexOf("=", afterName);
+    const open = assignment < 0 ? -1 : text.indexOf("{", assignment + 1);
+    const close = open < 0 ? -1 : text.indexOf("};", open + 1);
+    if (assignment < 0 || open < 0 || close < 0) return null;
+    return text.slice(open + 1, close);
+  };
+  let declaration = declarationFor(source);
+  if (!declaration) {
+    for (const candidate of sourceFiles) {
+      declaration = declarationFor(candidate);
+      if (declaration) break;
+    }
+  }
+  if (!declaration) return null;
+  const rawPatternStart = declaration.indexOf("rawPattern:");
+  if (rawPatternStart < 0) return null;
+  let start = rawPatternStart + "rawPattern:".length;
+  while (/\s/.test(declaration[start] ?? "")) start++;
+  if (declaration[start] !== "/") return undefined;
+  let end = start + 1;
+  let escaped = false;
+  let inCharacterClass = false;
+  for (; end < declaration.length; end++) {
+    const char = declaration[end];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") inCharacterClass = true;
+    else if (char === "]") inCharacterClass = false;
+    else if (char === "/" && !inCharacterClass) break;
+  }
+  if (end >= declaration.length) return undefined;
+  const rawPattern = declaration.slice(start, end + 1);
+  // Other typed slices have different retention contracts and are outside this census's question.
+  return stepsInPatternText(rawPattern);
+}
+
 /** Every union call site paired with the step names its pattern names, and whether each survives
  *  rotation. `steps: []` means the read is not keyed on step literals at all (a caller passing a
  *  runtime pattern), which this gate has no opinion about. */
 export function censusFindings(files, readFile, retention) {
   const findings = [];
-  for (const file of files) {
-    const source = readFile(file);
-    if (!source.includes("resolveLedgerUnion")) continue;
+  const sources = files.map((file) => [file, readFile(file)]);
+  const sourceText = sources.map(([, source]) => source);
+  for (const [file, source] of sources) {
+    if (!source.includes("resolveLedgerUnion") && !source.includes("createEscalationTriageHistoryReader")) continue;
     UNION_CALL_RE.lastIndex = 0;
     let call;
     while ((call = UNION_CALL_RE.exec(source))) {
@@ -209,6 +263,25 @@ export function censusFindings(files, readFile, retention) {
         continue;
       }
       const steps = stepsInPatternText(patternText);
+      findings.push({
+        file,
+        arg,
+        unresolved: false,
+        steps: steps.map((step) => ({
+          step,
+          retainedBy: [...retention.entries()].find(([, set]) => set.has(step))?.[0],
+        })),
+      });
+    }
+    TRIAGE_SLICE_CALL_RE.lastIndex = 0;
+    while ((call = TRIAGE_SLICE_CALL_RE.exec(source))) {
+      const arg = call[1];
+      const steps = resolveTriageSliceSteps(source, arg, sourceText);
+      if (steps === null) continue;
+      if (steps === undefined) {
+        findings.push({ file, arg, unresolved: true, steps: [] });
+        continue;
+      }
       findings.push({
         file,
         arg,
