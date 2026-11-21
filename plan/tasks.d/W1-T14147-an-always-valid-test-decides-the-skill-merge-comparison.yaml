@@ -14,6 +14,12 @@
     - src/lib/sequential-test.ts
     - src/lib/skill-workshop.ts
     - test/learning/an-always-valid-test-decides-the-skill-merge-comparison.test.ts
+    - test/a-skill-is-withheld-on-a-seeded-share-of-runs.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
+    - test/learning/a-skill-is-harmful-only-when-it-fails-more-than-its-controls.test.ts
+    - test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts
+    - test/learning/a-stale-skill-retirement-is-withdrawn-not-approved.test.ts
+    - test/skill-lifecycle.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -43,6 +49,10 @@
        - otherwise INSUFFICIENT EVIDENCE, with the basis `undecided`.
        Harm and cost rules and their order are unchanged.
     3. The report prints the bounds and the always-valid p-value beside the merge rates.
+    4. Six existing suites pin point-comparison verdicts on 10 runs per arm. A builder measured 15 of their tests changing
+       verdict under this rule, as intended: 8/10 against 3/10 no longer decides, and pending-shipment becomes undecided.
+       Update only their fixtures and expected basis text, to sizes the confidence sequence decides (for example 9/10 against
+       1/10), and keep every test title verbatim. Two of the titles are W1-T3413's proofs.
 
     INVARIANT peeking-is-safe: under the null, the share of simulated runs that ever read decided, with a look after every run, stays at or below α plus simulation error.
   acceptance:
