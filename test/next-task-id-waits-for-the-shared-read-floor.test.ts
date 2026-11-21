@@ -54,7 +54,7 @@ test("W1-T7957: a wait-mode read waits out the shared floor before reading", asy
       assert.deepEqual(f.events, [`sleep:${waitMs}`, `stamp:${admittedAt}`, `read:${admittedAt}`]);
       assert.equal(f.last(), admittedAt);
       assert.equal(f.warnings.length, 1);
-      assert.ok(f.warnings[0].includes(`waiting ${waitMs / 1000}s`));
+      assert.ok(f.warnings[0].includes(`waited ${waitMs / 1000}s`));
       assert.ok(f.warnings[0].includes("180s"));
       assert.ok(f.warnings[0].includes(f.path));
       f.events.length = 0;
@@ -110,7 +110,11 @@ test("W1-T7957: a read stamped during the wait extends the remaining floor", asy
       if (asyncRead) await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], deps);
       else applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["sleep:60000", "sleep:150000", "stamp:1210000"]);
-      assert.equal(f.warnings.length, 1, "one read prints one wait notice");
+      // W1-T12058: one read prints one line, when its wait ends, with the sum of its sleeps: the stamp
+      // that lands mid-wait extends it to 210 s, which a 60 s line printed up front would understate.
+      const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+      assert.equal(waits.length, 1, `one read prints one wait notice: ${JSON.stringify(waits)}`);
+      assert.match(waits[0]!, /waited 210s for the 180s floor/);
       f.events.length = 0;
       applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["stamp:1210000"], "the completed wait earns the invocation's burst");
