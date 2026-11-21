@@ -1145,21 +1145,18 @@ export async function evaluateReviewerHealthNow(
       baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
   };
 
-  /** W1-T13850, observe-only: judge every evaluator model, ledger the judgment, open one incident per newly
-   *  diverged model and close one whose interval overlaps its baseline again. It reads the counts and
-   *  writes only `modelIncidents`: no route, verdict, sha judgment or reviewer-sha incident. */
-  const judgeModels = async (state: ReviewerHealthState): Promise<void> => {
-    const judged = judgeEvaluatorModels(state);
-    log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged: judged.filter((j) => j.state === "diverged").map((j) => j.model) });
+  /** Reconcile this evaluation's evidence with the incidents left by earlier evaluations. */
+  const reconcileModels = async (judged: EvaluatorModelJudgment[], failsByModel: ReviewerHealthState["modelFails"]): Promise<void> => {
+    let { modelIncidents } = loadReviewerHealthState(statePath);
     for (const j of judged) {
-      const pending = modelValue(state.modelIncidents, j.model);
+      const pending = modelValue(modelIncidents, j.model);
       const diverged = j.state === "diverged";
       const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
       if (diverged && pending?.issueUrl) continue;
       if (!diverged && (pending === undefined || !overlap)) continue;
       const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
         provider: j.provider, openedAt: clock.iso(), evidence: j };
-      state.modelIncidents = { ...state.modelIncidents, [j.model]: incident };
+      modelIncidents = { ...modelIncidents, [j.model]: incident };
 
       if (!incident.issueUrl) {
         try {
@@ -1167,7 +1164,7 @@ export async function evaluateReviewerHealthNow(
           // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
           incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
           if (diverged && !incident.issueUrl) {
-            const fails = await publishedModelFails(modelValue(state.modelFails, j.model) ?? [], input.readEvidence ?? readReviewEvidenceRecord, log);
+            const fails = await publishedModelFails(modelValue(failsByModel, j.model) ?? [], input.readEvidence ?? readReviewEvidenceRecord, log);
             incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, fails), {
               ...escalation, issues: { ...escalation.issues, listOpen: async () => open },
             });
@@ -1192,9 +1189,12 @@ export async function evaluateReviewerHealthNow(
           continue;
         }
       }
-      delete state.modelIncidents[j.model];
+      delete modelIncidents[j.model];
       if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
     }
+    const latest = loadReviewerHealthState(statePath);
+    latest.modelIncidents = modelIncidents;
+    saveReviewerHealthState(statePath, latest);
   };
 
   /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
@@ -1253,11 +1253,14 @@ export async function evaluateReviewerHealthNow(
   } else {
     await step(read.rows, input.originMainSha, true);
   }
-  // Observe-only (W1-T13850): the SHA state is saved and the route decided BEFORE the model judgment runs, so a
-  // slow or failing model issue lookup never delays or changes either. `modelIncidents` is the judgment's own
-  // field: this save keeps the copy on disk, and the judgment below merges only that field back.
   state.cursor = read.cursor;
-  state.modelIncidents = loadReviewerHealthState(statePath).modelIncidents;
+  // An earlier model job may have saved an incident while this evaluation was reading rows.
+  try {
+    state.modelIncidents = loadReviewerHealthState(statePath).modelIncidents;
+  } catch (error) {
+    // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
+    reportModelHealthFailure(error, log);
+  }
   saveReviewerHealthState(statePath, state);
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
@@ -1269,17 +1272,20 @@ export async function evaluateReviewerHealthNow(
       // returned to baseline, the incident has closed above.
       : { route: "healed", incident, shadow: input.originMainSha !== null && current?.state !== "regressed",
         withPr: state.operatorHeal?.withPr ?? null, current };
-  queueModelJudgment(statePath, async () => {
-    const models = loadReviewerHealthState(statePath);
-    await judgeModels(models);
-    const latest = loadReviewerHealthState(statePath);
-    latest.modelIncidents = models.modelIncidents;
-    saveReviewerHealthState(statePath, latest);
-  }, log);
+  try {
+    // Capture before another evaluation can replace the counts or the FAIL evidence on disk.
+    const judged = judgeEvaluatorModels(state);
+    const { modelFails } = state;
+    log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged: judged.filter((j) => j.state === "diverged").map((j) => j.model) });
+    queueModelJudgment(statePath, () => reconcileModels(judged, modelFails), log);
+  } catch (error) {
+    // Report observation failures and return the decision from the saved SHA state.
+    reportModelHealthFailure(error, log);
+  }
   return decision;
 }
 
-/** W1-T13850 — the model judgments of one state file, run one at a time AFTER their evaluation returned. */
+/** W1-T13850 — model incident reconciliation runs serially for each state file. */
 const modelJudgments = new Map<string, Promise<void>>();
 
 function queueModelJudgment(statePath: string, job: () => Promise<void>, log: ReviewerHealthLog): void {
@@ -1291,7 +1297,7 @@ function queueModelJudgment(statePath: string, job: () => Promise<void>, log: Re
   void run.finally(() => { if (modelJudgments.get(statePath) === run) modelJudgments.delete(statePath); });
 }
 
-/** Test seam and shutdown hook: wait until every queued model judgment of `statePath` has settled. */
+/** Test seam and shutdown hook: wait for the queued model incident effects of `statePath`. */
 export async function settleReviewerModelJudgment(statePath: string): Promise<void> {
   for (let pending = modelJudgments.get(statePath); pending !== undefined; pending = modelJudgments.get(statePath)) {
     await pending;

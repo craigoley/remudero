@@ -9,7 +9,8 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import fs, { readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
@@ -95,7 +96,7 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
   const git: health.GitText = async () => { throw new Error("no git: no sha regresses here"); };
   const iso = { iso: () => new Date(clock).toISOString() };
   const input = (originMainSha: string | null) => ({ originMainSha, ...(readEvidence ? { readEvidence } : {}) });
-  /** The model judgment runs after the route returns (observe-only); these wait for it, so a test reads its effects. */
+  /** Wait for queued model incident effects before asserting on them. */
   const evaluate = async (originMainSha: string | null) => {
     const decision = await health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
     await health.settleReviewerModelJudgment(statePath);
@@ -107,7 +108,7 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
     await health.settleReviewerModelJudgment(statePath);
     return decision;
   };
-  /** The evaluation alone, as the daemon awaits it: the model judgment may still be running. */
+  /** The evaluation alone, as the daemon awaits it. Issue effects may still be pending. */
   const evaluateRouteOnly = (originMainSha: string | null) =>
     health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
   return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, evaluateRouteOnly, steps: (step: string) => logs.filter((l) => l.step === step) };
@@ -718,6 +719,111 @@ test("W1-T13850 criterion 4: the body tryEscalateAsync delivers stays within the
   assert.ok(rendered.length <= health.GITHUB_ISSUE_BODY_LIMIT - 4_096, `rendered ${rendered.length} leaves the footer reserve`);
   assert.match(h.created[0]!.body, /long clause 199 /, "the newest FAIL is still quoted");
 });
+
+test("W1-T13850 criterion 2 / W1-T13850 criterion 4: queued evaluations retain a transient divergence and its first FAIL evidence", async (t) => {
+  const h = harness(t);
+  const healed = fake("earlier-healed-sha");
+  const earlier = { provider: "codex", model: "earlier-evaluator" };
+  const peer = { provider: null, model: "earlier-peer" };
+  const healedRow = { incident_id: "earlier-sha-incident" };
+  // The earlier models share a healed SHA, outside Sol and Claude's healthy-SHA comparison.
+  h.queue.push(...repeat(20, () => verdict(healed, earlier, "failure", healedRow)),
+    ...repeat(40, () => verdict(healed, peer, "success", healedRow)));
+  let startLookup!: () => void;
+  let releaseLookup!: () => void;
+  const lookupStarted = new Promise<void>((resolve) => { startLookup = resolve; });
+  const lookupBlocked = new Promise<void>((resolve) => { releaseLookup = resolve; });
+  h.issues.listOpen = async () => { startLookup(); await lookupBlocked; return []; };
+  const { rows, solShas, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const latestFail = "the first divergence's latest FAIL";
+  rows.at(-1)!.failure_reason = latestFail;
+  rows.at(-1)!.reasons = [];
+  const laterFail = "the later evaluation's FAIL";
+  try {
+    await h.evaluateRouteOnly(null);
+    await lookupStarted;
+    h.queue.push(...rows);
+    await h.evaluateRouteOnly(current);
+    h.queue.push(verdict(solShas[0]!, SOL, "failure", { reasons: [], failure_reason: laterFail }));
+    await h.evaluateRouteOnly(current);
+    h.queue.push(...repeat(265, () => verdict(solShas[0]!, SOL, "success")));
+    await h.evaluateRouteOnly(current);
+    assert.equal(h.created.length, 0, "the earlier lookup still holds the queue");
+    assert.equal(divergenceRows(h).length, 4, "each evaluation writes its observation while the lookup is blocked");
+  } finally {
+    releaseLookup();
+    await health.settleReviewerModelJudgment(h.statePath);
+  }
+
+  const observed = divergenceRows(h);
+  assert.equal(observed.length, 4, "one row for each evaluation");
+  assert.equal(observed[0]!.models.some((j) => j.model === SOL.model), false);
+  const sol = observed.slice(1).map(({ models }) => models.find((j) => j.model === SOL.model)!);
+  assert.deepEqual(sol.map((j) => [j.state, j.fail, j.n, j.baseline_fail, j.baseline_n]),
+    [["diverged", 29, 31, 17, 172], ["diverged", 30, 32, 17, 172], ["healthy", 30, 297, 17, 172]]);
+  const z = upperNormalQuantile(health.REVIEWER_HEALTH_FAMILY_ALPHA / (2 * observed[1]!.models.length));
+  assert.deepEqual([sol[0]!.interval, sol[0]!.baseline_interval, sol[0]!.z, sol[0]!.population, sol[0]!.population_shas],
+    [wilsonInterval(29, 31, z), wilsonInterval(17, 172, z), z, "healthy-shas", 43]);
+  const opened = h.created.filter(({ title }) => title.includes(SOL.model));
+  assert.equal(opened.length, 1, "the first divergence opens an incident and the second is deduplicated");
+  assert.match(opened[0]!.body, /29 of 31.*17 of 172/);
+  assert.ok(opened[0]!.body.includes(latestFail));
+  assert.ok(!opened[0]!.body.includes(laterFail), "the incident quotes evidence from the opening evaluation");
+  assert.match(opened[0]!.body, /File a task to calibrate.*W1-T12145.*W1-T13448/);
+  assert.deepEqual(h.closed.map(({ url }) => url), ["https://github.com/acme/remudero/issues/2"]);
+  assert.match(h.closed[0]!.comment, /30 of 297/);
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.equal(saved.modelIncidents[SOL.model], undefined);
+  assert.equal(health.judgeEvaluatorModels(saved).find((j) => j.model === SOL.model)?.n, 297);
+});
+
+for (const [read, stage] of [[3, "SHA save"], [4, "incident reconciliation"]] as const) {
+  test(`W1-T13850 criterion 5: a model state reread EIO during ${stage} preserves the healed route`, async (t) => {
+    const { rows, claudeShas, solShas } = elevenNineteen();
+    const control = harness(t);
+    const failing = harness(t);
+    const incident = writeHealedState(control.statePath);
+    writeHealedState(failing.statePath);
+    control.queue.push(...rows);
+    failing.queue.push(...rows);
+    const current = claudeShas.at(-1)!;
+    const expected = await control.evaluateOuter(current);
+
+    const readStateFile = readFileSync;
+    let reads = 0;
+    t.mock.method(fs, "readFileSync", (...args: Parameters<typeof readFileSync>) => {
+      // The daemon precheck and evaluation load both succeed before either model-only reread.
+      if (args[0] === failing.statePath && ++reads === read) {
+        throw Object.assign(new Error("model state reread failed"), { code: "EIO" });
+      }
+      return readStateFile(...args);
+    });
+    syncBuiltinESMExports();
+    let decision: health.ReviewerHealthDecision;
+    try {
+      decision = await failing.evaluateOuter(current);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(expected.route, "healed");
+    assert.deepEqual(decision, expected);
+    assert.deepEqual(failing.steps("reviewer.health_unavailable"), []);
+    const failures = failing.steps("reviewer.model_divergence_failed");
+    assert.deepEqual(failures.map(({ extra }) => extra.error), ["model state reread failed"]);
+    const observed = divergenceRows(failing);
+    assert.equal(observed.length, 1, "the evaluation's observation survives the incident reread failure");
+    assert.equal(observed[0]!.models.find((j) => j.model === SOL.model)?.state, "diverged");
+    const saved = health.loadReviewerHealthState(failing.statePath);
+    assert.deepEqual(saved.incident, incident);
+    const controlState = health.loadReviewerHealthState(control.statePath);
+    for (const sha of [...solShas, ...claudeShas]) {
+      assert.deepEqual(health.judgeReviewerSha(saved, sha), health.judgeReviewerSha(controlState, sha), sha);
+    }
+    assert.deepEqual(failing.reverts, []);
+  });
+}
 
 test("W1-T13850 criterion 5: invariant:observe-only — a slow model issue lookup delays neither the saved sha state nor the healed route", async (t) => {
   // Review finding (11-20 19:55Z): with the same rows and an open sha incident, origin/main saved and returned
