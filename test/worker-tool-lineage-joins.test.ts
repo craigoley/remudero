@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "#src/lib/worker-tool-lineage.js";
 
@@ -84,4 +87,40 @@ test("test/worker-tool-lineage-joins.test.ts an ID reused in explicit provider t
   assert.equal(rows[2].turnId, rows[1].turnId);
   assert.equal(rows[3].turnId, rows[0].turnId);
   assert.notEqual(rows[2].turnId, rows[3].turnId);
+});
+
+test("tool error episode shadow requires continuous unique joined error evidence", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tool-episodes-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const options = { provider: "cash-chat", runId: "same-run", root };
+  const first = createWorkerToolLineage(options);
+  const second = createWorkerToolLineage(options);
+  function pair(observer: typeof first, id: string, is_error: unknown, turnId = "turn-a", name = "read_file") {
+    observer.observe({ type: "tool_use", id, turnId, name });
+    observer.observe({ type: "tool_result", tool_use_id: id, turnId, is_error });
+  }
+  pair(first, "a", true);
+  pair(first, "other-tool", false, "turn-a", "write_file");
+  pair(second, "a", true);
+  pair(first, "b", true);
+  pair(first, "reset", false);
+  pair(first, "c", true);
+  pair(first, "gap", "not-a-boolean");
+  pair(first, "d", true);
+  pair(first, "e", true, "turn-b");
+  pair(first, "f", true);
+  first.finish("stream-ended");
+  second.finish("stream-ended");
+
+  const shadows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n")
+    .map(line => JSON.parse(line)).filter(row => row.step === "worker.tool_lineage_shadow")
+    .map(row => row.tool_lineage_shadow);
+  assert.deepEqual(shadows.map(shadow => shadow.streamId), [first.streamId, second.streamId]);
+  assert.deepEqual(shadows[0].tools.find((entry: { tool: string }) => entry.tool === "read_file"), {
+    tool: "read_file", eligibleResults: 7, successes: 1, errorEpisodes: [{ length: 1, count: 4 }, { length: 2, count: 1 }],
+  });
+  assert.equal(shadows[0].excluded.unknown, 1);
+  assert.deepEqual(shadows[1].tools, [{
+    tool: "read_file", eligibleResults: 1, successes: 0, errorEpisodes: [{ length: 1, count: 1 }],
+  }]);
 });

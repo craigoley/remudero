@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,22 @@ import test from "node:test";
 import { CLAUDE_BIN_ENV_OVERRIDE, collectWorkerResult, createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { createWorkerToolLineage, observeWorkerToolLineage } from "#src/lib/worker-tool-lineage.js";
+
+function lineageRows(text: string, provider: string, runId: string, closure = "stream-ended") {
+  const rows = text.trim().split("\n").map(line => JSON.parse(line));
+  const events = rows.filter(row => row.step === "worker.tool_lineage");
+  const shadows = rows.filter(row => row.step === "worker.tool_lineage_shadow");
+  assert.equal(shadows.length, 1);
+  assert.deepEqual(rows, [...events, ...shadows]);
+  const [row] = shadows;
+  const encodedRun = createHash("sha256").update(runId).digest("hex");
+  assert.equal(row.run_id, encodedRun);
+  assert.equal(row.tool_lineage_shadow.runId, encodedRun);
+  assert.equal(row.tool_lineage_shadow.provider, provider);
+  assert.equal(row.tool_lineage_shadow.streamId, events[0].tool_lineage.streamId);
+  assert.equal(row.tool_lineage_shadow.closure, closure);
+  return { events, shadow: row.tool_lineage_shadow };
+}
 
 async function* stream() {
   yield { type: "assistant", message: { id: "turn", content: [
@@ -26,10 +43,10 @@ test("test/worker-tool-lineage-wiring.test.ts the consumed stream uses the defau
   const result = await collectWorkerResult(stream(), { childEnvKeys: [], root, runId: "r", taskId: "task" });
   assert.equal(result.text, "done");
   const text = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
-  const rows = text.trim().split("\n").map(line => JSON.parse(line));
-  assert.ok(rows.every(r => r.step === "worker.tool_lineage"));
+  const { events: rows, shadow } = lineageRows(text, "claude", "r");
   assert.deepEqual(rows.map(r => r.tool_lineage.state), ["attempt", "attempt", "joined", "joined"]);
   assert.deepEqual(rows.slice(2).map(r => [r.tool_lineage.tool, r.tool_lineage.result]), [["Read", "error"], ["Bash", "success"]]);
+  assert.equal(shadow.completeness, "complete");
   assert.ok(!text.includes("secret-command") && !text.includes("secret-result") && !text.includes("/private/secret"));
 });
 
@@ -43,14 +60,18 @@ test("test/worker-tool-lineage-wiring.test.ts durable sink failure and interrupt
   observeWorkerToolLineage(observer, { type: "assistant", message: { id: "t", content: [{ type: "tool_use", id: "a", name: "Read" }] } });
   assert.deepEqual(observer.delivery, { state: "failed", reason: "sink-threw", errorClass: "TypeError" });
   async function* interrupted() {
-    yield { type: "assistant", message: { id: "t", content: [{ type: "tool_use", id: "a", name: "Read" }] } };
+    yield { type: "assistant", message: { id: "t", content: [{ type: "tool_use", id: "a", name: "Read", input: { path: "/private/interrupted" } }] } };
     throw new Error("transport ended");
   }
   const interruptedRoot = mkdtempSync(join(tmpdir(), "rmd-tool-lineage-interrupted-"));
   await assert.rejects(collectWorkerResult(interrupted(), { childEnvKeys: [], root: interruptedRoot, runId: "r" }), /transport ended/);
-  const rows = readFileSync(join(interruptedRoot, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const text = readFileSync(join(interruptedRoot, "state", "ledger.ndjson"), "utf8");
+  const { events: rows, shadow } = lineageRows(text, "claude", "r", "interrupted");
   assert.equal(rows.at(-1).tool_lineage.state, "unfinished");
   assert.equal(rows.at(-1).tool_lineage.reason, "interrupted");
+  assert.equal(shadow.completeness, "incomplete");
+  assert.equal(shadow.excluded.interrupted, 1);
+  assert.ok(!text.includes("/private/interrupted"));
 });
 
 test("test/worker-tool-lineage-wiring.test.ts spawnWorker forwards attribution to the default Claude observer", async () => {
@@ -70,9 +91,11 @@ test("test/worker-tool-lineage-wiring.test.ts spawnWorker forwards attribution t
   });
   assert.equal(result.text, "done");
   assert.equal(consumed, 1);
-  const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const text = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  const { events: rows } = lineageRows(text, "claude", "assembly-run");
   assert.equal(rows.filter(r => r.tool_lineage?.state === "joined").length, 2);
   assert.ok(rows.every(r => r.tool_lineage.provider === "claude" && r.tool_lineage.runId !== null));
+  assert.ok(!text.includes("secret-command") && !text.includes("secret-result") && !text.includes("/private/secret"));
 });
 
 test("test/worker-tool-lineage-wiring.test.ts the real Codex JSONL consumer joins split chunks exactly once", async () => {
@@ -104,7 +127,7 @@ test("test/worker-tool-lineage-wiring.test.ts the real Codex JSONL consumer join
   assert.equal(result.text, "done");
   assert.equal(spawns, 1);
   const text = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
-  const rows = text.trim().split("\n").map(line => JSON.parse(line));
+  const { events: rows } = lineageRows(text, "codex", "r");
   assert.deepEqual(rows.map(r => r.tool_lineage.state), ["attempt", "joined"]);
   assert.equal(rows[1].tool_lineage.result, "success");
   assert.ok(!text.includes("secret-command") && !text.includes("secret-output"));
@@ -141,7 +164,9 @@ test("test/worker-tool-lineage-wiring.test.ts cash adapters retain actual IDs an
       assert.equal(requests, failedTool && (foundry || responses) ? 1 : 2);
       if (failedSink) continue;
       const text = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
-      const rows = text.trim().split("\n").map(line => JSON.parse(line));
+      const provider = foundry ? "cash-claude" : responses ? "cash-responses" : "cash-chat";
+      const closure = failedTool && (foundry || responses) ? "interrupted" : "stream-ended";
+      const { events: rows } = lineageRows(text, provider, "r", closure);
       assert.deepEqual(rows.map(r => r.tool_lineage.state), ["attempt", "joined"]);
       assert.equal(rows[1].tool_lineage.result, failedTool ? "error" : "success");
       assert.equal(rows[0].tool_lineage.callId, rows[1].tool_lineage.callId);

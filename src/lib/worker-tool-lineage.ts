@@ -14,6 +14,7 @@ type Result = "success" | "error" | "unknown";
 type Reason = "missing-call-id" | "missing-turn-id" | "missing-run-id" | "malformed-payload" | "malformed-outcome"
   | "unsupported-adapter" | "ambiguous-call-id" | "capacity-exceeded" | "duplicate-use" | "duplicate-result"
   | "unmatched-result" | "stream-ended" | "interrupted";
+type StreamEnd = "stream-ended" | "interrupted";
 
 export interface WorkerToolReceipt {
   provider: Provider;
@@ -41,6 +42,97 @@ type Delivery = { state: "unavailable" | "written" | "pending" }
   | { state: "failed"; reason: "sink-threw" | "normalization-threw"; errorClass: "TypeError" | "Error" | "non-error" };
 type Call = { turnId: string; tool: Tool; completed: boolean; ambiguous: boolean };
 type Metadata = { kind: "use" | "result"; id: unknown; turnId?: unknown; name?: unknown; result?: Result; reason?: Reason };
+
+const EMPTY_EXCLUSIONS = {
+  unknown: 0, duplicateUse: 0, duplicateResult: 0, orphan: 0, interrupted: 0,
+  unfinished: 0, ambiguous: 0, unsupported: 0, capacityExceeded: 0,
+};
+const EXCLUSION_BY_REASON: Partial<Record<Reason, keyof typeof EMPTY_EXCLUSIONS>> = {
+  "duplicate-use": "duplicateUse",
+  "duplicate-result": "duplicateResult",
+  "unmatched-result": "orphan",
+  "interrupted": "interrupted",
+  "stream-ended": "unfinished",
+  "ambiguous-call-id": "ambiguous",
+  "capacity-exceeded": "capacityExceeded",
+};
+type EpisodeStats = { eligibleResults: number; successes: number; streak: number; lengths: Map<number, number> };
+type EpisodeResult = { call: Call; result: "success" | "error"; startsWindow: boolean };
+
+function closeEpisode(stats: EpisodeStats): void {
+  if (stats.streak === 0) return;
+  stats.lengths.set(stats.streak, (stats.lengths.get(stats.streak) ?? 0) + 1);
+  stats.streak = 0;
+}
+
+class ToolErrorEpisodes {
+  private readonly excluded = { ...EMPTY_EXCLUSIONS };
+  // One entry per completed call, bounded by the join cap. A later identity conflict can invalidate an earlier join.
+  private readonly results: EpisodeResult[] = [];
+  private turnId: string | null = null;
+  private startsWindow = true;
+
+  turn(turnId: string | null): void {
+    if (turnId === null || this.turnId !== turnId) this.startsWindow = true;
+    this.turnId = turnId;
+  }
+
+  observe(receipt: WorkerToolReceipt, call?: Call): void {
+    if (receipt.turnId !== null) this.turn(receipt.turnId);
+    if (receipt.state === "attempt") return;
+    if (call && (receipt.result === "success" || receipt.result === "error")) {
+      this.results.push({ call, result: receipt.result, startsWindow: this.startsWindow });
+      this.startsWindow = false;
+      return;
+    }
+    const exclusion = receipt.reason ? EXCLUSION_BY_REASON[receipt.reason] : undefined;
+    this.excluded[exclusion ?? (receipt.state === "joined" ? "unknown" : "unsupported")]++;
+    this.startsWindow = true;
+  }
+
+  summarize() {
+    const byTool = new Map<Tool, EpisodeStats>();
+    // Fold in receipt order. Other classes can interleave within a turn; an evidence gap closes every class.
+    for (const { call, result, startsWindow } of this.results) {
+      if (startsWindow || call.ambiguous) for (const stats of byTool.values()) closeEpisode(stats);
+      if (call.ambiguous) {
+        this.excluded.ambiguous++;
+        continue;
+      }
+      let stats = byTool.get(call.tool);
+      if (!stats) {
+        stats = { eligibleResults: 0, successes: 0, streak: 0, lengths: new Map() };
+        byTool.set(call.tool, stats);
+      }
+      stats.eligibleResults++;
+      if (result === "error") stats.streak++;
+      else {
+        stats.successes++;
+        closeEpisode(stats);
+      }
+    }
+    this.results.length = 0;
+    const tools = Array.from(byTool, ([tool, stats]) => {
+      closeEpisode(stats);
+      return {
+        tool, eligibleResults: stats.eligibleResults, successes: stats.successes,
+        errorEpisodes: Array.from(stats.lengths, ([length, count]) => ({ length, count })).sort((a, b) => a.length - b.length),
+      };
+    });
+    const { duplicateUse, duplicateResult, ...gaps } = this.excluded;
+    return { tools, excluded: this.excluded, hasGaps: Object.values(gaps).some(count => count > 0) };
+  }
+}
+
+type ToolLineageShadow = Omit<ReturnType<ToolErrorEpisodes["summarize"]>, "hasGaps"> & {
+  provider: Provider;
+  streamId: string;
+  runId: string | null;
+  window: "stream";
+  closure: StreamEnd;
+  completeness: "complete" | "incomplete";
+  deliveryFailure: Extract<Delivery, { state: "failed" }>["reason"] | null;
+};
 
 function encoded(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= 4096
@@ -71,6 +163,7 @@ export class WorkerToolLineage {
   private readonly calls = new Map<string, Map<string, Call>>();
   private callCount = 0;
   private readonly sink?: WorkerToolLineageOptions["sink"];
+  private readonly shadow?: { episodes: ToolErrorEpisodes; sink: (summary: ToolLineageShadow) => void };
   private codexTurn = 0;
   private codexTurnActive = false;
   private closed = false;
@@ -78,23 +171,42 @@ export class WorkerToolLineage {
   constructor(options: WorkerToolLineageOptions) {
     this.provider = PROVIDERS.includes(options.provider as typeof PROVIDERS[number]) ? options.provider as Provider : "unsupported";
     this.runId = encoded(options.runId);
-    const taskId = encoded(options.taskId);
-    this.sink = options.sink ?? (options.root ? receipt => appendLedger(join(options.root!, "state", LEDGER_FILENAME), {
+    this.sink = options.sink;
+    const root = options.root;
+    if (!root || this.sink) return;
+    const ledgerPath = () => join(root, "state", LEDGER_FILENAME);
+    const attribution = {
       run_id: this.runId ?? "unattributed",
-      task_id: taskId ?? "unattributed",
+      task_id: encoded(options.taskId) ?? "unattributed",
+    };
+    this.sink = receipt => appendLedger(ledgerPath(), {
+      ...attribution,
       step: "worker.tool_lineage",
       tool_lineage: receipt,
-    }) : undefined);
+    });
+    this.shadow = {
+      episodes: new ToolErrorEpisodes(),
+      sink: summary => appendLedger(ledgerPath(), {
+        ...attribution,
+        step: "worker.tool_lineage_shadow",
+        tool_lineage_shadow: summary,
+      }),
+    };
   }
 
-  private emit(fields: Pick<WorkerToolReceipt, "state"> & Partial<WorkerToolReceipt>): void {
+  private emit(fields: Pick<WorkerToolReceipt, "state"> & Partial<WorkerToolReceipt>, call?: Call): void {
     const receipt: WorkerToolReceipt = {
       provider: this.provider, streamId: this.streamId, runId: this.runId, turnId: null, callId: null,
       tool: "other", result: "unknown", admission: "unknown", taskOutcome: "unknown", ...fields,
     };
-    if (!this.sink) return;
+    this.shadow?.episodes.observe(receipt, call);
+    this.deliver(this.sink, receipt);
+  }
+
+  private deliver<T>(sink: ((value: T) => unknown) | undefined, value: T): void {
+    if (!sink) return;
     try {
-      const pending = this.sink(receipt);
+      const pending = sink(value);
       if (pending instanceof Promise) {
         if (this.delivery.state !== "failed") this.delivery = { state: "pending" };
         void pending.then(() => {
@@ -142,8 +254,11 @@ export class WorkerToolLineage {
       this.emit({ state: "duplicate", callId, turnId: existing.turnId, tool: existing.tool, reason: "duplicate-result" });
     } else {
       existing.completed = true;
-      this.emit({ state: "joined", callId, turnId: existing.turnId, tool: existing.tool,
-        result: meta.result, ...(meta.result === "unknown" ? { reason: meta.reason ?? "malformed-outcome" } : {}) });
+      const observedTurn = this.provider !== "codex" || this.codexTurnActive;
+      this.emit({
+        state: "joined", callId, turnId: existing.turnId, tool: existing.tool,
+        result: meta.result, ...(meta.result === "unknown" ? { reason: meta.reason ?? "malformed-outcome" } : {}),
+      }, observedTurn ? existing : undefined);
     }
   }
 
@@ -159,7 +274,11 @@ export class WorkerToolLineage {
         if (event.type !== "assistant" && event.type !== "user") return;
         const message = record(event.message);
         const content = message?.content;
-        if (typeof content === "string" && event.type === "user") return;
+        if (event.type === "assistant" && this.shadow) this.shadow.episodes.turn(encoded(message?.id));
+        if (typeof content === "string" && event.type === "user") {
+          this.shadow?.episodes.turn(null);
+          return;
+        }
         if (!Array.isArray(content)) {
           this.emit({ state: "unsupported", reason: "malformed-payload" });
           return;
@@ -173,8 +292,15 @@ export class WorkerToolLineage {
           } else if (!block) this.emit({ state: "unsupported", reason: "malformed-payload" });
         }
       } else if (this.provider === "codex") {
-        if (event.type === "turn.started") { this.codexTurn++; this.codexTurnActive = true; }
-        if (event.type === "turn.completed" || event.type === "turn.failed") this.codexTurnActive = false;
+        if (event.type === "turn.started") {
+          this.codexTurn++;
+          this.codexTurnActive = true;
+          this.shadow?.episodes.turn(null);
+        }
+        if (event.type === "turn.completed" || event.type === "turn.failed") {
+          this.codexTurnActive = false;
+          this.shadow?.episodes.turn(null);
+        }
         const item = record(event.item);
         if (event.type !== "item.started" && event.type !== "item.completed") return;
         if (!item) { this.emit({ state: "unsupported", reason: "malformed-payload" }); return; }
@@ -194,7 +320,7 @@ export class WorkerToolLineage {
     }
   }
 
-  finish(reason: "stream-ended" | "interrupted"): void {
+  finish(reason: StreamEnd): void {
     if (this.closed) return;
     this.closed = true;
     for (const [callId, turns] of this.calls) {
@@ -203,6 +329,14 @@ export class WorkerToolLineage {
       }
     }
     this.calls.clear();
+    if (!this.shadow) return;
+    const { tools, excluded, hasGaps } = this.shadow.episodes.summarize();
+    const deliveryFailure = this.delivery.state === "failed" ? this.delivery.reason : null;
+    const complete = reason === "stream-ended" && this.runId !== null && this.provider !== "unsupported" && !hasGaps && !deliveryFailure;
+    this.deliver(this.shadow.sink, {
+      provider: this.provider, streamId: this.streamId, runId: this.runId, window: "stream", closure: reason,
+      completeness: complete ? "complete" : "incomplete", deliveryFailure, tools, excluded,
+    });
   }
 }
 

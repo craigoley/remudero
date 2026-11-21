@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createWorkerToolLineage, observeWorkerToolLineage, type WorkerToolReceipt } from "#src/lib/worker-tool-lineage.js";
 
@@ -59,4 +62,83 @@ test("test/worker-tool-lineage-outcomes.test.ts a contradictory tool identity pr
   assert.equal(rows[1].reason, "ambiguous-call-id");
   assert.equal(rows[2].reason, "ambiguous-call-id");
   assert.equal(rows[2].result, "unknown");
+});
+
+function readShadow(root: string) {
+  const lines = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n");
+  const row = JSON.parse(lines.at(-1)!);
+  assert.equal(row.step, "worker.tool_lineage_shadow");
+  return row.tool_lineage_shadow;
+}
+
+test("tool error episode shadow counts exclusions without inflating the streak", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tool-exclusions-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const observer = createWorkerToolLineage({ provider: "cash-chat", runId: "run", root });
+  const use = (id: string, name = "read_file") => observer.observe({ type: "tool_use", id, turnId: "turn", name });
+  const error = (id: string) => observer.observe({ type: "tool_result", tool_use_id: id, turnId: "turn", is_error: true });
+  use("first"); error("first");
+  use("first"); error("first");
+  use("second"); error("second");
+  error("orphan");
+  use("third"); error("third");
+  use("late-conflict"); error("late-conflict");
+  use("fourth"); error("fourth");
+  use("late-conflict", "write_file"); error("late-conflict");
+  observer.observe(null);
+  use("missing-result");
+  observer.finish("stream-ended");
+
+  const shadow = readShadow(root);
+  assert.equal(shadow.completeness, "incomplete");
+  assert.deepEqual(shadow.excluded, {
+    unknown: 0, duplicateUse: 1, duplicateResult: 1, orphan: 1, interrupted: 0,
+    unfinished: 1, ambiguous: 3, unsupported: 1, capacityExceeded: 0,
+  });
+  assert.deepEqual(shadow.tools, [{
+    tool: "read_file", eligibleResults: 4, successes: 0, errorEpisodes: [{ length: 1, count: 4 }],
+  }]);
+});
+
+test("tool error episode shadow preserves healthy repeated checks", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tool-successes-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const observer = createWorkerToolLineage({ provider: "codex", runId: "run", root });
+  observer.observe({ type: "turn.started" });
+  for (let index = 0; index < 5; index++) {
+    const item = { id: String(index), type: "command_execution", command: "npm run typecheck" };
+    observer.observe({ type: "item.started", item });
+    observer.observe({ type: "item.completed", item: { ...item, status: "completed", exit_code: 0 } });
+  }
+  observer.observe({ type: "turn.completed" });
+  observer.finish("stream-ended");
+  const shadow = readShadow(root);
+  assert.equal(shadow.completeness, "complete");
+  assert.deepEqual(shadow.tools, [{ tool: "command_execution", eligibleResults: 5, successes: 5, errorEpisodes: [] }]);
+});
+
+test("tool error episode shadow excludes Codex results received outside a known turn", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tool-codex-turn-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const observer = createWorkerToolLineage({ provider: "codex", runId: "run", root });
+  observer.observe({ type: "turn.started" });
+  const item = { id: "call", type: "command_execution" };
+  observer.observe({ type: "item.started", item });
+  observer.observe({ type: "turn.completed" });
+  observer.observe({ type: "item.completed", item: { ...item, status: "failed" } });
+  observer.finish("stream-ended");
+  assert.equal(readShadow(root).excluded.unknown, 1);
+  assert.deepEqual(readShadow(root).tools, []);
+});
+
+test("tool error episode shadow marks unsupported and unattributed empty streams incomplete", t => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-tool-empty-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const options of [{ provider: "future-adapter", runId: "run" }, { provider: "claude" }]) {
+    const observer = createWorkerToolLineage({ ...options, root });
+    observer.finish("stream-ended");
+    const shadow = readShadow(root);
+    assert.equal(shadow.completeness, "incomplete");
+    assert.deepEqual(shadow.tools, []);
+  }
 });
