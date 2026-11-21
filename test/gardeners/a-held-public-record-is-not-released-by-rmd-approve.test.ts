@@ -119,7 +119,8 @@ function publicMain(t: TestContext, text: string) {
   };
   const boot = publish(text);
   return { dir: checkout.dir, planPath, boot, publish: (next: string) => { const sha = publish(next); checkout.git("checkout", "--quiet", "--detach", boot); return sha; },
-    head: () => readOriginMainSha(checkout.dir), unpublish: () => checkout.git("update-ref", "-d", "refs/remotes/origin/main") };
+    head: () => readOriginMainSha(checkout.dir), unpublish: () => checkout.git("update-ref", "-d", "refs/remotes/origin/main"),
+    restoreBootRef: () => checkout.git("update-ref", "refs/remotes/origin/main", boot) };
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
@@ -138,8 +139,8 @@ async function refusalFixture(t: TestContext, opsBranch = "main", bootText = PUB
     ...productionStuckStatePorts({
       stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
       log: (step, extra = {}) => void rows.push({ ts: iso(now), step, ...extra }), escalate: () => null,
-      destinationRead: async () => undefined, approve: async (id, digest, publicSource) => {
-        const release = await readApproveRelease(id, digest === undefined ? bootPlan : undefined, main.dir, fx.lookup, append, digest, publicSource === "working_tree");
+      destinationRead: async () => undefined, approve: async (id, digest, publicSource, checkout) => {
+        const release = await readApproveRelease(id, digest === undefined ? bootPlan : undefined, checkout ?? main.dir, fx.lookup, append, digest, publicSource === "working_tree");
         const task = (release?.outcome === "found" ? release.plan : bootPlan).byId.get(id)!;
         approved.push({ id, pin: operatorReleasePin(task) });
         return release?.outcome === "found" || release === undefined ? 0 : 1;
@@ -335,6 +336,63 @@ test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only
   }
 });
 
+test("W1-T13785 criterion 4: recovering an older origin/main preserves an unchanged working-tree record and detects local edits or moves", async t => {
+  for (const shape of ["unchanged", "edited", "moved"] as const) await t.test(shape, async sub => {
+    const { fx, main, ports, rows, pass, approved } = await refusalFixture(sub, "main", record("PUB-1"));
+    main.unpublish();
+    writeFileSync(main.planPath, PUBLIC_TEXT);
+    rows.length = 0;
+    const task = loadPlan(main.planPath).byId.get("PUB-2")!;
+    const append = (row: Row) => rows.push({ ts: iso(NOW), ...row });
+    assert.deepEqual(await readApproveRelease(task.id, loadPlan(main.planPath), main.dir, fx.lookup, append), { outcome: "held", hold: DUP_HOLD });
+    assert.equal(rows[0]?.public_commit, null);
+    const [item] = scanStuckState(rows).open;
+    assert.ok(item);
+    const digest = publicRecordDigest(task);
+    await pass();
+
+    main.restoreBootRef();
+    const older = await readReleasePublicPlan(main.dir);
+    assert.equal(older.read, "origin/main");
+    assert.equal(older.plan.byId.has(task.id), false);
+    assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "held" });
+    await pass();
+    assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+    assert.deepEqual(approved, []);
+
+    if (shape === "unchanged") {
+      rmSync(main.planPath);
+      assert.deepEqual(await ports.probe(item), { present: true, reason: "public-working-tree-unreadable" });
+      writeFileSync(main.planPath, PUBLIC_TEXT);
+    }
+    if (shape !== "moved") fx.set(record("OPS-GOOD"));
+    if (shape === "unchanged") {
+      main.publish(record("PUB-1") + record(task.id, ["OPS-GOOD"]));
+      writeFileSync(main.planPath, PUBLIC_TEXT);
+      assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "held" });
+      assert.equal((await readApproveRelease(task.id, undefined, main.dir, fx.lookup, append, digest, true))?.outcome, "held");
+      await pass();
+      assert.deepEqual(approved, []);
+      main.restoreBootRef();
+    }
+    if (shape === "edited") writeFileSync(main.planPath, PUBLIC_TEXT.replace(task.title, "edited local public record"));
+    if (shape === "moved") writeFileSync(main.planPath, record("PUB-1"));
+    const current = loadPlan(main.planPath);
+    if (shape === "unchanged") {
+      assert.equal(await readApproveRelease(task.id, current, main.dir, fx.lookup, append), undefined, "ordinary approve keeps the local record");
+      assert.deepEqual(await ports.probe(item), { present: false, digest });
+    }
+    await pass();
+    await pass();
+    assert.deepEqual(approved, shape === "unchanged" ? [{ id: task.id, pin: operatorReleasePin(task) }] : []);
+    assert.deepEqual(steps(rows, "stuck_state.retried").map(row => row.exit_code), shape === "unchanged" ? [0] : []);
+    const changed = steps(rows, "stuck_state.record_changed").map(row => row.current_digest);
+    if (shape === "unchanged") assert.deepEqual(changed, []);
+    if (shape === "edited") assert.deepEqual(changed, [publicRecordDigest(current.byId.get(task.id)!)]);
+    if (shape === "moved") assert.deepEqual(changed, [opsRecordDigest((await fx.read()).plan!.byId.get(task.id)!)]);
+  });
+});
+
 test("W1-T13785: the working-tree event returns no stamp while the public plan is missing", t => {
   const fx = opsCatalog(t, SOUND_OPS);
   const publicRoot = join(fx.stateDir, "public");
@@ -358,9 +416,10 @@ test("W1-T13785: the working-tree event returns no stamp while the public plan i
   assert.notEqual(after, before);
 });
 
-test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged public dependant even when branch refs do not move", async t => {
+test("W1-T13785 criterion 4: a working-tree edge edit in a different checkout replays an unchanged public dependant even when branch refs do not move", async t => {
   const fx = opsCatalog(t, SOUND_OPS);
   const main = publicMain(t, WORLDS[2]!.publicText);
+  const daemon = publicMain(t, PUBLIC_TEXT);
   main.unpublish();
   const id = "PUB-REV-CHILD", rows: Row[] = [], replays: string[][] = [];
   const localPlan = loadLocalReleasePlan(main.planPath, fx.stateDir);
@@ -370,7 +429,7 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
   assert.deepEqual(await readApproveRelease(id, localPlan, main.dir, fx.lookup, append), { outcome: "held", hold: REV_HOLD });
   const ports = {
     ...productionStuckStatePorts({
-      stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
+      stateDir: fx.stateDir, publicRoot: daemon.dir, publicMainCommit: readOriginMainSha, gardenNames: [],
       api: path => {
         // The commit route only the catalog read opens: the stamp reads the repository and its default branch's ref.
         if (catalogUnavailable && path.startsWith(`repos/${REPOSITORY}/git/commits/`)) {
@@ -382,7 +441,7 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
       log: (step, extra = {}) => void append({ step, ...extra }), escalate: () => null, destinationRead: async () => undefined,
       approve: async (task, ...replay) => {
         replays.push([task, ...replay]);
-        const result = await readApproveRelease(task, undefined, main.dir, fx.lookup, append, replay[0], replay[1] === "working_tree");
+        const result = await readApproveRelease(task, undefined, replay[2] ?? daemon.dir, fx.lookup, append, replay[0], replay[1] === "working_tree");
         assert.equal(result?.outcome, "found");
         return 0;
       },
@@ -390,6 +449,8 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
     readRows: () => rows, nowMs: () => now,
   };
   const [item] = scanStuckState(rows).open;
+  assert.equal(ports.eventStamps["public-main"]!(), daemon.head());
+  assert.equal(ports.eventStamps["public-main"]!(item), undefined, "the refused checkout has no origin/main ref");
   assert.equal((await ports.probe(item!)).present, true);
   const pass = async () => { now += MIN; await runStuckStateGardener(ports); };
   await pass();
@@ -404,8 +465,9 @@ test("W1-T13785 criterion 4: a working-tree edge edit replays an unchanged publi
   assert.deepEqual(await ports.probe(item!), { present: false, digest });
   await pass();
   await pass();
-  assert.deepEqual(replays, [[id, digest, "working_tree"]]);
+  assert.deepEqual(replays, [[id, digest, "working_tree", main.dir]]);
   assert.deepEqual(steps(rows, "stuck_state.cleared").map(row => row.retry), ["approve"]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
 test("W1-T13785 criterion 4: a held public record that changed, or moved to the ops catalog, is never re-run and writes stuck_state.record_changed", async t => {

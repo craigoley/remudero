@@ -250,7 +250,8 @@ export function loadLocalReleasePlan(path: string, stateDir: string): Plan {
   return planDestinationRepository(stateDir).outcome === "named" ? loadPublicPlanWithDeferredDependencies(path) : loadPlan(path);
 }
 
-function loadPublicPlanWithDeferredDependencies(path: string): Plan {
+/** Read the local release record while retaining edges that catalog composition still needs to check. */
+export function loadPublicPlanWithDeferredDependencies(path: string): Plan {
   try {
     return loadPlan(path);
   } catch (error) {

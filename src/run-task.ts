@@ -29148,7 +29148,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // re-runs as `rmd approve <id>` (approveCommand, in a child) while the refused record is unchanged.
     case "stuck-state": {
       const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
-      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: readOriginMainSha,
         destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild({ publicRoot }),
         gardenNames: REGISTERED_GARDEN_NAMES });
       return () => runStuckStateGardener(ports);
@@ -39908,14 +39908,14 @@ export async function approveCommand(
     const stateDir = join(config.root, "state");
     const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
     const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
-    const allowWorkingTree = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
+    const workingTreeReplay = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
     // Keep the strict checkout search so an invalid cwd cannot mask a valid daemon target (W1-T10925).
     const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir) : undefined;
     // After a miss, the default plan can still surface a public hold through its deferred edges.
     const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : loadLocalReleasePlan(planPath, stateDir) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
     const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
-      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, allowWorkingTree);
+      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, workingTreeReplay);
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
       return 1;

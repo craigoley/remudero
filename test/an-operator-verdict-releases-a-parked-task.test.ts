@@ -730,25 +730,25 @@ test("W1-T13785 criterion 1: approve refuses a public record the composition hol
   }
 });
 
-test("W1-T13785 criterion 4: the real approve retry releases the verified origin/main record from a stale detached checkout", async t => {
+test("W1-T13785 criterion 4: the real approve retry releases the verified origin/main record from the checkout that refused it", async t => {
   const currentText = shardText(PUBLIC_ID);
   const bootText = currentText.replace(`Fixture ${PUBLIC_ID}`, "Older boot record");
   const world = publicMainAt(t, bootText, currentText);
+  const daemon = publicMainAt(t, bootText, bootText);
   const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
   const cleared = hostWithSecondCatalog(t);
   let api = host.api;
-  const approve = () => approveCommand([PUBLIC_ID], { config: host.config, planPath: world.planPath, taskLookup: { api } });
   const said = everythingSaid(t);
-  assert.equal(await approve(), 1, said.join("\n"));
+  assert.equal(await approveAtRoot(world.dir, host, [PUBLIC_ID], api), 1, said.join("\n"));
   const currentPlan = await readReleasePublicPlan(world.dir);
   const currentRecord = currentPlan.plan.byId.get(PUBLIC_ID)!;
   assert.notEqual(operatorReleasePin(loadPlan(world.planPath).byId.get(PUBLIC_ID)!), operatorReleasePin(currentRecord));
   const retries: string[][] = [];
   const ports = productionStuckStatePorts({
-    stateDir: host.stateDir, api: path => api(path), gardenNames: [], publicRoot: world.dir,
-    publicMainCommit: () => readOriginMainSha(world.dir), destinationRead: async () => undefined, escalate: () => null,
+    stateDir: host.stateDir, api: path => api(path), gardenNames: [], publicRoot: daemon.dir,
+    publicMainCommit: readOriginMainSha, destinationRead: async () => undefined, escalate: () => null,
     log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: PUBLIC_ID, ...fields, step }),
-    approve: approveInChild({ publicRoot: world.dir, execArgv: [], entry: "src/run-task.ts", env: {},
+    approve: approveInChild({ publicRoot: daemon.dir, execArgv: [], entry: "src/run-task.ts", env: {},
       run: async (_file, args) => {
         retries.push([...args]);
         assert.equal(await approveAtRoot(args[5]!, host, stripRepoRootFlag(args.slice(2)), api), 0, said.join("\n"));
@@ -757,6 +757,7 @@ test("W1-T13785 criterion 4: the real approve retry releases the verified origin
   });
   await runStuckStateGardener(ports);
   assert.deepEqual(retries, []);
+  assert.equal(host.rawLines().some(line => JSON.parse(line).step === "stuck_state.record_changed"), false);
   api = cleared.api;
   await runStuckStateGardener(ports);
   await runStuckStateGardener(ports);
