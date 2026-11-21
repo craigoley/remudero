@@ -224,6 +224,24 @@ test("W1-T11457 criterion 2: a stat record with an extra field inserted before s
   }
 });
 
+test("W1-T11457 criterion 2: a stat record with ppid removed and a non-numeric exit_code appended takes the ps path", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  // The field count and state letter still match, and vsize (14 days of ticks) sits in the start-time slot.
+  const noPpid = pidStatFields(123_456).filter((_, i) => i !== 1);
+  assertTakesPs(pidStatLine([...noPpid, "x"]), "ppid removed, non-numeric exit_code appended");
+});
+
+test("W1-T11457 criterion 2: a stat record with a non-numeric field in the middle takes the ps path", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  for (const at of [5, 13, 20, 35]) {
+    for (const bad of ["x", "1.5", "+3", "0x10", "-"]) {
+      const fields = pidStatFields(123_456);
+      fields[at] = bad;
+      assertTakesPs(pidStatLine(fields), `field index ${at} is ${JSON.stringify(bad)}`);
+    }
+  }
+});
+
 test("W1-T11457 criterion 2: a starttime that resolves to the future takes the ps path", (t) => {
   t.mock.method(Date, "now", () => BTIME_SEC * 1000 + 2_000_000);
   // 1_000_000 ticks at CLK_TCK 100 is 10 000 s after boot, 8 000 s after this pinned now.
