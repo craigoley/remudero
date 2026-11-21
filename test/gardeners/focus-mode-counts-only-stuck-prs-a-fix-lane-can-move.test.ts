@@ -8,7 +8,10 @@ import * as focus from "#src/lib/focus-gardener.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import { loadPlan } from "#src/lib/plan.js";
-import { DEFAULT_SWEEP_POLICY, checkQueueGovernor, logQueueGovernorDeferral, type QueueGovernorResult } from "#src/lib/sweep.js";
+import {
+  DEFAULT_SWEEP_POLICY, checkQueueGovernor, createSweepFixAdmissionController, logQueueGovernorDeferral, type OpenPrView,
+  type QueueGovernorResult,
+} from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 
@@ -236,6 +239,103 @@ test("W1-T13990 criterion 2: fixRoundReaderFor reads admitted and refused fix ro
   assert.deepEqual(read(T0), { admitted: 1, refused: 2 });
   assert.deepEqual(read(T0 - 10 * MIN), { admitted: 2, refused: 2 });
   assert.deepEqual(read(T0 + 10 * MIN), { admitted: 0, refused: 0 });
+});
+
+/** The capacity controller's own rows (`sweep.fix_capacity`), stamped as a ledger log stamps them. */
+function capacityLedger(runId: string, clockMs: () => number) {
+  const lines: Array<Record<string, unknown>> = [];
+  const log = (step: string, extra?: Record<string, unknown>) =>
+    lines.push({ ts: new Date(clockMs()).toISOString(), run_id: runId, task_id: "SWEEP", step, ...extra });
+  /** One sweep pass's controller: every host worker is busy, so each claim is refused before any dispatch. */
+  const pass = (claims: number[]) => {
+    const controller = createSweepFixAdmissionController({
+      surface: "light", queueDepth: claims.length, hostWorkerBudget: 2, activeWorkers: 2, reviewReservations: 0, log,
+    });
+    for (const prNumber of claims) assert.equal(controller.claim({ prNumber } as OpenPrView).admitted, false);
+  };
+  return { lines, log, pass };
+}
+
+test("W1-T13990 criterion 2: a refusal the capacity controller writes as sweep.fix_capacity counts as a refused round", () => {
+  let nowMs = T0;
+  const ledger = capacityLedger("DAEMON-1", () => nowMs);
+  ledger.pass([13, 14]);
+  nowMs += 10 * MIN;
+  ledger.pass([15]);
+  nowMs += 10 * MIN;
+  ledger.pass([]);
+  const capacity = ledger.lines.filter((line) => line.step === "sweep.fix_capacity");
+  assert.equal(capacity.length, 6, "each pass writes its opening reading and one row per refused claim");
+  assert.deepEqual(capacity.map((line) => line.fixes_refused), [0, 1, 2, 0, 1, 0], "the real row carries its running count");
+  assert.equal(ledger.lines.some((line) => line.step === "sweep.fix.dispatch_failed"), false,
+    "a claim refused before dispatch writes no dispatch failure: the capacity row is the only record of it");
+  const read = adaptiveWip.fixRoundReaderFor(ledger.lines);
+  assert.deepEqual(read(T0), { admitted: 0, refused: 3 });
+  assert.deepEqual(read(T0 + 5 * MIN), { admitted: 0, refused: 1 });
+});
+
+test("W1-T13990 criterion 2: a lost child counts once, and a controller whose opening row was not read still counts", () => {
+  const at = (m: number) => new Date(T0 + m * MIN).toISOString();
+  const read = adaptiveWip.fixRoundReaderFor([
+    { ts: at(1), run_id: "work-fix-dispatch-A", step: "sweep.fix_capacity", surface: "full", fixes_refused: 0 },
+    { ts: at(1), run_id: "work-fix-dispatch-A", step: "sweep.fix_capacity", surface: "full", fixes_refused: 1 },
+    { ts: at(2), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", child_run_id: "work-fix-dispatch-A" },
+    { ts: at(3), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", child_run_id: "work-fix-dispatch-B" },
+    { ts: at(4), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 2 },
+    { ts: at(5), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 1 },
+    { ts: at(6), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 1 },
+    { ts: at(7), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light" },
+  ]);
+  assert.deepEqual(read(T0), { admitted: 0, refused: 5 },
+    "A's refusal once (its lost child is the same refusal), B's lost child, 2 then a new controller's 1, a repeat adds none");
+});
+
+test("W1-T13990 criterion 2: a hold whose every fix claim the capacity controller refused releases as refused, with the count", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    let ledger: ReturnType<typeof capacityLedger> | undefined;
+    const h = harness(dir, { readFixRounds: (sinceMs) => adaptiveWip.fixRoundReaderFor(ledger!.lines)(sinceMs) });
+    ledger = capacityLedger("DAEMON-1", h.now);
+    enter(h);
+    h.consult({ stuck: 12, movable: 12 }, 5 * MIN);
+    ledger.pass([13, 14]);
+    h.consult({ stuck: 12, movable: 12 }, 10 * MIN);
+    ledger.pass([15]);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, 15 * MIN), undefined, "a dwell with every claim refused releases the hold");
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 3]);
+  });
+});
+
+test("W1-T13990 criterion 2: when the idle dwell and a half-bound exit mature on one consultation, one release names the cause", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    const on = enter(h);
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, 5 * MIN)?.tier, "focus", "the halved stack starts the exit dwell");
+    lane.refuse(on + 6 * MIN);
+    lane.refuse(on + 20 * MIN);
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, focus.FOCUS_DWELL_MS), undefined, "both dwells have matured");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP, focus.FOCUS_RELEASED_STEP],
+      "one release, not an exit that hides the unused hold");
+    const released = h.rows[1].fields;
+    assert.deepEqual([released.cause, released.refused_count], ["fix_lane_refused", 2]);
+    assert.match(String(released.reason), /no fix round was admitted in 30 minutes of focus \(2 refused\)/);
+    assert.match(String(released.reason), /5 movable stuck/, "the release also names the stack that reached the leave bound");
+    assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), false);
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, 1 * MIN), undefined, "the hold stays released");
+    assert.equal(h.rows.length, 2);
+  });
+  await withTempDir("focus-movable", (dir) => {
+    const lane = fixLane();
+    const h = harness(dir, { readFixRounds: lane.read });
+    const on = enter(h);
+    h.consult({ stuck: 16, movable: 5 }, 5 * MIN);
+    lane.admit(on + 10 * MIN);
+    assert.equal(h.consult({ stuck: 16, movable: 5 }, focus.FOCUS_DWELL_MS), undefined, "an admitted round leaves by the bound");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP, focus.FOCUS_EXITED_STEP]);
+    assert.equal(h.rows[1].fields.cause, undefined);
+  });
 });
 
 // ── criterion 3 ────────────────────────────────────────────────────────────────────────────────────────────────────

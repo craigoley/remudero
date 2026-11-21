@@ -101,20 +101,43 @@ export function deriveMovableStuckOwnedCount(
 export interface FixRoundAdmissions {
   /** `fix.dispatch` rows: rounds the fix lane started. */
   admitted: number;
-  /** `sweep.fix.dispatch_failed` rows: dispatches refused (memory, capacity, a checkout claim) or lost. */
+  /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
+   *  `fixes_refused`), and `sweep.fix.dispatch_failed` rows: dispatches refused later or lost. */
   refused: number;
 }
 /** Undefined when the fix lane's rows have not been read. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
+const FIX_ROUND_STEPS = new Set(["fix.dispatch", "sweep.fix_capacity", "sweep.fix.dispatch_failed"]);
+
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
   const admitted: number[] = [];
   const refused: number[] = [];
+  // Each controller (one per pass, keyed by run and surface) writes its running refusal count from 0.
+  const controllerRefused = new Map<string, number>();
+  // A run child refused at its own admission also ends lost: that loss is the same refusal, counted once.
+  const refusedRuns = new Set<string>();
   for (const line of lines) {
-    if (line.step !== "fix.dispatch" && line.step !== "sweep.fix.dispatch_failed") continue;
+    if (typeof line.step !== "string" || !FIX_ROUND_STEPS.has(line.step)) continue;
     const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
-    if (Number.isFinite(ts)) (line.step === "fix.dispatch" ? admitted : refused).push(ts);
+    if (!Number.isFinite(ts)) continue;
+    const runId = typeof line.run_id === "string" ? line.run_id : "";
+    if (line.step === "fix.dispatch") {
+      admitted.push(ts);
+    } else if (line.step === "sweep.fix_capacity") {
+      const count = line.fixes_refused;
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
+      const key = `${runId}\0${String(line.surface)}`;
+      const prior = controllerRefused.get(key) ?? 0;
+      // A fall means a new controller, whose whole count is new.
+      const fresh = count >= prior ? count - prior : count;
+      controllerRefused.set(key, count);
+      for (let i = 0; i < fresh; i++) refused.push(ts);
+      if (fresh > 0) refusedRuns.add(runId);
+    } else if (typeof line.child_run_id !== "string" || !refusedRuns.has(line.child_run_id)) {
+      refused.push(ts);
+    }
   }
   return (sinceMs) => ({ admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length });
 }

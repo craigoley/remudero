@@ -160,27 +160,30 @@ export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate
       opts.log(FOCUS_RELEASED_STEP, { ...counts, reason: `${FOCUS_FILE} was removed while focus held` });
     }
     const nowMs = clock.now();
+    // The idle dwell is judged on the hold this consultation found, before any exit the reading below may make.
+    const rounds = state.on && onSinceMs !== undefined && nowMs - onSinceMs >= dwellMs
+      ? opts.readFixRounds?.(nowMs - dwellMs) : undefined;
     const decision = decideFocus(state, {
       stuckOwnedCount: counts.stuck_owned_count, movableStuckOwnedCount: reading.movableStuckOwnedCount,
       observedOpenCount: counts.observed_open_count, baseWipLimit: counts.base_wip_limit,
     }, nowMs, dwellMs);
-    if (decision.changed) {
-      setFlag(decision.on, counts, decision.reason);
-      onSinceMs = decision.on ? nowMs : undefined;
-      opts.log(decision.on ? FOCUS_ENTERED_STEP : FOCUS_EXITED_STEP, { ...counts, reason: decision.reason });
-    }
-    state = { on: decision.on, ...(decision.pendingSinceMs === undefined ? {} : { pendingSinceMs: decision.pendingSinceMs }) };
-    const rounds = state.on && onSinceMs !== undefined && nowMs - onSinceMs >= dwellMs
-      ? opts.readFixRounds?.(nowMs - dwellMs) : undefined;
     if (rounds !== undefined && rounds.admitted === 0) {
+      // One release, even when the leave bound matured too: the row names the unused hold and the stack it left on.
       const reason = `no fix round was admitted in ${dwellMs / 60_000} minutes of focus (${rounds.refused} refused): ` +
-        "the build slots it held went unused";
+        `the build slots it held went unused${decision.changed ? `; ${decision.reason}` : ""}`;
       setFlag(false, counts, reason);
       state = { on: false };
       onSinceMs = undefined;
       opts.log(FOCUS_RELEASED_STEP, {
         ...counts, cause: rounds.refused > 0 ? "fix_lane_refused" : "fix_lane_idle", refused_count: rounds.refused, reason,
       });
+    } else {
+      if (decision.changed) {
+        setFlag(decision.on, counts, decision.reason);
+        onSinceMs = decision.on ? nowMs : undefined;
+        opts.log(decision.on ? FOCUS_ENTERED_STEP : FOCUS_EXITED_STEP, { ...counts, reason: decision.reason });
+      }
+      state = { on: decision.on, ...(decision.pendingSinceMs === undefined ? {} : { pendingSinceMs: decision.pendingSinceMs }) };
     }
     if (deferred !== undefined || !state.on) return deferred;
     held = true;
