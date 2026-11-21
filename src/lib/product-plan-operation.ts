@@ -4,8 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { open, unlink } from "node:fs/promises";
-import { promises as fsPromises } from "node:fs";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -16,7 +15,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync, rotationStampIso } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -31,12 +30,6 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
 /** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
-/**
- * W1-T13875 BACKSTOP: how late a row stamped inside a legacy refusal's window may still be appended. A window read opens
- * the archives cut before the refusal plus this margin and the first archive cut after it, never the later ones, which
- * hold only rows appended after the refusal.
- */
-export const PRODUCT_PLAN_LEGACY_LATE_ROW_MS = 10 * 60_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
 
@@ -280,7 +273,7 @@ const keptSchema = z.object({
 type Kept = z.infer<typeof keptSchema>;
 interface Paths { directory: string; state: string; kept: string; ownerKey: string }
 
-type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilMs?: number };
+type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilTs?: string };
 const keepEvidenceLine = (taskId: string) => (line: string) =>
   line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
 const runLedgerReader = promisify(execFile);
@@ -310,12 +303,8 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       continue;
     }
     const before = liveIdentity();
-    // A rotation is named after its snapshot, and its rows can be future-stamped. Apply a legacy refusal's upper
-    // bound to evidence rows in correlateLedger, scanning later sources that can still contain in-window rows.
-    // W1-T13875: a window with an upper bound opens no archive cut after its first one past the bound and margin.
-    const maxRotations = rotationsThroughWindow(ledgerRotationEntries(readdirSync(stateDir), stateDir), subject.untilMs);
-    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId),
-      ...(maxRotations !== undefined ? { maxRotations } : {}) });
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, untilTs: subject.untilTs,
+      refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
     if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
@@ -323,21 +312,6 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
     return read.ok ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread";
   }
-}
-
-/**
- * W1-T13875: how many of the oldest-first rotations a window ending at `untilMs` must read: every one cut before the end
- * plus {@link PRODUCT_PLAN_LEGACY_LATE_ROW_MS}, and the first one cut at or after it. Undefined reads them all (no end, or
- * no rotation cut that late yet). A name without a readable stamp is read, never guessed old.
- */
-export function rotationsThroughWindow(rotations: ReadonlyArray<{ path: string }>, untilMs: number | undefined): number | undefined {
-  if (untilMs === undefined) return undefined;
-  const cut = untilMs + PRODUCT_PLAN_LEGACY_LATE_ROW_MS;
-  const first = rotations.findIndex((entry) => {
-    const stamp = rotationStampIso(entry.path.slice(entry.path.lastIndexOf("/") + 1));
-    return stamp !== undefined && Date.parse(stamp) >= cut;
-  });
-  return first < 0 ? undefined : first + 1;
 }
 
 function parseEvidenceLines(rawLines: readonly string[]): Array<Record<string, unknown>> {
@@ -356,7 +330,7 @@ function correlateLedger(record: LedgerSubject, taskId: string, parsed: readonly
   const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   // Only rows inside the operation's window: from its request, and for a legacy refusal up to that refusal.
   const from = Date.parse(record.requestedAt);
-  const until = record.untilMs ?? Number.POSITIVE_INFINITY;
+  const until = record.untilTs === undefined ? Number.POSITIVE_INFINITY : Date.parse(record.untilTs);
   const rows = parsed.filter((row) => at(row) >= from && at(row) <= until).sort((a, b) => at(a) - at(b));
   const mine = rows.filter((row) => row.task_id === taskId);
   const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
@@ -431,8 +405,6 @@ export class ProductPlanOperationService {
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
-  /** W1-T13875: the kept-evidence publishes, one at a time. */
-  private publishing: Promise<unknown> = Promise.resolve();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -521,7 +493,7 @@ export class ProductPlanOperationService {
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
       let reusable = journal.operations[operationId];
       for (const entry of reusable ? [] : sameBrief) {
-        const seen = await this.readEvidence(paths, journal, entry);
+        const seen = await this.readEvidence(paths, entry);
         const state = this.observeWith(entry, product, head, seen).state;
         if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
           reusable = entry;
@@ -567,7 +539,7 @@ export class ProductPlanOperationService {
       }
     }
     product = this.readProduct(actor, input.productId);
-    const seen = selectedEvidence ?? await this.readEvidence(paths, journal, record);
+    const seen = selectedEvidence ?? await this.readEvidence(paths, record);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };
@@ -664,10 +636,13 @@ export class ProductPlanOperationService {
    * answer that arrives past the deadline is "expired" whatever it holds. Evidence is answered as final only once it is
    * durably kept: a failed write refuses the request instead of answering from memory a restart would not have.
    */
-  private async readEvidence(paths: Paths, journal: Journal, record: Record_): Promise<EvidenceRead> {
-    if (record.handoff?.outcome === "refused" && record.handoff.beforeLaunch && !this.inFlight(record.operationId)) {
+  private async readEvidence(paths: Paths, record: Record_): Promise<EvidenceRead> {
+    const handoff = this.inFlight(record.operationId) ? undefined : record.handoff;
+    if (handoff?.outcome === "refused" && handoff.beforeLaunch) {
       return { exited: false, failed: false };
     }
+    // The gateway saves these outcomes after a refused hand-off or a nonzero child exit.
+    const untilTs = handoff?.outcome === "refused" || handoff?.outcome === "exited" ? handoff.at : undefined;
     const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
     const deadline = performance.now() + bound;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -677,20 +652,19 @@ export class ProductPlanOperationService {
     });
     const pastDeadline = () => deadlineReached || performance.now() >= deadline;
     try {
-      const kept = await Promise.race([this.readKept(paths), expired]);
+      const kept = await Promise.race([this.readKept(paths, record.operationId), expired]);
       if (kept === "expired" || pastDeadline()) return "expired";
-      const known = kept?.evidence[record.operationId];
-      if (known) return known;
-      const seen = await this.ledger(record, expired, pastDeadline);
+      if (kept) return kept;
+      const seen = await this.ledger(record, untilTs, expired, pastDeadline);
       if (pastDeadline()) return "expired";
       if (typeof seen === "string") return seen;
       // W1-T13875: a journaled nonzero exit is final even when the gateway could not append its ratify.cli_exited row.
       const { opened, failed } = seen;
-      const exited = seen.exited || (record.handoff?.outcome === "exited" && !this.inFlight(record.operationId));
+      const exited = seen.exited || (!failed && handoff?.outcome === "exited");
       const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
-        : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
+        : handoff?.outcome === "refused" ? { exited: false, failed: false, settled: true as const } : undefined;
       if (final === undefined) return seen;
-      const saved = await Promise.race([this.keep(paths, journal, record.operationId, final, pastDeadline), expired]);
+      const saved = await Promise.race([this.publishKept(paths, record.operationId, final, pastDeadline), expired]);
       return pastDeadline() ? "expired" : saved;
     } catch (error) {
       // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
@@ -701,15 +675,29 @@ export class ProductPlanOperationService {
     }
   }
 
-  private legacyRefusal(record: Record_): boolean {
-    return record.handoff?.outcome === "refused" && record.handoff.beforeLaunch !== true && !this.inFlight(record.operationId);
+  private evidenceDirectory(paths: Paths, operationId: string): string {
+    return join(paths.directory, `${paths.ownerKey}.${operationId}.evidence`);
   }
 
-  /** The kept final evidence, read without blocking serve's loop; undefined only when no file exists yet. */
-  private async readKept(paths: Paths): Promise<Kept | undefined> {
+  private async readKept(paths: Paths, operationId: string): Promise<LedgerEvidence | undefined> {
+    const directory = this.evidenceDirectory(paths, operationId);
+    const info = await lstat(directory).catch((error: unknown) => {
+      if (errno(error, "ENOENT")) return undefined;
+      throw error;
+    });
+    if (!info) return (await this.readEvidenceFile(paths, paths.kept))?.evidence[operationId];
+    if (!info.isDirectory() || (info.mode & 0o077) !== 0) throw new Fault("unavailable");
+    const kept = (await this.readEvidenceFile(paths, join(directory, "evidence.json")))?.evidence[operationId];
+    if (!kept) throw new Fault("corrupt");
+    // A reader can find an entry after its rename and before its publisher syncs the parent.
+    await this.syncEvidenceDirectory(paths.directory);
+    return kept;
+  }
+
+  private async readEvidenceFile(paths: Paths, file: string): Promise<Kept | undefined> {
     let handle: Awaited<ReturnType<typeof open>>;
     try {
-      handle = await open(paths.kept, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error) {
       if (errno(error, "ENOENT")) return undefined;
       // An unreadable kept file is never "nothing kept": reading the ledger again, then rewriting it, would drop it.
@@ -738,70 +726,59 @@ export class ProductPlanOperationService {
     }
   }
 
-  /**
-   * W1-T13875: publishes run one at a time, each off the loop, and each merges the kept file as it is when it runs, with
-   * an entry already kept winning over this one. The rename is asynchronous, so a slow publish never delays the bounded
-   * answer or the journal release (the caller races it with the deadline); a stage still unpublished at the deadline is
-   * discarded, and one already renaming can only add an entry no kept file held when it was read.
-   */
-  private keep(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
-    Promise<LedgerEvidence | "expired"> {
-    const run = this.publishing.then(() => this.publishKept(paths, journal, operationId, final, pastDeadline));
-    this.publishing = run.catch((error: unknown) => { void error; /* this publish's caller receives its failure */ });
-    return run;
+  private async syncEvidenceDirectory(path: string): Promise<void> {
+    const directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
   }
 
-  /** Flush a private stage asynchronously, then publish it with an asynchronous rename. */
-  private async publishKept(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
+  /** Rename a nonempty directory so even a delayed publisher cannot replace an existing result for this operation. */
+  private async publishKept(paths: Paths, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
     Promise<LedgerEvidence | "expired"> {
-    const kept = await this.readKept(paths);
-    // Only operations the journal still holds, so the file stays within operations x one entry. An entry already kept wins.
-    const evidence = Object.fromEntries(Object.entries({ [operationId]: final, ...kept?.evidence }).filter(([id]) => journal.operations[id] !== undefined));
-    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence });
+    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence: { [operationId]: final } });
     if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let staged = false;
     let renamed = false;
     try {
-      const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      await mkdir(temporary, { mode: 0o700 });
       staged = true;
+      const handle = await open(join(temporary, "evidence.json"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
       finally { await handle.close(); }
+      await this.syncEvidenceDirectory(temporary);
       if (pastDeadline()) return "expired";
-      await fsPromises.rename(temporary, paths.kept);
+      await rename(temporary, this.evidenceDirectory(paths, operationId));
       renamed = true;
-      const directory = await open(paths.directory, constants.O_RDONLY);
-      try { await directory.sync(); } finally { await directory.close(); }
+      await this.syncEvidenceDirectory(paths.directory);
       return final;
     } catch (error) {
+      if (errno(error, "EEXIST") || errno(error, "ENOTEMPTY")) {
+        if (pastDeadline()) return "expired";
+        const winner = await this.readKept(paths, operationId);
+        if (winner) return winner;
+      }
       throw Object.assign(new Fault(renamed ? "outcome_unknown" : "unavailable"), { cause: error });
     } finally {
       if (staged && !renamed) {
-        try { await unlink(temporary); } catch (error) { void error; /* an unremovable private stage is reaped with the directory */ }
+        try { await rm(temporary, { recursive: true }); } catch (error) { void error; /* a private stage can be reaped later */ }
       }
     }
   }
 
-  private async ledger(record: Record_, expired: Promise<"expired">, pastDeadline: () => boolean): Promise<EvidenceRead> {
+  private async ledger(record: Record_, untilTs: string | undefined, expired: Promise<"expired">, pastDeadline: () => boolean): Promise<EvidenceRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    // W1-T13875: a saved nonzero exit ends its window too: the child had exited before the outcome was saved.
-    const refused = (record.handoff?.outcome === "refused" || record.handoff?.outcome === "exited") && !this.inFlight(record.operationId);
     if (ledgerPath === undefined) return none;
-    // A legacy refusal can be a nonzero exit after a proposal opened. The gateway saves the refusal only after the child
-    // exited and its exit row was written, so its window ends exactly at the saved refusal.
-    const untilMs = refused ? Date.parse(record.handoff!.at) : undefined;
     const taskId = productPlanLedgerTaskId(record.operationId);
     const controller = new AbortController();
     try {
       const { operationId, mode, repository, requestedAt } = record;
-      const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest,
-        ...(untilMs !== undefined ? { untilMs } : {}) };
+      const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest, untilTs };
       const stateDir = dirname(ledgerPath);
       return await Promise.race([
         expired,
         this.options.readLedgerLines
-          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilMs !== undefined ? { untilMs } : {}), refuseIncomplete: true,
+          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilTs !== undefined ? { untilMs: Date.parse(untilTs) } : {}), refuseIncomplete: true,
             keep: keepEvidenceLine(taskId) })
             .then((read): LedgerRead => read.ok && !pastDeadline() ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread")
           // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.

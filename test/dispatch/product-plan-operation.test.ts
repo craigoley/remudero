@@ -4,16 +4,19 @@ import fsPromises, { watch } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
 import { createHash } from "node:crypto";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
+import { compactRotations } from "#src/lib/ledger.js";
+import { readLedgerKeyManifest } from "#src/lib/ledger-key-manifest.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
-  PRODUCT_PLAN_LEGACY_LATE_ROW_MS, PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, rotationsThroughWindow, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
   type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -77,10 +80,10 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
     return JSON.stringify([{ name: "WRECK-T1-first.yaml" }]);
   };
   const checkout = join(root, "repos", "wreckterra");
-  const service = (options: { alive?: boolean; head?: string; gateway?: boolean; inFlight?: PlanHandoffPort["inFlight"]; sync?: (fd: number) => void; readLedgerLines?: EvidenceReader; ledgerReadBoundMs?: number } = {}) => new ProductPlanOperationService({
+  const service = (options: { alive?: boolean; head?: string; gateway?: false | PlanHandoffPort; sync?: (fd: number) => void; readLedgerLines?: EvidenceReader; ledgerReadBoundMs?: number } = {}) => new ProductPlanOperationService({
     root, store, provider, target, bootstrapConfirmed, ledgerPath, text, checkout: (repo: PlanRepository) => repo.name === "wreckterra" ? checkout : undefined, runnerConfig,
     clock: fixedClock(Date.parse(REQUESTED)), isAlive: () => options.alive ?? true,
-    ...(options.gateway === false || over.gateway === false ? {} : { gateway: { ...gateway, inFlight: options.inFlight } }),
+    ...(options.gateway === false || over.gateway === false ? {} : { gateway: options.gateway ?? gateway }),
     ...(options.sync === undefined ? {} : { sync: options.sync }),
     readLedgerLines: options.readLedgerLines, ledgerReadBoundMs: options.ledgerReadBoundMs,
   });
@@ -110,6 +113,16 @@ const nativeRun = (f: Fixture, operationId: string, extra: { exit?: boolean; pr?
 };
 const revisionOf = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.revision; };
 const evidenceIds = (f: Fixture) => { const read = f.store.read(actor, f.productId); assert.ok(read.ok); return read.value.stageEvidence.map((item) => item.id); };
+
+function secondPlanCommand(f: Fixture) {
+  const saved = f.store.write(actor, { version: "product-intent-v1", requestId: "second-product-000001", expectedRevision: 0,
+    brief: { ...brief, idea: "another saved original combat product" } });
+  assert.ok(saved.ok);
+  const secondId = saved.value.receipt.productId;
+  assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "second-binding-000001", id: secondId,
+    expectedRevision: 1, expectedObjectiveRevision: 1, repository: identity }).ok);
+  return f.command({ productId: secondId, requestId: "second-plan-000001" });
+}
 
 test("W1-T10823: a saved product reaches one native plan operation across replay and restart", async (t) => {
   // Refusals come first and never journal or hand anything off.
@@ -331,13 +344,7 @@ test("W1-T10823: the maintained gateway's product plan port validates its target
 
 test("W1-T10823: concurrent service instances retain every product operation and completion", async (t) => {
   const f = fixture(t);
-  const saved = f.store.write(actor, { version: "product-intent-v1", requestId: "second-product-000001", expectedRevision: 0,
-    brief: { ...brief, idea: "another saved original combat product" } });
-  assert.ok(saved.ok);
-  const secondId = saved.value.receipt.productId;
-  assert.ok(f.store.transition(actor, { version: "product-intent-v1", requestId: "second-binding-000001", id: secondId,
-    expectedRevision: 1, expectedObjectiveRevision: 1, repository: identity }).ok);
-  const commands = [f.command(), f.command({ productId: secondId, requestId: "second-plan-000001" })];
+  const commands = [f.command(), secondPlanCommand(f)];
   const values = await Promise.all(commands.map((command) => ok(f.service().execute(actor, command))));
   assert.equal(f.calls.length, 2, "two distinct saved products each launch once");
   const journal = () => JSON.parse(readFileSync(join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!), "utf8"));
@@ -635,6 +642,7 @@ const proposalLines = (f: Fixture, operationId: string): string[] => {
 };
 
 const journalPath = (f: Fixture) => join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.json`);
+const keptPath = (f: Fixture, operationId: string) => join(journalPath(f).replace(/\.json$/, `.${operationId}.evidence`), "evidence.json");
 
 /** When a seeded legacy refusal was saved: after its run's rows (1-4 s after the request), as the gateway saves it. */
 const REFUSED_OFFSET = 5_000;
@@ -661,21 +669,31 @@ function preloadChildModule(t: TestContext, f: Fixture, source: string) {
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
   const f = fixture(t);
-  const first = await ok(f.service({ inFlight: () => false }).execute(actor, f.command()));
+  let launches = 0;
+  let deliveredBrief: string | undefined;
+  const gateway = ratifyCliGateway(f.root, join(f.root, "logs"), { ledgerPath: f.ledgerPath,
+    freshTree: async (action) => { launches++; return action({ path: f.root, sha: HEAD }); } });
+  const first = await ok(f.service({ gateway: { inFlight: gateway.inFlight, productPlan: (call) => {
+    deliveredBrief = call.brief;
+    // Exercise the gateway's validation at its boundary. The service itself only constructs valid commands.
+    return gateway.productPlan!({ ...call, repoRoot: "relative" });
+  } } }).execute(actor, f.command()));
   const operationId = first.observation.operationId;
-  f.release("refused");
   await new Promise<void>((resolve) => setImmediate(resolve));
   const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
   assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED, beforeLaunch: true });
 
   // Ledger rows that would read as a proposal: a refusal where nothing ran must not even look.
-  const evidence = reader(() => proposalLines(f, operationId));
+  const evidence = reader(() => proposalLines(f, operationId).map((line) => {
+    const row = JSON.parse(line);
+    return row.step === "plan.start" ? JSON.stringify({ ...row, brief: deliveredBrief }) : line;
+  }));
   for (let resume = 0; resume < 2; resume++) {
     const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
     assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
   }
   assert.equal(evidence.reads.length, 0);
-  assert.equal(f.calls.length, 1);
+  assert.equal(launches, 0);
 });
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a legacy refusal's window is read", async (t) => {
@@ -785,7 +803,7 @@ test("W1-T13875: a nonzero child exit preserves an opened proposal across resume
 test("W1-T13875: invariant:bounded-read — an evidence read past its bound answers unknown and releases the journal", { timeout: 25_000 }, async (t) => {
   const f = fixture(t);
   const evidence = reader(() => "never");
-  const service = f.service({ readLedgerLines: evidence.read, ledgerReadBoundMs: 20 });
+  const service = f.service({ readLedgerLines: evidence.read, ledgerReadBoundMs: 200 });
   const first = await ok(service.execute(actor, f.command()));
   assert.equal(first.observation.state, "unknown", "an in-flight hand-off cannot turn a timeout into pending");
   assert.equal(first.observation.proposal, undefined);
@@ -841,14 +859,16 @@ test("W1-T13875: invariant:bounded-read — an evidence read past its bound answ
     t.mock.timers.reset();
   }
 
-  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+  const lateBound = 200;
+  const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, lateBound * 2);
   const delayedProposal = reader(() => { block(); return proposalLines(f, first.observation.operationId); });
-  const late = await ok(f.service({ readLedgerLines: delayedProposal.read, ledgerReadBoundMs: 10 }).execute(actor, f.command()));
+  const late = await ok(f.service({ readLedgerLines: delayedProposal.read, ledgerReadBoundMs: lateBound }).execute(actor, f.command()));
   assert.equal(delayedProposal.reads.length, 1);
   assert.equal(late.observation.state, "unknown");
   assert.equal(late.observation.proposal, undefined);
   const lateFailure = reader(() => { block(); throw new Error("late reader failure"); });
-  assert.equal((await ok(f.service({ readLedgerLines: lateFailure.read, ledgerReadBoundMs: 10 }).execute(actor, f.command()))).observation.state, "unknown");
+  assert.equal((await ok(f.service({ readLedgerLines: lateFailure.read, ledgerReadBoundMs: lateBound }).execute(actor, f.command()))).observation.state, "unknown");
+  assert.equal(lateFailure.reads.length, 1);
   const earlyFailure = reader(() => { throw new Error("early reader failure"); });
   assert.equal(await refused(f.service({ readLedgerLines: earlyFailure.read }).execute(actor, f.command())), "unavailable");
   acquireInflightLock(join(f.journalDirectory, "locks"), key, { run_id: "after-late-evidence" }).release();
@@ -944,7 +964,7 @@ test("W1-T13875: a proposal's evidence is read once and kept when the journal is
     assert.deepEqual([next.observation.operationId, next.observation.state, next.observation.proposal], [operationId, "proposed", PR_URL]);
   }
   assert.equal(evidence.reads.length, 1, "a journal with no room still keeps the proposal it read, across a restart");
-  assert.ok(existsSync(join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`)), "kept beside the journal, not in memory");
+  assert.ok(existsSync(keptPath(f, operationId)), "kept beside the journal, not in memory");
   assert.equal(statSync(path).size, limit, "nothing was written past the limit");
 });
 
@@ -1055,7 +1075,7 @@ test("W1-T13875 criterion 2: a stalled open of the kept evidence file answers un
   const evidence = reader(() => proposalLines(f, operationId));
   const settled = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.equal(settled.observation.state, "proposed");
-  const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
+  const kept = keptPath(f, operationId);
   assert.ok(existsSync(kept));
 
   const openStarted = deferredSignal();
@@ -1103,7 +1123,7 @@ function mockEvidenceSync(t: TestContext, f: Fixture, flush: (sync: () => Promis
   const realOpen = fsPromises.open;
   const mock = t.mock.method(fsPromises, "open", async (...args: Parameters<typeof realOpen>) => {
     const handle = await realOpen(...args);
-    if (String(args[0]).startsWith(`${f.journalDirectory}/.`) && String(args[0]).endsWith(".pending")) {
+    if (String(args[0]).startsWith(`${f.journalDirectory}/.`) && String(args[0]).endsWith(".pending/evidence.json")) {
       const sync = handle.sync.bind(handle);
       handle.sync = () => flush(sync);
     }
@@ -1119,7 +1139,7 @@ test("W1-T13875: invariant:bounded-read releases the journal while a new evidenc
   const operationId = first.observation.operationId;
   const evidence = reader(() => proposalLines(f, operationId));
   const ownerKey = createHash("sha256").update(actor).digest("hex");
-  const kept = join(f.journalDirectory, `${ownerKey}.evidence.json`);
+  const kept = keptPath(f, operationId);
   const started = deferredSignal();
   const release = deferredSignal();
   const discarded = deferredSignal();
@@ -1128,10 +1148,10 @@ test("W1-T13875: invariant:bounded-read releases the journal while a new evidenc
     await release.promise;
     await sync();
   });
-  const realUnlink = fsPromises.unlink;
-  const unlinkStage = t.mock.method(fsPromises, "unlink", async (path: Parameters<typeof realUnlink>[0]) => {
-    await realUnlink(path);
-    if (String(path).startsWith(`${f.journalDirectory}/.`)) discarded.resolve();
+  const realRm = fsPromises.rm;
+  const removeStage = t.mock.method(fsPromises, "rm", async (...args: Parameters<typeof realRm>) => {
+    await realRm(...args);
+    if (String(args[0]).startsWith(`${f.journalDirectory}/.`)) discarded.resolve();
   });
   syncBuiltinESMExports();
   const bound = 5_000;
@@ -1162,7 +1182,7 @@ test("W1-T13875: invariant:bounded-read releases the journal while a new evidenc
   } finally {
     t.mock.timers.reset();
     restoreSync();
-    unlinkStage.mock.restore();
+    removeStage.mock.restore();
     syncBuiltinESMExports();
     release.resolve();
   }
@@ -1183,7 +1203,7 @@ test("W1-T13875 criterion 3: a proposal is never answered from evidence its writ
   } finally {
     restore();
   }
-  const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
+  const kept = keptPath(f, operationId);
   assert.equal(existsSync(kept), false, "nothing was kept, so nothing was answered as kept");
   assert.equal(evidence.reads.length, 2);
 
@@ -1199,7 +1219,7 @@ test("W1-T13875 criterion 3: an unreadable kept file is never rewritten without 
   const a = await ok(f.service().execute(actor, f.command()));
   const evidence = reader(() => proposalLines(f, a.observation.operationId));
   assert.equal((await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()))).observation.state, "proposed");
-  const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
+  const kept = keptPath(f, a.observation.operationId);
   const saved = readFileSync(kept);
   writeFileSync(kept, "{ torn");
   assert.equal(await refused(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command())), "corrupt");
@@ -1240,7 +1260,7 @@ test("W1-T13875 criterion 2: a kept-evidence read that rejects past the deadline
   const operationId = first.observation.operationId;
   const evidence = reader(() => proposalLines(f, operationId));
   assert.equal((await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()))).observation.state, "proposed");
-  const kept = join(f.journalDirectory, `${createHash("sha256").update(actor).digest("hex")}.evidence.json`);
+  const kept = keptPath(f, operationId);
   assert.ok(existsSync(kept));
 
   const bound = 25;
@@ -1314,7 +1334,7 @@ test("W1-T13875 criterion 3: a view taken while rotation drains the replaced liv
 
 // ── W1-T13875 review round 2026-11-21: the production window read, a stalled publish, a journaled nonzero exit ─────
 
-test("W1-T13875: a legacy refusal's window read never opens an archive cut after its first one past the refusal", async (t) => {
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence after keeping a proposal recovered from nonadjacent compacted rotations", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
   const operationId = first.observation.operationId;
@@ -1322,35 +1342,62 @@ test("W1-T13875: a legacy refusal's window read never opens an archive cut after
   const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
   const dir = dirname(f.ledgerPath);
   const cut = (offset: number) => new Date(at(offset)).toISOString();
-  const pastCut = REFUSED_OFFSET + PRODUCT_PLAN_LEGACY_LATE_ROW_MS + 1_000;
-  const unread = cut(pastCut + 30 * 60_000);
+  const intermediate = REFUSED_OFFSET + 11 * 60_000;
+  const later = REFUSED_OFFSET + 20 * 60_000;
+  const excluded = cut(REFUSED_OFFSET + 30 * 60_000);
   writeLedger([], { dir, rotations: [
     { at: cut(2_500), rows: [started!, planned!] },
-    { at: cut(REFUSED_OFFSET + 1_000), gz: true, rows: [opened!] },
-    { at: cut(pastCut), gz: true, rows: [{ ts: cut(pastCut - 1_000), step: "daemon.heartbeat" }] },
-    { at: unread, gz: true, rows: [] },
+    { at: cut(REFUSED_OFFSET + 1_000), rows: [opened!] },
+    { at: cut(intermediate), gz: true, rows: [{ ts: cut(intermediate - 1_000), step: "daemon.heartbeat" }] },
+    { at: cut(later), rows: [{ ts: cut(later - 1_000), step: "daemon.heartbeat" }] },
+    { at: excluded, gz: true, rows: [{ ts: excluded, step: "daemon.heartbeat" }] },
   ] });
-  // An archive cut long after the refusal holds only rows appended after it: the production reader must not open it.
-  writeFileSync(join(dir, `ledger.${unread.replace(/[:.]/g, "-")}.ndjson.gz`), "unreadable archive cut after the window");
+  const rotation = (stamp: string) => join(dir, `ledger.${stamp.replace(/[:.]/g, "-")}.ndjson`);
+  const compacted = compactRotations([rotation(cut(REFUSED_OFFSET + 1_000)), rotation(cut(later))], {
+    readRows: (path) => readFileSync(path, "utf8").split("\n"),
+    write: (name, body) => writeFileSync(join(dir, name), gzipSync(body)), remove: unlinkSync,
+    clock: fixedClock(at(later + 1_000)),
+  });
+  assert.equal(compacted.archiveName, `ledger.${cut(later - 1_000).replace(/[:.]/g, "-")}.ndjson.gz`);
+  const excludedPath = `${rotation(excluded)}.gz`;
+  assert.equal((await readLedgerKeyManifest(dir, { path: excludedPath, form: "gzip" })).kind, "built");
+  preloadChildModule(t, f, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const read = fs.promises.readFile;
+    fs.promises.readFile = (path, ...args) => {
+      if (path === ${JSON.stringify(excludedPath)}) throw new Error("archive outside the verified window was opened");
+      return read(path, ...args);
+    };
+    syncBuiltinESMExports();
+  `);
   const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL],
-    "the window read stopped at the first archive past the refusal and its margin");
-  assert.equal(rotationsThroughWindow([{ path: "/s/ledger.ndjson" }], Date.parse(REFUSED)), undefined, "no stamped rotation: all are read");
-  assert.equal(rotationsThroughWindow([{ path: `/s/ledger.${cut(pastCut).replace(/[:.]/g, "-")}.ndjson.gz` }], undefined), undefined);
+    "the compacted archive still covers the refusal window despite sorting after an out-of-window archive");
+  const reread = reader(() => []);
+  const restarted = await ok(f.service({ gateway: false, readLedgerLines: reread.read }).execute(actor, f.command()));
+  assert.equal(restarted.observation.proposal, PR_URL);
+  assert.equal(reread.reads.length, 0);
 });
 
-test("W1-T13875: invariant:bounded-read holds while publishing newly found evidence is stalled", { timeout: 20_000 }, async (t) => {
+test("W1-T13875: a proposal's evidence is read once and kept when another instance's publish finishes late", { timeout: 20_000 }, async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));
-  const operationId = first.observation.operationId;
-  const evidence = reader(() => proposalLines(f, operationId));
+  const other = secondPlanCommand(f);
+  const second = await ok(f.service().execute(actor, other));
+  const firstId = first.observation.operationId;
+  const secondId = second.observation.operationId;
+  const evidence = reader(() => proposalLines(f, firstId));
   const ownerKey = createHash("sha256").update(actor).digest("hex");
   const renaming = deferredSignal();
   const release = deferredSignal();
+  const renamed = deferredSignal();
   const realRename = fsPromises.rename;
   const stall = t.mock.method(fsPromises, "rename", async (from: Parameters<typeof realRename>[0], to: Parameters<typeof realRename>[1]) => {
-    if (String(to).endsWith(".evidence.json")) { renaming.resolve(); await release.promise; }
-    return realRename(from, to);
+    if (dirname(keptPath(f, firstId)) !== to && `${journalPath(f).slice(0, -5)}.evidence.json` !== to) return realRename(from, to);
+    renaming.resolve();
+    await release.promise;
+    try { await realRename(from, to); } finally { renamed.resolve(); }
   });
   syncBuiltinESMExports();
   const bound = 5_000;
@@ -1364,14 +1411,44 @@ test("W1-T13875: invariant:bounded-read holds while publishing newly found evide
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(finished, true, "resume answered at the deadline while the publish was still stalled");
     const result = await resume;
-    assert.equal(result.observation.state, "unknown");
+    assert.deepEqual([result.observation.state, result.observation.proposal], ["unknown", undefined]);
     acquireInflightLock(join(f.journalDirectory, "locks"), ownerKey, { run_id: "while-evidence-publish-stalled" }).release();
+    t.mock.timers.reset();
+    stall.mock.restore();
+    syncBuiltinESMExports();
+
+    const secondEvidence = reader(() => proposalLines(f, secondId));
+    const retryURL = PR_URL.replace(/42$/, "43");
+    const retry = reader(() => proposalLines(f, firstId).map((line) => line.replace(PR_URL, retryURL)));
+    assert.equal((await ok(f.service({ gateway: false, readLedgerLines: secondEvidence.read }).execute(actor, other))).observation.proposal, PR_URL);
+    assert.equal((await ok(f.service({ gateway: false, readLedgerLines: retry.read }).execute(actor, f.command()))).observation.proposal, retryURL);
+    release.resolve();
+    await renamed.promise;
+
+    const restarted = f.service({ gateway: false, readLedgerLines: secondEvidence.read });
+    assert.equal((await ok(restarted.execute(actor, other))).observation.proposal, PR_URL);
+    assert.equal((await ok(restarted.execute(actor, f.command()))).observation.proposal, retryURL);
+    assert.equal(secondEvidence.reads.length, 1, "neither operation was read again after the late publish");
   } finally {
     t.mock.timers.reset();
     release.resolve();
     stall.mock.restore();
     syncBuiltinESMExports();
   }
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept from an existing shared evidence file", async (t) => {
+  const f = fixture(t);
+  const setup = await ok(f.service().execute(actor, f.command()));
+  const operationId = setup.observation.operationId;
+  const source = reader(() => proposalLines(f, operationId));
+  const resume = f.service({ gateway: false, readLedgerLines: source.read });
+  assert.equal((await ok(resume.execute(actor, f.command()))).observation.proposal, PR_URL);
+  const kept = keptPath(f, operationId);
+  renameSync(kept, `${journalPath(f).slice(0, -5)}.evidence.json`);
+  rmdirSync(dirname(kept));
+  assert.equal((await ok(f.service({ gateway: false, readLedgerLines: source.read }).execute(actor, f.command()))).observation.proposal, PR_URL);
+  assert.equal(source.reads.length, 1);
 });
 
 test("W1-T13875: a journaled nonzero exit stays refused and is kept when its exit row is missing", async (t) => {
@@ -1385,4 +1462,21 @@ test("W1-T13875: a journaled nonzero exit stays refused and is kept when its exi
     assert.deepEqual([again.observation.operationId, again.observation.state], [operationId, "refused"]);
   }
   assert.equal(evidence.reads.length, 1, "the final exit was read once and kept");
+});
+
+test("W1-T13875: a journaled nonzero exit leaves ambiguous native runs unknown when the target moves", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId, "exited");
+  const lines = proposalLines(f, operationId);
+  const evidence = reader(() => [...lines, lines[1]!.replace("PLAN-clarify-1", "PLAN-clarify-2")]);
+  const resumed = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["unknown", undefined]);
+  f.target.inspection.head = MOVED;
+  const fresh = await ok(f.service({ readLedgerLines: evidence.read }).execute(actor,
+    f.command({ requestId: "plan-request-after-ambiguous", expectedRevision: revisionOf(f) })));
+  assert.deepEqual([fresh.replayed, fresh.observation.operationId, fresh.observation.state], [true, operationId, "stale-target"]);
+  assert.equal(evidence.reads.length, 1);
+  assert.equal(f.calls.length, 1);
 });
