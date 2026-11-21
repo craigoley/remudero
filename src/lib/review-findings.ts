@@ -139,7 +139,7 @@ export function extractReviewFindings(input: {
 /** Replay is suppressed by the caller's exact-head review-decision claim; IDs also dedup one transcript. */
 export function recordReviewFindings(capture: FindingCapture, input: {
   taskId: string; prUrl: string; headSha: string; decisionDigest: string;
-  provenance: { provider: string | null; requestedModel: string | null; servedModel: string | null; effort: string | null; sessionId: string | null; selectionAssignmentId?: string | null; routedModel?: string | null };
+  provenance: { provider: string | null; requestedModel: string | null; servedModel: string | null; servedModelReason?: string | null; effort: string | null; sessionId: string | null; selectionAssignmentId?: string | null; routedModel?: string | null };
   log: (step: string, row: Record<string, unknown>) => void;
 }): void {
   for (const finding of capture.findings) {
@@ -149,7 +149,11 @@ export function recordReviewFindings(capture: FindingCapture, input: {
         finding_id: finding.id, lineage_key: finding.lineageKey, criterion_index: finding.criterion, category: finding.category, severity: finding.severity,
         mechanism: finding.mechanism, remedy: finding.remedy, anchor: finding.anchor, capture_state: finding.anchor.status,
         provider: input.provenance.provider, requested_model: input.provenance.requestedModel,
-        served_model: input.provenance.servedModel, routed_model: input.provenance.routedModel ?? null,
+        served_model: input.provenance.servedModel,
+        // W1-T13868: a null served model always names why, as worker.attempt does (W1-T2572).
+        ...(input.provenance.servedModel == null
+          ? { served_model_reason: input.provenance.servedModelReason || "the provider reported no served model for this call" } : {}),
+        routed_model: input.provenance.routedModel ?? null,
         selection_assignment_id: input.provenance.selectionAssignmentId ?? null,
       });
     } catch (error) {

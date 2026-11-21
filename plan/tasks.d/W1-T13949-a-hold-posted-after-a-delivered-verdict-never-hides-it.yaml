@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/ledger/a-hold-posted-after-a-delivered-verdict-never-hides-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A pending cannot-evaluate review.posted row written after a delivered failure of the same head and input is restored to the failure once, and the next pass settles the view and dispatches the fix lane"

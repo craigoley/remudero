@@ -1,7 +1,7 @@
 - id: W1-T14002
   title: The fix class learns its memory estimate from measured concurrent tree peaks, keeps lifetime-peak sums only as a labelled fallback, names why a tree went unmeasured, and reads its samples past the test-file rows, so fix admission stops charging 5.9 GiB for a tree whose measured p90 is 835 MiB (held rebuild)
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T14153]
   priority: 1
   type: implement
   verify: auto
@@ -19,6 +19,8 @@
     - src/lib/host-memory-learning.ts
     - src/lib/sweep.ts
     - test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts
+    - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
+    - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -62,7 +64,8 @@
     3. readPeakSamples reads the fix class's samples from the whole retained store file (up to PEAK_COMPACT_BYTES,
        the size past which an append compacts the file to the newest samples per class), not its last 256 KiB.
        Compaction keeps samples per class, so test-file rows cannot crowd fix samples out of that read. Test-file
-       reads and other classes keep the 256 KiB tail.
+       reads and other classes keep the 256 KiB tail. The whole-file read opens the store read-only with O_NOFOLLOW
+       and an explicit 0o600 mode, as src/lib/bounded-file-tail.ts does (CodeQL js/insecure-temporary-file).
     4. sweep.fix_capacity carries fix_estimate_basis from the learned estimate.
     UNCHANGED: the memory floor, the container limit, every existing refusal and rung of the fix admission
     controller, and the typical (median-peak) rung's rule; no new cap.
@@ -70,6 +73,15 @@
     Put back the legacy-first fix estimate (paired legacy_p for concurrent samples): criterion 1 fails. Drop the
     fallback label: criterion 2 fails. Drop the reason: criterion 3 fails. Read fix samples from the 256 KiB tail:
     criterion 4 fails. Drop the row field: criterion 5 fails.
+  note: |
+    AMENDED (2026-11-20): two existing tests join files. #19776 (the W1-T13878 build) had to change both, and
+    acceptance-author-gate refused it for that. In
+    test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts a whole-object deepEqual of
+    classEstimate("fix") must include the basis label of design step 1 (legacy-hwm-fallback for its legacy-only
+    fixture). In test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts the bounded tail read may
+    read one byte before the tail to find a line boundary, so its byte bound moves from 14 to 15. Design step 3
+    also names the open mode, because CodeQL alert 1351 (high) flagged the same read on #19776 without one.
+    DEPENDS (2026-11-21, operator): W1-T14002 alone under-charges fix trees that run tsc, because its concurrent-rss samples are almost all trees without tsc; W1-T14153 (#20014) fixes the tsc accounting first.
   needs_input:
     question: "Pull request https://github.com/craigoley/remudero/pull/19776 (task W1-T13878) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13878-1795182624098-45c2:1:1795183013572) — The canonical merge-base scope excludes two inherited test changes required by the estimate label and tail-boundary behavior. The CodeQL edit is saved, and required CI remains blocked on a separate scope amendment."
     source_pr: https://github.com/craigoley/remudero/pull/19776

@@ -1,0 +1,64 @@
+- id: W1-T14137
+  title: A withheld-arm draw is made per task, so a task's retries and every task in one sweep pass stay in their own arm
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the control arm every skill comparison and the new fix-lane knowledge arms read
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T4617, W1-T13860, W1-T12142]
+  files:
+    - src/lib/task-arm.ts
+    - src/lib/skill-workshop.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/cli/commands/fix.ts
+    - test/learning/a-withheld-arm-is-drawn-per-task.test.ts
+    - test/a-skill-is-withheld-on-a-seeded-share-of-runs.test.ts
+    - test/the-fix-lane-is-offered-its-skills-under-seeded-withholding.test.ts
+    - test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - skillWithheldForRun (src/lib/skill-workshop.ts:846-849) hashes (runId, skill). The implement lane's runId is
+      `${taskId}-${Date.now()}` (src/cli/commands/run-task-verb.ts:4815), so two runs of one task can land in different arms.
+    - The fix lane passes opts.runId (src/cli/commands/fix.ts:2771-2779). From the sweep that is the pass-wide
+      `SWEEP-${Date.now()}` (src/cli/commands/sweep.ts:739), so every task fixed in one sweep pass gets the same draw for a skill,
+      and buildSkillEffectivenessReport keys its selection by run_id (src/lib/skill-workshop.ts:1158), so a later task's row
+      overwrites an earlier one.
+    - Routing experiments fixed the same leak by keying the draw on the task (src/lib/routing-experiments.ts:108-141): W1-T4617
+      found 46% of tagged tasks had landed in both arms.
+    - The report reads each row's recorded arm (skill-workshop.ts:1196-1199), so changing the key breaks no report, but rows
+      drawn before and after the change are two designs and must not be pooled.
+    The fix-lane knowledge shadow (W1-T14138) and the fix-prompt lesson canary (W1-T14151) need the same task-keyed draw.
+  design: |
+    1. Add src/lib/task-arm.ts with a pure `taskArmWithheld({ taskId, unit, share, epoch })`: the first 4 bytes of
+       sha256(["task-arm/v1", epoch, unit, taskId].join("\0")) over 2^32, below share, means withheld. Export the epoch
+       constant the skill draw uses.
+    2. Both skill callers (selectImplementSkills in src/cli/commands/run-task-verb.ts and the fix lane's selection in
+       src/cli/commands/fix.ts) draw through taskArmWithheld keyed on (task id, skill name). SKILL_WITHHOLDING_SHARE and the
+       staged-retirement flip (skillWithheldUnderRetirement) are unchanged. The fix lane keys on opts.taskId, never the sweep's
+       run id.
+    3. skills.selection rows record `arm_unit: "task"` and `arm_epoch`. buildSkillEffectivenessReport compares only rows of the
+       newest epoch and reports rows without `arm_unit` (the run-keyed design) apart, never pooled with them.
+    4. Update the three tests that pin run-keyed assignment to the task-keyed rule (one of them uses one task id for two runs).
+
+    INVARIANT task-arm-stable: every run of one task, from any lane, draws the same arm for the same unit and epoch.
+  acceptance:
+    - claim: "invariant:task-arm-stable — two runs of one task, one from the implement lane and one from the fix lane, draw the same withheld arm for a skill"
+      kind: guard
+      proof: "grep: W1-T14137 criterion 1: in test/learning/a-withheld-arm-is-drawn-per-task.test.ts"
+    - claim: "Two tasks fixed in one sweep pass draw independently, and over many task ids the withheld share lands near the predeclared 25%"
+      proof: "grep: W1-T14137 criterion 2: in test/learning/a-withheld-arm-is-drawn-per-task.test.ts"
+    - claim: "The effectiveness report compares only rows of the newest arm epoch and reports legacy run-keyed rows apart"
+      proof: "grep: W1-T14137 criterion 3: in test/learning/a-withheld-arm-is-drawn-per-task.test.ts"
+    - claim: "The implement lane draws its skill arm through taskArmWithheld"
+      proof: "grep: taskArmWithheld( in src/cli/commands/run-task-verb.ts"
+    - claim: "The fix lane draws its skill arm through taskArmWithheld"
+      proof: "grep: taskArmWithheld( in src/cli/commands/fix.ts"
+  falsifier: |
+    Key the draw on the run id again and criterion 1 must fail. Draw once per sweep pass and criterion 2 must fail. Pool
+    legacy rows with the new epoch and criterion 3 must fail. Restore and require all to pass.
