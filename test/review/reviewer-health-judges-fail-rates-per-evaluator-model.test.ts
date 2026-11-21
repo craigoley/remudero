@@ -891,7 +891,7 @@ test("W1-T13850 criterion 4: a FAIL whose evidence publishes after delivery has 
   assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl, issueUrl);
 });
 
-test("W1-T13850 criterion 4: a pending FAIL's clause survives a failed comment, is added once, and an ops record adds none", async (t) => {
+test("W1-T13850 criterion 4: an unread or absent record is pending, survives a failed comment, is added once; an ops record adds none", async (t) => {
   const { rows, claudeShas } = elevenNineteen();
   const current = claudeShas.at(-1)!;
   const at = "2026-11-19T12:00:00.000Z";
@@ -911,6 +911,8 @@ test("W1-T13850 criterion 4: a pending FAIL's clause survives a failed comment, 
   let published = false;
   const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args) => {
     const fixture = [publicFail, opsFail].find(({ prUrl }) => String(args[1]).includes(`/issues/${prUrl.split("/").at(-1)}/comments?`));
+    // At delivery the public FAIL's comments cannot be read at all: unread is pending, never unpublished.
+    if (!published && fixture === publicFail) throw new Error("PR comments unreadable");
     return [published && fixture ? [{ id: 401, body: fixture.record, created_at: at, updated_at: at, user: { login: "remudero-fleet[bot]", type: "Bot" } }] : []];
   };
   let failAddedRow = false;
@@ -925,7 +927,9 @@ test("W1-T13850 criterion 4: a pending FAIL's clause survives a failed comment, 
   h.queue.push(...rows);
   await h.evaluate(current);
   assert.equal(h.created.length, 1);
-  assert.equal(h.created[0]!.body.match(/pending publication/g)?.length, 2, "both FAILs are pending publication");
+  assert.equal(h.created[0]!.body.match(/pending publication/g)?.length, 2, "an unread and an absent record are both pending publication");
+  assert.doesNotMatch(h.created[0]!.body, /retained on host/);
+  assert.match(String(h.steps("reviewer.model_divergence_evidence_unavailable")[0]?.extra.error), /PR comments unreadable/);
   const pendingUnits = () => health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.pendingPublication?.map((f) => f.unit);
   assert.equal(pendingUnits()?.length, 2);
 
