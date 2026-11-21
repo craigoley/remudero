@@ -654,6 +654,25 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runDraftRung"],
     outcomes: ["window", "allowance"],
   },
+  {
+    step: "skill_eval.auto_waiting",
+    meaning:
+      "The fleet's own held-out eval of a staged skill draft did not start, because a gate was closed: the fleet was " +
+      "not quiet, today's ledgered cost plus the eval's spend limit was above the daily cost ceiling, today had " +
+      "unpriced rows, or a cash stack had too little allowance left. Nothing was spent and nothing was claimed. " +
+      "`reason` says which gate; the same reason on a later pass writes no second row.",
+    writer: ["autoEvaluateSkillDrafts"],
+    outcomes: ["spend-not-measured", "fleet-not-idle", "daily-cost-unpriced", "daily-cost-ceiling", "cash-allowance-unreadable", "cash-allowance"],
+  },
+  {
+    step: "skill_eval.auto_claimed",
+    meaning:
+      "The fleet claimed one staged skill draft's text (`draft_sha256`) for its held-out eval, with every gate open, " +
+      "and the eval run `run_id` starts next. The claim is released only when the eval refused before any attempt; " +
+      "otherwise that text is never evaluated by the fleet again.",
+    writer: ["autoEvaluateSkillDrafts"],
+    outcomes: ["claimed"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

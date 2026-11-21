@@ -35,12 +35,16 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, sealedPairedAttemptDispatcher, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedGrader } from "./paired-trial.js";
 import { loadPlan, type Task } from "./plan.js";
-import { loadDefaultPolicy } from "./policy.js";
+import { loadDefaultPolicy, resolveDailyCostCeiling } from "./policy.js";
 import { replayOptIn } from "./replay-harness.js";
+import type { SkillEvalSpendFit } from "./skill-eval-auto.js";
 import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput,
   type SkillEvalVerdictReason } from "./skill-eval.js";
+import { readLedgerLines } from "./status.js";
+import { deriveDayCostUsd, deriveDayUnpricedRows } from "./sweep.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillFileStagedAtMs, type InjectableSkill } from "./skill-workshop.js";
 import { withTempDir } from "./tmp.js";
+import { readOpenWeightAllowance } from "./worker-provider.js";
 
 export const SKILL_EVAL_USAGE = "usage: rmd skill-eval <proposal-id> --confirm-spend";
 
@@ -79,6 +83,17 @@ export interface SkillEvalCommandInput {
   control?: SkillEvalRunInput["control"];
   clock?: Clock;
   print?: (line: string) => void;
+  /** W1-T13861: the spend the fleet's own eval must fit in. Absent: the auto pass waits (the operator verb never reads it). */
+  readSpendFit?: () => SkillEvalSpendFit;
+}
+
+/** How the spend of one eval was approved: the operator's argv, or the fleet's standing approval value. */
+export type SkillEvalSpendApproval = { argv: readonly string[] } | { standingApproval: Readonly<{ ref: string }> };
+
+/** One eval's end. `refusedBeforeDispatch`: it refused with zero attempts dispatched, so nothing was spent. */
+export interface SkillEvalOutcome {
+  code: number;
+  refusedBeforeDispatch: boolean;
 }
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -117,13 +132,24 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
     print(`skill-eval: ${optIn.reason}`);
     return 2;
   }
+  return (await evaluateStagedSkillDraft(proposalId, { argv }, input)).code;
+}
+
+/**
+ * The one eval path both callers use: `rmd skill-eval` with its argv, and the fleet's auto pass (skill-eval-auto.ts)
+ * with the standing approval. Exit codes, refusal reasons and the record are those {@link skillEvalCommand} documents.
+ */
+export async function evaluateStagedSkillDraft(proposalId: string, approval: SkillEvalSpendApproval, input: SkillEvalCommandInput,
+  runIdIn?: string): Promise<SkillEvalOutcome> {
+  const print = input.print ?? ((line: string) => console.log(line));
   const clock = input.clock ?? systemClock;
-  const runId = `SKILL-EVAL-${clock.now()}`;
+  const runId = runIdIn ?? `SKILL-EVAL-${clock.now()}`;
+  const ended = (code: number, refusedBeforeDispatch: boolean): SkillEvalOutcome => ({ code, refusedBeforeDispatch });
   const write = (step: string, fields: Record<string, unknown>): void => input.log({ ...fields, run_id: runId, task_id: proposalId, step });
-  const refuse = (code: number, reason: string, detail: string, fields: Record<string, unknown> = {}): number => {
+  const refuse = (code: number, reason: string, detail: string, fields: Record<string, unknown> = {}): SkillEvalOutcome => {
     write(SKILL_EVAL_STEPS.refused, { reason, detail, ...fields });
     print(`skill-eval: refused ${proposalId}: ${reason}: ${detail}`);
-    return code;
+    return ended(code, true);
   };
 
   const registryPath = input.registryPath();
@@ -199,7 +225,8 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
   }
 
   const run = await runSkillEval({
-    selection, draftMarkdown: skillFile.markdown, argv, grade: input.grade, control: input.control, stack: input.stack(), idle: await input.readIdle(),
+    selection, draftMarkdown: skillFile.markdown, grade: input.grade, control: input.control, stack: input.stack(), idle: await input.readIdle(),
+    ...("argv" in approval ? { argv: approval.argv } : { argv: [], standingApproval: approval.standingApproval }),
     dispatcherFor: (item) => {
       const part = parts.get(item.taskId)!;
       return input.dispatcherFor(taskById.get(item.taskId)!, item, (request) => (request.arm === "with-skill" ? part.with : part.without));
@@ -210,11 +237,11 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
   });
   if (run.state === "refused") {
     print(`skill-eval: refused ${proposalId}: ${run.reason}: ${run.detail}`);
-    return 2;
+    return ended(2, true);
   }
   if (run.state === "cancelled") {
     print(`skill-eval: cancelled ${proposalId}: ${run.detail}; capacity retained, whole-tree termination unverified`);
-    return 2; // Never record a partial run as a judged proposal, including cancellation during grading/cleanup.
+    return ended(2, false); // Never record a partial run as a judged proposal, including cancellation during grading/cleanup.
   }
   const { verdict } = run;
   // inbox.ts declares SkillEvalRecord structurally, never importing skill-eval.ts: the drafter imports inbox.ts.
@@ -233,10 +260,31 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
     write(SKILL_EVAL_STALE_STEP, { reason: "draft-changed-mid-run", detail: "the staged skill file is no longer the text this run evaluated",
       draft_sha256: selection.draftSha256, held_out_set_hash: selection.heldOutSetHash, verdict: verdict.verdict, verdict_reason: verdict.reason });
     print(`skill-eval: ${proposalId} ${summary}; NOT recorded: the staged text changed during the run`);
-    return 1;
+    return ended(1, false);
   }
   print(`skill-eval: ${proposalId} ${summary}; recorded on the proposal`);
-  return verdict.verdict === "pass" ? 0 : 1;
+  return ended(verdict.verdict === "pass" ? 0 : 1, false);
+}
+
+/**
+ * W1-T13861: the spend reading the auto pass checks before it claims a draft. The day's ledgered cost and its
+ * unpriced rows are the cost governor's own reading (live ledger); the ceiling is the effective one (the state/
+ * override within the committed bound, else plan/policy.yaml). The cash allowance is read only for a stack that
+ * bills cash, and observing it reserves nothing.
+ */
+export function readSkillEvalSpendFit(config: Config, pin: Pick<SkillEvalRunInput["stack"]["pin"], "billing" | "model">,
+  clock: Clock): SkillEvalSpendFit {
+  const nowMs = clock.now();
+  // ledger-read-intent: live
+  const lines = readLedgerLines(ledgerPathFor(config));
+  const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(lines, nowMs), unpricedRows: deriveDayUnpricedRows(lines, nowMs),
+    ceilingUsd: resolveDailyCostCeiling(config.root, loadDefaultPolicy()).usd };
+  if (pin.billing !== "api") return fit;
+  try {
+    return { ...fit, cash: { remainingUsd: readOpenWeightAllowance(config, { deployments: [pin.model], atIso: clock.iso() }).deployments[0]!.remainingUsd } };
+  } catch (error) {
+    return { ...fit, cash: { unreadable: String((error as Error)?.message ?? error).slice(0, 200) } };
+  }
 }
 
 /** A revision pin as the one string a stack's `revisions` row records: its revision, or `unavailable:<reason>`. */
@@ -274,7 +322,7 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
   const config = (): Config => (loaded ??= (options.loadConfig ?? loadConfig)());
   const clock = options.clock ?? systemClock;
   const stateDir = (): string => join(config().root, "state");
-  return {
+  const input: SkillEvalCommandInput = {
     registryPath: () => join(stateDir(), "inbox-proposals.json"),
     stateDir,
     approvedSkillsDir: () => join(repoRoot, ".claude", "skills"),
@@ -291,6 +339,8 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
         headroom: await readHeadroom(config()) };
     },
     log: (row) => appendLedger(ledgerPathFor(config()), row, { clock }),
+    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock),
     clock,
   };
+  return input;
 }
