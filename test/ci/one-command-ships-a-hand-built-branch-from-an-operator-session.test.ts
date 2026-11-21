@@ -19,7 +19,8 @@ import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { HANDLERS } from "#test/helpers/run-task-test.js";
+import { HANDLERS, handShipStopRunId, installUnhandledRejectionGuard, main as cliMain } from "#test/helpers/run-task-test.js";
+import { checkCliFreshness } from "#src/lib/self-sync.js";
 
 const head = "1".repeat(40);
 const main = "2".repeat(40);
@@ -1664,4 +1665,133 @@ test("W1-T12169 criterion 2: a child that resolves node through PATH finds the p
     assert.equal(entry.path.split(delimiter)[0], dirname(pinned));
     assert.ok(entry.path.split(delimiter).includes("/usr/bin"), "the rest of PATH is kept");
   }
+});
+
+// W1-T12169 criterion 5, operator ruling (option 2, "Exempt ship stop only, logged"): the exact
+// `hand-worktree ship stop <run-id>` argv passes the CLI freshness gate with one ledgered
+// `self_sync.exempt` row; `ship`, worktree creation and any other stop shape stay refused.
+
+class CliExit extends Error {
+  constructor(readonly code: number | undefined) { super(`process.exit(${code})`); }
+}
+
+/** A real checkout BEHIND its origin whose uncommitted edit touches the very file origin moved. */
+function behindWithOverlappingEdit(t: TestContext) {
+  const origin = gitRepo({ scope: t });
+  writeFileSync(join(origin.dir, "plan.yaml"), "- id: T1\n");
+  origin.git("add", "plan.yaml");
+  origin.git("commit", "-q", "-m", "plan");
+  const local = gitRepo({ scope: t, cloneFrom: origin.dir });
+  writeFileSync(join(origin.dir, "plan.yaml"), "- id: T1\n  title: newer\n");
+  origin.git("commit", "-q", "-am", "newer");
+  writeFileSync(join(local.dir, "plan.yaml"), "- id: T1\n  title: local edit\n");
+  const merges: string[][] = [];
+  // The real freshness check, pointed at the fixture: the CLI's own checkout is never assessed.
+  const checkFreshness: typeof checkCliFreshness = (_dir, _env, deps = {}) => checkCliFreshness(local.dir, {}, {
+    ...deps,
+    git: (args) => {
+      if (args[0] === "merge") { merges.push(args); throw new Error("the fixture is never merged"); }
+      // Raw, untrimmed output, exactly as the check's own default runner returns it.
+      return execFileSync("git", ["-C", local.dir, ...args], { encoding: "utf8" });
+    },
+  });
+  const snapshot = () => [local.git("rev-parse", "HEAD"), local.git("status", "--porcelain"), readFileSync(join(local.dir, "plan.yaml"), "utf8")];
+  return { checkFreshness, merges, snapshot };
+}
+
+/** Drives the CLI's real `main()` for one argv with HOME (so config, state and ledger) under a temp root. */
+async function cliUnderGate(t: TestContext, argv: string[], deps: NonNullable<Parameters<typeof cliMain>[0]>, seed: (root: string) => void = () => {}) {
+  const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-cli-`));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const root = join(scratch, "root");
+  mkdirSync(join(scratch, "home", ".config", "remudero"), { recursive: true });
+  writeFileSync(join(scratch, "home", ".config", "remudero", "config.json"), JSON.stringify({ root, claudeBin: "/bin/true" }));
+  seed(root);
+  const saved = { HOME: process.env.HOME, a: process.env.RMD_SELECTED_INSTANCE_REGISTRY, b: process.env.RMD_INSTANCE_REGISTRY, argv: process.argv };
+  // Installed with the real exit before process.exit is mocked, so main()'s own install is a no-op.
+  installUnhandledRejectionGuard();
+  const errs: string[] = [];
+  const logs: string[] = [];
+  t.mock.method(process, "exit", ((code?: number): never => { throw new CliExit(code); }) as typeof process.exit);
+  t.mock.method(console, "error", (...a: unknown[]) => { errs.push(a.map(String).join(" ")); });
+  t.mock.method(console, "log", (...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+  process.env.HOME = join(scratch, "home");
+  delete process.env.RMD_SELECTED_INSTANCE_REGISTRY;
+  delete process.env.RMD_INSTANCE_REGISTRY;
+  process.argv = ["node", "run-task.js", ...argv];
+  let caught: unknown;
+  try {
+    await cliMain(deps).catch((error: unknown) => { caught = error; });
+  } finally {
+    process.argv = saved.argv;
+    for (const [key, value] of [["HOME", saved.HOME], ["RMD_SELECTED_INSTANCE_REGISTRY", saved.a], ["RMD_INSTANCE_REGISTRY", saved.b]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  if (!(caught instanceof CliExit)) throw caught ?? new Error("main() returned without exiting");
+  const ledger = join(root, "state", "ledger.ndjson");
+  const rows = existsSync(ledger)
+    ? readFileSync(ledger, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+    : [];
+  return { code: caught.code, errs, logs, root, rows: rows.filter((row) => String(row.step).startsWith("self_sync.")) };
+}
+
+const liveRunId = "rmd-ship-1795084765220-abc123";
+
+/** A run this process holds open, as `ship` leaves it while it works. */
+function seedLiveRun(root: string): string {
+  const dir = join(root, "state", "hand-ship", liveRunId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ id: liveRunId, pid: process.pid, status: "preflight" }));
+  return dir;
+}
+
+test("W1-T12169 criterion 5: a behind checkout with an overlapping edit still stops a live run by id, ledgering the exemption", async (t) => {
+  const { checkFreshness, merges, snapshot } = behindWithOverlappingEdit(t);
+  const before = snapshot();
+  assert.equal(checkFreshness("", {}, { warn: () => {} }).status, "refused", "the fixture is a checkout the gate refuses");
+  let runDir = "";
+  const run = await cliUnderGate(t, ["hand-worktree", "ship", "stop", liveRunId], { checkFreshness }, (root) => { runDir = seedLiveRun(root); });
+  assert.equal(run.code, 0, JSON.stringify(run));
+  assert.ok(!run.errs.some((line) => line.includes("refusing to auto-sync")), JSON.stringify(run.errs));
+  assert.ok(existsSync(join(runDir, "stop")), "the real stop handler wrote the stop marker");
+  assert.ok(run.logs.includes(`${liveRunId}: stop requested`), JSON.stringify(run.logs));
+  assert.deepEqual(run.rows.map((row) => [row.step, row.task_id, row.verb, row.reason]),
+    [["self_sync.exempt", "CLI", "hand-worktree", `dirty (hand-worktree ship stop ${liveRunId})`]]);
+  assert.match(String(run.rows[0]!.run_id), /^CLI-\d+$/);
+  assert.deepEqual(snapshot(), before, "the checkout's HEAD, status and edit are untouched");
+  assert.deepEqual(merges, [], "the assessment never merges");
+});
+
+test("W1-T12169 criterion 5: ship, worktree creation and every other stop shape still exit at the gate on that checkout", async (t) => {
+  for (const argv of [
+    ["hand-worktree", "ship", "--title", "fix(example): ship", "--body-file", "body.md"],
+    ["hand-worktree", "ship"],
+    ["hand-worktree", "unfiled"],
+    ["hand-worktree", "ship", "stop"],
+    ["hand-worktree", "ship", "stop", liveRunId, "extra"],
+    ["hand-worktree", "ship", "stop", "--", liveRunId],
+    ["hand-worktree", "ship", "stop", `${liveRunId}x`],
+    ["hand-worktree", "stop", liveRunId],
+    ["hand-worktree", "ship", "STOP", liveRunId],
+  ]) {
+    const { checkFreshness, snapshot } = behindWithOverlappingEdit(t);
+    const before = snapshot();
+    const dispatched: string[][] = [];
+    let runDir = "";
+    const run = await cliUnderGate(t, argv, {
+      checkFreshness,
+      dispatch: async (cmd, rest) => { dispatched.push([cmd ?? "", ...rest]); return 0; },
+    }, (root) => { runDir = seedLiveRun(root); });
+    const label = `rmd ${argv.join(" ")}`;
+    assert.equal(run.code, 1, `${label} exits at the gate: ${JSON.stringify(run)}`);
+    assert.ok(run.errs.some((line) => line.includes("refusing to auto-sync")), `${label} prints the refusal`);
+    assert.deepEqual(dispatched, [], `${label} never reaches its dispatch`);
+    assert.equal(existsSync(join(runDir, "stop")), false, `${label} writes no stop marker`);
+    assert.deepEqual(run.rows.map((row) => row.step), ["self_sync.refused"], `${label} is ledgered as refused, never exempt`);
+    assert.deepEqual(snapshot(), before);
+  }
+  assert.equal(handShipStopRunId("hand-worktree", ["ship", "stop", liveRunId]), liveRunId);
+  assert.equal(handShipStopRunId("doctor", ["ship", "stop", liveRunId]), undefined);
 });

@@ -87,6 +87,8 @@ export interface HandShipEffects {
 
 interface ShipOptions { cwd: string; stateDir: string | (() => string); write?: (line: string) => void }
 const runId = /^rmd-ship-\d{13}-[a-zA-Z0-9]{6}$/;
+/** Whether `value` is exactly the id a ship run is given (`rmd-ship-<epochMs>-<6 chars>`). */
+export function isHandShipRunId(value: string): boolean { return runId.test(value); }
 const shaPattern = /^[0-9a-f]{40}$/;
 const testPath = /^test\/(?:[^/\0\r\n]+\/)*[^/\0\r\n]+\.test\.ts$/;
 const INIT_WINDOW_MS = 2_000;
