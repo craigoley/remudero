@@ -1,0 +1,60 @@
+- id: W1-T14155
+  title: The host memory budget counts one tail per live tree that is in or near validation, not one tail for the whole host, so workers admitted while the host is quiet cannot reach their validation peaks together and drive it into swap
+  repo: remudero
+  depends_on: []
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # changes when fix and review workers start
+  band_meaning: span
+  origin: operator-session#memory-thrash-2026-11-21
+  plan_refs: [W1-T10085, W1-T11344, W1-T13869, W1-T14143, W1-T14145]
+  files:
+    - src/lib/host-memory-shadow.ts
+    - src/lib/host-memory-admission.ts
+    - test/memory/the-host-memory-budget-counts-one-tail-per-validating-tree.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21 13:13-13:16Z on the Azure host (read-only): memory PSI some avg10 99.97 and full avg10 59 at
+    13:15Z; the host is 31 GiB and the daemon container was at 15.1 of 25.6 GiB. Live in the daemon container: 7
+    fix-dispatch runs (W1-T10937, 12169, 13850, 13875, 13944, 13969, 13991) and 4 review runs, with 31 codex, 30
+    node --test runners, 7 coverage runners and a 2.7 GB tsc under them. Ledger rows since the 12:07Z container start:
+    memory_budget.enforce_wait 10, enforce_queue 4, enforce_admit 1, shadow 13; run_child.admission_waiting 6,
+    run_child.spawned 5. The one admit row (12:22:16) has tier "fits" with memAvailableMib 9234, unrealizedMib 52727,
+    hostClaimMib 2690, hostClaimUndecayedMib 7244, hostTypicalMib 845, psi someAvg10 0.77, fullAvg10 0.28.
+    plan/policy.yaml sweep.hostMemoryBudget sets psiSomeAvg10Max 10 and psiFullAvg10Max 2 (static; the W1-T10085
+    learner is shadow-only).
+    OBSERVED in code at dd829e355: src/lib/host-memory-shadow.ts builds hostClaim = ... typicalAll + hostTail, so
+    every live tree counts its typical growth and the host counts ONE tail. The admit reason compares only
+    base - hostClaim with hostReserveMib. projectedAllPeaks is computed and published, but no admit reason reads
+    it. host-memory-learning.ts already samples each reservation's whole tree, descendants included.
+    INFERRED: fix workers validate in the same phase shape (tsc, the suite, coverage), so their tails are
+    correlated, and seven workers admitted while the host was quiet reached their peaks together. Separate from
+    W1-T14143 and W1-T14145, which cover tsc only.
+  design: |
+    Each live tree whose phase is validation (its tsc or test runner is live, or the learned phase says it is next)
+    contributes its learned tail to the claim; other trees keep typical growth only. The phase signal is the nested
+    test reservation (host-memory-learning openNestedTestRun) or W1-T14143's typecheck work, whichever exists at head.
+    The shadow row publishes validatingTails alongside hostClaimMib. The all-peaks figure is not made the bound itself
+    (healthy-condition-bound): with no live validating tree the claim is today's, so an idle host still admits its
+    first worker. A replay fixture of the 12:07-13:15Z window carries the numbers above.
+
+    INVARIANT one-start-always-possible: with no live validating tree the claim is unchanged from today, so an idle host still admits its first worker.
+  acceptance:
+    - claim: "A replay of the 2026-11-21 12:07-13:15Z admission inputs, as a fixture with the numbers above, holds at least one of the fix starts the current claim admitted, and names reason unrealized-reservations"
+      proof: "grep: W1-T14155 criterion 1 in test/memory/the-host-memory-budget-counts-one-tail-per-validating-tree.test.ts"
+    - claim: "Each live tree whose phase is validation (its tsc or test runner is live, or the learned phase says it is next) contributes its learned tail to the claim; other trees keep typical growth only"
+      proof: "grep: W1-T14155 criterion 2 in test/memory/the-host-memory-budget-counts-one-tail-per-validating-tree.test.ts"
+    - claim: "invariant:one-start-always-possible — with no live validating tree the claim is unchanged from today, so an idle host still admits its first worker"
+      kind: guard
+      proof: "grep: W1-T14155 criterion 3 in test/memory/the-host-memory-budget-counts-one-tail-per-validating-tree.test.ts"
+    - claim: "the shadow row publishes validatingTails alongside hostClaimMib"
+      proof: 'grep: "validatingTails" in src/lib/host-memory-shadow.ts'
+  falsifier: |
+    Revert the claim to typicalAll + hostTail: criterion 1's replay admits every start again and fails.
+  note: |
+    Validation: delete-the-fix on criterion 1 gives fail 1, with the fix fail 0. After deploy, on the next burst of 5
+    or more fix dispatches, the ledger shows enforce_wait rows naming unrealized-reservations while trees validate,
+    and the heartbeat's memory PSI full avg10 stays under 10; report both with the window's newest ledger timestamp.
