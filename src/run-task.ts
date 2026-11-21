@@ -39804,8 +39804,10 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
       if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
         const verdicts = readSkillDraftVerdicts(dirname(ledgerPath));
         if ("unmeasured" in verdicts) {
-          // The normal classifier can already have a live or retained verdict.
-          if (!verdicts.archivesUnreadable || (classification?.state !== "declined" && classification?.state !== "ratified")) {
+          // The normal classifier can already have a live or retained verdict. It is the path restore used
+          // before the union read, so a held rotation lock or an unreadable archive falls back to it.
+          const liveClassifierUsable = verdicts.archivesUnreadable || verdicts.rotationLockHeld;
+          if (!liveClassifierUsable || (classification?.state !== "declined" && classification?.state !== "ratified")) {
             throw new Error(`rmd restore: ${verdicts.unmeasured}`);
           }
         } else {

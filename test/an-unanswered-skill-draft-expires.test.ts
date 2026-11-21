@@ -1138,3 +1138,78 @@ test("W1-T13859 criterion 4: an unterminated row appended after the final versio
     assert.deepEqual(pass(s), { expired: [], reason: "no skill draft expires: incomplete ledger union: 0 unread file(s), 1 torn row(s)" });
   } finally { s.done(); }
 });
+
+/** Run `pass` with `bytes` appended to the live ledger after the decline's version check, just before its write. */
+function appendAtDeclineWrite(t: TestContext, s: Site, bytes: string): { landed: () => boolean } {
+  const write = fs.writeSync;
+  let injected = false;
+  const hook = t.mock.method(fs, "writeSync", (...args: Parameters<typeof fs.writeSync>) => {
+    const [, data] = args;
+    if (!injected && Buffer.isBuffer(data) && data.includes('"origin":"skill-workshop"') && data.includes('"expired:')) {
+      injected = true;
+      appendFileSync(s.ledgerPath, bytes);
+    }
+    return (write as (...a: unknown[]) => number)(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { hook.mock.restore(); syncBuiltinESMExports(); });
+  return { landed: () => injected };
+}
+
+test("W1-T13859 criterion 2: an approval that lands at the decline write and raises the bound leaves the 18-day draft open", (t) => {
+  const s = site();
+  try {
+    // One answer: a 2.00-day wait. The draft has waited 18.00 days.
+    writeFileSync(inboxFirstSeenPath(s.stateDir), JSON.stringify({
+      backfill: BACKFILL, short: "2026-11-05T00:00:00.000Z", long: "2026-10-24T00:00:00.000Z",
+      "skill-draft:old": "2026-11-01T12:00:00.000Z",
+    }));
+    row(s, "ratify.approved", "short", "2026-11-07T00:00:00.000Z", { origin: "rmd-cli" });
+    writeFileSync(s.registryPath, JSON.stringify({ proposals: [skillDraft("skill-draft:old")] }));
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 2 * DAY, sample: 1 });
+    const registry = readFileSync(s.registryPath);
+    const original = readFileSync(s.ledgerPath, "utf8");
+    // A second answer, 24.50 days after first-seen, completes between the expiry's read and its append.
+    const approval = JSON.stringify({ ts: "2026-11-17T12:00:00.000Z", step: "ratify.approved", task_id: "long", origin: "rmd-cli" }) + "\n";
+    const race = appendAtDeclineWrite(t, s, approval);
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.equal(race.landed(), true, "the approval landed after the version check");
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: live ledger gained a row before the decline append"]);
+    assert.deepEqual(declinesOf(s, "skill-draft:old"), [], "no decline computed from the 1-answer sample survives");
+    assert.doesNotMatch(readFileSync(s.ledgerPath, "utf8"), /skill-workshop/);
+    assert.equal(readFileSync(s.ledgerPath, "utf8").replace(/\n *\n$/, "\n"), original + approval, "the approval is intact");
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+
+    // The next pass measures the new bound; an 18-day draft is younger than 24.50 days and stays open.
+    assert.deepEqual(skillDraftExpiryBound(s.stateDir), { bound: 24.5 * DAY, sample: 2 });
+    const ledger = readFileSync(s.ledgerPath);
+    assert.deepEqual(pass(s), { expired: [], reason: "0 skill draft(s) expired; the bound is 24.50 days over 2 answered proposal(s)" });
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+  } finally { s.done(); }
+});
+
+test("W1-T13859 criterion 4: an unterminated approval at the decline write keeps every decline byte out of the real ledger", (t) => {
+  const s = site();
+  try {
+    drafts(s);
+    const registry = readFileSync(s.registryPath);
+    const original = readFileSync(s.ledgerPath, "utf8");
+    const torn = JSON.stringify({ step: "ratify.approved", task_id: "skill-draft:old", ts: clock.iso() });
+    const race = appendAtDeclineWrite(t, s, torn);
+    const printed: string[] = [];
+    reportSkillDraftExpiry(() => pass(s), retroLog(s), (message) => printed.push(message));
+    assert.equal(race.landed(), true, "the unterminated approval landed after the version check");
+    assert.deepEqual(printed, ["skill drafts: skill draft expiry stopped: incomplete ledger union: live ledger gained an unterminated row before the decline append"]);
+    const bytes = readFileSync(s.ledgerPath, "utf8");
+    // Only spaces follow the partial approval: no decline byte, and no newline that would join or commit it.
+    assert.equal(bytes.slice(0, original.length + torn.length), original + torn);
+    assert.match(bytes.slice(original.length + torn.length), /^ +$/);
+    assert.deepEqual(declinesOf(s, "skill-draft:old"), []);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+    // The next append meets the same unterminated tail it would have met had the decline never been written.
+    assert.deepEqual(pass(s), { expired: [], reason: "no skill draft expires: incomplete ledger union: 0 unread file(s), 1 torn row(s)" });
+    assert.equal(readFileSync(s.ledgerPath, "utf8"), bytes);
+  } finally { s.done(); }
+});

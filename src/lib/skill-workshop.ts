@@ -1622,7 +1622,7 @@ export function withSkillDraftVerdictLock<T>(stateDir: string, proposalId: strin
 export type SkillDraftExpiryBound = { bound: number; sample: number } | { unmeasured: string };
 
 type SkillDraftLedgerRows = LedgerUnionRecordRead["rows"];
-type UnmeasuredSkillDraftLedger = { unmeasured: string; archivesUnreadable?: true };
+type UnmeasuredSkillDraftLedger = { unmeasured: string; archivesUnreadable?: true; rotationLockHeld?: true };
 type SkillDraftLedgerRead = { rows: SkillDraftLedgerRows; liveVersion: string } | UnmeasuredSkillDraftLedger;
 
 function archiveVersion(path: string): string | undefined {
@@ -1637,17 +1637,24 @@ function archiveVersion(path: string): string | undefined {
  * holds it; the identity checks below still catch a writer that bypasses the lock.
  */
 function readSkillDraftLedger(stateDir: string, step: readonly string[]): SkillDraftLedgerRead {
-  const livePath = ledgerLivePath(stateDir);
+  return withLedgerRotationLock(stateDir, () => readLockedSkillDraftLedger(stateDir, ledgerLivePath(stateDir), step));
+}
+
+/**
+ * Run `action` holding the ledger rotation lock, or return why it could not be taken. The lock is never waited
+ * on here; `rotationLockHeld` tells a caller with another source of truth (restore's live classifier) it may use it.
+ */
+function withLedgerRotationLock<T>(stateDir: string, action: () => T): T | UnmeasuredSkillDraftLedger {
   let release: (() => void) | null;
   try {
-    release = tryAcquireRotationLock(ledgerRotationLockPath(livePath));
+    release = tryAcquireRotationLock(ledgerRotationLockPath(ledgerLivePath(stateDir)));
   } catch (error) {
     const reason = `incomplete ledger union: could not take the ledger rotation lock: ${String(error)}`;
     return { unmeasured: reason };
   }
-  if (release === null) return { unmeasured: "incomplete ledger union: the ledger is being rotated or compacted" };
+  if (release === null) return { unmeasured: "incomplete ledger union: the ledger is being rotated or compacted", rotationLockHeld: true };
   try {
-    return readLockedSkillDraftLedger(stateDir, livePath, step);
+    return action();
   } finally {
     release();
   }
@@ -1800,8 +1807,11 @@ export function expireUnansweredSkillDrafts(
   clock: Pick<Clock, "iso" | "now">,
 ): SkillDraftExpiryPass {
   const firstSeen = readInboxFirstSeen(stateDir);
-  const readMeasuredLedger = () => {
-    const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS);
+  // `locked`: the caller already holds the rotation lock, as the decision before an append does.
+  const readMeasuredLedger = (locked = false) => {
+    const union = locked
+      ? readLockedSkillDraftLedger(stateDir, ledgerLivePath(stateDir), SKILL_DRAFT_VERDICT_STEPS)
+      : readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS);
     if ("unmeasured" in union) return union;
     const measured = measureSkillDraftWaits(firstSeen, union.rows);
     return "unmeasured" in measured ? measured : { ...measured, ...union };
@@ -1819,11 +1829,13 @@ export function expireUnansweredSkillDrafts(
     const age = now - Date.parse(firstSeen[proposal.id] ?? "");
     if (!(age > measured.bound) || hasSkillDraftExpiryReceipt(proposal, rows)) continue;
     try {
-      const closed = withSkillDraftVerdictLock(stateDir, proposal.id, () =>
+      // Hold the rotation lock from the re-read through the append, so no rotation or compaction copies the
+      // live file between a decline row and its withdrawal (see appendLedger's expectedLiveVersion).
+      const closed = withSkillDraftVerdictLock(stateDir, proposal.id, () => withLedgerRotationLock(stateDir, () =>
         closeSkillDraft(registryPath, proposal.id, (entry) => {
           if (!entry.skillFile) return undefined;
-          // Re-read under both locks. An answer may have landed since the pass began and extended the bound.
-          measured = readMeasuredLedger();
+          // Re-read under the locks. An answer may have landed since the pass began and extended the bound.
+          measured = readMeasuredLedger(true);
           if ("unmeasured" in measured || age <= measured.bound) return undefined;
           const currentVerdicts = skillDraftVerdicts(measured.rows);
           if (currentVerdicts.isRatified(entry.id) || currentVerdicts.isDeclined(entry.id) !== undefined) return undefined;
@@ -1833,7 +1845,8 @@ export function expireUnansweredSkillDrafts(
               `${days(measured.bound)} days (${measured.sample} answered)`,
             liveVersion: measured.liveVersion,
           };
-        }, log, clock));
+        }, log, clock)));
+      if (typeof closed === "object") return { expired, reason: `skill draft expiry stopped: ${closed.unmeasured}` };
       if (closed) expired.push(proposal.id);
     } catch (error) {
       if (!(error instanceof LedgerAppendConflict)) throw error;

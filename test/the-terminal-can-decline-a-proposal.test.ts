@@ -317,3 +317,34 @@ test("W1-T13859 criterion 6: rmd restore reopens live declines and expiries besi
   assert.deepEqual(readFileSync(registryPath), registry);
   assert.deepEqual(readdirSync(skills), ["existing.md"]);
 });
+
+test("W1-T13859 criterion 6: rmd restore reopens a live operator decline while the ledger rotation lock is held", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}rmd-restore-rotation-lock-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const ledgerPath = ledgerLivePath(stateDir);
+  const registryPath = join(stateDir, "inbox-proposals.json");
+  mkdirSync(stateDir);
+  mkdirSync(join(root, "plan"));
+  writeFileSync(join(root, "plan", "tasks.yaml"), "[]\n");
+  assert.deepEqual(writeDaemonTargetRecord(stateDir, {
+    owner: "fixture", repo: "fixture", isSelf: false, checkoutRoot: root,
+  }), { written: true });
+  const id = "skill-draft:declined";
+  const markdown = "---\nname: proc\n---\n";
+  writeFileSync(registryPath, JSON.stringify({ proposals: [{ id, summary: markdown, evidenceAnchors: [], skillFile: { name: "proc", markdown } }] }));
+  appendLedger(ledgerPath, { step: "ratify.approved", task_id: "answered", run_id: "PANEL", ts: "2026-11-03T00:00:00Z" });
+  const config = { root } as never;
+  assert.equal(proposalVerdictCliCommand("decline", [id, "--reason", "operator decline"], config), 0);
+  const restores = () => readLedgerLines(ledgerPath).filter((row) => row.step === "panel.proposal_restored" && row.task_id === id);
+
+  const releaseRotation = tryAcquireRotationLock(ledgerRotationLockPath(ledgerPath));
+  assert.ok(releaseRotation, "this test holds the rotation lock, as a rotation or compaction would");
+  try {
+    assert.equal(proposalVerdictCliCommand("restore", [id, "--reason", "wrong call"], config), 0);
+  } finally { releaseRotation(); }
+  assert.deepEqual(restores().map(({ origin, reason }) => ({ origin, reason })), [{ origin: "rmd-cli", reason: "wrong call" }]);
+  const verdicts = readSkillDraftVerdicts(stateDir);
+  assert.ok(!("unmeasured" in verdicts));
+  assert.equal(verdicts.isDeclined(id), undefined);
+});

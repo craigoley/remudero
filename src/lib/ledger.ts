@@ -264,17 +264,53 @@ function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): bigi
 }
 
 /**
- * W1-T13859: a writer can append between the version check and this row. If it left its row unterminated, this
- * row joined it, and neither parses. Find the row past the checked size and refuse unless it starts a line.
+ * W1-T13859: a writer that takes no lock can append between the version check and this row, and no file
+ * primitive makes a check and an append one step. So check after the write: the row must sit exactly at the
+ * checked size. Any row before it means the decision read a ledger that has since grown (a complete row can
+ * change the expiry bound; an unterminated one now joins this row). Either way, withdraw this row and refuse.
  */
-function verifyAppendStartedALine(fd: number, checkedSize: bigint, row: Buffer): void {
+function verifyAppendAtCheckedSize(path: string, fd: number, checkedSize: bigint, row: Buffer): void {
   const end = fstatSync(fd, { bigint: true }).size;
   const span = Buffer.alloc(Number(end - checkedSize));
   const read = span.length === 0 ? 0 : readSync(fd, span, 0, span.length, checkedSize);
   const at = span.subarray(0, read).indexOf(row);
-  // At the checked size the row follows the newline the check confirmed.
-  if (at === 0 || (at > 0 && span[at - 1] === 0x0a)) return;
-  throw new LedgerAppendConflict("live ledger gained an unterminated row before the decline append");
+  if (at === 0) return;
+  if (at < 0) throw new LedgerAppendConflict("live ledger lost the decline row after the append");
+  const torn = span[at - 1] !== 0x0a;
+  withdrawAppendedRow(path, fd, checkedSize + BigInt(at), row.length, torn);
+  throw new LedgerAppendConflict(torn
+    ? "live ledger gained an unterminated row before the decline append"
+    : "live ledger gained a row before the decline append");
+}
+
+/**
+ * Overwrite only this row's own bytes, so no other writer's bytes move. After a complete row they become a blank
+ * line, which ledger readers skip. After an unterminated row they become spaces with no newline, so that row stays
+ * unterminated as it was before this append: the next append meets the tail it would have met had this row never
+ * been written. An O_APPEND descriptor ignores the position on Linux, so this opens the path again and writes only
+ * while it is still the same file.
+ */
+function withdrawAppendedRow(path: string, appendFd: number, offset: bigint, length: number, torn: boolean): void {
+  const filler = Buffer.alloc(length, 0x20);
+  if (!torn) filler[length - 1] = 0x0a;
+  const appended = fstatSync(appendFd, { bigint: true });
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_WRONLY);
+  } catch (error) {
+    throw new LedgerAppendConflict(`could not withdraw the decline row: ${String(error)}`);
+  }
+  try {
+    const current = fstatSync(fd, { bigint: true });
+    if (current.dev !== appended.dev || current.ino !== appended.ino) {
+      throw new LedgerAppendConflict("could not withdraw the decline row: the live ledger was replaced");
+    }
+    if (writeSync(fd, filler, 0, length, Number(offset)) !== length) {
+      throw new LedgerAppendConflict("could not withdraw the decline row: short write");
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function appendLedger(
@@ -321,7 +357,7 @@ export function appendLedger(
   try {
     const checkedSize = opts.expectedLiveVersion === undefined ? undefined : verifyLedgerBeforeAppend(fd, opts.expectedLiveVersion);
     const written = writeSync(fd, buf, 0, buf.length);
-    if (checkedSize !== undefined && written === buf.length) verifyAppendStartedALine(fd, checkedSize, buf);
+    if (checkedSize !== undefined && written === buf.length) verifyAppendAtCheckedSize(path, fd, checkedSize, buf);
     if (written !== buf.length) {
       console.error(
         `ledger: short write for ${path} (${written}/${buf.length} bytes written) — ` +
