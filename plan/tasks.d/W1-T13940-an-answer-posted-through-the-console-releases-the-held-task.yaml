@@ -39,7 +39,7 @@
       proof: "grep: W1-T13940 criterion 1 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
     - claim: "invariant:github-answer-still-releases — an answer that readEscalationAnswers lands from a GitHub issue reply still releases the task, and a second pass over the same reply adds no second store entry and no second ledger row"
       proof: "grep: W1-T13940 criterion 2 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
-    - claim: "invariant:held-task-is-listed — a queued task with an unanswered needs_input question appears in composeNeedsYou's decisions list (the list the Console renders) as a task_question with an answer form for POST /v1/questions/answer {taskId}; its gate key equals the decision's key, so the needs-you count and the list agree; after an answer through the route it leaves the list"
+    - claim: "invariant:held-task-is-listed — every queued task with an unanswered needs_input question appears in composeNeedsYou's decisions list (the list the Console renders) as a task_question with an answer form for POST /v1/questions/answer {taskId}, up to NOW_DECISIONS_CAP; past the cap, needsYou.display.more counts the held tasks the list leaves out, exact when the question store source is complete and atLeast when it is partial; the gate count equals the listed decisions plus that count; after an answer through the route the task leaves the list"
       proof: "grep: W1-T13940 criterion 3 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
     - claim: "invariant:one-answer-source — for every fixture in a table (route answer only, GitHub answer only, both, a blank answer, an answer for another task, no answer, an answer row the ledger rotation has dropped after the daemon read it once), the Inbox lists the held task exactly when the daemon's dispatch check refuses it; and each answer writer (the answer route, the escalation reply route, readEscalationAnswers) writes one panel.question_answered row with task_id, a nonblank answer and origin"
       proof: "grep: W1-T13940 criterion 4 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
@@ -47,7 +47,7 @@
       proof: "grep: taskInputAnswerWithLedger( in src/cli/commands/daemon.ts"
     - claim: the task run's own runnable check reads the answer through the ledger-backed reader
       proof: "grep: taskInputAnswerWithLedger( in src/cli/commands/run-task-verb.ts"
-    - claim: the Inbox projects each held task as a decision
+    - claim: "the Inbox projects each held task as a decision before NOW_DECISIONS_CAP, and counts the held tasks the cap leaves out instead of dropping them silently"
       proof: "grep: heldTaskDecisions( in src/lib/now-view.ts"
   rationale: |
     CONFIRMED 2026-11-20 (operator session). An answer posted through the Console or serve route
@@ -89,7 +89,8 @@
   design: |
     INVARIANT route-answer-releases: an answer posted through POST /v1/questions/answer releases a needs_input task on the daemon's next dispatch pass, whatever folder serve runs from.
     INVARIANT github-answer-still-releases: an answer from a GitHub issue reply releases the task as before, once.
-    INVARIANT held-task-is-listed: every queued needs_input task without an answer is one answerable decision in the Inbox's needs-you list.
+    INVARIANT held-task-is-listed: every queued needs_input task without an answer is one answerable decision in the Inbox's needs-you list, or, past NOW_DECISIONS_CAP, counted in needsYou.display.more.
+    NOW_DECISIONS_CAP is a body-size backstop for the needs-you view, and this task keeps it.
     INVARIANT one-answer-source: a task's answer is the newest nonblank answer among its panel.question_answered ledger rows and the reader's question store; the dispatch check, the task run's check, the build prompt, rmd inbox and the Inbox held list all decide through that one rule.
     CHOICE: the ledger path. The ledger is already the one file serve and the daemon share, and
     every answer writer already writes a panel.question_answered row. Serve writing into the

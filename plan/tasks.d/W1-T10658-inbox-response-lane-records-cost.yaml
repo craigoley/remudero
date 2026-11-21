@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 30.00
+  budget_usd: 4.50
   rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `inbox-response`, field `cost`: 26/47 joined worker calls (55.3%) against the field's 90.0% floor, first seen 2026-10-14T05:59:56.253Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The inbox responder spawns via benchmarkNonDispatchSpawn(\"inbox-response\") in src/lib/inbox-responder.ts; src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gaps: W1-T9387 (review cost), W1-T9109 (ci-judge cost), W1-T10272 (inbox-response servedModel audit, same lane)."
   design: |
     DIAGNOSE FIRST. Do not infer the cause from 26/47 alone. Using the complete ledger union, state the audited window and freshness, and classify joined inbox-response attempts: cost reported, provider legitimately reports no cost (named billingMode/reason), failed or thrown attempts whose terminal row skips accounting, and unexplained omissions. Include a positive control with a reported cost.
