@@ -3,20 +3,21 @@
  *
  * `compactRotations` owns row-set preservation. This module owns the filesystem boundary the
  * compactor deliberately leaves to its caller: select a bounded window preferring shared days, read plain or
- * gzip rotations, stage one replacement per UTC day atomically, and remove sources only after those writes.
+ * gzip rotations, publish replacements at unused paths (or, last, over a source whose rows are already published),
+ * and remove sources only after those writes.
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
+import { constants, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { flagValue, unknownArgError } from "./cli-args.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
-import { writeAtomic } from "./fs-race-safe.js";
-import { compactRotations, compactedArchiveName, type LedgerCompactionResult } from "./ledger.js";
-import { ledgerRotationEntries, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
+import { realWriteAtomicIo, writeAtomic, type WriteAtomicIo } from "./fs-race-safe.js";
+import { compactRotations, compactedArchiveName, ledgerRotationLockPath, tryAcquireRotationLock, type LedgerCompactionResult } from "./ledger.js";
+import { ledgerLivePath, ledgerRotationEntries, rotationStampIso, type LedgerCorpusEntry } from "./ledger-union.js";
 import { ledgerPathFor } from "./ledger-path.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -59,6 +60,15 @@ export interface LedgerCompactFs {
   /** Stamps a moved file with the move time, so retention counts from when it went cold. */
   touch?: (path: string, atMs: number) => void;
   mtimeMs?: (path: string) => number;
+  /** W1-T13859: takes the ledger rotation lock for an apply; null when a live holder has it. Absent, an
+   *  in-memory seam compacts without it, as before. */
+  rotationLock?: (lockPath: string) => (() => void) | null;
+  /** W1-T13859: atomically replaces a selected source in place with an output that keeps its name. Absent,
+   *  `writeAtomic` does it. */
+  replaceAtomic?: (path: string, content: Buffer) => boolean;
+  /** W1-T13859: copies a source into cold storage before an output replaces it. Absent, the copy is written
+   *  with `writeAtomic`. */
+  copyFileSync?: (from: string, to: string) => void;
 }
 
 /** Where merged sources go instead of being deleted; a union read lists only `ledger.*` names, so
@@ -76,6 +86,8 @@ export interface LedgerCompactCommandDeps {
   fs?: LedgerCompactFs;
   /** Test seam may lower the production ceiling, never raise it. */
   maxArchiveBytes?: number;
+  /** W1-T13859: the caller already holds the ledger rotation lock for this pass (the worker's parent thread). */
+  rotationLockHeld?: boolean;
   out?: (line: string) => void;
   error?: (line: string) => void;
 }
@@ -88,11 +100,28 @@ export interface LedgerCompactSelection {
   sizeSkippedCount?: number;
 }
 
+const publishArchiveIo: WriteAtomicIo = {
+  ...realWriteAtomicIo,
+  writeFileSync: (...args) => realWriteAtomicIo.writeFileSync(...args),
+  // Atomically name the complete stage only if the destination is still unused.
+  renameSync: (stage, target) => {
+    linkSync(stage, target);
+    unlinkSync(stage);
+  },
+};
+
+/** Replaces a selected source in place: the rename overwrites, so readers see the old file or the new one. */
+const replaceArchiveIo: WriteAtomicIo = {
+  ...realWriteAtomicIo,
+  writeFileSync: (...args) => realWriteAtomicIo.writeFileSync(...args),
+  renameSync: (...args) => realWriteAtomicIo.renameSync(...args),
+};
+
 const realFs: LedgerCompactFs = {
   readdirSync: (dir) => readdirSync(dir),
   readFileSync: (path) => readFileSync(path),
   existsSync: (path) => existsSync(path),
-  writeAtomic: (path, content) => writeAtomic(path, content, { tmpTag: "ledger-compact-tmp" }),
+  writeAtomic: (path, content) => writeAtomic(path, content, { tmpTag: "ledger-compact-tmp", io: publishArchiveIo }),
   rmSync: (path) => rmSync(path),
   gzipSync: (content) => gzipSync(content),
   gunzipSync: (content, options) => gunzipSync(content, options),
@@ -101,6 +130,9 @@ const realFs: LedgerCompactFs = {
   renameSync: (from, to) => renameSync(from, to),
   touch: (path, atMs) => utimesSync(path, atMs / 1000, atMs / 1000),
   mtimeMs: (path) => statSync(path).mtimeMs,
+  rotationLock: (lockPath) => tryAcquireRotationLock(lockPath),
+  replaceAtomic: (path, content) => writeAtomic(path, content, { tmpTag: "ledger-compact-tmp", io: replaceArchiveIo }),
+  copyFileSync: (from, to) => copyFileSync(from, to, constants.COPYFILE_EXCL),
 };
 
 /** Select parseable rotations strictly older than the requested age, preferring shared UTC days. The hard source
@@ -425,8 +457,55 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     return 1;
   }
 
+  const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
+  const window: CompactWindow = { mode, olderThanDays, maxSources, maxArchiveBytes, stateDir, fs, now: (deps.clock ?? systemClock).date(), out, log };
+  // W1-T13859: hold the rotation lock for a stable archive inventory, including while retiring sources.
+  if (mode === "dry-run" || !fs.rotationLock || deps.rotationLockHeld) return compactWindow(window);
+  const lock = takeCompactionRotationLock(stateDir, fs.rotationLock);
+  if ("refused" in lock) {
+    log(lock.refused);
+    return 1;
+  }
+  try {
+    return compactWindow(window);
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * W1-T13859: take the ledger rotation lock for one compaction pass. The daemon's worker parent takes it on
+ * the main thread, so a worker that is ended from outside cannot leave it held under a live pid.
+ */
+export function takeCompactionRotationLock(
+  stateDir: string,
+  take: (lockPath: string) => (() => void) | null = tryAcquireRotationLock,
+): { release: () => void } | { refused: string } {
+  let release: (() => void) | null;
+  try {
+    release = take(ledgerRotationLockPath(ledgerLivePath(stateDir)));
+  } catch (err) {
+    return { refused: `rmd ledger-compact: cannot take the ledger rotation lock in ${stateDir} — ${(err as Error)?.message ?? String(err)}` };
+  }
+  return release === null
+    ? { refused: "rmd ledger-compact: a ledger rotation or a complete-ledger read holds the rotation lock; nothing was compacted" }
+    : { release };
+}
+
+interface CompactWindow {
+  mode: "dry-run" | "apply";
+  olderThanDays: number;
+  maxSources: number;
+  maxArchiveBytes: number;
+  stateDir: string;
+  fs: LedgerCompactFs;
+  now: Date;
+  out: (line: string) => void;
+  log: (line: string) => void;
+}
+
+function compactWindow({ mode, olderThanDays, maxSources, maxArchiveBytes, stateDir, fs, now, out, log }: CompactWindow): number {
   let selection: LedgerCompactSelection;
-  const now = (deps.clock ?? systemClock).date();
   try {
     const names = fs.readdirSync(stateDir);
     selection = selectLedgerCompactionSources(
@@ -446,10 +525,29 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
 
   const entryByPath = new Map<string, LedgerCorpusEntry>();
   for (const entry of selection.sources) entryByPath.set(entry.path, entry);
-  const selectedPaths = new Set(selection.sources.map((entry) => entry.path));
   const stagedPaths = new Set<string>();
-  const staged: { name: string; body: string }[] = [];
-  const removals: string[] = [];
+  const staged: StagedArchive[] = [];
+  // A source can contain rows assigned to several outputs. Keep it readable until all are published.
+  const available = (path: string) => !entryByPath.has(path) && !stagedPaths.has(path) && !fs.existsSync(path);
+  // Windowed readers need a parseable timestamp at or after every row in the output.
+  const laterUnusedName = (name: string): string => {
+    let stamp = Date.parse(rotationStampIso(name)!);
+    do {
+      name = compactedArchiveName(fixedClock(++stamp).iso());
+    } while (!available(join(stateDir, name)));
+    return name;
+  };
+  const canonicalOutputName = (name: string): string | undefined => {
+    const path = join(stateDir, name);
+    if (available(path)) return name;
+    // W1-T13859: an output keeps the name of the selected source it collides with, and replaces it once every
+    // other output holding that source's rows is published. A stamp past the newest source reads, to an
+    // analytics checkpoint that already folded that source, as unread rows, and they were counted twice.
+    if (entryByPath.has(path) && !stagedPaths.has(path)) return name;
+    if (!stagedPaths.has(path)) return undefined;
+    return laterUnusedName(name);
+  };
+  const sourceLines = new Map<string, string[]>();
   let result: LedgerCompactionResult;
   try {
     result = compactRotations(selection.sources.map((entry) => entry.path), {
@@ -458,44 +556,41 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
         if (!entry) throw new Error(`selected source disappeared from the manifest: ${path}`);
         const raw = fs.readFileSync(path);
         const body = entry.form === "gzip" ? fs.gunzipSync(raw) : raw;
-        return body.toString("utf8").split("\n");
+        const lines = body.toString("utf8").split("\n");
+        // Kept to order a replacement after the outputs holding this source's rows, without a second read.
+        sourceLines.set(path, lines);
+        return lines;
       },
       write: (name, body) => {
         const parts = splitArchiveBody(body, maxArchiveBytes);
-        const basePath = join(stateDir, name);
         parts.forEach((partBody, index) => {
-          const isSplit = parts.length > 1;
-          const isLast = index === parts.length - 1;
-          const canUseBase =
-            (!isSplit || isLast) && (!fs.existsSync(basePath) || selectedPaths.has(basePath)) && !stagedPaths.has(basePath);
-          let outputName = canUseBase ? name : "";
-          if (outputName === "") {
-            const timedName = archiveNameForChunk(name, partBody);
-            const timedPath = timedName ? join(stateDir, timedName) : "";
-            if (
-              timedName && timedPath !== basePath && !stagedPaths.has(timedPath) &&
-              (!fs.existsSync(timedPath) || selectedPaths.has(timedPath))
-            ) {
-              outputName = timedName;
-            } else {
-              let part = index + 1;
-              do {
-                outputName = archivePartName(name, part++);
-              } while (fs.existsSync(join(stateDir, outputName)) || stagedPaths.has(join(stateDir, outputName)));
-            }
+          let outputName = index === parts.length - 1 ? canonicalOutputName(name) : undefined;
+          const timedName = outputName === undefined ? archiveNameForChunk(name, partBody) : undefined;
+          if (timedName && timedName !== name) outputName = canonicalOutputName(timedName);
+          if (outputName === undefined) {
+            let part = index + 1;
+            do {
+              outputName = archivePartName(name, part++);
+            } while (!available(join(stateDir, outputName)));
           }
           const outputPath = join(stateDir, outputName);
           stagedPaths.add(outputPath);
-          staged.push({ name: outputName, body: partBody });
+          staged.push({ name: outputName, body: partBody, ...(entryByPath.has(outputPath) ? { replaces: outputPath } : {}) });
         });
       },
-      remove: (path) => removals.push(path),
       clock: fixedClock(now.getTime()),
     });
   } catch (err) {
     log(`rmd ledger-compact: cannot read the selected window — ${(err as Error)?.message ?? String(err)}`);
     return 1;
   }
+  const publishOrder = orderPublications(staged, (path) => sourceLines.get(path) ?? [], (entry) => {
+    stagedPaths.delete(entry.replaces!);
+    entry.name = laterUnusedName(entry.name);
+    stagedPaths.add(join(stateDir, entry.name));
+    delete entry.replaces;
+  });
+  sourceLines.clear();
   if (staged.length > 0) {
     // Report the actual per-day pieces (including collision-safe part names), not compactRotations'
     // unsplit base names.
@@ -510,7 +605,6 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
     result = { sourceCount: 0, rowsWritten: 0, duplicatesCollapsed: 0, archiveName: "", archiveNames: [] };
   }
 
-  const mode = rest.includes("--dry-run") ? "dry-run" : "apply";
   const report = reportFor(
     mode,
     olderThanDays,
@@ -537,9 +631,9 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   }
 
   // Every day's output is checked before ANY is written, so a refusal leaves the corpus untouched.
-  for (const { name } of staged) {
+  for (const { name, replaces } of staged) {
     const targetPath = join(stateDir, name);
-    if (fs.existsSync(targetPath) && !selectedPaths.has(targetPath)) {
+    if (replaces === undefined && fs.existsSync(targetPath)) {
       out(report);
       log(`rmd ledger-compact: refusing to overwrite unselected archive ${targetPath}`);
       return 1;
@@ -553,22 +647,80 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
   try {
     // W1-T13333: a daemon pass runs beside the live daemon. Compress first, then check each name again, so an
     // archive that landed on an output name during the slow compression is refused, never replaced.
-    const packed = staged.map(({ name, body }) => ({ targetPath: join(stateDir, name), bytes: fs.gzipSync(Buffer.from(body, "utf8")) }));
-    const landed = packed.find(({ targetPath }) => fs.existsSync(targetPath) && !selectedPaths.has(targetPath));
+    const packed = publishOrder.map(({ name, body, replaces }) =>
+      ({ targetPath: join(stateDir, name), replaces, bytes: fs.gzipSync(Buffer.from(body, "utf8")) }));
+    const landed = packed.find(({ targetPath, replaces }) => replaces === undefined && fs.existsSync(targetPath));
     if (landed) throw new Error(`refusing to overwrite unselected archive ${landed.targetPath}`);
-    for (const { targetPath, bytes } of packed) {
+    for (const { targetPath, replaces, bytes } of packed) {
       forgetMeasuredArchive(targetPath);
-      if (!fs.writeAtomic(targetPath, bytes)) {
+      if (replaces !== undefined) coldCopy(fs, stateDir, replaces, now.getTime());
+      const publish = replaces === undefined ? fs.writeAtomic : (fs.replaceAtomic ?? fs.writeAtomic);
+      if (!publish(targetPath, bytes)) {
         throw new Error(`atomic replacement withdrew before rename: ${targetPath}`);
       }
     }
-    coldStore(fs, stateDir, removals, now.getTime(), log);
+    const replaced = new Set(packed.flatMap(({ replaces }) => replaces ?? []));
+    coldStore(fs, stateDir, [...entryByPath.keys()].filter((path) => !replaced.has(path)), now.getTime(), log);
   } catch (err) {
     log(`rmd ledger-compact: apply failed — ${(err as Error)?.message ?? String(err)}`);
     return 1;
   }
   out(report);
   return 0;
+}
+
+interface StagedArchive {
+  name: string;
+  body: string;
+  /** The selected source this output replaces in place, keeping its name. */
+  replaces?: string;
+}
+
+/**
+ * W1-T13859: the order that keeps every row readable if a pass stops after any publication. New names go
+ * first. An output that replaces a source goes only after every other output holding that source's rows; when
+ * replacements wait on each other, one takes a later unused name instead (`rename`), as it did before.
+ */
+function orderPublications(
+  staged: StagedArchive[],
+  sourceLines: (path: string) => string[],
+  rename: (entry: StagedArchive) => void,
+): StagedArchive[] {
+  const pending = staged.filter((entry) => entry.replaces !== undefined);
+  if (pending.length === 0) return staged;
+  const bodies = new Map(staged.map((entry) => [entry, new Set(entry.body.split("\n").filter((line) => line !== ""))]));
+  const needs = new Map<StagedArchive, Set<StagedArchive>>();
+  for (const entry of pending) {
+    const lines = sourceLines(entry.replaces!).map((line) => line.trim()).filter((line) => line !== "");
+    needs.set(entry, new Set(staged.filter((other) => other !== entry && lines.some((line) => bodies.get(other)!.has(line)))));
+  }
+  const order = staged.filter((entry) => entry.replaces === undefined);
+  while (pending.length > 0) {
+    const ready = pending.findIndex((entry) => [...needs.get(entry)!].every((other) => !pending.includes(other)));
+    const [next] = pending.splice(ready === -1 ? 0 : ready, 1);
+    if (ready === -1) rename(next!);
+    order.push(next!);
+  }
+  return order;
+}
+
+/** W1-T13859: keep a replaced source recoverable in cold storage, as a moved one is. */
+function coldCopy(fs: LedgerCompactFs, stateDir: string, path: string, nowMs: number): void {
+  const { mkdirSync: mkdir, renameSync: rename, touch, mtimeMs } = fs;
+  if (!mkdir || !rename || !touch || !mtimeMs) return;
+  const coldDir = join(stateDir, LEDGER_COLD_STORE_DIRNAME);
+  mkdir(coldDir);
+  const target = coldTarget(fs, coldDir, path);
+  if (fs.copyFileSync) fs.copyFileSync(path, target);
+  else if (!fs.writeAtomic(target, fs.readFileSync(path))) throw new Error(`cannot copy ${path} into cold storage`);
+  touch(target, nowMs);
+}
+
+function coldTarget(fs: LedgerCompactFs, coldDir: string, path: string): string {
+  const original = join(coldDir, basename(path));
+  let target = original;
+  for (let copy = 1; fs.existsSync(target); copy += 1) target = `${original}.${copy}`;
+  return target;
 }
 
 /** Move each merged source into {@link LEDGER_COLD_STORE_DIRNAME}, then delete cold files past
@@ -582,7 +734,7 @@ export function coldStore(fs: LedgerCompactFs, stateDir: string, sources: readon
   const coldDir = join(stateDir, LEDGER_COLD_STORE_DIRNAME);
   mkdir(coldDir);
   for (const path of sources) {
-    const target = join(coldDir, basename(path));
+    const target = coldTarget(fs, coldDir, path);
     rename(path, target);
     touch(target, nowMs);
   }
