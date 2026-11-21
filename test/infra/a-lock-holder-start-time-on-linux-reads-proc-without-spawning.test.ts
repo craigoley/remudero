@@ -13,10 +13,21 @@ const PS_ETIME = "   05:30\n"; // what the ps spy answers: 5 min 30 s elapsed
 const PS_ARGS = ["-o", "etime=", "-p", String(PID)];
 const GETCONF_CALL = ["getconf", ["CLK_TCK"], { encoding: "utf8" }];
 
-/** `/proc/<pid>/stat`: pid, (comm), fields 3..21, starttime (field 22), then a tail. */
-function pidStat(startTicks: number | string, comm = "node", pid = PID): string {
+/** The 50 fields after comm in a Linux 3.5+ `/proc/<pid>/stat`: state (field 3) .. exit_code (field 52). */
+function pidStatFields(startTicks: number | string, pid = PID): string[] {
   const fields3to21 = ["S", "1", String(pid), String(pid), "0", "-1", "4194560", "100", "0", "0", "0", "5", "3", "0", "0", "20", "0", "1", "0"];
-  return `${pid} (${comm}) ${[...fields3to21, String(startTicks), "123456789", "4321"].join(" ")}\n`;
+  const fields23to52 = ["123456789", "4321", "18446744073709551615", "94827364", "94837364", "140734", "0", "0", "0", "0", "4096", "134234626",
+    "0", "0", "0", "17", "3", "0", "0", "0", "0", "0", "94839000", "94839500", "94840000", "140735", "140736", "140737", "140738", "0"];
+  return [...fields3to21, String(startTicks), ...fields23to52];
+}
+
+function pidStatLine(fields: string[], comm = "node", pid = PID): string {
+  return `${pid} (${comm}) ${fields.join(" ")}\n`;
+}
+
+/** `/proc/<pid>/stat`: pid, (comm), fields 3..21, starttime (field 22), then fields 23..52. */
+function pidStat(startTicks: number | string, comm = "node", pid = PID): string {
+  return pidStatLine(pidStatFields(startTicks, pid), comm, pid);
 }
 
 function procStat(btimeSec: number = BTIME_SEC): string {
@@ -186,6 +197,39 @@ test("W1-T11457 criterion 2: malformed start ticks take the original ps path", (
   }
 });
 
+/** Thirty days of uptime: a field shifted into the start-time slot then lands in the past, so no bound catches it. */
+const LONG_UPTIME_NOW = BTIME_SEC * 1000 + 30 * 86_400_000;
+
+/** Runs one Linux probe over a pid stat file and asserts it took ps (one call) and returned ps's answer. */
+function assertTakesPs(pidStatText: string, label: string): void {
+  const { sys, execCalls } = linuxSeam({ "/proc/stat": procStat(), [`/proc/${PID}/stat`]: pidStatText });
+  assert.equal(defaultGetProcessStartTime(PID, sys), Date.now() - 330_000, `${label}: ps's answer`);
+  assert.deepEqual(execCalls.filter((call) => call[0] === "ps"), [["ps", PS_ARGS, { encoding: "utf8" }]], `${label}: one ps call`);
+}
+
+test("W1-T11457 criterion 2: a stat record with the state field removed takes the ps path, not the next field as its start", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  const noState = pidStatFields(123_456).slice(1); // field 23 (vsize) now sits in the start-time slot
+  assertTakesPs(pidStatLine(noState), "state removed");
+  // The same misread at the kernel's field count (one field appended): only the state-letter check names it.
+  assertTakesPs(pidStatLine([...noState, "0"]), "state removed, field count kept");
+});
+
+test("W1-T11457 criterion 2: a stat record with an extra field inserted before starttime takes the ps path", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  for (const at of [1, 10, 19]) {
+    const fields = pidStatFields(123_456);
+    fields.splice(at, 0, "0");
+    assertTakesPs(pidStatLine(fields), `extra field at index ${at}`);
+  }
+});
+
+test("W1-T11457 criterion 2: a starttime that resolves to the future takes the ps path", (t) => {
+  t.mock.method(Date, "now", () => BTIME_SEC * 1000 + 2_000_000);
+  // 1_000_000 ticks at CLK_TCK 100 is 10 000 s after boot, 8 000 s after this pinned now.
+  assertTakesPs(pidStat(1_000_000), "start after now");
+});
+
 test("W1-T11457 criterion 2: a failed CLK_TCK lookup falls back to ps and getconf runs only once", (t) => {
   const now = BTIME_SEC * 1000 + 2_000_000;
   t.mock.method(Date, "now", () => now);
@@ -208,6 +252,11 @@ test("W1-T11457: the real default seam judges this live test process its own cur
 test("W1-T11457: on a real Linux kernel the /proc start agrees with ps's for this process", (t) => {
   if (process.platform !== "linux") { t.skip("reads the real /proc; the Mac has none"); return; }
   const fromProc = defaultGetProcessStartTime(process.pid);
+  // The strict layout must accept the kernel's own record: a real /proc read asks nothing of ps.
+  const spawned: unknown[] = [];
+  const spy = ((...args: Parameters<typeof execFileSync>) => (spawned.push(args[0]), execFileSync(...args))) as typeof execFileSync;
+  assert.equal(typeof defaultGetProcessStartTime(process.pid, { execFileSync: spy, platform: "linux" }), "number");
+  assert.deepEqual(spawned, ["getconf"], "the real record parses, so only the one CLK_TCK lookup runs");
   const before = Date.now();
   const fromPs = defaultGetProcessStartTime(process.pid, { execFileSync }); // no platform: today's ps path
   const drift = Date.now() - before;

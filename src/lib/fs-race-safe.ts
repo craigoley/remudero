@@ -433,6 +433,9 @@ function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, readClockRate: (
   return value;
 }
 
+/** `/proc/<pid>/stat` has 52 fields since Linux 3.5: pid, (comm), then these 50, a one-letter state first. */
+const PROC_PID_STAT_FIELDS_AFTER_COMM = 50;
+
 /** Read `/proc/stat`'s btime and `/proc/<pid>/stat`'s start ticks (field 22).
  *  A missing PID stat file returns `null`. Other failures return `undefined` for the ps fallback. */
 function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { btimeSec: number; startTicks: number } | null | undefined {
@@ -455,8 +458,11 @@ function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { 
   const prefix = `${pid} (`;
   const close = stat.lastIndexOf(")");
   if (!stat.startsWith(prefix) || close < prefix.length || stat[close + 1] !== " ") return undefined;
-  const startTicksText = stat.slice(close + 1).trim().split(/\s+/)[19];
-  if (startTicksText === undefined || !/^\d+$/.test(startTicksText)) return undefined;
+  // Only the exact layout is read: a missing or extra field shifts another number into field 22.
+  const fields = stat.slice(close + 1).trim().split(/\s+/);
+  if (fields.length !== PROC_PID_STAT_FIELDS_AFTER_COMM || !/^[A-Ztx]$/.test(fields[0])) return undefined;
+  const startTicksText = fields[19];
+  if (!/^\d+$/.test(startTicksText)) return undefined;
   const startTicks = Number(startTicksText);
   return Number.isSafeInteger(startTicks) ? { btimeSec, startTicks } : undefined;
 }
@@ -490,7 +496,9 @@ export function defaultGetProcessStartTime(
     if (fields !== undefined) {
       const hz = clockTicksPerSecond(sysImpl, () => run("getconf", ["CLK_TCK"]));
       // Whole-second btime can put the answer up to 1 s before the true start.
-      if (hz !== null) return fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
+      const startMs = hz === null ? NaN : fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
+      // A start after now or before boot is a misread record, not a process: ask ps.
+      if (startMs <= Date.now() && startMs >= fields.btimeSec * 1000) return startMs;
     }
   }
   let raw: string;
