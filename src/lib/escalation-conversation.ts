@@ -109,7 +109,7 @@ function sourceLayout(body: string): { order: "fields-first" | "machine-fields-l
 
 /** Undo the new writer's quoting of field-shaped lines above its machine fields (escalate.ts
  *  quoteMachineFieldLines adds exactly one leading space to each), so the detail reads back as written. */
-const QUOTED_MACHINE_FIELD_LINE_RE = /^ (?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
+export const QUOTED_MACHINE_FIELD_LINE_RE = /^ (?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
 function unquoteMachineFieldLines(text: string): string {
   return text.replace(QUOTED_MACHINE_FIELD_LINE_RE, "");
 }

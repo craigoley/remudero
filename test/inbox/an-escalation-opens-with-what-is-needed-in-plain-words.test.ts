@@ -10,13 +10,20 @@ import {
   escalationIssueCause,
   escalationIssueTitle,
   escalationTaskId,
+  MACHINE_FIELD_LINE_RE,
   matchDuplicateEscalation,
   renderIssueBody,
   SECTION_HEADING_LINE_RE,
+  SUMMARY_HEADING_WORD_RE,
   type Escalation,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
-import { createEscalationConversationReader, MACHINE_FIELDS_RE, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
+import {
+  createEscalationConversationReader,
+  MACHINE_FIELDS_RE,
+  parseEscalationConversationSource,
+  QUOTED_MACHINE_FIELD_LINE_RE,
+} from "#src/lib/escalation-conversation.js";
 import { issueTaskId, supersededDuplicates } from "#src/lib/issue-revalidation-garden.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { taskInputAnswer } from "#src/lib/worker.js";
@@ -227,10 +234,33 @@ test("section heading quoting matches reserved headings and rejects lookalikes",
   assert.equal(SECTION_HEADING_LINE_RE.test("## Details from the prior run"), false);
 });
 
+test("machine field quoting matches fields at the start of a line", () => {
+  assert.equal(MACHINE_FIELD_LINE_RE.test("Compare **Task:** PR-54321"), false);
+  assert.equal(MACHINE_FIELD_LINE_RE.test("**Task owner:** Operator"), false);
+  assert.equal(MACHINE_FIELD_LINE_RE.test("**Task:** PR-54321"), true);
+  assert.equal(MACHINE_FIELD_LINE_RE.test('  **Full summary (JSON):** "Prior summary"'), true);
+});
+
+test("summary quoting recognizes reserved heading words within the summary", () => {
+  assert.equal(SUMMARY_HEADING_WORD_RE.test("See ## Prior recommendation"), false);
+  assert.equal(SUMMARY_HEADING_WORD_RE.test("See ## recommendation"), true);
+  SUMMARY_HEADING_WORD_RE.lastIndex = 0;
+});
+
+test("machine field unquoting requires a leading space before a machine field label", () => {
+  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("**Head:** prior-head"), false);
+  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("  **Head count:** 3"), false);
+  assert.equal(QUOTED_MACHINE_FIELD_LINE_RE.test("  **Head:** prior-head"), true);
+  QUOTED_MACHINE_FIELD_LINE_RE.lastIndex = 0;
+});
+
 test("W1-T12041 criterion 2: reconciliation, answers and dedup read the new body order", async (t) => {
   const subject = {
     ...clipped,
-    detail: `${clipped.detail}\n\n**Task:** PR-54321\n**Head:** prior-head\n**Cause:** review\n**Contract:** prior-revision`,
+    detail: [
+      clipped.detail, "", "**Task:** PR-54321", "  **Head:** prior-head", "  **Head count:** 3",
+      "**Cause:** review", "**Contract:** prior-revision",
+    ].join("\n"),
     options: [{ label: "retry", detail: `Compare ${otherPrUrl} before retrying.` }, escalation.options[1]!],
   };
   const body = renderIssueBody(subject);

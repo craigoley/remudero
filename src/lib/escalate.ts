@@ -1127,7 +1127,7 @@ function quoteSectionHeadings(text: string): string {
  *  readers outside this module (the revalidation garden, sweep's head rewrite) take the FIRST such
  *  line, which in the fields-first order was always the producer's. One more leading space keeps
  *  the line rendered the same; escalation-conversation.ts removes it again when it reads the detail. */
-const MACHINE_FIELD_LINE_RE = /^(?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
+export const MACHINE_FIELD_LINE_RE = /^(?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
 function quoteMachineFieldLines(text: string): string {
   return text.replace(MACHINE_FIELD_LINE_RE, " ");
 }
@@ -1135,7 +1135,7 @@ function quoteMachineFieldLines(text: string): string {
 /** The summary is the only text this layout newly places above "## Options" and "## Recommendation".
  *  The answer reader finds those headings by an unanchored `##\s*<name>\s*\n`, so a summary ending in
  *  one would capture the next section; `#\#` renders the same and no longer reads as `##`. */
-const SUMMARY_HEADING_WORD_RE = /##(?=\s*(?:Decision Summary|Options|Recommendation|Details|Machine fields))/gi;
+export const SUMMARY_HEADING_WORD_RE = /##(?=\s*(?:Decision Summary|Options|Recommendation|Details|Machine fields))/gi;
 function quoteSummaryLine(summary: string): string {
   return quoteSectionHeadings(summary.replace(/[\r\n\u2028\u2029]/g, " ").replace(SUMMARY_HEADING_WORD_RE, "#\\#"));
 }
