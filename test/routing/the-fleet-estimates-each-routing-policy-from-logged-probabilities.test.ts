@@ -361,13 +361,13 @@ test("W1-T14146: the measurement cadence writes one routing.policy.estimate row 
       assert.equal(typeof estimate.decision.reason, "string");
     }
     // A second pass on the same day writes nothing; the next day writes each cell again.
-    assert.deepEqual(recordRoutingPolicyEstimates({ stateDir, today }), []);
+    assert.deepEqual(await recordRoutingPolicyEstimates({ stateDir, today }), []);
     assert.equal(read().length, 2);
-    assert.equal(recordRoutingPolicyEstimates({ stateDir, today: "2026-11-22" }).length, 2);
+    assert.equal((await recordRoutingPolicyEstimates({ stateDir, today: "2026-11-22" })).length, 2);
     assert.equal(read().length, 4);
-    assert.throws(() => recordRoutingPolicyEstimates({ stateDir, today: "2026-02-30" }), /invalid routing policy day/);
+    await assert.rejects(recordRoutingPolicyEstimates({ stateDir, today: "2026-02-30" }), /invalid routing policy day/);
     writeFileSync(join(stateDir, "ledger.2026-11-21T12-00-00-000Z.ndjson.gz"), "corrupt gzip");
-    assert.throws(() => recordRoutingPolicyEstimates({ stateDir, today: "2026-11-23" }), /routing policy ledger unreadable/);
+    await assert.rejects(recordRoutingPolicyEstimates({ stateDir, today: "2026-11-23" }), /routing policy ledger unreadable/);
     assert.deepEqual(meaningOfStep(ROUTING_POLICY_ESTIMATE_STEP)?.writer, ["recordRoutingPolicyEstimates"]);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -22822,7 +22822,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       // W1-T14146: the same provider choice, estimated from the auction's logged probabilities over all routed traffic.
-      recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      await recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own

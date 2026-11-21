@@ -4,7 +4,7 @@ import { fixedClock, systemClock } from "./clock.js";
 import { twoProportionSampleSize } from "./eval-card.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
 
 /**
@@ -438,16 +438,20 @@ export const ROUTING_POLICY_SOURCE_STEPS = ["worker.assignment", "verdict", "ver
 
 /** The measurement cadence's pass: one `routing.policy.estimate` row per cell per UTC day. A cell already written
  *  today is frozen for that day, concluded or not; the next day estimates it again from the larger log. */
-export function recordRoutingPolicyEstimates(opts: { stateDir: string; today?: string }): RoutingPolicyEstimate[] {
+export async function recordRoutingPolicyEstimates(opts: { stateDir: string; today?: string }): Promise<RoutingPolicyEstimate[]> {
   const today = opts.today ?? systemClock.iso().slice(0, 10);
   assertDay(today);
-  const read = readLedgerUnionRecordsSync(opts.stateDir, { refuseIncomplete: true,
-    step: [...ROUTING_POLICY_SOURCE_STEPS, ROUTING_POLICY_ESTIMATE_STEP] });
-  if (!read.ok) throw new Error(`routing policy ledger unreadable: ${read.unread.join(", ")}`);
-  const written = new Set(read.rows.flatMap((row) =>
+  // The daemon loop reaches this pass, so it streams the ledger off the event loop. Any unread file refuses
+  // the pass: an estimate from part of the log would read as a smaller, different experiment.
+  const unread: string[] = [];
+  const rows = await readLedgerUnionRecords(opts.stateDir, { step: [...ROUTING_POLICY_SOURCE_STEPS, ROUTING_POLICY_ESTIMATE_STEP],
+    onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
+    onUnreadDirectory: (path) => unread.push(path) });
+  if (unread.length > 0) throw new Error(`routing policy ledger unreadable: ${unread.join(", ")}`);
+  const written = new Set(rows.flatMap((row) =>
     row.step === ROUTING_POLICY_ESTIMATE_STEP && row.day === today && typeof row.cell_key === "string" ? [row.cell_key] : []));
   const recorded: RoutingPolicyEstimate[] = [];
-  for (const estimate of estimateRoutingPolicies(read.rows, today).cells) {
+  for (const estimate of estimateRoutingPolicies(rows, today).cells) {
     if (written.has(estimate.cellKey)) continue;
     appendLedger(join(opts.stateDir, LEDGER_FILENAME), { run_id: `ROUTING-POLICY-${estimate.cellKey}-${today}`,
       task_id: "FLEET", step: ROUTING_POLICY_ESTIMATE_STEP, cell_key: estimate.cellKey, day: today, estimate });
