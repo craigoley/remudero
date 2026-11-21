@@ -27,6 +27,13 @@
     - test/a-drafted-skill-is-selectable-for-its-own-task-type.test.ts
     - test/a-staged-skill-reaches-the-worker-prompt.test.ts
     - test/a-retracted-fact-is-pulled-from-what-cites-it.test.ts
+    # Amended 2026-11-21: these five stage drafts whose Procedure bullets are not action lines, so the
+    # not-an-action check (design 3) refuses them; their fixture bullets are reworded into action lines.
+    - test/a-signal-only-skill-draft-is-never-staged.test.ts
+    - test/legacy-skill-stamp-scanned-text.test.ts
+    - test/a-skill-draft-approval-only-ever-writes-the-skill.test.ts
+    - test/skill-draft-ratification.test.ts
+    - test/a-staged-skill-draft-is-evaluated-on-tasks-merged-after-it.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -89,6 +96,12 @@
          in that order. Grow procedures from ordered pairs and extend a procedure by one later step while
          its recurrence stays at or above `opts.minRuns` (default 2). Keep a procedure only when no longer
          procedure with the same recurrence contains it.
+       - Prune the growth. Plain growth from pairs is exponential on real ledgers (600 or more runs of 10 to 25
+         action steps each). Each run holds a step at most once, so a procedure has one fixed position per
+         step in each of its runs. When one step lies in the same gap of a procedure in every one of its runs
+         (before its first step, or between two of its steps), inserting that step keeps the same runs for
+         the procedure and for every extension of it, so none of them can be kept. The miner cuts that
+         branch. The result is the same set of procedures that plain growth returns.
        - A procedure is returned only when its runs belong to at least `opts.minTaskIds` (default 2)
          distinct task ids. One task repeated is one anecdote.
        - Each procedure carries `steps`, `recurrence`, `runIds`, `taskIds`, `medianSpannedCalls` (tool
@@ -99,12 +112,19 @@
        - The result is sorted by `score`, highest first, then by `steps` joined, so it is deterministic.
        - Add `outputTokens?: number` to `TranscriptRun`. retro.ts's `RunSummary` already has it.
     2. skill-workshop.ts: `renderSkillDraft(candidate, transcripts)` calls `mineRecurringProcedures` over the
-       transcript runs that are in the candidate's `runIds`, and drafts the highest-scored procedure.
+       transcript runs that are in the candidate's `runIds`, and drafts the highest-scored procedure whose
+       every step it can write as an action line (below). A step it cannot write (a bare tool name, or a
+       tool other than Bash, Edit, MultiEdit, NotebookEdit and Write) never reaches a draft; the next
+       procedure in score order that it can write is drafted instead.
        - Each step renders as an action line: a `Bash:` step as "- Run `<command>`", `Edit:<path>` as
          "- Change `<path>`", `Write:<path>` as "- Create `<path>`". No line names a tool (`Bash`, `Edit`,
          `Write`), because the scanner refuses a tool name outside the worker allowlist.
        - The name comes from the procedure, not the signal: the slug of the first two action steps, then
          the first 8 characters of the procedure key.
+       - The procedure key is the first 16 hex characters of the sha256 of the task type and the ordered
+         steps (`<type>|<step 1>|<step 2>|...`). One procedure keeps one proposal id as its runs grow, and two
+         candidates that draft the same procedure share one proposal. `procedureKeyFor` takes the task type
+         and the steps.
        - Evidence lists the recurrence, the task ids, `medianSpannedCalls`, `estimatedTokensPerRun` (or
          "tokens: not measured") and the score, then the `[src: run#...]` lines as today.
        - A candidate with no recurring action procedure gets no draft (`undefined`). The signal text is
@@ -117,7 +137,9 @@
        bullet starts with a verb from a data table `SKILL_ACTION_VERBS` (at least Run, Rerun, Change,
        Create, Add, Delete, Commit, Push, Fetch, Merge, Open, Reserve, Claim, Copy) and holds at least one
        backticked command or path. The refusal names the line, with a reason that starts `not-an-action`.
-       The existing outcome check stays.
+       The existing outcome check stays. The test drafts in the five amended test files whose Procedure
+       bullets are not action lines (`- step`, `- Verify the result.`) are reworded into action lines (for
+       example "- Run `npm run typecheck`."); each test keeps what it asserts.
     4. Fixtures: write the three drafts below to test/fixtures/recurring-procedure-skills/ exactly as given,
        with the evidence counts as of 2026-11-19. They are test fixtures and the operator's candidates. They
        are never written under .claude/skills/. Rule 15 is unchanged: a draft reaches the operator only as an
@@ -192,7 +214,7 @@
       - Open the failing check's log and copy each `<file>:<line>` under `diff-coverage: BLOCKED`, or each `not ok` test title.
       - Run `git diff origin/main...HEAD -- <file>` for each listed file to see the lines the change adds.
       - Run `rmd test-place <test path>` to choose the test folder.
-      - Add a test that drives each listed line through its production entry path.
+      - Add a test in the folder `rmd test-place` names that drives each listed line through its production entry path.
       - Run `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <test file>`.
       - Run `npm run diff-coverage:local -- <test files>` and confirm it lists no line.
       - Rerun each failing test file alone with the same command when the log lists `not ok` titles and no blocked line. When each passes alone on the same head, report a host flake with both results and change no file.

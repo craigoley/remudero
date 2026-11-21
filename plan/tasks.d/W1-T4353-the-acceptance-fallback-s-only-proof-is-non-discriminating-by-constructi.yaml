@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   band_meaning: blast-radius
-  budget_usd: 40.00
+  budget_usd: 4.50
   origin: "retro#1789341105445"
   plan_refs: ["§5", "W1-T1060", "W1-T3508"]
   files: [src/run-task.ts, scripts/acceptance-author-gate.mjs, test/a-fallback-acceptance-proof-must-not-be-diff-blind.test.ts]
