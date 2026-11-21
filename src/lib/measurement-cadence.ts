@@ -67,8 +67,8 @@ import { interventionFromLedgerRow, interventionKey, mostChangedFile, OPERATOR_I
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
-import { judgeCiLessonEfficacy, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson } from "./ci-lesson-recurrence.js";
-import { FLOW_LADDER, ladderOrigin, ownRedCauseKey } from "./flow-remedy-gardener.js";
+import { judgeCiLessonEfficacy, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson, type FiledCiLessonsRead } from "./ci-lesson-recurrence.js";
+import { CI_LESSON_HANDOFF_STEP, FLOW_LADDER, ladderOrigin, ownRedCauseKey } from "./flow-remedy-gardener.js";
 export { judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
 import {
@@ -3613,6 +3613,28 @@ export function mintCiLearningShards(
   // The weaker claim wins: a window that was never fully seen cannot report "clear".
   const status: CiLearningMintResult["status"] = blind ? "unreadable" : drafts.length > 0 ? "backlog" : "clear";
   return { status, drafts, excludedFindings, unreadableShas, ladder };
+}
+
+/** W1-T14140: the mint as both ci-learning callers run it — the scheduled rung (buildCiLearningCadenceRunner) and
+ *  `rmd ci-learning`. The plan's filed lessons are read first and handed to the mint when the read is measured, so a gate
+ *  whose newest lesson recurred reopens live; an unreadable read reopens nothing rather than judging a partial set. Each
+ *  ladder hand-off is written as the CI_LESSON_HANDOFF_STEP row the flow-remedy ladder reads beside the sweep's own. */
+export function mintCiLearningFromPlan(input: {
+  corpus: CiFailureCorpus;
+  alreadyFiledFindingIds: readonly string[];
+  handFix?: HandFixInput;
+  readLessons: () => FiledCiLessonsRead;
+  stateRoot: string;
+  runId: string;
+}): { result: CiLearningMintResult; filedLessons: FiledCiLessonsRead } {
+  const filedLessons = input.readLessons();
+  const result = mintCiLearningShards(input.corpus, input.alreadyFiledFindingIds, input.handFix,
+    filedLessons.status === "measured" ? filedLessons.lessons : undefined);
+  for (const h of result.ladder) {
+    appendLedger(join(input.stateRoot, "state", LEDGER_FILENAME), { run_id: input.runId, task_id: "DAEMON", step: CI_LESSON_HANDOFF_STEP,
+      gate: h.gate, cause: h.cause, origin: h.origin, finding_id: h.findingId, reopen: h.reopen, recurred_prs: h.recurredPrs });
+  }
+  return { result, filedLessons };
 }
 
 // W1-T2968: file W1-T2959's bounded drafts; Law 5 requires `author_class` to survive plan.ts parsing.

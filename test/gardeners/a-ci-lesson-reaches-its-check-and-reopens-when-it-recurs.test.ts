@@ -24,13 +24,13 @@ import {
   ciLearningReopenOf,
   ciLearningShardYaml,
   ciLessonReach,
+  mintCiLearningFromPlan,
   mintCiLearningShards,
   parseFiledCiLesson,
   type CiLearningShardDraft,
 } from "#src/lib/measurement-cadence.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
-import { buildCiLearningCadenceRunner, ciLearningCommand, ciLearningMintLessons } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const pair = (pr: number, gate = "ci-gate", state: CiFailurePair["state"] = "repaired"): CiFailurePair => ({
@@ -186,12 +186,6 @@ test("W1-T14140 criterion 5: the third reopen goes to the flow-remedy ladder, an
 const NOW = Date.parse("2026-11-21T12:00:00.000Z");
 const HOUR = 3_600_000;
 
-/** A pull-request window in which ci-gate went red and was repaired on each PR. */
-const repairedWindow = (...prs: number[]) => ({ prs: prs.map((number) => ({ number, commits: [
-  { sha: `aaa${number}`, rollup: [{ name: "ci-gate", conclusion: "FAILURE" }], changedFiles: ["src/lib/x.ts"] },
-  { sha: `bbb${number}`, rollup: [{ name: "ci-gate", conclusion: "SUCCESS" }], changedFiles: ["src/lib/x.ts"] },
-] })) }) as never;
-
 /** The flow-remedy ladder's inventory over `records`: PR 170 was held own-red by ci-gate, then merged by the fleet. */
 function flowCandidates(records: LedgerRecord[]): string[] {
   const iso = (h: number) => new Date(NOW + h * HOUR).toISOString();
@@ -208,36 +202,29 @@ function flowCandidates(records: LedgerRecord[]): string[] {
   return spec.inventory().candidates.map((p) => p.key);
 }
 
-test("W1-T14140 criterion 6: the measurement cadence hands the filed lessons to the mint, so a recurred gate reopens live", async (t) => {
-  const fixture = mkdtempSync(join(tmpdir(), "rmd-ci-lesson-cadence-"));
-  t.after(() => rmSync(fixture, { recursive: true, force: true }));
-  const root = join(fixture, "root");
-  const checkoutRoot = join(fixture, "checkout");
-  mkdirSync(join(root, "state"), { recursive: true });
-  mkdirSync(join(checkoutRoot, "plan", "tasks.d"), { recursive: true });
+test("W1-T14140 criterion 6: the measurement cadence hands the filed lessons to the mint, so a recurred gate reopens live", (t) => {
+  // mintCiLearningFromPlan is the mint step of both callers in src/run-task.ts (the scheduled rung and `rmd ci-learning`);
+  // test/ci-learning-safe-landing.test.ts drives those two callers end to end. This file does not import src/run-task.ts:
+  // the affected-suite reach ratchet holds its importer count.
+  const stateRoot = mkdtempSync(join(tmpdir(), "rmd-ci-lesson-cadence-"));
+  t.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+  mkdirSync(join(stateRoot, "state"), { recursive: true });
   const base = "ci-learning:100:ci-gate";
-  const cadence = async (origins: string[], lessons: ReturnType<NonNullable<Parameters<typeof buildCiLearningCadenceRunner>[0]["loadLessons"]>>) => {
-    const filed: string[] = [];
-    await buildCiLearningCadenceRunner({
-      root, checkoutRoot, loadWindow: () => repairedWindow(130), planOrigins: origins, pendingOrigins: () => [],
-      mergedOrigins: () => [], handFixInput: (at) => ({ rows: [], now: at }), loadLessons: () => lessons,
-      fileShards: ((drafts: CiLearningShardDraft[]) => { filed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
-      mintTaskId: () => "W1-T900006", recordFire: () => {}, recordAttempt: () => {}, windowDays: 1, clock: fixedClock(NOW),
-    })();
-    return filed;
-  };
+  const mint = (origins: string[], lessons: Parameters<typeof mintCiLearningFromPlan>[0]["readLessons"]) =>
+    mintCiLearningFromPlan({ corpus: corpus([pair(130)]), alreadyFiledFindingIds: origins, readLessons: lessons, stateRoot, runId: "CI-LEARNING-TEST" });
 
-  // The plan holds a lesson for ci-gate up to #120; #130 was refused after it landed. The cadence reopens it.
-  assert.deepEqual(await cadence([base], { status: "measured", lessons: [{ findingId: base, gate: "ci-gate", watermarkPr: 120 }] }),
-    ["ci-learning:130:ci-gate#r1"]);
+  // The plan holds a lesson for ci-gate up to #120; #130 was refused after it landed. The mint reopens it.
+  const live = mint([base], () => ({ status: "measured", lessons: [{ findingId: base, gate: "ci-gate", watermarkPr: 120 }] }));
+  assert.deepEqual(live.result.drafts.map((d) => d.findingId), ["ci-learning:130:ci-gate#r1"]);
+  assert.equal(live.filedLessons.status, "measured", "the read is handed back for the recurrence summary");
   // An unreadable plan read hands the mint nothing to judge, so the held gate stays dropped.
-  assert.deepEqual(await cadence([base], { status: "unreadable" }), []);
-  assert.equal(ciLearningMintLessons({ status: "unreadable" }), undefined);
+  assert.deepEqual(mint([base], () => ({ status: "unreadable" })).result.drafts, []);
 
-  // At the third reopen the cadence writes the hand-off the flow-remedy ladder reads, and drafts no lesson.
+  // At the third reopen the mint drafts no lesson and writes the hand-off the flow-remedy ladder reads.
   const filed = [base, "ci-learning:110:ci-gate#r1", "ci-learning:120:ci-gate#r2"];
-  assert.deepEqual(await cadence(filed, { status: "measured", lessons: [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 125 }] }), []);
-  const rows = readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((l) => JSON.parse(l) as LedgerRecord);
+  const third = mint(filed, () => ({ status: "measured", lessons: [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 125 }] }));
+  assert.deepEqual(third.result.drafts, []);
+  const rows = readFileSync(join(stateRoot, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((l) => JSON.parse(l) as LedgerRecord);
   const handoffs = rows.filter((r) => r.step === CI_LESSON_HANDOFF_STEP);
   assert.deepEqual(handoffs.map((r) => [r.gate, r.cause, r.origin, r.finding_id, r.reopen, r.recurred_prs]), [
     ["ci-gate", ownRedCauseKey("ci-gate"), "flow-blocker:own-red:ci-gate failed on <sha>", filed[2], 3, [130]],
@@ -245,17 +232,4 @@ test("W1-T14140 criterion 6: the measurement cadence hands the filed lessons to 
   // The flow ladder takes the handed-over check as a remedy candidate, though the fleet cleared its episode.
   assert.deepEqual(flowCandidates([]), [], "control: a cleared own-red episode is not a candidate by itself");
   assert.deepEqual(flowCandidates(handoffs), [ownRedCauseKey("ci-gate")]);
-
-  // The hand-run verb reads the same lessons and reopens the same way.
-  const landed: string[] = [];
-  const logs = t.mock.method(console, "log", () => {});
-  const code = ciLearningCommand(["--force"], {
-    root, checkoutRoot, loadWindow: () => repairedWindow(130), planOrigins: filed,
-    loadLessons: () => ({ status: "measured", lessons: [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 125 }] }),
-    landShards: ((drafts: CiLearningShardDraft[]) => { landed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
-  });
-  logs.mock.restore();
-  assert.equal(code, 0);
-  assert.deepEqual(landed, []);
-  assert.ok(logs.mock.calls.some((c) => String(c.arguments[0]).includes("HANDED TO THE FLOW LADDER ci-gate")));
 });

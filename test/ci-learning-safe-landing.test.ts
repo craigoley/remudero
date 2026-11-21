@@ -592,3 +592,40 @@ test("W1-T4190: an unreadable origin/main is reported, not read as no merged fin
   assert.equal(errors.length, 1, "the unreadable read is named once");
   assert.match(errors[0], /origin\/main's filed origins are unreadable.*bad revision/);
 });
+
+test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the filed lessons, so a recurred gate reopens live", async (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), "rmd-ci-learning-reopen-"));
+  const root = join(fixture, "root");
+  const checkoutRoot = join(fixture, "checkout");
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(join(checkoutRoot, "plan", "tasks.d"), { recursive: true });
+  // repairedWindow(): ci-gate went red on #4321 and was repaired. The plan's lesson for ci-gate is held up to #4300.
+  const base = "ci-learning:4200:ci-gate";
+  const measured = { status: "measured" as const, lessons: [{ findingId: base, gate: "ci-gate", watermarkPr: 4300 }] };
+  const cadence = async (lessons: { status: "unreadable" } | typeof measured) => {
+    const filed: string[] = [];
+    await buildCiLearningCadenceRunner({
+      root, checkoutRoot, loadWindow: () => repairedWindow(), planOrigins: [base], pendingOrigins: () => [], mergedOrigins: () => [],
+      handFixInput: (at) => ({ rows: [], now: at }), loadLessons: () => lessons, recordFire: () => {}, recordAttempt: () => {},
+      fileShards: ((drafts: CiLearningShardDraft[]) => { filed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
+      mintTaskId: () => "W1-T900006", windowDays: 1,
+    })();
+    return filed;
+  };
+  assert.deepEqual(await cadence(measured), ["ci-learning:4321:ci-gate#r1"], "the scheduled rung reopens the recurred gate");
+  assert.deepEqual(await cadence({ status: "unreadable" }), [], "an unreadable plan read reopens nothing");
+
+  // The hand-run verb: at the third reopen it drafts nothing and names the flow-ladder hand-off it wrote.
+  const filed = [base, "ci-learning:4250:ci-gate#r1", "ci-learning:4290:ci-gate#r2"];
+  const landed: string[] = [];
+  const logs = t.mock.method(console, "log", () => {});
+  const code = ciLearningCommand(["--force"], {
+    root, checkoutRoot, loadWindow: () => repairedWindow(), planOrigins: filed,
+    loadLessons: () => ({ status: "measured", lessons: [{ findingId: filed[2]!, gate: "ci-gate", watermarkPr: 4300 }] }),
+    landShards: ((drafts: CiLearningShardDraft[]) => { landed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; }) as never,
+  });
+  logs.mock.restore();
+  assert.equal(code, 0);
+  assert.deepEqual(landed, []);
+  assert.ok(logs.mock.calls.some((c) => String(c.arguments[0]).includes("HANDED TO THE FLOW LADDER ci-gate")), "the hand-off is named");
+});
