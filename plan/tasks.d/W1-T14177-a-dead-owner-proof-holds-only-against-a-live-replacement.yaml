@@ -14,6 +14,7 @@
     - src/lib/sweep.ts
     - src/cli/commands/review.ts
     - src/cli/commands/sweep.ts # amended 2026-11-21 for PR 20070: the one-shot sweep path wires the act-time re-reader the other two paths already pass
+    - src/lib/tick-read-worker.ts # amended 2026-11-21 for PR 20070: a recognisable claim in /status bypasses the status history there, so the act-time re-check must read the history's newest id
     - test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts
   status: queued
   attempts: 0
@@ -44,3 +45,4 @@
     ledger only: criterion 2's GitHub-only takeover admits a second review.
   note: |
     files: amendment 2026-11-21 (PR 20070 review round 1): criterion 2 asks the act-time re-check to fail closed when no re-reader is wired. The daemon and light sweep pass buildRereadPrAtAct; the one-shot rmd sweep path in src/cli/commands/sweep.ts does not, so failing closed there would hold every dead-owner retry that path admits. The build wires the same re-reader into that path. No criterion changes.
+    files: second amendment 2026-11-21 (PR 20070 review round 2 at 213568bb8): the board read in src/lib/tick-read-worker.ts takes a recognisable /status claim without reading /statuses history, so a takeover GitHub accepted before its ledger append still reads as the dead owner's claim. The build reads the history's newest id there. No criterion changes.
