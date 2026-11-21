@@ -2268,8 +2268,8 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     const previousGeneric = genericCodexBucket(previousRates);
     const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, previousGeneric),
       rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
-        .map(([id, b]) => [id, carryBalance(b, id === "codex" && currentRates.rateLimits == null
-          ? previousGeneric : previousRates?.rateLimitsByLimitId?.[id])])) };
+        .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id] ??
+          (id === "codex" ? previousGeneric : undefined))])) };
     let hasUnresetWindow = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,

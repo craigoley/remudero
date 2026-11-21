@@ -2947,7 +2947,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
               throw new CashDraftResumeBlockedError();
             }
             error.message += `; ${held}`;
-            publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
             throw error;
           }
         }

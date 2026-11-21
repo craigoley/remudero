@@ -33,6 +33,7 @@ import {
 } from "#src/lib/review-capacity.js";
 import {
   clearCodexCapacityCache,
+  OPENWEIGHT_ALLOWANCE_FILENAME,
   providerEligibility,
   readCodexCapacity,
   selectCodexModel,
@@ -698,16 +699,18 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
     a.state.now += 3_600_000; a.state.balance = "10"; clearCodexCapacityCache(); await a.read();
     a.fail(6 * 3_600_000);
   });
-  await refused("burned out when the generic bucket is exposed only by ID", async (a) => {
-    a.state.balance = "20";
-    a.state.genericSource = "top-level";
-    assert.equal((await a.read()).credits?.balance, 20);
-    a.state.now += 3_600_000;
-    a.state.balance = "10";
-    a.state.genericSource = "by-id";
-    assert.equal((await a.read()).credits?.balance, 10);
-    a.fail(6 * 3_600_000);
-  });
+  for (const source of ["by-id", "both"] as const) {
+    await refused(`burned out when the generic bucket gains a by-ID entry (${source})`, async (a) => {
+      a.state.balance = "20";
+      a.state.genericSource = "top-level";
+      assert.equal((await a.read()).credits?.balance, 20);
+      a.state.now += 3_600_000;
+      a.state.balance = "10";
+      a.state.genericSource = source;
+      assert.equal((await a.read()).credits?.balance, 10);
+      a.fail(6 * 3_600_000);
+    });
+  }
   // Control: the same burn half an hour on still carries (10 - 5 > 0), so the projection is what refuses.
   const soon = codexAccount(t);
   soon.state.balance = "20"; await soon.read();
@@ -732,6 +735,26 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
     await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; await a.read(); clearCodexCapacityCache(); a.fail();
   });
   await refused("absent", async (a) => { await a.read(); rmSync(a.lastGood); clearCodexCapacityCache(); a.fail(); });
+});
+
+test("W1-T13855 criterion 9: the by-ID generic bucket keeps its own credit history when the top-level reading falls", async (t) => {
+  const account = codexAccount(t);
+  account.state.balance = "20";
+  account.state.buckets.codex = { limitId: "codex",
+    primary: { usedPercent: 99, windowDurationMins: 10080, resetsAt: account.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  assert.equal((await account.read()).credits?.balance, 10);
+  account.state.now += 3_600_000;
+  account.state.balance = "10";
+  assert.equal((await account.read()).credits?.balance, 10);
+  account.fail(6 * 3_600_000);
+
+  const spawn = await routeSpawn(account);
+  assert.equal(spawn.decision?.rule, "codex-credits");
+  assert.deepEqual(spawn.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue,
+    { path: "carried", tier: "codex-credits", projectedBalance: 10, ageMs: 6 * 3_600_000, failureKind: "timeout" });
+  assert.equal(spawn.codexSpawns, 1);
+  assert.equal(spawn.cashSpawns, 0);
 });
 
 test("W1-T13855 criterion 9: a newly visible model with its own credits starts without measured credit burn", async (t) => {
@@ -872,6 +895,34 @@ test("W1-T13855 criterion 4: an ordinary successful cash fallback leaves a healt
     hostHealthy(account.state.now, after), BOUNDS).decision;
   assert.equal(review.reason, "healthy-window");
   assert.equal(review.effectiveWidth, BOUNDS.baseWidth);
+});
+
+test("W1-T13855 criterion 4: a blocked auction with exhausted cash allowance sheds review width", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  account.state.used = 40;
+  await routeSpawn(account, 80, { root, write: true });
+  const before = readProviderRoutingStatus(root, { now: () => account.state.now });
+  const review = (status: ProviderRoutingStatus) => selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth),
+    POLICY, hostHealthy(account.state.now, status), BOUNDS).decision;
+  assert.equal(before.state, "selected");
+  assert.equal(review(before).reason, "healthy-window");
+  assert.equal(review(before).effectiveWidth, 4);
+
+  writeFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), JSON.stringify({ utcDay: "2026-11-19", reservations: {
+    earlier: { reservedUsd: 20, settledUsd: null, deployment: "gpt-6-luna" },
+  } }));
+  account.state.now += 5_000;
+  account.state.used = 99;
+  account.state.balance = "0";
+  await assert.rejects(routeSpawn(account, 99, { root, write: true }), /cash daily allowance exhausted until/);
+
+  const after = readProviderRoutingStatus(root, { now: () => account.state.now });
+  const decision = review(after);
+  assert.deepEqual([decision.reason, decision.effectiveWidth], ["provider-refused", 3]);
+  assert.equal(after.state, "blocked");
+  assert.equal(after.observedAt, new Date(account.state.now).toISOString());
+  assert.equal(decision.evidence.providerCreditsLane, undefined);
 });
 
 test("W1-T13855 criterion 7 (creditsLaneRoom from review-capacity): a cash fallback after credits ran out leaves no credits room", async (t) => {
