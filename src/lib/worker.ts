@@ -2867,9 +2867,14 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined;
       // A fallback can still serve the work. Retire the previous credits signal without changing the review's quota reading.
-      const spawnFallback = (fallback: SpawnWorkerArgs) => {
+      const spawnFallback = (mountProvider: WorkerProviderId, fallback: Pick<SpawnWorkerArgs,
+        "cashSqueezed" | "cashOpusEmergency" | "cashSonnetEmergency" | "routingFallback" | "tools">) => {
         publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
-        return spawnWorker(fallback);
+        return spawnWorker({
+          ...args,
+          ...fallback,
+          mountProvider,
+        });
       };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
@@ -2883,9 +2888,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
-          return await spawnFallback({
-            ...args,
-            mountProvider: "cash",
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashOpusEmergency: true,
             routingFallback: { rule: "cash-opus-fallback", capacities },
@@ -2927,9 +2930,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             reason: "no subscription had readable headroom",
             requested_model: args.model,
           }));
-          return await spawnFallback({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashSonnetEmergency: true,
             routingFallback: { rule: "cash-sonnet-fallback", capacities },
@@ -2946,9 +2947,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // No "selected" status is written here: the auction really did block, and there is no
           // ProviderSelection to report -- inventing one would be the fabricated telemetry this
           // design refuses.
-          return await spawnFallback({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          return await spawnFallback("cash", {
             // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
@@ -2976,9 +2975,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnFallback({
-            ...args,
-            mountProvider: "claude" as WorkerProviderId,
+          return await spawnFallback("claude", {
             routingFallback: { rule: "overflow-fallback", capacities },
           });
         }
