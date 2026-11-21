@@ -8962,49 +8962,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
   const options = asyncFixRungOptions(opts, hostWorktreeGitAsync);
-  const { host, restore } = prepareScopeAmendmentReads(options, fixCommandHost());
-  return runFixRungFromModule(options, host).finally(restore);
-}
-
-function prepareScopeAmendmentReads(options: Parameters<typeof runFixRung>[0], host: FixCommandHost) {
-  const { deps, taskId } = options;
-  const { fetchPrBody, scopeAmendmentPortsIo } = deps;
-  if (deps.scopeAmendmentWritePorts || scopeAmendmentPortsIo?.findShardFn || /^PR-\d+$/.test(taskId)) {
-    return { host };
-  }
-
-  type Shard = Awaited<ReturnType<typeof findScopeAmendmentBaseShard>>;
-  let observed: { dir: string; result: PromiseSettledResult<Shard> } | undefined;
-  const readBody = fetchPrBody ?? host.fetchPrBodyViaGh;
-  // The scope writer is synchronous and always reads the PR identity first. Load its base
-  // alongside that read, and surface lookup errors only to a writer that uses the observation.
-  const readBodyWithScopeBase: typeof readBody = async (url) => {
-    if (url !== options.prUrl) return readBody(url);
-    const dir = options.worktreePath;
-    const [body, result] = await Promise.allSettled([
-      readBody(url),
-      findScopeAmendmentBaseShard(dir, taskId),
-    ]);
-    if (body.status === "rejected") throw body.reason;
-    observed = { dir, result };
-    return body.value;
-  };
-  deps.scopeAmendmentPortsIo = {
-    ...scopeAmendmentPortsIo,
-    findShardFn: (dir, id) => {
-      if (dir !== observed?.dir) return findTaskShard(dir, id);
-      if (observed.result.status === "rejected") throw observed.result.reason;
-      return observed.result.value;
-    },
-  };
-  if (fetchPrBody) deps.fetchPrBody = readBodyWithScopeBase;
-  return {
-    host: fetchPrBody ? host : { ...host, fetchPrBodyViaGh: readBodyWithScopeBase },
-    restore: () => {
-      deps.fetchPrBody = fetchPrBody;
-      deps.scopeAmendmentPortsIo = scopeAmendmentPortsIo;
-    },
-  };
+  return runFixRungFromModule(options, fixCommandHost());
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
@@ -9044,6 +9002,25 @@ export function buildProofAmendmentGitOps(git: (worktreePath: string, args: stri
       return git(worktreePath, ["rev-parse", "HEAD"]).trim();
     },
   };
+}
+
+async function buildFixScopeAmendmentWritePorts(
+  ...[params, io]: Parameters<typeof buildProofAmendmentWritePorts>
+): Promise<ProofAmendmentWritePorts> {
+  const { worktreePath, taskId } = params;
+  if (io?.findShardFn || /^PR-\d+$/.test(taskId)) return buildProofAmendmentWritePorts(params, io);
+
+  // Read the same base the amendment worktree starts from. Defer read errors until the
+  // writer needs the shard so it can still resume an existing amendment by identity.
+  const [observed] = await Promise.allSettled([findScopeAmendmentBaseShard(worktreePath, taskId)]);
+  return buildProofAmendmentWritePorts(params, {
+    ...io,
+    findShardFn: (dir, id) => {
+      if (dir !== worktreePath) return findTaskShard(dir, id);
+      if (observed.status === "rejected") throw observed.reason;
+      return observed.value;
+    },
+  });
 }
 
 async function findScopeAmendmentBaseShard(repoDir: string, taskId: string): Promise<ReturnType<typeof findTaskShard>> {
@@ -46417,7 +46394,7 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
-function fixCommandHost(): FixCommandHost {
+export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
     get CENSUS_PUSH_CHECK() { return CENSUS_PUSH_CHECK; },
@@ -46439,6 +46416,7 @@ function fixCommandHost(): FixCommandHost {
     get buildImportClosureRead() { return buildImportClosureRead; },
     get buildProofAmendmentGitOps() { return buildProofAmendmentGitOps; },
     get buildProofAmendmentWritePorts() { return buildProofAmendmentWritePorts; },
+    get buildFixScopeAmendmentWritePorts() { return buildFixScopeAmendmentWritePorts; },
     get buildSweepEffects() { return buildSweepEffects; },
     get checkFixCensusSnapshotAsync() { return checkFixCensusSnapshotAsync; },
     get readInheritedCensusContextAsync() { return readInheritedCensusContextAsync; },

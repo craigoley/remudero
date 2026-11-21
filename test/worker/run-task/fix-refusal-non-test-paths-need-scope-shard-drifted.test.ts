@@ -3,10 +3,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse } from "yaml";
+import { runFixRung } from "#src/cli/commands/fix.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { runFixRung } from "#test/helpers/run-task-test.js";
+import { fixCommandHost } from "#test/helpers/run-task-test.js";
 
 test("W1-T10581: fix_refusal:non-test-paths-need-scope-shard-drifted is prevented, not retried", async (t) => {
   await t.test("task shard", (sub) => checkAmendmentUsesMain(sub, "plan/tasks.d/W1-T10581-fixture.yaml"));
@@ -48,6 +49,7 @@ async function checkAmendmentUsesMain(t: TestContext, planPath: string, readFaul
   const rows: Record<string, unknown>[] = [];
   let identityReads = 0;
   let amendmentCuts = 0;
+  let workerRounds = 0;
   let amendedFiles: string[] | undefined;
   const result = await runFixRung({
     taskId, task: { id: taskId, title: "repair", files: ["src/fix.ts"] }, runId: "scope-fixture",
@@ -58,6 +60,7 @@ async function checkAmendmentUsesMain(t: TestContext, planPath: string, readFaul
     reviewBase: { owner: "acme", repo: "repo", headCheckoutDir: repo.dir, reviewerMount: mount },
     deps: {
       spawn: async () => {
+        workerRounds++;
         writeFileSync(join(repo.dir, "src/needed.ts"), "needed repair\n");
         return {
           text: "FIX_OUTCOME: NEEDS_SCOPE src/needed.ts", blocks: [], sessionId: "fix", costUsd: 0,
@@ -97,9 +100,11 @@ async function checkAmendmentUsesMain(t: TestContext, planPath: string, readFaul
       ledgerPath: join(repo.dir, "ledger.ndjson"), ledgerLines: () => rows,
       log: (step, extra) => { rows.push({ step, task_id: taskId, ...extra }); }, say: () => {}, account: (r) => r,
     },
-  });
+  }, fixCommandHost());
 
-  assert.equal(result.reason, "awaiting scope amendment merge");
+  assert.equal(result.reason, "awaiting scope amendment merge", JSON.stringify(rows.filter((row) =>
+    row.step === "fix.scope_amendment" || row.step === "fix.commit_refused")));
+  assert.equal(workerRounds, 1);
   assert.equal(amendmentCuts, 1);
   assert.deepEqual(amendedFiles, ["src/fix.ts", "src/from-main.ts", "src/needed.ts"]);
   const scopeRows = rows.filter((row) => row.step === "fix.scope_amendment" && row.outcome);

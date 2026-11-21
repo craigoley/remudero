@@ -96,6 +96,9 @@ export interface FixCommandHost {
   readonly buildImportClosureRead: HostFn;
   readonly buildProofAmendmentGitOps: RunTaskCommandHost["buildProofAmendmentGitOps"];
   readonly buildProofAmendmentWritePorts: RunTaskCommandHost["buildProofAmendmentWritePorts"];
+  readonly buildFixScopeAmendmentWritePorts: (
+    ...args: Parameters<RunTaskCommandHost["buildProofAmendmentWritePorts"]>
+  ) => Promise<ReturnType<RunTaskCommandHost["buildProofAmendmentWritePorts"]>>;
   readonly buildSweepEffects: HostFn;
   readonly preserveInheritedCensusWork: RunTaskCommandHost["preserveInheritedCensusWork"];
   readonly readInheritedCensusContextAsync: RunTaskCommandHost["readInheritedCensusContextAsync"];
@@ -2605,7 +2608,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     try {
       const body = await (deps.fetchPrBody ?? host.fetchPrBodyViaGh)(opts.prUrl);
       const trailers = [...body.matchAll(/^Remudero-Task:[ \t]*(\S+)[ \t]*$/gm)];
-      const ports = deps.scopeAmendmentWritePorts ?? host.buildProofAmendmentWritePorts({
+      const ports = deps.scopeAmendmentWritePorts ?? await host.buildFixScopeAmendmentWritePorts({
         taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
         owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
         ledgerLinesNow: (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), log: deps.log,
