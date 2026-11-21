@@ -281,3 +281,17 @@ test("a revert that cannot land leaves its canary as it was, and the pass still 
   await assert.rejects(h.tend(), /rollback line changed or ambiguous: plan\/tasks\.d\/W1-T960-z\.yaml; config gardener: rollback line changed or ambiguous/);
   assert.equal(h.landed.length, 2, "neither opens a revert");
 });
+
+test("a revert whose line cannot ride a PR body verbatim opens no PR", async () => {
+  const { h } = await thinExposedCanary();
+  const [real] = readConfigCanaries(h.deps.stateDir);
+  // A CRLF file: the line put back ends in a carriage return, which a PR body cannot carry, so no proof can name it.
+  put(h.deps.repoRoot, "scripts/crlf-baseline.yaml", "caps:\r\n  budget_usd: 9.00\r\n");
+  const crlf = { ...real!, edits: [{ path: "scripts/crlf-baseline.yaml", from: "  budget_usd: 30.00\r", to: "  budget_usd: 9.00\r" }] };
+  writeConfigCanaries(h.deps.stateDir, [crlf]);
+  h.advance(CANARY_TTL_MS + HOUR);
+  await assert.rejects(h.tend(), /the rollback proof for scripts\/crlf-baseline\.yaml would not tell the revert from the tree before it/);
+  assert.equal(h.landed.length, 1, "no revert PR opens");
+  assert.deepEqual(readConfigCanaries(h.deps.stateDir), [crlf], "the canary is left as it was");
+  assert.ok(h.gardenState().pending, "its class stays pending");
+});
