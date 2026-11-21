@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// @ts-expect-error The executable JavaScript module has no declaration file.
+import { codeqlProvenance } from "#scripts/code-health-provenance.mjs";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { validateCodeHealthAssessment, type CodeHealthAssessment } from "#src/lib/code-health-contract.js";
 import { readCodeHealthQualityEvidence } from "#src/lib/code-health-collector.js";
@@ -173,6 +175,19 @@ function extractedOutput(language = "javascript-typescript", family = "js") {
   };
   return { ...input, sarif: { ...input.sarif, runs: [sarifRun] } };
 }
+
+test("the CodeQL provenance function returns metadata for original extracted files", () => {
+  const result = codeqlProvenance(extractedOutput());
+  assert.equal(result.version, "code-health-source-v1");
+  assert.equal(result.state, "complete");
+  assert.deepEqual(result.scope, {
+    kind: "codeql-extracted-files",
+    fileCount: 2,
+    hash: createHash("sha256")
+      .update(JSON.stringify(["codeql-extracted-files", ["src/another.ts", "src/check file.ts"]]))
+      .digest("hex"),
+  });
+});
 
 test("Code health preserves original extracted-file coverage with its own method identity", () => {
   const paths = ["src/another.ts", "src/check file.ts"];
