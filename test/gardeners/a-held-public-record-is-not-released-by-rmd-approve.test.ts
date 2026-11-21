@@ -683,6 +683,29 @@ test("W1-T13785 criterion 5: a record either public view's composition holds is 
   assert.ok(sound >= 5, `sound records (${sound})`);
 });
 
+test("W1-T13785 criterion 4: an ops refusal origin/main no longer holds is probed through the strict fallback, which can still hold it", async t => {
+  const id = "OPS-ON-NEW";
+  const main = publicMain(t, PUBLIC_TEXT);
+  const fx = opsCatalog(t, SOUND_OPS + record(id, ["PUB-NEW"]));
+  const rows: Row[] = [];
+  assert.deepEqual(await readApproveRelease(id, loadPlan(main.planPath), main.dir, fx.lookup, row => rows.push({ ts: iso(NOW), ...row })),
+    { outcome: "held", hold: { reason: BAD_EDGE, task: id, dependsOn: "PUB-NEW" } });
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  const ports = productionStuckStatePorts({
+    stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [], api: fx.api,
+    log: () => undefined, escalate: () => null, destinationRead: async () => undefined, approve: async () => 1,
+  });
+  // origin/main gains PUB-NEW beside a public-to-ops edge, so it loads only with deferred edges; the strict fallback
+  // (the working tree) still lacks PUB-NEW and holds the record.
+  main.publish(PUBLIC_TEXT + record("PUB-NEW") + record("PUB-REV", ["OPS-GOOD"]));
+  assert.deepEqual(await ports.probe(item), { present: true, reason: "held" });
+  writeFileSync(main.planPath, PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  assert.deepEqual(await ports.probe(item), { present: true, reason: "public-replay-plan-invalid" }, "no strict view at all");
+  main.publish(PUBLIC_TEXT + record("PUB-NEW"));
+  assert.deepEqual(await ports.probe(item), { present: false, digest: item.digest }, "a strict origin/main with PUB-NEW clears it");
+});
+
 test("W1-T13785 criterion 4: an existing ops refusal stays held in the probe and approve until origin/main clears it, whatever the working tree holds", async t => {
   const id = "OPS-ON-BOOT";
   const main = publicMain(t, PUBLIC_TEXT);
