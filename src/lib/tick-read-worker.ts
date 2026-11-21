@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, reviewStatusOwnerRun, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -610,14 +610,15 @@ export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefine
 }
 
 /** W1-T14035: the run that owns the live `remudero-review` status, read off its own description ("owned by run <id>",
- *  which every claim postReviewPending posts carries). Absent or another wording is an unknown run, never a match. */
+ *  which every pending post carries: a claim from postReviewPending, and a hold through publishReviewStatusLocked or the
+ *  ops catalog poster). Absent or another wording is an unknown run, never a match. */
 export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
-  return /\(owned by run ([^)\s]+)\)/.exec(r?.description ?? "")?.[1];
+  return reviewStatusOwnerRun(r?.description);
 }
 
-/** W1-T14035: the run that published a live pending `remudero-review` status. A claim names its run in the description.
- *  A hold (a pending verdict: promise harvest, cannot-evaluate, host load) names none, so it is bound to the run whose
+/** W1-T14035: the run that published a live pending `remudero-review` status. Every pending post now names its run. A hold
+ *  posted before that (a pending verdict: promise harvest, cannot-evaluate, host load) names none, so it is bound to the run whose
  *  `review.posted` pending row is the newest pending publication on this PR and head, and only while that row's own
  *  summary is the live description. Anything else is an unknown run: no row, another run's row, a newer claim row, or a
  *  description the row did not post. WRITE ORDER: a review run writes its claim row after GitHub accepts the claim, and

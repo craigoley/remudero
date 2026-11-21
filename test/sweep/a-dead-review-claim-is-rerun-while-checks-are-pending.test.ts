@@ -13,7 +13,9 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewInputDigest, type ReviewVerdict } from "#src/lib/review.js";
+import { judgeReview, postReviewStatusGuarded, recoverPromisedFollowUpReports, reviewInputDigest, reviewPendingDescriptionWithOwner,
+  reviewStatusOwnerRun, type ReviewVerdict } from "#src/lib/review.js";
+import { catalogReviewPoster } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 
@@ -281,24 +283,30 @@ test("W1-T14035 criterion 2: green checks with an inconclusive-load hold and a d
   assert.equal(h.posted.length, 1);
 });
 
-/** A production promise-harvest hold, published by `run` through the real review code path: the harvest fails on a ledger
- *  that is not the union's live file, judgeReview turns that into its pending summary, the guarded post publishes it, and
- *  the review lane writes its `review.posted` pending row, undigested as a hold whose PR body was unread is. Returns the
- *  description GitHub received, which names no run. */
-async function publishPromiseHarvestHold(ledgerPath: string, run: string, verdictFor?: () => ReviewVerdict): Promise<string> {
+const DEAD = "review-PR19791-dead";
+const OPS_HOLD = "remudero-review: pending — detailed evidence retained on host";
+
+/** A production hold, published by `run` through the real review code path: the harvest fails on a ledger that is not the
+ *  union's live file, judgeReview turns that into its pending summary, the guarded post publishes it through the catalog
+ *  poster the review lane uses (the ops one redacts it), and the lane writes its `review.posted` pending row, undigested
+ *  as a hold whose PR body was unread is. Returns the description GitHub received, or with `legacy` the summary a hold
+ *  posted before every pending post named its run carried. */
+async function publishHold(ledgerPath: string, run: string, opts: {
+  verdictFor?: () => ReviewVerdict; catalog?: "ops"; codeSha?: string; legacy?: true;
+} = {}): Promise<string> {
   const sha = "d".repeat(40);
   const prUrl = "https://github.com/o/r/pull/19791";
   const observation = await recoverPromisedFollowUpReports(
     { state: "complete", promised: [{ path: "docs/adr/0001-cache.md", text: "file a follow-up for the cache" }], planRecords: [] } as never,
     { ledgerPath: `${ledgerPath}.elsewhere`, taskId: "W1-T14035", prUrl, prCreatedAt: minutesAgo(60) });
-  const verdict = verdictFor?.() ?? judgeReview([], { diff: "", report: "", promisedFollowUpObservation: observation } as never);
+  const verdict = opts.verdictFor?.() ?? judgeReview([], { diff: "", report: "", promisedFollowUpObservation: observation } as never);
   assert.equal(verdict.state, "pending");
   assert.equal(verdict.capped, false, "an uncapped verdict posts its summary as the description");
   let posted: string | undefined;
   const result = await postReviewStatusGuarded({
     owner: "o", repo: "r", sha, state: "pending", verdict, description: verdict.summary, taskId: "W1-T14035",
     evidence: "no_evidence", ledgerPath, runId: run, prUrl, fetchLifecycle: () => ({ merged: false, closed: false }),
-    post: async (status) => { posted = status.description?.slice(0, 140); },
+    post: catalogReviewPoster(opts.catalog ?? "public", async (status) => { posted = status.description; }, opts.codeSha),
   });
   assert.equal(result.posted, true, result.reason);
   appendLedger(ledgerPath, {
@@ -306,20 +314,33 @@ async function publishPromiseHarvestHold(ledgerPath: string, run: string, verdic
     head_sha: sha, pr_url: prUrl, decision_verdict: verdict, ts: minutesAgo(20),
   });
   assert.ok(posted);
-  assert.doesNotMatch(posted, /owned by run/, "the production hold wording names no run");
-  return posted;
+  assert.ok(posted.length <= 140, `GitHub keeps the whole description: ${posted.length} characters`);
+  assert.equal(reviewStatusOwnerRun(posted), run, "the posted hold names the run that published it");
+  assert.ok(posted.endsWith(` (owned by run ${run})`), "the marker is never cut");
+  return opts.legacy ? verdict.summary : posted;
 }
+
+test("W1-T14035 criterion 1: every pending post names its run within 140 characters, cutting the text and never the marker", () => {
+  const long = `remudero-review: promise-harvest-incomplete — ${"x".repeat(200)}`;
+  const named = reviewPendingDescriptionWithOwner(long, DEAD);
+  assert.equal(named.length, 140);
+  assert.ok(named.endsWith(` (owned by run ${DEAD})`));
+  const claim = `remudero-review: review in progress (owned by run ${DEAD})`;
+  assert.equal(reviewPendingDescriptionWithOwner(claim, DEAD), claim, "a claim that names its run is posted as it is");
+  const quoting = reviewPendingDescriptionWithOwner("remudero-review: cannot-evaluate — quoted (owned by run review-old)", DEAD);
+  assert.equal(reviewStatusOwnerRun(quoting), DEAD, "the publisher's own marker outranks a quoted one");
+  assert.equal(reviewStatusOwnerRun(OPS_HOLD), undefined, "a description with no marker names no run");
+});
 
 test("W1-T14035 criterion 1: a production promise-harvest hold published by the dead run is released alongside CI", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   let wording = "";
-  const pr = await producedView(dir, { runId: "review-PR19791-dead" }, async (ledgerPath) =>
-    (wording = await publishPromiseHarvestHold(ledgerPath, "review-PR19791-dead")));
+  const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) => (wording = await publishHold(ledgerPath, DEAD)));
   assert.match(wording, /^remudero-review: promise-harvest-incomplete — promise harvest unavailable: /);
   assert.equal(pr.reviewPendingOwnerDead, true, "the producer proved the claiming run dead");
   assert.equal(pr.priorReviewAttemptsForInput ?? 0, 0, "the hold judged no input of this head");
-  assert.equal(pr.reviewPendingStatusRunId, "review-PR19791-dead", "the hold is bound to the run whose row published it");
+  assert.equal(pr.reviewPendingStatusRunId, DEAD, "the hold names the run that published it");
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "post-review");
   assert.equal(r.blocker, "awaiting-ci");
@@ -332,29 +353,52 @@ test("W1-T14035 criterion 1: a production cannot-evaluate hold published by the 
   const adrDiff = "diff --git a/docs/adr/0001-cache.md b/docs/adr/0001-cache.md\n--- a/docs/adr/0001-cache.md\n" +
     "+++ b/docs/adr/0001-cache.md\n@@ -1 +1,2 @@\n # Cache\n+We will file a follow-up.\n";
   let wording = "";
-  const pr = await producedView(dir, { runId: "review-PR19791-dead" }, async (ledgerPath) =>
-    (wording = await publishPromiseHarvestHold(ledgerPath, "review-PR19791-dead",
-      () => judgeReview([], { diff: adrDiff, report: "" } as never))));
+  const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) =>
+    (wording = await publishHold(ledgerPath, DEAD, { verdictFor: () => judgeReview([], { diff: adrDiff, report: "" } as never) })));
   assert.match(wording, /^remudero-review: cannot-evaluate — /);
-  assert.equal(pr.reviewPendingStatusRunId, "review-PR19791-dead");
+  assert.equal(pr.reviewPendingStatusRunId, DEAD);
+  assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
+});
+
+test("W1-T14035 criterion 1: an ops hold the catalog poster redacted is released alongside CI by the run it names", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const codeSha of [undefined, "c".repeat(40)]) {
+    let wording = "";
+    const pr = await producedView(dir, { runId: DEAD }, async (ledgerPath) =>
+      (wording = await publishHold(ledgerPath, DEAD, { catalog: "ops", codeSha })));
+    assert.equal(wording, `${OPS_HOLD} (owned by run ${DEAD})`, "the redaction replaced the summary and kept the owner");
+    assert.equal(pr.reviewPendingStatusRunId, DEAD);
+    const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "post-review", `code sha ${codeSha ?? "absent"}`);
+    assert.match(r.reason, /remudero-review owner proven dead/);
+  }
+});
+
+test("W1-T14035 criterion 1: a hold posted before pending posts named their run is bound by its ledger row", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pr = await producedView(dir, { runId: DEAD }, (ledgerPath) => publishHold(ledgerPath, DEAD, { legacy: true }));
+  assert.equal(pr.reviewPendingStatusRunId, DEAD, "the dead run's newest pending row posted that summary");
   assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
 });
 
 test("W1-T14035 criterion 2: runSweep records the dead-owner reason for a production promise-harvest hold", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const pr = await producedView(dir, { runId: "review-PR19791-dead" }, (ledgerPath) =>
-    publishPromiseHarvestHold(ledgerPath, "review-PR19791-dead"));
-  const h = sweepHarness(t);
-  const ledgerPath = join(dir, "ledger.ndjson");
-  await runSweep([pr], { ...h.deps, ledgerPath }, DEFAULT_SWEEP_POLICY);
-  const row = readLedgerLines(ledgerPath).findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
-  assert.ok(row, "the sweep disposed the head");
-  assert.equal(row.disposition, "post-review");
-  assert.equal(row.owner_gone_cause, "promise-harvest-incomplete");
-  assert.equal(row.reason, "checks pending 42m, remudero-review owner proven dead (its promise harvest did not complete) — " +
-    "re-running one exact-input review alongside CI through the bounded post-review lane");
-  assert.equal(h.posted.length, 1);
+  for (const catalog of [undefined, "ops"] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const pr = await producedView(dir, { runId: DEAD }, (ledgerPath) => publishHold(ledgerPath, DEAD, { catalog }));
+    const h = sweepHarness(t);
+    const ledgerPath = join(dir, "ledger.ndjson");
+    await runSweep([pr], { ...h.deps, ledgerPath }, DEFAULT_SWEEP_POLICY);
+    const row = readLedgerLines(ledgerPath).findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
+    assert.ok(row, "the sweep disposed the head");
+    assert.equal(row.disposition, "post-review", catalog ?? "public");
+    assert.equal(row.owner_gone_cause, "promise-harvest-incomplete");
+    assert.equal(row.reason, "checks pending 42m, remudero-review owner proven dead (its promise harvest did not complete) — " +
+      "re-running one exact-input review alongside CI through the bounded post-review lane");
+    assert.equal(h.posted.length, 1);
+  }
 });
 
 test("W1-T14035 criterion 3: a hold the ledger does not bind to the dead run still waits", async (t) => {
@@ -363,17 +407,22 @@ test("W1-T14035 criterion 3: a hold the ledger does not bind to the dead run sti
   const cases: Array<[string, (ledgerPath: string) => Promise<string | undefined>]> = [
     ["no run's row published the live hold", async () =>
       "remudero-review: promise-harvest-incomplete — promise harvest unavailable: Error: a newer run's harvest"],
-    ["another run published the hold after the dead claim", (ledgerPath) =>
-      publishPromiseHarvestHold(ledgerPath, "review-PR19791-other")],
+    ["another run published the hold after the dead claim", (ledgerPath) => publishHold(ledgerPath, "review-PR19791-other")],
+    ["another run published an ops hold after the dead claim", (ledgerPath) =>
+      publishHold(ledgerPath, "review-PR19791-other", { catalog: "ops" })],
     ["the live hold is not the dead run's posted wording", async (ledgerPath) => {
-      await publishPromiseHarvestHold(ledgerPath, "review-PR19791-dead");
+      await publishHold(ledgerPath, DEAD, { legacy: true });
       return "remudero-review: cannot-evaluate — promise harvest corpus is unreadable or malformed; a newer post";
+    }],
+    ["a redacted ops hold that names no run", async (ledgerPath) => {
+      await publishHold(ledgerPath, DEAD, { catalog: "ops", legacy: true });
+      return OPS_HOLD;
     }],
   ];
   for (const [label, afterClaim] of cases) {
-    const pr = await producedView(dir, { runId: "review-PR19791-dead" }, afterClaim);
+    const pr = await producedView(dir, { runId: DEAD }, afterClaim);
     assert.equal(pr.reviewPendingOwnerDead, true, `${label}: the producer still proves the claiming run dead`);
-    assert.notEqual(pr.reviewPendingStatusRunId, "review-PR19791-dead", `${label}: the live status is not bound to the dead run`);
+    assert.notEqual(pr.reviewPendingStatusRunId, DEAD, `${label}: the live status is not bound to the dead run`);
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(r.disposition, "wait", label);
     assert.doesNotMatch(r.reason, /owner proven dead/, label);
