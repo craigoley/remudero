@@ -11,6 +11,11 @@
   attempts: 0
   author_class: machine
   origin: "scout:engine.build_failed"
+  files:
+    - plan/tasks.d/W1-T12438-scout-engine-build-failed.yaml
+  acceptance:
+    - claim: "the retired record declares NO-INVARIANTS, since retirement adds no behavior"
+      proof: "grep: NO-INVARIANTS: the symptom stopped recurring in plan/tasks.d/W1-T12438-scout-engine-build-failed.yaml"
   note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
   rationale: |
     The ledger step engine.build_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 7 in the newer.
