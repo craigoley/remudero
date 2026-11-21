@@ -24,6 +24,9 @@ import {
 } from "#src/lib/review.js";
 
 const STORE = "proof-dependency-seeds";
+/** The priming a proof run asks for (execWhitelistedProof's own call); a bare call is any other caller's, such as a
+ *  paired trial's worker tree, which never reaches the state-dir store. */
+const PROOF = { proofTree: true } as const;
 const SEED_KEY = /^[a-f0-9]{64}$/;
 
 interface World {
@@ -51,21 +54,24 @@ interface InstallRow {
   wall_ms: number;
 }
 
-/** A fake npm: logs argv and cwd, answers --version, and `ci` writes every lockfile package after a short wait so
- *  two concurrent primes genuinely overlap. */
-function fakeNpm(log: string): string {
+/** A fake npm: logs argv and cwd, answers --version, and `ci` writes every lockfile package after a wait (300 ms, or
+ *  the milliseconds in the world's `ci-delay-ms` file) so two concurrent primes genuinely overlap. Each package it
+ *  writes is a real ES module exporting its locked version, so a proof run on the tree executes what was installed. */
+function fakeNpm(log: string, delayFile: string, version = "10.9.9"): string {
   return `#!${process.execPath}
 const fs = require("node:fs"), path = require("node:path");
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }) + "\\n");
-if (process.argv[2] === "--version") { console.log("10.9.9"); process.exit(0); }
+if (process.argv[2] === "--version") { console.log(${JSON.stringify(version)}); process.exit(0); }
 if (process.argv[2] === "ci") {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+  const delay = fs.existsSync(${JSON.stringify(delayFile)}) ? Number(fs.readFileSync(${JSON.stringify(delayFile)}, "utf8")) : 300;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
   const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
   for (const [name, pkg] of Object.entries(lock.packages || {})) {
     if (!name.startsWith("node_modules/")) continue;
     const dir = path.join("node_modules", name.slice("node_modules/".length));
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: name.slice("node_modules/".length), version: pkg.version }));
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: name.slice("node_modules/".length), version: pkg.version, type: "module", exports: "./index.mjs" }));
+    fs.writeFileSync(path.join(dir, "index.mjs"), "export const version = " + JSON.stringify(pkg.version) + ";\\n");
     fs.writeFileSync(path.join(dir, "vitest.mjs"), "");
   }
 }
@@ -83,7 +89,7 @@ function world(): World {
   mkdirSync(state, { recursive: true });
   mkdirSync(bin);
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root: instance }));
-  writeFileSync(join(bin, "npm"), fakeNpm(log), { mode: 0o755 });
+  writeFileSync(join(bin, "npm"), fakeNpm(log, join(root, "ci-delay-ms")), { mode: 0o755 });
   writeFileSync(log, "");
   return { root, home, state, store: join(state, STORE), log, checkouts: 0 };
 }
@@ -136,7 +142,12 @@ function installs(w: World): NpmCall[] {
 }
 
 function rows(w: World): InstallRow[] {
-  const ledger = join(w.state, LEDGER_FILENAME);
+  return rowsIn(w.state);
+}
+
+/** The proof-install rows in a state dir's ledger. */
+function rowsIn(state: string): InstallRow[] {
+  const ledger = join(state, LEDGER_FILENAME);
   if (!existsSync(ledger)) return [];
   return readFileSync(ledger, "utf8").split("\n").filter(Boolean)
     .map((line) => JSON.parse(line) as InstallRow)
@@ -166,15 +177,17 @@ test("W1-T13974 criterion 1: a reviewer's proof tree with no configured seed roo
   await inWorld(w, undefined, () => {
     const first = owned(w), second = owned(w);
     const calls: string[][] = [];
-    assert.equal(ensureDeps(first, recordingExec(calls), pinnedVitestCli(first)), true, "the first tree gets its runner");
+    assert.equal(ensureDeps(first, recordingExec(calls), pinnedVitestCli(first), PROOF), true, "the first tree gets its runner");
     assert.equal(calls.length, 1, `one install command for the first tree: ${JSON.stringify(calls)}`);
     assert.ok(isSeedPrime(calls[0]!, w.store), `the first tree is primed from the state-dir store, not npm ci: ${JSON.stringify(calls[0])}`);
     assert.equal(installs(w).length, 1, "the store's first generation is one npm install");
-    assert.equal(ensureDeps(second, recordingExec(calls), pinnedVitestCli(second)), true, "the second tree gets its runner");
+    assert.equal(ensureDeps(second, recordingExec(calls), pinnedVitestCli(second), PROOF), true, "the second tree gets its runner");
     assert.ok(isSeedPrime(calls[1]!, w.store), "the second tree goes to the same store");
     assert.equal(installs(w).length, 1, "the second tree on the same lockfile runs no npm install");
-    assert.deepEqual(npmCalls(w).filter((call) => call.cwd === second).map((call) => call.argv), [["--version"]],
-      "the second tree's only npm call is the seed identity's version read: no install runs there");
+    // Round 2: the seed identity's npm version is memoised in the store, keyed by the npm binary, so the second prime
+    // (a fresh child process) launches no npm at all.
+    assert.deepEqual(npmCalls(w).filter((call) => call.cwd === second), [], "the second tree runs no npm: no install, no version read");
+    assert.deepEqual(npmCalls(w).filter((call) => call.argv[0] === "--version").length, 1, "two primes, one npm version read");
     assert.deepEqual(npmCalls(w).filter((call) => call.argv[0] !== "--version" && call.argv[0] !== "ci"), [],
       "npm's only other call is the seed identity's version read");
     assert.equal(seeds(w).length, 1, "one lockfile, one seed generation");
@@ -190,8 +203,8 @@ test("W1-T13974 criterion 1: the asynchronous review path primes from the same s
   const w = world();
   await inWorld(w, undefined, async () => {
     const first = owned(w), second = owned(w);
-    assert.equal(await ensureDepsAsync(first, pinnedVitestCli(first)), true);
-    assert.equal(await ensureDepsAsync(second, pinnedVitestCli(second)), true);
+    assert.equal(await ensureDepsAsync(first, pinnedVitestCli(first), PROOF), true);
+    assert.equal(await ensureDepsAsync(second, pinnedVitestCli(second), PROOF), true);
     assert.equal(installs(w).length, 1, "one npm install between both trees");
     assert.ok(installs(w).every((call) => call.cwd !== first && call.cwd !== second), "npm ci ran in the store's stage, never in a proof tree");
     assert.equal(seeds(w).length, 1);
@@ -199,11 +212,41 @@ test("W1-T13974 criterion 1: the asynchronous review path primes from the same s
   });
 });
 
+test("W1-T13974 criterion 1: the seed identity reads npm's version once per npm binary, and again only when that binary changes", async () => {
+  const w = world();
+  await inWorld(w, undefined, () => {
+    // A PATH entry whose `npm` is a directory, or not executable, is passed over, as the spawn's own PATH lookup is.
+    const shadow = join(w.root, "shadow-bin"), plain = join(w.root, "plain-bin");
+    mkdirSync(join(shadow, "npm"), { recursive: true });
+    mkdirSync(plain);
+    writeFileSync(join(plain, "npm"), "not a program");
+    const env = { PATH: `${shadow}:${plain}:${join(w.root, "bin")}` };
+    const versionReads = () => npmCalls(w).filter((call) => call.argv[0] === "--version").length;
+    const opts = { root: w.store, proof: true, env, runInstall: installVitest };
+    assert.equal(materializeDependencySeed(checkout(w), opts).status, "materialized");
+    assert.equal(materializeDependencySeed(checkout(w), opts).status, "materialized");
+    assert.equal(versionReads(), 1, "two primes, one npm version call: the second reads the store's memo");
+    const probe = checkout(w);
+    assert.equal(dependencySeedIdentity(probe, { proof: true, env }).npm, "10.9.9");
+    assert.equal(versionReads(), 1, "an identity outside any store reuses the process's own memo");
+    writeFileSync(join(w.store, ".rmd-npm-version.json"), "{"); // a store memo that cannot be parsed is not trusted
+    materializeDependencySeed(checkout(w), opts);
+    assert.equal(versionReads(), 2, "an unreadable memo is read again from npm, and rewritten");
+    materializeDependencySeed(checkout(w), opts);
+    assert.equal(versionReads(), 2);
+    writeFileSync(join(w.root, "bin", "npm"), fakeNpm(w.log, join(w.root, "ci-delay-ms"), "11.0.10"), { mode: 0o755 });
+    assert.equal(dependencySeedIdentity(probe, { proof: true, env }).npm, "11.0.10", "a changed npm binary is read again");
+    assert.equal(versionReads(), 3);
+    assert.throws(() => dependencySeedIdentity(probe, { proof: true, env: { PATH: shadow } }),
+      "with no npm on PATH there is no memo key, and the version read fails exactly as before");
+  });
+});
+
 test("W1-T13974 criterion 2: two proof trees on one lockfile primed at the same time make one install between them, and a changed lockfile installs exactly once", async () => {
   const w = world();
   await inWorld(w, undefined, async () => {
     const a = owned(w), b = owned(w);
-    assert.deepEqual(await Promise.all([ensureDepsAsync(a, pinnedVitestCli(a)), ensureDepsAsync(b, pinnedVitestCli(b))]), [true, true]);
+    assert.deepEqual(await Promise.all([ensureDepsAsync(a, pinnedVitestCli(a), PROOF), ensureDepsAsync(b, pinnedVitestCli(b), PROOF)]), [true, true]);
     assert.equal(installs(w).length, 1, "the second prime waited on the seed key's lock and linked the same seed");
     const together = rows(w);
     assert.deepEqual(together.map((row) => row.install).sort(), ["fresh", "reused"]);
@@ -211,8 +254,8 @@ test("W1-T13974 criterion 2: two proof trees on one lockfile primed at the same 
     const [oldSeed] = seeds(w);
 
     const c = owned(w, "5.0.6"), d = owned(w, "5.0.6");
-    assert.equal(await ensureDepsAsync(c, pinnedVitestCli(c)), true);
-    assert.equal(ensureDeps(d, execFileSync, pinnedVitestCli(d)), true);
+    assert.equal(await ensureDepsAsync(c, pinnedVitestCli(c), PROOF), true);
+    assert.equal(ensureDeps(d, execFileSync, pinnedVitestCli(d), PROOF), true);
     assert.equal(installs(w).length, 2, "a changed lockfile installs exactly once");
     assert.equal(installedVitest(c), "5.0.6", "a changed lockfile never reuses the old install");
     assert.equal(installedVitest(d), "5.0.6");
@@ -226,13 +269,24 @@ test("W1-T13974 criterion 2: two proof trees on one lockfile primed at the same 
   });
 });
 
+test("W1-T13974 criterion 2: a proof prime waits out a same-key install that holds the lock past two seconds, so two trees still make one install", async () => {
+  const w = world();
+  await inWorld(w, undefined, async () => {
+    writeFileSync(join(w.root, "ci-delay-ms"), "2500"); // the first prime holds the key's lock for 2.5 s while it installs
+    const a = owned(w), b = owned(w);
+    assert.deepEqual(await Promise.all([ensureDepsAsync(a, pinnedVitestCli(a), PROOF), ensureDepsAsync(b, pinnedVitestCli(b), PROOF)]), [true, true]);
+    assert.equal(installs(w).length, 1, "the second prime waited the store's own lockWaitMs, not a shorter proof wait, and ran no npm ci");
+    assert.deepEqual(rows(w).map((row) => row.install).sort(), ["fresh", "reused"]);
+  });
+});
+
 test("W1-T13974 criterion 3: each priming of a reviewer checkout writes one review.proof_install row naming reused, fresh or npm-ci, the seed key and its wall time", async () => {
   const w = world();
   await inWorld(w, undefined, async () => {
     const a = owned(w), b = owned(w);
-    ensureDeps(a, execFileSync, pinnedVitestCli(a));
-    await ensureDepsAsync(b, pinnedVitestCli(b));
-    ensureDeps(a, execFileSync, pinnedVitestCli(a)); // memoised: no second priming, no second row
+    ensureDeps(a, execFileSync, pinnedVitestCli(a), PROOF);
+    await ensureDepsAsync(b, pinnedVitestCli(b), PROOF);
+    ensureDeps(a, execFileSync, pinnedVitestCli(a), PROOF); // memoised: no second priming, no second row
     const seeded = rows(w);
     assert.equal(seeded.length, 2, "one row per primed checkout");
     assert.deepEqual(seeded.map((row) => [row.checkout, row.install, row.seed_store, row.ok]), [[a, "fresh", "state-dir", true], [b, "reused", "state-dir", true]]);
@@ -249,7 +303,7 @@ test("W1-T13974 criterion 3: each priming of a reviewer checkout writes one revi
 
     process.env.RMD_DEPENDENCY_SEED_ROOT = "";
     const disabled = owned(w);
-    await ensureDepsAsync(disabled, pinnedVitestCli(disabled));
+    await ensureDepsAsync(disabled, pinnedVitestCli(disabled), PROOF);
     const last = rows(w).at(-1)!;
     assert.deepEqual([last.checkout, last.install, last.seed_key, last.seed_store, last.ok], [disabled, "npm-ci", null, null, true]);
   });
@@ -261,14 +315,49 @@ test("W1-T13974 criterion 3: a seed prime that fails falls back to npm ci and it
     writeFileSync(w.store, "not a directory"); // every prime into this store fails
     const sync = owned(w), later = owned(w);
     const calls: string[][] = [];
-    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync)), true, "the fallback still installs the runner");
+    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF), true, "the fallback still installs the runner");
     assert.ok(isSeedPrime(calls[0]!, w.store), "the seed prime was tried first");
     assert.deepEqual(calls[1], ["npm", ...PROOF_INSTALL_ARGS], "then npm ci, exactly as at base");
-    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later)), true);
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
     assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later], "npm ci ran in each tree");
     const fallen = rows(w);
     assert.deepEqual(fallen.map((row) => [row.install, row.seed_key, row.seed_store, row.ok]), [["npm-ci", null, "state-dir", true], ["npm-ci", null, "state-dir", true]]);
     for (const row of fallen) assert.match(row.reason ?? "", /dependency-seeds|Command failed/, "the row carries why the seed was not used");
+  });
+});
+
+test("W1-T13974 criterion 3: a failed account prime falls back to npm ci and its row says npm-ci, never none", async () => {
+  const w = world();
+  const account = join(w.root, "account-seeds");
+  await inWorld(w, undefined, async () => {
+    writeFileSync(account, "not a directory"); // the account's opted-in store cannot be made, so every prime fails
+    writeFileSync(join(w.home, ".config", "remudero", "dependency-seeds.json"), JSON.stringify({ enabled: true, root: account }));
+    const sync = owned(w), later = owned(w);
+    const calls: string[][] = [];
+    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF), true, "npm ci installs the runner");
+    assert.ok(isSeedPrime(calls[0]!, account), "the account's prime was tried first, as today");
+    assert.deepEqual(calls[1], ["npm", ...PROOF_INSTALL_ARGS], "then npm ci in the tree");
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
+    assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later]);
+    const fallen = rows(w);
+    assert.deepEqual(fallen.map((row) => [row.checkout, row.install, row.seed_store, row.ok]), [[sync, "npm-ci", "account", true], [later, "npm-ci", "account", true]]);
+    for (const row of fallen) assert.match(row.reason ?? "", /dependency-seeds: /, "the row carries the prime's own refusal");
+    assert.equal(existsSync(w.store), false, "the state-dir store is not reached when the account opted in");
+  });
+});
+
+test("W1-T13974 criterion 3: a reviewer checkout primed without an instance config still writes its one row, in the default instance's state dir", async () => {
+  const w = world();
+  await inWorld(w, undefined, async () => {
+    rmSync(join(w.home, ".config", "remudero", "config.json")); // loadConfig's default root is then ~/Remudero
+    const fallback = join(w.home, "Remudero", "state");
+    const sync = owned(w), later = owned(w);
+    assert.equal(ensureDeps(sync, execFileSync, pinnedVitestCli(sync), PROOF), true);
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
+    assert.deepEqual(rowsIn(fallback).map((row) => [row.checkout, row.install, row.seed_key, row.seed_store, row.ok]),
+      [[sync, "npm-ci", null, null, true], [later, "npm-ci", null, null, true]], "one row per primed checkout");
+    assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later], "with no instance named, the tree takes npm ci as at base");
+    assert.equal(existsSync(join(fallback, STORE)), false, "no store is made in a state dir no config named");
   });
 });
 
@@ -277,7 +366,7 @@ test("W1-T13974 criterion 3: a ledger that cannot be written never fails the pri
   await inWorld(w, undefined, () => {
     mkdirSync(join(w.state, LEDGER_FILENAME)); // appendLedger cannot open a directory
     const dir = owned(w);
-    assert.equal(ensureDeps(dir, execFileSync, pinnedVitestCli(dir)), true);
+    assert.equal(ensureDeps(dir, execFileSync, pinnedVitestCli(dir), PROOF), true);
     assert.equal(installedVitest(dir), "5.0.5");
   });
 });
@@ -287,9 +376,9 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — an empty RMD_
   await inWorld(w, "", async () => {
     const sync = owned(w), later = owned(w);
     const calls: string[][] = [];
-    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync)), true);
+    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF), true);
     assert.deepEqual(calls, [["npm", ...PROOF_INSTALL_ARGS]]);
-    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later)), true);
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
     assert.deepEqual(npmCalls(w), [{ argv: [...PROOF_INSTALL_ARGS], cwd: sync }, { argv: [...PROOF_INSTALL_ARGS], cwd: later }]);
     assert.equal(existsSync(w.store), false, "the state-dir store is never created");
   });
@@ -302,22 +391,22 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — an account se
     writeFileSync(join(w.home, ".config", "remudero", "dependency-seeds.json"), JSON.stringify({ enabled: true, root: account }));
     const sync = owned(w), later = owned(w), stranger = checkout(w);
     const calls: string[][] = [];
-    ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync));
+    ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF);
     ensureDeps(stranger, recordingExec(calls));
     assert.ok(isSeedPrime(calls[0]!, account), `the account root primes the reviewer's tree: ${JSON.stringify(calls[0])}`);
     assert.ok(isSeedPrime(calls[1]!, account), "and any other fresh checkout, as at base");
-    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later)), true);
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
     assert.equal(existsSync(w.store), false, "the state-dir store is never created when the account opted in");
     assert.equal(readdirSync(account).filter((name) => SEED_KEY.test(name)).length, 1);
     writeFileSync(join(w.home, ".config", "remudero", "dependency-seeds.json"), JSON.stringify({ enabled: false }));
     const off = owned(w);
     const offCalls: string[][] = [];
-    ensureDeps(off, recordingExec(offCalls), pinnedVitestCli(off));
+    ensureDeps(off, recordingExec(offCalls), pinnedVitestCli(off), PROOF);
     assert.deepEqual(offCalls, [["npm", ...PROOF_INSTALL_ARGS]], "an account that turned seeds off keeps npm ci");
     process.env.RMD_DEPENDENCY_SEED_ROOT = account;
     const pinned = owned(w);
     const pinnedCalls: string[][] = [];
-    ensureDeps(pinned, recordingExec(pinnedCalls), pinnedVitestCli(pinned));
+    ensureDeps(pinned, recordingExec(pinnedCalls), pinnedVitestCli(pinned), PROOF);
     assert.ok(isSeedPrime(pinnedCalls[0]!, account), "an RMD_DEPENDENCY_SEED_ROOT override is used as today");
   });
 });
@@ -331,8 +420,8 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a linked node
     const linkedSync = owned(w), linkedAsync = owned(w);
     for (const dir of [linkedSync, linkedAsync]) symlinkSync(shared, join(dir, "node_modules"), "dir");
     const calls: string[][] = [];
-    assert.equal(ensureDeps(linkedSync, recordingExec(calls), pinnedVitestCli(linkedSync)), false, "the shared install lacks the runner");
-    assert.equal(await ensureDepsAsync(linkedAsync, pinnedVitestCli(linkedAsync)), false);
+    assert.equal(ensureDeps(linkedSync, recordingExec(calls), pinnedVitestCli(linkedSync), PROOF), false, "the shared install lacks the runner");
+    assert.equal(await ensureDepsAsync(linkedAsync, pinnedVitestCli(linkedAsync), PROOF), false);
     assert.deepEqual(calls, [], "a linked install is never reinstalled");
     assert.deepEqual(readdirSync(shared), ["vitest"], "the shared target is untouched");
     assert.deepEqual(npmCalls(w), []);
@@ -355,26 +444,29 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — an unreadable
     mkdirSync(config); // the instance config cannot be read: no state dir, so npm ci as at base
     const noState = owned(w);
     const calls: string[][] = [];
-    assert.equal(ensureDeps(noState, recordingExec(calls), pinnedVitestCli(noState)), true);
+    assert.equal(ensureDeps(noState, recordingExec(calls), pinnedVitestCli(noState), PROOF), true);
     assert.deepEqual(calls, [["npm", ...PROOF_INSTALL_ARGS]]);
     assert.equal(existsSync(w.store), false);
+    assert.deepEqual(rowsIn(join(w.home, "Remudero", "state")).map((row) => [row.checkout, row.install]), [[noState, "npm-ci"]],
+      "its row goes to the default instance's state dir");
     rmSync(config, { recursive: true });
     const noConfig = owned(w); // no instance config at all: no state dir either
     const noConfigCalls: string[][] = [];
-    assert.equal(ensureDeps(noConfig, recordingExec(noConfigCalls), pinnedVitestCli(noConfig)), true);
+    assert.equal(ensureDeps(noConfig, recordingExec(noConfigCalls), pinnedVitestCli(noConfig), PROOF), true);
     assert.deepEqual(noConfigCalls, [["npm", ...PROOF_INSTALL_ARGS]]);
     assert.equal(existsSync(w.store), false);
     writeFileSync(config, JSON.stringify({ root: join(w.root, "instance") }));
 
     // An account seed config with no root throws, as at base: the sync path installs nothing, the async path rejects.
+    // Neither is a prime that failed (no prime ran), so each row says none, and the async one is written before it rejects.
     writeFileSync(join(w.home, ".config", "remudero", "dependency-seeds.json"), JSON.stringify({ enabled: true }));
     const badSync = owned(w), badAsync = owned(w);
     const badCalls: string[][] = [];
-    assert.equal(ensureDeps(badSync, recordingExec(badCalls), pinnedVitestCli(badSync)), false, "no install, so no runner");
+    assert.equal(ensureDeps(badSync, recordingExec(badCalls), pinnedVitestCli(badSync), PROOF), false, "no install, so no runner");
     assert.deepEqual(badCalls, []);
-    await assert.rejects(ensureDepsAsync(badAsync, pinnedVitestCli(badAsync)), /absolute root/);
-    assert.deepEqual(rows(w).map((row) => [row.checkout, row.install, row.ok]), [[badSync, "none", false]]);
-    assert.match(rows(w)[0]!.reason ?? "", /absolute root/);
+    await assert.rejects(ensureDepsAsync(badAsync, pinnedVitestCli(badAsync), PROOF), /absolute root/);
+    assert.deepEqual(rows(w).map((row) => [row.checkout, row.install, row.ok]), [[badSync, "none", false], [badAsync, "none", false]]);
+    for (const row of rows(w)) assert.match(row.reason ?? "", /absolute root/);
   });
 });
 
@@ -382,51 +474,94 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a corrupt see
   const w = world();
   await inWorld(w, undefined, () => {
     const first = owned(w);
-    ensureDeps(first, execFileSync, pinnedVitestCli(first));
+    ensureDeps(first, execFileSync, pinnedVitestCli(first), PROOF);
     const [key] = seeds(w);
     const ready = join(w.store, key!, "ready.json");
     writeFileSync(ready, JSON.stringify({ ...JSON.parse(readFileSync(ready, "utf8")), key: "0".repeat(64) }));
     const second = owned(w);
-    assert.equal(ensureDeps(second, execFileSync, pinnedVitestCli(second)), true);
+    assert.equal(ensureDeps(second, execFileSync, pinnedVitestCli(second), PROOF), true);
     assert.deepEqual(installs(w).map((call) => call.cwd).slice(1), [second], "the corrupt seed's tree ran npm ci in place");
     assert.equal(existsSync(join(second, "node_modules", ".rmd-dependency-seed.json")), false, "nothing from the corrupt seed was materialized");
     assert.deepEqual(rows(w).map((row) => row.install), ["fresh", "npm-ci"]);
+    // W1-T13974 criterion 3: the prime reached the key before the seed failed its check, so the npm-ci row names it.
+    assert.deepEqual(rows(w).map((row) => row.seed_key), [key, key], "the fallback row carries the key the prime reached");
+    assert.match(rows(w)[1]!.reason ?? "", /readiness metadata mismatch/);
   });
 });
 
-test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a proof's verdict and argv on a seed-primed tree match an npm-ci tree, and a linked install still gets --configLoader native", async () => {
+/** A registered proof tree whose proof is a real `node --test` file: it asserts the version of the `answer` package
+ *  its lockfile pins, so its verdict is decided by what the install put in the tree. `--import tsx` loads the
+ *  lockfile's `tsx` package (the fake npm writes it as an empty module); Node strips the file's types itself. */
+function realProofTree(w: World, expected: string): string {
+  const dir = join(w.root, `checkout-${++w.checkouts}`);
+  mkdirSync(join(dir, "test", "setup"), { recursive: true });
+  const manifest = { name: "seed-fixture", version: "1.0.0", dependencies: { answer: "1.0.0", tsx: "4.0.0" } };
+  writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify({
+    name: "seed-fixture", version: "1.0.0", lockfileVersion: 3, requires: true,
+    packages: { "": manifest, "node_modules/answer": { version: "1.0.0" }, "node_modules/tsx": { version: "4.0.0" } },
+  }));
+  writeFileSync(join(dir, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+  writeFileSync(join(dir, "test", "seeded.test.ts"), [
+    `import assert from "node:assert/strict";`, `import { test } from "node:test";`, `import { version } from "answer";`,
+    `test("the installed answer", () => { assert.equal(version, ${JSON.stringify(expected)}); });`, "",
+  ].join("\n"));
+  registerReviewerCheckout(dir);
+  return dir;
+}
+
+test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a real proof run on seed-primed trees reaches the same verdicts as on npm-ci trees", async () => {
   const w = world();
   await inWorld(w, undefined, () => {
+    // No canned output: execWhitelistedProof primes each tree itself (its own ensureDeps call) and runs the real
+    // `node --test` proof in it with the default spawner. The npm-ci arm is origin/main's (an empty
+    // RMD_DEPENDENCY_SEED_ROOT takes npm ci in every tree, exactly as at base).
+    const proof = parseWhitelistedProof("unit test: test/seeded.test.ts");
+    assert.ok(proof, "the proof parses as a node test proof");
+    const verdict = (dir: string) => execWhitelistedProof(proof, dir, 60_000, undefined, { preflightBrowsers: () => {} });
+    const seeded = [verdict(realProofTree(w, "1.0.0")), verdict(realProofTree(w, "2.0.0"))];
+    process.env.RMD_DEPENDENCY_SEED_ROOT = "";
+    const npmCi = [verdict(realProofTree(w, "1.0.0")), verdict(realProofTree(w, "2.0.0"))];
+    assert.deepEqual(rows(w).map((row) => row.install), ["fresh", "reused", "npm-ci", "npm-ci"], "two trees from each arm, really installed");
+    assert.deepEqual(seeded, ["pass", "fail"], "the seed-primed trees ran the proof against what was installed");
+    assert.deepEqual(npmCi, seeded, "every verdict on a seed-primed tree is the npm-ci tree's verdict");
+  });
+});
+
+test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a Vitest proof on a seed-primed tree keeps its own config loader, and a linked install still gets --configLoader native", async () => {
+  const w = world();
+  await inWorld(w, undefined, () => {
+    // This one is about the argv only: the recording spawner answers a fixed pass, and no verdicts are compared.
     const target = { owner: "craigoley", repo: "remudero-console" };
     const pass = "TAP version 13\n1..1\nok 1 - tests/unit/seeded.test.ts {\n    1..1\n    ok 1 - a seeded proof\n}\n";
-    const fail = "TAP version 13\n1..1\nnot ok 1 - tests/unit/seeded.test.ts {\n    1..1\n    not ok 1 - a seeded proof\n}\n";
     const seeded = owned(w);
-    ensureDeps(seeded, execFileSync, pinnedVitestCli(seeded));
-    process.env.RMD_DEPENDENCY_SEED_ROOT = "";
-    const npmCi = owned(w);
-    ensureDeps(npmCi, execFileSync, pinnedVitestCli(npmCi));
-    assert.deepEqual(rows(w).map((row) => row.install), ["fresh", "npm-ci"], "one tree from each arm");
+    ensureDeps(seeded, execFileSync, pinnedVitestCli(seeded), PROOF);
+    assert.deepEqual(rows(w).map((row) => row.install), ["fresh"]);
     const linked = owned(w);
     symlinkSync(join(seeded, "node_modules"), join(linked, "node_modules"), "dir");
-
-    const run = (cwd: string, tap: string) => {
+    const argv = (cwd: string) => {
       const seen: string[][] = [];
       const proof = parseWhitelistedProof("unit test: tests/unit/seeded.test.ts", target)!;
-      const verdict = execWhitelistedProof(proof, cwd, 1000, (_command, args) => {
+      execWhitelistedProof(proof, cwd, 1000, (_command, args) => {
         seen.push([...args]);
-        return tap;
+        return pass;
       }, { preflightBrowsers: () => {} });
-      return { verdict, argv: seen.map((args) => args.map((arg) => arg.split(cwd).join("<tree>"))) };
+      return seen;
     };
-    for (const tap of [pass, fail]) {
-      const fromSeed = run(seeded, tap), fromNpmCi = run(npmCi, tap);
-      assert.deepEqual(fromSeed, fromNpmCi, "the seed-primed tree runs the same argv to the same verdict");
-      assert.ok(!fromSeed.argv.flat().includes("--configLoader"), "a real install keeps the target's own config loader");
-    }
-    assert.equal(run(seeded, pass).verdict, "pass");
-    const shared = run(linked, pass);
-    assert.equal(shared.verdict, "pass");
-    assert.deepEqual(shared.argv[0]!.slice(-2), ["--configLoader", "native"], "a linked install still loads config natively");
+    assert.ok(!argv(seeded).flat().includes("--configLoader"), "a real install keeps the target's own config loader");
+    assert.deepEqual(argv(linked)[0]!.slice(-2), ["--configLoader", "native"], "a linked install still loads config natively");
+  });
+});
+
+test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a registered tree primed outside a proof run, as a paired trial primes its worker tree, never reaches the state-dir store", async () => {
+  const w = world();
+  await inWorld(w, undefined, () => {
+    // paired-trial.ts registers its sealed attempt tree and then calls ensureDeps(dir, exec) itself, not for a proof.
+    const paired = owned(w);
+    const calls: string[][] = [];
+    assert.equal(ensureDeps(paired, recordingExec(calls)), true);
+    assert.deepEqual(calls, [["npm", ...PROOF_INSTALL_ARGS]], "it takes npm ci, as at base");
+    assert.equal(existsSync(w.store), false, "the state-dir store is never created for it");
   });
 });
 
@@ -493,7 +628,7 @@ test("W1-T13974 criterion 2: a seed lock whose owner died on this host is reclai
     const viaReview = owned(w);
     const key = primeKey(viaReview);
     const lock = holdLock(w, key, ownerOf(deadPid()));
-    assert.equal(ensureDeps(viaReview, execFileSync, pinnedVitestCli(viaReview)), true);
+    assert.equal(ensureDeps(viaReview, execFileSync, pinnedVitestCli(viaReview), PROOF), true);
     const [row] = rows(w);
     assert.deepEqual([row!.install, row!.seed_key, row!.reason], ["fresh", key, "seed-lock-reclaimed"], "the dead owner's lock was reclaimed");
     assert.equal(installs(w).filter((call) => call.cwd === viaReview).length, 0, "the tree took the seed, not npm ci");
@@ -526,25 +661,18 @@ test("W1-T13974 criterion 2: a reused pid on Linux counts as a dead owner", asyn
   });
 });
 
-test("W1-T13974 criterion 2: a seed lock with a live owner is never reclaimed, and the proof prime falls back within its short wait as seed-lock-held", async () => {
+test("W1-T13974 criterion 2: a seed lock with a live owner is never reclaimed, and a prime that waits it out names the key it reached", async () => {
   const w = world();
-  await inWorld(w, undefined, async () => {
-    const sync = owned(w);
-    const key = primeKey(sync);
+  await inWorld(w, undefined, () => {
+    const dir = checkout(w);
+    const key = dependencySeedIdentity(dir, inProcess(w)).key;
     const lock = holdLock(w, key, ownerOf(process.pid));
     const owner = readFileSync(join(lock, "owner.json"), "utf8");
-    // No wall-clock bound here (W1-T2811): the short wait is proven by the reason. A prime that waited out the 120 s
-    // install bound would be SIGKILLed by its own 120 s exec bound first, and its row would not say seed-lock-held.
-    assert.equal(ensureDeps(sync, execFileSync, pinnedVitestCli(sync)), true, "npm ci still installs the runner");
-    const later = owned(w);
-    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later)), true);
-    assert.deepEqual(rows(w).map((row) => [row.install, row.seed_key, row.reason]), [["npm-ci", null, "seed-lock-held"], ["npm-ci", null, "seed-lock-held"]]);
-    assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later], "each tree fell back to npm ci in place");
+    // Bounded here only to keep the suite fast: a proof prime has no wait of its own and waits the store's lockWaitMs.
+    assert.throws(() => materializeDependencySeed(dir, inProcess(w, { lockWaitMs: 300 })), (error: NodeJS.ErrnoException) =>
+      error.code === "EEXIST" && error.message.includes("seed-lock-held") && error.message.startsWith(`[seed ${key}] `));
     assert.equal(readFileSync(join(lock, "owner.json"), "utf8"), owner, "a live owner's lock is left exactly as it was");
-
-    const direct = checkout(w);
-    assert.throws(() => materializeDependencySeed(direct, inProcess(w)), /seed-lock-held.*EEXIST/, "a proof prime gives up on its own");
-    assert.ok(existsSync(lock));
+    assert.equal(existsSync(join(dir, "node_modules")), false, "nothing was installed");
   });
 });
 

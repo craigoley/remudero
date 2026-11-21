@@ -41,7 +41,7 @@ import { makeTempDir } from "./tmp.js";
 import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import { dependencySeedRootChoice, SEED_LOCK_HELD, SEED_LOCK_RECLAIMED } from "./dependency-seeds.js";
+import { dependencySeedRootChoice, SEED_LOCK_RECLAIMED } from "./dependency-seeds.js";
 import { configPath } from "./config.js";
 import { proofTestRunnerArgs } from "./test-run-timeout.js";
 import {
@@ -2736,6 +2736,21 @@ const DEPENDENCY_SEED_SCRIPT = fileURLToPath(new URL("../../scripts/dependency-s
 type ProofInstallPlan = { arm: "npm-ci" } | { arm: "seed"; store: "account" | "state-dir"; root: string };
 type PrimeResult = { status?: unknown; key?: unknown; installed?: unknown; lockReclaimed?: unknown };
 type InstallAttempt = { error?: string; prime?: PrimeResult };
+/** Why a tree takes npm ci (null when nothing was tried first), and the seed key a failed prime reached, if any. */
+type NpmCiFallback = { fallback: string | null; key: string | null };
+/** The state dir a row goes to, and whether a config file named it (only a named one may hold the store). */
+type ProofStateDir = { dir: string; named: boolean };
+/** The key a failed proof prime names in its refusal (dependency-seeds.ts withSeedKey). */
+const FAILED_PRIME_SEED_KEY = /\[seed ([a-f0-9]{64})\]/;
+
+/** W1-T13974: what a priming is for. Only a proof run's own priming (execWhitelistedProof) reaches the state-dir
+ *  store: paired-trial.ts registers its sealed attempt tree as the reviewer's too and primes it with a bare call, so
+ *  registration alone cannot tell a proof tree from a worker tree. */
+export interface ProofPriming {
+  proofTree?: boolean;
+}
+const PROOF_TREE_PRIMING: ProofPriming = { proofTree: true };
+
 interface ProofInstallRecord {
   install: "reused" | "fresh" | "npm-ci" | "none";
   seed_key: string | null;
@@ -2745,14 +2760,16 @@ interface ProofInstallRecord {
 }
 
 /** How a checkout with no node_modules is installed. The account's opt-in is used as before for every checkout; an
- *  explicit disable keeps npm ci; only a checkout the reviewer created reaches the state-dir store. */
-function proofInstallPlan(cwd: string, nodeModulesExists: boolean, stateDir: string | undefined): ProofInstallPlan {
+ *  explicit disable keeps npm ci; only a proof run's priming of a checkout the reviewer created reaches the state-dir
+ *  store, and only in a state dir a config file named. */
+function proofInstallPlan(cwd: string, nodeModulesExists: boolean, stateDir: ProofStateDir, priming: ProofPriming): ProofInstallPlan {
   if (nodeModulesExists) return { arm: "npm-ci" };
   const choice = dependencySeedRootChoice();
   if (choice.kind === "configured") return { arm: "seed", store: "account", root: choice.root };
-  if (choice.kind === "disabled" || !reviewerOwnedCheckouts.has(resolve(cwd)) || stateDir === undefined || !existsSync(stateDir)) return { arm: "npm-ci" };
+  if (choice.kind === "disabled" || priming.proofTree !== true || !reviewerOwnedCheckouts.has(resolve(cwd))) return { arm: "npm-ci" };
+  if (!stateDir.named || !existsSync(stateDir.dir)) return { arm: "npm-ci" };
   // The store refuses a root that traverses a link, so name the state dir by its real path.
-  return { arm: "seed", store: "state-dir", root: join(realpathSync(stateDir), REVIEWER_PROOF_SEED_STORE) };
+  return { arm: "seed", store: "state-dir", root: join(realpathSync(stateDir.dir), REVIEWER_PROOF_SEED_STORE) };
 }
 
 function proofInstallCommand(cwd: string, plan: ProofInstallPlan): [string, readonly string[], NodeJS.ProcessEnv] {
@@ -2764,17 +2781,19 @@ function proofInstallCommand(cwd: string, plan: ProofInstallPlan): [string, read
 }
 
 /** The instance state dir as the daemon resolves it: `<config root>/state`, read the way feedback.ts's
- *  instanceStateDir reads it (importing that module from here closes an import cycle through worker.ts). No config
- *  file, or one that cannot be read or parsed, means no state-dir store and no row. */
-function proofStateDir(): string | undefined {
+ *  instanceStateDir reads it (importing that module from here closes an import cycle through worker.ts). With no config
+ *  file, or one that cannot be read or parsed, nothing names the instance: the row still goes to the state dir of
+ *  loadConfig's default root (`~/Remudero`), but no store is made there. */
+function proofStateDir(): ProofStateDir {
+  const unnamed: ProofStateDir = { dir: join(homedir(), "Remudero", "state"), named: false };
   try {
     const raw = readFileIfExists(configPath());
-    if (raw === undefined) return undefined;
+    if (raw === undefined) return unnamed;
     const root = (JSON.parse(raw) as { root?: unknown } | null)?.root;
-    return join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state");
+    return { dir: join(typeof root === "string" && root !== "" ? root : join(homedir(), "Remudero"), "state"), named: true };
   } catch (error) {
-    console.error(`review: proof installs have no state dir: ${installFailure(error)}`);
-    return undefined;
+    console.error(`review: proof installs have no named state dir: ${installFailure(error)}`);
+    return unnamed;
   }
 }
 
@@ -2784,35 +2803,40 @@ function installFailure(error: unknown): string {
   return (stderr || (error instanceof Error ? error.message : String(error)).split("\n")[0]!).slice(0, 300);
 }
 
-/** A seed prime's final record, or the reason the tree must take npm ci instead. The account opt-in keeps its old
- *  behaviour, where its prime IS the install and a failure is recorded, except for a held seed lock: a proof prime no
- *  longer waits out a lock it cannot prove dead, so that tree takes npm ci rather than going without. */
-function afterSeedPrime(plan: Extract<ProofInstallPlan, { arm: "seed" }>, attempt: InstallAttempt): ProofInstallRecord | { fallback: string } {
+/** A seed prime's final record, or the reason the tree must take npm ci instead. Every failed prime, the account's or
+ *  the state-dir store's, falls back to npm ci (the record's design step 3), and the fallback keeps the key the prime
+ *  reached, when it reached one. */
+function afterSeedPrime(plan: Extract<ProofInstallPlan, { arm: "seed" }>, attempt: InstallAttempt): ProofInstallRecord | NpmCiFallback {
   const result = attempt.prime;
   if (attempt.error === undefined && result?.status === "materialized" && typeof result.key === "string") {
     const reason = result.lockReclaimed === true ? SEED_LOCK_RECLAIMED : null;
     return { install: result.installed === true ? "fresh" : "reused", seed_key: result.key, seed_store: plan.store, ok: true, reason };
   }
-  const held = attempt.error?.includes(SEED_LOCK_HELD) === true;
-  const reason = held ? SEED_LOCK_HELD : attempt.error ?? `the seed prime materialized nothing (${String(result?.status)})`;
-  if (plan.store === "account" && !held) return { install: "none", seed_key: null, seed_store: "account", ok: false, reason };
-  return { fallback: reason };
+  const reason = attempt.error ?? `the seed prime materialized nothing (${String(result?.status)})`;
+  return { fallback: reason, key: FAILED_PRIME_SEED_KEY.exec(reason)?.[1] ?? null };
 }
 
-function npmCiRecord(plan: ProofInstallPlan, fallback: string | null, attempt: InstallAttempt): ProofInstallRecord {
+const NO_FALLBACK: NpmCiFallback = { fallback: null, key: null };
+
+function npmCiRecord(plan: ProofInstallPlan, seeded: NpmCiFallback, attempt: InstallAttempt): ProofInstallRecord {
   return {
-    install: "npm-ci", seed_key: null, seed_store: plan.arm === "seed" ? plan.store : null,
-    ok: attempt.error === undefined, reason: fallback ?? attempt.error ?? null,
+    install: "npm-ci", seed_key: seeded.key, seed_store: plan.arm === "seed" ? plan.store : null,
+    ok: attempt.error === undefined, reason: seeded.fallback ?? attempt.error ?? null,
   };
+}
+
+/** An account seed config that cannot be read plans nothing: no prime ran and nothing is installed, as at base. */
+function unplannedRecord(error: unknown): ProofInstallRecord {
+  return { install: "none", seed_key: null, seed_store: null, ok: false, reason: installFailure(error) };
 }
 
 /** One review.proof_install row per primed reviewer checkout, so the seed store's reuse rate is readable from the
  *  ledger. Its sender is SWEEP, the lane that admits and runs a fleet review (PRODUCER_IDENTITIES). A row that cannot be
  *  written is reported and never fails the priming. */
-function recordProofInstall(cwd: string, stateDir: string | undefined, record: ProofInstallRecord, startedMs: number): void {
-  if (stateDir === undefined || !reviewerOwnedCheckouts.has(resolve(cwd))) return;
+function recordProofInstall(cwd: string, stateDir: ProofStateDir, record: ProofInstallRecord, startedMs: number): void {
+  if (!reviewerOwnedCheckouts.has(resolve(cwd))) return;
   try {
-    appendLedger(join(stateDir, LEDGER_FILENAME), {
+    appendLedger(join(stateDir.dir, LEDGER_FILENAME), {
       run_id: "review-proof-install", task_id: "SWEEP", step: PROOF_INSTALL_STEP, checkout: cwd, ...record,
       wall_ms: Math.round(performance.now() - startedMs),
     });
@@ -2855,13 +2879,14 @@ async function attemptInstallAsync(cwd: string, plan: ProofInstallPlan): Promise
  *  is the exact shape that let a SIGTERM default survive six hours, so this one is recorded by a
  *  test rather than merely written down.
  *
- *  W1-T13974: with no configured seed root, a checkout the reviewer created takes its install from the lockfile-keyed
- *  store under the instance state dir ({@link REVIEWER_PROOF_SEED_STORE}), and each priming writes one
- *  review.proof_install row. */
+ *  W1-T13974: with no configured seed root, a proof run's priming ({@link ProofPriming}) of a checkout the reviewer
+ *  created takes its install from the lockfile-keyed store under the instance state dir
+ *  ({@link REVIEWER_PROOF_SEED_STORE}), and each priming of a reviewer checkout writes one review.proof_install row. */
 export function ensureDeps(
   cwd: string,
   exec: typeof execFileSync = execFileSync,
   requiredRunnerPath?: string,
+  priming: ProofPriming = {},
 ): boolean {
   const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
   if (npmCiPrimed.has(cwd)) return runnerIsPresent();
@@ -2887,26 +2912,26 @@ export function ensureDeps(
 
   // W1-T3266: same untrappable bound as the proof spawner above — a wedged install must not
   // outlive its timeout and hold the reviewer the way a wedged proof did.
-  // W1-T13974: a reviewer's own tree with no configured seed root primes from the state-dir store; any seed
-  // failure there falls back to npm ci exactly as before.
+  // W1-T13974: a proof run's priming of a reviewer's own tree with no configured seed root primes from the state-dir
+  // store; any failed seed prime falls back to npm ci exactly as before.
   const startedMs = performance.now();
   const stateDir = proofStateDir();
   let plan: ProofInstallPlan;
   try {
-    plan = proofInstallPlan(cwd, existsSync(nodeModules), stateDir);
+    plan = proofInstallPlan(cwd, existsSync(nodeModules), stateDir, priming);
   } catch (error) {
     // An unreadable account seed config installs nothing, as before this task; best-effort priming, see above.
-    recordProofInstall(cwd, stateDir, { install: "none", seed_key: null, seed_store: null, ok: false, reason: installFailure(error) }, startedMs);
+    recordProofInstall(cwd, stateDir, unplannedRecord(error), startedMs);
     return runnerIsPresent();
   }
-  const seeded = plan.arm === "seed" ? afterSeedPrime(plan, attemptInstallSync(exec, cwd, plan)) : { fallback: null };
-  const record = "fallback" in seeded ? npmCiRecord(plan, seeded.fallback, attemptInstallSync(exec, cwd, { arm: "npm-ci" })) : seeded;
+  const seeded = plan.arm === "seed" ? afterSeedPrime(plan, attemptInstallSync(exec, cwd, plan)) : NO_FALLBACK;
+  const record = "fallback" in seeded ? npmCiRecord(plan, seeded, attemptInstallSync(exec, cwd, { arm: "npm-ci" })) : seeded;
   recordProofInstall(cwd, stateDir, record, startedMs);
   return runnerIsPresent();
 }
 
 /** The review path primes a fresh checkout without holding the daemon's event loop. */
-export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string): Promise<boolean> {
+export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string, priming: ProofPriming = {}): Promise<boolean> {
   const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
   const pending = npmCiPending.get(cwd);
   if (pending) {
@@ -2926,11 +2951,18 @@ export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string):
   if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
   const startedMs = performance.now();
   const stateDir = proofStateDir();
-  const plan = proofInstallPlan(cwd, existsSync(nodeModules), stateDir);
-  // Best effort; the runner check below decides availability. A state-dir seed failure falls back to npm ci.
+  let plan: ProofInstallPlan;
+  try {
+    plan = proofInstallPlan(cwd, existsSync(nodeModules), stateDir, priming);
+  } catch (error) {
+    // An unreadable account seed config rejects, as before this task; its row is written first.
+    recordProofInstall(cwd, stateDir, unplannedRecord(error), startedMs);
+    throw error;
+  }
+  // Best effort; the runner check below decides availability. A failed seed prime falls back to npm ci.
   const install = (async () => {
-    const seeded = plan.arm === "seed" ? afterSeedPrime(plan, await attemptInstallAsync(cwd, plan)) : { fallback: null };
-    const record = "fallback" in seeded ? npmCiRecord(plan, seeded.fallback, await attemptInstallAsync(cwd, { arm: "npm-ci" })) : seeded;
+    const seeded = plan.arm === "seed" ? afterSeedPrime(plan, await attemptInstallAsync(cwd, plan)) : NO_FALLBACK;
+    const record = "fallback" in seeded ? npmCiRecord(plan, seeded, await attemptInstallAsync(cwd, { arm: "npm-ci" })) : seeded;
     recordProofInstall(cwd, stateDir, record, startedMs);
   })();
   npmCiPending.set(cwd, install);
@@ -3799,7 +3831,7 @@ export function execWhitelistedProof(
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
   if (deps.preparedArgs === undefined && whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
-    if (!ensureDeps(cwd, execFileSync, runner)) {
+    if (!ensureDeps(cwd, execFileSync, runner, PROOF_TREE_PRIMING)) {
       throw new ProofRunnerUnavailableError(runner!);
     }
     args = argsWithCheckoutRunner(whitelisted, args, cwd);
@@ -3982,7 +4014,7 @@ export async function execWhitelistedProofAsync(
   }
   if (whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
-    if (!(await ensureDepsAsync(cwd, runner))) throw new ProofRunnerUnavailableError(runner!);
+    if (!(await ensureDepsAsync(cwd, runner, PROOF_TREE_PRIMING))) throw new ProofRunnerUnavailableError(runner!);
     args = argsWithCheckoutRunner(whitelisted, args, cwd);
     if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
       if (deps.preflightBrowsers) deps.preflightBrowsers(cwd);

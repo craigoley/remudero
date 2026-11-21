@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
 
 export const DEPENDENCY_SEED_MIN_IDLE_MS = 6 * 60 * 60 * 1000;
@@ -31,11 +31,58 @@ export type DependencySeedResult = { status: "present" } | { status: "materializ
 const LOCK_OWNER = "owner.json";
 type LockOwner = { pid: number; hostname: string; started_at_ms: number; process_start?: string; pid_namespace?: string };
 /** The reason a prime gives up on a held lock, and the marker of a prime that reclaimed a dead owner's lock. */
-export const SEED_LOCK_HELD = "seed-lock-held";
+const SEED_LOCK_HELD = "seed-lock-held";
 export const SEED_LOCK_RECLAIMED = "seed-lock-reclaimed";
-/** How long a proof prime waits on a held lock it cannot prove dead. Its caller falls back to npm ci, so waiting can
- * only ever cost more than giving up: 20 polls (100 ms each) ride out a sibling's release, never another's install. */
-export const PROOF_SEED_LOCK_WAIT_MS = 20 * 100;
+
+/** W1-T13974: a proof prime's failure after its key is known names that key, so the reviewer's npm ci fallback row can
+ * carry it (the prime child reports only its error's message). First, so a truncated message keeps it. */
+function withSeedKey(error: unknown, key: string, proof: boolean | undefined): unknown {
+  if (proof && error instanceof Error) error.message = `[seed ${key}] ${error.message}`;
+  return error;
+}
+
+/** W1-T13974: `npm --version` per npm binary, so a later prime launches no npm. The key is the binary the spawn's own
+ * PATH lookup would run, by real path and stat: npm's packed files share one fixed mtime, so the inode, size and ctime
+ * stand beside it. A store prime reads and writes the memo in its root (each prime is its own process); anything else
+ * memoises per process. */
+const npmVersions = new Map<string, string>();
+const NPM_VERSION_MEMO = ".rmd-npm-version.json";
+
+function npmBinaryKey(env: NodeJS.ProcessEnv): string | undefined {
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    const candidate = join(dir, "npm");
+    if (!existsSync(candidate)) continue;
+    const stat = statSync(candidate);
+    if (!stat.isFile() || (stat.mode & 0o111) === 0) continue;
+    return JSON.stringify([realpathSync(candidate), stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+  return undefined;
+}
+
+function storedNpmVersion(root: string, key: string): string | undefined {
+  const file = join(root, NPM_VERSION_MEMO);
+  if (!existsSync(file)) return undefined;
+  try {
+    const memo = JSON.parse(readFileSync(file, "utf8")) as { key?: unknown; version?: unknown };
+    return memo.key === key && typeof memo.version === "string" && memo.version !== "" ? memo.version : undefined;
+  } catch (error) {
+    // Deliberate: a memo that cannot be parsed is not trusted; npm is asked again and the memo rewritten.
+    void error;
+    return undefined;
+  }
+}
+
+function npmVersion(env: NodeJS.ProcessEnv, root?: string): string {
+  const key = npmBinaryKey(env);
+  const known = key === undefined ? undefined : root === undefined ? npmVersions.get(key) : storedNpmVersion(root, key);
+  if (known !== undefined) return known;
+  const version = execFileSync("npm", ["--version"], { encoding: "utf8", env, timeout: 10_000 }).trim();
+  if (key !== undefined) {
+    npmVersions.set(key, version);
+    if (root !== undefined) writeJsonAtomic(join(root, NPM_VERSION_MEMO), { key, version });
+  }
+  return version;
+}
 
 /** Linux /proc/<pid>/stat field 22, the process start time in clock ticks; undefined where there is no procfs. */
 function processStart(pid: number): string | undefined {
@@ -155,7 +202,7 @@ export function dependencySeedIdentity(checkout: string, opts: DependencySeedOpt
   const env = opts.env ?? process.env;
   // Environment options which change npm's dependency graph or lifecycle behavior cannot borrow another generation.
   const npmConfig = Object.fromEntries(Object.entries(env).filter(([key]) => /^npm_config_(omit|include|legacy_peer_deps|install_links|install_strategy|ignore_scripts|optional|production|arch|platform|libc)$/i.test(key)).sort());
-  const npm = opts.npmVersion ?? execFileSync("npm", ["--version"], { encoding: "utf8", env, timeout: 10_000 }).trim();
+  const npm = opts.npmVersion ?? npmVersion(env);
   const identity = { version: VERSION, files, policy: opts.proof ? "proof-ignore-scripts" : "development-ignore-scripts", platform: opts.platform ?? process.platform, arch: process.arch, node: process.version, abi: process.versions.modules, npm, npmConfig, nodeEnv: env.NODE_ENV ?? "" };
   const key = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
   return { ...identity, key, lastUsed: opts.now ?? systemClock.now() };
@@ -541,23 +588,23 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   if (occupied && !replacing) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
-  const meta = dependencySeedIdentity(checkout, opts);
+  const meta = dependencySeedIdentity(checkout, { ...opts, npmVersion: opts.npmVersion ?? npmVersion(opts.env ?? process.env, root) });
   const seed = join(root, meta.key);
   const lock = join(root, `${meta.key}.lock`);
   let installed = false;
   // Serialize builders and GC. Never reclaim a lock by its age: only one whose recorded owner provably died
-  // (deadLockOwner), at most once per prime. A proof prime gives up quickly, since its caller has npm ci.
+  // (deadLockOwner), at most once per prime. A proof prime waits the same lockWaitMs as any other (W1-T13974).
   const started = systemClock.now();
-  const lockWaitMs = opts.lockWaitMs ?? (opts.proof ? PROOF_SEED_LOCK_WAIT_MS : 120_000);
+  const lockWaitMs = opts.lockWaitMs ?? 120_000;
   let lockReclaimed = false, reclaimTried = false;
   while (true) {
     try { mkdirSync(lock, { mode: 0o700 }); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw withSeedKey(error, meta.key, opts.proof);
       const dead = reclaimTried ? undefined : deadLockOwner(lock);
       if (dead !== undefined) { reclaimTried = true; lockReclaimed = reclaimLock(lock, dead); continue; }
       if (systemClock.now() - started >= lockWaitMs) {
-        throw Object.assign(new Error(`${SEED_LOCK_HELD}: ${lock} is held by an owner this prime cannot prove dead (EEXIST)`), { code: "EEXIST" });
+        throw withSeedKey(Object.assign(new Error(`${SEED_LOCK_HELD}: ${lock} is held by an owner this prime cannot prove dead (EEXIST)`), { code: "EEXIST" }), meta.key, opts.proof);
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     }
@@ -650,6 +697,8 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
     return { status: "materialized", key: meta.key, seed, method, installed, ...reclaimed };
+  } catch (error) {
+    throw withSeedKey(error, meta.key, opts.proof);
   } finally {
     for (const path of [stage, targetStage]) if (existsSync(path)) { setWritable(path, true); rmSync(path, { recursive: true, force: true }); }
     rmSync(lock, { recursive: true });
