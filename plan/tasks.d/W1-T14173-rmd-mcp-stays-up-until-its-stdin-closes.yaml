@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # one CLI verb's lifetime in operator-mcp.ts; no route, token or tool changes
+  risk: high # Rule 19 sizing: the verb's lifetime in operator-mcp.ts plus a child-process CLI entry fixture; no route, token or tool changes
   origin: "operator-session#operator-mcp-exits-2026-11-21"
   plan_refs:
     - W1-T4679
@@ -30,8 +30,6 @@
       proof: "grep: W1-T14173 criterion 3: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
     - claim: "A bad argument still throws the usage error, and --enable-write without a write token still throws, before any transport starts"
       proof: "grep: W1-T14173 criterion 4: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
-    - claim: "The production mcp verb still runs through operatorMcpCommand"
-      proof: "grep: \\[\"mcp\", async (rest) => await operatorMcpCommand( in src/run-task.ts"
     - claim: "operatorMcpCommand waits for the end of its input before it returns"
       proof: "grep: \"end\" in src/lib/operator-mcp.ts"
   rationale: |
@@ -79,9 +77,8 @@
     On origin/main operatorMcpCommand resolves right after connect: criterion 1 sees the promise settle
     before stdin ends, and criterion 2's child exits 0 with no stdout. Return without closing the server:
     criterion 1 sees the server still connected. Wait only for server.onclose: stdin ending never closes the
-    stdio transport, so criterion 2's child never exits and hits its 10 s bound. Special-case mcp in main():
-    the operatorMcpCommand grep in run-task.ts still holds, but criterion 2's fixture, which uses
-    flushThenExit as main does, still fails.
+    stdio transport, so criterion 2's child never exits and hits its 10 s bound. Special-case mcp in main() instead:
+    criterion 2's fixture, which uses flushThenExit as main does, still fails.
   note: |
     Id reserved for run-unfiled-1795278840539 with ~/rmd-work/bin/reserve-id.sh.
     Filed by the operator session on 2026-11-21. Filing only; not built.
