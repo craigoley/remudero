@@ -1118,8 +1118,9 @@ const ISSUE_FOOTER = [
 
 /** The hidden line that ends each section of a W1-T12041 body. Its nonce is a digest of the whole
  *  body's content, so no summary, option, detail or notice can carry a marker of the body it sits
- *  in: it would have to contain its own digest. Markers of another body (a quoted issue) differ. */
-const LAYOUT_MARKER_RE = /<!-- rmd-escalation-layout:v1:([0-9a-f]{16}):([a-z]+) -->/g;
+ *  in: it would have to contain its own digest. Markers of another body (a quoted issue) differ.
+ *  Global (read with matchAll); exported so a test drives both arms of the grammar by identifier. */
+export const LAYOUT_MARKER_RE = /<!-- rmd-escalation-layout:v1:([0-9a-f]{16}):([a-z]+) -->/g;
 const LAYOUT_SECTIONS = ["options", "recommendation", "details", "tail", "fields"] as const;
 
 /** Open with the decision summary or the producer's summary, then Options, Recommendation, the raw

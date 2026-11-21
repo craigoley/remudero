@@ -13,6 +13,7 @@ import {
   escalationIssueCause,
   escalationIssueTitle,
   escalationTaskId,
+  LAYOUT_MARKER_RE,
   matchDuplicateEscalation,
   prReferentFromIssueText,
   renderIssueBody,
@@ -647,4 +648,17 @@ test("W1-T12041 criterion 2: a body quoting a whole other escalation still reads
   const stripped = body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:fields -->$/, "");
   assert.notEqual(stripped, body);
   assert.equal(escalationBodyInLegacyOrder(stripped), stripped);
+});
+
+test("the layout marker grammar accepts only a writer marker: v1, a 16-hex nonce and a section name", () => {
+  const marker = "<!-- rmd-escalation-layout:v1:0123456789abcdef:fields -->";
+  LAYOUT_MARKER_RE.lastIndex = 0;
+  assert.equal(LAYOUT_MARKER_RE.exec(marker)?.[2], "fields");
+  for (const lookalike of [marker.replace(":v1:", ":v2:"), marker.replace("0123456789abcdef", "0123"), marker.replace(":fields", ":Fields")]) {
+    LAYOUT_MARKER_RE.lastIndex = 0;
+    assert.equal(LAYOUT_MARKER_RE.test(lookalike), false);
+  }
+  LAYOUT_MARKER_RE.lastIndex = 0;
+  assert.equal(LAYOUT_MARKER_RE.test(renderIssueBody(escalation)), true);
+  LAYOUT_MARKER_RE.lastIndex = 0;
 });
