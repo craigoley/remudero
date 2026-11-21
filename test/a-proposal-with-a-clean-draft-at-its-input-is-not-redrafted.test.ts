@@ -44,7 +44,7 @@ function hookFixture(t: TestContext, proposals: Proposal[], rows: Row[]) {
   const logs: Row[] = [];
   const append = (row: Row) => appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n");
   rows.forEach(append);
-  const newHook = (complete = false) => buildInboxDraftHook("o", "r", { root } as Config, "RUN-13864", (step, extra = {}) => {
+  const newHook = (complete = false, owner = "o", repo = "r") => buildInboxDraftHook(owner, repo, { root } as Config, "RUN-13864", (step, extra = {}) => {
     const row = { step, ...extra };
     logs.push(row);
     append(row);
@@ -54,7 +54,7 @@ function hookFixture(t: TestContext, proposals: Proposal[], rows: Row[]) {
       causalScope: { repository: "o/r" }, spawn: async () => worker(clean), log,
     }, runId) : [];
   }, () => true, () => "fixture");
-  return { stateDir, ledgerPath, setProposals, append, drafted, logs, newHook };
+  return { root, stateDir, ledgerPath, setProposals, append, drafted, logs, newHook };
 }
 
 function corruptReceiptIndex(stateDir: string) {
@@ -384,4 +384,25 @@ test("W1-T13864 criterion 4: malformed attempt entries do not prevent unrelated 
   writeFileSync(join(fixture.stateDir, "inbox-reopened-keys.json"), JSON.stringify({ [bare.id]: "seen", [fresh.id]: "seen" }));
   await fixture.newHook()();
   assert.deepEqual(fixture.drafted, [fresh.id]);
+});
+
+test("W1-T13864 criterion 2: a clean receipt logged under Owner/target still retires the draft after a restart as owner/target", async t => {
+  const fixture = hookFixture(t, [bare], [{ ...cleanRow(bare), repository: "Owner/target" }]);
+  const misses = () => fixture.logs.filter(row => row.step === "inbox.draft_cache_missing");
+  // The ledger row names the repository as the earlier daemon's --repo spelled it.
+  await fixture.newHook(false, "owner", "target")();
+  assert.deepEqual(fixture.drafted, [], "the ledger receipt is read whatever the owner's casing");
+  assert.deepEqual(misses().map(row => [row.proposal_id, row.repository]), [[bare.id, "owner/target"]]);
+
+  // Only the receipt index remains: the ledger and its archives are gone.
+  for (const name of fs.readdirSync(fixture.stateDir)) if (name.startsWith("ledger")) fs.rmSync(join(fixture.stateDir, name), { force: true });
+  await fixture.newHook(false, "Owner", "Target")();
+  assert.deepEqual(fixture.drafted, [], "the receipt index is found whatever the owner's casing");
+  assert.equal(misses().length, 1, "the cache miss is reported once across the casings");
+  assert.deepEqual(fs.readdirSync(join(fixture.stateDir, "inbox-draft-receipts")), ["owner%2Ftarget.json"]);
+
+  // Positive control: another repository's receipt does not retire this one's draft.
+  const other = hookFixture(t, [bare], [{ ...cleanRow(bare), repository: "owner/other" }]);
+  await other.newHook(false, "owner", "target")();
+  assert.deepEqual(other.drafted, [bare.id]);
 });

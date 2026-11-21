@@ -530,8 +530,16 @@ function draftReceiptRow(row: Record<string, unknown>): Record<string, unknown> 
   return undefined;
 }
 
+/**
+ * GitHub names a repository case-insensitively, and the daemon keeps `--repo` as typed: `Owner/target` and
+ * `owner/target` are one repository, so its receipts are scoped and indexed under one lower-case name.
+ */
+function receiptRepository(repository: string): string {
+  return repository.trim().toLowerCase();
+}
+
 function draftReceiptIndexPath(stateDir: string, repository: string): string {
-  return join(stateDir, "inbox-draft-receipts", `${encodeURIComponent(repository)}.json`);
+  return join(stateDir, "inbox-draft-receipts", `${encodeURIComponent(receiptRepository(repository))}.json`);
 }
 
 function mergeDraftReceiptIndex(path: string, observed: readonly Record<string, unknown>[]) {
@@ -559,7 +567,8 @@ function retainDraftReceipts(
   registryLocked: boolean,
 ): Record<string, unknown>[] {
   const path = draftReceiptIndexPath(stateDir, repository);
-  const scoped = observed.filter(row => row && (row.repository === undefined || row.repository === repository));
+  const scoped = observed.filter(row => row && (row.repository === undefined ||
+    (typeof row.repository === "string" && receiptRepository(row.repository) === receiptRepository(repository))));
   let rows = scoped;
   try {
     const merged = mergeDraftReceiptIndex(path, scoped);
