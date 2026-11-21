@@ -31,9 +31,9 @@
       proof: "grep: W1-T12169 criterion 1 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
     - claim: "On a Mac the command runs the preflight at low priority, so that a person's work on the same machine goes first"
       proof: "grep: W1-T12169 criterion 2 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
-    - claim: "After a failed preflight the command runs the failed tests alone, then runs the same tests on unchanged main on the same host. It puts each failure in one class: caused by the change, caused by the host, or also failing on main"
+    - claim: "After a failed preflight the command runs the failed tests alone, then runs the same tests on unchanged main on the same host. It names each test by its file and its full title, never by its body, and puts each failure in one class: caused by the change, caused by the host, or also failing on main. A test whose file and full title both fail on main is also failing on main, even when the change edits its body"
       proof: "grep: W1-T12169 criterion 3 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
-    - claim: "The command pushes only when the receipt says the run may push, or when every failure is in the class also failing on main and the output names each one. It never skips a check and never forces a push"
+    - claim: "The command pushes only when the receipt says the run may push, or when every failure is in the class also failing on main and the output names each one. It never skips a check and never forces a push. It pushes the exact sha with a lease on the remote tip it last read, so the push is refused when that tip moved, by any writer, before the push lands"
       proof: "grep: W1-T12169 criterion 4 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
     - claim: "One command ends a run by its id. No caller reads a process list to find it"
       proof: "grep: W1-T12169 criterion 5 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
@@ -54,7 +54,7 @@
     `authorPushEligibility` in scripts/preflight-author.mjs stays the only judge of a receipt.
     NOT IN SCOPE: the merge, any change to the author preflight, and the removal of the two shell scripts. The operator removes them after one week of use.
   falsifier: |
-    Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Restore and require all to pass.
+    Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Key a failure by its callback body instead of its file and title, edit only an assertion message in a test that fails on main, and criterion 3 must fail. Drop the lease and move the remote tip between the last read and the push, and criterion 4 must fail. Restore and require all to pass.
   note: |
     files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): #19651 adds three caller-less AUTHORITY_TABLE rows
     (hand-ship-push, hand-ship-open-pr, hand-ship-amend-pr), and test/authority-table.test.ts pins every caller-less row,
@@ -67,3 +67,6 @@
     - A branch that already has a pull request is updated. The command does not open a second pull request for it.
     - The body of an amendment pull request needs an `Acceptance:` block. The hand lane's first amendment bodies had none and failed the gate.
     - A launcher that the command starts must add to PATH. It must not replace PATH.
+    Restructure 2026-11-21 (#19651 long tail, about 21 review rounds): criteria 3 and 4 were open claims with no threat model, so each round found a new case.
+    - Criterion 3 now names a test by file and full title. A change to a test's body does not by itself make the failure "caused by the change".
+    - Criterion 4 now names its threat model: the remote tip is the only shared state, and a lease on the tip last read refuses a push when any writer moved it.
