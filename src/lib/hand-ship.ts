@@ -173,35 +173,31 @@ function registeredName(escaped: string): string {
 const regexLiteral = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 
 /** Select exactly one named test and its ancestors with the documented public filters of `node --test`.
- *  Node runs a test when `--test-name-pattern` matches its name, an ancestor's name, or its name joined to its
- *  ancestors' names by single spaces (trimmed); a filtered `test()` never runs its body, so its subtests never
- *  register. Admitting each ancestor's space-joined name lets a dynamic parent register its subtests, and Node
- *  then admits every one of them, so `--test-skip-pattern` removes each test whose name and space-joined name
- *  are both off the target's path; Node runs a test only when both filters admit it. The space join can still
- *  name a different path, so the rerun's TAP rows are read by their ancestry afterwards ({@link pathRows}). */
+ *  Node runs a test only when both filters admit it. `--test-name-pattern` admits a test whose name, an ancestor's
+ *  name, or its name joined to its ancestors' names by single spaces matches; a filtered `test()` never runs its
+ *  body, so its subtests never register. The name pattern is therefore the target's TOP-LEVEL ancestor's own name,
+ *  anchored: that admits the one top-level test the path starts from, and every test inside it, and no other
+ *  top-level test, whatever its name joins to (a top-level `a b c` beside `a` > `b c` never runs). Inside that
+ *  test, `--test-skip-pattern` skips each test whose own name or space-joined name is off the target's path. */
 function isolatedTestArgs(title: string): string[] {
   const names = title.split(" > ").map(registeredName);
   const joined = names.map((_, index) => names.slice(0, index + 1).join(" ").trim());
   // Node also tests the skip pattern against each ancestor, up to its unnamed root (`<root>`, joined name "").
   const onPath = [...new Set([...names, ...joined, "<root>", ""])];
-  return [`--test-name-pattern=^(?:${joined.map(regexLiteral).join("|")})$`,
+  return [`--test-name-pattern=^${regexLiteral(names[0]!)}$`,
     `--test-skip-pattern=^(?!(?:${onPath.map(regexLiteral).join("|")})$)`];
 }
 
-/** The rows that belong to the target: the target and its ancestors, read by their ancestry in the TAP nesting
- *  (`a > b c`), never by the space-joined name the filters match. A test whose space-joined name collides with the
- *  path's (`a b c`) can still run; it is named in the log and dropped, so its result never counts as the target's.
- *  The run's summary is still checked against every row, the dropped ones included. */
-function pathRows(rows: FailingTest[], title: string, tree: string, file: string, log: (line: string) => void): FailingTest[] {
-  const joined = (name: string) => name.split(" > ").join(" ");
-  const kept: FailingTest[] = [];
+/** The rerun ran the target alone only when its TAP rows, read by their ancestry (`a > b c`), are the target and its
+ *  ancestors. A test inside the target's top-level ancestor whose name and space-joined name both fall on the path
+ *  can still pass the filters; its callback has then run, so the rerun was not isolated and is refused, never read. */
+function pathRows(rows: FailingTest[], title: string, tree: string, file: string): FailingTest[] {
   for (const row of rows) {
-    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) { kept.push(row); continue; }
-    log(joined(row.title) === joined(title) || joined(title).startsWith(`${joined(row.title)} `)
-      ? `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which ran only because its space-joined name matches ${JSON.stringify(title)}'s`
-      : `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which is not ${JSON.stringify(title)} or one of its ancestors`);
+    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) continue;
+    throw new Error(`${tree} ${file}: the isolated rerun of ${JSON.stringify(title)} also ran ${JSON.stringify(row.title)}, ` +
+      "so it did not run the named test alone");
   }
-  return kept;
+  return rows;
 }
 
 /** A unique registration expression can be matched across line shifts. Identical expressions
@@ -655,7 +651,9 @@ const launchInDir = 'if [ -n "$1" ]; then PATH="$1:$PATH"; export PATH; fi; ' +
 
 async function hostCommand(host: ShipHost, run: ShipRun, args: string[], opts: ChildOptions = {}): Promise<CommandResult> {
   if (host.target === "local") {
-    const env = (await authorTools()).authorEnvironment(process.env);
+    // A caller's environment (the preflight's, with the pinned Node's directory first on PATH) is kept;
+    // pathPrefix still goes in front of it, added to PATH and never replacing it.
+    const env = { ...(opts.env ?? (await authorTools()).authorEnvironment(process.env)) };
     if (host.pathPrefix) env.PATH = `${host.pathPrefix}:${env.PATH ?? "/usr/bin:/bin"}`;
     return runChild(run, args[0], args.slice(1), { ...opts, env });
   }
@@ -735,6 +733,12 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         nodeExecutable = located.reexec;
       }
     }
+    // Children that resolve `node` through PATH find the pinned Node first: its directory is added to PATH, never replacing it.
+    const pinnedEnv = async () => {
+      const env = (await authorTools()).authorEnvironment(process.env);
+      if (isAbsolute(nodeExecutable)) env.PATH = `${dirname(nodeExecutable)}${delimiter}${env.PATH ?? ""}`;
+      return env;
+    };
     const node = (args: string[]) => priority === "low" ? ["/usr/bin/nice", "-n", "10", nodeExecutable, ...args] : [nodeExecutable, ...args];
     let baseCut = false;
     const declarations = new Map<string, ReturnType<typeof locateDeclarations>>();
@@ -742,10 +746,8 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
       async preflight(requested) {
         priority = requested;
         run.log(`running author preflight at ${priority} priority`);
-        const env = (await authorTools()).authorEnvironment(process.env);
-        if (isAbsolute(nodeExecutable)) env.PATH = `${dirname(nodeExecutable)}${delimiter}${env.PATH ?? ""}`;
         const result = await hostCommand(host, run, node(["--import", "tsx", authorEntry,
-          "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true, env });
+          "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true, env: await pinnedEnv() });
         if (result.code === null || result.code > 3) throw new Error(`author preflight did not finish (exit ${result.code ?? "signal"})`);
         const raw = await command(["cat", "coverage/preflight-author.json"], { cwd: headDir });
         writeFileSync(join(run.dir, "receipt.json"), raw, { mode: 0o600 });
@@ -781,7 +783,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         const selection = title === undefined ? [] : isolatedTestArgs(title);
         const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", "--enable-source-maps", ...selection,
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
-        const result = await hostCommand(host, run, node(args), { cwd, record: true });
+        const result = await hostCommand(host, run, node(args), { cwd, record: true, env: await pinnedEnv() });
         const { testSummary } = await authorTools();
         const summary = testSummary(result.stdout);
         const results = tapResults(result.stdout, cwd, file);
@@ -809,7 +811,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           }
           for (const row of redTargets) row.declaration = identify(row.location);
         }
-        return title === undefined ? results : pathRows(results, title, tree, file, run.log);
+        return title === undefined ? results : pathRows(results, title, tree, file);
       },
       close,
     };

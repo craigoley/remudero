@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
@@ -521,12 +521,11 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true, declaration: undefined },
     ]);
-    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^(?:existing red)$"), "the isolated rerun selects the named failure");
+    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^existing red$"), "the isolated rerun selects the named failure");
     assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
     assert.ok(!spawned.at(-1)!.some((arg) => /expose-internals|node:internal/.test(decodeURIComponent(arg))), "with public runner flags only");
-    // A row that is neither the target nor one of its ancestors is named and dropped, never read as the target.
-    assert.deepEqual(await workspace.rerun("main", file, base, "other"), []);
-    assert.match(f.lines.join("\n"), /main test\/ci\/example\.test\.ts: ignored "existing red", which is not "other" or one of its ancestors/);
+    // A row that is neither the target nor one of its ancestors means the rerun did not run the target alone.
+    await assert.rejects(workspace.rerun("main", file, base, "other"), /also ran "existing red", so it did not run the named test alone/);
     assert.deepEqual(await workspace.rerun("main", file, base), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
@@ -665,7 +664,7 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
   // No `+`: a plain fast-forward refspec, leased on the absent ref the gate read (an empty lease: the ref must not exist).
-  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]], "no force option and no `+` refspec");
   assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
   await assert.rejects(defaults.push(source, run), /changed during verification/);
@@ -1390,8 +1389,7 @@ test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic 
     from = readFileSync(commands, "utf8").length;
     const collided = await workspace.rerun("head", collision, source.head, "a > b c");
     assert.deepEqual(collided.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(collided));
-    assert.deepEqual(ranSince(from), ["COLLISION"], "the colliding test runs, and only its row is dropped");
-    assert.match(f.lines.join("\n"), /ignored "a b c", which ran only because its space-joined name matches "a > b c"'s/);
+    assert.deepEqual(ranSince(from), [], "the top-level namesake's callback never runs");
     from = readFileSync(commands, "utf8").length;
     // Node's TAP writes `#` as `\#` and `\` as `\\`; the rerun selects the name Node registered.
     const escaped = await workspace.rerun("head", file, source.head, "hash \\# and back\\\\slash");
@@ -1465,7 +1463,7 @@ test("W1-T12169 criterion 4: a remote already at the verified head gets no push,
   // Positive control: a remote without the head runs the gate and then pushes.
   await withLiveWritesAllowed(() => defaults.push(source, offlinePushRun(f)));
   assert.equal(readFileSync(mark, "utf8"), "ran\n");
-  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
 });
 
 test("W1-T12169 criterion 5: a stoppable ship read still goes through a live broker, and a stop ends its wait there", async (t) => {
@@ -1515,7 +1513,7 @@ test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a 
   // "a" > "b c" and the top-level "a b c" share the space-joined name the runner's filters match.
   const tests = (nestedRed: boolean, topRed: boolean) => ['import { test } from "node:test";',
     `test("a", async (context) => { await context.test("b c", () => { ${nestedRed ? 'throw new Error("nested red");' : ""} }); });`,
-    `test("a b c", () => { ${topRed ? 'throw new Error("top-level red");' : ""} });`, ""].join("\n");
+    `test("a b c", () => { console.log("RAN NAMESAKE"); ${topRed ? 'throw new Error("top-level red");' : ""} });`, ""].join("\n");
   // Main: the nested test passes and its namesake fails. Read as the target, the namesake would make it "also failing on main".
   writeFileSync(join(repo.dir, file), tests(false, true));
   repo.git("add", file, "test/setup/tmp-hygiene.ts");
@@ -1536,7 +1534,7 @@ test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a 
   assert.doesNotMatch(log, /comparison unavailable|also failing on main/, log);
   assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a > b c$/m);
   assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a$/m);
-  assert.match(log, /main test\/ci\/example\.test\.ts: ignored "a b c", which ran only because its space-joined name matches/);
+  assert.doesNotMatch(readFileSync(join(f.root, "commands.log"), "utf8"), /RAN NAMESAKE/, "the namesake's callback never runs on head or main");
   assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
 });
 
@@ -1567,7 +1565,7 @@ test("W1-T12169 criterion 3: a test red on head and main stays also failing on m
   assert.ok(f.calls.includes(`push ${source.head}`));
 });
 
-test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a tip that moves after the gate is never fast-forwarded", async (t) => {
+test("W1-T12169 criterion 4: the push sends no force option, refuses a tip that moved after its gate, and a non-fast-forward never lands", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   const base = seedHandBranch(repo);
@@ -1591,22 +1589,79 @@ test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a t
     git: ((cwd, args, options) => hostWorktreeGitAsync(cwd, args[0] === "ls-remote" ? toRemote(args) : args, options)) satisfies typeof hostWorktreeGitAsync };
   const source = await defaults.readSource(repo.dir, run);
   writeFileSync(join(f.root, "advance"), ancestor);
-  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stale info|rejected/);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /remote ref moved after the pre-push gate read it/);
   assert.equal(readFileSync(mark, "utf8"), "ran\n");
-  assert.deepEqual(pushes, [["push", `--force-with-lease=refs/heads/${branch}:${base}`, "origin", `${verifiedHead}:refs/heads/${branch}`]]);
-  assert.equal(tip(), ancestor, "the gate judged the push from the base; a remote that moved since rejects it");
-  // A tip the head does not descend from is refused before the gate, so the lease can never replace a commit.
+  assert.deepEqual(pushes, [], "the gate judged the push from the base; a remote that moved since is not fast-forwarded on that result");
+  assert.equal(tip(), ancestor);
+  // A tip the head does not descend from is refused before the gate.
   repo.git("switch", "-q", "--detach", base);
   repo.git("commit", "--allow-empty", "-m", "someone else's commit");
   const foreign = repo.git("rev-parse", "HEAD");
   repo.git("push", "-q", remote, `${foreign}:refs/heads/${branch}`, "-f");
   repo.git("switch", "-q", branch);
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /is not an ancestor of .* so this push could only replace it/);
-  assert.equal(pushes.length, 1);
+  assert.deepEqual(pushes, []);
   assert.equal(tip(), foreign);
-  // Positive control: an unmoved tip the head descends from takes the leased fast-forward.
+  // The argv the push sends, against that tip, is a non-fast-forward the remote itself refuses: nothing forces it.
+  await assert.rejects(hostWorktreeGitAsync(repo.dir, ["push", remote, `${verifiedHead}:refs/heads/${branch}`]), /rejected|non-fast-forward|fetch first/);
+  assert.equal(tip(), foreign);
+  // Positive control: an unmoved tip the head descends from takes the plain fast-forward.
   execFileSync("git", ["--git-dir", remote, "update-ref", `refs/heads/${branch}`, base]);
   writeFileSync(join(f.root, "advance"), base);
   await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.deepEqual(pushes, [["push", "origin", `${verifiedHead}:refs/heads/${branch}`]]);
+  assert.ok(!pushes.flat().some((arg) => /^--force|^-f$|^\+/.test(arg)), "no force option and no `+` refspec");
   assert.equal(tip(), verifiedHead);
+});
+
+test("W1-T12169 criterion 2: a child that resolves node through PATH finds the pinned Node first, added to PATH, not replacing it", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo, true);
+  writeFileSync(join(repo.dir, file), 'import { test } from "node:test"; test("existing red", () => { throw new Error("red"); });\n');
+  repo.git("add", file);
+  repo.git("commit", "-m", "name the test fixture");
+  const pin = readFileSync(join(repo.dir, ".nvmrc"), "utf8").trim().replace(/^v/, "");
+  const pinned = process.versions.node === pin ? process.execPath
+    : pinnedNodeReexec({ pin, current: process.versions.node, env: process.env }).reexec;
+  assert.ok(pinned, "the .nvmrc Node is present on this host");
+  // The operator's PATH, without the pinned Node's directory and with no configured pathPrefix.
+  const path = process.env.PATH;
+  t.after(() => { process.env.PATH = path; });
+  process.env.PATH = (path ?? "").split(delimiter).filter((entry) => entry !== dirname(pinned)).join(delimiter);
+  const resolved: { what: string; node: string; path: string }[] = [];
+  const defaults = handShipEffects(() => 0);
+  const run: Parameters<HandShipEffects["readSource"]>[1] = {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(command, args, options) {
+      if (command !== "/usr/bin/nice") return spawn(command, args, options);
+      const env = options.env ?? {};
+      const node = spawnSync("sh", ["-c", "command -v node"], { env, encoding: "utf8" }).stdout.trim();
+      const cwd = String(options.cwd);
+      const preflight = args.includes("scripts/preflight-author.mjs");
+      resolved.push({ what: preflight ? "preflight" : "rerun", node, path: String(env.PATH) });
+      if (preflight) {
+        mkdirSync(join(cwd, "coverage"), { recursive: true });
+        writeFileSync(join(cwd, "coverage/preflight-author.json"), JSON.stringify({ ...redReceipt(["existing red"]),
+          headSha: repo.git("rev-parse", "HEAD"), baseSha: base, version: 1, dryRun: false, publicationIdentity: { state: "passed", headRef: branch } }));
+        return spawn(process.execPath, ["-e", "process.exitCode = 1"], options);
+      }
+      const tap = `not ok 1 - existing red\n  ---\n  location: '${join(cwd, file)}:1:1'\n  ...\n` +
+        "# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n";
+      return spawn(process.execPath, ["-e", "process.stdout.write(process.argv[1]); process.exitCode = 1", tap], options);
+    },
+  };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...linux, kind: "mac" }, source, run);
+  try {
+    await workspace.preflight("low");
+    await workspace.rerun("head", file, source.head, "existing red");
+  } finally {
+    await workspace.close();
+  }
+  assert.deepEqual(resolved.map((entry) => [entry.what, entry.node]), [["preflight", pinned], ["rerun", pinned]], JSON.stringify(resolved));
+  for (const entry of resolved) {
+    assert.equal(entry.path.split(delimiter)[0], dirname(pinned));
+    assert.ok(entry.path.split(delimiter).includes("/usr/bin"), "the rest of PATH is kept");
+  }
 });

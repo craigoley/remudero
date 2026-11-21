@@ -456,8 +456,8 @@ interface PrePushGate {
   args: string[];
   input: string;
   env: NodeJS.ProcessEnv;
-  /** A required gate's verdict holds only for the remote tip it read: the push's compare-and-set on that tip. */
-  lease?: string;
+  /** A required gate's verdict holds only for the remote tip it read: `ls-remote` args and the line it answered. */
+  sampled?: { args: string[]; line: string };
 }
 
 /**
@@ -510,8 +510,7 @@ function* prePushGateSteps(
   }
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   if (required && remoteSha !== ZERO_SHA) {
-    // The push below is leased on this tip, and a lease alone would let a push replace a tip it does not
-    // descend from. Only a tip the head descends from may be updated, so the leased push is a fast-forward.
+    // Only a tip the head descends from may be updated: the push is a plain fast-forward from the tip the gate judged.
     try {
       yield* step(() => read(["merge-base", "--is-ancestor", remoteSha, localSha]));
     } catch {
@@ -525,7 +524,7 @@ function* prePushGateSteps(
   // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
   if (required) delete env.RMD_PREPUSH_GATES;
   return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env,
-    ...(required ? { lease: `--force-with-lease=${remoteRef}:${remoteSha === ZERO_SHA ? "" : remoteSha}` } : {}) };
+    ...(required ? { sampled: { args: remoteArgs, line: remoteLine ?? "" } } : {}) };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
@@ -957,15 +956,23 @@ export function worktreePushExecAsync(
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
-    // A required gate judged the push from the remote tip it read. The lease makes the push a compare-and-set on
-    // that exact tip: Git rejects it if the remote moved at all, even to an ancestor of the head, and, the tip
-    // being an ancestor of the head (checked above), it can only fast-forward and never replace a commit.
-    const sent = gate?.lease === undefined ? pushArgs : [pushArgs[0]!, gate.lease, ...pushArgs.slice(1)];
+    // A required gate judged the push from the remote tip it read. The push carries no force option: Git and the
+    // remote refuse it unless it fast-forwards, and the gate checked that the tip it read is an ancestor of the head.
+    // The tip is read again just before the push and must still be the one the gate judged. That re-read is not
+    // atomic with the push; only a lease is, and a lease is a force option, so this narrows the window, no more.
+    if (gate?.sampled !== undefined) {
+      const sampled = gate.sampled;
+      const now = String(await read(sampled.args)).trim();
+      if (now !== sampled.line) {
+        throw gateRefusal(worktreePath, pushArgs, { reason: `the remote ref moved after the pre-push gate read it (${
+          sampled.line.split(/\s+/)[0] || "absent"} -> ${now.split(/\s+/)[0] || "absent"}), so the gate's result does not cover this push` });
+      }
+    }
     signal?.throwIfAborted();
     await pushWithAuthRetry(async (env) => {
       try {
         signal?.throwIfAborted();
-        await (push ?? hostWorktreeGitAsync)(worktreePath, sent, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
         signal?.throwIfAborted();
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);
