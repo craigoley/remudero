@@ -1060,6 +1060,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   resolvedInboxDraftLane,
   inboxDraftLaneForMount,
@@ -1653,6 +1654,10 @@ import {
   skillsInjectedEvent,
   skillWithheldForRun,
   stageSkillDrafts,
+  expireUnansweredSkillDrafts,
+  readSkillDraftVerdicts,
+  reportSkillDraftExpiry,
+  withSkillDraftVerdictLock,
   stageSkillLifecycleProposal,
   withdrawSkillLifecycleProposal,
   workerAllowlistFromCapabilityContext,
@@ -24407,8 +24412,8 @@ async function retroCommand(
   const wrk = workerModel(config);
 
   const runId = `RETRO-${nextLaneEpochMs()}`; // W1-T2528: the singleton lane the collision was observed on
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra });
+  const log = (step: string, extra: Record<string, unknown> = {}, expectedLiveVersion?: string) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "RETRO", step, lane: "retro", ...extra }, { expectedLiveVersion });
 
   // W1-T3101 — THE CALLER stageSkillDraft NEVER HAD. Its own suite drove it; nothing in production
   // did, so `skill.staged` had fired ZERO times across three days of ledger. Staging writes a
@@ -24423,6 +24428,11 @@ async function retroCommand(
     log,
   );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
+  reportSkillDraftExpiry(
+    () => expireUnansweredSkillDrafts(followupRegistryPath, dirname(ledgerPath), log, systemClock),
+    log,
+    say,
+  );
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -39828,12 +39838,28 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
   const ledgerPath = ledgerPathFor(config);
   const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  return proposalVerdictCommand(
+  const decide = () => proposalVerdictCommand(
     kind,
     rest,
     (id) => {
-      const { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
+      let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
+      if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
+        const verdicts = readSkillDraftVerdicts(dirname(ledgerPath));
+        if ("unmeasured" in verdicts) {
+          // The normal classifier can already have a live or retained verdict. It is the path restore used
+          // before the union read, so a held rotation lock or an unreadable archive falls back to it.
+          const liveClassifierUsable = verdicts.archivesUnreadable || verdicts.rotationLockHeld;
+          if (!liveClassifierUsable || (classification?.state !== "declined" && classification?.state !== "ratified")) {
+            throw new Error(`rmd restore: ${verdicts.unmeasured}`);
+          }
+        } else {
+          const declinedReason = verdicts.isDeclined(id);
+          if (verdicts.isRatified(id)) classification = { proposalId: id, state: "ratified", reasons: [] };
+          else if (declinedReason !== undefined) classification = { proposalId: id, state: "declined", reasons: [], declinedReason };
+          else if (classification?.state === "declined") classification = undefined;
+        }
+      }
       return { exists: proposal !== undefined, classification };
     },
     (step, id, reason) => {
@@ -39845,6 +39871,7 @@ export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: strin
         (failed, extra) => console.error(`rmd ${row.step}: ${failed} ${JSON.stringify(extra)}`));
     },
   );
+  return withSkillDraftVerdictLock(dirname(ledgerPath), rest[0], decide);
 }
 
 /**
@@ -40493,8 +40520,14 @@ export async function approveCommand(
         payload: { proposalId, fragmentYaml: "", stampLine: "" },
       };
     } else {
-      result = withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
-        approveProposal(classification, gateway, { ledgerPath, runId, duplicateCorpus }));
+      result = withSkillDraftVerdictLock(dirname(ledgerPath), proposalId, () => {
+        const current = proposal.skillFile
+          ? loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot).classification
+          : classification;
+        if (!current) throw new Error(`rmd approve: ${proposalId} left the active registry`);
+        return withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, log), () =>
+          approveProposal(current, gateway, { ledgerPath, runId, duplicateCorpus }));
+      });
     }
   } catch (e) {
     // W1-T311: createRatificationBranch REFUSED (a degraded mint or a failed reservation) —
