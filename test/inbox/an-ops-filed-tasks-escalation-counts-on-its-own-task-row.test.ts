@@ -186,3 +186,18 @@ test("W1-T14114 ops-filed own task row: a catalog packet older than one refresh 
   now += 2_000;
   assert.equal(catalog.referentPlan(publicPlan, state), undefined, "at 121 s the packet is stale, so the referents use the public plan");
 });
+
+test("W1-T14114 ops-filed own task row: a PR whose body was never read takes no ops count from its run branch alone", () => {
+  const unread: PrRef = { number: 8, url: "https://github.com/craigoley/remudero/pull/8", state: "OPEN", headRefName: "run-W1-T9-1795095230170" };
+  const read = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway([unread]), inboxReferentPlan: () => combined }, publicPlan);
+  assert.deepEqual(read.boardReferents.states.get("#8"), { status: "open" }, "an unseen trailer may name another task");
+});
+
+test("W1-T14114 ops-filed own task row: an ops task two open PRs claim verifies neither, even when one claims it unambiguously", () => {
+  const otherOps = task("W1-T8");
+  const wide = planOf(task("W1-T1"), opsTask, otherOps);
+  const open = [pr(9, "run-W1-T9-1795095230170", "Remudero-Task: W1-T9"), pr(10, "run-W1-T9-1795095299999", "Remudero-Task: W1-T8")];
+  const read = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway(open), inboxReferentPlan: () => wide }, publicPlan);
+  assert.deepEqual(read.boardReferents.states.get("#10"), { status: "open" }, "the contradictory PR reads no false zero");
+  assert.deepEqual(read.boardReferents.states.get("#9"), { status: "open" }, "a shared claim is not unambiguous ownership");
+});
