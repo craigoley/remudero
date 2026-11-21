@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 
 import {
   buildFreshTreeReviewRunner,
@@ -13,6 +13,7 @@ import {
 import { ReviewerWorktreeLeasedError } from "#src/lib/reviewer-worktree-lease.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 // ── W1-T3723 — A STALE REVIEWER REVIEWS FROM A FRESH TREE INSTEAD OF WAITING FOR A RESTART ────
 //
@@ -315,7 +316,7 @@ function busyRunner(over: {
   addWorktree?: (path: string) => void;
   inspectOwn?: "reusable" | "unsafe";
   prepareWorktree?: (path: string) => boolean;
-  removeWorktree?: (path: string) => void;
+  removeWorktree?: (path: string) => void | Promise<void>;
   spawn?: (w: string) => Promise<number>;
 } = {}) {
   const events: string[] = [];
@@ -338,7 +339,11 @@ function busyRunner(over: {
       if (refusal) throw refusal;
       return action();
     },
-    removeWorktree: (_d, path) => { events.push(`remove ${path}`); removed.push(path); over.removeWorktree?.(path); },
+    removeWorktree: (_d, path) => {
+      events.push(`remove ${path}`);
+      removed.push(path);
+      return over.removeWorktree?.(path);
+    },
     spawnReview: async (tree) => {
       events.push(`spawn ${tree}`);
       spawns.push(tree);
@@ -379,20 +384,21 @@ test("W1-T14066 criterion 2: the own tree is removed when spawnReview rejects, a
   assert.deepEqual(rejected.removed, rejected.added);
   assert.match(rejected.failures.join("\n"), /spawn failed/);
 
-  for (const exit of [0, 4]) {
-    const brokenRemoval = busyRunner({ spawn: async () => exit, removeWorktree: () => { throw new Error("worktree remove failed"); } });
-    assert.equal(await brokenRemoval.run(), exit, `a removal that throws leaves exit ${exit} unchanged`);
+  const throwRemovalError = () => { throw new Error("worktree remove failed"); };
+  for (const [exit, removeWorktree] of [[0, throwRemovalError], [4, async () => throwRemovalError()]] as const) {
+    const brokenRemoval = busyRunner({ spawn: async () => exit, removeWorktree });
+    assert.equal(await brokenRemoval.run(), exit, `a failed removal leaves exit ${exit} unchanged`);
     assert.equal(brokenRemoval.removed.length, 1);
     assert.equal(brokenRemoval.failures.length, 0, "a failed removal is not a review failure");
   }
 });
 
-test("W1-T14066 criterion 3: with the production lease and a real repository, a shared tree held by a live process of this host is left alone and the review runs from its own tree", async () => {
-  const root = makeTempDir("t14066-busy-reviewer-tree");
+test("W1-T14066 criterion 3: with the production lease and a real repository, a shared tree held by a live process of this host is left alone and the review runs from its own tree", async (t) => {
+  const { dir: root } = ownedFixtureDir(t, "t14066-busy-reviewer-tree");
   const worktreeRoot = join(root, "worktrees");
   mkdirSync(worktreeRoot, { recursive: true });
-  const sourceStore = gitRepo({ kind: "t14066-source" });
-  const remoteStore = gitRepo({ bare: true, kind: "t14066-remote" });
+  const sourceStore = gitRepo({ scope: t, kind: "t14066-source" });
+  const remoteStore = gitRepo({ scope: t, bare: true, kind: "t14066-remote" });
   const repo = sourceStore.dir;
   writeFileSync(join(repo, "tracked.txt"), "base\n");
   mkdirSync(join(repo, "node_modules"));
@@ -409,18 +415,49 @@ test("W1-T14066 criterion 3: with the production lease and a real repository, a 
   const holder = JSON.stringify({ version: "reviewer-worktree-lease-v1", pid: process.ppid, host: hostname(),
     startedAt: new Date().toISOString(), run_id: "work-review-W1-T13991-1795200190867-d6e3" });
   writeFileSync(lock, holder);
+
+  // The real removal command waits for an event-loop callback after Git starts. The bounded
+  // wait still lets a synchronous regression finish removing the tree and fail the assertion.
+  const shim = join(root, "git");
+  writeFileSync(shim, `#!/bin/sh
+if [ "$3" = worktree ] && [ "$4" = remove ]; then
+  dir=\${0%/*}
+  : > "$dir/removing"
+  attempts=0
+  while [ ! -f "$dir/resume" ] && [ "$attempts" -lt 200 ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if [ -f "$dir/resume" ]; then : > "$dir/resumed-during-removal"; fi
+fi
+PATH=\${PATH#*:}
+exec git "$@"
+`, { mode: 0o755 });
+  const pathBefore = process.env.PATH;
+  process.env.PATH = [root, pathBefore].join(delimiter);
   const seen: Array<{ tree: string; head: string; tracked: boolean }> = [];
   const runner = buildFreshTreeReviewRunner(repo, {
     git,
     addWorktree: (dir, path, revision) => { git(["-C", dir, "worktree", "add", "--detach", path, revision]); },
-    removeWorktree: (dir, path) => { git(["-C", dir, "worktree", "remove", "--force", path]); },
     spawnReview: async (tree) => {
       seen.push({ tree, head: git(["-C", tree, "rev-parse", "HEAD"]).trim(), tracked: existsSync(join(tree, "tracked.txt")) });
       return 0;
     },
     worktreeRoot,
   });
-  assert.equal(await runner("19515", [], { originMainSha: sha }), 0);
+  const tick = setInterval(() => {
+    if (!existsSync(join(root, "removing"))) return;
+    writeFileSync(join(root, "resume"), "");
+    clearInterval(tick);
+  }, 10);
+  try {
+    assert.equal(await runner("19515", [], { originMainSha: sha }), 0);
+  } finally {
+    clearInterval(tick);
+    if (pathBefore === undefined) delete process.env.PATH;
+    else process.env.PATH = pathBefore;
+  }
+  assert.ok(existsSync(join(root, "resumed-during-removal")), "the default Git removal allows the event loop to progress");
   assert.equal(seen.length, 1, "the review ran");
   const own = seen[0]!.tree;
   assert.notEqual(own, shared, "the leased shared tree is never reviewed in");

@@ -1946,9 +1946,9 @@ export type FreshTreeReviewSeams = {
     store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
-  /** Remove a tree this process cut for one attempt (`git worktree remove --force` through the
-   *  hardened leaf by default). Only ever handed a path whose `addWorktree` this process saw succeed. */
-  removeWorktree?: (repoDir: string, worktreePath: string) => void;
+  /** Remove a tree this process cut for one attempt through the async hardened Git leaf by default.
+   *  Only ever handed a path whose `addWorktree` this process saw succeed. */
+  removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
   /**
    * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
    * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
@@ -2178,9 +2178,9 @@ function prepareFreshOriginMainTree(repoDir: string, deps: FreshTreeTools, prefi
 
 /** Remove a per-attempt tree once its attempt settles. A failed removal never replaces the attempt's own outcome:
  *  the tree is registered and detached, so the general worktree reaper collects it on a later pass. */
-function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): void {
+async function removePerAttemptTree(repoDir: string, deps: FreshTreeTools, worktree: string): Promise<void> {
   try {
-    (deps.removeWorktree ?? worktreeRemove)(repoDir, worktree);
+    await (deps.removeWorktree ?? worktreeRemoveAsync)(repoDir, worktree);
   } catch (error) {
     process.stderr.write(`fresh origin/main tree: left ${worktree} for the worktree reaper: ${scrubGitCredentialText(String(error))}\n`);
   }
@@ -2203,7 +2203,7 @@ async function inPerAttemptTree<T>(repoDir: string, deps: FreshTreeTools, prefix
       return action(path);
     });
   } finally {
-    if (cut !== undefined) removePerAttemptTree(repoDir, deps, cut);
+    if (cut !== undefined) await removePerAttemptTree(repoDir, deps, cut);
   }
 }
 
