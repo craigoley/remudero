@@ -126,7 +126,7 @@ export interface TranscriptContext {
 const PROCEDURE_STEP_VERBS = new Map([
   ["Bash", "Run"], ["Edit", "Change"], ["MultiEdit", "Change"], ["NotebookEdit", "Change"], ["Write", "Create"],
 ]);
-const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"]);
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...PROCEDURE_STEP_VERBS.keys(), "Read", "WebFetch", "WebSearch"]);
 const CAPABILITY_TOOL_NAMES: ReadonlySet<string> = new Set([...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"]);
 
 function toolNamesIn(text: string, toolNames: ReadonlySet<string>): string[] {
@@ -327,27 +327,44 @@ const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
   "Run", "Rerun", "Change", "Create", "Add", "Delete", "Commit", "Push", "Fetch", "Merge", "Open", "Reserve", "Claim", "Copy",
 ]);
 
-const SECTION_HEADING = /^ {0,3}#{1,2}(?:[ \t]+|$)/;
-const PROCEDURE_HEADING = /^ {0,3}##[ \t]+Procedure(?:[ \t]+#+)?[ \t]*$/;
 const PROCEDURE_BULLET = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)(.*)$/;
 const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 
+/** Comments and fences are opaque to section tracking. The scanner still checks the raw lines. */
 function* skillDraftLines(markdown: string): Generator<{ line: string; bullet: string | undefined }> {
-  let inProcedure = false;
+  let procedureLevel: number | undefined;
   let fence: string | undefined;
+  let inComment = false;
+  let paragraph: string | undefined;
   for (const line of markdown.split(/\r?\n/)) {
     let bullet: string | undefined;
+    let nextParagraph: string | undefined;
     if (fence) {
       const close = FENCE_CLOSE.exec(line)?.[1];
       if (close && close[0] === fence[0] && close.length >= fence.length) fence = undefined;
+    } else if (inComment || /^ {0,3}<!--/.test(line)) {
+      inComment = !line.includes("-->");
     } else {
       fence = FENCE_OPEN.exec(line)?.[1];
       if (!fence) {
-        if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
-        if (inProcedure) bullet = PROCEDURE_BULLET.exec(line)?.[1];
+        const atx = /^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/.exec(line);
+        const setext = paragraph === undefined ? null : /^ {0,3}(=+|-+)[ \t]*$/.exec(line);
+        if (atx || setext) {
+          const level = atx ? atx[1]!.length : (setext?.[1]?.startsWith("=") ? 1 : 2);
+          const title = atx ? atx[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim() : paragraph;
+          if (title === "Procedure") procedureLevel = level;
+          else if (procedureLevel !== undefined && level <= Math.max(2, procedureLevel)) procedureLevel = undefined;
+        } else if (!/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
+          const item = PROCEDURE_BULLET.exec(line)?.[1];
+          if (procedureLevel !== undefined) bullet = item;
+          if (item === undefined && /^ {0,3}(?!>)\S/.test(line)) {
+            nextParagraph = paragraph === undefined ? line.trim() : "";
+          }
+        }
       }
     }
+    paragraph = nextParagraph;
     yield { line, bullet };
   }
 }

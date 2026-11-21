@@ -76,16 +76,20 @@ test("W1-T13857 criterion 2: a command sequence recurring in runs of two tasks i
   const { runs, records } = corpus([
     ["A1", "W1-T1", ["Bash:npm run comment-load-signal", "Bash:sed", "Bash:npm run typecheck"]],
     ["A2", "W1-T2", ["Bash:npm run comment-load-signal", "Bash:npm run typecheck"]],
+    ["A3", "", ["Bash:npm run comment-load-signal", "Bash:npm run typecheck"]],
     ["B1", "W1-T3", ["Bash:npm run lint-plan:fast", "Bash:git push"]],
     ["B2", "W1-T3", ["Bash:npm run lint-plan:fast", "Bash:git push"]],
+    ["B3", "", ["Bash:npm run lint-plan:fast", "Bash:git push"]],
   ]);
   const found = mineRecurringProcedures(runs, records);
   assert.deepEqual(found.map((p) => p.steps), [["Bash:npm run comment-load-signal", "Bash:npm run typecheck"]]);
   assert.deepEqual(found[0]!.taskIds, ["W1-T1", "W1-T2"]);
-  assert.deepEqual(found[0]!.runIds, ["A1", "A2"]);
-  assert.equal(found[0]!.recurrence, 2);
+  assert.deepEqual(found[0]!.runIds, ["A1", "A2", "A3"]);
+  assert.equal(found[0]!.recurrence, 3);
   // The one-task sequence is held back by the task floor alone.
-  assert.ok(mineRecurringProcedures(runs, records, { minTaskIds: 1 }).some((p) => p.steps.includes("Bash:git push")));
+  const oneTask = mineRecurringProcedures(runs, records, { minTaskIds: 1 }).find((p) => p.steps.includes("Bash:git push"));
+  assert.deepEqual(oneTask?.taskIds, ["W1-T3"]);
+  assert.deepEqual(oneTask?.runIds, ["B1", "B2", "B3"]);
 
   const crowded = competingProcedures();
   const complete = mineRecurringProcedures(crowded.runs, crowded.records);
@@ -169,6 +173,8 @@ test("W1-T13857 criterion 5: the top procedure is drafted as Run and Change line
   assert.deepEqual(scanSkillDraft(fallback, ALLOWLIST), { ok: true });
 
   const toolNamePaths = corpus([
+    ["M1", "W1-T1", ["Bash:npm run typecheck", "Edit:MultiEdit.md"], 2000],
+    ["M2", "W1-T2", ["Bash:npm run typecheck", "Edit:MultiEdit.md"], 2000],
     ["B1", "W1-T1", ["Bash:npm run typecheck", "Edit:Bash.md"], 1000],
     ["B2", "W1-T2", ["Bash:npm run typecheck", "Edit:Bash.md"], 1000],
     ["C1", "W1-T1", ["Bash:npm run typecheck", "Edit:RunCheck.md"], 500],
@@ -177,10 +183,12 @@ test("W1-T13857 criterion 5: the top procedure is drafted as Run and Change line
     ["D2", "W1-T2", HIGH_SCORE_STEPS],
   ]);
   assert.deepEqual(mineRecurringProcedures(toolNamePaths.runs, toolNamePaths.records).map((p) => p.steps[1]),
-    ["Edit:Bash.md", "Edit:RunCheck.md", "Edit:src/lib/*.ts"]);
+    ["Edit:MultiEdit.md", "Edit:Bash.md", "Edit:RunCheck.md", "Edit:src/lib/*.ts"]);
   const safeFallback = renderSkillDraft(candidate(toolNamePaths.runs.map((run) => run.runId)), toolNamePaths)!;
   assert.deepEqual(procedureLines(safeFallback.markdown), expectedLines);
   assert.deepEqual(scanSkillDraft(safeFallback, ALLOWLIST), { ok: true });
+  assert.equal(scanSkillDraft(draftWith(["- Change `MultiEdit.md`."]), ALLOWLIST).reason,
+    "names tool 'MultiEdit' outside the worker allowlist");
 
   const crowded = competingProcedures();
   const top = renderSkillDraft(candidate(crowded.runs.map((run) => run.runId)), crowded)!;
@@ -227,6 +235,20 @@ test("W1-T13857 criterion 6: scanSkillDraft refuses a Procedure step with no act
       assert.match(result.reason ?? "", /^not-an-action/, line);
     }
   }
+
+  const signal = `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`;
+  for (const markdown of [
+    draftWith([signal]).markdown.replace("## Procedure", "Procedure\n---------"),
+    draftWith([signal]).markdown.replace("## Procedure", "Procedure\n========="),
+    draftWith(["<!--\n## Evidence\n```sh\n-->", signal]).markdown,
+  ]) {
+    const result = scanSkillDraft({ ...draftWith([]), markdown }, ALLOWLIST);
+    assert.equal(result.offendingLine, signal);
+    assert.match(result.reason ?? "", /^not-an-action/);
+  }
+  const headings = draftWith(["<!--\n- an example line\n-->", "- Run `npm run typecheck`.", "", "- - -"]);
+  headings.markdown = headings.markdown.replace("## Procedure", "Procedure\n=========").replace("## Evidence", "Evidence\n--------");
+  assert.deepEqual(scanSkillDraft(headings, ALLOWLIST), { ok: true });
 });
 
 test("W1-T13857 criterion 7: the three recurring-procedure fixtures pass scanSkillDraft", () => {

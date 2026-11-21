@@ -215,6 +215,14 @@ function insertableInEveryRun(steps: readonly string[], members: readonly Member
   return false;
 }
 
+function distinctTaskIds(members: readonly Member[]): Set<string> {
+  const taskIds = new Set<string>();
+  for (const { run } of members) {
+    if (run.taskId?.trim()) taskIds.add(run.taskId);
+  }
+  return taskIds;
+}
+
 function procedureOf(steps: readonly string[], members: readonly Member[]): RecurringProcedure {
   const firstStep = steps[0]!;
   const lastStep = steps[steps.length - 1]!;
@@ -226,7 +234,7 @@ function procedureOf(steps: readonly string[], members: readonly Member[]): Recu
     steps: [...steps],
     recurrence: members.length,
     runIds: members.map(({ run }) => run.runId).sort(),
-    taskIds: [...new Set(members.map(({ run }) => run.taskId))].sort(),
+    taskIds: [...distinctTaskIds(members)].sort(),
     medianSpannedCalls,
     medianOutputTokensPerCall,
     estimatedTokensPerRun: medianOutputTokensPerCall === null ? null : medianSpannedCalls * medianOutputTokensPerCall,
@@ -262,7 +270,7 @@ export function mineRecurringProcedures(
     mined.push(minedRun(run, rowsByRun.get(run.runId) ?? []));
   }
   const qualifies = (members: readonly Member[]): boolean =>
-    members.length >= minRuns && new Set(members.map(({ run }) => run.taskId)).size >= minTaskIds;
+    members.length >= minRuns && distinctTaskIds(members).size >= minTaskIds;
   const out: RecurringProcedure[] = [];
   const grow = (steps: string[], members: Member[]): void => {
     if (insertableInEveryRun(steps, members)) return;

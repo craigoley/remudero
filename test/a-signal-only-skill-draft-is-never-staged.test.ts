@@ -114,22 +114,20 @@ test("W1-T13858 criterion 1: a draft whose every step is a signal-table line is 
   } finally { f.done(); }
 });
 
-test("W1-T13858 criterion 2: transcript-mined steps stage after removing the signal line required to be refused by W1-T13857", () => {
+test("W1-T13858 criterion 2: a draft with the fully_executed_proof line and a transcript-mined step still stages", () => {
   const f = fixture();
   try {
     const draft = minedDraft();
-    const mixed = { ...draft, markdown: draft.markdown.replace("## Procedure\n\n", `## Procedure\n\n- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n`) };
-    const refusal = stageSkillDraft(f.registryPath, mixed, allowlist, reachability(), {}, clock);
-    assert.equal(refusal.refused, true);
-    assert.match(refusal.reason ?? "", /^not-an-action:/);
-    assert.equal(existsSync(f.registryPath), false);
-
-    const r = stageSkillDraft(f.registryPath, draft, allowlist, reachability(), {}, clock);
+    const proofAction = "- Run `./bin/rmd check-acceptance <body file>` to check the proof declarations.";
+    const mixed = { ...draft, markdown: draft.markdown.replace("## Procedure\n\n",
+      `## Procedure\n\n${proofAction} ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n`) };
+    const r = stageSkillDraft(f.registryPath, mixed, allowlist, reachability(), {}, clock);
     assert.equal(r.refused, false, r.reason);
     assert.equal(r.staged, true);
     const entry = loadProposalRegistry(f.registryPath).find((p) => p.id === skillDraftProposalId(draft.procedureKey));
     assert.ok(entry?.skillFile?.markdown.includes("- Run `npm run typecheck`."), "the mined command is the staged step");
-    assert.ok(!entry?.skillFile?.markdown.includes(PROCEDURAL_STEP_TEXT.fully_executed_proof));
+    assert.ok(entry?.skillFile?.markdown.includes(proofAction));
+    assert.ok(entry?.skillFile?.markdown.includes(PROCEDURAL_STEP_TEXT.fully_executed_proof), "the staged action retains the signal text");
   } finally { f.done(); }
 });
 
