@@ -539,7 +539,12 @@ const SEED_ROWS: readonly SeedRow[] = [
       "released for this pull request and head), split-follow-up (the criteria that need operator input " +
       "move to the held task `held_task_id` by an acceptance amendment, and the pull request merges on the " +
       "rest) or close-and-rebuild (the pull request is closed and `held_task_id` rebuilds it). `cause` keys " +
-      "one held task per pull request; `text` is the escalation text it replaces. \"refused\" means the " +
+      "one held task per pull request; `text` is the escalation text it replaces. `reused: true` means a held " +
+      "follow-up for this task and each criterion was already on the plan of origin/main or in the task-files landing " +
+      "queue, so none was filed (W1-T13944); a split files a held task only for the criteria none carries, and `criteria` " +
+      "names them. `partial_refusal` on a taken split means the held task file staged and the landing refused another " +
+      "file, such as the edit of the parent task file during staging or batch preflight; it holds that refusal first, then any landing error. A landing " +
+      "error with no such refusal stays \"refused\". \"refused\" means the " +
       "remedy could not act; `reason` says why, and the next pass tries again.",
     writer: ["takeParkedPrRemedy"],
     outcomes: ["taken", "refused"],
