@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -14,6 +14,7 @@ import {
 } from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const BASE = 10;
 const MIN = 60_000;
@@ -241,11 +242,12 @@ test("W1-T13990 criterion 2: fixRoundReaderFor reads admitted and refused fix ro
   assert.deepEqual(read(T0 + 10 * MIN), { admitted: 0, refused: 0 });
 });
 
-/** The capacity controller's own rows (`sweep.fix_capacity`), stamped as a ledger log stamps them. */
-function capacityLedger(runId: string, clockMs: () => number) {
-  const lines: Array<Record<string, unknown>> = [];
+/** Sweep passes of the real capacity controller, its rows (`sweep.fix_capacity`) appended to a {@link writeLedger}
+ *  fixture as the sweep's log stamps them, and read back from that file. */
+function capacityPasses(dir: string, runId: string, clockMs: () => number) {
+  const fixture = writeLedger([], { dir });
   const log = (step: string, extra?: Record<string, unknown>) =>
-    lines.push({ ts: new Date(clockMs()).toISOString(), run_id: runId, task_id: "SWEEP", step, ...extra });
+    fixture.append([{ ts: new Date(clockMs()).toISOString(), run_id: runId, task_id: "SWEEP", step, ...extra }]);
   /** One sweep pass's controller: every host worker is busy, so each claim is refused before any dispatch. */
   const pass = (claims: number[]) => {
     const controller = createSweepFixAdmissionController({
@@ -253,25 +255,30 @@ function capacityLedger(runId: string, clockMs: () => number) {
     });
     for (const prNumber of claims) assert.equal(controller.claim({ prNumber } as OpenPrView).admitted, false);
   };
-  return { lines, log, pass };
+  const lines = (): Array<Record<string, unknown>> => readFileSync(fixture.path, "utf8").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  return { lines, pass };
 }
 
-test("W1-T13990 criterion 2: a refusal the capacity controller writes as sweep.fix_capacity counts as a refused round", () => {
-  let nowMs = T0;
-  const ledger = capacityLedger("DAEMON-1", () => nowMs);
-  ledger.pass([13, 14]);
-  nowMs += 10 * MIN;
-  ledger.pass([15]);
-  nowMs += 10 * MIN;
-  ledger.pass([]);
-  const capacity = ledger.lines.filter((line) => line.step === "sweep.fix_capacity");
-  assert.equal(capacity.length, 6, "each pass writes its opening reading and one row per refused claim");
-  assert.deepEqual(capacity.map((line) => line.fixes_refused), [0, 1, 2, 0, 1, 0], "the real row carries its running count");
-  assert.equal(ledger.lines.some((line) => line.step === "sweep.fix.dispatch_failed"), false,
-    "a claim refused before dispatch writes no dispatch failure: the capacity row is the only record of it");
-  const read = adaptiveWip.fixRoundReaderFor(ledger.lines);
-  assert.deepEqual(read(T0), { admitted: 0, refused: 3 });
-  assert.deepEqual(read(T0 + 5 * MIN), { admitted: 0, refused: 1 });
+test("W1-T13990 criterion 2: a refusal the capacity controller writes as sweep.fix_capacity counts as a refused round", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    let nowMs = T0;
+    const passes = capacityPasses(dir, "DAEMON-1", () => nowMs);
+    passes.pass([13, 14]);
+    nowMs += 10 * MIN;
+    passes.pass([15]);
+    nowMs += 10 * MIN;
+    passes.pass([]);
+    const lines = passes.lines();
+    const capacity = lines.filter((line) => line.step === "sweep.fix_capacity");
+    assert.equal(capacity.length, 6, "each pass writes its opening reading and one row per refused claim");
+    assert.deepEqual(capacity.map((line) => line.fixes_refused), [0, 1, 2, 0, 1, 0], "the real row carries its running count");
+    assert.equal(lines.some((line) => line.step === "sweep.fix.dispatch_failed"), false,
+      "a claim refused before dispatch writes no dispatch failure: the capacity row is the only record of it");
+    const read = adaptiveWip.fixRoundReaderFor(lines);
+    assert.deepEqual(read(T0), { admitted: 0, refused: 3 });
+    assert.deepEqual(read(T0 + 5 * MIN), { admitted: 0, refused: 1 });
+  });
 });
 
 test("W1-T13990 criterion 2: a lost child counts once, and a controller whose opening row was not read still counts", () => {
@@ -292,14 +299,14 @@ test("W1-T13990 criterion 2: a lost child counts once, and a controller whose op
 
 test("W1-T13990 criterion 2: a hold whose every fix claim the capacity controller refused releases as refused, with the count", async () => {
   await withTempDir("focus-movable", (dir) => {
-    let ledger: ReturnType<typeof capacityLedger> | undefined;
-    const h = harness(dir, { readFixRounds: (sinceMs) => adaptiveWip.fixRoundReaderFor(ledger!.lines)(sinceMs) });
-    ledger = capacityLedger("DAEMON-1", h.now);
+    let passes: ReturnType<typeof capacityPasses> | undefined;
+    const h = harness(dir, { readFixRounds: (sinceMs) => adaptiveWip.fixRoundReaderFor(passes!.lines())(sinceMs) });
+    passes = capacityPasses(dir, "DAEMON-1", h.now);
     enter(h);
     h.consult({ stuck: 12, movable: 12 }, 5 * MIN);
-    ledger.pass([13, 14]);
+    passes.pass([13, 14]);
     h.consult({ stuck: 12, movable: 12 }, 10 * MIN);
-    ledger.pass([15]);
+    passes.pass([15]);
     assert.equal(h.consult({ stuck: 12, movable: 12 }, 15 * MIN), undefined, "a dwell with every claim refused releases the hold");
     const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
     assert.equal(released.length, 1);
