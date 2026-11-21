@@ -1837,6 +1837,15 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
     return decision.paced ? Math.max(0, windowMs - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
   };
+  /** The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
+   *  shared gap still protects the secondary limiter across sibling processes without making a
+   *  normal sweep self-refuse after its first read. */
+  const sharedGapRemainingAt = (path: string, nowMs: number): number => {
+    const latest = readStampMs(path);
+    const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
+    const elapsed = latest === undefined ? undefined : nowMs - latest;
+    return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+  };
   /** The queue, with every ticket whose process is gone, or that nobody refreshed for a window plus the
    *  lock-stale bound, reclaimed. A pid is judged only on its own host: another container's pid
    *  namespace says nothing here, so a foreign ticket ages out instead. */
@@ -1892,7 +1901,10 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     if (waiter) {
       // W1-T12058: one line, with the WHOLE expected wait. Each queued read ahead takes its slot when
       // its floor is due and so restarts the window for this one: the floor, then one window per read.
-      const expectedS = (floorWaitMs + ahead * decision.windowS * 1000) / 1000;
+      // The shared read gap runs in the same wait: with no read ahead, the read is admitted when BOTH the
+      // floor and the gap from the newest shared stamp have passed (#19924 review: a fresh advisory stamp).
+      const gapNowMs = ahead === 0 && stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
+      const expectedS = (Math.max(floorWaitMs, gapNowMs) + ahead * decision.windowS * 1000) / 1000;
       warnLine(
         `gh read cadence (wait, W1-T7957): waiting ${expectedS}s ` +
           (ahead > 0
@@ -1955,15 +1967,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedReadGapMs,
     sharedReadGapLoopBoundMs,
-    sharedGapRemainingMs: (path) => {
-      // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
-      // shared gap still protects the secondary limiter across sibling processes without making a
-      // normal sweep self-refuse after its first read.
-      const latest = readStampMs(path);
-      const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
-      const elapsed = latest === undefined ? undefined : now() - latest;
-      return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
-    },
+    sharedGapRemainingMs: (path) => sharedGapRemainingAt(path, now()),
     stampAfterGap: (path) => {
       // Stamp only after the gap so a concurrent process observes the completed transport slot.
       const nowMs = now();

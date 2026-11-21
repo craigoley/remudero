@@ -6,6 +6,10 @@ import { test, type TestContext } from "node:test";
 
 import {
   applyGhReadCadence,
+  applyGhReadCadenceAsync,
+  DEFAULT_GH_SHARED_READ_GAP_MS,
+  ghAdvisoryStampText,
+  ghGatedStampPath,
   GhReadCadenceRefusal,
   ghReadCadenceStampPath,
   ghReadTicketDir,
@@ -130,4 +134,29 @@ test("W1-T12058 criterion 3: with one live ticket ahead, the one wait line state
   const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
   assert.match(waits[0]!, new RegExp(`waiting ${total}s `), `the line states the whole ${total}s wait: ${waits[0]}`);
+});
+
+test("W1-T12058 criterion 3: when the shared read gap outlasts the floor, the one wait line states the gap's length", async (t) => {
+  // Reviewer's counterexample (#19924): no mode set, a gated stamp 179.5 s old and a fresh advisory
+  // stamp. The floor has 0.5 s left but the shared read gap from the advisory stamp has 1.5 s, so the
+  // read is admitted after 1.5 s; the line said "waiting 0.5s".
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(ghGatedStampPath(f.stamp), "1\n", start - (WINDOW_MS - 500));
+  stampGhRead(f.stamp, ghAdvisoryStampText(start - (WINDOW_MS - 500)), start);
+  const sleeps: number[] = [];
+  let now = start;
+  const deps: GhReadCadenceDeps = {
+    ...f.deps,
+    nowMs: () => now,
+    sleep: async (ms) => { sleeps.push(ms); now += ms; },
+  };
+  await withGhTransportFloor(async () => {
+    await applyGhReadCadenceAsync([...READ], deps);
+  }, f.env);
+  const waited = slept(sleeps);
+  assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read was admitted after the shared gap, slept ${JSON.stringify(sleeps)}`);
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s wait: ${waits[0]}`);
 });
