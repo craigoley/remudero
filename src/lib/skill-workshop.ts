@@ -28,6 +28,7 @@ import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js
 import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
+import { TASK_ARM_UNIT } from "./task-arm.js";
 import {
   mineTranscriptWorkflows,
   renderTranscriptWorkflowSteps,
@@ -822,6 +823,10 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   zero_selection: boolean;
   /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
   withheld_names?: string[];
+  /** W1-T14137: present when the assignment was drawn per task ({@link import("./task-arm.js").taskArmWithheld}).
+   *  A randomized row without it was drawn per run, a different design the report never pools with this one. */
+  arm_unit?: typeof TASK_ARM_UNIT;
+  arm_epoch?: string;
   /** Each eligible skill's {@link skillContentDigest}: the version a selected run read and a withheld run did
    *  not, so effectiveness evidence can be told apart across edits of one skill. */
   skill_digests: Record<string, string>;
@@ -838,20 +843,27 @@ export interface ObservedSkillSelection {
   observation: SkillSelectionObservation;
 }
 
-/** Predeclared share of eligible runs on which each approved skill is withheld. Without it a skill
+/** Predeclared share of eligible tasks on which each approved skill is withheld. Without it a skill
  *  that fits the budget is selected on every eligible run and the report's control cohort is empty. */
 export const SKILL_WITHHOLDING_SHARE = 0.25;
 
-/** Seeded per-(run, skill) assignment, independent across skills and recomputable from the ledger. */
+/** The RETIRED per-(run, skill) assignment that rows without `arm_unit` record, kept so such a row's arm stays
+ *  recomputable from the ledger. No lane draws with it: W1-T14137 draws per task (`taskArmWithheld`). */
 export function skillWithheldForRun(runId: string, skillName: string, share: number = SKILL_WITHHOLDING_SHARE): boolean {
   const digest = createHash("sha256").update(`${runId}\0${skillName}`).digest();
   return digest.readUInt32BE(0) / 0x1_0000_0000 < share;
 }
 
-/** A skill with a staged retirement is offered only on the seeded share of runs that would have withheld it: the
- *  arms flip, so evidence keeps accruing, and a withdrawn proposal restores the normal share. */
-export function skillWithheldUnderRetirement(runId: string, skillName: string, staged: ReadonlySet<string>): boolean {
-  const withheld = skillWithheldForRun(runId, skillName);
+/** The skill arm's design, recorded on each `skills.selection` row it drew. */
+export interface SkillArmDesign {
+  unit: typeof TASK_ARM_UNIT;
+  epoch: string;
+}
+
+/** A skill with a staged retirement is offered only on the seeded share of tasks that would have withheld it: the
+ *  arms flip, so evidence keeps accruing, and a withdrawn proposal restores the normal share. `withheld` is the
+ *  task's own draw for the skill. */
+export function skillWithheldUnderRetirement(withheld: boolean, skillName: string, staged: ReadonlySet<string>): boolean {
   return staged.has(skillName) ? !withheld : withheld;
 }
 
@@ -872,6 +884,7 @@ export function observeSkillSelection(
   budgetChars: number,
   taskFiles?: readonly string[],
   withhold?: (skillName: string) => boolean,
+  arm?: SkillArmDesign,
 ): ObservedSkillSelection {
   const want = taskType.toLowerCase();
   const taskTypeEligible = skills.filter((s) => s.appliesTo.includes(want));
@@ -901,6 +914,7 @@ export function observeSkillSelection(
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
       ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
+      ...(withhold && arm ? { arm_unit: arm.unit, arm_epoch: arm.epoch } : {}),
       skill_digests: Object.fromEntries(eligible.map((s) => [s.name, skillContentDigest(s)])),
     },
   };
@@ -1048,6 +1062,11 @@ export interface SkillEffectivenessReport {
   /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
    *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
   assignment: "randomized" | "observational";
+  /** W1-T14137: the task-keyed arm epoch the comparison reads, the newest among this skill's rows (the one whose
+   *  rows began last); null when no row carries one, and the run-keyed or observational rows are compared as before. */
+  arm_epoch: string | null;
+  /** Eligible rows of every other assignment design, counted here and never pooled into the arms above. */
+  apart: SkillEffectivenessApartRows[];
   /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
    *  versions were recorded. The comparison above pools every version listed here. */
   versions: SkillEffectivenessVersion[];
@@ -1055,6 +1074,13 @@ export interface SkillEffectivenessReport {
   settle_window_ms: number | null;
   /** One-sided 95% lower bound of (selected minus control) cost per merged PR; null when not compared. */
   cost_difference_lower_bound_usd: number | null;
+}
+
+export interface SkillEffectivenessApartRows {
+  /** `run-keyed` (drawn per run, before task-keyed arms), `observational` (no assignment), or an older arm epoch. */
+  design: string;
+  eligible_runs: number;
+  terminal_runs: number;
 }
 
 export interface SkillEffectivenessVersion {
@@ -1118,7 +1144,7 @@ export function buildSkillEffectivenessReport(
   const mergedAtMs = new Map<string, number | undefined>();
   const timedClosedPrKeys = new Set<string>();
   const fixCostByPr = new Map<string, number>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null; epoch: string | null; startMs: number }>();
   let latestMs: number | undefined;
 
   for (const row of rows) {
@@ -1158,6 +1184,8 @@ export function buildSkillEffectivenessReport(
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
       digest: typeof digest === "string" ? digest : null,
+      epoch: row.arm_unit === TASK_ARM_UNIT ? (typeof row.arm_epoch === "string" ? row.arm_epoch : "unrecorded-epoch") : null,
+      startMs: ms ?? Number.NEGATIVE_INFINITY,
     });
   }
 
@@ -1186,11 +1214,30 @@ export function buildSkillEffectivenessReport(
     return { outcome: terminal.verdict, cost };
   };
 
+  // W1-T14137: rows drawn per task and rows drawn per run are two designs, and two epochs are two experiments, so
+  // only the newest epoch's rows are compared: the one whose rows began last, whatever order the rows are read in.
+  const epochStartMs = new Map<string, number>();
+  for (const o of selectionByRun.values()) {
+    if (o.epoch !== null) epochStartMs.set(o.epoch, Math.min(epochStartMs.get(o.epoch) ?? Number.POSITIVE_INFINITY, o.startMs));
+  }
+  const armEpoch = [...epochStartMs]
+    .sort(([epochA, a], [epochB, b]) => (a !== b ? (a < b ? -1 : 1) : epochA < epochB ? -1 : epochA > epochB ? 1 : 0))
+    .at(-1)?.[0] ?? null;
+  const compared = (o: { epoch: string | null }): boolean => o.epoch === armEpoch;
   // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
   // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
-  const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
-  const inArm = (o: { selected: boolean; withheld?: boolean }, treated: boolean): boolean =>
-    randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated;
+  const randomized = [...selectionByRun.values()].some((o) => compared(o) && o.withheld !== undefined);
+  const inArm = (o: { selected: boolean; withheld?: boolean; epoch: string | null }, treated: boolean): boolean =>
+    compared(o) && (randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated);
+  const apartByDesign = new Map<string, SkillEffectivenessApartRows>();
+  for (const [runId, o] of selectionByRun) {
+    if (inArm(o, true) || inArm(o, false)) continue;
+    const design = o.epoch ?? (o.withheld === undefined ? "observational" : "run-keyed");
+    const apart = apartByDesign.get(design) ?? { design, eligible_runs: 0, terminal_runs: 0 };
+    apart.eligible_runs++;
+    if (terminalVerdictByRun.has(runId)) apart.terminal_runs++;
+    apartByDesign.set(design, apart);
+  }
 
   const costSamples = { selected: [] as CostSample[], control: [] as CostSample[] };
   const buildCohort = (selected: boolean): SkillEffectivenessArm => {
@@ -1281,6 +1328,8 @@ export function buildSkillEffectivenessReport(
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
     assignment: randomized ? "randomized" : "observational",
+    arm_epoch: armEpoch,
+    apart: [...apartByDesign.values()].sort((a, b) => (a.design < b.design ? -1 : a.design > b.design ? 1 : 0)),
     versions: [...versionByDigest.values()],
     settle_window_ms: settleWindowMs,
     cost_difference_lower_bound_usd: costLowerBound,
@@ -1316,11 +1365,21 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
         "selected is every other eligible run (intent to treat)."
       : "assignment: observational — control is eligible runs on which the budget omitted the skill.",
+    `arm design: ${renderArmDesign(report)}`,
     report.assignment === "randomized"
       ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
       : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
     `skill versions: ${renderSkillVersions(report.versions)}`,
   ].join("\n");
+}
+
+/** The compared assignment design, and every other design's rows, which the comparison never pools. */
+function renderArmDesign(report: SkillEffectivenessReport): string {
+  const compared = report.arm_epoch === null
+    ? "before task-keyed arms (run-keyed or observational rows)" : `task-keyed, epoch ${report.arm_epoch}`;
+  const apart = report.apart.length === 0 ? "none"
+    : report.apart.map((a) => `${a.design} eligible=${a.eligible_runs} terminal=${a.terminal_runs}`).join("; ");
+  return `${compared}; apart, never pooled: ${apart}`;
 }
 
 /** The settle window and the cost bound a verdict rests on. */
