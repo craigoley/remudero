@@ -164,10 +164,8 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
  * pattern also admits every child. The predicate sees each registered name and its actual parents. */
 function isolatedTestArgs(title: string): string[] {
   const preload = `
-    import { createRequire } from "node:module";
     if (process.env.NODE_TEST_CONTEXT === "child-v8") {
-      const require = createRequire(process.cwd() + "/hand-ship.cjs");
-      const { Test } = require("internal/test_runner/test");
+      const Test = process.getBuiltinModule("node:internal/test_runner/test")?.Test;
       if (typeof Test?.prototype.willBeFilteredByName !== "function") {
         throw new Error("hand-ship: this Node runner cannot isolate a named test");
       }
