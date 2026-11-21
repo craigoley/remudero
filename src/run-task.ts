@@ -53,6 +53,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  operatorReviewArgs,
   REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
@@ -45481,7 +45482,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 2 -- dispatch glue enters GitHub-backed reviewCommand; reviewCommand has injectable tests */
       await loadHeavyVerb("review");
-      return await withGhTransportFloor(() => reviewCommand(arg, rest.slice(1)));
+      return await withGhTransportFloor(() => reviewCommand(arg, operatorReviewArgs(rest.slice(1))));
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
