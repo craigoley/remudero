@@ -871,6 +871,35 @@ test("W1-T13850 criterion 5: the SHA cursor and healed route survive a model-siz
     { [SOL.model]: { provider: SOL.provider, pass: 1, fail: 1 } }, "the next successful write includes the retained FAIL");
 });
 
+test("W1-T13850 criterion 5: a retained model payload never grafts onto a checkpoint another writer replaced", async (t) => {
+  const limited = harness(t);
+  writeHealedState(limited.statePath);
+  const sha = fake("replaced-checkpoint-reviewer");
+  limited.queue.push(verdict(sha, SOL, "failure", { failure_reason: "a retained clause".repeat(30), reasons: [] }));
+  const write = realWriteAtomicIo.writeFileSync;
+  let refused = 0;
+  const budget = t.mock.method(realWriteAtomicIo, "writeFileSync", (path: string, content: string | Buffer, mode: number | undefined) => {
+    if (String(path).startsWith(limited.statePath + ".") && String(content).includes("a retained clause")) {
+      refused++;
+      throw Object.assign(new Error("reviewer health state exceeds the disk budget"), { code: "ENOSPC" });
+    }
+    write(path, content, mode);
+  });
+  await limited.evaluateOuter(sha);
+  budget.mock.restore();
+  assert.ok(refused > 0, "the model payload really was retained unsaved");
+  assert.equal(health.loadReviewerHealthState(limited.statePath).modelFails[SOL.model], undefined, "only the SHA checkpoint reached disk");
+
+  // Another writer (a re-seed) replaces the checkpoint the retained payload was keyed to.
+  health.saveReviewerHealthState(limited.statePath, { ...health.emptyReviewerHealthState(), seededAt: "2026-11-18T10:30:00.000Z", cursor: { liveOffset: 0 } });
+  limited.queue.push(verdict(sha, SOL, "success"));
+  await limited.evaluateOuter(sha);
+  const saved = health.loadReviewerHealthState(limited.statePath);
+  assert.equal(saved.seededAt, "2026-11-18T10:30:00.000Z");
+  assert.deepEqual(saved.modelFails[SOL.model] ?? [], [], "the retained FAIL belongs to the replaced checkpoint");
+  assert.deepEqual(health.evaluatorModelCounts(saved, sha), { [SOL.model]: { provider: SOL.provider, pass: 1, fail: 0 } });
+});
+
 test("an undurable issue receipt still deduplicates the next evaluator incident", async (t) => {
   const h = harness(t);
   const { rows, claudeShas } = elevenNineteen();
