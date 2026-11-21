@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { defaultGetProcessStartTime, isHolderStale, type ProcessStartTimeSyscalls } from "#src/lib/fs-race-safe.js";
 
 const PID = 4242;
+const PID_STAT = `/proc/${PID}/stat`;
+const LEADER_STAT = `/proc/${PID}/task/${PID}/stat`;
 const BTIME_SEC = 1_795_000_000;
 const PS_ETIME = "   05:30\n"; // what the ps spy answers: 5 min 30 s elapsed
 const PS_ARGS = ["-o", "etime=", "-p", String(PID)];
@@ -69,7 +71,8 @@ function linuxSeam(
 
 const healthy = (startTicks: number | string = 123_456, comm = "node"): Record<string, FixtureFile> => ({
   "/proc/stat": procStat(),
-  [`/proc/${PID}/stat`]: pidStat(startTicks, comm),
+  [PID_STAT]: pidStat(startTicks, comm),
+  [LEADER_STAT]: pidStat(startTicks, comm),
 });
 
 /** Today's ps result for PS_ETIME, bracketed by the clock read around the call. */
@@ -84,14 +87,14 @@ test("W1-T11457 criterion 1: a holder's start time uses procfs and a cached CLK_
     const { sys, execCalls, reads } = linuxSeam(files, PS_ETIME, "linux", `${hz}\n`);
     assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + expectedOffsetMs, `uses the reported CLK_TCK ${hz}`);
     assert.deepEqual(execCalls, [GETCONF_CALL], "the cold lookup initializes the clock rate once");
-    assert.deepEqual([...reads].sort(), ["/proc/4242/stat", "/proc/stat"]);
+    assert.deepEqual(reads, ["/proc/stat", PID_STAT, LEADER_STAT]);
     execCalls.length = 0;
     reads.length = 0;
     files["/proc/stat"] = procStat(BTIME_SEC + 1);
-    files[`/proc/${PID}/stat`] = pidStat(123_456 + hz);
+    files[PID_STAT] = files[LEADER_STAT] = pidStat(123_456 + hz);
     assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + expectedOffsetMs + 2000);
     assert.deepEqual(execCalls, [], "the next Linux lookup spawns no child process");
-    assert.deepEqual([...reads].sort(), ["/proc/4242/stat", "/proc/stat"]);
+    assert.deepEqual(reads, ["/proc/stat", PID_STAT, LEADER_STAT]);
   }
 });
 
@@ -127,9 +130,9 @@ test("W1-T11457 criterion 1: for one process, the /proc start is never later tha
         const ticks = Math.floor((sinceBootMs * hz) / 1000);
         const kernelStartMs = bootWallMs + (ticks * 1000) / hz; // the instant the kernel's ticks name
         const trueStartMs = bootWallMs + sinceBootMs;
-        const files: Record<string, FixtureFile> = {
+        const files = {
+          ...healthy(ticks),
           "/proc/stat": procStat(Math.floor(bootWallMs / 1000)),
-          [`/proc/${PID}/stat`]: pidStat(ticks),
         };
         const fromProc = defaultGetProcessStartTime(PID, linuxSeam(files, PS_ETIME, "linux", `${hz}\n`).sys);
         const before = Date.now();
@@ -170,6 +173,8 @@ test("W1-T11457 criterion 2: a /proc read or parse failure on Linux falls back t
     ["/proc/<pid>/stat with no '('", { ...healthy(), [`/proc/${PID}/stat`]: pidStat(123_456).replace("(", "") }],
     ["/proc/<pid>/stat truncated before field 22", { ...healthy(), [`/proc/${PID}/stat`]: "4242 (node) S 1 4242 4242 0\n" }],
     ["/proc/<pid>/stat with a non-numeric start", healthy("x1")],
+    ["leader stat vanished after the PID stat read", { ...healthy(), [LEADER_STAT]: errno("ENOENT", LEADER_STAT) }],
+    ["leader stat with a non-numeric start", { ...healthy(), [LEADER_STAT]: pidStat("x1") }],
   ];
   for (const [label, files] of cases) {
     const { sys, execCalls } = linuxSeam(files);
@@ -201,8 +206,8 @@ test("W1-T11457 criterion 2: malformed start ticks take the original ps path", (
 const LONG_UPTIME_NOW = BTIME_SEC * 1000 + 30 * 86_400_000;
 
 /** Runs one Linux probe over a pid stat file and asserts it took ps (one call) and returned ps's answer. */
-function assertTakesPs(pidStatText: string, label: string): void {
-  const { sys, execCalls } = linuxSeam({ "/proc/stat": procStat(), [`/proc/${PID}/stat`]: pidStatText });
+function assertTakesPs(pidStatText: string, label: string, leaderStatText = pidStat(123_456)): void {
+  const { sys, execCalls } = linuxSeam({ "/proc/stat": procStat(), [PID_STAT]: pidStatText, [LEADER_STAT]: leaderStatText });
   assert.equal(defaultGetProcessStartTime(PID, sys), Date.now() - 330_000, `${label}: ps's answer`);
   assert.deepEqual(execCalls.filter((call) => call[0] === "ps"), [["ps", PS_ARGS, { encoding: "utf8" }]], `${label}: one ps call`);
 }
@@ -240,17 +245,28 @@ test("W1-T11457 criterion 2: a shifted numeric stat record keeps a live holder v
   const noPpid = pidStatFields(startTicks).filter((_, i) => i !== 1);
   const shiftedWithFiniteRssLimit = [...noPpid, "0"];
   shiftedWithFiniteRssLimit[21] = "1024";
+  const intact = pidStatFields(startTicks);
+  intact[20] = String(128 * 1024 * 1024); // vsize also looks like an elapsed tick count within this boot.
+  intact[21] = "4096"; // rss
+  intact[22] = "1073741824"; // finite rsslim keeps the shifted rss in range.
+  const noStarttime = [...intact];
+  noStarttime.splice(19, 1);
+  noStarttime.push("0");
+  assert.equal(noStarttime.length, intact.length);
   const held = { pid: PID, startedAt: new Date(start).toISOString() };
   const malformedRecords = {
     "numeric second line": `${pidStatLine(noPpid)}0\n`,
     "same field count on one line": pidStatLine([...noPpid, "0"]),
     "same field count and a finite rsslim": pidStatLine(shiftedWithFiniteRssLimit),
+    "starttime removed and trailing zero keeps the field count": pidStatLine(noStarttime),
   };
   for (const [label, record] of Object.entries(malformedRecords)) {
     const { sys, execCalls } = linuxSeam({
       "/proc/stat": procStat(),
       "/proc/1/stat": pidStat(0, "init", 1),
-      [`/proc/${PID}/stat`]: record,
+      "/proc/1/task/1/stat": pidStat(0, "init", 1),
+      [PID_STAT]: record,
+      [LEADER_STAT]: pidStatLine(intact),
     }, formatEtime(elapsedSec));
     const opts = { isPidAlive: () => true, getProcessStartTime: (pid: number) => defaultGetProcessStartTime(pid, sys) };
     assert.equal(isHolderStale(held, opts), false, `${label}: the fallback keeps the live holder`);
@@ -288,7 +304,8 @@ test("W1-T11457 criterion 2: a stat record with a non-numeric field in the middl
 test("W1-T11457 criterion 2: a starttime that resolves to the future takes the ps path", (t) => {
   t.mock.method(Date, "now", () => BTIME_SEC * 1000 + 2_000_000);
   // 1_000_000 ticks at CLK_TCK 100 is 10 000 s after boot, 8 000 s after this pinned now.
-  assertTakesPs(pidStat(1_000_000), "start after now");
+  const future = pidStat(1_000_000);
+  assertTakesPs(future, "start after now", future);
 });
 
 test("W1-T11457 criterion 2: a failed CLK_TCK lookup falls back to ps and getconf runs only once", (t) => {

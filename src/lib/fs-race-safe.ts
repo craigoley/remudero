@@ -455,6 +455,19 @@ function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { 
     // No stat file is no such pid, the answer ps gives; any other failure asks ps.
     return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
   }
+  const startTicks = parseProcStartTicks(pid, stat);
+  if (startTicks === undefined) return undefined;
+  // The leader's task stat reports the same starttime. A missing field plus numeric padding can
+  // preserve the layout and make vsize look like valid ticks, so confirm field 22 before using it.
+  try {
+    const leaderStat = read(`/proc/${pid}/task/${pid}/stat`).toString("utf8");
+    return parseProcStartTicks(pid, leaderStat) === startTicks ? { btimeSec, startTicks } : undefined;
+  } catch {
+    return undefined; // Even ENOENT here is a failed confirmation after the PID stat was read.
+  }
+}
+
+function parseProcStartTicks(pid: number, stat: string): number | undefined {
   // comm (field 2) is parenthesised and may hold spaces and ") (", so fields count from after the LAST ")".
   const prefix = `${pid} (`;
   const close = stat.lastIndexOf(")");
@@ -472,7 +485,7 @@ function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { 
   const startTicksText = fields[19];
   if (!/^\d+$/.test(startTicksText)) return undefined;
   const startTicks = Number(startTicksText);
-  return Number.isSafeInteger(startTicks) ? { btimeSec, startTicks } : undefined;
+  return Number.isSafeInteger(startTicks) ? startTicks : undefined;
 }
 
 /** `ps -o etime=`'s `[[DD-]HH:]MM:SS` elapsed-time format, in ms — or `null` for anything that
