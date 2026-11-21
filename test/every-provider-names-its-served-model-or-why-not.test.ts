@@ -664,4 +664,16 @@ test("W1-T13868 criterion 1: a cash call cancelled with a structured or primitiv
   assert.deepEqual([detail.error_code, detail.served_model], ["USER_CANCELLED", "gpt-5-nano-2025-08-07"]);
   assert.equal(await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" }, "operator stop" as never), "operator stop",
     "a primitive reason is thrown unchanged");
+  // Through the dispatch receipt writer, the failed attempt's row still records the model, or the reason none was named.
+  const rowsFor = async (reply: Partial<WorkerResult>) => {
+    const rows: Record<string, unknown>[] = [];
+    const thrown = await recordBenchmarkWorkerAttempt(() => runAbandonedCash(reply, "operator stop" as never)
+      .then((value) => { if (value !== undefined) throw value; return undefined as never; }),
+    (step, fields) => rows.push({ step, ...fields }), () => undefined, () => {}).catch((error: unknown) => error);
+    assert.equal(thrown, "operator stop");
+    return rows.filter((row) => row.worker_failure === "spawn-threw-before-result").map((row) => [row.served_model, row.served_model_reason]);
+  };
+  assert.deepEqual(await rowsFor({ servedModel: "gpt-5-nano-2025-08-07" }), [["gpt-5-nano-2025-08-07", undefined]], "a named response");
+  assert.deepEqual(await rowsFor({ servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } as never),
+    [[null, CASH_SERVED_MODEL_REASONS.unnamed]], "an unnamed response");
 });
