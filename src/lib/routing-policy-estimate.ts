@@ -33,8 +33,8 @@ import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
  * - ESTIMATOR: Hajek (self-normalised) weights `1 / selectedProbability`, the estimator knowledge-outcome.ts runs
  *   for learnings. Its `hajek` is private and takes no clusters, so the sums are restated here per task.
  * - INTERVAL: a 2,000-draw bootstrap over TASKS, seeded from the cell, so one task's attempts move together.
- * - DECISION: the experiments' rule ({@link ROUTING_POLICY_RULE}), with effective tasks per arm as the floor, every
- *   threshold read under the rule's one tolerance.
+ * - DECISION: the experiments' rule ({@link ROUTING_POLICY_RULE}), with effective tasks per arm as the floor. Every
+ *   sum it reads is compensated, and its tolerance absorbs representation error alone.
  *
  * INVARIANT within-support: no estimate values a provider that the logged policy gave probability 0 in its cell.
  * SURFACE, DO NOT ACT: nothing routes on these rows. W1-T12143 reads a concluded cell as randomised evidence.
@@ -52,10 +52,15 @@ export const ROUTING_POLICY_ESTIMATE_STEP = "routing.policy.estimate";
  * power and a 20-task floor), plus the estimator's own trim and bootstrap size. The trim equals
  * knowledge-outcome.ts's `OUTCOME_PROPENSITY_TRIM`: an inverse weight of 20+ lets one task dominate an arm.
  *
- * `tolerance` is the ONE slack every threshold comparison in {@link decide} reads (the effect bar, the interval's
- * bound at 0, the effective-tasks floor): a value within `tolerance × max(1, |threshold|)` of a threshold is AT it.
- * Doubles miss exact boundaries — 0.5 − 0.4 is 0.09999999999999998 — and summing a few thousand weights drifts by
- * well under 1e-12 of the sum, while a rate over any feasible number of tasks moves in steps far above 1e-9.
+ * `tolerance` absorbs floating-point representation error and nothing else, so it is RELATIVE to the operands: a
+ * computed value within `tolerance × s` of a threshold is AT it, where `s` is the magnitude of what produced it —
+ * the larger of the two rates a difference subtracts, or the effective n and the floor. Doubles miss exact
+ * boundaries (0.5 − 0.4 is 0.09999999999999998), but by a bounded amount. Every sum the decision reads is
+ * compensated ({@link plus}), so it holds within 2u of its terms whatever their count (u = 2^-53; Higham,
+ * "Accuracy and Stability of Numerical Algorithms", 2nd ed., eq. 4.8). With each weight's own rounding, a rate
+ * then carries at most 11u of relative error, a difference of two rates 24u of the larger, and Kish's effective n
+ * 37u of itself. 2^-45 is 256u, about 2.8e-14: seven times the largest of those bounds, and any gap wider than
+ * that share of the operands is a shortfall. The bar at 0.10 between rates near 0.5 therefore gives 1.4e-14.
  */
 export interface RoutingPolicyRule {
   minimumDifference: number;
@@ -73,14 +78,34 @@ export const ROUTING_POLICY_RULE: Readonly<RoutingPolicyRule> = {
   minTasksPerArm: 20,
   trim: 0.05,
   draws: 2000,
-  tolerance: 1e-9,
+  tolerance: 2 ** -45,
 };
 
-/** The rule's three threshold readings under its one {@link RoutingPolicyRule.tolerance}. */
-const slack = (threshold: number, rule: Readonly<RoutingPolicyRule>): number => rule.tolerance * Math.max(1, Math.abs(threshold));
-const meets = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value >= threshold - slack(threshold, rule);
-const exceeds = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value > threshold + slack(threshold, rule);
-const under = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value < threshold - slack(threshold, rule);
+/** Whether `value` reaches `threshold`, where both come from operands of magnitude `scale`: a gap within their
+ *  representation error ({@link RoutingPolicyRule.tolerance}) is no gap, and any larger gap is a shortfall. */
+const reaches = (value: number, threshold: number, scale: number, rule: Readonly<RoutingPolicyRule>): boolean =>
+  value >= threshold - rule.tolerance * scale;
+
+/** always-codex minus always-claude, and exactly 0 when the two rates agree within their representation error: so
+ *  the interval's bounds compare with 0 bare, as the experiments' do (`evaluateRoutingExperimentResult`). */
+const gap = (claude: number, codex: number, rule: Readonly<RoutingPolicyRule>): number => {
+  const difference = codex - claude;
+  return Math.abs(difference) <= rule.tolerance * Math.max(claude, codex) ? 0 : difference;
+};
+
+/** A running sum and the low-order bits its last addition dropped. */
+interface Compensated { sum: number; carry: number }
+const compensated = (): Compensated => ({ sum: 0, carry: 0 });
+
+/** Kahan's compensated step: the sum stays within (2u + O(n·u²)) of the summed magnitudes however many terms it
+ *  takes (Higham, eq. 4.8), where a plain running sum drifts by up to (n − 1)·u: plain sums read an exact 0.10
+ *  effect over two 1,000-task arms of the auction's equal weights as 0.09999999999997594, 2.4e-14 short. */
+function plus(acc: Compensated, value: number): void {
+  const y = value - acc.carry;
+  const t = acc.sum + y;
+  acc.carry = (t - acc.sum) - y;
+  acc.sum = t;
+}
 
 /** Effective tasks each arm needs: the two-proportion sample `requiredRoutingTasksPerArm` computes for an
  *  experiment (symmetric rates about 0.5, the largest variance), never below the experiments' task floor. */
@@ -119,7 +144,8 @@ export interface RoutingPolicyValue {
 }
 
 export interface RoutingPolicyDifference {
-  /** always-codex minus always-claude. For review the positive outcome is a FAILED review, so lower wins. */
+  /** always-codex minus always-claude, 0 within representation error ({@link RoutingPolicyRule.tolerance}). For
+   *  review the positive outcome is a FAILED review, so lower wins. */
   estimate: number;
   lower: number;
   upper: number;
@@ -237,10 +263,11 @@ function admit(routing: Row, served: string, trim: number): Admission {
   return { served, weight: 1 / selected, claude, codex };
 }
 
-interface Cluster { task: string; sums: Record<RoutingPolicyTarget, { w: number; wy: number; n: number }> }
+interface Cluster { task: string; sums: Record<RoutingPolicyTarget, { w: Compensated; wy: Compensated; n: number }> }
 
 const emptySums = (): Cluster["sums"] => ({
-  "always-claude": { w: 0, wy: 0, n: 0 }, "always-codex": { w: 0, wy: 0, n: 0 }, logged: { w: 0, wy: 0, n: 0 },
+  "always-claude": { w: compensated(), wy: compensated(), n: 0 }, "always-codex": { w: compensated(), wy: compensated(), n: 0 },
+  logged: { w: compensated(), wy: compensated(), n: 0 },
 });
 
 /** Kish's effective sample size, over weights scaled by their largest: n equal weights each scale to exactly 1, so
@@ -248,12 +275,12 @@ const emptySums = (): Cluster["sums"] => ({
 function kish(weights: readonly number[]): number {
   const largest = weights.reduce((a, b) => Math.max(a, b), 0);
   if (!(largest > 0)) return 0;
-  let total = 0, squares = 0;
+  const total = compensated(), squares = compensated();
   for (const w of weights) {
     const scaled = w / largest;
-    total += scaled; squares += scaled * scaled;
+    plus(total, scaled); plus(squares, scaled * scaled);
   }
-  return total * total / squares;
+  return total.sum * total.sum / squares.sum;
 }
 
 function percentile(values: number[], confidence: number): { lower: number; upper: number } | null {
@@ -269,7 +296,7 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
     const cluster = byTask.get(o.task) ?? { task: o.task, sums: emptySums() };
     const add = (target: RoutingPolicyTarget, w: number) => {
       const sum = cluster.sums[target];
-      sum.w += w; sum.wy += w * o.positive; sum.n += 1;
+      plus(sum.w, w); plus(sum.wy, w * o.positive); sum.n += 1;
     };
     add("logged", 1);
     if (o.served === "claude") add("always-claude", o.weight);
@@ -279,9 +306,9 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
   const clusters = [...byTask.values()].sort((a, b) => compare(a.task, b.task));
   const targets: RoutingPolicyTarget[] = ["always-claude", "always-codex", "logged"];
   const value = (target: RoutingPolicyTarget): number | null => {
-    let w = 0, wy = 0;
-    for (const cluster of clusters) { w += cluster.sums[target].w; wy += cluster.sums[target].wy; }
-    return w > 0 ? wy / w : null;
+    const w = compensated(), wy = compensated();
+    for (const cluster of clusters) { plus(w, cluster.sums[target].w.sum); plus(wy, cluster.sums[target].wy.sum); }
+    return w.sum > 0 ? wy.sum / w.sum : null;
   };
   // Resample TASKS: a task's attempts (and both providers' share of it) are drawn together or not at all.
   let state = createHash("sha256").update(seed).digest().readUInt32LE(0);
@@ -292,21 +319,29 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
   const samples: Record<RoutingPolicyTarget | "difference", number[]> = { "always-claude": [], "always-codex": [], logged: [], difference: [] };
   // Flat per-task sums, one column per (target, w | wy): the draw loop touches no object.
   const columns = targets.flatMap((target) => [
-    Float64Array.from(clusters, (cluster) => cluster.sums[target].w), Float64Array.from(clusters, (cluster) => cluster.sums[target].wy),
+    Float64Array.from(clusters, (cluster) => cluster.sums[target].w.sum), Float64Array.from(clusters, (cluster) => cluster.sums[target].wy.sum),
   ]);
   const totals = new Float64Array(columns.length);
+  const carries = new Float64Array(columns.length);
   for (let n = 0; n < rule.draws; n++) {
     totals.fill(0);
+    carries.fill(0);
     for (let k = 0; k < clusters.length; k++) {
       const j = draw(clusters.length);
-      for (let c = 0; c < columns.length; c++) totals[c]! += columns[c]![j]!;
+      for (let c = 0; c < columns.length; c++) {
+        // {@link plus}, inlined over the columns.
+        const y = columns[c]![j]! - carries[c]!;
+        const t = totals[c]! + y;
+        carries[c] = (t - totals[c]!) - y;
+        totals[c] = t;
+      }
     }
     const values = targets.map((_, i) => totals[2 * i]! > 0 ? totals[2 * i + 1]! / totals[2 * i]! : null);
     targets.forEach((target, i) => { if (values[i] !== null) samples[target].push(values[i]!); });
-    if (values[0] !== null && values[1] !== null) samples.difference.push(values[1]! - values[0]!);
+    if (values[0] !== null && values[1] !== null) samples.difference.push(gap(values[0]!, values[1]!, rule));
   }
   const policies = Object.fromEntries(targets.map((target) => {
-    const weights = clusters.map((cluster) => cluster.sums[target].w).filter((w) => w > 0);
+    const weights = clusters.map((cluster) => cluster.sums[target].w.sum).filter((w) => w > 0);
     const estimate = value(target);
     return [target, {
       estimate, interval: estimate === null ? null : percentile(samples[target], rule.confidence),
@@ -324,14 +359,18 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
     support: { claude: range((o) => o.claude), codex: range((o) => o.codex) },
     policies,
     difference: claude !== null && codex !== null && interval
-      ? { estimate: codex - claude, ...interval, confidence: rule.confidence, method: "task-bootstrap" } : null,
+      ? { estimate: gap(claude, codex, rule), ...interval, confidence: rule.confidence, method: "task-bootstrap" } : null,
   };
 }
 
 type Decision = Pick<RoutingPolicyEstimate, "status" | "winner" | "decision">;
 
-/** The experiments' rule, read across every active pipeline as `evaluateRoutingExperimentResult` reads it. Every
- *  threshold is read through {@link meets}, {@link exceeds} and {@link under}, never a bare comparison. */
+/** The experiments' rule, read across every active pipeline as `evaluateRoutingExperimentResult` reads it: the
+ *  difference is always-codex minus always-claude (its second arm minus its first), and EITHER sign concludes —
+ *  an interval above 0 with a difference of at least the minimum favours the higher arm, one below 0 with a
+ *  difference of at most minus the minimum the lower. The bounds compare with 0 strictly and the floor and the
+ *  minimum inclusively, as the experiments' do; the floor and the minimum through {@link reaches}, the bounds bare,
+ *  over resamples already exact at 0 ({@link pipelineEstimate}). */
 function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<RoutingPolicyRule>, floor: number): Decision {
   const stop = (status: Decision["status"], code: RoutingPolicyDecisionCode, reason: string): Decision =>
     ({ status, winner: null, decision: { code, reason } });
@@ -340,7 +379,7 @@ function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<Ro
   for (const [p, entry] of active) {
     for (const target of ["always-claude", "always-codex"] as const) {
       const effective = entry.policies[target].effectiveN;
-      if (!meets(effective, floor, rule)) {
+      if (!reaches(effective, floor, Math.max(effective, floor), rule)) {
         return stop("underpowered", "below-floor", `${p}: ${target} has ${effective.toFixed(1)} effective tasks, below the floor of ${floor}`);
       }
     }
@@ -349,12 +388,13 @@ function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<Ro
   for (const [p, entry] of active) {
     // Both arms clear a positive floor, so both are valued and the difference exists.
     const d = entry.difference!;
+    const scale = Math.max(entry.policies["always-claude"].estimate!, entry.policies["always-codex"].estimate!);
     const codexWhenHigher: RoutingPolicyProvider = p === "review" ? "claude" : "codex";
     const codexWhenLower: RoutingPolicyProvider = p === "review" ? "codex" : "claude";
-    const excludesZeroAbove = exceeds(d.lower, 0, rule);
-    const excludesZeroBelow = under(d.upper, 0, rule);
-    if (excludesZeroAbove && meets(d.estimate, rule.minimumDifference, rule)) favoured.push([p, codexWhenHigher]);
-    else if (excludesZeroBelow && meets(-d.estimate, rule.minimumDifference, rule)) favoured.push([p, codexWhenLower]);
+    const excludesZeroAbove = d.lower > 0;
+    const excludesZeroBelow = d.upper < 0;
+    if (excludesZeroAbove && reaches(d.estimate, rule.minimumDifference, scale, rule)) favoured.push([p, codexWhenHigher]);
+    else if (excludesZeroBelow && reaches(-d.estimate, rule.minimumDifference, scale, rule)) favoured.push([p, codexWhenLower]);
     else if (!excludesZeroAbove && !excludesZeroBelow) {
       return stop("running", "interval-includes-zero", `${p}: the interval ${fixed(d.lower)} to ${fixed(d.upper)} includes 0`);
     } else {

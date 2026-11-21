@@ -8,8 +8,8 @@ import type { Config } from "#src/lib/config.js";
 import { OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { meaningOfStep } from "#src/lib/ledger-steps.js";
-import { requiredRoutingTasksPerArm } from "#src/lib/routing-experiment-result.js";
-import { ROUTING_EXPERIMENTS } from "#src/lib/routing-experiments.js";
+import { evaluateRoutingExperimentResult, requiredRoutingTasksPerArm } from "#src/lib/routing-experiment-result.js";
+import { experimentDrawSeed, ROUTING_EXPERIMENTS } from "#src/lib/routing-experiments.js";
 import {
   estimateRoutingPolicies,
   recordRoutingPolicyEstimates,
@@ -19,7 +19,14 @@ import {
   type RoutingPolicyEstimate,
 } from "#src/lib/routing-policy-estimate.js";
 import type { WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
-import { ROUTING_DRAW_METHOD, selectionPropensity } from "#src/lib/worker-provider.js";
+import {
+  type ProviderCapacity,
+  ROUTING_DRAW_METHOD,
+  type RoutingDrawSeed,
+  selectionPropensity,
+  selectWorkerProvider,
+  spawnDecisionPoint,
+} from "#src/lib/worker-provider.js";
 import { buildMeasurementCadenceDaemonHooks } from "#test/helpers/run-task-test.js";
 
 type Row = Record<string, unknown>;
@@ -126,6 +133,44 @@ function confounded(seed: number, tasks = 4000): Row[] {
     const rate = (easy ? 0.7 : 0.2) + (served === "codex" ? 0.15 : 0);
     rows.push(...attemptRows({ task: `W1-T${i + 1}`, id: `a${i}`, served, probabilities: { claude: 1 - codex, codex },
       positive: rand() < rate, at: i }));
+  }
+  return rows;
+}
+
+type Readings = Record<"claude" | "codex", number>;
+
+/** Two subscriptions as the auction weighs them: one window each, at `used` percent. */
+const capacities = (used: Readings): ProviderCapacity[] => (["claude", "codex"] as const).map((provider) =>
+  ({ provider, readable: true, windows: [{ name: "five-hour", usedPercent: used[provider] }] }));
+
+/** The probability the production auction gives `provider` at `used`, under the default 5% reserve. */
+const drawProbability = (used: Readings, provider: "claude" | "codex"): number =>
+  selectWorkerProvider(capacities(used), 5).draw!.probabilities.find((entry) => entry.provider === provider)!.probability;
+
+/** One spawn routed as worker.ts routes it: `selectWorkerProvider` over the readings, its draw keyed on the task,
+ *  the run and the decision point (or the experiment's own key), and the row's propensity `selectionPropensity`
+ *  of that draw (src/lib/worker.ts, `workerSelectionAssignment`). */
+function auction(used: Readings, key: RoutingDrawSeed): { served: "claude" | "codex"; propensity: Row } {
+  const selection = selectWorkerProvider(capacities(used), 5, key);
+  const served = selection.provider as "claude" | "codex";
+  return { served, propensity: { ...selectionPropensity({ selected: served, considered: ["claude", "codex"], selection }) } };
+}
+
+/** `tasks` tasks the production auction served by `provider` at `used` (a draw serving the other provider is not
+ *  kept), numbered from `first`, each of `attempts` attempts: the first attempt of each of the first `positive`
+ *  tasks is positive, every other attempt negative. */
+function auctionArm(provider: "claude" | "codex", used: Readings, spec: { tasks: number; positive: number; first: number; attempts?: number }): Row[] {
+  const rows: Row[] = [];
+  for (let t = 0; t < spec.tasks; t++) {
+    const task = `W1-T${spec.first + t}`;
+    for (let kept = 0, run = 0; kept < (spec.attempts ?? 1); run++) {
+      const runId = `${task}-${1795000000000 + run}`;
+      const routed = auction(used, { unit: "spawn", taskId: task, attempt: runId, point: spawnDecisionPoint({ prompt: `implement ${task}` }) });
+      if (routed.served !== provider) continue;
+      rows.push(...attemptRows({ task, id: `${runId}-assignment`, probabilities: {}, ...routed,
+        positive: kept === 0 && t < spec.positive, at: (spec.first + t) * 4 + kept }));
+      kept++;
+    }
   }
   return rows;
 }
@@ -355,6 +400,124 @@ test("W1-T14146 criterion 4: the rule's boundaries are exact — 0.10 and 392 ef
   assert.ok(diffOf(upperAtZero).lower < 0);
   assert.equal(upperAtZero.status, "running");
   assert.equal(upperAtZero.decision.code, "interval-includes-zero");
+});
+
+test("W1-T14146 criterion 4: on the production auction's own probabilities 0.10 concludes, 0.0999999995 and 0.0999 do not, 392 effective tasks conclude and 391 do not, and rates equal but for rounding include 0", () => {
+  const diffOf = (estimate: RoutingPolicyEstimate) => estimate.pipelines.build!.difference!;
+  // Fresh windows, Claude 9% used and Codex 5%: the auction weighs (100 - used - 5)^2, so it draws Claude at 0.477
+  // and Codex at 0.523, and every row's weight is the inverse of a probability it computed.
+  const fresh = { claude: 9, codex: 5 };
+  assert.ok(Math.abs(drawProbability(fresh, "claude") - 7396 / 15496) < 1e-15);
+  // The Codex reading at which the auction draws Codex at q, Claude's reading held.
+  const codexDrawnAt = (q: number): Readings => ({ claude: fresh.claude, codex: 95 - Math.sqrt(q / (1 - q)) * (95 - fresh.claude) });
+
+  // THE EFFECT BAR, short by `delta`. Claude merges 400 of 1,000 tasks drawn at the fresh readings. Codex merges 200 of
+  // 500 there and 300 of 500 at readings that weigh its rows rho = (1 - 10 delta) / (1 + 10 delta) of the fresh ones,
+  // so its Hajek rate is (2 + 3 rho) / (5 (1 + rho)) = 0.5 - delta: always-codex minus always-claude is 0.10 - delta.
+  const shortBy = (delta: number) => {
+    const q = drawProbability(fresh, "codex");
+    const other = delta === 0 ? fresh : codexDrawnAt(q * (1 + 10 * delta) / (1 - 10 * delta));
+    return cell([
+      ...auctionArm("claude", fresh, { tasks: 1000, positive: 400, first: 100000 }),
+      ...auctionArm("codex", fresh, { tasks: 500, positive: 200, first: 200000 }),
+      ...auctionArm("codex", other, { tasks: 500, positive: 300, first: 300000 }),
+    ]);
+  };
+  // An exact 0.10 effect, computed as the double under 0.1: it concludes. Plain running sums read it 2.4e-14 short.
+  const exact = shortBy(0);
+  assert.ok(diffOf(exact).estimate < ROUTING_POLICY_RULE.minimumDifference, "the boundary is live: the double sits under 0.1");
+  assert.ok(Math.abs(diffOf(exact).estimate - 0.1) < 1e-15);
+  assert.ok(diffOf(exact).lower > 0, "the interval excludes 0, so only the bar decides");
+  assert.deepEqual(exact.effectiveN, { "always-claude": 1000, "always-codex": 1000 });
+  assert.equal(exact.status, "concluded", exact.decision.reason);
+  assert.equal(exact.winner, "codex");
+  // 5e-10 short, and 1e-4 short: each interval is above 0 and each arm above the floor, so only the bar decides.
+  for (const [delta, difference] of [[5e-10, 0.0999999995], [1e-4, 0.0999]] as const) {
+    const short = shortBy(delta);
+    assert.ok(Math.abs(diffOf(short).estimate - difference) < 1e-12, `${diffOf(short).estimate} is ${difference}`);
+    assert.ok(diffOf(short).lower > 0, "the interval excludes 0, so only the bar decides");
+    assert.ok(short.effectiveN["always-claude"]! >= routingPolicyFloor() && short.effectiveN["always-codex"]! >= routingPolicyFloor());
+    assert.equal(short.status, "running", `${difference}: ${short.decision.reason}`);
+    assert.equal(short.concluded, false);
+    assert.equal(short.winner, null);
+    assert.equal(short.decision.code, "below-minimum-difference");
+  }
+
+  // THE FLOOR. Every Claude row weighs 1/0.477 and every Codex row 1/0.523: n equal weights are exactly n tasks.
+  const floorAt = (claudeTasks: number) => cell([
+    ...auctionArm("claude", fresh, { tasks: claudeTasks, positive: 80, first: 400000 }),
+    ...auctionArm("codex", fresh, { tasks: 392, positive: 240, first: 500000 }),
+  ]);
+  const atFloor = floorAt(392);
+  assert.deepEqual(atFloor.effectiveN, { "always-claude": 392, "always-codex": 392 });
+  assert.equal(atFloor.status, "concluded", atFloor.decision.reason);
+  const underFloor = floorAt(391);
+  assert.deepEqual(underFloor.effectiveN, { "always-claude": 391, "always-codex": 392 });
+  assert.equal(underFloor.status, "underpowered");
+  assert.match(underFloor.decision.reason, /^build: always-claude has 391\.0 effective tasks, below the floor of 392$/);
+
+  // THE INTERVAL'S BOUND. Every task is three attempts, one merged, so each arm's rate is exactly 1/3 in every
+  // resample. In doubles the two arms' 1/3 differ by one unit in the last place, Codex's above Claude's at the first
+  // readings and below at the second: a bound that far from 0 is 0, so the interval includes 0.
+  for (const used of [{ claude: 60, codex: 40 }, { claude: 42, codex: 17 }]) {
+    const thirds = cell([
+      ...auctionArm("claude", used, { tasks: 400, positive: 400, first: 600000, attempts: 3 }),
+      ...auctionArm("codex", used, { tasks: 400, positive: 400, first: 700000, attempts: 3 }),
+    ]);
+    const build = thirds.pipelines.build!;
+    const claude = build.policies["always-claude"].estimate!, codex = build.policies["always-codex"].estimate!;
+    assert.notEqual(codex, claude, `the boundary is live: ${codex} and ${claude} differ in doubles`);
+    assert.ok(Math.abs(codex - claude) < 1e-16);
+    assert.deepEqual(thirds.effectiveN, { "always-claude": 400, "always-codex": 400 });
+    assert.deepEqual([build.difference!.estimate, build.difference!.lower, build.difference!.upper], [0, 0, 0]);
+    assert.equal(thirds.status, "running");
+    assert.equal(thirds.decision.code, "interval-includes-zero", thirds.decision.reason);
+  }
+});
+
+test("W1-T14146 criterion 4: either sign concludes, as the experiments' own rule concludes on the same tasks — at −0.30 Claude wins", () => {
+  // The experiments' rule (routing-experiment-result.ts, `evaluateRoutingExperimentResult`) reads its second arm
+  // minus its first, and every experiment declares Claude's arm first: the difference is Codex minus Claude. An
+  // interval above 0 with a difference of at least +0.10 names the second arm, one below 0 with at most -0.10 the
+  // first; for review, whose positive outcome is a FAILED review, the other way round.
+  const experiment = ROUTING_EXPERIMENTS.find((candidate) => candidate.id === "sol-vs-sonnet")!;
+  assert.deepEqual(Object.entries(experiment.arms), [["claude", "sonnet"], ["codex", "sol"]]);
+  // Equal readings give each provider exactly 0.5, and the experiment's draw walks its arms in declared order, so the
+  // auction serves each task the arm the experiment assigns it: the IPW estimate and the experiment's ITT read the
+  // same split, from the same rows.
+  const used = { claude: 30, codex: 30 };
+  assert.equal(drawProbability(used, "claude"), 0.5);
+  const enrolled = (perTen: Readings, pipeline: Pipeline): Row[] => {
+    const seen = { claude: 0, codex: 0 };
+    return Array.from({ length: 1000 }, (_, i) => {
+      const task = `W1-T${800000 + i}`;
+      const routed = auction(used, experimentDrawSeed(experiment, task));
+      const rows = attemptRows({ task, id: `${task}-assignment`, probabilities: {}, ...routed, pipeline,
+        positive: seen[routed.served]++ % 10 < perTen[routed.served], at: 2 * i });
+      // worker.ts tags a decision the experiment drew with the experiment's id.
+      ((rows[0]!.worker_assignment as { routing: { decision: Row } }).routing.decision).ab = experiment.id;
+      return rows;
+    }).flat();
+  };
+  const cases = [
+    { pipeline: "build", perTen: { claude: 7, codex: 4 }, difference: -0.3, winner: "claude" },
+    { pipeline: "build", perTen: { claude: 4, codex: 7 }, difference: 0.3, winner: "codex" },
+    { pipeline: "review", perTen: { claude: 7, codex: 4 }, difference: -0.3, winner: "codex" },
+  ] as const;
+  for (const { pipeline, perTen, difference, winner } of cases) {
+    const rows = enrolled(perTen, pipeline);
+    const result = evaluateRoutingExperimentResult(rows, experiment, today);
+    assert.equal(result.status, "concluded", `${pipeline} ${difference}: the experiment concludes`);
+    assert.equal(result.conclusion, "winner");
+    assert.equal(result.winner, experiment.arms[winner], `${pipeline} ${difference}: the experiment names ${winner}'s arm`);
+    const estimate = cell(rows);
+    const d = estimate.pipelines[pipeline]!.difference!;
+    assert.ok(Math.abs(d.estimate - difference) < 0.01, `${pipeline}: always-codex minus always-claude ${d.estimate}`);
+    assert.ok(difference < 0 ? d.upper < 0 : d.lower > 0, "the interval excludes 0 on the difference's side");
+    assert.ok(estimate.effectiveN["always-claude"]! >= 392 && estimate.effectiveN["always-codex"]! >= 392);
+    assert.equal(estimate.status, "concluded", `${pipeline} ${difference}: ${estimate.decision.reason}`);
+    assert.equal(estimate.winner, winner, `${pipeline} ${difference}: the estimate names ${winner}, as the experiment does`);
+  }
 });
 
 test("W1-T14146 criterion 5: invariant within-support — no row values a provider whose logged probability in that cell was 0", () => {
