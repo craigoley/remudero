@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
 import type { Config } from "#src/lib/config.js";
 import { OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
@@ -17,7 +18,8 @@ import {
   routingPolicyFloor,
   type RoutingPolicyEstimate,
 } from "#src/lib/routing-policy-estimate.js";
-import { ROUTING_DRAW_METHOD } from "#src/lib/worker-provider.js";
+import type { WorkerResult, WorkerSelectionAssignment } from "#src/lib/worker.js";
+import { ROUTING_DRAW_METHOD, selectionPropensity } from "#src/lib/worker-provider.js";
 import { buildMeasurementCadenceDaemonHooks } from "#test/helpers/run-task-test.js";
 
 type Row = Record<string, unknown>;
@@ -89,6 +91,15 @@ function patterned(count: number, rates: { claude: number; codex: number }, opts
     return attemptRows({ task: `${prefix}T${i}`, id: `${prefix}${i}`, served, probabilities: { claude: 0.5, codex: 0.5 },
       positive: Math.floor(i / 2) % 100 < Math.round(rates[served] * 100), pipeline, cell: opts.cell, at: i });
   }).flat();
+}
+
+/** One task per attempt, every task of an arm served at the same probabilities (so an arm's weights are equal), the
+ *  first `positive` of an arm's `tasks` positive: each arm's rate and task count are exact by construction. */
+function arms(spec: Record<"claude" | "codex", { tasks: number; positive: number }>,
+  probabilities: Record<string, number> = { claude: 0.5, codex: 0.5 }): Row[] {
+  return (["claude", "codex"] as const).flatMap((served, s) => Array.from({ length: spec[served].tasks }, (_, i) => attemptRows({
+    task: `arm-${served}-T${i}`, id: `arm-${served}-${i}`, served, probabilities, positive: i < spec[served].positive, at: s * 10000 + i,
+  })).flat());
 }
 
 function mulberry32(seed: number): () => number {
@@ -298,6 +309,54 @@ test("W1-T14146 criterion 4: a cell concludes only past the experiments' decisio
   assert.equal(empty.trimmedShare, 0);
 });
 
+test("W1-T14146 criterion 4: the rule's boundaries are exact — 0.10 and 392 effective tasks conclude, 0.0999 and 391 do not, and a bound at 0 includes 0", () => {
+  const tasks = (claude: [number, number], codex: [number, number]) =>
+    ({ claude: { positive: claude[0], tasks: claude[1] }, codex: { positive: codex[0], tasks: codex[1] } });
+  const diffOf = (estimate: RoutingPolicyEstimate) => estimate.pipelines.build!.difference!;
+
+  // THE EFFECT BAR. 0.5 - 0.4 is 0.09999999999999998 in doubles: exactly the minimum difference, read as met.
+  const atBar = cell(arms(tasks([400, 1000], [500, 1000])));
+  assert.ok(diffOf(atBar).estimate < ROUTING_POLICY_RULE.minimumDifference, "the boundary is live: the double sits under 0.1");
+  assert.ok(Math.abs(diffOf(atBar).estimate - 0.1) < 1e-15);
+  assert.ok(diffOf(atBar).lower > 0, "the interval excludes 0, so only the bar decides");
+  assert.deepEqual(atBar.effectiveN, { "always-claude": 1000, "always-codex": 1000 });
+  assert.equal(atBar.status, "concluded", atBar.decision.reason);
+  assert.equal(atBar.winner, "codex");
+  // 129/400 against 264/625 is a 0.0999 difference, its interval also above 0: under the bar, so still running.
+  const underBar = cell(arms(tasks([129, 400], [264, 625])));
+  assert.ok(Math.abs(diffOf(underBar).estimate - 0.0999) < 1e-12);
+  assert.ok(diffOf(underBar).lower > 0, "the interval excludes 0, so only the bar decides");
+  assert.deepEqual(underBar.effectiveN, { "always-claude": 400, "always-codex": 625 });
+  assert.equal(underBar.status, "running");
+  assert.equal(underBar.decision.code, "below-minimum-difference");
+
+  // THE FLOOR. At 0.3 / 0.7 every Claude weight is 1/0.3, and Kish's sums over 392 of them read 391.9999999999956
+  // unscaled: n equal weights must be exactly n effective tasks.
+  const probabilities = { claude: 0.3, codex: 0.7 };
+  const atFloor = cell(arms(tasks([80, 392], [240, 392]), probabilities));
+  assert.deepEqual(atFloor.effectiveN, { "always-claude": 392, "always-codex": 392 });
+  assert.equal(atFloor.status, "concluded", atFloor.decision.reason);
+  const underFloor = cell(arms(tasks([80, 391], [240, 392]), probabilities));
+  assert.deepEqual(underFloor.effectiveN, { "always-claude": 391, "always-codex": 392 });
+  assert.equal(underFloor.status, "underpowered");
+  assert.equal(underFloor.decision.code, "below-floor");
+  assert.match(underFloor.decision.reason, /^build: always-claude has 391\.0 effective tasks, below the floor of 392$/);
+
+  // THE INTERVAL'S BOUND. Claude never succeeds and Codex once in 400 tasks, so over a third of the resamples miss that
+  // task and differ by exactly 0: the lower bound IS 0, and an interval that reaches 0 includes it. The mirror image
+  // puts the upper bound at exactly 0.
+  const lowerAtZero = cell(arms(tasks([0, 400], [1, 400])));
+  assert.equal(diffOf(lowerAtZero).lower, 0);
+  assert.ok(diffOf(lowerAtZero).upper > 0);
+  assert.equal(lowerAtZero.status, "running");
+  assert.equal(lowerAtZero.decision.code, "interval-includes-zero");
+  const upperAtZero = cell(arms(tasks([1, 400], [0, 400])));
+  assert.equal(diffOf(upperAtZero).upper, 0);
+  assert.ok(diffOf(upperAtZero).lower < 0);
+  assert.equal(upperAtZero.status, "running");
+  assert.equal(upperAtZero.decision.code, "interval-includes-zero");
+});
+
 test("W1-T14146 criterion 5: invariant within-support — no row values a provider whose logged probability in that cell was 0", () => {
   const docs = { capability: "economy", effort: "low", taskClass: "docs" };
   const rows: Row[] = [
@@ -369,6 +428,90 @@ test("W1-T14146: the measurement cadence writes one routing.policy.estimate row 
     writeFileSync(join(stateDir, "ledger.2026-11-21T12-00-00-000Z.ndjson.gz"), "corrupt gzip");
     await assert.rejects(recordRoutingPolicyEstimates({ stateDir, today: "2026-11-23" }), /routing policy ledger unreadable/);
     assert.deepEqual(meaningOfStep(ROUTING_POLICY_ESTIMATE_STEP)?.writer, ["recordRoutingPolicyEstimates"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14146: the cadence's estimate carries the review pipeline from the review lane's own rows, whose receipt names no task class", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-routing-policy-review-"));
+  try {
+    // The review lane's assignment rows come from its production writer, `benchmarkNonDispatchSpawn("review")`
+    // (src/cli/commands/review.ts), fed the assignment the auction hands every routed spawn.
+    const laneRoot = join(root, "lane");
+    const reviews = 24;
+    const task = (i: number) => `W1-T${700 + i}`;
+    const served = (i: number) => i % 2 === 0 ? "claude" : "codex";
+    const assignmentId = (i: number) => `review-assignment-${i}`;
+    const spawn = benchmarkNonDispatchSpawn("review", async (args) => {
+      const i = Number(args.taskId!.slice("W1-T".length)) - 700;
+      const provider = served(i);
+      args.onSelectionAssignment?.({
+        version: 1, id: assignmentId(i), phase: "pre-execution",
+        requested: { model: "reviewer-model", effort: "high", maxTurns: 40 },
+        selected: { provider, model: `${provider}-model`, effort: "high" },
+        routing: { mode: "multi-provider", selectionPath: "auction",
+          policy: { preference: "automatic", reservePercent: 5, provenance: "default" },
+          decision: { rule: "headroom-auction", capability: "balanced", considered: [], headroomPercent: {} },
+          propensity: selectionPropensity({ selected: provider, considered: ["claude", "codex"], selection: { draw: {
+            method: ROUTING_DRAW_METHOD, value: 0.25, seed: "0000abcd",
+            probabilities: [{ provider: "claude", probability: 0.5 }, { provider: "codex", probability: 0.5 }] } } }) },
+        candidates: [],
+      } as unknown as WorkerSelectionAssignment);
+      return { sessionId: `review-session-${i}`, costUsd: 0.1, numTurns: 1, text: "VERDICT", blocks: [], stderr: "",
+        subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: `${provider}-model`,
+        effort: "high", tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
+        qualitySuspect: false, workerDurationMs: 5, selectionAssignmentId: assignmentId(i) } as unknown as WorkerResult;
+    });
+    for (let i = 0; i < reviews; i++) {
+      await spawn({ cwd: root, permissionMode: "bypassPermissions", settingsFile: "settings.json", prompt: "review",
+        config: { root: laneRoot } as Config, runId: `review-PR${100 + i}-1795000000000`, taskId: task(i) });
+    }
+    const laneRows = readFileSync(join(laneRoot, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
+      .filter((row) => row.step === "worker.assignment");
+    assert.equal(laneRows.length, reviews);
+    for (const row of laneRows) {
+      assert.equal(row.lane, "review");
+      assert.deepEqual((row.benchmark_run as { work: { taskClass: unknown } }).work.taskClass,
+        { state: "unavailable", reason: "not-recorded-at-assignment" }, "production's review receipt names no task class");
+    }
+    // Each task's implement dispatch wrote its `run.start` (src/cli/commands/run-task-verb.ts) before its PR was
+    // reviewed; the review then posted its verdict naming the assignment that served it. Timestamps are pinned.
+    const rows: Row[] = laneRows.flatMap((assignment, i) => {
+      const id = assignmentId(i);
+      const provider = served(i);
+      const runStart: Row = { ts: at(3 * i), run_id: `${task(i)}-1795000000000`, task_id: task(i), step: "run.start", repo: "remudero",
+        type: "implement", risk: "medium", task_class: "src", mount_class: "src", provider: "claude", worker_role: "implementer" };
+      const posted: Row = { ts: at(3 * i + 2), run_id: assignment.run_id, task_id: task(i), step: "review.posted", lane: "review",
+        context: "remudero-review", state: Math.floor(i / 2) % 2 === 0 ? "failure" : "success", head_sha: `head-${i}`,
+        pr_url: `https://github.com/craigoley/remudero/pull/${100 + i}`, evaluator_provenance: { provider,
+          requestedModel: "reviewer-model", servedModel: `${provider}-model`, effort: "high", sessionId: `review-session-${i}`,
+          routedModel: `${provider}-model`, selectionAssignmentId: id } };
+      // The last review's task had no dispatch before it: its own run.start comes later, so it names no class.
+      return i === reviews - 1 ? [{ ...assignment, ts: at(3 * i + 1) }, posted, { ...runStart, ts: at(3 * i + 3) }]
+        : [runStart, { ...assignment, ts: at(3 * i + 1) }, posted];
+    });
+    const report = estimateRoutingPolicies(rows, today);
+    assert.deepEqual(report.unplaced, { "no-capability": 0, "no-effort": 0, "no-task-class": 1 });
+    // A lane's own run.start names its lane, not a task class, so it never places that lane's rows.
+    const lane = attemptRows({ task: "TRIAGE-9", id: "triage-1", served: "codex", probabilities: { claude: 0.5, codex: 0.5 },
+      cell: { taskClass: "" }, at: 9000 });
+    const laneStart = { ts: at(8999), run_id: "TRIAGE-9-1795000000000", task_id: "TRIAGE-9", step: "run.start", type: "triage", task_class: "triage" };
+    assert.equal(estimateRoutingPolicies([...rows, laneStart, ...lane], today).unplaced["no-task-class"], 2);
+
+    mkdirSync(join(root, "state"));
+    writeFileSync(join(root, "state", LEDGER_FILENAME), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const hooks = buildMeasurementCadenceDaemonHooks({ config: { root } as Config, now: () => new Date(`${today}T10:00:00.000Z`),
+      verifyHumanCadenceResult: async () => { throw new Error("fixture stops sibling work"); } });
+    await assert.rejects(hooks.runMeasurementCadence(), /fixture stops sibling work/);
+    const written = readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
+      .filter((row) => row.step === ROUTING_POLICY_ESTIMATE_STEP);
+    assert.deepEqual(written.map((row) => row.cell_key), [KEY]);
+    const estimate = written[0]!.estimate as RoutingPolicyEstimate;
+    assert.equal(estimate.pipelines.build, null);
+    assert.equal(estimate.pipelines.review?.n, reviews - 1, "every review whose task class is known is estimated");
+    assert.equal(estimate.pipelines.review?.policies["always-claude"].n, 12, "the even reviews, 0 to 22, were served by Claude");
+    assert.equal(estimate.n, reviews - 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

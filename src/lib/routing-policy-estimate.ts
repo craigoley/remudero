@@ -4,7 +4,7 @@ import { fixedClock, systemClock } from "./clock.js";
 import { twoProportionSampleSize } from "./eval-card.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { readLedgerUnionRecords } from "./ledger-union.js";
+import { openLedgerUnion } from "./ledger-union.js";
 import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
 
 /**
@@ -23,12 +23,18 @@ import { ROUTING_DRAW_METHOD } from "./worker-provider.js";
  *   that gave BOTH providers a probability inside `[trim, 1 - trim]`. Every other row is excluded and counted by
  *   {@link RoutingPolicyExclusion}; a row that names no cell is counted in {@link RoutingPolicyReport.unplaced}.
  * - CELL: capability (`routing.decision.capability`) × requested effort × task class (`benchmark_run.work.taskClass`).
+ *   A non-dispatch lane's receipt names no class (`nonDispatchBenchmarkWork`): the review lane's and the sweep's fix
+ *   rung's rows read `not-recorded-at-assignment`. Such a row takes the `task_class` of its task's latest `run.start`
+ *   at or before it ({@link taskClassFromDispatch}): the dispatch's own row, and the field its receipt copies
+ *   (`observeBenchmarkWork`). A lane's own `run.start` (triage, retro) names its lane, not a task class, so only a
+ *   plan task's counts; a row with neither stays unplaced as `no-task-class`.
  * - OUTCOME: the ledger-only terminal join routing-experiment-result.ts uses, per pipeline. Its helpers are private
  *   to that module, so the join is restated below ({@link terminalOutcome}); a change to one must change both.
  * - ESTIMATOR: Hajek (self-normalised) weights `1 / selectedProbability`, the estimator knowledge-outcome.ts runs
  *   for learnings. Its `hajek` is private and takes no clusters, so the sums are restated here per task.
  * - INTERVAL: a 2,000-draw bootstrap over TASKS, seeded from the cell, so one task's attempts move together.
- * - DECISION: the experiments' rule ({@link ROUTING_POLICY_RULE}), with effective tasks per arm as the floor.
+ * - DECISION: the experiments' rule ({@link ROUTING_POLICY_RULE}), with effective tasks per arm as the floor, every
+ *   threshold read under the rule's one tolerance.
  *
  * INVARIANT within-support: no estimate values a provider that the logged policy gave probability 0 in its cell.
  * SURFACE, DO NOT ACT: nothing routes on these rows. W1-T12143 reads a concluded cell as randomised evidence.
@@ -45,6 +51,11 @@ export const ROUTING_POLICY_ESTIMATE_STEP = "routing.policy.estimate";
  * The experiments' decision rule (every live experiment in routing-experiments.ts declares 0.10 at 95% with 80%
  * power and a 20-task floor), plus the estimator's own trim and bootstrap size. The trim equals
  * knowledge-outcome.ts's `OUTCOME_PROPENSITY_TRIM`: an inverse weight of 20+ lets one task dominate an arm.
+ *
+ * `tolerance` is the ONE slack every threshold comparison in {@link decide} reads (the effect bar, the interval's
+ * bound at 0, the effective-tasks floor): a value within `tolerance × max(1, |threshold|)` of a threshold is AT it.
+ * Doubles miss exact boundaries — 0.5 − 0.4 is 0.09999999999999998 — and summing a few thousand weights drifts by
+ * well under 1e-12 of the sum, while a rate over any feasible number of tasks moves in steps far above 1e-9.
  */
 export interface RoutingPolicyRule {
   minimumDifference: number;
@@ -53,6 +64,7 @@ export interface RoutingPolicyRule {
   minTasksPerArm: number;
   trim: number;
   draws: number;
+  tolerance: number;
 }
 export const ROUTING_POLICY_RULE: Readonly<RoutingPolicyRule> = {
   minimumDifference: 0.1,
@@ -61,7 +73,14 @@ export const ROUTING_POLICY_RULE: Readonly<RoutingPolicyRule> = {
   minTasksPerArm: 20,
   trim: 0.05,
   draws: 2000,
+  tolerance: 1e-9,
 };
+
+/** The rule's three threshold readings under its one {@link RoutingPolicyRule.tolerance}. */
+const slack = (threshold: number, rule: Readonly<RoutingPolicyRule>): number => rule.tolerance * Math.max(1, Math.abs(threshold));
+const meets = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value >= threshold - slack(threshold, rule);
+const exceeds = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value > threshold + slack(threshold, rule);
+const under = (value: number, threshold: number, rule: Readonly<RoutingPolicyRule>): boolean => value < threshold - slack(threshold, rule);
 
 /** Effective tasks each arm needs: the two-proportion sample `requiredRoutingTasksPerArm` computes for an
  *  experiment (symmetric rates about 0.5, the largest variance), never below the experiments' task floor. */
@@ -94,7 +113,8 @@ export interface RoutingPolicyValue {
   /** Assignments served by the policy's provider (every assignment for `logged`). */
   n: number;
   tasks: number;
-  /** Kish's (Σw)² / Σw² over TASK weights (a task's weight sums its attempts'), so retries never inflate it. */
+  /** Kish's (Σw)² / Σw² over TASK weights (a task's weight sums its attempts'), so retries never inflate it, and
+   *  n equal task weights read exactly n ({@link kish}). */
   effectiveN: number;
 }
 
@@ -180,6 +200,17 @@ function terminalOutcome(row: Row): { pipeline: RoutingPolicyPipeline; positive:
   return undefined;
 }
 
+/** A plan task's id, the shape dispatch-value.ts's `PLAN_TASK_ID` reads `run.start` by: a lane's own id
+ *  (`TRIAGE-<feedback>`, `PR-<n>`) never matches. */
+const PLAN_TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
+
+/** The class a dispatch's `run.start` gave its task, or undefined for any other row. */
+function taskClassFromDispatch(row: Row): { task: string; taskClass: string } | undefined {
+  const task = text(row.task_id);
+  const taskClass = text(row.task_class);
+  return row.step === "run.start" && PLAN_TASK_ID.test(task) && taskClass ? { task, taskClass } : undefined;
+}
+
 interface Observation { task: string; served: string; weight: number; claude: number; codex: number; ts: string }
 type Admission = { reason: RoutingPolicyExclusion } | Omit<Observation, "task" | "ts">;
 
@@ -211,6 +242,19 @@ interface Cluster { task: string; sums: Record<RoutingPolicyTarget, { w: number;
 const emptySums = (): Cluster["sums"] => ({
   "always-claude": { w: 0, wy: 0, n: 0 }, "always-codex": { w: 0, wy: 0, n: 0 }, logged: { w: 0, wy: 0, n: 0 },
 });
+
+/** Kish's effective sample size, over weights scaled by their largest: n equal weights each scale to exactly 1, so
+ *  they read exactly n, where the unscaled sums of 392 weights of 1/0.3 read 391.9999999999956. */
+function kish(weights: readonly number[]): number {
+  const largest = weights.reduce((a, b) => Math.max(a, b), 0);
+  if (!(largest > 0)) return 0;
+  let total = 0, squares = 0;
+  for (const w of weights) {
+    const scaled = w / largest;
+    total += scaled; squares += scaled * scaled;
+  }
+  return total * total / squares;
+}
 
 function percentile(values: number[], confidence: number): { lower: number; upper: number } | null {
   if (!values.length) return null;
@@ -263,13 +307,11 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
   }
   const policies = Object.fromEntries(targets.map((target) => {
     const weights = clusters.map((cluster) => cluster.sums[target].w).filter((w) => w > 0);
-    const total = weights.reduce((a, b) => a + b, 0);
-    const squares = weights.reduce((a, b) => a + b * b, 0);
     const estimate = value(target);
     return [target, {
       estimate, interval: estimate === null ? null : percentile(samples[target], rule.confidence),
       n: clusters.reduce((sum, cluster) => sum + cluster.sums[target].n, 0), tasks: weights.length,
-      effectiveN: squares > 0 ? total * total / squares : 0,
+      effectiveN: kish(weights),
     }];
   })) as Record<RoutingPolicyTarget, RoutingPolicyValue>;
   const claude = policies["always-claude"].estimate;
@@ -288,7 +330,8 @@ function pipelineEstimate(observations: Array<Observation & { positive: number }
 
 type Decision = Pick<RoutingPolicyEstimate, "status" | "winner" | "decision">;
 
-/** The experiments' rule, read across every active pipeline as `evaluateRoutingExperimentResult` reads it. */
+/** The experiments' rule, read across every active pipeline as `evaluateRoutingExperimentResult` reads it. Every
+ *  threshold is read through {@link meets}, {@link exceeds} and {@link under}, never a bare comparison. */
 function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<RoutingPolicyRule>, floor: number): Decision {
   const stop = (status: Decision["status"], code: RoutingPolicyDecisionCode, reason: string): Decision =>
     ({ status, winner: null, decision: { code, reason } });
@@ -297,7 +340,7 @@ function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<Ro
   for (const [p, entry] of active) {
     for (const target of ["always-claude", "always-codex"] as const) {
       const effective = entry.policies[target].effectiveN;
-      if (effective < floor) {
+      if (!meets(effective, floor, rule)) {
         return stop("underpowered", "below-floor", `${p}: ${target} has ${effective.toFixed(1)} effective tasks, below the floor of ${floor}`);
       }
     }
@@ -308,9 +351,11 @@ function decide(pipelines: RoutingPolicyEstimate["pipelines"], rule: Readonly<Ro
     const d = entry.difference!;
     const codexWhenHigher: RoutingPolicyProvider = p === "review" ? "claude" : "codex";
     const codexWhenLower: RoutingPolicyProvider = p === "review" ? "codex" : "claude";
-    if (d.lower > 0 && d.estimate >= rule.minimumDifference) favoured.push([p, codexWhenHigher]);
-    else if (d.upper < 0 && d.estimate <= -rule.minimumDifference) favoured.push([p, codexWhenLower]);
-    else if (d.lower <= 0 && d.upper >= 0) {
+    const excludesZeroAbove = exceeds(d.lower, 0, rule);
+    const excludesZeroBelow = under(d.upper, 0, rule);
+    if (excludesZeroAbove && meets(d.estimate, rule.minimumDifference, rule)) favoured.push([p, codexWhenHigher]);
+    else if (excludesZeroBelow && meets(-d.estimate, rule.minimumDifference, rule)) favoured.push([p, codexWhenLower]);
+    else if (!excludesZeroAbove && !excludesZeroBelow) {
       return stop("running", "interval-includes-zero", `${p}: the interval ${fixed(d.lower)} to ${fixed(d.upper)} includes 0`);
     } else {
       return stop("running", "below-minimum-difference",
@@ -355,7 +400,11 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
   type Placed = { task: string; ts: string; routing: Row; served: string }
     & ({ unplaced: RoutingPolicyUnplaced } | { cell: RoutingPolicyEstimate["cell"] });
   const assignments = new Map<string, Placed>();
+  // Rows are in time order, so this holds each task's latest dispatch class at the row being read.
+  const dispatchClass = new Map<string, string>();
   for (const row of rows) {
+    const dispatched = taskClassFromDispatch(row);
+    if (dispatched) { dispatchClass.set(dispatched.task, dispatched.taskClass); continue; }
     const assignment = object(row.worker_assignment);
     const id = text(assignment.id);
     if (row.step !== "worker.assignment" || !id) continue;
@@ -363,7 +412,7 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
     const capability = text(object(routing.decision).capability);
     const effort = text(object(assignment.requested).effort);
     const classEvidence = object(object(object(row.benchmark_run).work).taskClass);
-    const taskClass = classEvidence.state === "observed" ? text(classEvidence.value) : "";
+    const taskClass = classEvidence.state === "observed" ? text(classEvidence.value) : dispatchClass.get(text(row.task_id)) ?? "";
     const unplaced = !capability ? "no-capability" : !effort ? "no-effort" : !taskClass ? "no-task-class" : undefined;
     assignments.set(id, { task: text(row.task_id) || id, ts: text(row.ts), routing,
       served: text(object(assignment.selected).provider), ...(unplaced ? { unplaced } : { cell: { capability, effort, taskClass } }) });
@@ -434,7 +483,8 @@ export function estimateRoutingPolicies(input: Iterable<Row>, today: string): Ro
 }
 
 /** The ledger steps the estimate reads, beside its own rows (read back so a day is written once). */
-export const ROUTING_POLICY_SOURCE_STEPS = ["worker.assignment", "verdict", "verdict.merged", "fix.done", "review.posted", "pr.opened"] as const;
+export const ROUTING_POLICY_SOURCE_STEPS = ["worker.assignment", "verdict", "verdict.merged", "fix.done", "review.posted", "pr.opened",
+  "run.start"] as const;
 
 /** The measurement cadence's pass: one `routing.policy.estimate` row per cell per UTC day. A cell already written
  *  today is frozen for that day, concluded or not; the next day estimates it again from the larger log. */
@@ -444,9 +494,13 @@ export async function recordRoutingPolicyEstimates(opts: { stateDir: string; tod
   // The daemon loop reaches this pass, so it streams the ledger off the event loop. Any unread file refuses
   // the pass: an estimate from part of the log would read as a smaller, different experiment.
   const unread: string[] = [];
-  const rows = await readLedgerUnionRecords(opts.stateDir, { step: [...ROUTING_POLICY_SOURCE_STEPS, ROUTING_POLICY_ESTIMATE_STEP],
+  const rows: Row[] = [];
+  for await (const row of openLedgerUnion(opts.stateDir, { step: [...ROUTING_POLICY_SOURCE_STEPS, ROUTING_POLICY_ESTIMATE_STEP],
     onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path),
-    onUnreadDirectory: (path) => unread.push(path) });
+    onUnreadDirectory: (path) => unread.push(path) })) {
+    // A run.start carries the task's whole shape block; the estimate reads its class alone, so keep only that.
+    rows.push(row.step === "run.start" ? { ts: row.ts, step: row.step, task_id: row.task_id, task_class: row.task_class } : row);
+  }
   if (unread.length > 0) throw new Error(`routing policy ledger unreadable: ${unread.join(", ")}`);
   const written = new Set(rows.flatMap((row) =>
     row.step === ROUTING_POLICY_ESTIMATE_STEP && row.day === today && typeof row.cell_key === "string" ? [row.cell_key] : []));
