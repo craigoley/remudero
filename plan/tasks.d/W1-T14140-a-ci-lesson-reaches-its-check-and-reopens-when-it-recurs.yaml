@@ -18,6 +18,11 @@
     - test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts
     - test/the-learnings-store-merges-without-conflict.test.ts
     - test/ci-learning-safe-landing.test.ts
+    - learnings/ci.yaml
+    - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/criteria.yaml
+    - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/diff.patch
+    - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/report.md
+    - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/golden.yaml
   status: queued
   attempts: 0
   rationale: |
@@ -28,6 +33,15 @@
     - The draft (CiLearningShardDraft, :3195-3226) knows its gate, the check that went red. A later fix round's failing check name
       (CiFailure.name, src/lib/sweep.ts:7114) is exactly that text, so the gate is the natural error signature for the fix-lane
       knowledge shadow (W1-T14138).
+    - Measured on 2026-11-21 at origin/main 17e986698: learnings/ci.yaml holds 31 ci-learning entries, 25 of them active.
+      selectLearnings selects only 2 of the 25 for a context naming their own gate; they are the two whose error_signatures
+      hold the gate exactly. With `[<gate>]` added in memory, all 25 are selected. Superseded entries are never selected,
+      because selectLearnings drops non-active entries before matching. Error signatures match as exact substrings
+      (errorHitCount, src/lib/learnings.ts), and the 25 gates are check names, not common words.
+    - Without the backfill, a fix round failing one of those checks matches none of their lessons, so the W1-T14138 shadow
+      would see almost no CI-lesson matches. learnings-budget-ratchet counts only each entry's rendered fact line, so
+      signatures add no budget weight. prompt-surface-gate admits a learnings data change only with a golden verdict under
+      test/fixtures/golden-verdicts/ (evidenceFor, scripts/prompt-surface-gate.mjs).
     - judgeCiLessonEfficacy (src/lib/ci-lesson-recurrence.ts:46-83) reads a lesson held, recurred or unmeasurable, but
       mintCiLearningShards drops every gate that already has a lesson (`heldGates`, measurement-cadence.ts:3432, 3441), and the
       recurrences are read only by a hand-run script (daemon.ts:6916; scripts/private-routing-daily-review.mjs:229). A lesson that
@@ -35,22 +49,30 @@
     - Machine shards must keep `files:` to the lesson and its golden fixture (src/lib/plan.ts:1786-1790), and proof-scope blocks a
       path proof outside files for machine shards (src/lib/task-linter.ts:3356-3363); a `unit test:` title names no path.
   design: |
-    1. ciLearningShardYaml writes the new entry with `error_signatures: [<gate>]`, the check name that went red.
-    2. Add test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts, which generates one test per ci-learning entry
-       in learnings/ci.yaml and learnings/ci.d/*.yaml, titled `ci lesson <findingId> is selected for its own check`. Each runs
-       selectLearnings over the real corpus with the gate name as context text and asserts the entry is selected.
+    1. ciLearningShardYaml's note tells the worker to write the new entry with `src: "<findingId>"` and
+       `error_signatures: [<gate>]`, the check name that went red, so the generated suite can read the gate from src.
+    2. Add test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts, which generates one test per ACTIVE ci-learning
+       entry in learnings/ci.yaml and learnings/ci.d/*.yaml, titled `ci lesson <findingId> is selected for its own check`. Each
+       runs selectLearnings over the real corpus with the gate name as context text and asserts the entry is selected.
+       Superseded entries get no test, since they are never injected.
     3. The shard template's first proof becomes `unit test: ci lesson <findingId> is selected for its own check`. It is absent at
        the merge base, so it discriminates. Keep the golden-fixture proof. Update the two tests that pin the old proof.
     4. When a gate's held lesson reads recurred, mintCiLearningShards no longer drops that gate. It drafts a reopen whose finding id
        carries `#r<N>`, where N is one more than the prior reopens. ciLearningGateOf and parseFiledCiLesson accept the suffix.
     5. At the third reopen the gate goes to the existing flow-remedy ladder (LadderKind, src/lib/flow-remedy-gardener.ts:61-85) instead
        of filing another lesson. A held lesson files nothing, and so does an unmeasurable one.
+    6. Backfill: add `error_signatures: [<gate>]` to every active ci-learning entry in learnings/ci.yaml whose signatures do not
+       already hold its gate exactly, keeping any existing signature. Change no fact text. Add the golden verdict case
+       test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/ in the layout of the existing ci-*-lesson cases, so
+       prompt-surface-gate admits the data change and test/golden-verdicts.test.ts passes on it.
+    The hand-fix lesson template (the ci-learning rung's file-keyed drafts, parked for operator release) is out of scope and
+    keeps its proofs.
 
-    INVARIANT a-lesson-proves-reach: every machine-filed CI lesson is proved by a test that selects it for its own check, never by the presence of its id alone.
+    INVARIANT a-lesson-proves-reach: every CI lesson drafted from a failing check is proved by a test that selects it for its own check, never by the presence of its id alone.
   acceptance:
-    - claim: "A new CI lesson carries its gate's check name as an error signature"
+    - claim: "A drafted CI lesson shard tells its worker to write the finding id as src and the gate's check name as an error signature"
       proof: "grep: W1-T14140 criterion 1: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
-    - claim: "Every ci-learning entry is selected by selectLearnings for a context naming its own check, one generated test per entry"
+    - claim: "Every active ci-learning entry is selected by selectLearnings for a context naming its own check, one generated test per entry"
       proof: "grep: is selected for its own check in test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts"
     - claim: "invariant:a-lesson-proves-reach — a machine-filed lesson's first proof is the generated unit test that selects it, not a grep of its id"
       kind: guard
@@ -61,4 +83,5 @@
       proof: "grep: W1-T14140 criterion 5: in test/learning/a-ci-lesson-reaches-its-check-and-reopens-when-it-recurs.test.ts"
   falsifier: |
     Keep the heldGates filter for a recurred lesson and criterion 4 must fail. Write the lesson without the gate signature and
-    criterion 1 must fail, and its generated selection test must fail. Restore and require all to pass.
+    criterion 1 must fail, and its generated selection test must fail. Remove one backfilled signature and that entry's
+    generated test must fail. Restore and require all to pass.
