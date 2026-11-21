@@ -2476,13 +2476,21 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13951: whether a Codex JSONL line opens as an agent_message item, `"id"` field optional. */
+/** W1-T13951: whether the head of a Codex JSONL line is an item.completed agent_message event. JSON allows
+ *  whitespace around every colon and comma, so the keys are matched as tokens, never as one exact prefix.
+ *  Inside a JSON string every `"` is escaped, so a raw `"type"` followed by a colon is always a key. */
 function opensAsAgentMessage(head: string): boolean {
-  const prefix = '{"type":"item.completed","item":{';
-  if (!head.startsWith(prefix)) return false;
-  let rest = head.slice(prefix.length);
-  if (rest.startsWith('"id":"')) rest = rest.indexOf('",') < 0 ? "" : rest.slice(rest.indexOf('",') + 2);
-  return rest.startsWith('"type":"agent_message"');
+  const ws = "[ \\t\\n\\r]*";
+  if (!new RegExp(`^${ws}\\{`).test(head)) return false;
+  if (!new RegExp(`"type"${ws}:${ws}"item\\.completed"`).test(head)) return false;
+  const item = new RegExp(`"item"${ws}:${ws}\\{`).exec(head);
+  return item !== null && new RegExp(`"type"${ws}:${ws}"agent_message"`).test(head.slice(item.index));
+}
+
+/** W1-T13951: a decoded text's size in the stream — its JSON-encoded string payload, quotes excluded. Every
+ *  dropped-byte count uses this unit, so a spilled cut and a later eviction of the same text add up. */
+function streamBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text)) - 2;
 }
 
 /** W1-T13951: a JSON text cut at a byte boundary may end inside an escape; drop the dangling part. */
@@ -2727,14 +2735,14 @@ class CodexJsonlAccumulator {
     let tail = raw.length - (allowance - head);
     while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
     while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
-    const dropped = tail - head;
+    const dropped = streamBytes(raw.subarray(head, tail).toString());
     this.droppedBytes += dropped;
     return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
   }
 
   /** W1-T13951: a line that opens as an agent_message, judged from its first bytes. */
   private pendingIsAgentMessage(part: string): boolean {
-    const head = this.pending.length >= 256 ? this.pending.slice(0, 256) : this.pending + part.slice(0, 256);
+    const head = this.pending.length >= 1024 ? this.pending.slice(0, 1024) : this.pending + part.slice(0, 1024);
     return opensAsAgentMessage(head);
   }
 
@@ -2761,7 +2769,9 @@ class CodexJsonlAccumulator {
   private evictBlock(index: number): void {
     const block = this.blocks.splice(index, 1)[0]!;
     const markers = this.blockMarkers.splice(index, 1)[0] ?? [];
-    this.droppedBytes += Buffer.byteLength(block) - markers.reduce((sum, marker) => sum + marker.len, 0);
+    const raw = Buffer.from(block);
+    const markerBytes = markers.reduce((sum, marker) => sum + streamBytes(raw.subarray(marker.at, marker.at + marker.len).toString()), 0);
+    this.droppedBytes += streamBytes(block) - markerBytes;
   }
 
   /** {@link boundText} for a retained block: an earlier marker is never split, and its bytes are not counted
@@ -2787,8 +2797,8 @@ class CodexJsonlAccumulator {
       }
     }
     const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
-      .reduce((sum, marker) => sum + marker.len, 0);
-    const dropped = tail - head - covered;
+      .reduce((sum, marker) => sum + streamBytes(raw.subarray(marker.at, marker.at + marker.len).toString()), 0);
+    const dropped = streamBytes(raw.subarray(head, tail).toString()) - covered;
     this.droppedBytes += dropped;
     const marker = this.truncationMarker(dropped);
     const markerLen = Buffer.byteLength(marker);
@@ -2804,7 +2814,7 @@ class CodexJsonlAccumulator {
     const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     const droppedBefore = this.droppedBytes;
-    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += streamBytes(this.errors.pop()!);
     if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
     // W1-T13951: the 128-byte reserve is for the marker block finish() inserts between two blocks; a lone
     // block gets none, so a final message that fits the limit alone keeps every byte.
