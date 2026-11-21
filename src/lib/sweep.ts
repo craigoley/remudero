@@ -5516,7 +5516,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               pr: { ...pr, headSha: handed.head_sha, reviewSummary: handed.review_summary },
               reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount } });
             return { headSha: handed.head_sha, failure: handed.failure, review: review?.initialReview,
-              criterionIndices: review?.initialCriterionIndices, actionableGateFailures: handed.actionable_gate_failures };
+              criterionIndices: review?.initialCriterionIndices, actionableGateFailures: handed.actionable_gate_failures,
+              ...(handed.ci_failures === undefined ? {} : { ciFailures: handed.ci_failures }) };
           },
           deps: {
             fixProgressJudge: evidence.progressJudge ?? effectsProgressJudge,
@@ -15376,6 +15377,8 @@ export interface FixRoundHandoff {
   unmet_criteria: CriterionVerdict[];
   review_summary?: string;
   actionable_gate_failures?: ActionableGateFailure[];
+  /** A red check's failures as the sweep read them on this head, so the round's next strike never waits on a lagging rollup. */
+  ci_failures?: CiFailure[];
   ts: string;
 }
 
@@ -15386,6 +15389,8 @@ export interface LiveRoundHandoff {
   review?: ReviewVerdict & { headSha: string; reviewerOutcome: string };
   criterionIndices?: readonly number[];
   actionableGateFailures?: ActionableGateFailure[];
+  /** The red checks the sweep saw on the handed head: the next strike targets these. */
+  ciFailures?: CiFailure[];
 }
 
 export function fixRoundHandoffPath(stateRoot: string, claimRunId: string): string {
@@ -15417,7 +15422,8 @@ export function readFixRoundHandoff(path: string): FixRoundHandoff | undefined {
     throw error;
   }
   return typeof parsed?.claim_run_id === "string" && typeof parsed.round_run_id === "string" && typeof parsed.head_sha === "string" &&
-    (parsed.failure === "check" || parsed.failure === "review") && Array.isArray(parsed.unmet_criteria)
+    (parsed.failure === "check" || parsed.failure === "review") && Array.isArray(parsed.unmet_criteria) &&
+    (parsed.ci_failures === undefined || Array.isArray(parsed.ci_failures))
     ? parsed as FixRoundHandoff : undefined;
 }
 
@@ -15470,23 +15476,51 @@ function releaseOwnedFixClaim(path: string, owner: InflightLockInfo): void {
   });
 }
 
-/** Serialize the memory charge on the PR itself, across heads and sweep processes. */
+/** W1-T13991 — the lock that serializes one PR's fix memory charge on one host. The charge is that host's memory, so a
+ *  holder on another host (shared state) never blocks this host's admission, and its abandoned lock never needs a reclaim
+ *  this host cannot judge. */
+export function fixAdmissionLockPath(dir: string, pr: Pick<OpenPrView, "prUrl">, host: string = hostname()): string {
+  const target = mergeTargetFromPrUrl(pr.prUrl);
+  const key = target ? `${target.owner}/${target.repo}#${target.prNumber}`.toLowerCase() : pr.prUrl;
+  return inflightLockPath(dir, createHash("sha256").update(`${host.toLowerCase()}\0${key}`).digest("hex"));
+}
+
+/** W1-T13991 — a PR's fix admission: the charge, and the per-PR lock that holds it. */
+interface FixAdmissionLock { path: string; owner: InflightLockInfo }
+type PrFixAdmission =
+  | { admitted: true; release?: () => void; releaseCharge?: () => void; lock?: FixAdmissionLock }
+  | { admitted: false; reason: string };
+
+function readFixAdmissionHolder(path: string): InflightLockInfo | null {
+  try {
+    return parseInflightLockInfo(readFileSync(path, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** Serialize the memory charge on the PR itself, across heads and sweep processes. `inherited` is the dispatching sweep's
+ *  holder, which a hosted child adopts in place: the lock is never free between the sweep's charge and the child's. */
 function claimFixAdmissionForPr(
   dir: string | undefined,
   pr: OpenPrView,
   charge: NonNullable<SweepDeps["claimFixAdmission"]>,
-): ReturnType<NonNullable<SweepDeps["claimFixAdmission"]>> {
+  inherited?: InflightLockInfo,
+): PrFixAdmission {
   if (dir === undefined) return charge(pr);
-  const target = mergeTargetFromPrUrl(pr.prUrl);
-  const key = target ? `${target.owner}/${target.repo}#${target.prNumber}`.toLowerCase() : pr.prUrl;
-  const path = inflightLockPath(dir, createHash("sha256").update(key).digest("hex"));
+  const path = fixAdmissionLockPath(dir, pr);
   const owner = { run_id: randomUUID(), pid: process.pid, host: hostname(), startedAt: systemClock.iso() };
-  const stale = reclaimStaleLock(path, {
-    parseHolder: parseInflightLockInfo,
-    isStale: (holder) => isHolderStale(holder, { isPidAlive: defaultIsPidAlive }),
-  });
-  if (stale.outcome === "live" || !publishFixRoundFile(path, JSON.stringify(owner))) {
-    return { admitted: false, reason: "a fix round already holds admission for this pull request" };
+  if (inherited !== undefined && sameFixClaim(readFixAdmissionHolder(path), inherited)) {
+    writeAtomic(path, JSON.stringify(owner));
+  } else {
+    const stale = reclaimStaleLock(path, {
+      parseHolder: parseInflightLockInfo,
+      isStale: (holder) => isHolderStale(holder, { isPidAlive: defaultIsPidAlive }),
+    });
+    if (stale.outcome === "live" || !publishFixRoundFile(path, JSON.stringify(owner))) {
+      return { admitted: false, reason: "a fix round already holds admission for this pull request" };
+    }
   }
   const release = () => releaseOwnedFixClaim(path, owner);
   let grant: ReturnType<NonNullable<SweepDeps["claimFixAdmission"]>> | undefined;
@@ -15494,7 +15528,7 @@ function claimFixAdmissionForPr(
     grant = charge(pr);
     if (!grant.admitted) return grant;
     const releaseCapacity = grant.release;
-    return { admitted: true, release: () => {
+    return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, release: () => {
       try { releaseCapacity?.(); }
       finally { release(); }
     } };
@@ -15525,7 +15559,8 @@ export function deferToLiveFixRound(
     return { liveRoundRunId, claimRunId: holder.run_id, failure: prior.failure, handedOff: false };
   }
   const handoff: FixRoundHandoff = { claim_run_id: holder.run_id, round_run_id: liveRoundRunId, head_sha: pr.headSha, failure,
-    ...(failure === "review" ? { review_summary: pr.reviewSummary, actionable_gate_failures: pr.actionableGateFailures } : {}),
+    ...(failure === "review" ? { review_summary: pr.reviewSummary, actionable_gate_failures: pr.actionableGateFailures }
+      : { ci_failures: pr.ciFailures ?? [] }),
     unmet_criteria: failure === "review" ? pr.unmetCriteria : [], ts: clockFromMillisFn(() => io.nowMs).iso() };
   if (publishFixRoundFile(path, JSON.stringify(handoff), () => {
     io.beforePublish?.();
@@ -20623,6 +20658,8 @@ export interface FixDispatchEnvelope {
   /** The original admission wait survives retries and daemon restarts. */
   admissionSinceMs?: number;
   fixAdmissionLockDir?: string;
+  /** W1-T13991: the dispatching sweep's holder of the PR's admission lock, which the child adopts in place. */
+  fixAdmissionOwner?: InflightLockInfo;
   /** The canonical task context the sweep saw (`planContextDigestFor`); a child that reads another one refuses. */
   planContextDigest?: string;
   dedupeKey?: string;
@@ -20631,7 +20668,8 @@ export interface FixDispatchEnvelope {
 /** The envelope for a decision, as plain JSON. Throws when the view or the evidence is not serializable: the dispatch then stays in process. */
 export function buildFixDispatchEnvelope(
   pr: OpenPrView, evidence: FixDispatchEvidence, facts: {
-    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; fixAdmissionLockDir?: string; planContextDigest?: string; dedupeKey?: string;
+    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; fixAdmissionLockDir?: string; fixAdmissionOwner?: InflightLockInfo;
+    planContextDigest?: string; dedupeKey?: string;
   },
 ): FixDispatchEnvelope {
   const serializable: Omit<FixDispatchEvidence, "progressJudge"> & { progressJudge?: FixProgressJudge } = { ...evidence };
@@ -20646,6 +20684,8 @@ export function readFixDispatchEnvelope(raw: unknown): FixDispatchEnvelope | und
   if (e.schema !== 1 || typeof e.fixKey !== "string" || typeof e.decidedAtMs !== "number") return undefined;
   if (e.admissionSinceMs !== undefined && (typeof e.admissionSinceMs !== "number" || !Number.isFinite(e.admissionSinceMs))) return undefined;
   if (e.fixAdmissionLockDir !== undefined && typeof e.fixAdmissionLockDir !== "string") return undefined;
+  if (e.fixAdmissionOwner !== undefined && (typeof e.fixAdmissionOwner !== "object" || e.fixAdmissionOwner === null ||
+    typeof e.fixAdmissionOwner.run_id !== "string" || typeof e.fixAdmissionOwner.pid !== "number")) return undefined;
   const { pr, evidence } = e;
   if (typeof pr !== "object" || pr === null || typeof pr.prNumber !== "number" || typeof pr.prUrl !== "string" || typeof pr.headSha !== "string") return undefined;
   if (typeof evidence !== "object" || evidence === null || !Array.isArray(evidence.unmetCriteria)) return undefined;
@@ -20771,6 +20811,18 @@ export async function recheckFixDispatch(
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
   const decided = readFixDispatchEnvelope(inputs.envelope);
+  try {
+    await runAdmittedFixDispatchChild(decided, deps);
+  } finally {
+    // W1-T13991: a child that ends before it adopts the sweep's admission lock frees it; an adopted one is no longer its holder.
+    const inherited = decided?.fixAdmissionOwner;
+    if (decided?.fixAdmissionLockDir !== undefined && inherited !== undefined) {
+      releaseOwnedFixClaim(fixAdmissionLockPath(decided.fixAdmissionLockDir, decided.pr), inherited);
+    }
+  }
+}
+
+async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefined, deps: FixDispatchChildPorts): Promise<void> {
   if (decided === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
   const rechecked = await recheckFixDispatch(decided, deps);
   if (!rechecked.ok) {
@@ -20808,7 +20860,7 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
   try {
     try {
       grant = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-admission", () =>
-        (grant = claimFixAdmissionForPr(envelope.fixAdmissionLockDir, envelope.pr, deps.claimFixAdmission)));
+        (grant = claimFixAdmissionForPr(envelope.fixAdmissionLockDir, envelope.pr, deps.claimFixAdmission, envelope.fixAdmissionOwner)));
       if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
     } catch (error) {
       const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
@@ -23210,13 +23262,16 @@ export async function runSweep(
     }
   }
   const fixCapacityReleases = new Map<string, () => void>();
+  // W1-T13991: the per-PR admission lock each held charge carries, handed to a hosted child in place.
+  const fixAdmissionLocks = new Map<string, { lock: FixAdmissionLock; releaseCharge?: () => void }>();
   const fixCapacityKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     try {
       const claim = claimFixAdmissionForPr(deps.fixAdmissionLockDir, pr, capacityClaim);
       if (claim.admitted && claim.release) fixCapacityReleases.set(fixCapacityKey(pr), claim.release);
-      return claim;
+      if (claim.admitted && claim.lock) fixAdmissionLocks.set(fixCapacityKey(pr), { lock: claim.lock, releaseCharge: claim.releaseCharge });
+      return claim.admitted ? { admitted: true as const, ...(claim.release ? { release: claim.release } : {}) } : claim;
     } catch (error) {
       return { admitted: false as const, reason: `fix admission failed: ${String(error)}` };
     }
@@ -24125,15 +24180,19 @@ export async function runSweep(
     const host = installedWorkHost;
     if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
     let envelope: FixDispatchEnvelope;
+    const capacityKey = fixCapacityKey(pr);
+    const heldAdmission = deps.fixAdmissionLockDir === undefined ? undefined : fixAdmissionLocks.get(capacityKey);
     try {
       envelope = buildFixDispatchEnvelope(pr, withDispatchCauseProgress(pr, evidence), { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
         admissionSinceMs: claim.control.admissionSinceMs, fixAdmissionLockDir: deps.fixAdmissionLockDir,
+        ...(heldAdmission === undefined ? {} : { fixAdmissionOwner: heldAdmission.lock.owner }),
         planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
     } catch (error) {
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     }
     let hosted: FixChildLaunch | undefined;
+    let launched = false;
     try {
       // W1-T13440: while the run child waits for admission this pass holds the key; record who holds it, and ledger it once.
       const onPending = ({ runId, abort }: { runId: string; abort: () => Promise<void> }) => {
@@ -24143,13 +24202,26 @@ export async function runSweep(
           pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: claim.fixKey, child_run_id: runId,
         });
       };
-      if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
+      if (heldAdmission !== undefined) {
+        // W1-T13991: the host charges the child's memory itself, so this pass's charge goes back now. The PR's admission lock
+        // does not: it is held through the host's reservation until the child adopts it, so no second round reserves.
+        fixCapacityReleases.delete(capacityKey);
+        fixAdmissionLocks.delete(capacityKey);
+        heldAdmission.releaseCharge?.();
+      } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
       hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
+      launched = hosted !== undefined && !("abandoned" in hosted);
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     } finally {
       queuedHostFixes.delete(claim.fixKey);
+      // No child took the lock: free it. A launched child adopts it, or frees it when it ends; its settlement is the backstop.
+      if (heldAdmission !== undefined) {
+        const { path, owner } = heldAdmission.lock;
+        if (!launched) releaseOwnedFixClaim(path, owner);
+        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseOwnedFixClaim(path, owner)).catch(() => {});
+      }
     }
     if (hosted === undefined) return false;
     if ("abandoned" in hosted) {
@@ -24205,6 +24277,7 @@ export async function runSweep(
     const key = fixCapacityKey(pr);
     const release = fixCapacityReleases.get(key);
     fixCapacityReleases.delete(key);
+    fixAdmissionLocks.delete(key);
     release?.();
   }
 

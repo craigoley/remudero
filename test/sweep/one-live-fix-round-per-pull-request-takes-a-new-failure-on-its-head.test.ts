@@ -12,12 +12,17 @@ import {
   acquireFixRoundClaim,
   buildFixDispatchEnvelope,
   deferToLiveFixRound,
+  drainDetachedSweepActions,
+  fixAdmissionLockPath,
   fixRoundBranchClaim,
   fixRoundClaimEnded,
   fixRoundHandoffPath,
   fixRoundIsLiveOnHead,
   readFixRoundHandoff,
+  installDetachedWorkHost,
   reclaimFixRoundBranch,
+  resetChildWork,
+  runFixDispatchChild,
   runSweep,
   type FixRoundLiveProbe,
   type OpenPrView,
@@ -53,6 +58,7 @@ const ROUND_ID = `${ROUND}:1`;
 const UNMET = "the live round takes the new failure on its own head";
 const HOLDOUT = "a private acceptance claim";
 const REMEDY = "remove the unsupported change claim from the report";
+const HANDED_CHECK = "lint-shard (2/3)";
 
 type Row = Record<string, unknown>;
 
@@ -394,6 +400,75 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
   }
 });
 
+test("W1-T13991 criterion 3: a hosted round holds the PR's admission through the host's reservation, and its child adopts it", async (t) => {
+  const root = scratch(t, "hosted");
+  const dir = join(root, "fix-admission");
+  const rows: Row[] = [];
+  const nowMs = Date.now();
+  const charges: string[] = [];
+  const holder = (path: string): string | undefined => {
+    try { return (JSON.parse(readFileSync(path, "utf8")) as { run_id?: string }).run_id; } catch { return undefined; }
+  };
+  const depsFor = (runId: string): SweepDeps => ({
+    ledgerPath: join(root, "ledger.ndjson"), runId, now: () => nowMs, detachFixWait: true, fixAdmissionLockDir: dir,
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: new Date(nowMs).toISOString(), ...row }); },
+    log: (step, extra) => { rows.push({ ts: new Date(nowMs).toISOString(), step, ...(extra ?? {}) }); },
+    claimFixAdmission: (view) => {
+      charges.push(`${runId}@${view.headSha}`);
+      return { admitted: true, release: () => charges.push(`${runId}:released`) };
+    },
+    dispatchFix: () => assert.fail("a hosted fix never runs in process"),
+    arm: () => assert.fail("a red PR must not arm"), close: () => assert.fail("no close is due"),
+    escalate: () => assert.fail("nothing is escalated"),
+  });
+  const seen: { atReservation?: string; inEnvelope?: string; overlapping?: string; inChild?: string } = {};
+  t.after(() => { installDetachedWorkHost(undefined); resetChildWork(); });
+  installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async (input) => {
+      // The host reserves the child's memory here, before the child reaches its own admission.
+      const path = fixAdmissionLockPath(dir, input.envelope.pr);
+      seen.atReservation = holder(path);
+      seen.inEnvelope = input.envelope.fixAdmissionOwner?.run_id;
+      const overlapping = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-B"), DEFAULT_SWEEP_POLICY);
+      seen.overlapping = overlapping.actions.find((action) => action.prNumber === PR)?.reason;
+      await runFixDispatchChild({ envelope: input.envelope }, {
+        readLivePr: async () => ({ state: "OPEN", headSha: input.envelope.pr.headSha }),
+        readTask: () => ({ found: true, merged: false, retired: false }),
+        hold: () => undefined, log: () => {},
+        claimFixAdmission: () => {
+          charges.push("child");
+          return { admitted: true, release: () => charges.push("child:released") };
+        },
+        dispatcher: () => ({ dispatchFix: async () => { seen.inChild = holder(path); } }),
+      } as never);
+      return { runId: "work-fix-dispatch-R1", settled: Promise.resolve() };
+    },
+  });
+  await runSweep([redPr()], depsFor("SWEEP-A"), DEFAULT_SWEEP_POLICY);
+  await drainDetachedSweepActions();
+  assert.ok(seen.atReservation !== undefined, "the sweep's admission lock is held while the host reserves the child's memory");
+  assert.equal(seen.atReservation, seen.inEnvelope, "the envelope names that holder for the child");
+  assert.match(String(seen.overlapping), /already holds admission/, "an overlapping round for the PR is refused before any reservation");
+  assert.ok(seen.inChild !== undefined && seen.inChild !== seen.atReservation, "the child adopted the lock in place");
+  assert.deepEqual(charges, [`SWEEP-A@${PUSHED}`, "SWEEP-A:released", "child", "child:released"], "one round charged at a time");
+  assert.equal(holder(fixAdmissionLockPath(dir, redPr())), undefined, "the lock is free once the child ends");
+});
+
+test("W1-T13991 criterion 4: an abandoned admission lock another host left in shared state never blocks this host's redispatch", async (t) => {
+  const h = sweepHarness(t, { live: false });
+  const dir = join(h.root, "fix-admission");
+  const foreign = fixAdmissionLockPath(dir, redPr(), "build-host-b");
+  mkdirSync(dirname(foreign), { recursive: true });
+  writeFileSync(foreign, JSON.stringify({ run_id: "ABANDONED", pid: 4242, host: "build-host-b",
+    startedAt: new Date(h.nowMs - 3_600_000).toISOString() }));
+  assert.notEqual(foreign, fixAdmissionLockPath(dir, redPr()), "the lock is this host's own");
+  await runSweep([redPr()], { ...h.deps, fixAdmissionLockDir: dir }, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(h.admitted, [PR], "this host charges its own memory, as on origin/main");
+  assert.deepEqual(h.dispatched, [PR]);
+  assert.equal(existsSync(foreign), true, "the other host's lock is left to that host");
+});
+
 test("W1-T13991 criterion 5: the wait belongs to the exact round and another PR's dispatch under the same run does not end it", () => {
   const nowMs = Date.now();
   const probe = probeFor({ pid: process.pid, run_id: CLAIM, host: hostname() }, nowMs);
@@ -427,7 +502,7 @@ function worker(text: string): WorkerResult {
 }
 
 test("W1-T13991 criterion 2: red checks and failing reviews resume the round in its own worktree with the original criterion index", async (t) => {
-  for (const failure of ["review", "public-criterion", "check", "foreign-head", "marker-error"] as const) {
+  for (const failure of ["review", "public-criterion", "check", "check-pending", "foreign-head", "marker-error"] as const) {
     const root = scratch(t, `rung-${failure}`);
     const repo = "scratch-w1t13991";
     // A checkout of a bare origin under <root>/repos/<repo>, with the run branch pushed.
@@ -447,7 +522,8 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
     const key = fixBranchClaimKey("acme", repo, BRANCH);
     const logs: Row[] = [];
     const spawns: SpawnWorkerArgs[] = [];
-    const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number } = {};
+    const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number;
+      lockAtWaitRow?: string | null; racerRefused?: boolean } = {};
     let waits = 0;
     let successor: InflightLockInfo | undefined;
     const shim = ghShim([
@@ -468,6 +544,10 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
         policy: DEFAULT_SWEEP_POLICY,
         log: (step: string, fields?: Row) => {
           const row = { ts: new Date().toISOString(), run_id: "SWEEP-W1T13991", step, ...(fields ?? {}) };
+          // The first wait row that reads the round live: the claim fix.done released must not be re-taken yet.
+          if (step === "run.awaiting_external" && fields?.branch_claim_run_id !== undefined && seen.lockAtWaitRow === undefined) {
+            seen.lockAtWaitRow = readInflightLock(join(root, "state", "inflight"), key)?.run_id ?? null;
+          }
           logs.push(row);
           appendFileSync(ledger, `${JSON.stringify(row)}\n`);
         },
@@ -499,8 +579,10 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
             seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound(view,
               readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
           };
-          if (failure === "check" || failure === "foreign-head") {
+          if (failure === "check" || failure === "check-pending" || failure === "foreign-head") {
             let polls = 0;
+            // The rollup lags the red the sweep saw: only the hand-off names the failing check.
+            if (failure === "check-pending") shim.addRoute({ when: "statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [] }) });
             return waitForCiGreen(url, logWait, 0, {
               sleep: async () => {
                 await poll.sleep(0);
@@ -525,6 +607,16 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
                   return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
                     conclusion: failed ? "failure" : null }] };
                 }
+                if (args[1].includes(`commits/${head}/check-runs`) && failure === "check-pending") {
+                  // The sweep hands the red over while this head's checks still read pending: the hand-off ends the wait.
+                  // Poll 1 starts the wait (its row reads the round live); the hand-off lands at poll 2, checks still pending.
+                  if (++polls === 2) handoff({ ...redPr(head), redRequiredChecks: [HANDED_CHECK],
+                    ciFailures: [{ name: HANDED_CHECK, logTail: "Error: the red the sweep handed over" }] } as OpenPrView);
+                  if (polls > 2) seen.waitedOut = true;
+                  const stuck = polls > 4; // never reached when the hand-off ends the wait; it bounds a red run
+                  return { check_runs: [{ name: "coverage-shard (1/12)", status: stuck ? "completed" : "in_progress",
+                    conclusion: stuck ? "failure" : null }] };
+                }
                 if (args[1].includes(`commits/${head}/check-runs`)) {
                   const failed = ++polls > 1;
                   if (failed) handoff(redPr(head));
@@ -538,6 +630,16 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
             });
           }
           logWait("run.awaiting_external", { waiting_on: "ci", head_sha: head });
+          if (failure === "review") {
+            // A sweep racing the round into its wait: it reads the re-taken claim, and the wait beside it.
+            try {
+              acquireFixRoundClaim(join(root, "state", "inflight"), key, "RACER", (id, held) =>
+                fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: head, processStart: undefined })));
+              seen.racerRefused = false;
+            } catch (error) {
+              seen.racerRefused = error instanceof InflightLockError;
+            }
+          }
           if (failure === "marker-error") {
             mkdirSync(fixRoundHandoffPath(root, String(done.branch_claim_run_id)), { recursive: true });
             await poll.sleep(0);
@@ -565,6 +667,8 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
     }
     const steps = (step: string) => logs.filter((row) => row.step === step);
     const firstDone = steps("fix.done")[0];
+    assert.equal(seen.lockAtWaitRow, null, `${failure}: the wait row lands before the claim is re-taken`);
+    if (failure === "review") assert.equal(seen.racerRefused, true, "a racing sweep reads the live wait and keeps off the claim");
     assert.equal(seen.heldDuringWait, firstDone?.branch_claim_run_id, `${failure}: the waiting round holds the claim fix.done named`);
     assert.deepEqual(readInflightLock(join(root, "state", "inflight"), key), successor ?? null,
       `${failure}: cleanup never removes a successor's claim`);
@@ -585,7 +689,7 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
       assert.equal(steps("sweep.fix.error").length, 0);
       continue;
     }
-    const failureKind = failure === "check" ? "check" : "review";
+    const failureKind = failure === "check" || failure === "check-pending" ? "check" : "review";
     assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id,
       failure: failureKind, handedOff: true });
     assert.equal(seen.waitedOut, undefined, `${failure}: the hand-off ended the wait at its next poll`);
@@ -604,7 +708,10 @@ test("W1-T13991 criterion 2: red checks and failing reviews resume the round in 
     }
     else {
       assert.ok(logs.indexOf(steps("fix.ci_not_green")[0]) > logs.indexOf(resumed[0]), "the wait reads the handed red");
-      assert.match(String(spawns[1].prompt), /coverage-shard \(1\/12\)/, "the strike targets the red check");
+      if (failure === "check-pending") {
+        assert.match(String(spawns[1].prompt), new RegExp(HANDED_CHECK.replace(/[()/]/g, "\\$&")),
+          "the strike targets the handed red, though the rollup lags it");
+      } else assert.match(String(spawns[1].prompt), /coverage-shard \(1\/12\)/, "the strike targets the red check");
     }
     assert.deepEqual(steps("fix.stood_down").filter((row) => /a later round reclaimed/.test(String(row.reason))), []);
     assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false, `${failure}: the round removed its hand-off when it ended`);

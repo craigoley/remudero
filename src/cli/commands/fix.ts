@@ -5492,11 +5492,25 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
     if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
+    // W1-T13991: the first wait row, which reads this round live, lands BEFORE the claim fix.done released is re-taken. A
+    // sweep that reads the re-taken claim then also reads the wait, so it never judges the claim ended on fix.done alone.
+    let waitHoldsClaim: boolean | undefined;
     const logCiWait: Parameters<typeof deps.waitForCiGreen>[1] = (step, extra) => {
       if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
-        deps.branchClaim?.holdForWait === undefined) return deps.log(step, extra);
-      if (deps.branchClaim.holdForWait() !== undefined) return deps.log(step, extra);
-      deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: deps.branchClaim.id() });
+        deps.branchClaim?.holdForWait === undefined || waitHoldsClaim === false) return deps.log(step, extra);
+      const live = (claimRunId: string | undefined) =>
+        ({ ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: claimRunId });
+      if (waitHoldsClaim === undefined) {
+        const claimRunId = deps.branchClaim.id() ?? releasedClaimId;
+        if (claimRunId === undefined) {
+          waitHoldsClaim = false;
+          return deps.log(step, extra);
+        }
+        deps.log(step, live(claimRunId));
+        waitHoldsClaim = deps.branchClaim.holdForWait() === undefined;
+        return;
+      }
+      deps.log(step, live(deps.branchClaim.id()));
     };
     const waited = opts.waitForOwnHeadCi === undefined
       ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
@@ -5534,7 +5548,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // blocker). Refresh the failing-check content best-effort; a missing/
       // throwing fetchCiFailures still corrects the MODE via `noReviewYet`.
       noReviewYet = true;
-      if (deps.fetchCiFailures) {
+      if (resumed?.failure === "check" && (resumed.ciFailures?.length ?? 0) > 0) {
+        // W1-T13991: the red the sweep handed this round, read on this head; a lagging rollup cannot drop it.
+        currentCiFailures = resumed.ciFailures;
+        for (const f of currentCiFailures ?? []) everRedCiCheckNames.add(f.name);
+      } else if (deps.fetchCiFailures) {
         try {
           currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(ci));
           for (const f of currentCiFailures) everRedCiCheckNames.add(f.name);
