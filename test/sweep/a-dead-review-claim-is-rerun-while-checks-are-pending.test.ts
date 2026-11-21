@@ -15,7 +15,7 @@ import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { reviewInputDigest } from "#src/lib/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { buildOpenPrViews } from "#src/run-task.js";
+import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
@@ -163,7 +163,7 @@ test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undi
 
 /** #19791's head as the real view producer reads it: checks pending since 42m ago, the dead run's ledger row, and the
  *  live `remudero-review` status the fetch returns. */
-function producedView(dir: string, liveStatus: { runId: string; createdAt?: string }): OpenPrView {
+async function producedView(dir: string, liveStatus: { runId: string; createdAt?: string }): Promise<OpenPrView> {
   const ledgerPath = join(dir, "ledger.ndjson");
   const sha = "d".repeat(40);
   const prUrl = "https://github.com/o/r/pull/19791";
@@ -174,10 +174,10 @@ function producedView(dir: string, liveStatus: { runId: string; createdAt?: stri
     head_sha: sha, pr_url: prUrl, review_input_digest: reviewInputDigest(sha, body),
     host: hostname(), owner_pid: 41, owner_started_at: minutesAgo(23),
   });
-  const [pr] = buildOpenPrViews("o", "r", ledgerPath, {
+  const [pr] = await buildOpenPrViewsAsync("o", "r", ledgerPath, {
     requiredContexts: () => ["ci-gate"],
     assessPendingOwner: (record) => record.runId === "review-PR19791-dead" ? "dead" : "active",
-    fetch: (args) => {
+    fetchAsync: async (args) => {
       const path = args.at(-1)!;
       if (path.includes("state=open")) return [{
         number: 19791, html_url: prUrl, head: { ref: "run-W1-T14035-1795190000000", sha },
@@ -197,19 +197,19 @@ function producedView(dir: string, liveStatus: { runId: string; createdAt?: stri
   return pr;
 }
 
-test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet waits, replayed from the view producer", (t) => {
+test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet waits, replayed from the view producer", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const own = producedView(dir, { runId: "review-PR19791-dead", createdAt: minutesAgo(23).replace(/\.\d{3}Z$/, "Z") });
+  const own = await producedView(dir, { runId: "review-PR19791-dead", createdAt: minutesAgo(23).replace(/\.\d{3}Z$/, "Z") });
   assert.equal(own.checksState, "pending");
   assert.equal(own.reviewPendingOwnerDead, true, "the producer read the dead run's row");
   assert.equal(deriveDisposition(own, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review",
     "the dead run's own status is released alongside CI");
-  const newer = producedView(dir, { runId: "review-PR19791-live", createdAt: minutesAgo(2).replace(/\.\d{3}Z$/, "Z") });
+  const newer = await producedView(dir, { runId: "review-PR19791-live", createdAt: minutesAgo(2).replace(/\.\d{3}Z$/, "Z") });
   assert.equal(newer.reviewPendingOwnerDead, true, "the producer still judges the older dead run's row");
   const live = deriveDisposition(newer, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(live.disposition, "wait", "the live status names a newer claim, so the active claim is not disposed");
   assert.doesNotMatch(live.reason, /owner proven dead/);
-  const undated = producedView(dir, { runId: "review-PR19791-dead" });
+  const undated = await producedView(dir, { runId: "review-PR19791-dead" });
   assert.equal(deriveDisposition(undated, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait", "an undated live status is an unknown run");
 });
