@@ -1,5 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
-import { newestTaskAnswer, type Task } from "./plan.js";
+import { answerHeld, answerRecords, newestLedgerTaskAnswer, newestTaskAnswer, publishAnswers, sharedAnswerEvidence, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
@@ -5056,6 +5056,10 @@ export interface QuestionAnswerEntry {
    * `bearerTokenId`). */
   origin: string;
   contribution?: unknown;
+  answer_id?: string;
+  author_login?: string;
+  authority?: string;
+  source?: "ledger" | "store";
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -5075,21 +5079,48 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
 /** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
  * answers nothing, so a task with needs_input stays held. */
 export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  return newestTaskAnswer(questionStoreLines(repoRoot) ?? [], taskId);
+}
+
+/** The store's parsed lines; [] when it is absent, undefined when it exists but cannot be read. */
+function questionStoreLines(repoRoot: string): unknown[] | undefined {
   let text: string;
   try {
     text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
-  } catch {
-    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+  } catch (error) {
+    // deliberate: an absent or unreadable store answers nothing, the safe side; an unreadable one also takes no copy.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
   }
   const lines: unknown[] = [];
   for (const raw of text.split("\n")) {
     try {
-      lines.push(JSON.parse(raw));
+      if (raw.trim() !== "") lines.push(JSON.parse(raw));
     } catch {
       continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
     }
   }
-  return newestTaskAnswer(lines, taskId);
+  return lines;
+}
+
+/** W1-T13940: the answer reader every needs_input check uses: the newest nonblank answer among this checkout's store, the
+ * live answer rows and the answers published beside the ledger. It copies each row the store lacks into the store, and
+ * publishes each store answer no row carries, so serve counts it too; neither write ever decides the answer. */
+export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const lines = questionStoreLines(repoRoot);
+    const store = answerRecords(lines ?? [], taskId);
+    const rows = answerRecords(read.rows(taskId), taskId);
+    for (const row of lines === undefined ? [] : rows) {
+      // Skipped when the store has its answer_id, or its origin and text (the daemon's own GitHub reply).
+      if (!answerHeld(store, row) && appendQuestionAnswer(repoRoot, { ...row, source: "ledger" })) store.push({ ...row, source: "ledger" });
+    }
+    const published = answerRecords(read.lines, taskId);
+    if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
 }
 
 /** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */
