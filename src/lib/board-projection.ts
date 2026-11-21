@@ -497,7 +497,7 @@ export interface BoardOracleResult {
 export interface BoardUpdate {
   /** False when nothing moved, the debounce deferred the derive, or the ingest has not reached the store's tail. */
   derived: boolean;
-  /** False while a cold ingest is between chunks: call `update` again to resume it. */
+  /** False while initial ingest or recovery needs more chunks. */
   caughtUp: boolean;
   deferred: boolean;
   newRows: number;
@@ -868,6 +868,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   db.exec(BOARD_PROJECTION_DDL);
   const unread = [...BOARD_UNREAD_STEPS];
   const unreadSql = unread.map(() => "?").join(", ");
+  // The fact columns come from JSON.parse, which takes the last occurrence of each key.
+  const textIdentity = ["task_id", "run_id"].map((key) =>
+    `(SELECT type FROM json_each(fact.body) WHERE key = '${key}' ORDER BY id DESC LIMIT 1) = 'text'`).join(" AND ");
   const sql = {
     facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq LIMIT ?"),
     upsert: db.prepare(`INSERT INTO task_projection(task_id, stamp, json) VALUES(?, ?, ?)
@@ -897,9 +900,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyDigest: db.prepare(`SELECT count(*) AS n, sum(seq) AS s, sum(ts_ms % ${DIGEST_MOD}) AS t FROM fact
       WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ?`),
     runNewestFact: db.prepare(`SELECT MAX(ts_ms) AS ms FROM fact WHERE task_id = ? AND run_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
-      AND json_type(body, '$.task_id') = 'text' AND json_type(body, '$.run_id') = 'text'`),
+      AND ${textIdentity}`),
     newestFactByRun: db.prepare(`SELECT task_id, run_id, MAX(ts_ms) AS ms FROM fact WHERE task_id IS NOT NULL AND run_id IS NOT NULL
-      AND seq <= ? AND step NOT IN (${unreadSql}) AND json_type(body, '$.task_id') = 'text' AND json_type(body, '$.run_id') = 'text'
+      AND seq <= ? AND step NOT IN (${unreadSql}) AND ${textIdentity}
       GROUP BY task_id, run_id`),
   };
   const tableExists = (name: string): boolean => db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
@@ -927,6 +930,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const touched = (): void => noteLedgerGeneration(rows, ++rowsGeneration);
   touched();
   let lastSeq = 0;
+  // During recovery, lastSeq still bounds index reads and marks which facts were already delivered.
+  let replayAfter: number | undefined;
   /** W1-T9403: the summed source-text length of every row in `rows` but the sentinel. */
   let keptBytes = 0;
   /** A first load spanning chunks: its rows are appended in seq order and sorted once, at the tail, as a one-call load. */
@@ -1198,13 +1203,6 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return newestFactMs.get(taskRunKey(taskId, runId)) ?? Number.NEGATIVE_INFINITY;
   }
 
-  /** W1-T13905: {@link newestFactMs} read afresh, under the same filters as one run's read. */
-  function readNewestFactMs(): Map<string, number> {
-    const out = new Map<string, number>();
-    for (const r of sql.newestFactByRun.iterate(lastSeq, ...unread)) out.set(taskRunKey(String(r.task_id), String(r.run_id)), Number(r.ms));
-    return out;
-  }
-
   function newestStoredFactMs(taskId: string, runId: string, upTo: number): number {
     const r = sql.runNewestFact.get(taskId, runId, upTo, ...unread);
     return r?.ms === null || r?.ms === undefined ? Number.NEGATIVE_INFINITY : Number(r.ms);
@@ -1306,24 +1304,42 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
   }
 
-  function ingest(limit: number, deadline = Number.POSITIVE_INFINITY, replayThrough?: number): { fresh: number; caughtUp: boolean } {
-    if (replayThrough === undefined) checkStepCache(false);
+  function ingest(limit: number, deadline = Number.POSITIVE_INFINITY, replayRead?: { rows: number; bytes: number }): { fresh: number; caughtUp: boolean } {
+    checkStepCache(false);
+    if (replayAfter === 0) clearRetention();
     let fresh = 0;
+    let replayed = 0;
     let cut = false;
     // The first load is sorted once; afterwards a live row a few ms early walks back a step or two.
-    const bulk = lastSeq === 0 || bulkOpen;
+    const bulk = replayAfter !== undefined || lastSeq === 0 || bulkOpen;
     let outOfOrder = bulk && bulkOutOfOrder;
     const ingested: Row[] = [];
-    for (const r of sql.facts.iterate(lastSeq, Number.isFinite(limit) ? limit : -1)) {
-      const seq = Number(r.seq);
-      if (replayThrough !== undefined && seq > replayThrough) break;
-      if (fresh > 0 && clock.now() >= deadline) {
-        cut = true;
-        break;
+    const facts = sql.facts.iterate(replayAfter ?? lastSeq, Number.isFinite(limit) ? limit : -1);
+    function* withinDeadline() {
+      for (const fact of facts) {
+        yield fact;
+        if (clock.now() >= deadline) {
+          cut = true;
+          return;
+        }
       }
-      lastSeq = seq;
+    }
+    for (const r of deadline === Number.POSITIVE_INFINITY ? facts : withinDeadline()) {
+      const seq = Number(r.seq);
+      const replay = replayAfter !== undefined && seq <= lastSeq;
+      if (replay) {
+        replayAfter = seq;
+        replayed++;
+        if (replayRead) {
+          replayRead.rows++;
+          replayRead.bytes += Buffer.byteLength(String(r.body), "utf8");
+        }
+      } else {
+        replayAfter = undefined;
+        lastSeq = seq;
+        fresh++;
+      }
       const tsMs = Number(r.ts_ms);
-      fresh++;
       if (BOARD_UNREAD_STEPS.has(String(r.step))) {
         if (tsMs > latestTsMs) {
           sentinel.ts = String(r.ts);
@@ -1337,15 +1353,15 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const row = withoutUnreadFields(JSON.parse(body) as Row);
       noteParsedTs(row.ts);
       latestTsMs = Math.max(latestTsMs, tsMs);
-      if (onIngest && replayThrough === undefined) ingested.push(row);
+      if (onIngest && !replay) ingested.push(row);
       // W1-T9604: a row of a cached step, or a plan-only row, extends the cache from this read; no index reads it again.
       const step = String(r.step);
-      if (stepCache.has(step)) (stepPending.get(step) ?? stepPending.set(step, []).get(step)!).push({ row, tsMs, seq, bytes: body.length, step });
-      if (planOnlyCache && PLAN_ONLY_STEPS.has(step)) {
+      if (!replay && stepCache.has(step)) (stepPending.get(step) ?? stepPending.set(step, []).get(step)!).push({ row, tsMs, seq, bytes: body.length, step });
+      if (!replay && planOnlyCache && PLAN_ONLY_STEPS.has(step)) {
         planOnlyDigest = digestWith(planOnlyDigest!, seq, tsMs);
         if (row.plan_only === true) planOnlyPending.push({ row, tsMs, seq, bytes: body.length, step });
       }
-      if (replayThrough === undefined && typeof row.task_id === "string" && typeof row.run_id === "string") {
+      if (!replay && typeof row.task_id === "string" && typeof row.run_id === "string") {
         const key = taskRunKey(row.task_id, row.run_id);
         newestFactMs.set(key, Math.max(newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
         const standing = activityRows.get(key);
@@ -1369,7 +1385,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       if (boardDirtForRow(row, rules).all) {
         noteCrossRow(row, seq);
-        if (replayThrough === undefined && lastDeriveAt !== undefined) crossRowsPending++;
+        if (!replay && lastDeriveAt !== undefined) crossRowsPending++;
       }
       const named = boardDirtForRow(row, { alias: rules.alias, crossTask: false });
       for (const id of named.all ? [] : named.tasks) {
@@ -1380,14 +1396,18 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         lastRunStartMs.set(row.task_id, Math.max(lastRunStartMs.get(row.task_id) ?? 0, tsMs));
       }
     }
-    if (onIngest && ingested.length > 0) onIngest(ingested);
-    const caughtUp = replayThrough === undefined ? !cut && fresh < limit : !bulkOpen;
+    if (onIngest && ingested.length > 0) {
+      onIngest(ingested);
+      if (checkStepCache(false)) return { fresh, caughtUp: false };
+    }
+    const caughtUp = fresh + replayed < limit && (!cut || Number(sql.maxSeq.get()?.seq ?? 0) <= (replayAfter ?? lastSeq));
     [bulkOpen, bulkOutOfOrder] = [bulk && !caughtUp, !caughtUp && outOfOrder];
     if (!caughtUp) {
       compact();
       pending = true;
       return { fresh, caughtUp };
     }
+    replayAfter = undefined;
     compact();
     // Ledger order is time order, so a row is placed by its ts, not by when the projector read it.
     if (outOfOrder) {
@@ -1473,7 +1493,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   function resetStepCache(through: number): void {
+    function readNewestFactMs(): Map<string, number> {
+      const out = new Map<string, number>();
+      for (const r of sql.newestFactByRun.iterate(through, ...unread)) out.set(taskRunKey(String(r.task_id), String(r.run_id)), Number(r.ms));
+      return out;
+    }
     newestFactMs = readNewestFactMs();
+    lastSeq = through;
     stepCache.clear();
     auditedSteps.clear();
     stepPending.clear();
@@ -1484,11 +1510,12 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     taskCache.clear();
     taskCacheHeld = 0;
     cacheStrings?.clear();
-    replayRetention(through);
+    replayAfter = 0;
+    pending = true;
   }
 
   /** Rebuilds fact-derived retention before workers and activity can compete for the same task slots. */
-  function replayRetention(through: number): void {
+  function clearRetention(): void {
     rows.length = rowOrder.length = 1;
     delete sentinel.ts;
     kept.clear();
@@ -1511,12 +1538,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     lastRunStartMs.clear();
     crossSteps.clear();
     filingUrls.clear();
-    lastSeq = activitySeq = workerSeq = keptBytes = latestTsMs = crossCount = crossSeq = filingCount = filingSeq = 0;
+    activitySeq = workerSeq = keptBytes = latestTsMs = crossCount = crossSeq = filingCount = filingSeq = 0;
     latestParsedTsMs = undefined;
     bulkOutOfOrder = false;
     touched();
-    ingest(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, through);
-    pending = true;
   }
 
   /** The store's digest of `step`'s rows up to `lastSeq`, or of every row of the plan-only steps. */
@@ -1526,9 +1551,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   };
 
   /** The deletion counter covers uncached steps and changes on other connections. Only index reads check step digests. */
-  function checkStepCache(checkDigests = true): void {
+  function checkStepCache(checkDigests = true): boolean {
     const deletions = db.meta(FACT_DELETIONS_META);
     const deleted = deletions !== factDeletions && lastSeq > 0;
+    let reset = false;
     if (deleted || (checkDigests && (stepCache.size > 0 || planOnlyCache || taskCache.size > 0))) {
       const moved = deleted || [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
         || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
@@ -1537,9 +1563,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (reason) {
         resetStepCache(Math.min(lastSeq, maxSeq));
         stepReads.resets[reason]++;
+        reset = true;
       }
     }
     factDeletions = deletions;
+    return reset;
   }
 
   /** `step`'s cached rows as of `upTo`: read in full at `lastSeq` on the first ask, so the ingest extends it from there. */
@@ -2009,7 +2037,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   /** Tiers, as the consistency oracle's: recheck, heal, then escalate if the drift survives the heal or recurs within 24 h. */
-  function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string): BoardOracleResult {
+  function oracleWith(plan: Plan, credit: CreditStore, overrides: string, stampOf: (id: string, task?: Task) => string,
+    replayRead?: { rows: number; bytes: number }): BoardOracleResult {
     const now = clock.now();
     const view = currentGithubView();
     const index = sliceCursor % slices;
@@ -2095,6 +2124,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     log("read_model.board_oracle", {
       outcome, compared: result.compared, mismatches: mismatches.length, sample: mismatches.slice(0, 5),
       ...(reasons.length > 0 ? { reasons } : {}), ...(result.issueUrl ? { issue_url: result.issueUrl } : {}), ...stepCacheRow, cross_task: crossTask,
+      ...(replayRead && replayRead.rows > 0 ? { retention_replay: replayRead } : {}),
       slice: { index, of: slices, audited: audited.length, always_audited: always.length }, read,
     });
     return result;
@@ -2109,7 +2139,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         releasePastWindows();
       }
       const { fresh: newRows, caughtUp } = ingest(chunkRows, startedAt + chunkMs);
-      if (!caughtUp) return { derived: false, deferred: false, caughtUp, newRows, rederived: [], reused: 0, full: false, elapsedMs: clock.now() - startedAt };
+      const unfinished = (): BoardUpdate => ({ derived: false, deferred: false, caughtUp: false, newRows, rederived: [], reused: 0, full: false,
+        elapsedMs: clock.now() - startedAt });
+      if (!caughtUp) return unfinished();
       const now = clock.now();
       const oracleDue = lastOracleAt === undefined ? false : now - lastOracleAt >= BOARD_ORACLE_INTERVAL_MS;
       // The oracle runs right after a clock re-derive, so it never reports what the next 30 s tick would fix.
@@ -2123,11 +2155,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const idle: BoardUpdate = { derived: false, caughtUp, deferred: false, newRows, rederived: [], reused: plan.tasks.length, full: false, elapsedMs: 0 };
       if (!options.force && !moved && !pending && !clockDue && !oracleDue) return idle;
       if (!options.force && lastDeriveAt !== undefined && now - lastDeriveAt < BOARD_DERIVE_DEBOUNCE_MS) return { ...idle, deferred: true };
-      const beforeIndex = rowsGeneration;
       const index = fromRows ? undefined : storeIndex(rows);
-      if (rowsGeneration !== beforeIndex) {
-        for (const task of plan.tasks) stamps.set(task.id, stampOf(task.id, task));
-      }
+      if (replayAfter !== undefined) return unfinished();
       // The ledger clock: a lone run.start inside the liveness bound can turn orphan as soon as any newer row lands.
       const ledgerClockDue = new Set<string>();
       if (rules.ledgerClock && latestTsMs > derivedLatestTsMs) {
@@ -2185,6 +2214,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
         crossTotals = { rows: crossTotals.rows + crossRows, rederived: crossTotals.rederived + crossMoved, reused: crossTotals.reused + plan.tasks.length - crossMoved };
       }
       if (oracleDue) result.oracle = oracleWith(plan, credit, overrides, stampOf);
+      result.caughtUp = replayAfter === undefined;
       result.elapsedMs = clock.now() - startedAt;
       return result;
     },
@@ -2195,9 +2225,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     size: () => ({ rows: rows.length - 1, keptBytes }),
     creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
-      ingest(Number.POSITIVE_INFINITY);
+      const replayRead = { rows: 0, bytes: 0 };
+      while (!ingest(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, replayRead).caughtUp) { /* drain for an explicit audit */ }
       const { plan, credit, overrides, stampOf } = inputs();
-      return oracleWith(plan, credit, overrides, stampOf);
+      return oracleWith(plan, credit, overrides, stampOf, replayRead);
     },
   };
 }

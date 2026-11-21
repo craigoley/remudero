@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type BoardProjectionOptions, type Row } from "#src/lib/board-projection.js";
+import { BOARD_ORACLE_INTERVAL_MS, BOARD_RUN_ACTIVITY_STEP, createBoardProjection, type BoardProjection, type BoardProjectionOptions, type Row } from "#src/lib/board-projection.js";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { changedActivityByTask } from "#src/lib/now-view.js";
@@ -33,11 +33,14 @@ const OLD = T0 - 14 * 86_400_000;
 const fact = (ms: number, taskId: string, runId: string): Row => ({ ts: at(ms), step: FACT, task_id: taskId, run_id: runId, host: "h1" });
 const activity = (ms: number, taskId: string, runId: string): Row => ({ ts: at(ms), step: ACTIVITY, task_id: taskId, run_id: runId, host: "h1" });
 
-/** Counts executions of the statements whose SQL matches `pattern`. */
-function counting(db: ReadModelDb, patterns: Record<string, RegExp>): { db: ReadModelDb; count: Record<string, number> } {
+/** Counts statement executions and rows yielded by each matching iterator. */
+function counting(db: ReadModelDb, patterns: Record<string, RegExp>, onRow?: (name: string) => void): {
+  db: ReadModelDb; count: Record<string, number>; rowsRead: Record<string, number>;
+} {
   const count = Object.fromEntries(Object.keys(patterns).map((k) => [k, 0]));
+  const rowsRead = { ...count };
   return {
-    count,
+    count, rowsRead,
     db: { ...db, exec: (sql) => db.exec(sql), meta: (key) => db.meta(key), inTransaction: () => db.inTransaction(), close: () => db.close(),
       prepare: (sql, opts) => {
         const statement = db.prepare(sql, opts);
@@ -48,16 +51,25 @@ function counting(db: ReadModelDb, patterns: Record<string, RegExp>): { db: Read
           run: (...p) => statement.run(...p),
           get: (...p) => { note(); return statement.get(...p); },
           all: (...p) => { note(); return statement.all(...p); },
-          iterate: (...p) => { note(); return statement.iterate(...p); },
+          *iterate(...p) {
+            note();
+            for (const row of statement.iterate(...p)) {
+              for (const k of names) {
+                rowsRead[k]!++;
+                onRow?.(k);
+              }
+              yield row;
+            }
+          },
         };
         return counted;
       } },
   };
 }
 
-function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
+function world(t: { after: (fn: () => void) => void }, rows: Array<Row | string>) {
   const root = readModelFixtureDir(t, "run-activity-newest-fact").dir;
-  const ms = T0 + 86_400_000;
+  let ms = T0 + 86_400_000;
   const clock: Clock = { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() };
   const ledgerDir = join(root, "core", "state");
   mkdirSync(ledgerDir, { recursive: true });
@@ -66,17 +78,18 @@ function world(t: { after: (fn: () => void) => void }, rows: Row[]) {
   const got = acquireLease(raw, { clock, ttlMs: 1e12 });
   assert.ok(got.ok);
   const projector = createLedgerProjector({ ledgerDir, db: raw, lease: got.lease, clock });
-  const append = (more: Row[]): void => {
-    appendFileSync(join(ledgerDir, "ledger.ndjson"), more.map((r) => `${JSON.stringify(r)}\n`).join(""));
+  const append = (more: Array<Row | string>): void => {
+    appendFileSync(join(ledgerDir, "ledger.ndjson"), more.map((r) => `${typeof r === "string" ? r : JSON.stringify(r)}\n`).join(""));
     for (let i = 0; i < 50; i++) projector.tick();
   };
   append(rows);
-  const board = (db: ReadModelDb = raw, options: Pick<BoardProjectionOptions, "onIngest" | "log"> = {}): BoardProjection => createBoardProjection({
+  const board = (db: ReadModelDb = raw, options: Partial<Pick<BoardProjectionOptions,
+    "onIngest" | "log" | "ingestChunkRows" | "ingestChunkMs" | "oracleSlices" | "readPlan">> = {}): BoardProjection => createBoardProjection({
     db, ledgerPath: join(ledgerDir, "ledger.ndjson"), clock, readPlan: () => PLAN, github: GATEWAY, githubGeneration: () => "g1",
     readCreditStore: () => ({}), readCreditOverrideFile: () => "", ...options,
   });
   const caughtUp = (b: BoardProjection): BoardProjection => { while (!b.update({ force: true }).caughtUp); return b; };
-  return { raw, append, board, caughtUp };
+  return { raw, append, board, caughtUp, advance: (elapsed: number) => { ms += elapsed; } };
 }
 
 /** The board's run activity stand-ins, as task|run@ts, sorted. */
@@ -259,6 +272,64 @@ test("W1-T13905 criterion 3: a fact row dropped under the board rebuilds the new
   assert.deepEqual(logged.at(-1)?.cross_task, update.crossTask, "the oracle reports the same cross-task total");
 });
 
+for (const budget of ["row", "time"] as const) {
+  test(`W1-T13905 criterion 3: deletion recovery shares the ${budget} budget with fresh facts`, (t) => {
+    const w = world(t, [fact(T0, "W1-T1", "target"), ...Array.from({ length: 10 }, (_, i) => fact(T0 + i + 1, "W1-T2", `other-${i}`))]);
+    let timed = false;
+    const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/, ingest: /FROM fact WHERE seq > \? ORDER BY seq LIMIT/ }, (name) => {
+      if (timed && name === "ingest") w.advance(1);
+    });
+    const delivered: Row[] = [];
+    const board = w.caughtUp(w.board(counted.db, {
+      ingestChunkRows: budget === "row" ? 2 : 100,
+      ingestChunkMs: budget === "time" ? 2 : 250,
+      onIngest: (rows) => delivered.push(...rows),
+    }));
+    board.index(board.rows()).byStep.get(FACT);
+    assert.deepEqual(standIns(board), []);
+    assert.equal(w.raw.prepare("DELETE FROM fact WHERE run_id = 'target'").run().changes, 1);
+    w.append([fact(T0 + 1_000, "W1-T2", "new")]);
+    timed = budget === "time";
+
+    const calls = [];
+    const reads = [];
+    for (let i = 0; i < 12; i++) {
+      const before = counted.rowsRead.ingest!;
+      const result = board.update({ force: true });
+      calls.push(result);
+      reads.push(counted.rowsRead.ingest! - before);
+      if (result.caughtUp) break;
+    }
+    assert.deepEqual(reads.filter((n) => n > 0), [2, 2, 2, 2, 2, 1], "old and new fact bodies share the same bound");
+    assert.ok(calls.slice(0, -1).every((u) => !u.caughtUp && !u.derived));
+    assert.equal(calls.at(-1)?.caughtUp, true);
+    assert.equal(calls.reduce((n, u) => n + u.newRows, 0), 1);
+    assert.equal(delivered.length, 12, "replayed facts stay out of the feed");
+    assert.equal(delivered.at(-1)?.run_id, "new");
+    assert.equal(counted.count.grouped, 1);
+    const fresh = w.caughtUp(w.board());
+    assert.deepEqual(standIns(fresh), [`W1-T1|target@${at(T0)}`]);
+    assert.deepEqual(standIns(board), standIns(fresh));
+    assert.deepEqual(board.rows(), fresh.rows());
+  });
+}
+
+test("W1-T13905 criterion 3: grouped recovery uses the final task and run keys in the fact body", (t) => {
+  const duplicate = JSON.stringify(fact(T0, "W1-T1", "target"))
+    .replace('"task_id":', '"task_id":false,"task_id":').replace('"run_id":', '"run_id":42,"run_id":');
+  const w = world(t, [duplicate, { ts: at(T0 + 1_000), step: "daemon.boot", host: "h1" }, fact(T0 + 2_000, "W1-T2", "tail")]);
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+  const board = w.caughtUp(w.board(counted.db));
+  assert.equal(w.raw.prepare("SELECT run_id FROM fact WHERE task_id = 'W1-T1'").get()?.run_id, "target");
+  assert.deepEqual(standIns(board), [], "the final keys identify the fact that suppresses target activity");
+  assert.equal(w.raw.prepare("DELETE FROM fact WHERE step = 'daemon.boot'").run().changes, 1);
+  w.caughtUp(board);
+  assert.equal(counted.count.grouped, 1);
+  assert.deepEqual(standIns(w.caughtUp(w.board())), []);
+  assert.deepEqual(standIns(board), []);
+  assert.deepEqual(indexedActivity(board.index(board.rows())), [], "the sequence-bound query uses the same keys");
+});
+
 test("W1-T13905 criterion 3: removing a cached task-only fact restores an older stand-in", (t) => {
   const w = world(t, [
     activity(OLD, "W1-T1", "older"),
@@ -300,20 +371,28 @@ test("W1-T13905 criterion 3: a deletion during ingest refreshes the task stamp b
   assert.deepEqual(board.update({ force: true }).rederived, []);
 
   w.append([fact(T0 + 1_000, "W1-T2", "next-tail")]);
+  const interrupted = board.update({ force: true });
+  assert.equal(interrupted.caughtUp, false, "the callback-triggered deletion queues recovery");
+  assert.equal(interrupted.newRows, 1);
   const update = board.update({ force: true });
-  assert.deepEqual(update.rederived, ["W1-T1"], "the index rebuild invalidates the task's previously computed stamp");
+  assert.deepEqual(update.rederived, ["W1-T1"], "recovery invalidates the task's previous stamp");
   assert.equal(counted.count.grouped, 1);
   const fresh = w.caughtUp(w.board());
   assert.deepEqual(standIns(fresh), [`W1-T1|older@${at(OLD)}`]);
   assert.deepEqual(standIns(board), standIns(fresh));
 });
 
-test("W1-T13905 criterion 4: an audit reset rebuilds the map when a cached fact changes run at the same sequence", (t) => {
+test("W1-T13905 criterion 4: a scheduled audit rebuilds the map without replaying fact bodies in its slice", (t) => {
   const w = world(t, [
     activity(OLD, "W1-T1", "original"), activity(OLD, "W1-T1", "replacement"), fact(OLD, "W1-T1", "original"),
+    ...Array.from({ length: 11 }, (_, i) => ({ ts: at(OLD + i + 1), step: "panel.other", host: "h1" })),
   ]);
-  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
-  const board = w.caughtUp(w.board(counted.db));
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/, ingest: /FROM fact WHERE seq > \? ORDER BY seq LIMIT/ });
+  const logged: Array<Record<string, unknown>> = [];
+  const board = w.caughtUp(w.board(counted.db, {
+    readPlan: () => ({ tasks: [], byId: new Map() }), ingestChunkRows: 2, oracleSlices: 6,
+    log: (_step, extra) => logged.push(extra),
+  }));
   board.index(board.rows()).byStep.get(FACT);
   assert.deepEqual(standIns(board), [`W1-T1|replacement@${at(OLD)}`]);
 
@@ -321,11 +400,44 @@ test("W1-T13905 criterion 4: an audit reset rebuilds the map when a cached fact 
   assert.equal(replace.run("replacement", "replacement", FACT).changes, 1);
   assert.equal(board.index(board.rows()).byStep.get(FACT)?.[0]?.run_id, "original", "the step digest still matches");
   assert.equal(counted.count.grouped, 0);
-  board.oracle();
+  w.advance(BOARD_ORACLE_INTERVAL_MS);
+  const before = counted.rowsRead.ingest;
+  const audit = board.update({ force: true });
+  assert.equal(audit.oracle?.slice.of, 6);
+  assert.equal(counted.rowsRead.ingest, before, "the scheduled audit leaves replay to bounded updates");
+  assert.deepEqual(logged.at(-1)?.read, { projections: 1, rows: 1, bytes: String(w.raw.prepare("SELECT body FROM fact WHERE step = ?").get(FACT)?.body).length });
+  assert.equal(audit.caughtUp, false, "the board still needs to refresh its retained rows");
 
   assert.equal(counted.count.grouped, 1, "the audit reset uses one grouped read");
   assert.equal(board.index(board.rows()).byStep.get(FACT)?.[0]?.run_id, "replacement");
+  assert.equal(board.update({ force: true }).caughtUp, false);
+  assert.equal(counted.rowsRead.ingest, before! + 2, "the next update progresses by one chunk");
+  w.caughtUp(board);
+  assert.equal(counted.count.grouped, 1, "resuming the replay needs no further grouped read");
   const fresh = standIns(w.caughtUp(w.board()));
   assert.deepEqual(fresh, [`W1-T1|original@${at(OLD)}`]);
   assert.deepEqual(standIns(board), fresh);
+});
+
+test("W1-T13905 criterion 4: an explicit oracle accounts for a queued retention replay separately", (t) => {
+  const w = world(t, [{ ...fact(T0, "W1-T1", "target"), message: "réponse" }, activity(T0 + 1_000, "W1-T1", "target")]);
+  const logged: Array<Record<string, unknown>> = [];
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/, ingest: /FROM fact WHERE seq > \? ORDER BY seq LIMIT/ });
+  const board = w.caughtUp(w.board(counted.db, { log: (_step, extra) => logged.push(extra) }));
+  board.index(board.rows()).byStep.get(FACT);
+  assert.deepEqual(standIns(board), [`W1-T1|target@${at(T0 + 1_000)}`]);
+  assert.equal(w.raw.prepare("UPDATE fact SET ts_ms = ?, ts = ?, body = json_set(body, '$.ts', ?)")
+    .run(T0 + 1_000, at(T0 + 1_000), at(T0 + 1_000)).changes, 1);
+  const before = counted.rowsRead.ingest!;
+  const interrupted = board.update({ force: true });
+  assert.equal(interrupted.caughtUp, false, "the digest mismatch queues a replay during indexing");
+  assert.equal(interrupted.derived, false);
+  assert.equal(counted.count.grouped, 1);
+  assert.equal(counted.rowsRead.ingest, before);
+  board.oracle();
+  assert.equal(counted.rowsRead.ingest, before + 1);
+  assert.deepEqual(logged.at(-1)?.retention_replay, {
+    rows: 1, bytes: Buffer.byteLength(String(w.raw.prepare("SELECT body FROM fact").get()?.body), "utf8"),
+  });
+  assert.deepEqual(standIns(board), []);
 });
