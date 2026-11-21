@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { classifyProposal, ledgerProposalVerdicts, loadProposalRegistry, type ReadinessContext } from "#src/lib/inbox.js";
-import { appendLedger } from "#src/lib/ledger.js";
+import { appendLedger, ledgerRotationLockPath, tryAcquireRotationLock } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import {
   PROCEDURAL_STEP_TEXT,
@@ -114,13 +114,20 @@ test("W1-T13858 criterion 1: a draft whose every step is a signal-table line is 
   } finally { f.done(); }
 });
 
-test("W1-T13858 criterion 2: a draft with transcript-mined steps still stages (W1-T13857 drafts no signal line)", () => {
+test("W1-T13858 criterion 2: transcript-mined steps stage after removing the signal line required to be refused by W1-T13857", () => {
   const f = fixture();
   try {
-    const r = stageSkillDraft(f.registryPath, minedDraft(), allowlist, reachability(), {}, clock);
+    const draft = minedDraft();
+    const mixed = { ...draft, markdown: draft.markdown.replace("## Procedure\n\n", `## Procedure\n\n- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n`) };
+    const refusal = stageSkillDraft(f.registryPath, mixed, allowlist, reachability(), {}, clock);
+    assert.equal(refusal.refused, true);
+    assert.match(refusal.reason ?? "", /^not-an-action:/);
+    assert.equal(existsSync(f.registryPath), false);
+
+    const r = stageSkillDraft(f.registryPath, draft, allowlist, reachability(), {}, clock);
     assert.equal(r.refused, false, r.reason);
     assert.equal(r.staged, true);
-    const entry = loadProposalRegistry(f.registryPath).find((p) => p.id === skillDraftProposalId(minedDraft().procedureKey));
+    const entry = loadProposalRegistry(f.registryPath).find((p) => p.id === skillDraftProposalId(draft.procedureKey));
     assert.ok(entry?.skillFile?.markdown.includes("- Run `npm run typecheck`."), "the mined command is the staged step");
     assert.ok(!entry?.skillFile?.markdown.includes(PROCEDURAL_STEP_TEXT.fully_executed_proof));
   } finally { f.done(); }
@@ -259,5 +266,36 @@ test("W1-T13858 criterion 3: an unterminated decline cannot close a draft and th
     assert.deepEqual(rows.map((row) => row.step), ["panel.proposal_declined", "skill.staged"]);
     assert.equal(declines(rows, id).length, 1);
     assert.match(loadProposalRegistry(f.registryPath).find((p) => p.id === id)?.skillDraftClose?.reason ?? "", /^withdrawn:/);
+  } finally { f.done(); }
+});
+
+test("the legacy withdrawal retries after the verdict ledger can be read safely", () => {
+  const f = fixture();
+  try {
+    stageSkillDrafts(f.root, [], allowlist, reachability, f.log);
+    assert.match(String(f.rows().at(-1)?.error), /EISDIR/);
+
+    const id = seedStaged(f.registryPath, signalOnlyDraft());
+    const stage = () => stageSkillDrafts(f.registryPath, [], allowlist, reachability, f.log);
+    const unlock = tryAcquireRotationLock(ledgerRotationLockPath(f.ledgerPath));
+    assert.ok(unlock);
+    try {
+      stage();
+      assert.match(String(f.rows().at(-1)?.error), /the ledger is being rotated or compacted/);
+      assert.equal(loadProposalRegistry(f.registryPath)[0]?.skillDraftClose, undefined);
+    } finally {
+      unlock();
+    }
+
+    const readable = readFileSync(f.ledgerPath);
+    appendFileSync(f.ledgerPath, `{"step":"ratify.approved","task_id":"${id}",\n`);
+    stage();
+    assert.match(String(f.rows().at(-1)?.error), /could not verify the ledger verdict/);
+    assert.equal(loadProposalRegistry(f.registryPath)[0]?.skillDraftClose, undefined);
+
+    writeFileSync(f.ledgerPath, readable);
+    stage();
+    assert.equal(declines(f.rows(), id).length, 1);
+    assert.match(loadProposalRegistry(f.registryPath)[0]?.skillDraftClose?.reason ?? "", /^withdrawn: outcome-only:/);
   } finally { f.done(); }
 });

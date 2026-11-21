@@ -2,11 +2,12 @@
 // proof") as every draft's one Procedure step. The miner now finds the ordered action commands runs of two or more
 // tasks repeat, and the workshop drafts the top one as Run and Change lines.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { loadProposalRegistry } from "#src/lib/inbox.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { buildGather } from "#src/lib/retro.js";
 import {
   PROCEDURAL_STEP_TEXT,
@@ -19,6 +20,7 @@ import {
   type ProceduralCandidateLike,
   type SkillDraft,
 } from "#src/lib/skill-workshop.js";
+import { toolStepSignature } from "#src/lib/tool-step-signature.js";
 import { mineRecurringProcedures, type TranscriptRun } from "#src/lib/workflow-mining.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -53,7 +55,22 @@ const procedureLines = (markdown: string): string[] =>
 const ALLOWLIST = workerAllowlistFromSettings(JSON.parse(readFileSync(join(REPO_ROOT, "settings", "worker.json"), "utf8")));
 
 const LOOK = ["Read:src/lib/review.ts", "Grep:src", "Glob", "Bash:sed", "Bash:grep", "Bash:cat", "Bash:rg", "Bash:git status",
-  "Bash:git diff", "Bash:git log", "Bash:node", "Write:<outside>"];
+  "Bash:git diff", "Bash:git log", "Bash:node", "Write:<outside>", "<outside>"];
+
+const HIGH_SCORE_STEPS = ["Bash:npm run typecheck", "Edit:src/lib/*.ts"];
+
+function competingProcedures() {
+  const steps = Array.from({ length: 15 }, (_, i) => `Bash:npm run nuisance-${i}`);
+  // 120 runs omit one step each. Every subset of two or more steps that still recurs is closed:
+  // adding an omitted step always costs its eight supporting runs.
+  const specs = steps.flatMap((_, missing) => Array.from({ length: 8 }, (_, i): [string, string, string[]] =>
+    [`R${missing}-${i}`, `W1-T${10 + i}`, steps.filter((_, at) => at !== missing)]));
+  return corpus([
+    ...specs,
+    ["H1", "W1-T1", HIGH_SCORE_STEPS, 1_000_000],
+    ["H2", "W1-T2", HIGH_SCORE_STEPS, 1_000_000],
+  ]);
+}
 
 test("W1-T13857 criterion 2: a command sequence recurring in runs of two tasks is returned, one recurring within one task is not", () => {
   const { runs, records } = corpus([
@@ -69,16 +86,26 @@ test("W1-T13857 criterion 2: a command sequence recurring in runs of two tasks i
   assert.equal(found[0]!.recurrence, 2);
   // The one-task sequence is held back by the task floor alone.
   assert.ok(mineRecurringProcedures(runs, records, { minTaskIds: 1 }).some((p) => p.steps.includes("Bash:git push")));
+
+  const crowded = competingProcedures();
+  const complete = mineRecurringProcedures(crowded.runs, crowded.records);
+  assert.deepEqual(complete[0]?.steps, HIGH_SCORE_STEPS);
+  assert.deepEqual(complete[0]?.runIds, ["H1", "H2"]);
+  assert.equal(complete.length, 2 ** 15 - 1 - 15);
 });
 
 test("W1-T13857 criterion 3: look steps never appear in a procedure, and runs of only look steps yield none", () => {
+  const scriptless = toolStepSignature("Bash", { command: "node --import tsx --test" }, REPO_ROOT);
+  const withScript = toolStepSignature("Bash", { command: "node --test test/mine.test.ts" }, REPO_ROOT);
+  assert.equal(scriptless, "Bash:node --test");
+  assert.equal(withScript, "Bash:node --test test/mine.test.ts");
   const { runs, records } = corpus([
-    ["L1", "W1-T1", [...LOOK, "Bash:npm run typecheck", ...LOOK.slice().reverse(), "Bash:git commit"]],
-    ["L2", "W1-T2", ["Bash:npm run typecheck", ...LOOK, "Bash:git commit"]],
+    ["L1", "W1-T1", [scriptless, ...LOOK, withScript, ...LOOK.slice().reverse(), "Bash:git commit"]],
+    ["L2", "W1-T2", [scriptless, withScript, ...LOOK, "Bash:git commit"]],
   ]);
   const found = mineRecurringProcedures(runs, records);
-  assert.deepEqual(found.map((p) => p.steps), [["Bash:npm run typecheck", "Bash:git commit"]]);
-  const onlyLook = corpus([["O1", "W1-T1", LOOK], ["O2", "W1-T2", LOOK]]);
+  assert.deepEqual(found.map((p) => p.steps), [[withScript, "Bash:git commit"]]);
+  const onlyLook = corpus([["O1", "W1-T1", [...LOOK, scriptless]], ["O2", "W1-T2", [...LOOK, scriptless]]]);
   assert.equal(mineRecurringProcedures(onlyLook.runs, onlyLook.records).length, 0);
 });
 
@@ -129,6 +156,22 @@ test("W1-T13857 criterion 5: the top procedure is drafted as Run and Change line
   assert.equal(renderSkillDraft(candidate(["N1", "N2"]), none), undefined);
   // Only the candidate's own runs count: R3 alone holds the sequence once.
   assert.equal(renderSkillDraft(candidate(["R3", "N1"]), { runs: [...transcripts.runs, ...none.runs], records: [...transcripts.records, ...none.records] }), undefined);
+
+  const unsupported = corpus([
+    ["U1", "W1-T1", ["constructor:foo", "Bash:sed", ...HIGH_SCORE_STEPS]],
+    ["U2", "W1-T2", ["constructor:foo", "Bash:sed", ...HIGH_SCORE_STEPS]],
+    ["U3", "W1-T3", HIGH_SCORE_STEPS],
+  ]);
+  assert.equal(mineRecurringProcedures(unsupported.runs, unsupported.records)[0]!.steps[0], "constructor:foo");
+  const fallback = renderSkillDraft(candidate(["U1", "U2", "U3"]), unsupported)!;
+  const expectedLines = ["- Run `npm run typecheck`.", "- Change `src/lib/*.ts`."];
+  assert.deepEqual(procedureLines(fallback.markdown), expectedLines);
+  assert.deepEqual(scanSkillDraft(fallback, ALLOWLIST), { ok: true });
+
+  const crowded = competingProcedures();
+  const top = renderSkillDraft(candidate(crowded.runs.map((run) => run.runId)), crowded)!;
+  assert.deepEqual(procedureLines(top.markdown), expectedLines);
+  assert.match(top.markdown, /^- Score: 2000000\.$/m);
 });
 
 function draftWith(steps: string[]): SkillDraft {
@@ -145,12 +188,20 @@ function draftWith(steps: string[]): SkillDraft {
 
 test("W1-T13857 criterion 6: scanSkillDraft refuses a Procedure step with no action verb or no backticked command, and the signal line", () => {
   assert.deepEqual(scanSkillDraft(draftWith(["- Run `npm run typecheck`."]), ALLOWLIST), { ok: true });
-  for (const line of ["- Verify the result before shipping.", "- Run the type checker before the tests.", `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`]) {
+  assert.deepEqual(scanSkillDraft(draftWith(["  + Run ``npm run typecheck``.", "1. Change `src/lib/retro.ts`."]), ALLOWLIST), { ok: true });
+  for (const line of [
+    "- Verify the result before shipping.", "- Run the type checker before the tests.",
+    "* Verify the result.", "  - Verify the result.", "1) Verify the result.", "+ Run `  `.", "- Run `` \t ``.",
+    `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`,
+  ]) {
     const result = scanSkillDraft(draftWith(["- Run `npm run typecheck`.", line]), ALLOWLIST);
     assert.equal(result.ok, false, line);
     assert.equal(result.offendingLine, line);
     assert.match(result.reason ?? "", /^not-an-action/, line);
   }
+  const alternativeHeading = draftWith(["* Verify the result."]);
+  alternativeHeading.markdown = alternativeHeading.markdown.replace("## Procedure", " ## Procedure ##").replaceAll("\n", "\r\n");
+  assert.match(scanSkillDraft(alternativeHeading, ALLOWLIST).reason ?? "", /^not-an-action/);
 });
 
 test("W1-T13857 criterion 7: the three recurring-procedure fixtures pass scanSkillDraft", () => {
@@ -165,19 +216,18 @@ test("W1-T13857 criterion 7: the three recurring-procedure fixtures pass scanSki
 });
 
 test("W1-T13857 criterion 8: the retro drafts the recurring census commands in order and stages them only as a proposal", (t) => {
-  const run = (runId: string, taskId: string, day: number): Row[] => {
+  const run = (runId: string, taskId: string, day: number, signatures: string[]): Row[] => {
     const ts = (s: number) => `2026-11-0${day}T00:00:0${s}.000Z`;
     const at = (s: number, row: Row): Row => ({ ts: ts(s), task_id: taskId, ...row });
     return [
       { ts: ts(0), run_id: runId, task_id: taskId, step: "run.start", type: "implement" },
-      at(1, toolRow(runId, "Bash:npm run comment-load-signal")),
-      at(2, toolRow(runId, "Read:src/lib/retro.ts")),
-      at(3, toolRow(runId, "Bash:npm run typecheck")),
+      ...signatures.map((signature, index) => at(index + 1, toolRow(runId, signature))),
       { ts: ts(4), run_id: runId, task_id: taskId, step: "review.posted", proof_exec: ["executed_pass", "executed_pass"] },
       { ts: ts(5), run_id: runId, task_id: taskId, step: "verdict", verdict: "merged" },
     ];
   };
-  const ledger = writeLedger([...run("P1", "W1-T4800", 1), ...run("P2", "W1-T4801", 2)], { scope: t });
+  const commands = ["Bash:npm run comment-load-signal", "Read:src/lib/retro.ts", "Bash:npm run typecheck"];
+  const ledger = writeLedger([...run("P1", "W1-T4800", 1, commands), ...run("P2", "W1-T4801", 2, commands)], { scope: t });
   const gather = buildGather({ ledgerNdjson: readFileSync(ledger.path, "utf8"), learningsMd: "" });
   assert.equal(gather.skillDrafts.length, 1);
   const draft = gather.skillDrafts[0]!;
@@ -193,4 +243,43 @@ test("W1-T13857 criterion 8: the retro drafts the recurring census commands in o
   assert.equal(proposals[0]!.skillFile?.markdown, draft.markdown);
   assert.equal(existsSync(join(dir, ".claude", "skills")), false);
   assert.equal(existsSync(join(REPO_ROOT, ".claude", "skills", draft.name)), false);
+
+  const noProcedure = writeLedger([
+    ...run("P3", "W1-T4802", 3, ["Read:src/lib/retro.ts"]),
+    ...run("P4", "W1-T4803", 4, ["Bash:git status"]),
+  ], { scope: t, rotations: [{
+    at: "2026-11-01T12:00:00.000Z", gz: true, rows: [
+      { ts: "2026-11-01T00:00:00.000Z", step: "ratify.approved", task_id: skillDraftProposalId("approved") },
+      { ts: "2026-11-01T00:00:01.000Z", step: "panel.proposal_declined", task_id: skillDraftProposalId("declined") },
+    ],
+  }] });
+  const legacyGather = buildGather({ ledgerNdjson: readFileSync(noProcedure.path, "utf8"), learningsMd: "" });
+  assert.ok(legacyGather.proceduralCandidates.some((c) => c.signals.includes("fully_executed_proof")));
+  assert.deepEqual(legacyGather.skillDrafts, []);
+  const legacyId = "skill-draft:88d9945faf4c75d3";
+  const legacyRegistry = join(noProcedure.dir, "proposals.json");
+  const legacy = draftWith([`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`]);
+  const entries = [legacyId, skillDraftProposalId("approved"), skillDraftProposalId("declined")].map((id) => ({
+    id, summary: legacy.markdown, evidenceAnchors: [], skillFile: { name: legacy.name, markdown: legacy.markdown },
+    skillFileStagedAt: "2026-10-14T00:00:00.000Z",
+  }));
+  writeFileSync(legacyRegistry, JSON.stringify({ proposals: entries }));
+  const events: Array<{ step: string } & Row> = [];
+  const stage = () => stageSkillDrafts(legacyRegistry, legacyGather.skillDrafts, ALLOWLIST, describeSkillInjectionReachability,
+    (step, extra, expectedLiveVersion) => {
+      events.push({ step, ...extra });
+      appendLedger(noProcedure.path, { run_id: "RETRO-1", task_id: "RETRO", step, ...extra }, { expectedLiveVersion });
+    });
+  stage();
+  assert.deepEqual(events.map((event) => event.step), ["panel.proposal_declined", "skill.staged"]);
+  assert.equal(events[0]?.task_id, legacyId);
+  assert.equal(events[0]?.origin, "skill-workshop");
+  assert.match(String(events[0]?.reason), /^withdrawn: outcome-only:/);
+  assert.deepEqual(loadProposalRegistry(legacyRegistry).map((p) => [p.id, p.skillDraftClose?.reason]), [
+    [legacyId, events[0]?.reason], [skillDraftProposalId("approved"), undefined], [skillDraftProposalId("declined"), undefined],
+  ]);
+  noProcedure.append([{ step: "panel.proposal_restored", task_id: legacyId }]);
+  stage();
+  assert.equal(events.length, 2, "an operator restore of the same text survives the next pass");
+  assert.equal(existsSync(join(noProcedure.dir, ".claude", "skills")), false);
 });

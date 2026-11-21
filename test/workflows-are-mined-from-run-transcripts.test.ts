@@ -67,17 +67,15 @@ test("a sequence held by one run is below the run floor and mines nothing", () =
   assert.equal(mineRecurringProcedures(runs, records, { minRuns: 1, minTaskIds: 1 }).length, 2);
 });
 
-test("growth stops at its branch bound when many runs share most of one long order, and keeps the most-recurring", () => {
-  // 120 runs each keep a seeded 80% of 30 shared commands: millions of closed sequences recur in two runs.
-  let seed = 11;
-  const keep = (): boolean => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31 < 0.8;
-  const shared = Array.from({ length: 30 }, (_, i) => `Bash:npm run s${i}`);
-  const runs = Array.from({ length: 120 }, (_, r) => ({ runId: `R${r}`, taskId: `W1-T${r}`, type: "implement", verdict: "merged" }));
-  const records = runs.flatMap(({ runId }) => shared
-    .filter(() => keep())
+test("gap pruning keeps the three closed procedures in 650 runs with two long command orders", () => {
+  const shared = Array.from({ length: 23 }, (_, i) => `Bash:npm run s${i}`);
+  const firstOrder = ["Bash:git add", ...shared, "Bash:git commit"];
+  const secondOrder = ["Bash:git worktree", ...shared, "Bash:git push"];
+  const runs = Array.from({ length: 650 }, (_, r) => ({ runId: `R${r}`, taskId: `W1-T${r}`, type: "implement", verdict: "merged" }));
+  const records = runs.flatMap(({ runId }, i) => (i < 350 ? firstOrder : secondOrder)
     .map((tool_signature) => ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: "Bash", tool_signature })));
   const found = mineRecurringProcedures(runs, records);
-  assert.ok(found.length > 10_000 && found.length <= 20_000, `${found.length} procedures: the bound stopped growth`);
-  assert.ok(found.every((p) => p.recurrence >= 2 && p.taskIds.length >= 2));
-  assert.ok(found[0]!.recurrence >= Math.max(...found.map((p) => p.recurrence)) / 2, "the most-recurring sequences are grown first");
+  assert.deepEqual(found.map((p) => [p.steps, p.recurrence]), [
+    [shared, 650], [firstOrder, 350], [secondOrder, 300],
+  ]);
 });

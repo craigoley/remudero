@@ -108,25 +108,32 @@ export function procedureStepsForRun(records: readonly TranscriptLedgerRow[], ru
   }
   return steps;
 }
-/** Shell commands that read or wait, never act, as the text after `Bash:`. A new look command is a new row here. */
-const LOOK_STEPS: ReadonlySet<string> = new Set([
-  "sed", "grep", "cat", "rg", "tail", "head", "ls", "wc", "find", "awk", "jq", "echo", "printf", "ps", "pgrep",
-  "sleep", "for", "until", "while", "timeout", "python3", "node", "pwd", "cd", "date", "which", "stat", "sort",
-  "cut", "tr", "true", "test",
-  "git show", "git status", "git log", "git diff", "git grep", "git rev-parse", "git remote", "git ls-files",
-  "git ls-tree", "git rev-list", "git cat-file", "git merge-base", "git blame", "git config",
-]);
+/** Match Node by its full signature so Node commands that name a script still count as actions. */
+const LOOK_STEPS = {
+  prefix: new Set([
+    "sed", "grep", "cat", "rg", "tail", "head", "ls", "wc", "find", "awk", "jq", "echo", "printf", "ps", "pgrep",
+    "sleep", "for", "until", "while", "timeout", "python3", "pwd", "cd", "date", "which", "stat", "sort",
+    "cut", "tr", "true", "test",
+    "git show", "git status", "git log", "git diff", "git grep", "git rev-parse", "git remote", "git ls-files",
+    "git ls-tree", "git rev-list", "git cat-file", "git merge-base", "git blame", "git config",
+  ]),
+  exact: new Set(["node", "node --test"]),
+};
 
 /** File tools and bare tool names that only read. */
 const LOOK_TOOLS: ReadonlySet<string> = new Set(["Read", "Grep", "Glob"]);
 
 /** Whether a census step only looks: a read or search tool, a path outside the worktree, or a {@link LOOK_STEPS} command. */
 function isLookStep(step: string): boolean {
-  if (step.endsWith(":<outside>")) return true;
+  if (step === "<outside>" || step.endsWith(":<outside>")) return true;
   const colon = step.indexOf(":");
   const tool = colon < 0 ? step : step.slice(0, colon);
   if (LOOK_TOOLS.has(tool)) return true;
-  return tool === "Bash" && colon >= 0 && LOOK_STEPS.has(step.slice(colon + 1));
+  if (tool !== "Bash" || colon < 0) return false;
+  const command = step.slice(colon + 1);
+  const [program = "", subcommand] = command.split(/\s+/, 2);
+  return LOOK_STEPS.exact.has(command) || LOOK_STEPS.prefix.has(program) ||
+    (subcommand !== undefined && LOOK_STEPS.prefix.has(`${program} ${subcommand}`));
 }
 
 /** One ordered action-step sequence that recurs across runs, with the work it spans. */
@@ -144,11 +151,6 @@ export interface RecurringProcedure {
   /** `recurrence * medianSpannedCalls * (medianOutputTokensPerCall ?? 1)`. */
   score: number;
 }
-
-/** BACKSTOP: the prune keeps real ledgers small, but closed sequences can still number in the millions when hundreds
- *  of runs each keep most of one shared order. Growth stops after this many branches; the most-recurring
- *  extensions are grown first, so the procedures found are the ones with the most runs. */
-const MAX_GROWN_BRANCHES = 20_000;
 
 interface MinedRun {
   runId: string;
@@ -236,7 +238,7 @@ function procedureOf(steps: readonly string[], members: readonly Member[]): Recu
  * The ordered action-step sequences of two or more steps that recur in at least `opts.minRuns` (default 2) runs of
  * at least `opts.minTaskIds` (default 2) tasks. Each step comes after the one before it in a run, not necessarily
  * next to it. A procedure is kept only when no longer procedure with the same recurrence contains it. Sorted by
- * score, highest first, then by the steps joined. Growth stops at {@link MAX_GROWN_BRANCHES}.
+ * score, highest first, then by the steps joined.
  */
 export function mineRecurringProcedures(
   runs: readonly TranscriptRun[],
@@ -262,13 +264,8 @@ export function mineRecurringProcedures(
   const qualifies = (members: readonly Member[]): boolean =>
     members.length >= minRuns && new Set(members.map(({ run }) => run.taskId)).size >= minTaskIds;
   const out: RecurringProcedure[] = [];
-  let grown = 0;
-  // Most runs first, then by step, so growth is deterministic and a stopped search keeps the most-recurring.
-  const bySupport = (a: [string, Member[]], b: [string, Member[]]): number =>
-    b[1].length - a[1].length || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
   const grow = (steps: string[], members: Member[]): void => {
-    if (grown >= MAX_GROWN_BRANCHES || insertableInEveryRun(steps, members)) return;
-    grown += 1;
+    if (insertableInEveryRun(steps, members)) return;
     const extensions = new Map<string, Member[]>();
     for (const { run, last } of members) {
       for (let i = last + 1; i < run.actions.length; i++) {
@@ -279,7 +276,7 @@ export function mineRecurringProcedures(
       }
     }
     let longest = true;
-    for (const [step, next] of [...extensions].sort(bySupport)) {
+    for (const [step, next] of extensions) {
       if (!qualifies(next)) continue;
       if (next.length === members.length) longest = false;
       grow([...steps, step], next);
@@ -294,7 +291,7 @@ export function mineRecurringProcedures(
       else roots.set(step, [{ run, last: i }]);
     });
   }
-  for (const [step, members] of [...roots].sort(bySupport)) if (qualifies(members)) grow([step], members);
+  for (const [step, members] of roots) if (qualifies(members)) grow([step], members);
   const key = (p: RecurringProcedure): string => p.steps.join("\n");
   return out.sort((a, b) => b.score - a.score || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }

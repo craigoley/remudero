@@ -123,13 +123,17 @@ export interface TranscriptContext {
   records: readonly TranscriptLedgerRow[];
 }
 
+const PROCEDURE_STEP_VERBS = new Map([
+  ["Bash", "Run"], ["Edit", "Change"], ["MultiEdit", "Change"], ["NotebookEdit", "Change"], ["Write", "Create"],
+]);
+
 /** Writes a census step as an action line, or `undefined` when no action verb fits it. No line names a tool. */
 function procedureStepLine(step: string): string | undefined {
   const colon = step.indexOf(":");
   if (colon < 0) return undefined;
-  const target = step.slice(colon + 1);
-  const verb = ({ Bash: "Run", Edit: "Change", MultiEdit: "Change", NotebookEdit: "Change", Write: "Create" } as Record<string, string>)[step.slice(0, colon)];
-  return verb && target.length > 0 ? `- ${verb} \`${target}\`.` : undefined;
+  const target = step.slice(colon + 1).trim();
+  const verb = PROCEDURE_STEP_VERBS.get(step.slice(0, colon));
+  return verb && target && !/[`\r\n]/.test(target) ? `- ${verb} \`${target}\`.` : undefined;
 }
 
 /**
@@ -318,6 +322,17 @@ const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
   "Run", "Rerun", "Change", "Create", "Add", "Delete", "Commit", "Push", "Fetch", "Merge", "Open", "Reserve", "Claim", "Copy",
 ]);
 
+const SECTION_HEADING = /^ {0,3}#{1,2}(?:[ \t]+|$)/;
+const PROCEDURE_HEADING = /^ {0,3}##[ \t]+Procedure(?:[ \t]+#+)?[ \t]*$/;
+const PROCEDURE_BULLET = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)(.*)$/;
+
+function hasNonblankCodeSpan(text: string): boolean {
+  for (const span of text.matchAll(/(?<![`\\])(`+)(?!`)(.*?)(?<!`)\1(?!`)/g)) {
+    if (span[2]!.trim()) return true;
+  }
+  return false;
+}
+
 const STEP_FILLER_WORDS = new Set("a an the and or are as at be been being by for from has have had in is it of on that to was were with".split(" "));
 
 /** A lexical check, not a semantic judgement: case, punctuation, filler and common inflections
@@ -345,8 +360,8 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
   let inProcedure = false;
-  for (const line of draft.markdown.split("\n")) {
-    if (line.startsWith("## ")) inProcedure = line === "## Procedure";
+  for (const line of draft.markdown.split(/\r?\n/)) {
+    if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
     const hostMatch = line.match(/https?:\/\/([a-zA-Z0-9.-]+)/);
     if (hostMatch && !allowlist.allowedHosts.includes(hostMatch[1])) {
       return { ok: false, offendingLine: line, reason: `names host '${hostMatch[1]}' outside the worker allowlist` };
@@ -372,13 +387,14 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         };
       }
     }
-    if (inProcedure && line.startsWith("- ")) {
-      const tokens = stepContentTokens(line);
-      if (outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
+    const bullet = inProcedure ? PROCEDURE_BULLET.exec(line)?.[1] : undefined;
+    if (bullet !== undefined) {
+      const tokens = stepContentTokens(bullet);
+      if (tokens.length > 0 && outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
         return { ok: false, offendingLine: line, reason: "outcome-only: step restates its mined outcome without adding behavioral content" };
       }
-      const verb = line.slice(2).split(" ", 1)[0]!;
-      if (!SKILL_ACTION_VERBS.has(verb) || !/`[^`]+`/.test(line)) {
+      const verb = bullet.split(/\s+/, 1)[0]!;
+      if (!SKILL_ACTION_VERBS.has(verb) || !hasNonblankCodeSpan(bullet)) {
         return { ok: false, offendingLine: line, reason: "not-an-action: a Procedure step starts with an action verb and names a backticked command or path" };
       }
     }
@@ -469,8 +485,14 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
 }
 
 function procedureStepLines(markdown: string): string[] {
-  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) => line.startsWith("- "));
+  let inProcedure = false;
+  const steps: string[] = [];
+  for (const line of markdown.split(/\r?\n/)) {
+    if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
+    const step = inProcedure ? PROCEDURE_BULLET.exec(line)?.[1] : undefined;
+    if (step !== undefined) steps.push(step);
+  }
+  return steps;
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
@@ -478,7 +500,7 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
   return procedureStepLines(markdown).filter((line) => !descriptions.some((description) => restatesOutcome(line, description)));
 }
 
-const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT));
 
 /** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
 function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
@@ -509,7 +531,7 @@ type SkillDraftLog = (step: string, extra?: Record<string, unknown>, expectedLiv
 function closeSkillDraft(
   registryPath: string,
   proposalId: string,
-  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion: string } | undefined),
+  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion?: string } | undefined),
   log: SkillDraftLog,
   clock: Pick<Clock, "iso">,
 ): boolean {
@@ -1552,7 +1574,7 @@ export function stageSkillDrafts(
   drafts: readonly SkillDraft[],
   allowlist: WorkerAllowlist | ((draft: SkillDraft) => WorkerAllowlist),
   reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  log: SkillDraftLog,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
@@ -1566,6 +1588,51 @@ export function stageSkillDrafts(
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, closed, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  withdrawLegacyOutcomeOnlyDrafts(registryPath, new Set(drafts.map((draft) => skillDraftProposalId(draft.procedureKey))), log);
+}
+
+/** Legacy signal-only text no longer comes back through renderSkillDraft. Recheck the stored payload in place. */
+function withdrawLegacyOutcomeOnlyDrafts(registryPath: string, incomingIds: ReadonlySet<string>, log: SkillDraftLog): void {
+  let proposals: Proposal[];
+  try {
+    proposals = loadProposalRegistry(registryPath);
+  } catch (error) {
+    log("skill.stage_failed", { error: String(error) });
+    return;
+  }
+  const stateDir = dirname(registryPath);
+  const livePath = ledgerLivePath(stateDir);
+  for (const proposal of proposals) {
+    const { id, skillFile } = proposal;
+    if (!id.startsWith(SKILL_DRAFT_ID_PREFIX) || incomingIds.has(id) || !skillFile ||
+      workshopClosedSkillDraft(proposal) || !outcomeOnlyDraftRefusal(skillFile.markdown)) continue;
+    try {
+      let refusal: string | undefined;
+      const closed = withSkillDraftVerdictLock(stateDir, id, () => withLedgerRotationLock(stateDir, () =>
+        closeSkillDraft(registryPath, id, (entry) => {
+          refusal = entry.skillFile && outcomeOnlyDraftRefusal(entry.skillFile.markdown);
+          if (!refusal) return undefined;
+          const liveVersion = archiveVersion(livePath);
+          const pattern = new RegExp(JSON.stringify(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+          const union = readLedgerUnionRecordsSync(stateDir, {
+            step: SKILL_DRAFT_VERDICT_STEPS, pattern, where: (row) => row.task_id === id, refuseIncomplete: true,
+          });
+          if (!union.ok || union.torn > 0 || liveVersion !== archiveVersion(livePath)) {
+            throw new Error(`could not verify the ledger verdict for ${id}`);
+          }
+          const verdicts = ledgerProposalVerdicts(union.rows);
+          if (verdicts.isRatified(id) || verdicts.isDeclined(id) !== undefined) return undefined;
+          return { reason: `withdrawn: ${refusal}`, liveVersion };
+        }, log, systemClock)));
+      if (typeof closed === "object") throw new Error(closed.unmeasured);
+      if (closed) {
+        log("skill.staged", { name: skillFile.name, staged: false, already: false, backfilled: false, refreshed: false,
+          refused: true, closed, reason: refusal });
+      }
+    } catch (error) {
+      log("skill.stage_failed", { name: skillFile.name, error: String(error) });
     }
   }
 }
