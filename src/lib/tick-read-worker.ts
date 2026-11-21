@@ -617,13 +617,15 @@ export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): 
   return reviewStatusOwnerRun(r?.description);
 }
 
+/** W1-T14035: the redaction a reviewer deployed before every pending post named its run gave an ops hold: one text for every run. */
+const LEGACY_OPS_HOLD = /^remudero-review: pending — detailed evidence retained on host(?: \[review code [0-9a-f]+\])?$/;
+
 /** W1-T14035: the run that published a live pending `remudero-review` status. Every pending post now names its run. A hold
- *  posted before that (a pending verdict: promise harvest, cannot-evaluate, host load) names none, so it is bound to the run whose
- *  `review.posted` pending row is the newest pending publication on this PR and head, and only while that row's own
- *  summary is the live description. Anything else is an unknown run: no row, another run's row, a newer claim row, or a
- *  description the row did not post. WRITE ORDER: a review run writes its claim row after GitHub accepts the claim, and
- *  posts any hold later still; the rollup is read before the ledger, so a hold another run published before the rollup
- *  read has that run's claim row (when it claimed) visible here, and the newest-row rule then names that run. */
+ *  posted before that names none, so it is bound to the run whose `review.posted` pending row is the newest pending
+ *  publication on this PR and head, only while the description is that row's summary or the legacy ops redaction, AND
+ *  GitHub's created_at is no later than that row. Text cannot decide it (another run posts the same words); time can: a run
+ *  writes its row after GitHub accepts the post, so a status dated after the row is a newer post whose run left no visible
+ *  row yet. Undated, or a host clock behind GitHub's, is an unknown run, and an unknown run waits. */
 export function reviewPendingStatusRunId(
   rollup: RollupCheck[] | undefined,
   ledger: ReadonlyArray<Record<string, unknown>>,
@@ -633,7 +635,8 @@ export function reviewPendingStatusRunId(
 ): string | undefined {
   const named = reviewStatusRunIdFromRollup(rollup);
   if (named !== undefined) return named;
-  const description = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.description;
+  const status = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  const description = status?.description;
   if (!description) return undefined;
   let newest: Record<string, unknown> | undefined;
   for (const line of ledger) {
@@ -642,7 +645,11 @@ export function reviewPendingStatusRunId(
   }
   if (newest?.step !== "review.posted" || typeof newest.run_id !== "string" || newest.run_id === "") return undefined;
   const summary = (newest.decision_verdict as { summary?: unknown } | undefined)?.summary;
-  return typeof summary === "string" && summary !== "" && summary.slice(0, 140) === description ? newest.run_id : undefined;
+  const postedWording = LEGACY_OPS_HOLD.test(description) ||
+    (typeof summary === "string" && summary !== "" && summary.slice(0, 140) === description);
+  const postedAt = Date.parse(status?.startedAt ?? "");
+  const rowAt = Date.parse(typeof newest.ts === "string" ? newest.ts : "");
+  return postedWording && Number.isFinite(postedAt) && Number.isFinite(rowAt) && postedAt <= rowAt ? newest.run_id : undefined;
 }
 
 /** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
