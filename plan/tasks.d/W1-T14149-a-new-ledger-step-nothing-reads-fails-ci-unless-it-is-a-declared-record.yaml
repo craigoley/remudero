@@ -15,7 +15,10 @@
     - scripts/write-only-ledger-step-baseline.json
     - package.json
     - .github/workflows/ci.yml
-    - test/a-new-ledger-step-nothing-reads-fails-ci.test.ts
+    - src/lib/gate-posture.ts
+    - test/the-merge-queue-runs-the-recorded-literal-gates.test.ts
+    - test/fast-lane-classifier.test.ts
+    - test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -46,22 +49,27 @@
          merge queue);
        - a recordOnly entry has an empty reason.
     4. Add an npm script and a light-gates step (`continue-on-error: true`, SOURCE class only) folded into the existing
-       comment-load-ratchet report line, as console-parity is. Script and step land together, because unwired-gate refuses an
-       uninvoked gate.
+       comment-load-ratchet report line, as console-parity is. The new id'd step must also be pinned where the repo
+       enumerates such steps:
+       - PR_ARGV and the rebased set in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts;
+       - FAST_LANE_WIRED_STEP_IDS in test/fast-lane-classifier.test.ts;
+       - a GATE_POSTURE_DECLARATIONS row in src/lib/gate-posture.ts, because the script has a refusing exit.
+       The posture row and the ci.yml step together read as instrument-entangled under Rule 25, which is advisory. One PR
+       is kept so that the check and its wiring land together.
 
     INVARIANT no-silent-loop: a step newly written in src with no reader outside its writer fails the check unless it is declared record-only with a reason.
   acceptance:
     - claim: "invariant:no-silent-loop — a step newly written in src that no other file reads fails the check"
       kind: guard
-      proof: "grep: W1-T14149 criterion 1: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+      proof: "grep: W1-T14149 criterion 1: in test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
     - claim: "A step read in another file through an equality, a set, a read-steps array or a prefix passes"
-      proof: "grep: W1-T14149 criterion 2: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+      proof: "grep: W1-T14149 criterion 2: in test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
     - claim: "A step declared record-only with a reason passes, and one with an empty reason fails"
-      proof: "grep: W1-T14149 criterion 3: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+      proof: "grep: W1-T14149 criterion 3: in test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
     - claim: "A baseline entry that gained a reader must be removed, so the baseline only shrinks"
-      proof: "grep: W1-T14149 criterion 4: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+      proof: "grep: W1-T14149 criterion 4: in test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
     - claim: "A step emitted through a named constant is resolved and counted"
-      proof: "grep: W1-T14149 criterion 5: in test/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
+      proof: "grep: W1-T14149 criterion 5: in test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts"
     - claim: "The light-gates job runs the ratchet"
       proof: "grep: write-only-ledger-step in .github/workflows/ci.yml"
   falsifier: |
