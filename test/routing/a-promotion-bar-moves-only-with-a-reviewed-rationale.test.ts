@@ -14,7 +14,8 @@ import { JUDGE_SHADOW_POOL_BAR, judgeReplayPoolRefusal } from "#src/lib/judge-sh
 import {
   PROMOTION_BARS_ROOT, PROMOTION_CEILING_FIELDS, PROMOTION_CEILINGS_PATH, PROMOTION_FLOOR_FIELDS, PROMOTION_FLOORS_PATH, readPromotionBars,
 } from "#src/lib/promotion-bars.js";
-import { classifyInstrumentChange } from "#src/lib/review.js";
+import { localPrDiffAsync } from "#src/lib/pr-diff.js";
+import { INSTRUMENT_ALIGN_CELLS, classifyInstrumentChange } from "#src/lib/review.js";
 import { SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_MIN_MEAN_GAIN, SKILL_EVAL_TRIALS_PER_ARM } from "#src/lib/skill-eval.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -119,6 +120,18 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   assert.equal(unreadable.status, "regressed", "an unreadable plan counts no task reference");
   assert.match(unreadable.detail, /W1-T2906 cannot count: cannot list plan\/tasks\.d under /);
 
+  // A reference counts only as a whole word (PR #20033's third review: `W1-T2906bogus` named W1-T2906 and passed). A
+  // format character renders as nothing, so it joins the word it sits in.
+  assert.equal(verdict(floors, "W1-T2906bogus").status, "regressed", "the reviewed rationale, verbatim");
+  for (const glued of ["W1-T2906bogus", "xW1-T2906", "W1-T2906_x", "W1-T2906é", "W1-T2906​bogus", "#20999abc", "PR#20999", "#20999_1"]) {
+    const lowered = verdict(floors, `${previous} Lowered by ${glued}.`);
+    assert.equal(lowered.status, "regressed", JSON.stringify(glued));
+    assert.doesNotMatch(lowered.detail, /cannot count/, `${JSON.stringify(glued)} names no reference at all`);
+  }
+  for (const word of ["(W1-T2906)", "W1-T2906's", "W1-T2906-reviewed", "#20999,", "#20999"]) {
+    assert.equal(verdict(floors, `${previous} Lowered by ${word}`).status, "reviewed-bump", `positive control: ${JSON.stringify(word)}`);
+  }
+
   // The real CLI over the production rows, against a fixture repo whose HEAD holds today's two files and whose
   // working tree raises one ceiling: exit 1, naming the field.
   const repo = gitRepo({ scope: t, kind: "promotion-bars" });
@@ -146,6 +159,12 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T2906-fixture.yaml"), "- id: W1-T2906\n");
   errors.length = 0;
   assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 0, errors.join("\n"));
+
+  // The reviewed case through the same CLI: judgeMinAgreeShare 0.98 -> 0.90 under `W1-T2906bogus`, W1-T2906 in the plan.
+  writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), JSON.stringify({ ...floors, judgeMinAgreeShare: 0.9, bumpRationale: "W1-T2906bogus" }));
+  errors.length = 0;
+  assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 1);
+  assert.deepEqual(errors.filter((line) => line.includes("BLOCKED")).map((line) => /: (\w+) moved/.exec(line)?.[1]), ["judgeMinAgreeShare"]);
 });
 
 test("the promotion bars the gardener, judge shadow pool and skill eval use are the baseline values", (t) => {
@@ -221,7 +240,7 @@ test("a promotion bar file that is missing, not JSON or carries a non-number fai
   }
 });
 
-test("raising a promotion floor reads as tightening to the reviewer, lowering one as loosening", () => {
+test("raising a promotion floor reads as tightening to the reviewer, lowering one as loosening", async (t) => {
   const diffOf = (file: string, body: string) => [`diff --git a/${file} b/${file}`, `--- a/${file}`, `+++ b/${file}`, "@@ -1,8 +1,8 @@", body].join("\n");
   const classify = (file: string, body: string) => classifyInstrumentChange(diffOf(file, body), [file], file);
   assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 400,\n'), "tightening");
@@ -249,6 +268,48 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   // The key outside the hunk (git cut it from the context): nothing pairs the number, so the file stays undetermined.
   assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.99,\n"), "undetermined");
   assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.90,\n"), "undetermined");
+
+  // Real git hunks between two real versions of the floors file, read through the reviewer's own diff source
+  // (src/lib/pr-diff.ts). A line holding no JSON token, or a change that moves tokens without changing one, cannot
+  // move the verdict (PR #20033's third review: 0.98 -> 0.99 plus one blank line read `undetermined`).
+  const repo = gitRepo({ scope: t, kind: "promotion-floor-diff" });
+  mkdirSync(join(repo.dir, "scripts"));
+  const reviewerReads = async (base: string, head: string): Promise<string> => {
+    writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), base);
+    repo.git("add", ".");
+    repo.git("commit", "--quiet", "--allow-empty", "-m", "base");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), head);
+    repo.git("commit", "--quiet", "--allow-empty", "-am", "head");
+    const diff = await localPrDiffAsync(repo.dir, repo.git("rev-parse", "HEAD"));
+    return classifyInstrumentChange(diff, [PROMOTION_FLOORS_PATH], PROMOTION_FLOORS_PATH);
+  };
+  const text = readFileSync(join(REPO_ROOT, PROMOTION_FLOORS_PATH), "utf8");
+  const agree = '  "judgeMinAgreeShare": 0.98,\n';
+  assert.ok(text.includes(agree), "positive control: the floor the edits below move");
+  const moveTo = (value: string) => text.replace(agree, `  "judgeMinAgreeShare": ${value},\n`);
+  assert.equal(await reviewerReads(text, moveTo("0.99")), "tightening", "control: the raise alone");
+  assert.equal(await reviewerReads(text, moveTo("0.90")), "loosening", "control: the lowering alone");
+  const reorder = (s: string, ...order: string[]) => {
+    const json = JSON.parse(s) as Record<string, unknown>;
+    return `${JSON.stringify(Object.fromEntries(order.map((k) => [k, json[k]])), null, 2)}\n`;
+  };
+  const keys = Object.keys(JSON.parse(text) as Record<string, unknown>);
+  const layouts: Array<[string, (s: string) => string, ((s: string) => string)?]> = [
+    ["a blank line added", (s) => s.replace(/("judgeMinAgreeShare": [^\n]*\n)/, "$1\n")],
+    ["an indentation-only line added", (s) => s.replace(/("judgeMinAgreeShare": [^\n]*\n)/, "$1    \t\n")],
+    ["a blank line removed", (s) => s, (s) => s.replace(/("judgeMinPaired": [^\n]*\n)/, "$1\n")],
+    ["re-indentation, the closing brace too", (s) => s.replace(/^ {2}"/gm, '    "').replace(/^}$/m, "  }")],
+    ["a trailing comma moved to the next line", (s) => s.replace(/("judgeMinAgreeShare": [^,\n]*),\n {2}"/, '$1\n  , "')],
+    ["a trailing comma moved by swapping the last two keys", (s) => reorder(s, ...keys.slice(0, -2), ...keys.slice(-2).reverse())],
+    ["a key reordered with its value unchanged", (s) => reorder(s, "skillEvalHeldOutTasks", ...keys.filter((k) => k !== "skillEvalHeldOutTasks"))],
+    ["the final newline removed", (s) => s.replace(/\n$/, "")],
+  ];
+  for (const [layout, head, base = (s: string) => s] of layouts) {
+    assert.equal(await reviewerReads(base(text), head(moveTo("0.99"))), "tightening", `0.98 -> 0.99 with ${layout}`);
+    assert.equal(await reviewerReads(base(text), head(moveTo("0.90"))), "loosening", `0.98 -> 0.90 with ${layout}`);
+    assert.equal(await reviewerReads(base(text), head(text)), "undetermined", `${layout} alone moves no bar, so tightens none`);
+  }
 });
 
 test("an instrument diff pairs each value with its own key, whatever the hunk's layout", () => {
@@ -266,14 +327,33 @@ test("an instrument diff pairs each value with its own key, whatever the hunk's 
   for (const value of ["{ }", "[200]", "true", "null"]) {
     assert.equal(classify(`-  "judgeMinPaired": 200,\n+  "judgeMinPaired": ${value},\n`), "undetermined", value);
   }
-  // One name with two removed values cannot say which one an added value replaces.
-  assert.equal(classify('-  "a": { "legacy": 9 },\n-  "b": { "legacy": 1 },\n+  "a": { "legacy": 3 },\n+  "b": { "legacy": 1 },\n'), "undetermined");
+  // A value is judged under its own parent: both lines rewritten, but only a's `legacy` lowered, reads as that lowering.
+  assert.equal(classify('-  "a": { "legacy": 9 },\n-  "b": { "legacy": 1 },\n+  "a": { "legacy": 3 },\n+  "b": { "legacy": 1 },\n'), "loosening");
+  // A key moved into another object, or out of an unwrapped one, is a new key there, never a reordering.
+  assert.equal(classify('-  "a": { "legacy": 9 },\n-  "b": { },\n+  "a": { },\n+  "b": { "legacy": 9 },\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "undetermined");
+  assert.equal(classify('-  "x": { "judgeMinPaired": 200 },\n+  "judgeMinPaired": 200,\n-  "judgeMinAgreeShare": 0.98\n+  "judgeMinAgreeShare": 0.99\n'), "undetermined");
+  // One path with two removed values (two hunks, each cut below its parent) cannot say which one an added value replaces.
+  assert.equal(classify('-    "legacy": 9,\n+    "legacy": 3,\n', '-    "legacy": 1,\n+    "legacy": 2,\n'), "undetermined");
+  // A structural line re-indented or an array re-flowed moves no token; reordering an array's entries moves some.
+  assert.equal(classify('   "nested": {\n-    "judgeMinPaired": 200\n-  },\n+      "judgeMinPaired": 250\n+    },\n'), "tightening");
+  const exempt = (from: string, to: string) => `-  "exempt": ${from},\n+  "exempt": ${to},\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n`;
+  assert.equal(classify(exempt('["a.ts", "b.ts"]', '[\n+    "a.ts",\n+    "b.ts"\n+  ]')), "tightening");
+  assert.equal(classify(exempt('["a.ts", "b.ts"]', '["b.ts", "a.ts"]')), "undetermined");
+  // Past INSTRUMENT_ALIGN_CELLS a change block's tokens stay unaligned, read line by line: the same re-laid entries
+  // beside the same tightening read `tightening` in a block under the budget and `undetermined` in one over it.
+  const block = (entries: number) => {
+    const rows = (indent: string) => Array.from({ length: entries }, (_, i) => `${indent}"k${i}": { "v": ${i} },`).join("\n");
+    return `-  "judgeMinPaired": 200,\n${rows("-  ")}\n-  "judgeMinAgreeShare": 0.98\n+  "judgeMinPaired": 250,\n${rows("+    ")}\n+  "judgeMinAgreeShare": 0.99\n`;
+  };
+  assert.ok((8 * 50 + 5) ** 2 < INSTRUMENT_ALIGN_CELLS && (8 * 1000) ** 2 > INSTRUMENT_ALIGN_CELLS, "positive control: the two blocks straddle it");
+  assert.equal(classify(block(50)), "tightening");
+  assert.equal(classify(block(1000)), "undetermined");
   // Tokens no pair holds: an array element, a bare string, a colon with no key, a stray literal, a non-JSON run.
   for (const line of ["+  200,", '+  "orphan",', "+  : 200,", "+  true,", '+  "judgeMinPaired" 200,', '+  "judgeMinPaired": : 200,',
     "+  200 // was 100", '+  "judgeMinPaired": 2_00,', '+  "a" { },', '+  "a" true,', '+  "a": "\\q",']) {
     assert.equal(classify(`-  "judgeMinPaired": 100,\n${line}\n`), "undetermined", line);
   }
-  // A structural or blank added line holds no pair, as before.
+  // An added structural line holds no pair, as before: a bracket the old side did not have refuses.
   assert.equal(classify('-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n+  },\n'), "undetermined");
   assert.equal(classify('-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250\n+  }\n'), "undetermined");
   assert.equal(classify('-  "judgeMinPaired": 200, "judgeMinAgreeShare": 0.98\n+  "judgeMinPaired": 250, "judgeMinAgreeShare": 0.99\n'), "tightening");

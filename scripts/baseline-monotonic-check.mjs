@@ -6,7 +6,8 @@
 // construction, because every ratchet reads its baseline from the PR's own tree. This checks each
 // row in SCORE_TABLE against `git show <base>:<path>` and refuses a regression unless the working
 // tree's `bumpRationale` names a PR or task the base's rationale did not -- the one that reviewed it.
-// References compare as numbers, and a `W1-T<n>` counts only when <root>/plan/tasks.d holds its shard.
+// A reference counts only as a whole word, compares as a number, and a `W1-T<n>` counts only when
+// <root>/plan/tasks.d holds its shard.
 //
 // SCOPE, drawn from the LEDGER/FLOOR line src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS
 // comment already states: a SCORE FLOOR (or ceiling) grades a falsifier, so lowering (or raising)
@@ -57,7 +58,10 @@ export const SCORE_TABLE = [
   { path: "scripts/promotion-ceilings-baseline.json", field: "canaryMaxMergeRateDrop", direction: "decrease" },
 ];
 
-const PR_REFERENCES_RE = /#(\d+)|W1-T(\d+)/g;
+/** A `#<n>` or `W1-T<n>` with no word character on either side, in any script. A format character (a zero-width
+ *  space or joiner, which renders as nothing) joins rather than separates, so `W1-T2906<ZWSP>bogus` reads as the
+ *  one word it shows. Without the bounds `W1-T2906bogus` named W1-T2906 (PR #20033's third review). */
+const PR_REFERENCES_RE = /(?<![\p{L}\p{M}\p{N}\p{Pc}\p{Cf}])(?:#(\d+)|W1-T(\d+))(?![\p{L}\p{M}\p{N}\p{Pc}\p{Cf}])/gu;
 const PLAN_SHARD_RE = /^w1-t(\d+)(?:-.*)?\.ya?ml$/i;
 
 /** `true` when `newValue` moved the WRONG way for `direction` -- the ratchet's own regression. */
@@ -65,9 +69,10 @@ export function isRegression(oldValue, newValue, direction) {
   return direction === "increase" ? newValue < oldValue : newValue > oldValue;
 }
 
-/** Every reference `rationale` names, each as a canonical `#<n>` or `W1-T<n>` key. The number is read as an
- *  integer, so leading zeros name the same reference (`W1-T012187` is `W1-T12187`, `#007` is `#7`), and a zero
- *  (`#0`, `W1-T0`) names nothing. None for a non-string. */
+/** Every reference `rationale` names, each as a canonical `#<n>` or `W1-T<n>` key. Only a whole word counts:
+ *  `W1-T2906bogus`, `xW1-T2906`, `W1-T2906_x` and `#12abc` name nothing. The number is read as an integer, so
+ *  leading zeros name the same reference (`W1-T012187` is `W1-T12187`, `#007` is `#7`), and a zero (`#0`, `W1-T0`)
+ *  names nothing. None for a non-string. */
 export function rationaleReferences(rationale) {
   const refs = new Set();
   if (typeof rationale !== "string") return refs;
@@ -164,8 +169,9 @@ export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN) {
     detail:
       `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main -- the WRONG direction for this ${kind}. ` +
       `Restore it, or if the move is deliberate and reviewed, write a "bumpRationale" in ${path} that names a PR or task ` +
-      `the previous rationale did not (a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json ` +
-      `already follows. Rewording, padding or zero-padding the old rationale's references does not count.${unknown}`,
+      `the previous rationale did not (a "#<n>" or "W1-T<n>" reference, standing as its own word), the convention ` +
+      `scripts/claude-md-budget-baseline.json already follows. Rewording, padding or zero-padding the old rationale's ` +
+      `references does not count.${unknown}`,
   };
 }
 

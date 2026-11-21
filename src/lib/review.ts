@@ -10756,10 +10756,19 @@ function isInstrumentProvenanceKey(key: string): boolean {
   return key.startsWith("_") || INSTRUMENT_CAPTURE_KEYS.has(key);
 }
 
-/** One key/value pair an instrument's diff shows, on one side (old: context + removed lines; new: context + added).
- *  `value` is the number, the string, or `undefined` for any other JSON value. `lines` index every line holding one
- *  of its tokens, so a pair laid out over several lines (`"k":` then `0.98`, or `"k"` then `: 0.98`) is still one pair. */
-interface InstrumentPair { key: string; value: number | string | undefined; lines: number[] }
+/** One {@link INSTRUMENT_TOKEN_RE} token of an instrument hunk, numbered by its place in the hunk. Whitespace is no
+ *  token, so a blank or re-indented line holds none and a line break moves none. */
+interface InstrumentToken { kind: DiffLine["kind"]; text: string; str?: string; num?: number; punct?: string; literal: boolean }
+
+/** One key/value pair one side of a hunk shows (old: context + removed lines; new: context + added). `value` is the
+ *  number, the string, or `undefined` for any other JSON value; `tokens` are its key, colon and value, wherever the
+ *  lines put them (`"k":` then `0.98`, or `"k"` then `: 0.98`). `path` is the key under the keyed containers the hunk
+ *  opens around it, after the containers it closes first, so a key moved into another object is another pair. */
+interface InstrumentPair { key: string; path: string; value: number | string | undefined; tokens: [number, number, number] }
+
+/** What a token is on one side, and the containers around it there. An `orphan` is a token no pair can hold: a number
+ *  or string whose key lies outside the hunk (or an array element), a colon with no key, a stray literal, a non-JSON run. */
+interface InstrumentRole { name: "key" | "colon" | "value" | "comma" | "bracket" | "orphan"; scope: string }
 
 /** One JSON token per match: a string, a complete JSON number (sign, fraction, exponent: `9e-1` is 0.9, never 9),
  *  punctuation, a literal, or one run of anything else, which no pair may hold. Structurally total: `\s+` and `\S+`
@@ -10767,74 +10776,136 @@ interface InstrumentPair { key: string; value: number | string | undefined; line
  *  the instrument-diff tests drive that arm through classifyInstrumentChange. */
 const INSTRUMENT_TOKEN_RE = /\s+|("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")|(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w.+-])|([{}[\]:,])|(true|false|null)(?!\w)|\S+/gy;
 
-/** The pairs one side of one hunk shows, and the lines a token no pair can hold sits on: a number or string with no
- *  key in the hunk (its key lies outside it, or it is an array element), a colon with no key, or a non-JSON run.
- *  W1-T3133's reading was one line at a time, so a key and its value on different lines (valid JSON) read as no pair
- *  at all, and both a raise and a lowering classified `undetermined` (PR #20033's second review). */
-function instrumentSidePairs(lines: ReadonlyArray<{ index: number; text: string }>): { pairs: InstrumentPair[]; orphans: Set<number> } {
-  const pairs: InstrumentPair[] = [];
-  const orphans = new Set<number>();
-  let candidate: { key: string; line: number } | undefined; // a string that a colon would make a key
-  let pending: { key: string; lines: number[] } | undefined; // a key and its colon, awaiting a value
-  const strand = () => {
-    if (candidate) orphans.add(candidate.line);
-    for (const line of pending?.lines ?? []) orphans.add(line);
-    candidate = pending = undefined;
-  };
-  const settle = (value: InstrumentPair["value"], line: number, orphan: boolean) => {
-    if (pending) pairs.push({ key: pending.key, value, lines: [...pending.lines, line] });
-    else if (orphan) orphans.add(line);
-    pending = undefined;
-  };
-  for (const { index, text } of lines) {
+function hunkTokens(hunk: ReadonlyArray<{ kind: DiffLine["kind"]; text: string }>): InstrumentToken[] {
+  const tokens: InstrumentToken[] = [];
+  for (const { kind, text } of hunk) {
     INSTRUMENT_TOKEN_RE.lastIndex = 0;
     for (let m = INSTRUMENT_TOKEN_RE.exec(text); m !== null && m[0] !== ""; m = INSTRUMENT_TOKEN_RE.exec(text)) {
       const [token, str, num, punct, literal] = m;
-      if (str !== undefined) {
-        if (pending) settle(JSON.parse(str) as string, index, true);
-        else {
-          if (candidate) orphans.add(candidate.line);
-          candidate = { key: JSON.parse(str) as string, line: index };
-        }
-      } else if (num !== undefined) {
-        if (candidate) strand();
-        settle(Number(num), index, true);
-      } else if (punct === ":") {
-        if (candidate && !pending) {
-          pending = { key: candidate.key, lines: [candidate.line, index] };
-          candidate = undefined;
-        } else {
-          strand();
-          orphans.add(index);
-        }
-      } else if (punct === "{" || punct === "[" || literal !== undefined) {
-        // A container or a literal settles a pending key with a non-scalar value; with no key it pairs nothing.
-        if (pending) settle(undefined, index, false);
-        else {
-          strand();
-          if (literal !== undefined) orphans.add(index);
-        }
-      } else if (punct !== undefined) {
-        strand(); // `,` `}` `]`: a key still waiting for its value, or a bare string, is stranded
-      } else if (token.trim() !== "") {
-        strand();
-        orphans.add(index);
-      }
+      if (token.trim() === "") continue;
+      const value = { str: str === undefined ? undefined : (JSON.parse(str) as string), num: num === undefined ? undefined : Number(num) };
+      tokens.push({ kind, text: token, ...value, punct, literal: literal !== undefined });
     }
   }
-  strand();
-  return { pairs, orphans };
+  return tokens;
 }
 
-/** Every pair the instrument's diff changes, per side, hunk by hunk (a key never pairs across a hunk boundary), and
- *  the added lines no pair accounts for. Lines before a file's first `@@` form one hunk, as {@link walkDiff} keeps them. */
+/** One side of one hunk read as JSON: its pairs, and every token's {@link InstrumentRole}. W1-T3133 read one line at
+ *  a time, so a key and its value on different lines (valid JSON) read as no pair (PR #20033's second review). */
+function instrumentSide(tokens: readonly InstrumentToken[], skip: DiffLine["kind"]): { pairs: InstrumentPair[]; roles: Map<number, InstrumentRole> } {
+  const pairs: InstrumentPair[] = [];
+  const roles = new Map<number, InstrumentRole>();
+  const open: Array<string | undefined> = []; // each container this side opens, with its key when it has one
+  let closedAbove = 0; // containers closed here that the hunk never opened
+  const scope = () => `${closedAbove}${open.flatMap((k) => (k === undefined ? [] : [`/${JSON.stringify(k)}`])).join("")}`;
+  const role = (id: number, name: InstrumentRole["name"]) => roles.set(id, { name, scope: scope() });
+  let candidate: { key: string; id: number } | undefined; // a string that a colon would make a key
+  let pending: { key: string; ids: [number, number] } | undefined; // a key and its colon, awaiting a value
+  const strand = () => {
+    for (const id of [candidate?.id, ...(pending?.ids ?? [])]) if (id !== undefined) role(id, "orphan");
+    candidate = pending = undefined;
+  };
+  tokens.forEach((t, id) => {
+    if (t.kind === skip) return;
+    const opens = t.punct === "{" || t.punct === "[";
+    if (pending && (t.str !== undefined || t.num !== undefined || t.literal || opens)) {
+      // A string or number settles the pending key with itself; a container or a literal with a non-scalar value.
+      const [keyId, colonId] = pending.ids;
+      pairs.push({ key: pending.key, path: `${scope()}/${JSON.stringify(pending.key)}`, value: t.str ?? t.num, tokens: [keyId, colonId, id] });
+      role(keyId, "key");
+      role(colonId, "colon");
+      role(id, "value");
+      if (opens) open.push(pending.key);
+      pending = undefined;
+    } else if (t.str !== undefined) {
+      strand();
+      candidate = { key: t.str, id };
+    } else if (t.punct === ":" && candidate) {
+      pending = { key: candidate.key, ids: [candidate.id, id] };
+      candidate = undefined;
+    } else {
+      strand(); // anything else strands a key still waiting for its value, or a bare string
+      const closes = t.punct === "}" || t.punct === "]";
+      if (closes && open.length > 0) open.pop();
+      else if (closes) closedAbove++;
+      role(id, t.punct === "," ? "comma" : opens || closes ? "bracket" : "orphan");
+      if (opens) open.push(undefined);
+    }
+  });
+  strand();
+  return { pairs, roles };
+}
+
+/** Cells past which a change block's tokens stay unaligned, each read as changed (the line-level reading): 2^21
+ *  two-byte cells, 4 MiB, about 1,400 tokens a side once the block's shared prefix and suffix are set aside. */
+export const INSTRUMENT_ALIGN_CELLS = 1 << 21;
+
+/** A longest common subsequence of `a` and `b`, as index pairs: the shared prefix and suffix, and between them the
+ *  dynamic-programming alignment while it fits {@link INSTRUMENT_ALIGN_CELLS}. */
+function commonTokens(a: readonly string[], b: readonly string[]): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let lo = 0;
+  for (; lo < a.length && lo < b.length && a[lo] === b[lo]; lo++) out.push([lo, lo]);
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > lo && endB > lo && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const [n, m] = [endA - lo, endB - lo];
+  if (n * m <= INSTRUMENT_ALIGN_CELLS) {
+    const w = m + 1;
+    const len = new Uint16Array((n + 1) * w); // len[i * w + j]: the subsequence's length over a[lo + i..] and b[lo + j..]
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        len[i * w + j] = a[lo + i] === b[lo + j] ? len[(i + 1) * w + j + 1] + 1 : Math.max(len[(i + 1) * w + j], len[i * w + j + 1]);
+      }
+    }
+    for (let i = 0, j = 0; i < n && j < m; ) {
+      if (a[lo + i] === b[lo + j]) out.push([lo + i++, lo + j++]);
+      else if (len[(i + 1) * w + j] >= len[i * w + j + 1]) i++;
+      else j++;
+    }
+  }
+  for (let k = 0; endA + k < a.length; k++) out.push([endA + k, endB + k]);
+  return out;
+}
+
+/** Every token's partner on the other side of its hunk: a context token is its own, and a removed token's is an added
+ *  token of the same change block (the -/+ tokens between two context tokens) by {@link commonTokens}. Git aligns
+ *  lines; this aligns the tokens inside a rewritten run, so a change that only moves whitespace or line breaks leaves
+ *  every token its partner. */
+function tokenPartners(tokens: readonly InstrumentToken[]): Map<number, number> {
+  const partner = new Map<number, number>();
+  let block: Record<"del" | "add", number[]> = { del: [], add: [] };
+  const align = () => {
+    const text = (ids: number[]) => ids.map((id) => tokens[id]!.text);
+    for (const [i, j] of commonTokens(text(block.del), text(block.add))) partner.set(block.del[i]!, block.add[j]!).set(block.add[j]!, block.del[i]!);
+    block = { del: [], add: [] };
+  };
+  tokens.forEach((t, id) => {
+    if (t.kind !== "ctx") block[t.kind].push(id);
+    else {
+      align();
+      partner.set(id, id);
+    }
+  });
+  align();
+  return partner;
+}
+
+/** Every pair the instrument's diff changes, hunk by hunk (a key never pairs across a hunk boundary). A new pair is
+ *  unchanged when its three tokens partner the three of one old pair under the same path, and any other token when
+ *  its partner has the same role in the same scope. `events` are the new side's changed pairs and its changed tokens
+ *  no pair holds (`undefined`), in order; `dropped`, an old orphan changed (an array entry removed). Lines before a
+ *  file's first `@@` form one hunk, as {@link walkDiff} keeps them. */
 function instrumentDiffPairs(diff: string, file: string): {
-  lines: Array<{ kind: DiffLine["kind"]; text: string }>; removed: InstrumentPair[]; added: InstrumentPair[]; unaccounted: Set<number>;
+  lines: number; removed: InstrumentPair[]; added: InstrumentPair[]; events: Array<InstrumentPair | undefined>; dropped: boolean;
 } {
-  const hunks: Array<Array<{ kind: DiffLine["kind"]; text: string; index: number }>> = [];
-  const lines: Array<{ kind: DiffLine["kind"]; text: string }> = [];
+  const hunks: Array<Array<{ kind: DiffLine["kind"]; text: string }>> = [];
+  let lines = 0;
   let current = "";
-  let hunk: Array<{ kind: DiffLine["kind"]; text: string; index: number }> | undefined;
+  let hunk: Array<{ kind: DiffLine["kind"]; text: string }> | undefined;
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git")) {
       current = raw.match(/\sb\/(\S+)\s*$/)?.[1] ?? "";
@@ -10850,24 +10921,43 @@ function instrumentDiffPairs(diff: string, file: string): {
     if (current !== file) continue;
     if (raw.startsWith("@@") || hunk === undefined) hunks.push((hunk = []));
     if (raw.startsWith("@@")) continue;
+    lines++;
+    if (raw.startsWith("\\")) continue; // git's `\ No newline at end of file` describes the line above; it is no content
     const kind: DiffLine["kind"] = raw.startsWith("+") ? "add" : raw.startsWith("-") ? "del" : "ctx";
-    const line = { kind, text: kind === "ctx" && !raw.startsWith(" ") ? raw : raw.slice(1), index: lines.length };
-    lines.push(line);
-    hunk.push(line);
+    hunk.push({ kind, text: kind === "ctx" && !raw.startsWith(" ") ? raw : raw.slice(1) });
   }
   const removed: InstrumentPair[] = [];
   const added: InstrumentPair[] = [];
-  const unaccounted = new Set<number>();
+  const events: Array<InstrumentPair | undefined> = [];
+  let dropped = false;
   for (const h of hunks) {
-    const before = instrumentSidePairs(h.filter((l) => l.kind !== "add"));
-    const after = instrumentSidePairs(h.filter((l) => l.kind !== "del"));
-    removed.push(...before.pairs.filter((p) => p.lines.some((i) => lines[i]!.kind === "del")));
-    const changed = after.pairs.filter((p) => p.lines.some((i) => lines[i]!.kind === "add"));
-    added.push(...changed);
-    const held = new Set(changed.flatMap((p) => p.lines));
-    for (const l of h) if (l.kind === "add" && (after.orphans.has(l.index) || !held.has(l.index))) unaccounted.add(l.index);
+    const tokens = hunkTokens(h);
+    const before = instrumentSide(tokens, "add");
+    const after = instrumentSide(tokens, "del");
+    const partner = tokenPartners(tokens);
+    const keyAt = new Map(after.pairs.map((p) => [p.tokens[0], p]));
+    const kept = new Set<InstrumentPair>();
+    for (const p of before.pairs) {
+      const q = keyAt.get(partner.get(p.tokens[0]) ?? -1);
+      if (q?.path === p.path && p.tokens.every((id, i) => partner.get(id) === q.tokens[i])) kept.add(q);
+      else removed.push(p);
+    }
+    const same = (id: number, mine: Map<number, InstrumentRole>, theirs: Map<number, InstrumentRole>): boolean => {
+      const [a, b] = [mine.get(id), theirs.get(partner.get(id) ?? -1)];
+      return a?.name === b?.name && a?.scope === b?.scope;
+    };
+    const valueAt = new Map(after.pairs.map((p) => [p.tokens[2], p]));
+    tokens.forEach((_, id) => {
+      if (before.roles.get(id)?.name === "orphan" && !same(id, before.roles, after.roles)) dropped = true;
+      const role = after.roles.get(id)?.name;
+      const pair = valueAt.get(id);
+      if (pair !== undefined && !kept.has(pair)) {
+        events.push(pair);
+        added.push(pair);
+      } else if ((role === "orphan" || role === "bracket") && !same(id, after.roles, before.roles)) events.push(undefined);
+    });
   }
-  return { lines, removed, added, unaccounted };
+  return { lines, removed, added, events, dropped };
 }
 
 /** W1-T3133: classify one instrument's change. `introduced` requires a new file and an added/changed reader
@@ -10889,39 +10979,40 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
   const direction = stricterDirectionFor(file);
   if (direction === undefined) return "undetermined";
 
-  const { lines, removed, added, unaccounted } = instrumentDiffPairs(diff, file);
-  if (lines.length === 0) return "undetermined";
+  const { lines, removed, added, events, dropped } = instrumentDiffPairs(diff, file);
+  if (lines === 0) return "undetermined";
 
-  // One name with several removed values (a per-file ledger's `legacy` under two files, mutation's root and nightly
-  // `scorePct`) cannot say which old value an added one replaces, so any added value under that name is unaccountable.
-  const removedByKey = new Map<string, Set<number>>();
+  // One path with several removed values (two hunks that each cut away their pair's parent, a duplicated key) cannot
+  // say which old value an added one replaces, so any added value under that path is unaccountable.
+  const removedByPath = new Map<string, Set<number>>();
+  const net = new Map<string, number>();
   for (const p of removed) {
-    if (typeof p.value === "number") removedByKey.set(p.key, (removedByKey.get(p.key) ?? new Set()).add(p.value));
+    if (typeof p.value === "number") removedByPath.set(p.path, (removedByPath.get(p.path) ?? new Set()).add(p.value));
+    net.set(p.path, (net.get(p.path) ?? 0) + 1);
   }
-  // A removed row is strictly fewer exemptions / one less recorded allowance. Always tightening.
-  let sawTightening = lines.some((l) => l.kind === "del");
-  for (const [index, l] of lines.entries()) {
-    if (l.kind !== "add") continue;
-    // W1-T3182: a line carrying ONLY provenance/prose rows is accountable (a correct re-capture must refresh
-    // `capturedAt`); anything else no pair accounts for -- including a line with no parseable row -- still refuses.
-    if (unaccounted.has(index)) return "undetermined"; // a hunk this parser cannot account for
-    // Each changed pair is judged once, at its last added line: its value may sit on a context line below.
-    for (const { key, value } of added.filter((p) => p.lines.filter((i) => lines[i]!.kind === "add").at(-1) === index)) {
-      if (typeof value === "string" && isInstrumentProvenanceKey(key)) continue;
-      if (typeof value !== "number") return "undetermined";
-      const before = removedByKey.get(key);
-      if (before === undefined) {
-        // A brand-new key is admissible ONLY when it names a source file this diff also adds.
-        if (!diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) return "undetermined";
-        continue;
-      }
-      if (before.size !== 1) return "undetermined";
-      const [was] = before;
-      if (value === was) continue;
-      const stricter = direction === "lower" ? value < was : value > was;
-      if (!stricter) return "loosening";
-      sawTightening = true;
+  for (const p of added) net.set(p.path, (net.get(p.path) ?? 0) - 1);
+  // A removed row or entry is strictly fewer exemptions / one less recorded allowance. Always tightening. Tokens that
+  // only moved (a blank line, re-indentation, a comma, a reordered key) removed nothing (PR #20033's third review).
+  let sawTightening = dropped || [...net.values()].some((n) => n > 0);
+  for (const pair of events) {
+    // W1-T3182: a pair carrying ONLY provenance/prose is accountable (a correct re-capture must refresh `capturedAt`);
+    // a changed token no pair holds -- a structural line, a row this parser cannot read -- still refuses.
+    if (pair === undefined) return "undetermined"; // a hunk this parser cannot account for
+    const { key, path, value } = pair;
+    if (typeof value === "string" && isInstrumentProvenanceKey(key)) continue;
+    if (typeof value !== "number") return "undetermined";
+    const before = removedByPath.get(path);
+    if (before === undefined) {
+      // A brand-new key is admissible ONLY when it names a source file this diff also adds.
+      if (!diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) return "undetermined";
+      continue;
     }
+    if (before.size !== 1) return "undetermined";
+    const [was] = before;
+    if (value === was) continue;
+    const stricter = direction === "lower" ? value < was : value > was;
+    if (!stricter) return "loosening";
+    sawTightening = true;
   }
   return sawTightening ? "tightening" : "undetermined";
 }
