@@ -9,11 +9,13 @@ import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import type { Config } from "./config.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
-import { mergeVerdictReceipts, readVerdictReceipts, verdictReceiptOf } from "./inbox-verdict-receipts.js";
 
 export { proposalVerdictCommand as proposalVerdictInProcess } from "./inbox-verdict-command.js";
 const inboxCliTokensPath = (root: string): string => join(root, "state", "service-tokens.json");
+const servePortPath = (root: string): string => join(root, "state", "serve-port");
+export const INBOX_TERMINAL_VERDICT_HEADER = "x-remudero-terminal-verdict";
 
 type ServePortResolver = (rest: string[], configPort?: number) => number;
 export type InboxCliServeConfig = Pick<Config, "root" | "serve"> & { resolveServePort: ServePortResolver };
@@ -21,8 +23,13 @@ export type InboxCliServeConfig = Pick<Config, "root" | "serve"> & { resolveServ
 /** Share serve's port validation through the caller to keep this module out of serve's import cycle. */
 export function resolveLocalServePort(rest: string[], configPort: number | undefined, resolveServePort: ServePortResolver): number {
   const envPort = process.env.RMD_SERVE_PORT;
-  if (rest.includes("--port") || configPort !== undefined || !envPort) return resolveServePort(rest, configPort);
+  if (rest.includes("--port") || !envPort) return resolveServePort(rest, configPort);
   return resolveServePort(["--port", envPort]);
+}
+
+/** Publish only after binding so a separate CLI process can discover the launcher's --port. */
+export function publishLocalServePort(root: string, port: number): void {
+  writeAtomic(servePortPath(root), `${port}\n`, { mode: 0o600 });
 }
 
 /** W1-T13238: how long an Inbox verb waits to connect to the running serve before it runs in-process instead. */
@@ -35,9 +42,9 @@ export interface InboxCliServeTarget { url: string; token: string }
 export function inboxCliServeTarget(config: InboxCliServeConfig): InboxCliServeTarget | { reason: string } {
   let port: number;
   try {
-    port = resolveLocalServePort([], config.serve?.port, config.resolveServePort);
+    const published = readFileIfExists(servePortPath(config.root))?.trim();
+    port = resolveLocalServePort(published === undefined ? [] : ["--port", published], config.serve?.port, config.resolveServePort);
   } catch (error) {
-    // serve refuses to start on this port, so no serve listens on it: the reason makes the CLI run in-process.
     return { reason: (error as Error).message };
   }
   let write: unknown;
@@ -85,14 +92,14 @@ export function serveFirstInboxActions(targetFor: () => ReturnType<typeof inboxC
   return Object.fromEntries(entries) as unknown as InboxVerbActions;
 }
 
-function postInboxVerb(url: string, token: string, body: unknown, connectMs: number):
+function postInboxVerb(url: string, token: string, body: unknown, connectMs: number, headers?: Record<string, string>):
   Promise<{ status: number; body: unknown } | { unreachable: string } | { failed: string }> {
   const payload = Buffer.from(JSON.stringify(body));
   return new Promise((resolve) => {
     let connected = false;
     // Use a direct loopback connection even when Node's global agent is configured for a proxy.
     const req = httpRequest(url, { agent: false, method: "POST", headers: { "content-type": "application/json", "content-length": payload.length,
-      authorization: `Bearer ${token}` } }, (res) => {
+      authorization: `Bearer ${token}`, ...headers } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("error", (error) => resolve({ failed: error.message }));
@@ -132,12 +139,12 @@ export function proposalVerdictReceipt(kind: "decline" | "restore", proposalId: 
     : `rmd restore: ${proposalId} RESTORED — it is back in the inbox and classifies as it would have before the decline`;
 }
 
-/** A legacy verdict can check the listener with a TCP connection alone. */
-function inboxServeConnectionError(url: string, connectMs: number): Promise<string | undefined> {
+/** Archived skill-draft restores need the terminal archive reader and only probe serve for a fallback warning. */
+function inboxServeConnectionError(url: string): Promise<string | undefined> {
   const address = new URL(url);
   return new Promise((resolve) => {
     const socket = createConnection({ host: address.hostname, port: Number(address.port || 80) });
-    const timer = setTimeout(() => finish("CONNECT_TIMEOUT"), connectMs);
+    const timer = setTimeout(() => finish("CONNECT_TIMEOUT"), INBOX_CLI_SERVE_CONNECT_MS);
     function finish(reason?: string): void {
       clearTimeout(timer);
       socket.destroy();
@@ -154,7 +161,7 @@ function inboxServeConnectionError(url: string, connectMs: number): Promise<stri
  * the route would not take, no serve target or no serve answering the connect run `inProcess`, which validates and acts.
  */
 export async function proposalVerdictViaServe(kind: "decline" | "restore", rest: string[], config: InboxCliServeConfig,
-  inProcess: () => number, opts: { connectMs?: number; legacyVerdict?: (proposalId: string) => boolean } = {}): Promise<number> {
+  inProcess: () => number, localOnly = false): Promise<number> {
   const proposalId = rest[0];
   const reason = rest.length === 3 && rest[1] === "--reason" ? rest[2] : undefined;
   // Arguments the HTTP route rejects stay with the original terminal parser.
@@ -164,14 +171,14 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
     console.error(`rmd ${kind}: ${target.reason}; running in-process`);
     return inProcess();
   }
-  const connectMs = opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS;
-  if (opts.legacyVerdict?.(proposalId)) {
-    const error = await inboxServeConnectionError(target.url, connectMs);
+  if (localOnly) {
+    const error = await inboxServeConnectionError(target.url);
     if (error !== undefined) console.error(`rmd ${kind}: ${unansweredServe(target.url, error)}; running in-process`);
     return inProcess();
   }
   const spec = INBOX_VERBS.find((verb) => verb.name === kind)!;
-  const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, { proposalId, reason }, connectMs);
+  const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, { proposalId, reason }, INBOX_CLI_SERVE_CONNECT_MS,
+    { [INBOX_TERMINAL_VERDICT_HEADER]: "1" });
   if ("unreachable" in answer) {
     console.error(`rmd ${kind}: ${unansweredServe(target.url, answer.unreachable)}; running in-process`);
     return inProcess();
@@ -185,21 +192,5 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
   const detail = refusal?.detail ?? refusal?.error;
   console.error(`rmd ${kind}: ${typeof detail === "string" ? detail : `serve answered ${answer.status}`}`);
   return 1;
-}
-
-/**
- * W1-T13238: could serve's verdict route answer this proposal differently from the in-process `rmd decline`/`restore`?
- * Serve re-opens a declined verify-human item once the observed state its decline recorded has changed (W1-T10077's
- * declineLapse, in classifyAllProposals): a later decline then records anew and exits 0, and a restore is refused as not
- * declined. The in-process verdict (loadProposalForRatify) applies no lapse, so it answers "already declined" and exits
- * 1, or restores. Telling a real lapse needs the dependencies' merge state, which is live gh, so this answers from the
- * local ledger alone: a verify-human item whose newest verdict receipt is a decline that recorded an observed state,
- * the only receipt declineLapse can lapse. A receipt that has not lapsed gives the same answer on both paths.
- */
-export function verdictMayDifferOnServe(proposalId: string, ledgerRows: ReadonlyArray<Record<string, unknown>>, stateDir: string): boolean {
-  if (!/^verify-human:[A-Za-z0-9-]+$/.test(proposalId)) return false;
-  const receipts = mergeVerdictReceipts(readVerdictReceipts(stateDir), ledgerRows.flatMap((row) => verdictReceiptOf(row) ?? []));
-  const newest = receipts.findLast((receipt) => receipt.task_id === proposalId);
-  return newest?.step === "panel.proposal_declined" && newest.observed_state !== undefined;
 }
 

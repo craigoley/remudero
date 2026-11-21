@@ -254,7 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, resolveLocalServePort, verdictMayDifferOnServe } from "./lib/inbox-cli-serve.js";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31170,6 +31170,11 @@ export async function serveCommand(
   }
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+  try {
+    publishLocalServePort(config.root, port);
+  } catch (error) {
+    log("serve.port_publication_failed", { port, reason: (error as Error).message });
+  }
 
   // Start the projection only after a successful bind. The worker uses this process's one
   // GitHub gateway for facts and publishes complete snapshots; client reads never start a pass.
@@ -39842,11 +39847,8 @@ export async function inboxActionCliCommand(name: InboxVerbName, rest: string[],
  */
 function proposalVerdictServeFirst(kind: ProposalVerdictKind, rest: string[]): Promise<number> {
   const config = loadConfig();
-  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config), {
-    // ledger-read-intent: live — the in-process verdict this preserves reads the live file and the retained receipts.
-    legacyVerdict: (id) => (kind === "restore" && id.startsWith(SKILL_DRAFT_ID_PREFIX)) ||
-      verdictMayDifferOnServe(id, readLedgerLines(ledgerPathFor(config)), join(config.root, "state")),
-  });
+  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config),
+    kind === "restore" && rest[0]?.startsWith(SKILL_DRAFT_ID_PREFIX));
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {

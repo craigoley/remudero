@@ -12,13 +12,14 @@ import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
+import { fixedClock } from "#src/lib/clock.js";
 import { INBOX_VERBS, inboxVerbCommand, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
-import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, resolveLocalServePort, serveFirstInboxActions, verdictMayDifferOnServe, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
+import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, serveFirstInboxActions, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
 import { declinedWithReceipts } from "#src/lib/inbox-verdict-receipts.js";
 import { DEFAULT_SERVE_PORT, resolveServePort, serviceTokensPath } from "#src/lib/serve.js";
 import { readLedgerLines, type PrRef } from "#src/lib/status.js";
 import { anchorFingerprint, applyProposalVerdict } from "#src/lib/inbox.js";
-import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
+import { buildInboxVerbActions, buildPanelGraphRoutes, inboxTriagePath, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createService } from "#src/lib/service.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -146,7 +147,7 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
 });
 
-test("W1-T13238: the CLI uses the configured port, then RMD_SERVE_PORT, then serve's default", (t) => {
+test("W1-T13238: without a published listener the CLI uses RMD_SERVE_PORT, then the configured port, then serve's default", (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
   const base = { resolveServePort, root: root(t) };
@@ -154,18 +155,17 @@ test("W1-T13238: the CLI uses the configured port, then RMD_SERVE_PORT, then ser
 
   delete process.env.RMD_SERVE_PORT;
   assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${DEFAULT_SERVE_PORT}`, token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget({ ...base, serve: { port: 0 } }), { reason: "config serve.port must be an integer 1-65535, got 0" });
   process.env.RMD_SERVE_PORT = String(SERVE_PORT);
   assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${SERVE_PORT}`, token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
+  assert.deepEqual(inboxCliServeTarget(configured), { url: `http://127.0.0.1:${SERVE_PORT}`, token: TOKEN });
   process.env.RMD_SERVE_PORT = "invalid";
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(base), { reason: '--port must be an integer 1-65535, got "invalid"' });
+  assert.deepEqual(inboxCliServeTarget(configured), { reason: '--port must be an integer 1-65535, got "invalid"' });
   assert.equal(resolveLocalServePort(["--port", "4418"], 9, resolveServePort), 4418);
-  // A serve.port serve refuses to bind is no serve address: the CLI names serve's own refusal and runs in-process.
-  assert.deepEqual(inboxCliServeTarget({ ...base, serve: { port: 0 } }), { reason: "config serve.port must be an integer 1-65535, got 0" });
 });
 
-test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale RMD_SERVE_PORT answers 404", async (t) => {
+test("W1-T13238 criterion 1: rmd archive reaches the published serve port while a stale RMD_SERVE_PORT answers 404", async (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
   const { server, seen } = serve(fakeActions());
@@ -177,7 +177,8 @@ test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale 
   });
   useHttpEndpoints(t, new Map([[port, server], [STALE_PORT, stale]]));
   process.env.RMD_SERVE_PORT = String(STALE_PORT);
-  const config = { resolveServePort, root: root(t), serve: { port } } as unknown as InboxCliServeConfig;
+  const config = { resolveServePort, root: root(t), serve: { port } };
+  publishLocalServePort(config.root, port);
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
   assert.deepEqual(staleRequests, [], "the stale listener received no request or bearer");
   assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
@@ -185,7 +186,7 @@ test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale 
   assert.deepEqual(seen, [request]);
 });
 
-test("W1-T13238 criterion 1: rmd archive reaches a launcher-selected RMD_SERVE_PORT without serve.port", async (t) => {
+test("W1-T13238 criterion 1: rmd archive reaches the launcher override RMD_SERVE_PORT=4417 with serve.port=4317", async (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
   process.env.RMD_SERVE_PORT = String(SERVE_PORT);
@@ -195,11 +196,27 @@ test("W1-T13238 criterion 1: rmd archive reaches a launcher-selected RMD_SERVE_P
   assert.equal(port, SERVE_PORT);
   const defaultListener = serve(fakeActions());
   useHttpEndpoints(t, new Map([[port, server], [DEFAULT_SERVE_PORT, defaultListener.server]]));
-  const config = { resolveServePort, root: root(t) };
+  const config = { resolveServePort, root: root(t), serve: { port: 4317 } };
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => assert.fail("ran in-process")));
   assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
   assert.deepEqual(seen, [{ method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
   assert.deepEqual(defaultListener.seen, []);
+});
+
+test("W1-T13238 criterion 1: a separate CLI reaches the site listener bound by --port 4318 without inheriting the flag or environment", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  delete process.env.RMD_SERVE_PORT;
+  const config = { resolveServePort, root: root(t), serve: { port: 4317 } };
+  const port = resolveLocalServePort(["--port", "4318"], config.serve.port, resolveServePort);
+  const { server, seen } = serve(fakeActions());
+  const other = serve(fakeActions());
+  useHttpEndpoints(t, new Map([[port, server], [4317, other.server]]));
+  publishLocalServePort(config.root, port);
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => assert.fail("ran in-process")));
+  assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
+  assert.deepEqual(seen, [{ method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+  assert.deepEqual(other.seen, []);
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
@@ -219,10 +236,10 @@ test("W1-T13238: without a serve write token, the CLI warns once and returns the
   assert.equal(existsSync(join(config.root, "state", "service-tokens.json")), false);
 });
 
-test("W1-T13238 criterion 2: a stalled serve connection has one two-second deadline despite a stale override", async (t) => {
+test("W1-T13238 criterion 2: a stalled serve connection has one two-second deadline", async (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
-  process.env.RMD_SERVE_PORT = String(STALE_PORT);
+  delete process.env.RMD_SERVE_PORT;
   const socket = Object.assign(new Socket(), { connecting: true });
   t.after(() => { socket.destroy(); });
   const connect = t.mock.method(Agent.prototype, "createConnection", () => socket);
@@ -464,6 +481,68 @@ test("W1-T13238 criterion 3: the CLI preserves age-only verdicts when serve's re
   assert.equal(readFileSync(world.ledgerPath, "utf8"), "", "the serve routes recorded no verdict");
 });
 
+function triageWorld(t: Ctx, now: number): PanelGraphDeps {
+  const dir = root(t);
+  const planPath = join(dir, "tasks.yaml");
+  const ledgerPath = join(dir, "state", "ledger.ndjson");
+  writeFileSync(planPath, "[]\n");
+  writeFileSync(ledgerPath, "");
+  writeFileSync(join(dir, "state", "inbox-proposals.json"), JSON.stringify({
+    proposals: ["P1", "P2"].map(id => ({ id, summary: `${id} needs a decision`, evidenceAnchors: [] })),
+  }));
+  return { root: dir, inboxRoot: dir, planPath, ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(),
+    ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40), inboxClock: fixedClock(now) };
+}
+
+test("W1-T13238 criterion 3: expired snoozes print the same refusal through the real route and locally at different times", async (t) => {
+  const until = "2026-10-13T02:00:00Z";
+  const expiry = Date.parse(until);
+  const local = triageWorld(t, expiry + 1000);
+  const remote = triageWorld(t, expiry + 10_000);
+  const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(remote) });
+  useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
+  const config = { root: remote.root, resolveServePort, serve: { port: SERVE_PORT } };
+  const args = ["P1", "--until", until];
+  const inProcess = await captured(t, () => inboxVerbCommand("snooze", args, buildInboxVerbActions(local)));
+  const throughServe = await captured(t, () => inboxVerbViaServe("snooze", args, config, () => assert.fail("ran in-process")));
+  assert.deepEqual(throughServe, inProcess);
+  assert.deepEqual(throughServe, { code: 2, out: [], err: [JSON.stringify({ error: "invalid_request", detail: "until must be in the future" })] });
+  for (const deps of [local, remote]) assert.deepEqual(readLedgerLines(deps.ledgerPath), []);
+});
+
+test("W1-T13238 criterion 3: successful terminal declines through serve preserve archive and keep marks and the next archive receipt", async (t) => {
+  const time = Date.parse("2026-10-13T02:00:00Z");
+  const local = triageWorld(t, time);
+  const remote = triageWorld(t, time);
+  const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes({ ...remote, inboxClock: fixedClock(time + 1000) }) });
+  useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
+  const config = { root: remote.root, resolveServePort, serve: { port: SERVE_PORT } };
+  const noFallback = () => assert.fail("ran in-process");
+  const readMarks = (deps: PanelGraphDeps) => JSON.parse(readFileSync(inboxTriagePath(join(deps.inboxRoot, "state")), "utf8"));
+  for (const deps of [local, remote]) {
+    const actions = buildInboxVerbActions(deps);
+    assert.equal((await captured(t, () => inboxVerbCommand("archive", ["P1"], actions))).code, 0);
+    assert.equal((await captured(t, () => inboxVerbCommand("keep", ["P2"], actions))).code, 0);
+  }
+  const marks = readMarks(local);
+  assert.equal(marks.P1.archivedAt, new Date(time).toISOString());
+  assert.equal(marks.P2.keptAt, new Date(time).toISOString());
+  assert.deepEqual(readMarks(remote), marks);
+
+  for (const id of ["P1", "P2"]) {
+    const args = [id, "--reason", "duplicate"];
+    const inProcess = await captured(t, async () => proposalVerdictInProcess("decline", args, proposalId => ({ exists: proposalId === id }), () => {}));
+    const viaServe = await captured(t, () => proposalVerdictViaServe("decline", args, config, noFallback));
+    assert.deepEqual(viaServe, inProcess);
+    assert.equal(viaServe.code, 0);
+  }
+  assert.deepEqual(readMarks(remote), marks);
+  const declines = readLedgerLines(remote.ledgerPath).filter(row => row.step === "panel.proposal_declined");
+  assert.deepEqual(declines.map(row => [row.task_id, row.reason]), [["P1", "duplicate"], ["P2", "duplicate"]]);
+  const archived = await captured(t, () => inboxVerbViaServe("archive", ["P1"], config, noFallback));
+  assert.deepEqual(archived, { code: 0, out: [JSON.stringify({ ok: true, proposalId: "P1", archived: true, archivedAt: marks.P1.archivedAt })], err: [] });
+});
+
 /** A core-shaped root as test/a-decline-holds-until-the-state-it-judged-changes builds it: verify-human:W3-T7 declined
  *  on 2026-10-13 while its dependencies were unmerged, and both have merged since, so serve's route re-opens it. */
 const PARKED = "verify-human:W3-T7";
@@ -473,11 +552,7 @@ const PARKED_DECLINE = { ts: "2026-10-13T02:56:30.145Z", run_id: "PANEL-1", task
 
 test("W1-T13238 criterion 2: a verify-human decline with an observed-state receipt explains unavailable serve", async (t) => {
   const port = SERVE_PORT;
-  const connect = t.mock.method(Socket.prototype, "connect", function (this: Socket) {
-    globalThis.setImmediate(() => this.destroy(Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" })));
-    return this;
-  });
-  t.mock.method(Agent.prototype, "createConnection", () => assert.fail("attempted an HTTP write for the observed-state decline"));
+  useHttpEndpoints(t);
   const args = [PARKED, "--reason", "still not now"];
 
   for (const [token, warning] of [
@@ -491,15 +566,13 @@ test("W1-T13238 criterion 2: a verify-human decline with an observed-state recei
     writeFileSync(ledgerPath, before);
     const rows = readLedgerLines(ledgerPath);
     const declined = declinedWithReceipts(rows, stateDir);
-    const legacyVerdict = (id: string) => verdictMayDifferOnServe(id, rows, stateDir);
-    assert.equal(legacyVerdict(PARKED), true);
     const inProcess = t.mock.fn(() => proposalVerdictInProcess("decline", args, (id) => ({
       exists: id === PARKED,
       classification: { proposalId: id, state: "declined", reasons: [], declinedReason: declined(id) },
     }), () => assert.fail("recorded a second decline")));
 
     const result = await captured(t, () => proposalVerdictViaServe("decline", args,
-      { root: dir, resolveServePort, serve: { port } }, inProcess, { legacyVerdict }));
+      { root: dir, resolveServePort, serve: { port } }, inProcess));
     assert.deepEqual(result, {
       code: 1,
       out: [],
@@ -508,16 +581,15 @@ test("W1-T13238 criterion 2: a verify-human decline with an observed-state recei
     assert.equal(inProcess.mock.callCount(), 1);
     assert.equal(readFileSync(ledgerPath, "utf8"), before);
   }
-  assert.equal(connect.mock.callCount(), 1, "only the credentialed attempt checked the listener");
 });
 
-test("W1-T13238 criterion 2: the legacy verdict's connection check stops after two seconds", async (t) => {
+test("W1-T13238 criterion 2: the archived skill-draft restore connection check stops after two seconds", async (t) => {
   const connect = t.mock.method(Socket.prototype, "connect", function (this: Socket) { return this; });
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const config = { resolveServePort, root: root(t), serve: { port: SERVE_PORT } };
   const local = t.mock.fn(() => 1);
   const result = await captured(t, async () => {
-    const run = proposalVerdictViaServe("decline", [PARKED, "--reason", "duplicate"], config, local, { legacyVerdict: () => true });
+    const run = proposalVerdictViaServe("restore", ["skill-draft:parked", "--reason", "reconsidered"], config, local, true);
     assert.equal(connect.mock.callCount(), 1);
     t.mock.timers.tick(1_999);
     await setImmediate();
@@ -526,11 +598,11 @@ test("W1-T13238 criterion 2: the legacy verdict's connection check stops after t
     return run;
   });
   assert.deepEqual(result, { code: 1, out: [],
-    err: [`rmd decline: no serve answered at http://127.0.0.1:${SERVE_PORT} (CONNECT_TIMEOUT); running in-process`] });
+    err: [`rmd restore: no serve answered at http://127.0.0.1:${SERVE_PORT} (CONNECT_TIMEOUT); running in-process`] });
   assert.equal(local.mock.callCount(), 1);
 });
 
-function lapsedDeclineServe(t: Ctx): { root: string; ledgerPath: string; stateDir: string } {
+function lapsedDeclineServe(t: Ctx) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-inbox-cli-lapse-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const stateDir = join(dir, "state"), planPath = join(dir, "plan", "tasks.yaml"), ledgerPath = join(stateDir, "ledger.ndjson");
@@ -552,17 +624,15 @@ function lapsedDeclineServe(t: Ctx): { root: string; ledgerPath: string; stateDi
       prBody: (url: string) => (url.startsWith("https://github.com/o/r/pull/") ? `Remudero-Task: ${taskOfUrl(url)}\n` : undefined),
     }), ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40) };
   const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(deps) });
+  const requests: string[] = [];
+  server.prependListener("request", (req) => requests.push(`${req.method} ${req.url}`));
   useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
-  return { root: dir, ledgerPath, stateDir };
+  return { root: dir, ledgerPath, stateDir, requests };
 }
 
-test("W1-T13238 criterion 3: a verify-human decline serve re-opens after its dependencies merged prints and exits as in-process", async (t) => {
+test("W1-T13238 criterion 3: a terminal POST preserves the recorded decline after its dependencies merge", async (t) => {
   const world = lapsedDeclineServe(t);
   const config = { resolveServePort, root: world.root, serve: { port: SERVE_PORT } };
-  t.mock.method(Socket.prototype, "connect", function (this: Socket) {
-    globalThis.setImmediate(() => this.emit("connect"));
-    return this;
-  });
   const before = readFileSync(world.ledgerPath, "utf8");
   // The in-process verdict as loadProposalForRatify classifies it: the ledger's decline, with no lapse applied.
   const legacyFind = (id: string) => {
@@ -570,24 +640,23 @@ test("W1-T13238 criterion 3: a verify-human decline serve re-opens after its dep
     return id !== PARKED ? { exists: false } : { exists: true, classification: declinedReason === undefined
       ? { proposalId: id, state: "ready" as const, reasons: [] } : { proposalId: id, state: "declined" as const, reasons: [], declinedReason } };
   };
-  // What run-task.ts's proposalVerdictServeFirst passes: the live ledger and the retained receipts.
-  const legacyVerdict = (id: string) => verdictMayDifferOnServe(id, readLedgerLines(world.ledgerPath), world.stateDir);
-  for (const kind of ["decline", "restore"] as const) {
-    const args = [PARKED, "--reason", "still not now"];
-    const recorded: Array<[string, string, string]> = [];
-    const inProcess = () => proposalVerdictInProcess(kind, args, legacyFind, (...row) => { recorded.push(row); });
-    const local = await captured(t, async () => inProcess());
-    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, inProcess, { legacyVerdict }));
-    assert.deepEqual(remote, local, kind);
-    assert.deepEqual(local, kind === "decline"
-      ? { code: 1, out: [], err: [`rmd decline: ${PARKED} was already declined (${PARKED_REASON})`] }
-      : { code: 0, out: [`rmd restore: ${PARKED} RESTORED — it is back in the inbox and classifies as it would have before the decline`], err: [] });
-  }
-  assert.equal(readFileSync(world.ledgerPath, "utf8"), before, "serve's route recorded no second decline");
-  // Positive control: serve's real route does re-open this item, so a post would have printed a fresh decline receipt.
-  const posted = await captured(t, () => proposalVerdictViaServe("decline", [PARKED, "--reason", "still not now"], config, () => assert.fail("ran in-process")));
-  assert.deepEqual(posted, { code: 0, out: [`rmd decline: ${PARKED} DECLINED — take it back with rmd restore ${PARKED} --reason "<text>"`], err: [] });
-  // Only a verify-human decline that recorded an observed state can lapse; every other item still posts.
-  assert.equal(verdictMayDifferOnServe("board-review:stale:PR-7", readLedgerLines(world.ledgerPath), world.stateDir), false);
-  assert.equal(verdictMayDifferOnServe(PARKED, [{ ts: "2026-10-13T02:56:30.145Z", task_id: PARKED, step: "panel.proposal_declined" }], join(world.root, "none")), false);
+  const args = [PARKED, "--reason", "still not now"];
+  const noFallback = () => assert.fail("ran in-process");
+  const local = await captured(t, async () => proposalVerdictInProcess("decline", args, legacyFind, () => assert.fail("recorded a second decline")));
+  const remote = await captured(t, () => proposalVerdictViaServe("decline", args, config, noFallback));
+  assert.deepEqual(remote, local);
+  assert.deepEqual(remote, { code: 1, out: [], err: [`rmd decline: ${PARKED} was already declined (${PARKED_REASON})`] });
+  assert.equal(readFileSync(world.ledgerPath, "utf8"), before);
+
+  const consoleActions = serveFirstInboxActions(() => inboxCliServeTarget(config), noFallback);
+  const consoleRestore = await captured(t, () => inboxVerbCommand("restore", args, consoleActions));
+  assert.equal(consoleRestore.code, 1);
+  assert.equal(JSON.parse(consoleRestore.err[0]!).error, "not_declined", "the Console still sees the reopened item");
+
+  const localRestore = await captured(t, async () => proposalVerdictInProcess("restore", args, legacyFind, () => {}));
+  const remoteRestore = await captured(t, () => proposalVerdictViaServe("restore", args, config, noFallback));
+  assert.deepEqual(remoteRestore, localRestore);
+  assert.equal(remoteRestore.code, 0);
+  assert.deepEqual(world.requests, ["POST /v1/inbox/decline", "POST /v1/inbox/restore", "POST /v1/inbox/restore"]);
+  assert.deepEqual(readLedgerLines(world.ledgerPath).map(row => row.step), ["panel.proposal_declined", "panel.proposal_restored"]);
 });
