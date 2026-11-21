@@ -1950,11 +1950,10 @@ export type FreshTreeReviewSeams = {
    *  Only ever handed a path whose `addWorktree` this process saw succeed. */
   removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
   /**
-   * Classify the stable reviewer path before an add. `unsafe` deliberately combines a registered
-   * path with a wrong ref, a branch checkout, dirt, a missing checkout, or an unreadable registry:
-   * none proves a child would judge from the requested source revision. Optional only so the
-   * production implementation remains one small, real git-backed default while focused tests can
-   * name each preparation state without making a repository.
+   * Classify the stable reviewer path before an add. `unsafe` means a readable registered
+   * checkout with a wrong ref, a branch, or dirt. An unreadable registry or a registered checkout
+   * that Git cannot read throws into the preparation refusal. The optional seam lets focused
+   * tests name each preparation state without making a repository.
    */
   inspectExistingWorktree?: (
     repoDir: string,
@@ -2007,12 +2006,13 @@ function inspectFreshReviewerWorktree(
     .map((block) => block.split("\n"));
   const block = blocks.find((lines) => lines.some((line) => line.startsWith("worktree ") && canonicalPath(line.slice("worktree ".length)) === expectedPath));
   if (!block) return "absent";
+  // A registered checkout that Git cannot read must skip even when its registered HEAD differs.
+  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
   const listedHead = block.find((line) => line.startsWith("HEAD "))?.slice("HEAD ".length);
   // A `branch` line says it is not detached. A stale reviewer must never make an existing ref its
   // recovery surface even when the ref happens to resolve to the requested commit today.
   if (block.some((line) => line.startsWith("branch ")) || listedHead !== revision) return "unsafe";
-  const actualHead = git(["-C", worktreePath, "rev-parse", "HEAD"]).trim();
-  const porcelain = git(["-C", worktreePath, "status", "--porcelain", "-uno"]);
   return actualHead === revision && porcelain.trim() === "" ? "reusable" : "unsafe";
 }
 

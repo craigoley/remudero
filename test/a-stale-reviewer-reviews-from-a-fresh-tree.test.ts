@@ -180,7 +180,16 @@ test("W1-T3962 fresh reviewer preparation refusal never spawns an incomplete tre
 });
 
 test("W1-T3962 fresh reviewer unproven tree control, W1-T14066 criterion 4: a mismatched or dirty shared tree is never added over or reviewed in; a missing or unreadable one never adds or spawns", async () => {
-  for (const reason of ["mismatched", "dirty", "missing", "unreadable"]) {
+  const cases = [
+    { reason: "mismatched", wrongHead: true },
+    { reason: "dirty" },
+    { reason: "missing" },
+    { reason: "missing", wrongHead: true },
+    { reason: "unreadable registry" },
+    { reason: "unreadable checkout", wrongHead: true },
+  ];
+  for (const { reason, wrongHead } of cases) {
+    const context = wrongHead ? `${reason} with wrong registered HEAD` : reason;
     const added: string[] = [];
     const removed: string[] = [];
     const spawns: string[] = [];
@@ -190,16 +199,19 @@ test("W1-T3962 fresh reviewer unproven tree control, W1-T14066 criterion 4: a mi
       git: (args) => {
         if (args.includes("fetch")) return "";
         if (args.includes("worktree") && args.includes("list")) {
-          if (reason === "unreadable") throw new Error("registry unreadable");
+          if (reason === "unreadable registry") throw new Error("registry unreadable");
           const own = added.map((path) => `worktree ${path}\nHEAD ${revision}\ndetached\n\n`).join("");
-          return `worktree ${worktree}\nHEAD ${reason === "mismatched" ? "aaaaaaaaaaaa" : revision}\ndetached\n\n${own}`;
+          return `worktree ${worktree}\nHEAD ${wrongHead ? "aaaaaaaaaaaa" : revision}\ndetached\n\n${own}`;
         }
         const ownTree = added.includes(args[1] ?? "");
         if (args.includes("rev-parse")) {
           if (reason === "missing" && !ownTree) throw new Error("registered checkout missing");
-          return `${revision}\n`;
+          return `${!ownTree && wrongHead ? "aaaaaaaaaaaa" : revision}\n`;
         }
-        if (args.includes("status")) return reason === "dirty" && !ownTree ? " M tracked.ts\n" : "";
+        if (args.includes("status")) {
+          if (reason === "unreadable checkout" && !ownTree) throw new Error("registered checkout unreadable");
+          return reason === "dirty" && !ownTree ? " M tracked.ts\n" : "";
+        }
         throw new Error(`unexpected git read: ${args.join(" ")}`);
       },
       addWorktree: (_dir, path) => { added.push(path); },
@@ -221,10 +233,10 @@ test("W1-T3962 fresh reviewer unproven tree control, W1-T14066 criterion 4: a mi
       assert.deepEqual(spawns, added, `${reason}: the review runs only in the tree it cut`);
       assert.deepEqual(removed, added, `${reason}: the own tree is removed once the review settles`);
     } else {
-      assert.equal(code, undefined, reason);
-      assert.equal(added.length, 0, `${reason}: no tree is cut`);
-      assert.equal(spawns.length, 0, `${reason}: no review runs`);
-      assert.equal(removed.length, 0, reason);
+      assert.equal(code, undefined, context);
+      assert.equal(added.length, 0, `${context}: no tree is cut`);
+      assert.equal(spawns.length, 0, `${context}: no review runs`);
+      assert.equal(removed.length, 0, context);
     }
   }
 });
