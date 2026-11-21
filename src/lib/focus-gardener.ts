@@ -108,8 +108,8 @@ export interface FocusGateOptions {
   log: (step: string, fields: Record<string, unknown>) => void;
   clock?: Clock;
   dwellMs?: number;
-  /** W1-T13990: the fix lane's admitted and refused rounds since a time, from the gate's own ledger read. Absent or
-   *  unread, a hold is never released for an unused fix lane. */
+  /** W1-T13990: the fix lane's rounds run and refused since a time, from the ledger union and the gate's own live read.
+   *  Absent or unread, a hold is never released for an unused fix lane. */
   readFixRounds?: FixRoundReader;
 }
 

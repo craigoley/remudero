@@ -1679,7 +1679,7 @@ export async function daemonCommand(
   };
   const openPrCount = () => openPrOwnership().owned;
   // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
-  // W1-T13990: the fix-round reader reads the governor gate's own ledger read, so a hold with no admitted round lifts.
+  // W1-T13990: the fix-round reader joins the ledger union with the gate's own live read; a hold with no round run lifts.
   const governorGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
   const queueGate = focusGateFor(governorGate,
     { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now), readFixRounds: governorGate.readFixRounds });

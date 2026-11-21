@@ -17,6 +17,8 @@
  */
 import { readFileSync } from "node:fs";
 
+import { clockFromMillisFn, type Clock } from "./clock.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 import { BLOCKER_SLO_MS, type PrBlocker } from "./pr-blocker.js";
 
 /** BACKSTOP ONLY: the adaptive bound never exceeds this multiple of the base limit. */
@@ -99,7 +101,7 @@ export function deriveMovableStuckOwnedCount(
 
 /** W1-T13990: the fix lane's admissions since a time. */
 export interface FixRoundAdmissions {
-  /** `fix.dispatch` rows: rounds the fix lane started. */
+  /** `fix.dispatch` and `fix.retrigger` rows: rounds the fix lane ran (a retrigger-shaped round writes only the second). */
   admitted: number;
   /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
    *  `fixes_refused`), and `sweep.fix.dispatch_failed` rows: dispatches refused later or lost. */
@@ -108,7 +110,9 @@ export interface FixRoundAdmissions {
 /** Undefined when the fix lane's rows have not been read. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
-const FIX_ROUND_STEPS = new Set(["fix.dispatch", "sweep.fix_capacity", "sweep.fix.dispatch_failed"]);
+/** The rows that record a round the fix lane ran, as `priorStrikesFor` and the sweep's `dispatchStarted` read them. */
+const FIX_ROUND_RAN_STEPS = new Set(["fix.dispatch", "fix.retrigger"]);
+const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "sweep.fix_capacity", "sweep.fix.dispatch_failed"];
 
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
@@ -119,11 +123,11 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
   // A run child refused at its own admission also ends lost: that loss is the same refusal, counted once.
   const refusedRuns = new Set<string>();
   for (const line of lines) {
-    if (typeof line.step !== "string" || !FIX_ROUND_STEPS.has(line.step)) continue;
+    if (typeof line.step !== "string" || !FIX_ROUND_STEPS.includes(line.step)) continue;
     const ts = typeof line.ts === "string" ? Date.parse(line.ts) : NaN;
     if (!Number.isFinite(ts)) continue;
     const runId = typeof line.run_id === "string" ? line.run_id : "";
-    if (line.step === "fix.dispatch") {
+    if (FIX_ROUND_RAN_STEPS.has(line.step)) {
       admitted.push(ts);
     } else if (line.step === "sweep.fix_capacity") {
       const count = line.fixes_refused;
@@ -140,6 +144,64 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
     }
   }
   return (sinceMs) => ({ admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length });
+}
+
+/** W1-T13990: the fix-round rows stamped at or after a time in a ledger directory, or undefined when unread. */
+export type FixRoundUnionRead = (stateDir: string, sinceMs: number) => Promise<ReadonlyArray<Record<string, unknown>> | undefined>;
+
+/** W1-T13990: the union's fix-round rows since `sinceMs`, rotations and the live file, read off the loop. Rotation keeps
+ *  no `sweep.fix_capacity` row in the live file, so a refusal older than the last rotation is in an archive alone.
+ *  Undefined when a rotation, the live file or the directory could not be read: unknown is never idle. */
+export async function readFixRoundUnionRows(stateDir: string, sinceMs: number): Promise<ReadonlyArray<Record<string, unknown>> | undefined> {
+  let complete = true;
+  const unread = (): void => { complete = false; };
+  const rows = await readLedgerUnionRecords(stateDir, { since: clockFromMillisFn(() => sinceMs).iso(), step: FIX_ROUND_STEPS,
+    onUnreadArchive: unread, onUnreadLive: unread, onUnreadDirectory: unread });
+  return complete ? rows : undefined;
+}
+
+/** W1-T13990: the focus gate's fix-round reader over the ledger union, for a gate that answers synchronously. */
+export interface FixRoundUnionReader {
+  /** A reader for one consultation: the newest completed union read, joined once with the live `lines` the gate just
+   *  read (rows written after that read began). Each call starts the next read when none is in flight. Undefined
+   *  while no read has completed, when the newest was unreadable, or when it began before `sinceMs`. */
+  readerFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader;
+  /** Settles when the read in flight does. */
+  settled(): Promise<void>;
+}
+
+export function createFixRoundUnionReader(
+  stateDir: string, opts: { clock: Clock; read?: FixRoundUnionRead },
+): FixRoundUnionReader {
+  const read = opts.read ?? readFixRoundUnionRows;
+  let latest: { startedAtMs: number; rows: ReadonlyArray<Record<string, unknown>> | undefined } | undefined;
+  let inFlight: Promise<void> | undefined;
+  const start = (sinceMs: number): void => {
+    if (inFlight !== undefined) return;
+    const startedAtMs = opts.clock.now();
+    inFlight = Promise.resolve().then(() => read(stateDir, sinceMs)).then(
+      (rows) => { latest = { startedAtMs, rows }; },
+      (error: unknown) => {
+        void error; // A failed read is no reading, so the dwell is unknown and the hold stands.
+        latest = { startedAtMs, rows: undefined };
+      },
+    ).finally(() => { inFlight = undefined; });
+  };
+  return {
+    readerFor: (lines) => (sinceMs) => {
+      const snapshot = latest;
+      start(sinceMs);
+      if (snapshot?.rows === undefined || snapshot.startedAtMs < sinceMs) return undefined;
+      const seen = new Set(snapshot.rows.map((row) => JSON.stringify(row)));
+      const live = lines.filter((line) => typeof line.step === "string" && FIX_ROUND_STEPS.includes(line.step) &&
+        !seen.has(JSON.stringify(line)));
+      // In time order, so a pass's rows the read's window cut are its context, never a new controller.
+      const stamp = (row: Record<string, unknown>): number => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+      const rows = [...snapshot.rows, ...live].sort((a, b) => (stamp(a) || 0) - (stamp(b) || 0));
+      return fixRoundReaderFor(rows)(sinceMs);
+    },
+    settled: async () => { await inFlight; },
+  };
 }
 
 /** MemAvailable / MemTotal from a /proc/meminfo-shaped file; throws when either line is absent. */

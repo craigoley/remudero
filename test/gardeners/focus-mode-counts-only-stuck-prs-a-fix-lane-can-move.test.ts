@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -7,6 +7,7 @@ import * as adaptiveWip from "#src/lib/adaptive-wip.js";
 import * as focus from "#src/lib/focus-gardener.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { rotateLedger } from "#src/lib/ledger.js";
 import { loadPlan } from "#src/lib/plan.js";
 import {
   DEFAULT_SWEEP_POLICY, checkQueueGovernor, createSweepFixAdmissionController, logQueueGovernorDeferral, type OpenPrView,
@@ -237,8 +238,8 @@ test("W1-T13990 criterion 2: fixRoundReaderFor reads admitted and refused fix ro
     { ts: at(3), step: "sweep.fix.dispatch_failed" }, { ts: at(4), step: "fix.done" }, { ts: at(5), step: "fix.retrigger" },
     { ts: "garbage", step: "fix.dispatch" }, { step: "sweep.fix.dispatch_failed" },
   ]);
-  assert.deepEqual(read(T0), { admitted: 1, refused: 2 });
-  assert.deepEqual(read(T0 - 10 * MIN), { admitted: 2, refused: 2 });
+  assert.deepEqual(read(T0), { admitted: 2, refused: 2 }, "a retrigger round ran, exactly as a dispatched one did; fix.done is no round");
+  assert.deepEqual(read(T0 - 10 * MIN), { admitted: 3, refused: 2 });
   assert.deepEqual(read(T0 + 10 * MIN), { admitted: 0, refused: 0 });
 });
 
@@ -345,6 +346,101 @@ test("W1-T13990 criterion 2: when the idle dwell and a half-bound exit mature on
   });
 });
 
+/** A real rotation of the live file at `atMs`: `rotateLedger` carries the retained fix-round rows back (fix.dispatch,
+ *  fix.retrigger, sweep.fix.dispatch_failed) and archives the rest, `sweep.fix_capacity` among them. */
+function rotateLive(dir: string, atMs: number): void {
+  const path = join(dir, "ledger.ndjson");
+  appendFileSync(path, Array.from({ length: 20 }, () => JSON.stringify({ ts: new Date(atMs).toISOString(), step: "ci.polling",
+    detail: "x".repeat(100) })).join("\n") + "\n");
+  assert.equal(rotateLedger(path, { ceilingBytes: 1_000, smoothingWindowMs: 0, now: () => new Date(atMs) }).rotated, true);
+}
+
+/** A focus harness whose fix-round reader is the production one: the union of the rotations and the live file, read
+ *  off the loop, joined with the live lines of each consultation. */
+function unionHarness(dir: string, read?: adaptiveWip.FixRoundUnionRead) {
+  let h: ReturnType<typeof harness> | undefined;
+  const now = () => h!.now();
+  const passes = capacityPasses(dir, "DAEMON-1", now);
+  const union = adaptiveWip.createFixRoundUnionReader(dir, { clock: clockFromMillisFn(now), ...(read ? { read } : {}) });
+  h = harness(dir, { readFixRounds: (sinceMs) => union.readerFor(passes.lines())(sinceMs) });
+  return { ...h, passes, union };
+}
+
+test("W1-T13990 criterion 2: a refusal whose sweep.fix_capacity rows rotated out of the live file is read through the union", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    const h = unionHarness(dir);
+    const ageing = { stuck: 12, movable: 12 };
+    const on = enter(h);
+    h.consult(ageing, 5 * MIN);
+    h.passes.pass([13]);
+    rotateLive(dir, h.now() + MIN);
+    const live = h.passes.lines();
+    assert.equal(live.some((line) => line.step === "sweep.fix_capacity"), false, "the refusal's rows are in the archive alone");
+    assert.deepEqual(adaptiveWip.fixRoundReaderFor(live)(on), { admitted: 0, refused: 0 }, "the live file alone reads no refusal");
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS - 5 * MIN)?.tier, "focus", "the dwell matured before the union was read");
+    await h.union.settled();
+    assert.equal(h.consult(ageing, MIN), undefined, "a dwell with no round run releases the hold");
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 1],
+      "the rotated refusal is counted, so the row names the refused fix lane, not an idle one");
+  });
+});
+
+test("W1-T13990 criterion 2: an unreadable union is unknown, never idle, and holds the hold", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    const h = unionHarness(dir);
+    const ageing = { stuck: 12, movable: 12 };
+    enter(h);
+    writeFileSync(join(dir, `ledger.${new Date(h.now() + 6 * MIN).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), "not gzip");
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
+    for (let i = 0; i < 3; i++) {
+      await h.union.settled();
+      assert.equal(h.consult(ageing, MIN)?.tier, "focus", `a rotation in the window cannot be read (consultation ${i})`);
+    }
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP]);
+  });
+  await withTempDir("focus-movable", async (dir) => {
+    let reads = 0;
+    const h = unionHarness(dir, async () => { reads++; throw new Error("EIO: the union read failed"); });
+    enter(h);
+    assert.equal(h.consult({ stuck: 12, movable: 12 }, focus.FOCUS_DWELL_MS)?.tier, "focus");
+    for (let i = 0; i < 3; i++) {
+      await h.union.settled();
+      assert.equal(h.consult({ stuck: 12, movable: 12 }, MIN)?.tier, "focus", `a failed read is no reading (consultation ${i})`);
+    }
+    await h.union.settled();
+    assert.equal(reads, 4, "each consultation after a settled read starts the next one");
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP]);
+  });
+});
+
+test("W1-T13990 criterion 2: the union reader answers from a read begun inside the window, joined once with newer live rows", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    let nowMs = T0 + focus.FOCUS_DWELL_MS;
+    const at = (ms: number) => new Date(ms).toISOString();
+    const fixture = writeLedger([
+      { ts: at(T0 - 5 * MIN), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 2 },
+      { ts: at(T0 + 2 * MIN), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 3 },
+      { ts: at(T0 + 3 * MIN), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", child_run_id: "work-fix-dispatch-B" },
+    ], { dir });
+    const lines = () => readFileSync(fixture.path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const union = adaptiveWip.createFixRoundUnionReader(dir, { clock: clockFromMillisFn(() => nowMs) });
+    assert.equal(union.readerFor(lines())(T0), undefined, "nothing is read yet");
+    assert.equal(union.readerFor(lines())(T0), undefined, "a read in flight is not a reading");
+    await union.settled();
+    assert.deepEqual(union.readerFor(lines())(T0), { admitted: 0, refused: 2 },
+      "the pass's rise inside the window and the lost child, each once, though the live file holds them too");
+    fixture.append([{ ts: at(nowMs + MIN), run_id: "DAEMON-1", step: "fix.retrigger", round_id: "r1" }]);
+    nowMs += 2 * MIN;
+    assert.deepEqual(union.readerFor(lines())(T0 + 2 * MIN), { admitted: 1, refused: 2 },
+      "a round the live file shows after the read began counts");
+    await union.settled();
+    nowMs += 2 * focus.FOCUS_DWELL_MS;
+    assert.equal(union.readerFor(lines())(nowMs - focus.FOCUS_DWELL_MS), undefined, "a read begun before the window is stale");
+  });
+});
+
 // ── criterion 3 ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 test("W1-T13990 criterion 3: the focus rows and the FOCUS flag carry the stuck count and the movable count", async () => {
@@ -440,6 +536,30 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the WIP bound 
   });
   assert.deepEqual([flow.adaptiveBound, result.deferred, result.tier], [BASE, false, "under_limit"],
     "21 owned less 16 stuck is under the bound of 10: the full count is subtracted, not the movable one");
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs hold focus through a dwell whose only round was a retrigger", async () => {
+  await withTempDir("focus-movable", (dir) => {
+    let nowMs = T0;
+    const fixture = writeLedger([], { dir });
+    const lines = () => readFileSync(fixture.path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const h = harness(dir, { readFixRounds: (sinceMs) => adaptiveWip.fixRoundReaderFor(lines())(sinceMs) });
+    const ageing = { stuck: 12, movable: 12 };
+    const on = enter(h);
+    nowMs = on;
+    // A worker admitted in the dwell, whose round's commits were retrigger-shaped: fix.ts writes fix.retrigger and no
+    // fix.dispatch for it (W1-T2403), so the retrigger row is the round's only record.
+    fixture.append([
+      { ts: new Date(nowMs + 2 * MIN).toISOString(), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_admitted: 1, fixes_refused: 0 },
+      { ts: new Date(nowMs + 20 * MIN).toISOString(), run_id: "work-fix-1", task_id: "W1-T1", step: "fix.retrigger", round_id: "r1", retrigger: 1, strike: 0 },
+    ]);
+    assert.equal(lines().some((line) => line.step === "fix.dispatch"), false, "the dwell holds no fix.dispatch row");
+    for (const advance of [focus.FOCUS_DWELL_MS, MIN, 5 * MIN]) {
+      assert.equal(h.consult(ageing, advance)?.tier, "focus", "12 ageing PRs above the leave bound of 5 hold focus, as on origin/main");
+    }
+    assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], "no release: a round ran in the dwell");
+    assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
+  });
 });
 
 test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the FOCUS file's restore at boot and its release by hand are unchanged", async () => {

@@ -232,7 +232,7 @@ import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
-import { assembleAdaptiveQueueFlow, fixRoundReaderFor, readMemoryHeadroomFraction, type FixRoundReader } from "./lib/adaptive-wip.js";
+import { assembleAdaptiveQueueFlow, createFixRoundUnionReader, readMemoryHeadroomFraction, type FixRoundReader } from "./lib/adaptive-wip.js";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -26149,11 +26149,13 @@ function queueGovernorGateFor(
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
   let fixRounds: FixRoundReader | undefined;
+  // W1-T13990: the dwell's fix rounds come from the ledger union, read off the loop; the live lines add newer rows.
+  const fixRoundUnion = createFixRoundUnionReader(dirname(ledgerPath), { clock: clockFromMillisFn(now) });
   const gate = (): QueueGovernorResult | undefined => {
     admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
-    fixRounds = fixRoundReaderFor(lines);
+    fixRounds = fixRoundUnion.readerFor(lines);
     const nowMs = now();
     const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
     const adaptive = assembleAdaptiveQueueFlow({
