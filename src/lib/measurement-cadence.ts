@@ -3204,9 +3204,9 @@ export function ciLessonBindingErrors(
     const lessonFile = files?.find((file) => /^learnings\/ci\.d\/[^/]+\.yaml$/.test(file));
     if (!lessonFile || !existsSync(join(root, lessonFile))) continue;
     const entries = loadLearnings(join(root, lessonFile));
-    if (!entries.some(({ id, src }) => src === origin && byId.get(id)?.src === origin)) {
-      errors.add(`${lessonFile} must contain a corpus entry with src: ${JSON.stringify(origin)}`);
-    }
+    // A file entry the corpus did not load under its id is not bound: only a corpus entry is ever selected.
+    const bound = entries.some(({ id, src }) => src === origin && byId.get(id)?.src === origin);
+    if (!bound) errors.add(`${lessonFile} must contain a corpus entry with src: ${JSON.stringify(origin)}`);
     for (const entry of entries) {
       if (entry.lifecycle === "active" && entry.src !== origin) {
         errors.add(`${lessonFile} entry ${entry.id} has src ${JSON.stringify(entry.src)}, expected ${JSON.stringify(origin)}`);
