@@ -1832,10 +1832,16 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     if (shared === undefined) return gated;
     return gated === undefined ? shared : Math.max(shared, gated);
   };
+  /** A paced floor's remaining wait, to ITS DEADLINE: the counted stamp plus one window. A stamp a little
+   *  ahead of the clock (mtime rounding, a sibling's clock) is paced as age 0 by the decision, but the
+   *  wait still runs until the stamp is a whole window old, so the deadline, not the clamped age, is the
+   *  wait's length (W1-T12058 criterion 3, #19924: a stamp 0.5 s ahead waited 180.5 s and printed 180). */
+  const floorDeadlineRemainingMs = (paced: boolean, lastReadMs: number | undefined, nowMs: number): number =>
+    paced && lastReadMs !== undefined ? Math.max(0, lastReadMs + windowMs - nowMs) : 0;
   const floorRemainingAt = (nowMs: number): number => {
     const lastReadMs = countedFloorMs();
     const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
-    return decision.paced ? Math.max(0, windowMs - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
+    return floorDeadlineRemainingMs(decision.paced, lastReadMs, nowMs);
   };
   /** The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
    *  shared gap still protects the secondary limiter across sibling processes without making a
@@ -1865,7 +1871,16 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     const rank = ghReadTicketRank(callerActor());
     return tickets.filter((t) => t.id !== ticket?.id && (ticket ? compareGhReadTickets(t, ticket) < 0 : t.rank <= rank));
   };
+  /** The live head ticket a non-waiter gives one shared gap (THE RESERVED SLOT, W1-T10271): due, since
+   *  the floor is clear, and not yet yielded to. `undefined` when no slot is owed. */
+  const headOwedSlot = (nowMs: number): GhReadTicket | undefined => {
+    if (sharedReadGapMs === 0) return undefined;
+    const head = liveTickets(nowMs)[0];
+    return head === undefined || head.yielded || floorRemainingAt(nowMs) > 0 ? undefined : head;
+  };
   const warnLine = (line: string) => (deps.warn ?? ((l: string) => void process.stderr.write(`${l}\n`)))(line);
+  /** Seconds, ROUNDED UP to a tenth: a printed wait is never shorter than the one sat through. */
+  const waitS = (ms: number): number => Math.ceil(ms / 100) / 10;
 
   const evaluate = (): GhReadCadenceDecision => {
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
@@ -1885,7 +1900,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     });
     const ahead = gatedFirst && windowS > 0 ? queuedAhead(liveTickets(nowMs)).length : 0;
     waiter = gatedFirst && mode === "wait" && (decision.paced || ahead > 0);
-    floorWaitMs = waiter && decision.paced ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
+    floorWaitMs = waiter ? floorDeadlineRemainingMs(decision.paced, lastReadMs, nowMs) : 0;
     // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
     // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
     // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
@@ -1898,27 +1913,34 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
+    // W1-T12058 criterion 3: ONE wait line per hand-run read, printed HERE, up front, with the TOTAL the
+    // read will sit through, computed from the same deadlines its wait loop uses. Up front rather than
+    // at each phase: a phase-by-phase line would print twice (the floor, then the gap), and a line at
+    // only the first phase would understate a wait made of several. Every source in wait mode is summed:
+    // - the floor, to its deadline (the counted stamp plus a window, even for a stamp ahead of the clock);
+    // - one window per queued read ahead: each takes its slot when due, so restarts the window for this one;
+    // - the shared read gap from the newest shared stamp, which runs in the same wait as the floor: the
+    //   first slot (this read's, or the head ticket's) is taken when BOTH have passed;
+    // - for a read the floor admits, the reserved slot it gives a due ticket behind it, which also runs
+    //   in the same wait as the gap: the gap is re-read after the yield, so the two overlap.
+    // A sibling that reads or queues ahead AFTER this line is a new wait the line cannot foresee.
+    const gapNowMs = gatedFirst && mode === "wait" && stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
     if (waiter) {
-      // W1-T12058: one line, with the WHOLE expected wait. Each queued read ahead takes its slot when
-      // its floor is due and so restarts the window for this one: the floor, then one window per read.
-      // The shared read gap runs in the same wait: the first slot (this read's, or the head ticket's) is
-      // taken when BOTH the floor and the gap from the newest shared stamp have passed, so it delays every
-      // later slot too (#19924 review: a fresh advisory stamp, with and without a read ahead).
-      const gapNowMs = stampPath !== undefined ? sharedGapRemainingAt(stampPath, nowMs) : 0;
-      const expectedS = (Math.max(floorWaitMs, gapNowMs) + ahead * decision.windowS * 1000) / 1000;
+      const expectedMs = Math.max(floorWaitMs, gapNowMs) + ahead * decision.windowS * 1000;
       warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${expectedS}s ` +
+        `gh read cadence (wait, W1-T7957): waiting ${waitS(expectedMs)}s ` +
           (ahead > 0
-            ? `(${floorWaitMs / 1000}s for the ${decision.windowS}s floor, then ${decision.windowS}s for each of ` +
+            ? `(${waitS(floorWaitMs)}s for the ${decision.windowS}s floor, then ${decision.windowS}s for each of ` +
               `${ahead} queued gated read(s) ahead, W1-T10271) on ${stampPath}`
             : `for the ${decision.windowS}s floor on ${stampPath}`),
       );
-    } else if (gatedFirst && mode === "wait" && stampPath !== undefined && sharedGapRemainingAt(stampPath, nowMs) > 0) {
-      // #19924 review: the floor is clear but a sibling's fresh stamp still holds the shared gap, so the
-      // read pauses for it; say so once, with its length.
+    } else if (gatedFirst && mode === "wait" && stampPath !== undefined && (gapNowMs > 0 || headOwedSlot(nowMs) !== undefined)) {
+      const slotMs = headOwedSlot(nowMs) !== undefined ? sharedReadGapMs : 0;
       warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${sharedGapRemainingAt(stampPath, nowMs) / 1000}s ` +
-          `for the ${sharedReadGapMs / 1000}s shared read gap on ${stampPath}`,
+        `gh read cadence (wait, W1-T7957): waiting ${waitS(Math.max(slotMs, gapNowMs))}s ` +
+          (slotMs > 0
+            ? `(a ${waitS(sharedReadGapMs)}s reserved slot for a due queued read, W1-T10271, and the shared read gap) on ${stampPath}`
+            : `for the ${waitS(sharedReadGapMs)}s shared read gap on ${stampPath}`),
       );
     } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
@@ -1963,9 +1985,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       }
       // THE RESERVED SLOT. The first reader to find a due head ticket gives it one shared gap, outside the
       // lock, so the waiter takes the next slot. Marked on the ticket: nobody yields to it twice.
-      if (sharedReadGapMs === 0) return 0;
-      const head = liveTickets(nowMs)[0];
-      if (head === undefined || head.yielded || floorRemainingAt(nowMs) > 0) return 0;
+      const head = headOwedSlot(nowMs);
+      if (head === undefined) return 0;
       writeGhReadTicket(stampPath, { ...head, yielded: true });
       ghReadCadenceCounts.slotsYielded += 1;
       return sharedReadGapMs;

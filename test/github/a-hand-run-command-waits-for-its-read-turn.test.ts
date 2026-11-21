@@ -219,3 +219,41 @@ test("W1-T12058 criterion 3: with the floor clear, a fresh advisory stamp's shar
   assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
   assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
 });
+
+test("W1-T12058 criterion 3: with the floor clear, the reserved slot a due lower-priority ticket is given is printed once with its length", async (t) => {
+  // Reviewer's counterexample (#19924 round 3, a): no mode set, the floor clear, and a due daemon ticket
+  // on disk. The read gives that ticket one shared gap (the reserved slot, W1-T10271) and printed nothing.
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(f.stamp, "", start - 2 * WINDOW_MS);
+  const behind = {
+    id: "behind-1", rank: 1, actor: "daemon", seq: 1, pid: process.pid, host: hostname(),
+    createdMs: start - 1_000, refreshedMs: start - 1_000, yielded: false,
+  };
+  writeGhReadTicket(f.stamp, behind);
+  const deps: GhReadCadenceDeps = { ...f.deps, actor: () => "operator_ai" };
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  const waited = slept(f.sleeps);
+  assert.equal(waited, DEFAULT_GH_SHARED_READ_GAP_MS, `the read gave the due ticket one shared gap, slept ${JSON.stringify(f.sleeps)}`);
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, new RegExp(`waiting ${waited / 1000}s `), `the line states the ${waited / 1000}s pause: ${waits[0]}`);
+});
+
+test("W1-T12058 criterion 3: a counted stamp ahead of the clock is printed with the whole wait to its deadline, not truncated", async (t) => {
+  // Reviewer's counterexample (#19924 round 3, b): a counted stamp 0.5 s ahead of the clock. The wait
+  // runs to that stamp plus the window, 180.5 s, and the line said "waiting 180s".
+  const f = fixture(t);
+  const start = f.now();
+  stampGhRead(f.stamp, "", start + 500);
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], f.deps);
+  }, f.env);
+  const waited = slept(f.sleeps);
+  assert.equal(waited, WINDOW_MS + 500, `the read waited to the stamp's deadline, slept ${JSON.stringify(f.sleeps)}`);
+  const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+  assert.equal(waits.length, 1, `one wait line, got: ${JSON.stringify(f.warnings)}`);
+  assert.match(waits[0]!, /waiting 180\.5s for the 180s floor/, `the line states the 180.5s wait: ${waits[0]}`);
+});
