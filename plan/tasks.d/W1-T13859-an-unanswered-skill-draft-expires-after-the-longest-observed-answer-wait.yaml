@@ -22,7 +22,7 @@
     - test/ledger-compact-command.test.ts # amended 2026-11-20 for PR 19830: compaction publishes archives to unused paths
     - test/the-terminal-can-decline-a-proposal.test.ts # amended 2026-11-20 for PR 19830: the verdict lock reclaims a stale holder
     - test/a-compaction-pass-that-cannot-reduce-writes-nothing.test.ts # amended 2026-11-20 for PR 19830: archive names when a source path is never overwritten
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "expireUnansweredSkillDrafts closes, once, a staged skill draft with no ratify or decline row whose first-seen age is greater than the bound. It writes one panel.proposal_declined row with origin skill-workshop and a reason that starts with 'expired:' and states the age, the bound and the sample size. A second pass writes no row."
