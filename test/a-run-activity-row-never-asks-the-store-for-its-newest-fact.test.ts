@@ -281,6 +281,33 @@ test("W1-T13905 criterion 3: removing a cached task-only fact restores an older 
   assert.deepEqual(standIns(board), fresh);
 });
 
+test("W1-T13905 criterion 3: a deletion during ingest refreshes the task stamp before reuse", (t) => {
+  const w = world(t, [
+    activity(OLD, "W1-T1", "older"),
+    { ts: at(OLD + 1_000), step: FACT, task_id: "W1-T1", host: "h1" },
+    fact(T0, "W1-T2", "tail"),
+  ]);
+  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+  const board = w.caughtUp(w.board(counted.db, {
+    onIngest: (rows) => {
+      if (rows.some((row) => row.run_id === "next-tail")) {
+        assert.equal(w.raw.prepare("DELETE FROM fact WHERE task_id = ? AND run_id IS NULL").run("W1-T1").changes, 1);
+      }
+    },
+  }));
+  board.index(board.rows()).byStep.get(FACT);
+  assert.deepEqual(standIns(board), []);
+  assert.deepEqual(board.update({ force: true }).rederived, []);
+
+  w.append([fact(T0 + 1_000, "W1-T2", "next-tail")]);
+  const update = board.update({ force: true });
+  assert.deepEqual(update.rederived, ["W1-T1"], "the index rebuild invalidates the task's previously computed stamp");
+  assert.equal(counted.count.grouped, 1);
+  const fresh = w.caughtUp(w.board());
+  assert.deepEqual(standIns(fresh), [`W1-T1|older@${at(OLD)}`]);
+  assert.deepEqual(standIns(board), standIns(fresh));
+});
+
 test("W1-T13905 criterion 4: an audit reset rebuilds the map when a cached fact changes run at the same sequence", (t) => {
   const w = world(t, [
     activity(OLD, "W1-T1", "original"), activity(OLD, "W1-T1", "replacement"), fact(OLD, "W1-T1", "original"),
