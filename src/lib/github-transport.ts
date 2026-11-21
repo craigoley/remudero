@@ -476,8 +476,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await admitInstallationReadAsync(args, readOpts.signal);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
-    // A caller's signal never changes the route: a live broker still answers first, unfloored, then the floored
-    // direct read. The signal only ends the caller's wait for whichever route is taken.
+    // A signal never changes the route (broker first); it only ends the caller's wait.
     const brokered = await untilAborted(ghBrokeredAsync(execArgs, readOpts), readOpts.signal);
     if (brokered !== undefined) return brokered;
     readOpts.signal?.throwIfAborted();
@@ -724,7 +723,7 @@ function admitInstallationReadSync(args: readonly string[]): void {
 
 const standDownFor = (reading: GhBudgetReading): never => { throw new GhPaceFloorStandDownError(reading); };
 
-/** A caller's `signal` ends the admission wait: a stopped run settles at the stop, not when the budget resets. */
+/** `signal` ends the admission wait, so a stopped run settles at the stop. */
 async function admitInstallationReadAsync(args: readonly string[], signal?: AbortSignal): Promise<void> {
   if (!installationCoreRead(args)) return;
   const budget = githubInstallationBudget();
@@ -740,13 +739,12 @@ async function admitInstallationReadAsync(args: readonly string[], signal?: Abor
   }
 }
 
-/** `work`, or the caller's stop when it comes first. The broker read, the cadence wait (which keeps its queue turn
- *  and lock to itself) and the in-process read each settle on their own; only the caller stops waiting for them. */
+/** `work`, or the caller's stop if it comes first; `work` still settles on its own. */
 function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return work;
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason);
-    if (signal.aborted) { work.catch(() => { /* the caller has stopped: the wait settles on its own and nobody reads its outcome */ }); stop(); return; }
+    if (signal.aborted) { work.catch(() => { /* stopped: nobody reads this outcome */ }); stop(); return; }
     signal.addEventListener("abort", stop, { once: true });
     work.then((value) => { signal.removeEventListener("abort", stop); resolve(value); },
       (error: unknown) => { signal.removeEventListener("abort", stop); reject(error); });
