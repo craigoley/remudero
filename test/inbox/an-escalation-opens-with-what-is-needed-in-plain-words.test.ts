@@ -70,7 +70,7 @@ const fields = [
 
 /** The body as GitHub shows it: the hidden layout markers (HTML comments) removed. */
 function visible(body: string): string {
-  return body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, "");
+  return body.replace(/\n(?:\n(?=<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:details -->))?<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, "");
 }
 
 test("W1-T12041 criterion 1: the body opens with the summary and choices and ends with machine fields", (t) => {
@@ -472,6 +472,48 @@ function reconciled(body: string, title: string): Array<[number | undefined, boo
   }).map(({ derived }) => [derived.prNumber, derived.merged]);
 }
 
+test("W1-T12041 criterion 1: an issue that fit at GitHub's body limit still opens with its machine fields", (t) => {
+  const limit = 65_536;
+  const subject = { ...escalation, detail: "" };
+  subject.detail = escalation.detail + "\n\n" + "x".repeat(limit - legacyRender(subject).length - escalation.detail.length - 2);
+  assert.equal(legacyRender(subject).length, limit);
+
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-body-limit-"));
+  t.after(() => rmSync(root, { recursive: true }));
+  let delivered: string | undefined;
+  assert.equal(escalate(subject, {
+    issues: {
+      create: (_title, body) => {
+        assert.ok(body.length <= limit);
+        delivered = body;
+        return issueUrl;
+      },
+    },
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "run-42",
+  }), issueUrl);
+  assert.ok(delivered);
+  assert.ok(delivered.startsWith(subject.summary));
+  assert.ok(delivered.includes(escalation.detail));
+  assert.ok(visible(delivered).endsWith(["## Machine fields", ...fields].join("\n")));
+  assert.deepEqual(reconciled(delivered, escalationIssueTitle(subject)), [[12345, false]]);
+});
+
+test("W1-T12041 criterion 1: fitting a long option keeps the other choices and the machine fields", () => {
+  const limit = 65_536;
+  const padding = limit - legacyRender(escalation).length;
+  const [retry, pause] = escalation.options;
+  const subject = { ...escalation, options: [{ ...retry!, detail: retry!.detail + "😀".repeat(Math.floor(padding / 2)) }, pause!] };
+  assert.ok(legacyRender(subject).length >= limit - 1);
+  const body = renderIssueBody(subject);
+  assert.ok(body.length <= limit);
+  assert.ok(body.includes(escalation.detail));
+  assert.match(body, /— Run the checks again(?:😀)+…\n- \*\*pause\*\*/u);
+  assert.equal(answerTextFor("pause, please", body), "pause");
+  assert.equal(reactionAnswerText("+1", body), "retry");
+  assert.ok(visible(body).endsWith(["## Machine fields", ...fields].join("\n")));
+});
+
 test("W1-T12041 criterion 1: the detail is written byte for byte and a no-PR repeat opens issues as before", () => {
   // Review of 627460ded3: a fenced `**Head:**` diagnostic was indented, and a `**Cause:** ci` line in a
   // no-PR, no-cause detail let the legacy body absorb a repeat that the new body turned into a second issue.
@@ -576,7 +618,7 @@ test("W1-T12041 criterion 2: every generated body reads back as the exact fields
     // detail moves with its section.
     assert.equal(escalationBodyInLegacyOrder(body.replaceAll("\n", "\r\n")), legacy.replaceAll("\n", "\r\n"));
     const nonce = /:([0-9a-f]{16}):fields -->$/.exec(body)![1];
-    const detailsEnd = `\n<!-- rmd-escalation-layout:v1:${nonce}:details -->`;
+    const detailsEnd = `\n\n<!-- rmd-escalation-layout:v1:${nonce}:details -->`;
     assert.equal(body.split(detailsEnd).length, 2);
     assert.equal(escalationBodyInLegacyOrder(body.replace(`${detailsEnd}\n\n${FOOTER}`, `${detailsEnd}\n\n`)), legacyRender(e, notices, ""));
     const appended = `${e.detail}\n\nAn operator note with ${otherPrUrl}.`;
@@ -590,7 +632,7 @@ test("W1-T12041 criterion 3: every fields-first body, edited or not, reads exact
   for (const { e, notices } of CASES) {
     const legacy = legacyRender(e, notices);
     for (const body of [legacy, legacy.replace("**Class:** ", "**Status:** waiting\n**Class:** "), legacy.replace("\n**Task:**", "\n\n**Task:**"),
-      legacy.replaceAll("\n", "\r\n"), `${legacy}\n\n${renderIssueBody(escalation)}`.slice(0, legacy.length + 40)]) {
+      legacy.replaceAll("\n", "\r\n"), `${legacy}\n\n${renderIssueBody(escalation)}`]) {
       assert.equal(escalationBodyInLegacyOrder(body), body);
       assert.equal(editEscalationMachineFields(body, (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved")),
         body.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved"));
@@ -652,10 +694,31 @@ test("W1-T12041 criterion 2: a body quoting a whole other escalation still reads
   const body = renderIssueBody(subject);
   assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
   assert.equal(escalationTaskId(body), "W1-T12041");
-  // A body whose own markers an edit removed is read exactly as any other body is.
   const stripped = body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:fields -->$/, "");
   assert.notEqual(stripped, body);
-  assert.equal(escalationBodyInLegacyOrder(stripped), stripped);
+  assert.equal(escalationBodyInLegacyOrder(stripped), legacyRender(subject));
+});
+
+test("W1-T12041 criterion 2: losing the fields marker keeps reconciliation and answers on the actual task", async (t) => {
+  const subject = { ...escalation, detail: `${escalation.detail}\n\n**Task:** PR-54321\n**Head:** quoted-head` };
+  const body = renderIssueBody(subject);
+  const edited = body.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:fields -->$/, "");
+  assert.notEqual(edited, body);
+  assert.ok(edited.endsWith(["## Machine fields", ...fields].join("\n")));
+  await assertReaders(t, edited, subject, "OPEN");
+  assertConversation(edited, subject, subject.detail);
+  assert.equal(escalationBodyInLegacyOrder(edited.replaceAll("\n", "\r\n")), legacyRender(subject).replaceAll("\n", "\r\n"));
+  const moved = stallIssueBodyAtHead(edited, "actual-new-head")!;
+  assert.equal(moved, edited.replace("**Head:** abc123", "**Head:** actual-new-head"));
+  const withoutContract = editEscalationMachineFields(edited, (text) => text.replace(/^\*\*Contract:\*\*.*\n/m, ""));
+  assert.equal(withoutContract, edited.replace(/\n\*\*Contract:\*\* rev-42$/, ""));
+});
+
+test("W1-T12041 criterion 3: a complete new layout pasted at the end leaves a legacy issue's readings intact", async (t) => {
+  const quoted = renderIssueBody({ ...escalation, taskId: "PR-54321", headSha: "quoted-head", recommendation: "pause" });
+  const body = `${legacyRender(escalation)}\n\n${quoted}`;
+  assert.equal(escalationBodyInLegacyOrder(body), body);
+  await assertReaders(t, body, escalation, "OPEN");
 });
 
 test("the layout marker grammar accepts only a writer marker: v1, a 16-hex nonce and a section name", () => {

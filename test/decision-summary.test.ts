@@ -383,7 +383,7 @@ test("W1-T313 criterion 2: renderIssueBody opens with the decision summary and k
   // hidden layout markers removed). Choices and the recommendation come before the unchanged
   // detail, and machine-readable fields trail it.
   assert.equal(
-    withoutSummary.replace(/\n<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, ""),
+    withoutSummary.replace(/\n(?:\n(?=<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:details -->))?<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, ""),
     [
       e.summary,
       "",
