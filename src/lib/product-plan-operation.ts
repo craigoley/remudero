@@ -5,7 +5,7 @@ import {
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { open } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
@@ -14,7 +14,8 @@ import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { ledgerLivePath, ledgerRotationEntries, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords, rotationStampIso } from "./ledger-union.js";
+import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
+import { ledgerLivePath, ledgerRotationEntries, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -280,35 +281,54 @@ const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
 const ledgerReaderEntry = fileURLToPath(import.meta.url);
 const ledgerReaderArg = "--read-product-plan-evidence";
 
+const legacyEvidenceSteps: readonly unknown[] = ["ratify.cli_started", "ratify.cli_exited", "ratify.handoff_failed", "plan.start", "pr.opened"];
+
+/**
+ * A legacy refusal's window ends at its saved refusal. A rotation's NAME cannot end the read: its stamp is taken after
+ * its snapshot, so rows written between the two sit in the NEXT file. Only a file holding a row stamped after the window
+ * proves it was cut after the window, so every row written by then is in it or an earlier file; the read stops there.
+ */
 async function readLegacyPlanLedgerRows(stateDir: string, subject: LedgerSubject, taskId: string, untilMs: number) {
   let ok = true;
   const markUnread = () => { ok = false; };
   const corpusSnapshot = listedLedgerFiles(stateDir, { readdirSync }, markUnread);
   if (!ok) return undefined;
-  const stamps = corpusSnapshot.rotations.map(({ path }) => Date.parse(rotationStampIso(basename(path)) ?? ""));
-  // Include the first cut after the window. An unstamped rotation prevents ruling out any later file.
-  const last = stamps.every(Number.isFinite)
-    ? corpusSnapshot.rotations[stamps.findIndex((stamp) => stamp > untilMs)]
-    : undefined;
+  let cutAfterWindow = false;
   const rows = await readLedgerUnionRecords(stateDir, {
-    corpusSnapshot, sinceTs: subject.requestedAt, throughRotation: last && basename(last.path), includeLive: last === undefined,
-    step: ["ratify.cli_started", "ratify.cli_exited", "ratify.handoff_failed", "plan.start", "pr.opened"],
-    where: (row) => (row.task_id === taskId || row.step === "plan.start" || row.step === "pr.opened") &&
-      typeof row.ts === "string" && Date.parse(row.ts) <= untilMs,
+    // No step filter: a row of ANY step stamped after the window is what proves its file's cut.
+    corpusSnapshot, sinceTs: subject.requestedAt,
+    where: (row) => {
+      const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+      if (ts > untilMs) { cutAfterWindow = true; return false; }
+      return Number.isFinite(ts) && legacyEvidenceSteps.includes(row.step) &&
+        (row.task_id === taskId || row.step === "plan.start" || row.step === "pr.opened");
+    },
+    stopAfterRotation: () => cutAfterWindow,
     onUnreadArchive: markUnread, onUnreadLive: markUnread,
   });
   return { ok, archiveFiles: corpusSnapshot.rotations.map(({ path }) => path), rows };
 }
 
-/** Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. */
+/**
+ * Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. After
+ * the swap, rows written to the replaced inode reach the new live file only when the rotation drains it, under the
+ * rotation lock: the new file can already hold the child's exit while the old one still holds its `pr.opened`. A view
+ * taken while that lock is held is never an answer; the parent's deadline bounds the wait.
+ */
 async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSubject): Promise<LedgerRead> {
   const livePath = ledgerLivePath(stateDir);
   const liveIdentity = () => {
     const stat = statSync(livePath, { bigint: true, throwIfNoEntry: false });
     return stat && `${stat.dev}:${stat.ino}`;
   };
+  const rotationLock = `${livePath}${LEDGER_ROTATION_LOCK_SUFFIX}`;
+  const rotating = () => lstatSync(rotationLock, { throwIfNoEntry: false }) !== undefined;
   const taskId = productPlanLedgerTaskId(subject.operationId);
   for (;;) {
+    if (rotating()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
     const before = liveIdentity();
     const read = subject.untilMs === undefined
       ? await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) })
@@ -316,7 +336,7 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
     if (read === undefined || ("unread" in read && read.unread.includes(stateDir))) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
-    if (before !== after || archives.length !== read.archiveFiles.length ||
+    if (rotating() || before !== after || archives.length !== read.archiveFiles.length ||
       archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
     return read.ok ? correlateLedger(subject, taskId, "rows" in read ? read.rows : parseEvidenceLines(read.rawLines)) : "unread";
   }
@@ -660,6 +680,10 @@ export class ProductPlanOperationService {
       if (final === undefined) return seen;
       this.keep(paths, journal, kept, record.operationId, final);
       return final;
+    } catch (error) {
+      // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
+      if (performance.now() >= deadline) return "unread";
+      throw error;
     } finally {
       clearTimeout(timer);
     }
