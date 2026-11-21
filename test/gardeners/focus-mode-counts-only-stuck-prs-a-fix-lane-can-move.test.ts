@@ -502,11 +502,11 @@ function startFixChild(): void {
 
 test("W1-T13990 criterion 2: fixRoundsInFlight counts the fix rounds this process admitted until each settles", async () => {
   resetChildWork();
+  let finish: () => void = () => {};
   try {
     assert.equal(fixRoundsInFlight(), 0);
     startFixChild();
     registerChildWork({ runId: "work-review-R2", kind: "review", taskId: "W1-T2", prNumber: 14, headSha: "b1", reviewKey: "k" });
-    let finish!: () => void;
     detachSweepAction(new Promise<void>((resolve) => { finish = resolve; }), { actionKind: "fix-dispatch", taskId: "W1-T3", fixKey: "W1-T3@c1" });
     assert.equal(fixRoundsInFlight(), 2, "a run child and an in-process round count; a review does not");
     settleChildWork("work-fix-dispatch-R1");
@@ -514,6 +514,9 @@ test("W1-T13990 criterion 2: fixRoundsInFlight counts the fix rounds this proces
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(fixRoundsInFlight(), 0, "a settled round no longer counts");
   } finally {
+    // Settled on every path, so a red here never leaves a round in flight for the tests after it.
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
     resetChildWork();
   }
 });
