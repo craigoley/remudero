@@ -829,6 +829,130 @@ test("W1-T13850 criterion 4: a published FAIL stays quoted whatever its PR shows
   assert.equal(h.steps("reviewer.model_divergence_evidence_unavailable").length, 0);
 });
 
+test("W1-T13850 criterion 4: a FAIL whose evidence publishes after delivery has its clause added to the open incident once", async (t) => {
+  // Review finding (head 5b272643a2): the review lane posts the status and the evidence comment as separate writes, so
+  // the FAIL that first makes the 29 of 31 diverge can reach reviewer health before its record is on the PR. The
+  // incident then left out its clause, and once the comment appeared the next evaluation skipped the open issue.
+  const { rows, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const latest = rows.at(-1)!;
+  const prUrl = String(latest.pr_url);
+  const headSha = String(latest.head_sha);
+  const digest = `v2:${headSha.padEnd(64, "0")}`;
+  const clause = "the late-published clause of the FAIL that triggered the divergence";
+  const reasons = [`proof executed and PASSED on the PR head (grep: x) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): ${clause}`];
+  Object.assign(latest, { task_id: "W1-T98850", review_input_digest: digest, reasons });
+  const record = renderReviewEvidenceRecord({ pr_url: prUrl, head_sha: headSha, review_input_digest: digest, state: "failure",
+    reviewer_code_sha: String(latest.reviewer_code_sha), capped: false, plan_only: false, partially_executed: false,
+    decision_verdict: { criteria: [] }, unmet_criteria: [], reasons }, "public");
+  const at = "2026-11-19T12:00:00.000Z";
+  let published = false;
+  const commentReads: string[] = [];
+  const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args) => {
+    commentReads.push(String(args[1]));
+    if (!String(args[1]).includes(`/issues/${prUrl.split("/").at(-1)}/comments?`)) return [[]];
+    return [published ? [{ id: 301, body: record, created_at: at, updated_at: at, user: { login: "remudero-fleet[bot]", type: "Bot" } }] : []];
+  };
+  const h = harness(t, undefined, readJson);
+  const annotations: Array<{ url: string; body: string }> = [];
+  h.issues.comment = async (url, body) => { annotations.push({ url, body }); };
+  await h.evaluate(null);
+  h.queue.push(...rows);
+
+  // First evaluation: the status arrived, the evidence comment has not.
+  await h.evaluate(current);
+  assert.equal(h.created.length, 1, "the divergence opens its one incident");
+  const issueUrl = "https://github.com/acme/remudero/issues/1";
+  assert.match(h.created[0]!.body, /failed 29 of 31/);
+  assert.doesNotMatch(h.created[0]!.body, /late-published clause/, "an unread record publishes nothing yet");
+  assert.match(h.created[0]!.body, /pending publication/, "the FAIL is pending publication, not retained on host");
+  assert.equal(annotations.filter((a) => a.body.includes(clause)).length, 0);
+
+  // Second evaluation: the comment is on the PR now, so the open incident gains the clause.
+  published = true;
+  const readsBefore = commentReads.length;
+  await h.evaluate(current);
+  assert.ok(commentReads.length > readsBefore, "the open incident re-reads its pending FAIL's record");
+  const added = annotations.filter((a) => a.body.includes(clause));
+  assert.equal(added.length, 1, "the clause is added exactly once");
+  assert.equal(added[0]!.url, issueUrl, "on the open incident's own issue");
+  assert.ok(added[0]!.body.includes(`acme/remudero#${prUrl.split("/").at(-1)}`), "naming the FAIL it belongs to");
+  assert.doesNotMatch(added[0]!.body, /\/pull\/\d/, "with no raw PR path the sweep would read as the issue's referent");
+  assert.equal(h.created.length, 1, "nothing new is opened");
+  assert.equal(h.closed.length, 0, "the incident stays open");
+  assert.equal(divergenceRows(h).at(-1)!.models.find((j) => j.model === SOL.model)?.state, "diverged");
+
+  // Third evaluation: nothing is pending, so nothing more is added or read.
+  const readsAfter = commentReads.length;
+  await h.evaluate(current);
+  assert.equal(annotations.filter((a) => a.body.includes(clause)).length, 1, "a later evaluation adds nothing");
+  assert.equal(commentReads.length, readsAfter, "a settled incident reads no PR comments");
+  assert.equal(h.created.length, 1);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl, issueUrl);
+});
+
+test("W1-T13850 criterion 4: a pending FAIL's clause survives a failed comment, is added once, and an ops record adds none", async (t) => {
+  const { rows, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const at = "2026-11-19T12:00:00.000Z";
+  const late = (row: Row, clause: string, catalog: "public" | "ops") => {
+    const prUrl = String(row.pr_url);
+    const headSha = String(row.head_sha);
+    const digest = `v2:${headSha.padEnd(64, "0")}`;
+    const reasons = [`proof executed and PASSED — (semantic downgrade): ${clause}`];
+    Object.assign(row, { task_id: `W1-T${prUrl.split("/").at(-1)}`, review_input_digest: digest, reasons });
+    const record = renderReviewEvidenceRecord({ pr_url: prUrl, head_sha: headSha, review_input_digest: digest, state: "failure",
+      reviewer_code_sha: String(row.reviewer_code_sha), capped: false, plan_only: false, partially_executed: false,
+      decision_verdict: { criteria: [] }, unmet_criteria: [], reasons: catalog === "ops" ? [] : reasons }, catalog);
+    return { prUrl, record };
+  };
+  const publicFail = late(rows.at(-1)!, "the public clause published late", "public");
+  const opsFail = late(rows.at(-2)!, "PRIVATE clause an ops record never publishes", "ops");
+  let published = false;
+  const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args) => {
+    const fixture = [publicFail, opsFail].find(({ prUrl }) => String(args[1]).includes(`/issues/${prUrl.split("/").at(-1)}/comments?`));
+    return [published && fixture ? [{ id: 401, body: fixture.record, created_at: at, updated_at: at, user: { login: "remudero-fleet[bot]", type: "Bot" } }] : []];
+  };
+  let failAddedRow = false;
+  const h = harness(t, (step) => failAddedRow && step === "reviewer.model_divergence_evidence_added", readJson);
+  const annotations: Array<{ url: string; body: string }> = [];
+  let commentFails = false;
+  h.issues.comment = async (url, body) => {
+    if (commentFails) throw new Error("issue comment refused");
+    annotations.push({ url, body });
+  };
+  await h.evaluate(null);
+  h.queue.push(...rows);
+  await h.evaluate(current);
+  assert.equal(h.created.length, 1);
+  assert.equal(h.created[0]!.body.match(/pending publication/g)?.length, 2, "both FAILs are pending publication");
+  const pendingUnits = () => health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.pendingPublication?.map((f) => f.unit);
+  assert.equal(pendingUnits()?.length, 2);
+
+  // Both records publish, but the comment is refused: nothing is added and both stay pending.
+  published = true;
+  commentFails = true;
+  await h.evaluate(current);
+  assert.equal(annotations.length, 0);
+  assert.equal(pendingUnits()?.length, 2, "a refused comment keeps every pending FAIL for the next evaluation");
+  assert.match(String(h.steps("reviewer.model_divergence_evidence_comment_failed")[0]?.extra.error), /issue comment refused/);
+
+  // The comment posts but its ledger row is lost: the clause is still added once, and the FAILs settle.
+  commentFails = false;
+  failAddedRow = true;
+  await h.evaluate(current);
+  assert.equal(annotations.length, 1);
+  assert.match(annotations[0]!.body, /the public clause published late/);
+  assert.doesNotMatch(annotations[0]!.body, /PRIVATE/, "a reasonless ops record publishes no clause");
+  assert.equal(pendingUnits(), undefined, "the public FAIL is added and the ops FAIL is settled as retained on host");
+  assert.ok(h.steps("reviewer.model_divergence_failed").length > 0, "the lost row is reported");
+
+  failAddedRow = false;
+  await h.evaluate(current);
+  assert.equal(annotations.length, 1, "nothing is added twice");
+  assert.equal(h.created.length, 1);
+});
+
 test("W1-T13850 criterion 5: the SHA cursor and healed route survive a model-sized ENOSPC", async (t) => {
   const control = harness(t);
   const limited = harness(t);

@@ -121,6 +121,10 @@ type EvaluatorModelCounts = Record<string, { provider: string | null; pass: numb
 
 /** W1-T13850: what an ops-catalog review publishes in place of its reasons (src/cli/commands/review.ts). */
 export const REVIEW_EVIDENCE_RETAINED_ON_HOST = "detailed evidence retained on host";
+/** W1-T13850: a FAIL whose own evidence record is not readable on its PR yet. The review lane posts the status
+ *  and the evidence comment as separate writes, so the record can follow the verdict; the open incident adds
+ *  the clauses once it appears. */
+export const REVIEW_EVIDENCE_PENDING_PUBLICATION = "evidence pending publication on the PR; its clauses follow on this issue once published";
 
 /** The evaluator a posted verdict names: evaluator_provenance's routed, else served, else requested model. */
 export interface ReviewerEvaluator { provider: string | null; model: string }
@@ -128,7 +132,9 @@ export interface ReviewerEvaluator { provider: string | null; model: string }
 /** One of a model's FAILs, with the clauses its review row carries. `key` is its decision's identity
  *  (absent in a file written before it: the unit). `published` marks a review whose reasons its own
  *  publication already made public; any other FAIL's clauses stay on the host. */
-export interface EvaluatorModelFail { unit: string; key?: string; sha: string; at: string; clauses: string[]; published?: true; inputDigest?: string }
+export interface EvaluatorModelFail { unit: string; key?: string; sha: string; at: string; clauses: string[]; published?: true; inputDigest?: string;
+  /** Delivery only: its own evidence record is not readable yet, so its clauses may still publish. */
+  pending?: true }
 
 /** One model's FAIL rate against the other models' pooled, over one population of reviewer code shas. */
 export interface EvaluatorModelJudgment {
@@ -157,6 +163,9 @@ export interface EvaluatorModelIncident {
   openedAt: string;
   evidence: EvaluatorModelJudgment;
   issueUrl?: string | null;
+  /** The FAILs the issue named as pending publication. A later evaluation adds each one's clauses once its
+   *  own record publishes them, then drops it, so each clause is added once. */
+  pendingPublication?: EvaluatorModelFail[];
 }
 
 export interface ReviewerIncident {
@@ -688,35 +697,60 @@ function evaluatorModelEvidenceText(j: EvaluatorModelJudgment): string {
     `for ${j.baseline.models.join(", ") || "no other model"} (${pctRange(j.baselineInterval)}), over ${population}.`;
 }
 
-/** The divergence as an escalation: the evidence, the model's latest FAILs with their clauses (newest
- *  first, as many as the issue body holds; a FAIL whose review kept its reasons on the host is named with
- *  {@link REVIEW_EVIDENCE_RETAINED_ON_HOST} instead), and the action. It asks for no ruling and changes no route.
- *  The sweep treats a raw /pull/<number> anywhere in the issue as its closure referent. Use GitHub
- *  PR references for the FAILs and escape that path in quoted clauses so recovery owns closure. */
-export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): Escalation {
-  const build = (shown: readonly EvaluatorModelFail[]): Escalation => ({
+/** One FAIL as the issue lists it: its PR reference, then its clauses, or where its evidence is. */
+function evaluatorModelFailLines(f: EvaluatorModelFail): string[] {
+  const reference = f.unit.replace(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)#/, "$1#$2 at ");
+  const clauses = f.published ? f.clauses : [f.pending ? REVIEW_EVIDENCE_PENDING_PUBLICATION : REVIEW_EVIDENCE_RETAINED_ON_HOST];
+  return [`- ${reference} (reviewer code ${f.sha.slice(0, 12)}, ${f.at})`, ...clauses.map((c) => `  - ${c}`)];
+}
+
+/** The sweep treats a raw /pull/<number> anywhere in the issue as its closure referent. */
+const escapePullPaths = (text: string): string => text.replace(/\/pull\/(?=\d)/g, "/pull&#47;");
+
+function buildEvaluatorModelDivergenceEscalation(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[],
+  shown: readonly EvaluatorModelFail[]): Escalation {
+  return {
     class: "MANUAL",
     taskId: incident.id,
     summary: `Reviewer model divergence: ${incident.model} fails code PRs far above the other reviewer models`,
-    detail: [
+    detail: escapePullPaths([
       evaluatorModelEvidenceText(incident.evidence),
       "",
       `Its latest FAILs, newest first (${shown.length} of ${fails.length} remembered), with the clauses the review rows carry:`,
-      ...[...shown].reverse().flatMap((f) => {
-        const reference = f.unit.replace(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)#/, "$1#$2 at ");
-        return [`- ${reference} (reviewer code ${f.sha.slice(0, 12)}, ${f.at})`,
-          ...(f.published ? f.clauses : [REVIEW_EVIDENCE_RETAINED_ON_HOST]).map((c) => `  - ${c}`)];
-      }),
+      ...[...shown].reverse().flatMap(evaluatorModelFailLines),
       "",
       "Observe-only (W1-T13850): routing, verdicts, the reviewer-sha judgment and the healed tree are unchanged.",
-    ].join("\n").replace(/\/pull\/(?=\d)/g, "/pull&#47;"),
+    ].join("\n")),
     options: [{ label: "File a calibration task", detail: `File a task to calibrate ${incident.model}'s review against the known-answer set (W1-T12145) and the replay (W1-T13448).`, kind: { type: "operator-only" } }],
     recommendation: "File a calibration task",
     consequence: `Reviews keep running on ${incident.model} as routed, and its FAILs keep holding PRs.`,
-  });
+  };
+}
+
+/** The newest FAILs the issue body holds. */
+function shownModelFails(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): EvaluatorModelFail[] {
   let shown = [...fails];
-  while (shown.length > 0 && renderIssueBody(build(shown)).length > GITHUB_ISSUE_BODY_LIMIT - ESCALATION_FOOTER_RESERVE) shown = shown.slice(1);
-  return build(shown);
+  while (shown.length > 0 &&
+      renderIssueBody(buildEvaluatorModelDivergenceEscalation(incident, fails, shown)).length > GITHUB_ISSUE_BODY_LIMIT - ESCALATION_FOOTER_RESERVE) shown = shown.slice(1);
+  return shown;
+}
+
+/** The divergence as an escalation: the evidence, the model's latest FAILs with their clauses (newest
+ *  first, as many as the issue body holds; a FAIL whose review kept its reasons on the host is named with
+ *  {@link REVIEW_EVIDENCE_RETAINED_ON_HOST}, and one whose record is not readable yet with
+ *  {@link REVIEW_EVIDENCE_PENDING_PUBLICATION}), and the action. It asks for no ruling and changes no route.
+ *  Use GitHub PR references for the FAILs and escape raw PR paths in quoted clauses so recovery owns closure. */
+export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): Escalation {
+  return buildEvaluatorModelDivergenceEscalation(incident, fails, shownModelFails(incident, fails));
+}
+
+/** The comment that adds the clauses of FAILs the open issue named as pending publication. */
+function evaluatorModelPublishedEvidenceComment(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): string {
+  return escapePullPaths([
+    `Evidence published since this issue opened (W1-T13850): these ${incident.model} FAILs were pending publication, ` +
+      "and their own records now show these clauses:",
+    ...fails.flatMap(evaluatorModelFailLines),
+  ].join("\n"));
 }
 
 /** `gh api` JSON, read as src/lib/review-evidence-record.ts reads a PR's evidence comments. */
@@ -730,10 +764,12 @@ const EVIDENCE_END = "\n-->";
  *  head, a review input or a verdict) can unpublish what they show, so no later state is read: whether the
  *  FAIL is still the PR's CURRENT verdict is readReviewEvidenceRecord's question, not this one. A record
  *  counts only as the publisher posted it: unedited, by the reviewer login, with its checksum intact.
- *  An ops review's record carries no reasons, so it publishes no clause. */
-function publishedFailClauses(comments: readonly unknown[], fail: { prUrl: string; headSha: string; inputDigest: string }): Set<string> {
+ *  An ops review's record carries no reasons, so it publishes no clause. `recorded` is false while no such
+ *  record is on the PR: that FAIL is pending publication, since its comment can follow its status. */
+function publishedFailClauses(comments: readonly unknown[], fail: { prUrl: string; headSha: string; inputDigest: string }): { recorded: boolean; clauses: Set<string> } {
   const publisher = process.env[REVIEWER_IDENTITY_ENV]?.trim().toLowerCase() || "remudero-fleet[bot]";
   const approved = new Set<string>();
+  let recorded = false;
   for (const raw of comments) {
     const comment = raw as { body?: unknown; created_at?: unknown; updated_at?: unknown; user?: { login?: unknown } | null } | null;
     const body = comment?.body;
@@ -750,13 +786,17 @@ function publishedFailClauses(comments: readonly unknown[], fail: { prUrl: strin
     const evidence = envelope?.evidence;
     if (evidence == null || envelope!.sha256 !== createHash("sha256").update(JSON.stringify(evidence)).digest("hex") ||
         evidence.pr_url !== fail.prUrl || evidence.head_sha !== fail.headSha ||
-        evidence.review_input_digest !== fail.inputDigest || evidence.state !== "failure" || strings(evidence.reasons).length === 0) continue;
+        evidence.review_input_digest !== fail.inputDigest || evidence.state !== "failure") continue;
+    recorded = true;
+    if (strings(evidence.reasons).length === 0) continue;
     for (const clause of failClauses(evidence)) approved.add(clause);
   }
-  return approved;
+  return { recorded, clauses: approved };
 }
 
-/** Filed reviews can supply their own published reasons. The ops producer removes those reasons. */
+/** Filed reviews can supply their own published reasons. The ops producer removes those reasons. A FAIL whose
+ *  own record is not readable yet (absent, or its PR's comments unread) is marked `pending`: it is pending
+ *  publication, not unpublished, and the open incident adds its clauses once the record shows them. */
 async function publishedModelFails(fails: readonly EvaluatorModelFail[], readJson: EvidenceJsonReader, log: ReviewerHealthLog): Promise<EvaluatorModelFail[]> {
   const published: EvaluatorModelFail[] = [];
   const commentsOf = new Map<string, Promise<unknown[]>>();
@@ -769,19 +809,22 @@ async function publishedModelFails(fails: readonly EvaluatorModelFail[], readJso
     const prUrl = fail.unit.slice(0, delimiter);
     const headSha = fail.unit.slice(delimiter + 1);
     let clauses: string[] = [];
+    const target = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(prUrl);
+    // Unread until its PR's comments are read: a failed read leaves the FAIL pending, never unpublished.
+    let pending = target !== null;
     try {
-      const target = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(prUrl);
       if (target) {
         // One read per PR per delivery; a PR's FAILs share its comments.
         if (!commentsOf.has(prUrl)) commentsOf.set(prUrl, readJson(["api", `repos/${target[1]}/${target[2]}/issues/${target[3]}/comments?per_page=100`,
           "--paginate", "--slurp"], { fresh: true }).then((pages) => (pages as unknown[][]).flat()));
-        const approved = publishedFailClauses(await commentsOf.get(prUrl)!, { prUrl, headSha, inputDigest: fail.inputDigest });
-        clauses = fail.clauses.filter((clause) => approved.has(clause));
+        const record = publishedFailClauses(await commentsOf.get(prUrl)!, { prUrl, headSha, inputDigest: fail.inputDigest });
+        clauses = fail.clauses.filter((clause) => record.clauses.has(clause));
+        pending = !record.recorded;
       }
     } catch (error) {
       log("reviewer.model_divergence_evidence_unavailable", { review_unit: fail.unit, error: String((error as Error)?.message ?? error) });
     }
-    published.push(clauses.length === 0 ? fail : { ...fail, clauses, published: true });
+    published.push(clauses.length > 0 ? { ...fail, clauses, published: true } : pending ? { ...fail, pending: true } : fail);
   }
   return published;
 }
@@ -1228,6 +1271,39 @@ export async function evaluateReviewerHealthNow(
       baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
   };
 
+  const readJson: EvidenceJsonReader = input.readEvidenceJson ?? ((args, options) => ghJsonAsync(args, undefined, undefined, options));
+  const withoutPendingMark = ({ pending: _pending, ...fail }: EvaluatorModelFail): EvaluatorModelFail => fail;
+
+  /** An open issue that named FAILs as pending publication gains the clauses their own records have since
+   *  published, in one comment on that issue, and drops each FAIL whose record is now on its PR. A FAIL still
+   *  unread stays for the next evaluation; a failed comment keeps them all, so nothing is added twice. */
+  const catchUpPublishedEvidence = async (incident: EvaluatorModelIncident & { issueUrl: string }): Promise<EvaluatorModelIncident | undefined> => {
+    const waiting = incident.pendingPublication ?? [];
+    if (waiting.length === 0 || !escalation.issues.comment) return undefined;
+    const settled = await publishedModelFails(waiting, readJson, log);
+    const nowPublished = settled.filter((f) => f.published);
+    const stillPending = settled.filter((f) => f.pending).map(withoutPendingMark);
+    if (stillPending.length === waiting.length) return undefined;
+    if (nowPublished.length > 0) {
+      try {
+        await escalation.issues.comment(incident.issueUrl, evaluatorModelPublishedEvidenceComment(incident, nowPublished));
+      } catch (error) {
+        log("reviewer.model_divergence_evidence_comment_failed", { incident_id: incident.id, issue_url: incident.issueUrl,
+          error: String((error as Error)?.message ?? error) });
+        return undefined;
+      }
+      try {
+        log("reviewer.model_divergence_evidence_added", { incident_id: incident.id, issue_url: incident.issueUrl,
+          review_units: nowPublished.map((f) => f.unit) });
+      } catch (error) {
+        // The comment is posted: report the lost row, and still drop these FAILs so no clause is added twice.
+        reportModelHealthFailure(error, log);
+      }
+    }
+    const { pendingPublication: _settled, ...rest } = incident;
+    return stillPending.length === 0 ? rest : { ...rest, pendingPublication: stillPending };
+  };
+
   /** Reconcile this evaluation's evidence with the incidents left by earlier evaluations. */
   const reconcileModels = async (judged: EvaluatorModelJudgment[], failsByModel: ReviewerHealthState["modelFails"]): Promise<void> => {
     const previous = loadReviewerHealthForEvaluation(statePath).modelIncidents;
@@ -1236,6 +1312,11 @@ export async function evaluateReviewerHealthNow(
       const pending = modelValue(modelIncidents, j.model);
       const diverged = j.state === "diverged";
       const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
+      if (pending?.issueUrl && (diverged || !overlap)) {
+        // The issue stays open this evaluation, so its quoted evidence catches up with what has since published.
+        const caughtUp = await catchUpPublishedEvidence(pending as EvaluatorModelIncident & { issueUrl: string });
+        if (caughtUp !== undefined) modelIncidents = { ...modelIncidents, [j.model]: caughtUp };
+      }
       if (diverged && pending?.issueUrl) continue;
       if (!diverged && (pending === undefined || !overlap)) continue;
       const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
@@ -1248,8 +1329,10 @@ export async function evaluateReviewerHealthNow(
           // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
           incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
           if (diverged && !incident.issueUrl) {
-            const readJson = input.readEvidenceJson ?? ((args, options) => ghJsonAsync(args, undefined, undefined, options));
             const fails = await publishedModelFails(modelValue(failsByModel, j.model) ?? [], readJson, log);
+            const waiting = shownModelFails(incident, fails).filter((f) => f.pending).map(withoutPendingMark);
+            if (waiting.length > 0) incident.pendingPublication = waiting;
+            else delete incident.pendingPublication;
             incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, fails), {
               ...escalation, issues: { ...escalation.issues, listOpen: async () => open },
             });
