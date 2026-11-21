@@ -215,13 +215,10 @@ export interface ProviderCapacity {
   probeFailure?: "timeout" | "starved" | "terminal";
 }
 
-/**
- * W1-T13855: credits carried past the reserve. `carried` comes from a last-good read after a probe
- * timeout or starvation. `generic-bucket` comes from the shared pool when the model has no credits block.
- */
+/** W1-T13855: credits from a last-good reading or the generic pool carried past the reserve. */
 export interface CodexCreditsRescue {
   path: "carried" | "generic-bucket";
-  /** Spendable balance after projection for carried readings. May be null for unlimited credits. */
+  /** Projected spendable balance, possibly null for unlimited credits. */
   projectedBalance: number | null;
   ageMs?: number;
   failureKind?: "timeout" | "starved";
@@ -1401,7 +1398,7 @@ function genericCodexBucket(reading: CodexRateLimitResult | undefined): CodexRat
   return reading?.rateLimits ?? reading?.rateLimitsByLimitId?.codex ?? undefined;
 }
 
-/** W1-T13855: buckets without a credits block inherit the shared balance and retain either bucket's spend block. */
+/** Inherit shared credits only if the block is absent. Honor either spend block. */
 function codexCreditsFor(bucket: CodexRateLimitBucket | undefined, reading: CodexRateLimitResult | undefined):
   { credits?: CodexCredits; borrowed: boolean } {
   if (!bucket) return { borrowed: false };
@@ -1448,16 +1445,10 @@ export function codexCapacityFromRateLimits(result: unknown): ProviderCapacity {
 }
 
 /**
- * Pick an account-visible model for the requested Remudero mount and attach only
- * that model's quota bucket. Independent model buckets must not veto each other.
- *
- * `capabilities` (W1-T2573) is the `.remudero/mounts.yaml` capability ladder — see
- * {@link codexCapabilityForRequestedModel} / {@link codexCandidatesForCapability}. It resolves
- * BOTH the capability tier (a table lookup on the Claude model name, never a substring match)
- * and, keyed also on `requestedEffort`, the ordered default candidates for that tier — so effort
- * now genuinely reaches the candidate pool instead of being dropped at the provider boundary. An
- * operator's `workerProviders.codexModels` override, when present, still wins outright per tier
- * (unchanged — it is not effort-keyed) exactly as it did before this axis existed.
+ * Pick an account-visible model using its own quota bucket. W1-T2573 resolves the Claude
+ * model's tier through {@link codexCapabilityForRequestedModel} and uses the requested
+ * effort in {@link codexCandidatesForCapability}. The operator's per-tier
+ * `workerProviders.codexModels` override takes precedence regardless of effort.
  */
 export function selectCodexModel(
   models: CodexModelInfo[],
@@ -1567,17 +1558,12 @@ export function selectCodexModel(
     ...(capabilityFallbackReason ? { capabilityFallbackReason } : {}),
   };
   if (!selected) {
-    // Preserve W1-T2573's fail-closed attribution contract: when mapped models are visible but
-    // their quota cannot authorize dispatch, return the first ranked concrete model alongside
-    // `readable:false`. The provider selector still refuses Codex (there is no proved headroom),
-    // while callers that explain the capability mapping do not lose which candidate the table
-    // resolved to. It is deliberately NOT marked selected in `modelDecision`: no worker can run.
+    // W1-T2573: retain the first ranked model for attribution even when quota refuses dispatch.
     const fallback = ranked[0];
     if (fallback) {
       const fallbackEfforts = fallback.option?.supportedEfforts ?? [];
       const fallbackEffort = requestedEffort ?? fallback.model.defaultReasoningEffort ?? fallbackEfforts[0] ?? "default";
-      // W1-T3718: the detail names WHY. It said "no reserved headroom" for every cause, a quota
-      // that was never readable included -- so an unanswerable probe read as a full subscription.
+      // W1-T3718: distinguish exhausted windows from unreadable quota.
       const reason = fallback.option?.reason;
       return {
         ...fallback.capacity,
@@ -2218,7 +2204,7 @@ function rememberCodexRuntime(config: Config, bin: string, value: CodexRuntimeRe
   }
 }
 
-/** W1-T13855: project observed spend over the reading's age. Keep unlimited and non-declining balances. */
+/** W1-T13855: project observed credit burn over the reading's age. */
 function projectedCreditsBalance(current: { readAt: number; credits: CodexCredits },
   previous: { readAt: number; credits: CodexCredits | undefined } | undefined, ageMs: number): number | null {
   const balance = current.credits.balance;
@@ -2254,6 +2240,7 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id] ??
           (id === "codex" ? previousGeneric : undefined))])) };
     let hasUnresetWindow = false;
+    let carriedByCredits = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
       creditsSpendable: boolean): CodexRateLimitWindow | string | null => {
@@ -2270,7 +2257,10 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
-      if (projected >= 100 - reserve && !creditsSpendable) return "projected burn reaches the reserve";
+      if (projected >= 100 - reserve) {
+        if (!creditsSpendable) return "projected burn reaches the reserve";
+        carriedByCredits = true;
+      }
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
     const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => {
@@ -2289,7 +2279,9 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
     const rateLimits = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
       rateLimitsByLimitId: carriedRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(carriedRates.rateLimitsByLimitId)
         .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
-    if (!hasUnresetWindow) throw new Error(rejectedWindow ?? "no unreset quota window with a duration");
+    // Keep the original reserve refusal unless credits actually carry a projected window.
+    if (rejectedWindow && !carriedByCredits) throw new Error(rejectedWindow);
+    if (!hasUnresetWindow) throw new Error("no unreset quota window with a duration");
     const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
     if (!selected.readable) {
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));

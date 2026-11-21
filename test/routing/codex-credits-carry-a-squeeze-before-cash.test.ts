@@ -306,6 +306,30 @@ test("W1-T13855 criterion 6: a carried model past its reserve on borrowed credit
     { path: "carried", projectedBalance: Number(BALANCE), ageMs: 61_000, failureKind: "timeout" });
 });
 
+test("W1-T13855 criterion 6: unfunded generic reserve breach refuses carry beside model headroom", async (t) => {
+  const account = codexAccount(t);
+  account.state.used = 97;
+  account.state.balance = "0";
+  account.state.buckets.sol = { limitName: SOL.id,
+    primary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: account.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: "0" } };
+  const fresh = await account.read();
+  assert.equal(fresh.model, SOL.id);
+  assert.equal(fresh.windows[0]?.usedPercent, 40);
+  assert.deepEqual(providerEligibility(fresh, 5), { eligible: true, headroomPercent: 3 });
+
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.readable, false, carried.detail);
+  assert.equal(carried.probeFailure, "timeout");
+  assert.match(carried.detail ?? "", /projected burn reaches the reserve/);
+  assert.equal(carried.carriedForward, undefined);
+  const routed = await routeSpawn(account);
+  assert.equal(routed.decision?.rule, "cash-fallback");
+  assert.equal(routed.codexSpawns, 0);
+  assert.equal(routed.cashSpawns, 1);
+});
+
 test("W1-T13855 criterion 9: carried subscription headroom wins beside an unfunded generic window and a funded model", async (t) => {
   const account = codexAccount(t);
   const primary = { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset };
@@ -1052,6 +1076,35 @@ test("W1-T13855 criterion 7: a delayed funded publication cannot restore the rev
   assert.equal(reviewProviderObservation(newer, fallbackAt + 1).creditsLane, true);
   statusFor(root, fallbackAt - 1, funded);
   assert.deepEqual(readStatus(), newer, "a later publication preserves the cutoff for delayed writers");
+});
+
+test("W1-T13855 criterion 4: cash fallback preserves delayed Claude subscription headroom", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  const codex = creditsCodex();
+  const before = statusFor(root, START - 5_000, [claudeAt(95), codex]);
+  assert.equal(reviewProviderObservation(before, START).creditsLane, true);
+
+  account.state.balance = "0";
+  assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+  const readStatus = (nowMs: number) => readProviderRoutingStatus(root, { now: () => nowMs });
+  assert.deepEqual(widen(3, readStatus).map(({ reason, effectiveWidth }) => [reason, effectiveWidth]),
+    [["provider-headroom", 4], ["provider-headroom", 4], ["provider-headroom", 4]]);
+
+  const delayedAt = START - 1;
+  statusFor(root, delayedAt, [claudeAt(90), codex]);
+  const delayed = readStatus(START);
+  assert.equal(delayed.selected?.provider, "claude");
+  assert.equal(delayed.observedAt, new Date(delayedAt).toISOString());
+  assert.equal(delayed.providers?.find((row) => row.provider === "codex")?.creditsLane, undefined);
+  assert.equal(reviewProviderObservation(delayed, START).headroomPct, 10);
+  const decision = widen(3, readStatus).at(-1)!;
+  assert.deepEqual([decision.reason, decision.effectiveWidth, decision.evidence.providerCreditsLane],
+    ["healthy-window", 5, undefined]);
+
+  const newer = statusFor(root, START + 1, [claudeAt(95), codex]);
+  statusFor(root, delayedAt, [claudeAt(90), codex]);
+  assert.deepEqual(readStatus(START + 1), newer);
 });
 
 test("a first cash fallback records the credits cutoff before any funded status reaches disk", async (t) => {
