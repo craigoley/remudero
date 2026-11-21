@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # Rule 19 sizing: one extra stderr line in planGhReadCadence's addPause, and two test files; no change to any wait, refusal, queue, stamp or mode
+  risk: high # Rule 19 sizing (three test or source surfaces): one extra stderr line in planGhReadCadence's addPause, and two test files; no change to any wait, refusal, queue, stamp or mode
   origin: "operator-session#merged-pr-gap-check-2026-11-21"
   plan_refs:
     - W1-T12058
