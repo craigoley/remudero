@@ -1575,9 +1575,7 @@ test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a t
   const ancestor = repo.git("rev-parse", "HEAD");
   repo.git("commit", "--allow-empty", "-m", "the verified head");
   const verifiedHead = repo.git("rev-parse", "HEAD");
-  const remote = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-remote-`));
-  t.after(() => rmSync(remote, { recursive: true, force: true }));
-  execFileSync("git", ["init", "-q", "--bare", remote]);
+  const remote = gitRepo({ scope: t, bare: true, kind: "hand-ship-remote" }).dir;
   repo.git("push", "-q", remote, `${verifiedHead}:refs/heads/objects`, `${base}:refs/heads/${branch}`);
   const tip = () => execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${branch}`], { encoding: "utf8" }).trim();
   // The race, inside the gate: after the gate read the tip, the remote advances to an ancestor of the head.
