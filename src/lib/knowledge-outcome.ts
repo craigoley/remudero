@@ -1,3 +1,4 @@
+import { AMBIGUOUS_LEARNING_CONTENT, LEARNING_CONTENT_IDENTITY_RE } from "./learnings.js";
 import { fixDispatchCountByRun } from "./retro.js";
 
 /**
@@ -18,6 +19,12 @@ import { fixDispatchCountByRun } from "./retro.js";
  *
  * SURFACE, DO NOT ACT: nothing here feeds ranking or retirement. Below the per-arm floor the answer
  * is `unmeasurable` with its counts, never a favourable zero.
+ *
+ * W1-T11115 — ONE COHORT PER CONTENT REVISION. An edit keeps the id, so grouping by id alone pooled
+ * different interventions, and an edit inherited its predecessor's verdict. The producer now ledgers
+ * `content_ids` (learnings.ts's `learningContentIdentity`) for every contested entry, and the fold
+ * groups by {id, revision}. An observation whose revision cannot be named is excluded and counted in
+ * `excludedRevision`. It is never given the current corpus's bytes: this fold reads the ledger only.
  */
 
 /** Propensities outside [TRIM, 1 - TRIM] are excluded: an inverse weight of 20+ lets one run
@@ -32,6 +39,8 @@ export type LearningOutcomeVerdict = "helps" | "hurts" | "no-detectable-effect" 
 
 export interface LearningOutcome {
   id: string;
+  /** W1-T11115: the exact content revision these observations exposed (`lc1:<16 hex>`). */
+  contentId: string;
   injected: number;
   dropped: number;
   /** Hajek-weighted clean-merge rate difference, injected minus dropped (absent when unmeasurable). */
@@ -49,7 +58,23 @@ export interface LearningOutcomeReport {
   excludedMasked: number;
   /** Entry observations outside the propensity trim. */
   excludedTrimmed: number;
+  /** W1-T11115: entry observations inside the trim that name no single revision, by reason. */
+  excludedRevision: RevisionExclusions;
   learnings: LearningOutcome[];
+}
+
+/** W1-T11115: why an observation names no single content revision. Each is excluded and counted. */
+export interface RevisionExclusions {
+  /** The row predates content identities: it carries no `content_ids` field. */
+  legacy: number;
+  /** `content_ids` is not an object, or this entry's value is neither an identity nor `ambiguous`. */
+  malformed: number;
+  /** The draw's snapshot held this id more than once with different content. */
+  ambiguous: number;
+  /** One run ledgered different revisions for the same entry. */
+  conflicting: number;
+  /** No identity for the contested entry, or it is not listed in exactly one of selected and dropped. */
+  unresolved: number;
 }
 
 /** Keep only the entries the budget cut decided (0 < p < 1); `undefined` when none were. */
@@ -77,11 +102,11 @@ function hajek(obs: Observation[], weight: (o: Observation) => number): { mean: 
   return { mean, variance };
 }
 
-export function estimateLearningOutcome(id: string, obs: Observation[], floor = OUTCOME_ARM_FLOOR): LearningOutcome {
+export function estimateLearningOutcome(id: string, contentId: string, obs: Observation[], floor = OUTCOME_ARM_FLOOR): LearningOutcome {
   const inj = obs.filter((o) => o.injected);
   const drop = obs.filter((o) => !o.injected);
   if (inj.length < floor || drop.length < floor) {
-    return { id, injected: inj.length, dropped: drop.length, verdict: "unmeasurable" };
+    return { id, contentId, injected: inj.length, dropped: drop.length, verdict: "unmeasurable" };
   }
   const a = hajek(inj, (o) => 1 / o.propensity);
   const b = hajek(drop, (o) => 1 / (1 - o.propensity));
@@ -89,11 +114,26 @@ export function estimateLearningOutcome(id: string, obs: Observation[], floor = 
   const se = Math.sqrt(a.variance + b.variance);
   const verdict: LearningOutcomeVerdict =
     Math.abs(effect) > OUTCOME_Z * se ? (effect > 0 ? "helps" : "hurts") : "no-detectable-effect";
-  return { id, injected: inj.length, dropped: drop.length, effect, se, verdict };
+  return { id, contentId, injected: inj.length, dropped: drop.length, effect, se, verdict };
 }
 
-/** Fold ledger rows (read through the ledger union by the caller) into a per-learning outcome
- *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. */
+type Revision = { contentId: string } | { excluded: Exclude<keyof RevisionExclusions, "conflicting"> };
+
+/** The revision one row's `content_ids` names for `id`, or why it names none. */
+function revisionOf(contentIds: unknown, id: string): Revision {
+  if (contentIds === undefined) return { excluded: "legacy" };
+  if (contentIds === null || typeof contentIds !== "object" || Array.isArray(contentIds)) return { excluded: "malformed" };
+  const value = (contentIds as Record<string, unknown>)[id];
+  if (value === undefined) return { excluded: "unresolved" };
+  if (value === AMBIGUOUS_LEARNING_CONTENT) return { excluded: "ambiguous" };
+  return typeof value === "string" && LEARNING_CONTENT_IDENTITY_RE.test(value) ? { contentId: value } : { excluded: "malformed" };
+}
+
+const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
+ *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. An
+ *  observation is checked in order: trimmed, then revision, then arm. Each exclusion counts once. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -108,8 +148,17 @@ export function foldLearningOutcomes(
     all.flatMap((r) => (r.step === "fix.dispatch" && typeof r.run_id === "string" ? [{ step: r.step, run_id: r.run_id }] : [])),
   );
 
-  const byLearning = new Map<string, Observation[]>();
-  const report: LearningOutcomeReport = { runs: 0, excludedNoVerdict: 0, excludedMasked: 0, excludedTrimmed: 0, learnings: [] };
+  const report: LearningOutcomeReport = {
+    runs: 0,
+    excludedNoVerdict: 0,
+    excludedMasked: 0,
+    excludedTrimmed: 0,
+    excludedRevision: { legacy: 0, malformed: 0, ambiguous: 0, conflicting: 0, unresolved: 0 },
+    learnings: [],
+  };
+  // An exposure is one run's draw of one entry. Two rows naming it with different revisions conflict.
+  const pending: Array<{ exposure: string; id: string; contentId: string; obs: Observation }> = [];
+  const revisionsByExposure = new Map<string, Set<string>>();
   let from: string | undefined;
   let to: string | undefined;
   for (const r of all) {
@@ -132,20 +181,44 @@ export function foldLearningOutcomes(
     }
     const clean = verdict === "merged" && (fixes.get(r.run_id) ?? 0) === 0;
     const selected = new Set(stringList(r.matched_ids));
+    const dropped = new Set(stringList(r.dropped));
     for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
       if (typeof p !== "number" || p <= 0 || p >= 1) continue;
       if (p < trim || p > 1 - trim) {
         report.excludedTrimmed++;
         continue;
       }
-      const list = byLearning.get(id) ?? [];
-      list.push({ injected: selected.has(id), propensity: p, clean });
-      byLearning.set(id, list);
+      const revision = revisionOf(r.content_ids, id);
+      if ("excluded" in revision) {
+        report.excludedRevision[revision.excluded]++;
+        continue;
+      }
+      const { contentId } = revision;
+      if (selected.has(id) === dropped.has(id)) {
+        report.excludedRevision.unresolved++;
+        continue;
+      }
+      const exposure = `${r.run_id}\u0000${id}`;
+      const seen = revisionsByExposure.get(exposure) ?? new Set<string>();
+      seen.add(contentId);
+      revisionsByExposure.set(exposure, seen);
+      pending.push({ exposure, id, contentId, obs: { injected: selected.has(id), propensity: p, clean } });
     }
   }
+  const byRevision = new Map<string, { id: string; contentId: string; obs: Observation[] }>();
+  for (const o of pending) {
+    if (revisionsByExposure.get(o.exposure)!.size > 1) {
+      report.excludedRevision.conflicting++;
+      continue;
+    }
+    const key = `${o.id}\u0000${o.contentId}`;
+    const cohort = byRevision.get(key) ?? { id: o.id, contentId: o.contentId, obs: [] };
+    cohort.obs.push(o.obs);
+    byRevision.set(key, cohort);
+  }
   if (from !== undefined && to !== undefined) report.window = { from, to };
-  report.learnings = [...byLearning.entries()]
-    .map(([id, obs]) => estimateLearningOutcome(id, obs, opts.floor))
-    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  report.learnings = [...byRevision.values()]
+    .map((c) => estimateLearningOutcome(c.id, c.contentId, c.obs, opts.floor))
+    .sort((x, y) => order(x.id, y.id) || order(x.contentId, y.contentId));
   return report;
 }
