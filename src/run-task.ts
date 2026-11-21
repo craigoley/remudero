@@ -16004,7 +16004,7 @@ export function ciLearningCommand(
   // W1-T4190: unioned with what fetched origin/main holds — the checkout's plan can lag it.
   const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
   const { result } = mintCiLearningFromPlan({
-    corpus, alreadyFiledFindingIds: planOrigins, stateRoot: root, runId: `CI-LEARNING-${process.pid}`,
+    corpus, window: input, alreadyFiledFindingIds: planOrigins, stateRoot: root, runId: `CI-LEARNING-${process.pid}`,
     readLessons: deps.loadLessons ?? (() => readCheckoutCiLessons(checkoutRoot, readMergedCiLessons(checkoutRoot))),
   });
   for (const h of result.ladder) {
@@ -27935,7 +27935,7 @@ export function buildCiLearningCadenceRunner(deps: {
     const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
     const lessonRead = deps.loadLessons?.() ?? readCheckoutCiLessons(deps.checkoutRoot, await readMergedCiLessonsAsync(deps.checkoutRoot));
     const { result, filedLessons } = mintCiLearningFromPlan({
-      corpus, alreadyFiledFindingIds: idempotencyOrigins, handFix, stateRoot: deps.root, runId: `CI-LEARNING-${at.getTime()}`,
+      corpus, window, alreadyFiledFindingIds: idempotencyOrigins, handFix, stateRoot: deps.root, runId: `CI-LEARNING-${at.getTime()}`,
       readLessons: () => lessonRead,
     });
     const lessonRecurrences =

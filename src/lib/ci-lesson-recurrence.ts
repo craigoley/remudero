@@ -6,10 +6,26 @@ import { parseTasksFromYaml, readBlobsAtRef, readBlobsAtRefAsync, type Task } fr
 import { resolveRepoLayout } from "./repo-layout.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 
-export const CI_LEARNING_ID_RE = /^ci-learning:\d+:(.+?)(?:#r(\d+))?$/;
+/** W1-T14140: a CI lesson's finding id — `ci-learning:<pr>:<gate>` for a gate's first lesson, `ci-learning:<pr>#r<N>:<gate>`
+ *  for its Nth reopen. The gate is everything after the colon that closes the PR field, VERBATIM. Every id filed before
+ *  W1-T14140 was written `ci-learning:${pr}:${gate}` from a CheckRun name as GitHub returns it (ci-learning-graphql.ts), so
+ *  it holds digits alone between `ci-learning:` and that colon: the reopen mark sits where no earlier id holds anything
+ *  else, and a check whose own name reads `Build #r1`, `a%23b` or `x:y` parses to the gate it always named. Nothing is
+ *  escaped, so no id needs a decoder. A hand-fix origin (`ci-learning:hand-fix:...`) does not match. */
+export const CI_LEARNING_ID_RE = /^ci-learning:\d+(?:#r(?<reopen>\d+))?:(?<gate>.+)$/;
 
+/** The check a finding id names and which reopen of its lesson it is (0 for the first), or `undefined` for an origin that is
+ *  no gate lesson's. */
+export function parseCiLearningId(findingId: string): { gate: string; reopen: number } | undefined {
+  const groups = CI_LEARNING_ID_RE.exec(findingId)?.groups;
+  return groups ? { gate: groups.gate!, reopen: Number(groups.reopen ?? 0) } : undefined;
+}
+
+/** The gate {@link CI_LEARNING_ID_RE} names, or undefined for another origin.
+ *  Dedup by gate: a window's changing first PR made whole-id dedup re-file existing lessons.
+ *  Evidence: 2026-09-29 plan/tasks.d audit, retained in the W1-T11007 review record. */
 export function ciLearningGateOf(findingId: string): string | undefined {
-  return CI_LEARNING_ID_RE.exec(findingId)?.[1].replace(/%23|%25/g, (escape) => escape === "%23" ? "#" : "%");
+  return parseCiLearningId(findingId)?.gate;
 }
 
 /**
@@ -98,7 +114,7 @@ export interface FiledCiLesson {
  *  for a record that carries no `ci_learning_prs` — every lesson filed before W1-T3055, which is
  *  UNJUDGEABLE rather than passing: an older record has no watermark and inventing one from the
  *  origin's first pull request would judge the lesson against its own evidence.
- *  W1-T14140: a reopen's origin ends `#r<N>`; the finding id keeps it and the gate does not. */
+ *  W1-T14140: a reopen's origin carries `#r<N>` on its PR field; the finding id keeps it and the gate does not. */
 export function parseFiledCiLesson(contents: string): FiledCiLesson | undefined {
   const origin = /^[ \t]*origin:[ \t]*(.+)$/m.exec(contents);
   const prs = /^[ \t]*ci_learning_prs:[ \t]*(\[[\d,\s]*\])[ \t]*$/m.exec(contents);
@@ -285,7 +301,7 @@ export type FiledCiLessonsRead =
   | { status: "measured"; lessons: FiledCiLesson[] }
   | { status: "unreadable"; reason?: string };
 
-const CI_LESSON_ORIGIN_LINE = "^[[:blank:]]*origin:[[:blank:]]*[\"']?ci-learning:[0-9]+:";
+const CI_LESSON_ORIGIN_LINE = "^[[:blank:]]*origin:[[:blank:]]*[\"']?ci-learning:[0-9]+(#r[0-9]+)?:";
 
 function filedCiLessonsInTasks(tasks: readonly Task[]): FiledCiLesson[] {
   return tasks.flatMap((task) => {
@@ -386,7 +402,7 @@ export function readFiledCiLessons(shardDir: string): FiledCiLessonsRead {
     } catch {
       return { status: "unreadable" };
     }
-    if (!/^[ \t]*origin:[ \t]*["']?ci-learning:\d+:/m.test(contents)) continue;
+    if (!/^[ \t]*origin:[ \t]*["']?ci-learning:\d+(?:#r\d+)?:/m.test(contents)) continue;
     try {
       rememberCiLessons(byFinding, readCiLessonTasks(contents, path));
     } catch {

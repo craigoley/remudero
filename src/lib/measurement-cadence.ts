@@ -60,16 +60,16 @@ import {
   type WipeTestPairSubject,
   type WipeTestRunResult,
 } from "./wipe-test.js";
-import type { CiFailureCorpus, CiFailurePair } from "./ci-failure-corpus.js";
+import { collectCiFailureCorpus, type CiFailureCorpus, type CiFailureCorpusInput, type CiFailurePair } from "./ci-failure-corpus.js";
 import { loadPlan, loadPlanFromYaml, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan, type Task, type TaskRisk } from "./plan.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { interventionFromLedgerRow, interventionKey, mostChangedFile, OPERATOR_INTERVENTION_STEP, type OperatorInterventionRow } from "./operator-interventions.js";
 import { foldKnowledgeGaps, KNOWLEDGE_MEASURED_STEP, type KnowledgeGapReport } from "./knowledge-gaps.js";
 import { foldLearningOutcomes, type LearningOutcomeReport } from "./knowledge-outcome.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
-import { CI_LEARNING_ID_RE, ciLearningGateOf, judgeCiLessonEfficacy, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson, type FiledCiLessonsRead } from "./ci-lesson-recurrence.js";
+import { ciLearningGateOf, judgeCiLessonEfficacy, parseCiLearningId, type CiLessonEfficacy, type CiLessonRecurrenceObservation, type FiledCiLesson, type FiledCiLessonsRead } from "./ci-lesson-recurrence.js";
 import { CI_LESSON_HANDOFF_STEP } from "./flow-remedy-gardener.js";
-export { CI_LEARNING_ID_RE, ciLearningGateOf, judgeCiLessonEfficacy, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
+export { CI_LEARNING_ID_RE, ciLearningGateOf, judgeCiLessonEfficacy, parseCiLearningId, parseFiledCiLesson } from "./ci-lesson-recurrence.js";
 export type { CiLessonEfficacy } from "./ci-lesson-recurrence.js";
 import {
   DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -3157,13 +3157,13 @@ export const CI_LEARNING_DOMINANT_FILE_COUNT = 3;
 /** The primary key: PR plus gate, never a similarity score — deterministic, so a rerun over an
  *  unchanged corpus recognises what it already filed ({@link adoptionProposalId}'s discipline). */
 export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">, reopen = 0): string {
-  const gate = finding.gate.replace(/%/g, "%25").replace(/#/g, "%23");
-  return `ci-learning:${finding.pr}:${gate}${reopen > 0 ? `#r${reopen}` : ""}`;
+  // W1-T14140: a reopen marks the PR field, never the gate, which stays verbatim (CI_LEARNING_ID_RE).
+  return `ci-learning:${finding.pr}${reopen > 0 ? `#r${reopen}` : ""}:${finding.gate}`;
 }
 
 /** W1-T14140: which reopen of its gate's lesson a finding id is — 0 for the first lesson, N for `#r<N>`. */
 export function ciLearningReopenOf(findingId: string): number {
-  return Number(CI_LEARNING_ID_RE.exec(findingId)?.[2] ?? 0);
+  return parseCiLearningId(findingId)?.reopen ?? 0;
 }
 
 /** W1-T14140: the reopen at which a gate whose lessons keep recurring stops filing lessons and goes to the
@@ -3173,7 +3173,9 @@ export const CI_LEARNING_LADDER_REOPEN = 3;
 /** W1-T14140 (INVARIANT a-lesson-proves-reach): every ACTIVE ci-learning entry in `corpus` — one whose `src:` is a
  *  ci-learning finding id — with the check that id names and whether selectLearnings selects it for a round whose
  *  context names only that check. test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts asserts `selected`
- *  for each one, so an entry no fix round of its own check is handed turns CI red. A superseded entry is never injected. */
+ *  for each one, so an entry no fix round of its own check is handed turns CI red. A superseded entry — one the
+ *  knowledge gardener retired (applyLearningActions), with or without a `superseded_by` — is never injected, so it is
+ *  not a lesson that must reach anything. */
 export function ciLessonReach<T extends LearningEntry>(corpus: T[]): { entry: T; gate: string; selected: boolean }[] {
   return corpus.flatMap((entry) => {
     const gate = entry.lifecycle === "active" ? ciLearningGateOf(entry.src) : undefined;
@@ -3186,17 +3188,10 @@ function lessonReachesGate(corpus: LearningEntry[], entry: LearningEntry, gate: 
   return selectLearnings(corpus, undefined, DEFAULT_KNOWLEDGE_BUDGET_CHARS, { text: gate }).selected.includes(entry);
 }
 
-function activeLessonReplacement(entry: LearningEntry, byId: ReadonlyMap<string, LearningEntry>): LearningEntry | undefined {
-  const visited = new Set<string>();
-  let current: LearningEntry | undefined = entry;
-  while (current?.lifecycle === "superseded" && current.supersededBy && !visited.has(current.id)) {
-    visited.add(current.id);
-    current = byId.get(current.supersededBy);
-  }
-  return current?.lifecycle === "active" ? current : undefined;
-}
-
-/** A filed shard owns the identity of its lesson file. Parked tasks can precede the file. */
+/** A filed shard owns the identity of its lesson file. Parked tasks can precede the file. The file must hold the corpus
+ *  entry carrying the shard's finding id as its `src:`, in any lifecycle: a lesson the knowledge gardener later retires
+ *  is still that shard's lesson, and a retirement names no replacement it must be measured against. Every ACTIVE entry
+ *  in the file must carry that finding id, and {@link ciLessonReach} proves each one reaches its check. */
 export function ciLessonBindingErrors(
   root: string,
   tasks: readonly Pick<Task, "origin" | "files">[],
@@ -3205,19 +3200,12 @@ export function ciLessonBindingErrors(
   const byId = new Map(corpus.map((entry) => [entry.id, entry]));
   const errors = new Set<string>();
   for (const { origin, files } of tasks) {
-    const gate = origin === undefined ? undefined : ciLearningGateOf(origin);
-    if (gate === undefined) continue;
+    if (origin === undefined || ciLearningGateOf(origin) === undefined) continue;
     const lessonFile = files?.find((file) => /^learnings\/ci\.d\/[^/]+\.yaml$/.test(file));
     if (!lessonFile || !existsSync(join(root, lessonFile))) continue;
     const entries = loadLearnings(join(root, lessonFile));
-    if (!entries.some(({ id, src }) => {
-      const entry = byId.get(id);
-      if (src !== origin || !entry || entry.src !== origin) return false;
-      if (entry.lifecycle === "active") return true;
-      const replacement = activeLessonReplacement(entry, byId);
-      return replacement !== undefined && lessonReachesGate(corpus, replacement, gate);
-    })) {
-      errors.add(`${lessonFile} must contain a corpus entry with src: ${JSON.stringify(origin)} that is active or has an active replacement for ${JSON.stringify(gate)}`);
+    if (!entries.some(({ id, src }) => src === origin && byId.get(id)?.src === origin)) {
+      errors.add(`${lessonFile} must contain a corpus entry with src: ${JSON.stringify(origin)}`);
     }
     for (const entry of entries) {
       if (entry.lifecycle === "active" && entry.src !== origin) {
@@ -3298,7 +3286,30 @@ export interface CiLessonLadderHandoff {
   /** The reopen this would have been: {@link CI_LEARNING_LADDER_REOPEN}. */
   reopen: number;
   recurredPrs: number[];
+  /** Every head at which the gate read red on a pull request after the lesson's watermark ({@link gateRedHeads}). */
   redHeads: { pr: number; sha: string }[];
+}
+
+/** W1-T14140: every head at which `gate` read red on a pull request above `watermarkPr` — each sha of each red streak.
+ *  A corpus pair keeps only its streak's FIRST red sha, while the sweep disposes whichever head it happens to see (often
+ *  a later push of the same streak) and writes `red_checks` only on a pass that dispatched a fix, so the flow-remedy
+ *  ladder's head join needs the whole streak. The heads are read from `window`, the rollups the corpus was collected
+ *  from, through collectCiFailureCorpus itself, so a head reads red exactly when the corpus reads it red. Without a
+ *  window, each pair's first red sha is all that is known. */
+function gateRedHeads(corpus: CiFailureCorpus, window: Pick<CiFailureCorpusInput, "prs"> | undefined, gate: string,
+  watermarkPr: number): { pr: number; sha: string }[] {
+  const heads = new Map<string, { pr: number; sha: string }>();
+  const add = (pr: number, sha: string) => { heads.set(JSON.stringify([pr, sha]), { pr, sha }); };
+  for (const p of corpus.pairs) if (p.gate === gate && p.pr > watermarkPr) add(p.pr, p.redSha);
+  const recurred = new Set([...heads.values()].map((h) => h.pr));
+  for (const pr of window?.prs ?? []) {
+    if (!recurred.has(pr.number)) continue;
+    for (const commit of pr.commits) {
+      const red = collectCiFailureCorpus({ prs: [{ number: pr.number, commits: [commit] }] }).pairs;
+      if (red.some((p) => p.gate === gate)) add(pr.number, commit.sha);
+    }
+  }
+  return [...heads.values()].sort((a, b) => a.pr - b.pr);
 }
 
 // ── W1-T12837: a repeated hand-fix class is a lesson the fleet never learned ─────────────────────
@@ -3532,13 +3543,14 @@ function recurredHeldGates(
  * W1-T14140: `filedLessons` are the plan's judgeable lessons ({@link FiledCiLesson}). A held gate whose newest lesson
  * recurred is drafted again as reopen `#r<N>` over the pull requests after that lesson's watermark; at reopen
  * {@link CI_LEARNING_LADDER_REOPEN} it goes to the flow-remedy ladder (`ladder`) instead. Omitted, every held gate is
- * dropped as before.
+ * dropped as before. `window`, the input `corpus` was collected from, gives a hand-off every red head of the gate.
  */
 export function mintCiLearningShards(
   corpus: CiFailureCorpus,
   alreadyFiledFindingIds: readonly string[],
   handFix?: HandFixInput,
   filedLessons: readonly FiledCiLesson[] = [],
+  window?: Pick<CiFailureCorpusInput, "prs">,
 ): CiLearningMintResult {
   const unreadableShas = [...corpus.unreadableShas];
   const blind = corpus.status === "unreadable";
@@ -3550,8 +3562,7 @@ export function mintCiLearningShards(
     .filter(([, fate]) => fate.reopen >= CI_LEARNING_LADDER_REOPEN)
     .map(([gate, { prior, reopen }]) => ({
       gate, findingId: prior.findingId, reopen, recurredPrs: prior.recurredPrs,
-      redHeads: corpus.pairs.filter((p) => p.gate === gate && p.pr > prior.watermarkPr)
-        .map((p) => ({ pr: p.pr, sha: p.redSha })),
+      redHeads: gateRedHeads(corpus, window, gate, prior.watermarkPr),
     }))
     .sort((a, b) => a.gate.localeCompare(b.gate));
 
@@ -3649,9 +3660,11 @@ export function mintCiLearningShards(
 /** W1-T14140: the mint as both ci-learning callers run it — the scheduled rung (buildCiLearningCadenceRunner) and
  *  `rmd ci-learning`. The plan's filed lessons are read first and handed to the mint when the read is measured, so a gate
  *  whose newest lesson recurred reopens live; an unreadable read reopens nothing rather than judging a partial set. Each
- *  ladder hand-off is written as the CI_LESSON_HANDOFF_STEP row the flow-remedy ladder reads beside the sweep's own. */
+ *  ladder hand-off is written as the CI_LESSON_HANDOFF_STEP row the flow-remedy ladder reads beside the sweep's own, with
+ *  every red head of its gate read from `window`, the input `corpus` was collected from. */
 export function mintCiLearningFromPlan(input: {
   corpus: CiFailureCorpus;
+  window: Pick<CiFailureCorpusInput, "prs">;
   alreadyFiledFindingIds: readonly string[];
   handFix?: HandFixInput;
   readLessons: () => FiledCiLessonsRead;
@@ -3661,7 +3674,7 @@ export function mintCiLearningFromPlan(input: {
   const filedLessons = input.readLessons();
   const lessons = filedLessons.status === "measured" ? filedLessons.lessons : [];
   const origins = [...input.alreadyFiledFindingIds, ...lessons.map((lesson) => lesson.findingId)];
-  const result = mintCiLearningShards(input.corpus, origins, input.handFix, lessons);
+  const result = mintCiLearningShards(input.corpus, origins, input.handFix, lessons, input.window);
   for (const h of result.ladder) {
     appendLedger(join(input.stateRoot, "state", LEDGER_FILENAME), { run_id: input.runId, task_id: "DAEMON", step: CI_LESSON_HANDOFF_STEP,
       gate: h.gate, finding_id: h.findingId, reopen: h.reopen, recurred_prs: h.recurredPrs, red_heads: h.redHeads });

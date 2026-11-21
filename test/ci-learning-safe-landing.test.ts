@@ -608,7 +608,7 @@ test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the f
     })();
     return filed;
   };
-  const expected = ["ci-learning:4321:ci-gate#r1"];
+  const expected = ["ci-learning:4321#r1:ci-gate"];
   assert.deepEqual(await cadence(checkout), expected, "the scheduled rung reopens using the merged watermark");
   assert.deepEqual(await cadence(checkout, expected), [], "a newer queued reopen is held until it can be judged");
 
@@ -624,7 +624,7 @@ test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the f
   };
   assert.deepEqual(manual(checkout), expected, "the manual verb reopens using the merged watermark");
 
-  const latest = "ci-learning:4290:ci-gate#r2";
+  const latest = "ci-learning:4290#r2:ci-gate";
   const { checkout: twiceReopened } = checkoutBehindMainCarrying(latest, [4290, 4300]);
   mkdirSync(join(twiceReopened, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(twiceReopened, "plan", "tasks.d", "W1-T9021-local.yaml"),

@@ -267,6 +267,16 @@ export function readOutcomes(prs: readonly number[], sources: FlowGardenSources)
   return result;
 }
 
+/** W1-T14140: the checks a `sweep.disposed` row names red — its `red_checks` when it carries them (written only on a pass
+ *  that dispatched a fix, W1-T4459), else the `<check> failed on <sha>` clauses describeCiFailures writes. `required checks
+ *  red`, the reason for every PR whose rollup reads red, names none, so such a row joins a hand-off by its head alone. */
+export function redChecksOf(row: LedgerRecord): string[] {
+  if (Array.isArray(row.red_checks)) return row.red_checks.filter((check): check is string => typeof check === "string");
+  return String(row.reason ?? "").split("; ")
+    .flatMap((clause) => /^(.+?) failed on [0-9a-f]{7,40}(?= — |$)/i.exec(clause)?.[1] ?? []);
+}
+
+/** A hand-off's checks by PR, one entry per red head ({@link CI_LESSON_HANDOFF_STEP}'s `red_heads`). */
 function handedOffChecks(records: readonly LedgerRecord[]): Map<number, { gate: string; sha: string }[]> {
   const byPr = new Map<number, { gate: string; sha: string }[]>();
   for (const { step, gate, red_heads: heads } of records) {
@@ -306,11 +316,10 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
         episode = { pr, key, owner: String(r.blocker_owner), start, end: start, outcome: "open", eligible: false, charges: [] };
         episodes.push(episode);
       }
-      // Sweep can give one aggregate reason for several red checks. Join the evidence on the PR
-      // and prefer the sweep's check names when recorded, otherwise use the observed red head.
-      const checks = r.red_checks;
-      if (r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) =>
-        Array.isArray(checks) && checks.length > 0 ? checks.includes(gate) : r.head_sha === sha)) {
+      // Join the evidence on the PR: the row is the handed check's when it names that check, or when it was written at a
+      // head where the check read red. Sweep gives one aggregate reason for most red rollups and names no check in it.
+      const named = redChecksOf(r);
+      if (r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) => named.includes(gate) || r.head_sha === sha)) {
         episode.handedOff = true;
       }
       const next = rows[i + 1];
