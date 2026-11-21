@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
+import { readFileIfExists } from "./fs-race-safe.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
@@ -311,6 +312,48 @@ export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string):
 }
 
 type LedgerTaskAnswer = Readonly<Record<string, unknown>> & { readonly ts: string; readonly answer: string };
+
+/** W1-T10925: what the daemon wrote at boot about the repository it drains. */
+export interface DaemonTargetRecord {
+  owner: string; repo: string; isSelf: boolean; checkoutRoot: string;
+  /** W1-T13940: the root whose plan/questions.ndjson the daemon's needs_input check reads. */
+  questionStoreRoot?: string;
+}
+
+export function daemonTargetRecordPath(stateDir: string): string {
+  return join(stateDir, "daemon-target.json");
+}
+
+export type DaemonTargetRecordRead =
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "record"; record: DaemonTargetRecord };
+
+/** An absent or malformed record means "no target", never a guess from the `repos/` listing. */
+export function readDaemonTargetRecord(stateDir: string): DaemonTargetRecordRead {
+  const path = daemonTargetRecordPath(stateDir);
+  let raw: string | undefined;
+  try {
+    raw = readFileIfExists(path);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  if (raw === undefined) return { kind: "absent" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  const r = parsed as Partial<DaemonTargetRecord> | null;
+  if (r === null || typeof r !== "object" || typeof r.owner !== "string" || typeof r.repo !== "string" ||
+    typeof r.isSelf !== "boolean" || typeof r.checkoutRoot !== "string" || r.checkoutRoot === "") {
+    return { kind: "unreadable", reason: `${path}: not an {owner, repo, isSelf, checkoutRoot} record` };
+  }
+  return { kind: "record", record: { owner: r.owner, repo: r.repo, isSelf: r.isSelf, checkoutRoot: r.checkoutRoot,
+    ...(typeof r.questionStoreRoot === "string" && r.questionStoreRoot !== "" ? { questionStoreRoot: r.questionStoreRoot } : {}) } };
+}
+
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
 function needsInputRefusal(task: Task, inputAnswer?: TaskInputAnswer): string | undefined {

@@ -1536,8 +1536,10 @@ export async function daemonCommand(
   let tickReadStartedAtMs: number | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
+  // W1-T13940: the store the needs_input check reads, recorded so serve's Inbox reads the same one.
+  const questionStoreRoot = effectiveRepoRoot;
   const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
-    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot, questionStoreRoot });
   if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
   await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
@@ -2374,7 +2376,7 @@ export async function daemonCommand(
         readRestartHistory: () => {
           return readRestartHistoryLines(dirname(ledgerPathFor(config)));
         },
-        taskInputAnswer: taskInputAnswerWithLedger(effectiveRepoRoot, ledgerPathFor(config)),
+        taskInputAnswer: taskInputAnswerWithLedger(questionStoreRoot, ledgerPathFor(config)),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
         probeFleetPushCredential: receivePackCredentialProbe({ originUrl: `https://github.com/${target.owner}/${target.repo}.git`,
           token: daemonPushTokenSource(`${target.owner}/${target.repo}`, gitCredentialSocket ? (deps.gitCredentialMint ?? realScopedMint(log)) : undefined) }),

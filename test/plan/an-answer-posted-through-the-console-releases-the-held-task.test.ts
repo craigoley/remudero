@@ -26,6 +26,7 @@ import { assertRunnable, loadPlanFromYaml, TaskAdmissionError, type Plan } from 
 import { policyPath } from "#src/lib/policy.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { BoardCatalogClient, BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
+import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
 import { createService } from "#src/lib/service.js";
 import type { GitHub } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -159,7 +160,7 @@ async function kick(daemonRoot: string, ledgerPath: string): Promise<{ ran: stri
 interface Stepped extends Clock { set(ms: number): void }
 
 /** Serve's side: a read model over the shared ledger, serve's question root, and the now view over both. */
-function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient; checkout?: true } = {}) {
+function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient; checkout?: true; noStoreRecord?: true } = {}) {
   const root = readModelFixtureDir(t, "t13940").dir;
   // The answer writers stamp their ledger rows with the system clock; the read model must not see them as future rows.
   let nowMs = Date.now();
@@ -168,6 +169,11 @@ function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs
   mkdirSync(ledgerDir, { recursive: true });
   const ledgerPath = join(ledgerDir, "ledger.ndjson");
   writeLedger([{ ts: clock.iso(), host: "h1", step: "daemon.tick" }], { dir: ledgerDir });
+  // The instance daemon's own checkout, apart from serve's root and the target checkout: its boot record names it.
+  const daemonRoot = join(root, "daemon-checkout");
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  writeDaemonTargetRecord(ledgerDir, { owner: "craigoley", repo: instance === "core" ? "remudero" : "wreckterra", isSelf: instance === "core",
+    checkoutRoot: join(root, "instance-checkout"), ...(plans.noStoreRecord ? {} : { questionStoreRoot: daemonRoot }) });
   const db = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
   onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
@@ -202,7 +208,7 @@ function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs
     const gates = composed.humanGates.gates.filter((g) => g.kind === "task_question");
     return { held, gates, composed };
   };
-  return { ledgerPath, serveRoot, checkout, needsYou, projector };
+  return { ledgerPath, serveRoot, checkout, daemonRoot, needsYou, projector };
 }
 
 test("W1-T13940 criterion 1: an answer through the real answer route, written to serve's own folder, releases the task on the daemon's next dispatch pass", async (t) => {
@@ -301,31 +307,33 @@ test("W1-T13940 criterion 4: the Inbox lists the held task exactly when the disp
   let box!: ReturnType<typeof inbox>;
   for (const fixture of fixtures) {
     box = inbox(t);
-    const daemonRoot = tempDir(t, "daemon");
+    const daemonRoot = box.daemonRoot;
     await fixture.apply({ serveRoot: box.serveRoot, daemonRoot, ledgerPath: box.ledgerPath });
     const refused = refusal(daemonRoot, box.ledgerPath) !== undefined;
     const listed = box.needsYou().held.length === 1;
     assert.equal(refused, fixture.refused, `${fixture.name}: the dispatch check`);
     assert.equal(listed, refused, `${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
   }
-  // A secondary instance's daemon reads its own checkout's store; the Inbox reads that same store for its held list.
-  const secondary: Array<{ name: string; refused: boolean; store?: string }> = [
-    { name: "a secondary checkout's store answer, with no ledger row", refused: false, store: "Use 5 passes." },
-    { name: "a secondary checkout's blank store answer", refused: true, store: "  " },
-    { name: "a secondary checkout with no answer", refused: true },
+  // A secondary instance's daemon reads the store its boot record names, apart from the target checkout; the Inbox reads that same store.
+  const secondary: Array<{ name: string; refused: boolean; daemon?: string; target?: string }> = [
+    { name: "an answer only in the secondary daemon's own store, with no ledger row", refused: false, daemon: "Use 5 passes." },
+    { name: "an answer only in the secondary instance's target checkout, with no ledger row", refused: true, target: "Use 5 passes." },
+    { name: "a blank answer in the secondary daemon's store", refused: true, daemon: "  " },
+    { name: "a secondary instance with no answer", refused: true },
   ];
+  const answerLine = (answer: string) => `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer, origin: "issue#501:comment:9001" })}\n`;
   for (const fixture of secondary) {
     const wreck = inbox(t, "wreck", { checkout: true });
-    if (fixture.store !== undefined) {
-      writeFileSync(join(wreck.checkout, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: fixture.store, origin: "issue#501:comment:9001" })}\n`);
-    }
+    assert.notEqual(wreck.daemonRoot, wreck.checkout, "control: the daemon's root and the target checkout are different folders");
+    if (fixture.daemon !== undefined) writeFileSync(join(wreck.daemonRoot, "plan", "questions.ndjson"), answerLine(fixture.daemon));
+    if (fixture.target !== undefined) writeFileSync(join(wreck.checkout, "plan", "questions.ndjson"), answerLine(fixture.target));
     assert.equal(answerRows(wreck.ledgerPath).length, 0, `${fixture.name}: control: no ledger answer row`);
-    const refused = refusal(wreck.checkout, wreck.ledgerPath) !== undefined;
+    const refused = refusal(wreck.daemonRoot, wreck.ledgerPath) !== undefined;
     const { held, composed } = wreck.needsYou();
     assert.equal(refused, fixture.refused, `${fixture.name}: the dispatch check`);
     assert.equal(held.length === 1, refused, `${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
     assert.equal(composed.humanGates.sources.find((source) => source.name === "held-tasks" && source.instance === "wreck")?.state, "complete",
-      `${fixture.name}: the held-task source read the checkout's store`);
+      `${fixture.name}: the held-task source read the daemon's store`);
   }
 
   const root = tempDir(t, "writers");
@@ -477,18 +485,20 @@ test("W1-T13940 criterion 3: past the decisions cap, the needs-you count says ho
   const listed = composed.decisions.filter((d) => d.kind === "task_question");
   assert.equal(gates.length, 51, "every held task is a gate");
   assert.equal(listed.length, 50, "the list keeps its cap");
-  // This fixture's GitHub, feedback-age and Inbox sources are partial, so the count is a lower bound; the next test makes every source complete.
+  // This fixture's GitHub, feedback-age and Inbox sources are partial, so the Inbox total is a lower bound; the question source is complete,
+  // and it alone produced the held task the list leaves out, so that count is exact.
   assert.equal(composed.humanGates.sources.find((source) => source.name === "task-questions")?.state, "complete", "an absent store is a complete source");
+  assert.ok(composed.needsYou.uncertain.length > 0, "control: other sources are partial");
   assert.deepEqual(composed.needsYou.inbox, { atLeast: 51 });
-  assert.deepEqual(composed.needsYou.display, { shown: 50, more: { atLeast: 1 } }, "the count names the one the list leaves out");
-  assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.atLeast ?? 0), gates.length, "the count and the list agree");
+  assert.deepEqual(composed.needsYou.display, { shown: 50, more: { count: 1 } }, "the count names the one the list leaves out, exactly");
+  assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.count ?? 0), gates.length, "the count and the list agree");
   assert.equal(composed.instances.find((i) => i.instance === "core")?.counts?.decisionsMore, 1, "the instance says one more decision exists");
 });
 
 test("W1-T13940 criterion 4: an array answer row counts as no answer in both the dispatch check and the Inbox", async (t) => {
   for (const answer of [[], ["  "], ["Use 5 passes."], { text: "Use 5 passes." }]) {
     const box = inbox(t);
-    const daemonRoot = tempDir(t, "daemon");
+    const daemonRoot = box.daemonRoot;
     appendFileSync(box.ledgerPath, `${JSON.stringify({ ts: new Date().toISOString(), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer })}\n`);
     assert.ok(refusal(daemonRoot, box.ledgerPath) !== undefined, `${JSON.stringify(answer)}: the dispatch check still holds the task`);
     assert.equal(box.needsYou().held.length, 1, `${JSON.stringify(answer)}: the Inbox still lists it`);
@@ -598,6 +608,9 @@ function completeCoreNeedsYou(t: TestCtx, plan: Plan, store: string) {
   mkdirSync(dirname(planPath), { recursive: true });
   writeFileSync(join(dirname(planPath), "policy.yaml"), readFileSync(policyPath(REPO_ROOT), "utf8"));
   writeFileSync(join(dirname(planPath), "questions.ndjson"), store);
+  const daemonRoot = join(root, "daemon-checkout");
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  writeDaemonTargetRecord(ledgerDir, { owner: "craigoley", repo: "remudero", isSelf: true, checkoutRoot: daemonRoot, questionStoreRoot: daemonRoot });
   writeFileSync(join(ledgerDir, "ledger.ndjson"), [{ ts: iso(-7_200_000), step: "daemon.boot", head_sha: "a".repeat(40) },
     { ts: iso(-1000), step: "daemon.freshness_not_stale", arm: "up_to_date" }].map((row) => `${JSON.stringify(row)}\n`).join(""));
   // Consenting, enrolled feedback-age evidence over a window that holds now: one triaged entry, every ledger form read.
@@ -679,4 +692,48 @@ test("W1-T13940 criterion 4: a ledger answer whose origin and text the store alr
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(2000), run_id: "PANEL-2", task_id: TASK, step: "panel.question_answered", origin: "tok-2", answer: "Use 5 passes.", answer_id: "a-3" })}\n`);
   taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
   assert.deepEqual(storeLines(daemonRoot).map((line) => line.answer_id), ["a-1", "a-3"]);
+});
+
+test("W1-T13940 criterion 3: with a partial question source and other partial sources, the held task the list leaves out is counted as a lower bound", (t) => {
+  const ids = Array.from({ length: NOW_DECISIONS_CAP + 1 }, (_, i) => `W1-T9${String(3000 + i)}`);
+  const many: Plan = loadPlanFromYaml(ids.map((id, i) => `- id: ${id}
+  title: "held fixture ${i}"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  origin: architect
+  files: [src/lib/plan.ts]
+  needs_input:
+    question: "question ${i}?"
+    asked_at: "2026-11-14T20:${String(i).padStart(2, "0")}:00Z"
+`).join(""), "plan/tasks.d/W1-T93000-many.yaml");
+  const box = inbox(t, "core", { readPlan: many });
+  writeFileSync(join(box.serveRoot, "plan", "questions.ndjson"), `{"task":"W1-T9\n`);
+  const { composed } = box.needsYou();
+  assert.equal(composed.humanGates.sources.find((source) => source.name === "task-questions")?.state, "partial");
+  assert.deepEqual(composed.needsYou.display, { shown: NOW_DECISIONS_CAP, more: { atLeast: 1 } });
+});
+
+test("W1-T13940 criterion 3: an answer only in a secondary instance's target checkout leaves the task held, one decision before the cap, and counted", (t) => {
+  const wreck = inbox(t, "wreck", { checkout: true });
+  writeFileSync(join(wreck.checkout, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: "Use 5 passes.", origin: "tok" })}\n`);
+  assert.match(refusal(wreck.daemonRoot, wreck.ledgerPath) ?? "", /needs-input/, "control: the daemon's own store has no answer, so dispatch holds the task");
+  const { held, gates, composed } = wreck.needsYou();
+  assert.equal(held.length, 1, "the held task is a decision in the list");
+  assert.deepEqual(gates.map((gate) => gate.key), [`task_question:wreck:${encodeURIComponent(held[0]!.id)}`], "and one gate");
+  assert.equal(composed.needsYou.instances.find((i) => i.instance === "wreck")?.inbox.atLeast ?? composed.needsYou.instances.find((i) => i.instance === "wreck")?.inbox.count, 1, "and counted");
+});
+
+test("W1-T13940 criterion 4: a daemon target record that names no question store marks the held-task source partial", (t) => {
+  for (const instance of ["core", "wreck"]) {
+    const box = inbox(t, instance, { noStoreRecord: true });
+    const { composed, held } = box.needsYou();
+    assert.equal(held.length, 1, `${instance}: the held task is still listed`);
+    const source = composed.humanGates.sources.find((s) => s.instance === instance && (s.name === "held-tasks" || s.name === "task-questions"));
+    assert.equal(source?.state, "partial", `${instance}: the held-task source is partial`);
+    assert.match(source?.reason ?? "", /names no question store/);
+  }
 });

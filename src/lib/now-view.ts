@@ -54,7 +54,7 @@ import {
   projectHumanGates,
   projectOperatorItemGates,
   projectPinReviewerGates,
-  shownHumanGates,
+  displayedHumanGates,
   type DependencyEscalation,
   type DependencyReviewFact,
   type FeedbackAgeEvidence,
@@ -83,7 +83,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { answerText, newestTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
+import { answerText, daemonTargetRecordPath, newestTaskAnswer, readDaemonTargetRecord, unmetDependencies, type Plan, type AcceptanceCriterion } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -564,6 +564,18 @@ function mtimeOf(path: string): number | undefined {
 
 const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
+/** W1-T13940: the question store the instance's daemon reads for its needs_input check, named on its boot target record. */
+function daemonQuestionStore(instance: NowInstance): { lines: readonly unknown[]; partial?: string } {
+  const read = readDaemonTargetRecord(instance.ledgerDir);
+  const root = read.kind === "record" ? read.record.questionStoreRoot : undefined;
+  if (root === undefined) {
+    return { lines: [], partial: read.kind === "unreadable" ? `the daemon's target record is unreadable: ${read.reason}` : "the daemon's target record names no question store" };
+  }
+  const store = readQuestionStore(root);
+  if ("reason" in store) return { lines: [], partial: `the daemon's question store at ${root} is unreadable: ${store.reason}` };
+  return { lines: store.lines, ...(store.skipped ? { partial: `the daemon's question store at ${root} has ${store.skipped} malformed line(s)` } : {}) };
+}
+
 /** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
 function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
   // The daemon's answerText decides; SQLite would return an array answer as its JSON text, so only a text answer is read.
@@ -1043,8 +1055,10 @@ export function createNowView(opts: NowViewOptions): {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stateRoot = dirname(instance.ledgerDir);
-    const stores = instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}`
-      : instance.name !== core && root ? `q:${mtimeOf(questionStorePath(root)) ?? "-"}` : "none";
+    const record = readDaemonTargetRecord(instance.ledgerDir);
+    const daemonRoot = record.kind === "record" ? record.record.questionStoreRoot : undefined;
+    const daemonStore = `${mtimeOf(daemonTargetRecordPath(instance.ledgerDir)) ?? "-"}:${daemonRoot ? mtimeOf(questionStorePath(daemonRoot)) ?? "-" : "none"}`;
+    const stores = `${instance.name === core && instance.feedbackRoot ? `${feedback}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none"}:${daemonStore}`;
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
     return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
@@ -1152,18 +1166,13 @@ export function createNowView(opts: NowViewOptions): {
     let storeLines: readonly unknown[] = [];
     let storeSkipped: string | undefined;
     const factAnswer = answeredByFact(db);
-    let heldUnread: string | undefined;
+    // The held list decides as the instance daemon's dispatch check does: its own store, then the ledger fact.
+    // Only a held candidate needs the store, so an instance with none attests its empty held list.
+    const heldCandidates = ((catalog?.plan ?? plan)?.tasks ?? []).some((task) => task.needs_input !== undefined && task.status === "queued");
+    const daemonStore = heldCandidates ? daemonQuestionStore(instance) : { lines: [] };
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
-      // The instance daemon's dispatch check reads its own checkout's store beside the ledger: the held list reads the same store.
-      const path = nowPlanPath(instance);
-      const store = path ? readQuestionStore(dirname(dirname(path))) : { reason: "the instance names no checkout, so its question store is unread" };
-      if ("reason" in store) heldUnread = store.reason;
-      else {
-        storeLines = store.lines;
-        if (store.skipped) storeSkipped = `the question store has ${store.skipped} malformed line(s)`;
-      }
     } else if (!instance.feedbackRoot) {
       reasons.grill = reasons.task_question = "no feedback root is configured";
     } else {
@@ -1201,7 +1210,7 @@ export function createNowView(opts: NowViewOptions): {
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
     // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
     const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [],
-      (taskId) => newestTaskAnswer(storeLines, taskId) !== undefined || factAnswer(taskId) !== undefined, catalog?.opsIds, instance.name === core);
+      (taskId) => newestTaskAnswer(daemonStore.lines, taskId) !== undefined || factAnswer(taskId) !== undefined, catalog?.opsIds, instance.name === core);
     const heldIds = new Set(held.map((decision) => decision.taskId));
     if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
       all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));
@@ -1218,14 +1227,13 @@ export function createNowView(opts: NowViewOptions): {
       const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
       sources.push(feedback);
       // The question reader counts the malformed lines it skips: complete only when it skipped none.
-      const partial = reasons.task_question ?? storeSkipped ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
+      const partial = reasons.task_question ?? storeSkipped ?? daemonStore.partial ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : partial ? "partial" : "complete",
         ...(partial ? { reason: partial } : {}),
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     } else if (plan) {
-      const partial = heldUnread ?? storeSkipped;
-      sources.push({ name: "held-tasks", instance: instance.name, state: heldUnread ? "unavailable" : partial ? "partial" : "complete",
-        ...(partial ? { reason: partial } : {}), gates: held.map(decisionGate) });
+      sources.push({ name: "held-tasks", instance: instance.name, state: daemonStore.partial ? "partial" : "complete",
+        ...(daemonStore.partial ? { reason: daemonStore.partial } : {}), gates: held.map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({
@@ -1248,8 +1256,8 @@ export function createNowView(opts: NowViewOptions): {
     sources.push(operatorItemsOf(instance, now, ledger).source);
     const humanGates = projectHumanGates(sources);
     const capped = capDecisions(all);
-    const shown = shownHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
-    const needsYou = consumeHumanGateCounts(humanGates, { shown });
+    const shown = displayedHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
+    const needsYou = consumeHumanGateCounts(humanGates, shown);
     lap("gates");
     return { ...capped, humanGates, needsYou, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
