@@ -1,0 +1,19 @@
+violation: none
+rule: >
+  W1-T14140 / W1-T3077: the backfill adds error_signatures: [<check name>] to every active
+  ci-learning entry in learnings/ci.yaml whose signatures did not hold its gate, keeps every
+  existing signature and changes no fact text. It is a learnings data change, so a prompt-surface
+  change that needs a golden verdict. This case carries no checkout/, so replayed offline its
+  unit-test proof is not executable: the report substantiates the criterion, the verdict is
+  success but capped (zero proofs executed), and a capped verdict never arms. On the real pull
+  request the proof is the executed generated suite.
+verdict:
+  state: success
+  capped: true
+  testTheater: false
+  criteriaTampered: false
+arm: false
+criteria:
+  - met: true
+    floorMet: true
+    proof_exec: not_executable

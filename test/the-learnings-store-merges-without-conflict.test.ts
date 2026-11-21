@@ -150,7 +150,8 @@ test("W1-T7954: a ci-learning filing writes its own entry file", () => {
   assert.deepEqual(task.files, [lessonsFile, `${ciLearningGoldenFixtureDir("ci-learning:111:coverage-ratchet")}/criteria.yaml`]);
   const secondTask = loadPlanFromYaml(second, "second filing").tasks[0]!;
   assert.equal(secondTask.files?.[0], "learnings/ci.d/ci-learning-222-coverage-ratchet.yaml");
-  assert.equal(task.acceptance![0]!.proof, `grep: ci-learning:111:coverage-ratchet in ${lessonsFile}`);
+  // W1-T14140: the entry is proved by the generated test that selects it for its own check, not by its id in the file.
+  assert.equal(task.acceptance![0]!.proof, "unit test: ci lesson ci-learning:111:coverage-ratchet is selected for its own check");
   assert.equal(first.includes("learnings/ci.yaml"), false);
   assert.deepEqual(ciLearningRecordVerdict(first, "fixture"), { ok: true, reason: "" });
 });

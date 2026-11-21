@@ -1,0 +1,2 @@
+- claim: every active ci-learning entry in learnings/ci.yaml carries its own check name as an error signature
+  proof: "unit test: test/learning/every-ci-lesson-is-selected-for-its-own-check.test.ts"

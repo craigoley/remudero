@@ -186,6 +186,12 @@ const parseOrigin = (kind: LadderKind, origin: string) =>
 export const reasonClass = (reason: string) => reason.split(" — ")[0]!
   .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
   .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
+/** The `origin:` a ladder's remedy for `key` carries at `rung`, for a rung that hands a cause to the ladder. */
+export const ladderOrigin = (kind: LadderKind, key: string, rung = 1): string => originOf(kind, key, rung);
+/** W1-T14140: the flow ladder's cause key for a PR one failing check holds red — the key {@link episodesOf} derives from
+ *  the sweep's own-red reason `<check> failed on <sha>` (describeCiFailures, src/lib/sweep.ts). The ci-learning rung hands
+ *  a check here when its reopened lessons keep recurring. */
+export const ownRedCauseKey = (check: string): string => `own-red:${reasonClass(`${check} failed on 0000000`)}`;
 /** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
  *  `readOutcomes` asks GraphQL, so the bare login is the one a fleet merge actually carries (sweep's isFleetAppAuthor). */
 export const isFleet = (actor: string | undefined) =>
