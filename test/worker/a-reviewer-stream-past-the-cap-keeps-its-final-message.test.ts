@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { CODEX_WORKER_STDOUT_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
+import { CODEX_WORKER_STDOUT_MAX_BYTES, CodexJsonlAccumulator, spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -30,7 +30,7 @@ function reviewer() {
     for (let offset = 0; offset < line.length; offset += 65_536) stdout.write(line.slice(offset, offset + 65_536));
   };
   return {
-    home, run, raw: write,
+    home, run, raw: write, chunk: (text: string) => { stdout.write(text); },
     message: (text: string) => write(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } })}\n`),
     command: (output: string) => write(`${JSON.stringify({ type: "item.completed", item: {
       id: "item_7", type: "command_execution", command: "/bin/bash -lc 'cat src/lib/worker-provider.ts'",
@@ -145,8 +145,8 @@ test("W1-T13951 criterion 2: an evicted message that was cut once counts only it
     const spillKept = 64 * 1024 + 256 * 1024;
     const outputs = ["a".repeat(1536 * 1024), "b".repeat(1536 * 1024)];
     const evicted = "E".repeat(2 * 1024 * 1024);
-    // While the 2 MiB message streams in, "first" is reclaimed for it before it spills; the cut message then
-    // heads the retained blocks, and a final message that fits the limit alone reclaims it and "B" in turn.
+    // The 2 MiB message spills and is cut; a final message that fits the limit alone reclaims it and "B", and
+    // "first" still fits the room left beside it.
     const final = "C".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 200);
     child.message("first");
     child.command(outputs[0]!);
@@ -158,8 +158,9 @@ test("W1-T13951 criterion 2: an evicted message that was cut once counts only it
     const result = await child.run;
     assert.ok(!result.blocks.some(block => block.startsWith("EEEE")), "the cut message was evicted");
     assert.equal(result.text, final);
+    assert.equal(result.blocks[0], "first");
     const expected = outputs.reduce((sum, output) => sum + commandLine(output) - spillKept, 0) + Buffer.byteLength(evicted)
-      + Buffer.byteLength("first") + 400 * 1024;
+      + 400 * 1024;
     assert.equal(result.outputTruncation!.droppedBytes, expected);
     const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
     assert.equal(receipt.output_truncation.droppedBytes, expected);
@@ -388,4 +389,108 @@ test("W1-T13951 criterion 2: an evicted message of escaped slashes counts the ra
     const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
     assert.equal(receipt.output_truncation.droppedBytes, 2_097_152);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+
+/** The reviewer's stream: an earlier message and a 2 MiB error fill the budget, then 2 MiB of command output. */
+async function filledBudget(final: string, splits: number[]) {
+  const child = reviewer();
+  try {
+    child.message("e".repeat(786_490));
+    child.raw(`${JSON.stringify({ type: "error", error: { message: "r".repeat(2 * 1024 * 1024) } })}\n`);
+    child.command("c".repeat(2 * 1024 * 1024));
+    let at = 0;
+    for (const split of splits) { child.chunk(final.slice(at, split)); at = split; }
+    child.raw(final.slice(at) + "\n");
+    child.end();
+    const result = await child.run;
+    return { text: result.text, blocks: result.blocks, retention: result.outputRetention?.text.state,
+      truncation: result.outputTruncation };
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+}
+
+test("W1-T13951 criterion 1: a final message that fits the limit is retained the same however stdout splits its line", async () => {
+  // The reviewer's counterexample: an 819,281-byte final line split at byte 16 started a lossy spill before its
+  // header could be classified, returning 327,647 of 819,200 text bytes.
+  const text = "f".repeat(819_200);
+  const final = JSON.stringify({ type: "item.completed", item: { id: "item_9", type: "agent_message", text } });
+  assert.equal(Buffer.byteLength(final), 819_281);
+  const whole = await filledBudget(final, []);
+  assert.ok(whole.text === text, "one chunk keeps the final message whole");
+  assert.equal(whole.retention, "complete");
+  for (const split of [16, ...Array.from({ length: 24 }, (_, i) => i + 1), 1024, 65_536]) {
+    const cut = await filledBudget(final, [split]);
+    assert.ok(cut.text === text, `a split at byte ${split} keeps the final message whole`);
+    assert.deepEqual(cut, whole, `a split at byte ${split} retains exactly what one chunk does`);
+  }
+  assert.deepEqual(await filledBudget(final, [16, 17, 40, 900, 70_000]), whole, "several splits retain the same");
+});
+
+test("W1-T13951 criterion 2: an evicted spilled error counts its source bytes only, never its own spill marker", async () => {
+  // The reviewer's counterexample: a 2 MiB Codex error message spills, is later evicted, and its 51-byte encoded
+  // spill marker was counted as dropped source output (2,097,203 for 2,097,152 source bytes).
+  const child = reviewer();
+  try {
+    const message = "r".repeat(2 * 1024 * 1024);
+    child.raw(`${JSON.stringify({ type: "error", error: { message } })}\n`);
+    const final = "F".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 100);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === final, "the final message is retained whole");
+    // Every source byte of the error is dropped; none of the accumulator's own marker bytes is counted.
+    assert.equal(result.outputTruncation!.droppedBytes, Buffer.byteLength(message));
+    const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
+    assert.equal(receipt.output_truncation.droppedBytes, Buffer.byteLength(message));
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: dropped bytes never exceed the source bytes and equal them when every payload is evicted", async () => {
+  const child = reviewer();
+  try {
+    const payloads = ["\\/".repeat(300_000), "\\n".repeat(400_000), "r".repeat(1_500_000)];
+    child.raw(`{"type":"error","error":{"message":"${payloads[2]}"}}\n`);
+    child.raw(`{"type":"item.completed","item":{"type":"agent_message","text":"${payloads[0]}"}}\n`);
+    child.raw(`{"type":"item.completed","item":{"type":"agent_message","text":"${payloads[1]}"}}\n`);
+    const final = "F".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 100);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === final);
+    const source = payloads.reduce((sum, payload) => sum + Buffer.byteLength(payload), 0);
+    assert.equal(result.outputTruncation!.droppedBytes, source);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 3: the accumulator never holds more than the limit and reports what it holds", () => {
+  // The reviewer's counterexample: one final message of 614,400 decoded bytes held beside its raw payload,
+  // 1,536,000 bytes live, while worker.output_truncated reported 614,400.
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t13951-held-`));
+  try {
+    const accumulator = new CodexJsonlAccumulator(0, join(dir, "stdout-pending.jsonl"));
+    // Every string the accumulator holds, whatever its field, except its session id and spill path.
+    const held = () => Object.entries(accumulator).reduce((sum, [key, value]) => ["sessionId", "pendingFile"].includes(key) ? sum
+      : sum + [value].flat(2).reduce((n: number, item) => n + (typeof item === "string" ? Buffer.byteLength(item) : 0), 0), 0);
+    const text = "a\n".repeat(307_200);
+    assert.equal(Buffer.byteLength(text), 614_400);
+    const lines = [
+      `${JSON.stringify({ type: "thread.started", thread_id: "review-run" })}\n{"type":"turn.started"}\n`,
+      `${JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: "c".repeat(2 * 1024 * 1024) } })}\n`,
+      `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } })}\n`,
+      '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n',
+    ];
+    for (const line of lines) {
+      for (let offset = 0; offset < line.length; offset += 65_536) {
+        accumulator.push(line.slice(offset, offset + 65_536));
+        assert.ok(held() <= CODEX_WORKER_STDOUT_MAX_BYTES, `held ${held()} bytes, past the limit`);
+        assert.equal(accumulator.retainedBytes(), held(), "retainedBytes() counts everything held");
+      }
+    }
+    const parsed = accumulator.finish();
+    assert.ok(parsed.text === text, "the final message is retained whole");
+    const blocks = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.equal(parsed.outputTruncation!.retainedBytes, blocks);
+    assert.equal(parsed.outputTruncation!.retainedBytes, held(), "what is reported is what is held");
+    assert.ok(held() <= CODEX_WORKER_STDOUT_MAX_BYTES);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
