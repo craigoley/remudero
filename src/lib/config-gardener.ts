@@ -1038,7 +1038,9 @@ export interface TendResult {
  * ends it with nothing exposed and debits the class — a person declined it; a merged one is exposed —
  * its shadow guard is re-read and the canary begins, or, refused, it is reverted at once. Canary and
  * observing: the cohort against the rest, one guarded step ({@link stepCanary}). A breach lands a
- * revert of exactly the canary's lines and debits the class; a promotion credits it.
+ * revert of exactly the canary's lines and debits the class; a promotion credits it. An expiry — the
+ * cohort never cleared its floor in time — lands the same revert, so an unvalidated change never stays
+ * on main, and releases the class unjudged: a change nobody measured is not evidence of harm.
  */
 /** Whether {@link tendConfigCanaries} would tend anything now: an active canary whose tend interval has
  *  elapsed. Read the same way, writing nothing, so a parent can skip a config pass that would do nothing. */
@@ -1088,7 +1090,7 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
     }
     c.promotion = { ...c.promotion, state: step.state };
     c.reason = step.reason ?? c.reason;
-    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = await rollBack(deps, c);
+    if ((step.verdict === "rolled_back" || step.verdict === "expired") && exposed) c.rollbackPrUrl = await rollBack(deps, c);
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
