@@ -11,7 +11,7 @@ import { instanceRegistryRuntimePresent, runtimeInstanceRegistryText, runtimeIns
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { selectedInstanceRegistryEnvPath } from "./instance-registry-selection.js";
 import { buildFixProgressInput as buildBaseFixProgressInput, fixRedClass, resolveFixProgress, parseFixProgressVerdict, scopeEscalationStandDown, priorRoundHold, PRIOR_ROUND_HOLD_FIELD,
-  scopeAmendmentsWithoutMergeTime, priorRoundRuling, type PriorRoundFacts,
+  scopeAmendmentsWithoutMergeTime, priorRoundRuling, unfiledScopeGrantAfterRound, type PriorRoundFacts,
   type FixProgressWitness, type FixProgressHostedProofResult,
   type FixProgressInput, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict,
   sameCriterionStall, nextStallRemedy, stallRemedyRows, failedApproaches, rowPrNumber, type StallRemedy,
@@ -3025,8 +3025,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const base = await readPrBaseRequiredChecks(pr);
     const branchChecks = base?.checks;
     // W1-T13865: ci-gate's list is required only through ci-gate, so it joins the set only when the PR's own base
-    // requires ci-gate, or when that base's requirements could not be read in full.
-    const throughCiGate = base === undefined || !base.complete || base.checks.has(CI_GATE_CHECK_NAME);
+    // requires ci-gate, or when no readable source names any requirement of that base. A partly unreadable base whose
+    // readable source (a ruleset) names its requirements keeps that answer: an unreadable read never widens it.
+    const throughCiGate = base === undefined || base.checks.has(CI_GATE_CHECK_NAME) || (!base.complete && base.checks.size === 0);
     const required = new Set([...(throughCiGate ? requiredChecks : []), ...(branchChecks?.keys() ?? [])]);
     if (required.size === 0) return [];
     let runs: { name: string; completedAt: string }[];
@@ -15843,12 +15844,15 @@ export function fixRoundNotRunReason(outcome: FixDispatchOutcome): string | unde
 export type MovedFixHeadOutcome = { adopted: OpenPrView; evidence: FixDispatchEvidence } | { deferred: string };
 
 const adoptedMovedFixHeads = new WeakSet<OpenPrView>();
-/** W1-T13865: the hold the sweep applies is {@link priorRoundHold}'s, on every path to a fix worker. An unfiled PR's owner
- *  `revise-pr` grant (`unfiledScopeGrant`) is neither a merged scope amendment nor a changed contract, so it
- *  releases no NEEDS_SCOPE hold at the ruled head: the granted round runs at a new head. */
+/** W1-T13865: the hold the sweep applies is {@link priorRoundHold}'s, on every path to a fix worker. An unfiled PR has no
+ *  task contract to amend: its owner's `revise-pr` grant ({@link unfiledScopeGrantAfterRound}) is the scope change its NEEDS_SCOPE
+ *  ruling waits for, so a grant answered after the ruling releases the hold and the granted round runs at the same head.
+ *  A grant answered before the ruling was already spent on that round, and releases nothing. */
 export function priorRoundHoldForSweep(ledger: readonly Record<string, unknown>[], facts: PriorRoundFacts & { prNumber: number }):
   PriorRoundHold | undefined {
-  return priorRoundHold(ledger, facts);
+  const held = priorRoundHold(ledger, facts);
+  if (held?.hold !== "NEEDS_SCOPE" || facts.taskId !== `PR-${facts.prNumber}`) return held;
+  return unfiledScopeGrantAfterRound(ledger, facts) ? undefined : held;
 }
 /** W1-T13865: {@link priorRoundHoldForSweep} with the live inputs its ruling waits on. A NEEDS_SCOPE ruling always reads
  *  its amendments' live merge times, even when the ledger alone releases it: a local receipt's ts is not a merge time. */
@@ -22543,6 +22547,13 @@ export async function runSweep(
     return union.ok ? union.rows : undefined;
   };
   let priorRoundHistory: readonly Record<string, unknown>[] | undefined;
+  // W1-T13865: one live read per amendment PR per pass, shared by the hold and the pending-amendment wait below.
+  const amendmentMergeReads = new Map<string, Promise<string | null | undefined>>();
+  const readAmendmentMergedAt = deps.readAmendmentMergedAt === undefined ? undefined : (url: string) => {
+    let read = amendmentMergeReads.get(url);
+    if (read === undefined) amendmentMergeReads.set(url, read = deps.readAmendmentMergedAt!(url));
+    return read;
+  };
   const readSweepPriorRoundHold = async (pr: OpenPrView) => {
     if (priorRoundHistory === undefined) {
       const archived = deps.readLedger === undefined ? await readRepairArchive() : undefined;
@@ -22554,7 +22565,7 @@ export async function runSweep(
       ? readWitnessContractRevision(pr.taskId) : undefined;
     const readCompletions = deps.readRequiredCheckCompletions;
     return await readPriorRoundHold(priorRoundHistory, { taskId, prNumber: pr.prNumber, headSha: pr.headSha, contractRevision },
-      { readAmendmentMergedAt: deps.readAmendmentMergedAt,
+      { readAmendmentMergedAt,
         readCheckCompletions: readCompletions === undefined ? undefined : () => readCompletions(pr) });
   };
   const priorRoundHoldFields = (hold: PriorRoundHold) => ({ [PRIOR_ROUND_HOLD_FIELD]: hold.hold, prior_round_hold_since: hold.since,
@@ -26153,8 +26164,20 @@ export async function runSweep(
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
               const scopeAmendment = ledgerLines.findLast(row => row.task_id === pr.taskId && row.step === "fix.scope_amendment" &&
                 row.head_sha === pr.headSha && (row.pr_number === undefined || Number(row.pr_number) === pr.prNumber));
-              const amendmentTerminal = scopeAmendment && ledgerLines.findLast(row => row.step === PR_TERMINAL_STEP &&
-                Number(row.pr_number) === Number(scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number));
+              // W1-T13865: an amendment recorded only by its URL is found by that URL, and one no pr.terminal row
+              // names (reconciliation discovers only pr_url rows) by its live merge time.
+              const amendmentUrl = scopeAmendment?.amendment_url ?? scopeAmendment?.amendmentUrl;
+              const amendmentKey = prUrlKey(amendmentUrl)?.toLowerCase();
+              const amendmentNumber = Number(scopeAmendment?.amendmentNumber ?? scopeAmendment?.amendment_number ??
+                (typeof amendmentUrl === "string" ? /\/pull\/(\d+)$/.exec(amendmentUrl.trim())?.[1] : undefined));
+              const amendmentTerminal: Record<string, unknown> | undefined = scopeAmendment ? ledgerLines.findLast(row =>
+                row.step === PR_TERMINAL_STEP && (amendmentKey !== undefined && typeof row.pr_url === "string"
+                  ? prUrlKey(row.pr_url)?.toLowerCase() === amendmentKey : Number(row.pr_number) === amendmentNumber)) : undefined;
+              const pendingAmendment = scopeAmendment !== undefined &&
+                ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
+                !["merged", "closed"].includes(String(amendmentTerminal?.state));
+              const liveAmendmentMerged = pendingAmendment && typeof amendmentUrl === "string" && readAmendmentMergedAt !== undefined &&
+                typeof await readAmendmentMergedAt(amendmentUrl) === "string";
               const closedAmendment = amendmentTerminal?.state === "closed";
               if (scopeAmendment && closedAmendment && deps.fixProgressJudge) {
                 progressParkedReason = `amendment-closed: scope amendment ${scopeAmendment.amendmentNumber ?? scopeAmendment.amendment_number} closed without merging`;
@@ -26163,8 +26186,7 @@ export async function runSweep(
                 if (!waited) { acted = false; standDownReason = progressParkedReason; break; }
                 if (!await askProgress()) break;
               }
-              if (scopeAmendment && ["created", "resumed", "branch_update_requested"].includes(String(scopeAmendment.outcome ?? scopeAmendment.kind)) &&
-                  !["merged", "closed"].includes(String(amendmentTerminal?.state))) {
+              if (scopeAmendment && pendingAmendment && !liveAmendmentMerged) {
                 const reason = `fix report requests a scope amendment: ${refusedSameRed?.scopeAmendment ?? scopeAmendment.paths}`;
                 // The amendment is already the requested remedy. Keep its contract latch while it is
                 // pending, but ask a person only if the amendment writer ultimately refuses it.

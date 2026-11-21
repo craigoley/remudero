@@ -947,16 +947,6 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(unwired.state.dispatched, 0, "no fix worker");
     assert.equal(lastDisposed(unwiredRows).stale_proof_escalated, true);
   });
-  test("W1-T13865 criterion 4: an owner revise-pr grant after a same-head NEEDS_SCOPE ruling spawns no fix worker", async () => {
-    const { rows, grant } = grantedScopeRound();
-    rows.push(grant);
-    const f = fixture(rows);
-    await runSweep([pr({ taskId: "unfiled" })], f.deps);
-    assert.equal(f.state.dispatched, 0, "no amendment merged and the contract is unchanged, so the grant releases nothing");
-    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "NEEDS_SCOPE");
-    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled NEEDS_SCOPE/);
-  });
-
   test("W1-T13865 criterion 2: a release branch that requires only its own gate keeps FLAKE on an optional ci-gate completion", async () => {
     const rows = swept(round("FLAKE"));
     const f = fixture(rows);
@@ -979,6 +969,66 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     await runSweep([pr()], f.deps);
     assert.equal(f.state.dispatched, 0, "an optional completion releases nothing");
     assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+  });
+
+  test("W1-T13865 criterion 2: an unreadable classic protection never widens a ruleset-only base to ci-gate's list", async () => {
+    // Review 451770663: a 502 on the classic protection read made an optional lint-plan completion release the hold.
+    const rows = swept(round("FLAKE"));
+    const f = fixture(rows);
+    let runs = [{ name: "lint-plan", status: "completed", conclusion: "failure", completed_at: at(1_000) }];
+    const effects = buildSweepEffects({ owner: "o", repo: "remudero", repoRoot: REPO_ROOT, config: { root: "/unused/prior-round-hold" } as Config,
+      ledgerPath: f.deps.ledgerPath, runId: f.deps.runId, plan: { tasks: [], byId: new Map() }, log: () => {},
+      ciGateRequired: ["lint-plan"], restRollupForImpl: rollupForAsync,
+      readJsonImpl: async (args) => {
+        const endpoint = args[1] ?? "";
+        if (endpoint.includes("/rules/branches/")) return [[{ type: "required_status_checks",
+          parameters: { required_status_checks: [{ context: "release-gate" }] } }]];
+        if (endpoint === PR_READ) return { base: { ref: "release/1.0" } };
+        if (endpoint.endsWith("/protection/required_status_checks")) throw new Error("gh: Bad Gateway (HTTP 502)");
+        if (endpoint.includes(`/commits/${HEAD}/check-runs`)) return [{ check_runs: runs }];
+        if (endpoint.includes(`/commits/${HEAD}/statuses?`)) return [[]];
+        assert.fail(`unexpected check read ${endpoint}`);
+      },
+    });
+    assert.deepEqual(await effects.readRequiredCheckCompletions!(pr()), [], "the ruleset requires only release-gate");
+    f.deps.readRequiredCheckCompletions = effects.readRequiredCheckCompletions;
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 0, "an optional completion releases nothing while protection is unreadable");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], "FLAKE");
+    runs = [{ name: "release-gate", status: "completed", conclusion: "failure", completed_at: at(1_000) }];
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the ruleset's own required check still releases the hold");
+  });
+
+  test("W1-T13865 criterion 3: a same-head amendment recorded only by its URL releases on its live merge", async () => {
+    // Review 451770663: no pr.terminal row ever names this amendment, so the pending-amendment wait must read it live.
+    const urlOnly: Row = { ...pendingAmendment };
+    delete urlOnly.amendmentNumber;
+    const rows = swept([...round("NEEDS_SCOPE", { contract_revision: "contract-A" }), urlOnly]);
+    const f = fixture(rows);
+    let mergedAt: string | null = null;
+    const reads: string[] = [];
+    f.deps.readAmendmentMergedAt = async url => { reads.push(url); return mergedAt; };
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 0, "the amendment is still open");
+    assert.match(String(lastDisposed(rows).stand_down_reason), /ruled NEEDS_SCOPE|scope amendment/);
+    mergedAt = at(10_000);
+    await runSweep([pr()], f.deps);
+    assert.equal(f.state.dispatched, 1, "the live reader confirms a merge after the round");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], undefined);
+    assert.deepEqual([...new Set(reads)], [AMENDMENT_URL]);
+  });
+
+  test("W1-T13865 criterion 4: an owner revise-pr grant answered after a same-head NEEDS_SCOPE ruling reaches the granted round", async () => {
+    // Review 451770663: the grant is the authorized route to a round after NEEDS_SCOPE on an unfiled PR.
+    const { rows, grant } = grantedScopeRound();
+    const f = fixture(rows);
+    await runSweep([pr({ taskId: "unfiled" })], f.deps);
+    assert.equal(f.state.dispatched, 0, "before the grant the scope question holds the head");
+    rows.push(grant);
+    await runSweep([pr({ taskId: "unfiled" })], f.deps);
+    assert.equal(f.state.dispatched, 1, "the owner's grant after the ruling releases the hold");
+    assert.equal(lastDisposed(rows)[PRIOR_ROUND_HOLD_FIELD], undefined);
   });
 
   test("W1-T13865 criterion 3: a same-head FIXED or NOT_LANDED round that lands after sweep entry releases the hold", async t => {

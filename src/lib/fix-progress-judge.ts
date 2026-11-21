@@ -360,6 +360,16 @@ export function unfiledScopeGrant(ledger: readonly Record<string, unknown>[], pr
   return { paths: [...new Set(held.paths as string[])].sort(), issueUrl, origin: answer.origin as string,
     ...(typeof held.head_sha === "string" ? { heldHead: held.head_sha } : {}) };
 }
+/** W1-T13865: whether the owner's {@link unfiledScopeGrant} was answered after the PR's newest round at `headSha`
+ * (its `fix.done` under `taskId`): a grant answered before that round's ruling was spent on it. */
+export function unfiledScopeGrantAfterRound(ledger: readonly Record<string, unknown>[],
+  pr: { prNumber: number; taskId: string | undefined; headSha: string }): boolean {
+  const grant = unfiledScopeGrant(ledger, pr);
+  if (grant === undefined) return false;
+  const ruled = ledger.findLastIndex(row => row.step === "fix.done" && row.task_id === pr.taskId && row.head_sha === pr.headSha);
+  return ledger.slice(ruled + 1).some(row => row.step === "panel.question_answered" &&
+    row.task_id === `PR-${pr.prNumber}` && row.origin === grant.origin);
+}
 const grantHint = (paths: readonly unknown[]): string =>
   `; the repository owner grants exactly ${paths.join(", ")} to this PR by answering ${UNFILED_SCOPE_GRANT_ANSWER} on that issue`;
 /** Checks that only roll other checks up (ci.yml's `ci` over the shard matrix, ci-gate.yml's `ci-gate`, sweep.ts
