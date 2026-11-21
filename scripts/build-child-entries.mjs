@@ -369,13 +369,22 @@ const isSafeRelativePath = (p) =>
  * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
  * manifest passes. The store is instance-owned, which is the boundary this relies on.
  */
-export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, hashSource = sourceHash } = {}) {
+export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, hashSource = currencySourceHash } = {}) {
   try {
     return judgeChildEntry(resolve(root), name, outDir, treeHash, hashSource);
   } catch (err) {
     return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
   }
 }
+
+/**
+ * W1-T13969: the default `hashSource` of a currency check is {@link memoizedSourceHash}: a tree whose every input has the
+ * stat (size, mtime, ctime, inode, device, mode) it had when last hashed answers with that hash and reads no source
+ * file; any changed stat reruns {@link sourceHash}. MEASURED 2026-11-20: rehashing the whole tree on each check held
+ * the daemon loop 115 s in a day (engine-tree's bundleIsCurrent and spawnRunChild's newestCurrentEngine).
+ */
+const currencyHashStats = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
+const currencySourceHash = (root) => memoizedSourceHash(root, currencyHashStats);
 
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
 function judgeChildEntry(root, name, outDir, treeHash, hashSource) {
