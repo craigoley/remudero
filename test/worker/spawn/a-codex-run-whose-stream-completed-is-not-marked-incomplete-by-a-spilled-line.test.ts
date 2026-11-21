@@ -544,3 +544,11 @@ test("W1-T13960 criterion 2: a final message after its turn's turn.completed doe
     completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
     textState: "complete", blocksState: "complete" });
 });
+
+test("W1-T13960 criterion 2: a sealed final message does not certify a stream whose earlier turn never completed", async () => {
+  // The final turn's message and turn.completed arrive intact after the spill, but an earlier turn has no
+  // turn.completed, so completion reads incomplete and origin/main's result stands.
+  assert.deepEqual(await aroundTheVerdict(['{"type":"turn.started"}', oversizedCommand()]), {
+    completion: "incomplete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
+    textState: "complete", blocksState: "complete" });
+});
