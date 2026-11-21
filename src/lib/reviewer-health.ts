@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
 import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { ghJsonAsync } from "./github-transport.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
@@ -254,16 +255,18 @@ function failClauses(row: Record<string, unknown>): string[] {
 
 /** A published verdict's evaluator and state; a shadow published nothing, so it names no model. */
 function verdictFields(row: Record<string, unknown>, shadow: boolean): VerdictFields {
+  if (shadow) return {};
+  const state = str(row.state);
+  const posted = state === undefined ? {} : { state };
   const provenance = row.evaluator_provenance as Record<string, unknown> | undefined;
   const model = str(provenance?.routedModel) ?? str(provenance?.servedModel) ?? str(provenance?.requestedModel);
-  if (shadow || model === undefined) return {};
-  const state = str(row.state);
+  if (model === undefined) return posted;
   // The posted review's own identity: W1-T2722 gives one decision one digest (a second terminal on it is a
   // replay or a conflict hold), so two digests are two decisions; the attempt id stands in for a row without one.
   const decision = str(row.review_decision_digest) ?? str(row.review_attempt_id);
   const inputDigest = str(row.review_input_digest);
   const published = /^PR-\d+$/.test(str(row.task_id) ?? "");
-  return { evaluator: { provider: str(provenance?.provider) ?? null, model }, ...(state === undefined ? {} : { state }),
+  return { ...posted, evaluator: { provider: str(provenance?.provider) ?? null, model },
     ...(decision === undefined ? {} : { decision }),
     ...(state === "failure" ? { clauses: failClauses(row), ...(published ? { published: true as const } : {}),
       ...(inputDigest === undefined ? {} : { inputDigest }) } : {}) };
@@ -715,8 +718,39 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
   return build(shown);
 }
 
+type EvidenceJsonReader = NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]>;
+type EvidenceIdentity = Required<Pick<Parameters<typeof readReviewEvidenceRecord>[0], "prUrl" | "headSha" | "reviewInputDigest">>;
+
+/** Select the comment's input before the shared reader checks the publisher, checksum and status. */
+function isEvidenceForInput(comment: unknown, expected: EvidenceIdentity): boolean {
+  const body = (comment as { body?: unknown } | null)?.body;
+  const header = "<!-- remudero-review-evidence:v1\n";
+  const end = "\n-->";
+  if (typeof body !== "string" || !body.startsWith(header) || !body.endsWith(end)) return false;
+  try {
+    const envelope = JSON.parse(body.slice(header.length, -end.length)) as {
+      evidence?: { pr_url?: unknown; head_sha?: unknown; review_input_digest?: unknown } | null;
+    } | null;
+    const evidence = envelope?.evidence;
+    return evidence?.pr_url === expected.prUrl && evidence.head_sha === expected.headSha &&
+      evidence.review_input_digest === expected.reviewInputDigest;
+  } catch (error) {
+    if (error instanceof SyntaxError) return false; // a malformed envelope cannot identify a publication
+    throw error;
+  }
+}
+
+/** Look up a counted FAIL's publication even after the PR has a newer head or review input. */
+function readPublishedModelFail(expected: EvidenceIdentity, readJson: EvidenceJsonReader) {
+  return readReviewEvidenceRecord({ ...expected, reviewState: "failure" }, async (args, options) => {
+    const pages = await readJson(args, options);
+    if (args[1] === "graphql" || !Array.isArray(pages)) return pages;
+    return pages.map((page: unknown) => Array.isArray(page) ? page.filter((comment: unknown) => isEvidenceForInput(comment, expected)) : page);
+  });
+}
+
 /** Filed reviews can supply their own verified reasons. The ops producer removes those reasons. */
-async function publishedModelFails(fails: readonly EvaluatorModelFail[], readEvidence: typeof readReviewEvidenceRecord, log: ReviewerHealthLog): Promise<EvaluatorModelFail[]> {
+async function publishedModelFails(fails: readonly EvaluatorModelFail[], readJson: EvidenceJsonReader, log: ReviewerHealthLog): Promise<EvaluatorModelFail[]> {
   const published: EvaluatorModelFail[] = [];
   for (const fail of fails) {
     if (fail.published || fail.inputDigest === undefined || fail.clauses.length === 0) {
@@ -728,7 +762,7 @@ async function publishedModelFails(fails: readonly EvaluatorModelFail[], readEvi
     const headSha = fail.unit.slice(delimiter + 1);
     let clauses: string[] = [];
     try {
-      const evidence = await readEvidence({ prUrl, headSha, reviewInputDigest: fail.inputDigest, reviewState: "failure" });
+      const evidence = await readPublishedModelFail({ prUrl, headSha, reviewInputDigest: fail.inputDigest }, readJson);
       if (evidence?.row.reasons.length) {
         const approved = new Set(failClauses(evidence.row));
         clauses = fail.clauses.filter((clause) => approved.has(clause));
@@ -1007,6 +1041,39 @@ export function saveReviewerHealthState(path: string, state: ReviewerHealthState
   writeAtomic(path, `${JSON.stringify(state)}\n`, { tmpTag: "reviewer-health" });
 }
 
+// A full model payload can fail to fit on disk even when the SHA checkpoint fits. Retain it for
+// the next write in this process, keyed to the checkpoint that actually made it to disk.
+const unsavedModelStates = new Map<string, ReviewerHealthState>();
+
+function loadReviewerHealthForEvaluation(path: string): ReviewerHealthState {
+  const state = loadReviewerHealthState(path);
+  const unsaved = unsavedModelStates.get(path);
+  if (unsaved === undefined) return state;
+  if (state.seededAt !== unsaved.seededAt || state.seq !== unsaved.seq || state.cursor?.liveOffset !== unsaved.cursor?.liveOffset ||
+      state.cursor?.liveIno !== unsaved.cursor?.liveIno || state.cursor?.afterRotation !== unsaved.cursor?.afterRotation) {
+    unsavedModelStates.delete(path);
+    return state;
+  }
+  const retained = structuredClone(unsaved);
+  for (const rec of Object.values(state.shas)) {
+    const models = retained.shas[rec.sha]?.models;
+    if (models !== undefined) rec.models = models;
+  }
+  const { pending, pooledModelShas, pooledModels, pooledSharedModels, modelIncidents, modelFails } = retained;
+  return { ...state, pending, pooledModelShas, modelIncidents, modelFails,
+    ...(pooledModels === undefined ? {} : { pooledModels }), ...(pooledSharedModels === undefined ? {} : { pooledSharedModels }) };
+}
+
+function saveReviewerShaCheckpoint(path: string, state: ReviewerHealthState): void {
+  const { pooledModelShas: _archive, pooledModels: _pooled, pooledSharedModels: _shared, modelIncidents: _incidents,
+    modelFails: _fails, shas, pending, ...shaState } = state;
+  writeAtomic(path, `${JSON.stringify({ ...shaState,
+    shas: Object.fromEntries(Object.entries(shas).map(([sha, { models: _models, ...rec }]) => [sha, rec])),
+    pending: Object.fromEntries(Object.entries(pending).map(([key, rows]) =>
+      [key, rows.map(({ unit, cls, reason, at, hold }) => ({ unit, cls, reason, at, hold }))])),
+  })}\n`, { tmpTag: "reviewer-health" });
+}
+
 function signatureOf(rec: ReviewerShaRecord): string[] {
   return Object.keys(rec.reasons).sort();
 }
@@ -1019,7 +1086,7 @@ function signatureOf(rec: ReviewerShaRecord): string[] {
  * {@link Clock} port — and git, the ledger reader and the log are plain functions.
  */
 export async function evaluateReviewerHealthNow(
-  input: { originMainSha: string | null; readEvidence?: typeof readReviewEvidenceRecord },
+  input: { originMainSha: string | null; readEvidenceJson?: EvidenceJsonReader },
   statePath: string,
   readRows: (cursor: ReviewerHealthCursor | null) => Promise<{ rows: Iterable<Record<string, unknown>>; cursor: ReviewerHealthCursor }>,
   git: GitText,
@@ -1028,7 +1095,7 @@ export async function evaluateReviewerHealthNow(
   log: ReviewerHealthLog,
   clock: Pick<Clock, "iso">,
 ): Promise<ReviewerHealthDecision> {
-  const state = loadReviewerHealthState(statePath);
+  const state = loadReviewerHealthForEvaluation(statePath);
   const read = await readRows(state.cursor);
 
   const isAncestor = (ancestor: string, descendant: string): Promise<boolean> =>
@@ -1152,7 +1219,8 @@ export async function evaluateReviewerHealthNow(
 
   /** Reconcile this evaluation's evidence with the incidents left by earlier evaluations. */
   const reconcileModels = async (judged: EvaluatorModelJudgment[], failsByModel: ReviewerHealthState["modelFails"]): Promise<void> => {
-    let { modelIncidents } = loadReviewerHealthState(statePath);
+    const previous = loadReviewerHealthForEvaluation(statePath).modelIncidents;
+    let modelIncidents = previous;
     for (const j of judged) {
       const pending = modelValue(modelIncidents, j.model);
       const diverged = j.state === "diverged";
@@ -1169,7 +1237,8 @@ export async function evaluateReviewerHealthNow(
           // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
           incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
           if (diverged && !incident.issueUrl) {
-            const fails = await publishedModelFails(modelValue(failsByModel, j.model) ?? [], input.readEvidence ?? readReviewEvidenceRecord, log);
+            const readJson = input.readEvidenceJson ?? ((args, options) => ghJsonAsync(args, undefined, undefined, options));
+            const fails = await publishedModelFails(modelValue(failsByModel, j.model) ?? [], readJson, log);
             incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, fails), {
               ...escalation, issues: { ...escalation.issues, listOpen: async () => open },
             });
@@ -1197,9 +1266,17 @@ export async function evaluateReviewerHealthNow(
       delete modelIncidents[j.model];
       if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
     }
-    const latest = loadReviewerHealthState(statePath);
+    if (modelIncidents === previous) return;
+    const latest = loadReviewerHealthForEvaluation(statePath);
     latest.modelIncidents = modelIncidents;
-    saveReviewerHealthState(statePath, latest);
+    try {
+      saveReviewerHealthState(statePath, latest);
+      unsavedModelStates.delete(statePath);
+    } catch (error) {
+      // The SHA checkpoint is already committed. Retain the delivery receipt or closure for retry.
+      unsavedModelStates.set(statePath, latest);
+      throw error;
+    }
   };
 
   /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
@@ -1261,12 +1338,20 @@ export async function evaluateReviewerHealthNow(
   state.cursor = read.cursor;
   // An earlier model job may have saved an incident while this evaluation was reading rows.
   try {
-    state.modelIncidents = loadReviewerHealthState(statePath).modelIncidents;
+    state.modelIncidents = loadReviewerHealthForEvaluation(statePath).modelIncidents;
   } catch (error) {
     // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
     reportModelHealthFailure(error, log);
   }
-  saveReviewerHealthState(statePath, state);
+  try {
+    saveReviewerHealthState(statePath, state);
+    unsavedModelStates.delete(statePath);
+  } catch (error) {
+    // Commit the cursor and SHA judgment at their original size, then report and retain the model write.
+    saveReviewerShaCheckpoint(statePath, state);
+    unsavedModelStates.set(statePath, state);
+    reportModelHealthFailure(error, log);
+  }
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
   const decision: ReviewerHealthDecision = incident === null

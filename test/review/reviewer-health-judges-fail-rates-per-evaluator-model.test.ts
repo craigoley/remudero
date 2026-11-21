@@ -16,6 +16,7 @@ import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
 import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
 import { NEEDS_HUMAN_LABEL, type AsyncIssueGateway } from "#src/lib/escalate.js";
+import { realWriteAtomicIo } from "#src/lib/fs-race-safe.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
@@ -68,7 +69,7 @@ function elevenNineteen(): { rows: Row[]; solShas: string[]; claudeShas: string[
 }
 
 /** `failLog` names the ledger steps whose append throws, as a full disk or a torn ledger would. */
-function harness(t: TestContext, failLog: (step: string) => boolean = () => false, readEvidence?: typeof readReviewEvidenceRecord) {
+function harness(t: TestContext, failLog: (step: string) => boolean = () => false, readEvidenceJson?: Parameters<typeof readReviewEvidenceRecord>[1]) {
   const dir = ownedFixtureDir(t, "reviewer-model-health").dir;
   const ledgerPath = join(dir, "ledger.ndjson");
   const statePath = join(dir, "reviewer-health.json");
@@ -94,10 +95,11 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
     if (failLog(step)) throw new Error(`ledger append failed: ${step}`);
     logs.push({ step, extra });
   };
-  const readRows = async () => ({ rows: queue.splice(0), cursor: { liveOffset: 0 } });
+  const readRows = async (cursor: health.ReviewerHealthCursor | null) =>
+    ({ rows: queue.splice(0), cursor: { liveOffset: (cursor?.liveOffset ?? 0) + 1 } });
   const git: health.GitText = async () => { throw new Error("no git: no sha regresses here"); };
   const iso = { iso: () => new Date(clock).toISOString() };
-  const input = (originMainSha: string | null) => ({ originMainSha, ...(readEvidence ? { readEvidence } : {}) });
+  const input = (originMainSha: string | null) => ({ originMainSha, ...(readEvidenceJson ? { readEvidenceJson } : {}) });
   /** Wait for queued model incident effects before asserting on them. */
   const evaluate = async (originMainSha: string | null) => {
     const decision = await health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
@@ -131,15 +133,21 @@ test("W1-T13850 criterion 1: a posted verdict keeps its evaluator and state, and
   const requested = health.classifyReviewerHealthRow({ ...verdict(sha, SONNET, "success"),
     evaluator_provenance: { provider: null, requestedModel: "sonnet", servedModel: null } });
   assert.deepEqual(requested?.kind === "outcome" ? requested.evaluator : null, { provider: null, model: "sonnet" }, "requestedModel last");
+  const deterministic = verdict(sha, SOL, "failure", {
+    evaluator_provenance: { provider: null, requestedModel: null, servedModel: null, routedModel: null },
+  });
+  const unattributed = health.classifyReviewerHealthRow(deterministic);
+  assert.deepEqual(unattributed?.kind === "outcome" ? [unattributed.cls, unattributed.state, unattributed.evaluator] : null,
+    ["posted", "failure", undefined], "deterministic review still posted a FAIL");
 
   const state = health.emptyReviewerHealthState();
   const counted = [verdict(sha, SOL, "failure"), verdict(sha, SOL, "failure"), verdict(sha, SOL, "success"), verdict(sha, SONNET, "success")];
   const judgedNothing = ["plan_only", "review_reused", "review_discriminated", "status_recovered", "status_confirmed"]
     .map((flag) => verdict(sha, SOL, "failure", { [flag]: true }));
-  health.ingestReviewerHealthRows(state, [...counted, ...judgedNothing]);
+  health.ingestReviewerHealthRows(state, [...counted, ...judgedNothing, deterministic]);
   const expected = { "gpt-6.2-sol": { provider: "codex", pass: 1, fail: 2 }, "claude-sonnet-5-5": { provider: null, pass: 1, fail: 0 } };
   assert.deepEqual(health.evaluatorModelCounts(state, sha), expected);
-  assert.equal(health.shaCounts(state.shas[sha]!).n, 4, "the same five rows count for no sha either");
+  assert.deepEqual(health.shaCounts(state.shas[sha]!), { k: 0, n: 5 }, "four attributed verdicts and the deterministic FAIL posted");
   health.ingestReviewerHealthRows(state, counted);
   assert.deepEqual(health.evaluatorModelCounts(state, sha), expected, "replaying a row changes nothing");
 
@@ -718,24 +726,113 @@ test("W1-T13850 criterion 4: a filed task quotes only clauses in its verified pu
   const unavailable = publication("public", [reason("PRIVATE unless the evidence can be verified")]);
   const mismatched = publication("public", [reason("PRIVATE evidence on a different input")]);
   mismatched.row.review_input_digest = `v2:${"3".repeat(64)}`;
-  const readEvidence: typeof readReviewEvidenceRecord = (expected) => readReviewEvidenceRecord(expected, async (args) => {
-    const fixture = [publicTask, opsTask, mismatched].find(({ prUrl }) => prUrl === expected.prUrl);
+  const passHead = fake("replacement head");
+  const passRecord = renderReviewEvidenceRecord({ pr_url: publicTask.prUrl, head_sha: passHead,
+    review_input_digest: `v2:${"4".repeat(64)}`, state: "success", reviewer_code_sha: sha, capped: false, plan_only: false,
+    partially_executed: false, decision_verdict: { criteria: [] }, unmet_criteria: [], reasons: [] }, "public");
+  let replacementPublished = false;
+  const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args, options) => {
+    assert.equal(options.fresh, true);
+    const fixture = [publicTask, opsTask, mismatched].find(({ prUrl, headSha }) => args[1] === "graphql"
+      ? args.includes(`sha=${headSha}`) : args[1]?.includes(`/issues/${prUrl.split("/").at(-1)}/comments?`));
     if (!fixture) throw new Error("review evidence unavailable");
     const at = "2026-11-19T12:00:00.000Z";
-    if (args[1] !== "graphql") return [[{ id: 123, body: fixture.record, created_at: at, updated_at: at,
-      user: { login: "remudero-fleet[bot]", type: "Bot" } }]];
+    if (args[1] !== "graphql") {
+      const comment = (id: number, body: string) => ({ id, body, created_at: at, updated_at: at,
+        user: { login: "remudero-fleet[bot]", type: "Bot" } });
+      const original = [comment(122, "<!-- remudero-review-evidence:v1\n{\n-->"), comment(123, fixture.record)];
+      return replacementPublished && fixture === publicTask ? [original, [comment(124, passRecord)]] : [original];
+    }
     return { data: { repository: { nameWithOwner: "acme/remudero", object: { oid: fixture.headSha,
       status: { context: { context: "remudero-review", state: "FAILURE", description: `Verdict [review code ${sha}]`,
         createdAt: at, creator: { login: "remudero-fleet", __typename: "Bot" } } } } } } };
-  });
-  const h = harness(t, undefined, readEvidence);
+  };
+  const h = harness(t, undefined, readJson);
   await h.evaluate(null);
+  h.issues.listOpen = async () => {
+    assert.equal(divergenceRows(h).at(-1)!.models.find(({ model }) => model === SOL.model)?.state, "diverged");
+    replacementPublished = true;
+    return [];
+  };
   h.queue.push(...rows, publicTask.row, opsTask.row, unavailable.row, mismatched.row);
   await h.evaluate(claudeShas.at(-1)!);
   assert.equal(h.created.length, 1);
-  assert.match(h.created[0]!.body, /the filed public clause/);
+  assert.equal(replacementPublished, true);
+  assert.equal(await readReviewEvidenceRecord({ prUrl: publicTask.prUrl, headSha: publicTask.headSha,
+    reviewInputDigest: String(publicTask.row.review_input_digest), reviewState: "failure" }, readJson), undefined,
+    "the current-verdict reader still rejects the superseded FAIL");
+  assert.match(h.created[0]!.body, /the filed public clause/, "delivery still cites the counted FAIL after another head publishes a PASS");
   assert.doesNotMatch(h.created[0]!.body, /PRIVATE/);
   assert.match(String(h.steps("reviewer.model_divergence_evidence_unavailable")[0]?.extra.error), /review evidence unavailable/);
+});
+
+test("W1-T13850 criterion 5: the SHA cursor and healed route survive a model-sized ENOSPC", async (t) => {
+  const control = harness(t);
+  const limited = harness(t);
+  const incident = writeHealedState(limited.statePath);
+  writeHealedState(control.statePath);
+  const sha = fake("disk-budget-reviewer");
+  const row = verdict(sha, SOL, "failure", { failure_reason: "a model-specific clause".repeat(30), reasons: [] });
+  limited.queue.push(row);
+  control.queue.push({ ...row, evaluator_provenance: undefined });
+
+  const expected = await control.evaluateOuter(sha);
+  assert.equal(expected.route, "healed");
+  const controlBytes = Buffer.byteLength(readFileSync(control.statePath));
+  const write = realWriteAtomicIo.writeFileSync;
+  const refused: number[] = [];
+  const budget = t.mock.method(realWriteAtomicIo, "writeFileSync", (path: string, content: string | Buffer, mode: number | undefined) => {
+    const bytes = Buffer.byteLength(content);
+    if (String(path).startsWith(limited.statePath + ".") && bytes > controlBytes) {
+      refused.push(bytes);
+      throw Object.assign(new Error("reviewer health state exceeds the disk budget"), { code: "ENOSPC" });
+    }
+    write(path, content, mode);
+  });
+
+  const actual = await limited.evaluateOuter(sha);
+  assert.ok(refused.length > 0, "the combined model state really exceeded the budget");
+  assert.deepEqual(actual, expected);
+  const saved = health.loadReviewerHealthState(limited.statePath);
+  assert.deepEqual(saved.cursor, { liveOffset: 1 });
+  assert.deepEqual(saved.incident, incident);
+  assert.deepEqual(health.judgeReviewerSha(saved, sha), expected.current);
+  assert.deepEqual(limited.steps("reviewer.health_unavailable"), []);
+  assert.ok(limited.steps("reviewer.model_divergence_failed").some(({ extra }) => /disk budget/.test(String(extra.error))));
+  assert.equal(divergenceRows(limited)[0]!.models.find(({ model }) => model === SOL.model)?.fail, 1);
+
+  budget.mock.restore();
+  limited.queue.push(verdict(sha, SOL, "success"));
+  await limited.evaluateOuter(sha);
+  assert.deepEqual(health.evaluatorModelCounts(health.loadReviewerHealthState(limited.statePath), sha),
+    { [SOL.model]: { provider: SOL.provider, pass: 1, fail: 1 } }, "the next successful write includes the retained FAIL");
+});
+
+test("an undurable issue receipt still deduplicates the next evaluator incident", async (t) => {
+  const h = harness(t);
+  const { rows, claudeShas } = elevenNineteen();
+  const sha = claudeShas.at(-1)!;
+  await h.evaluate(null);
+  h.queue.push(...rows);
+  const write = realWriteAtomicIo.writeFileSync;
+  let refused = false;
+  t.mock.method(realWriteAtomicIo, "writeFileSync", (path: string, content: string | Buffer, mode: number | undefined) => {
+    if (String(path).startsWith(h.statePath + ".") && h.created.length === 1 && !refused) {
+      refused = true;
+      throw Object.assign(new Error("no room for the issue receipt"), { code: "ENOSPC" });
+    }
+    write(path, content, mode);
+  });
+
+  await h.evaluate(sha);
+  assert.equal(refused, true);
+  assert.equal(h.created.length, 1);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model], undefined);
+  assert.deepEqual(h.steps("reviewer.model_divergence_failed").map(({ extra }) => extra.error), ["no room for the issue receipt"]);
+
+  await h.evaluate(sha);
+  assert.equal(h.created.length, 1);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl, "https://github.com/acme/remudero/issues/1");
 });
 
 test("W1-T13850 criterion 4: the body tryEscalateAsync delivers stays within the issue limit when a label cannot be provisioned", async (t) => {
