@@ -794,12 +794,15 @@ test("W1-T13850 criterion 4: a published FAIL stays quoted whatever its PR shows
   const forged = filed("PRIVATE record posted by another login");
   const tampered = filed("PRIVATE record whose checksum fails");
   const opsUnmet = filed("PRIVATE unmet claim of an ops review", "ops");
+  // Altered after its checksum was taken, with its clause intact: the body is no longer what the publisher wrote.
+  const altered = tampered.fail.replace('"capped":false', '"capped":true');
+  assert.notEqual(altered, tampered.fail);
   const comments = new Map<string, unknown[]>([
     // The same-commit PASS is newer than the FAIL, and the commit's status now reads SUCCESS (below).
     [bodyEdit.prUrl, [comment(201, bodyEdit.fail), comment(202, bodyEdit.pass, { created_at: later, updated_at: later })]],
     [edited.prUrl, [comment(203, edited.fail, { updated_at: later })]],
     [forged.prUrl, [comment(204, forged.fail, { user: { login: "someone-else", type: "User" } })]],
-    [tampered.prUrl, [comment(205, tampered.fail.replace("PRIVATE record whose checksum fails", "PRIVATE record, altered"))]],
+    [tampered.prUrl, [comment(205, altered)]],
     [opsUnmet.prUrl, [comment(206, opsUnmet.fail)]],
   ]);
   let statusReads = 0;
