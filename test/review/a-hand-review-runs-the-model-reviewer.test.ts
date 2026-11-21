@@ -56,7 +56,8 @@ interface Captured {
 type RunReviewArgs = Parameters<typeof runReview>[1];
 
 /** Runs the review command offline: a gh shim answers every GitHub call, nothing is posted anywhere. */
-async function handReview(body: string, rest: string[], runReviewWith: (args: RunReviewArgs) => ReturnType<typeof runReview>) {
+async function handReview(body: string, rest: string[], runReviewWith: (args: RunReviewArgs) => ReturnType<typeof runReview>,
+  prArg = "9998") {
   const root = mkdtempSync(join(tmpdir(), "rmd-t14156-hand-review-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-t14156-hand-review-bin-"));
   const oldPath = process.env.PATH;
@@ -84,7 +85,11 @@ async function handReview(body: string, rest: string[], runReviewWith: (args: Ru
     process.env.PATH = `${shim.dir}:${binDir}:${oldPath}`;
     console.log = (...parts: unknown[]) => { lines.push(parts.map(String).join(" ")); };
     const deps: ReviewCommandDeps = {
-      fetchView: () => ({ headRefOid: HEAD, headRefName: BRANCH, body, url: PR_URL, number: 9998 }),
+      // The numeric arm is addressed by REST: the single-pull endpoint answers a raw pull row that reviewCommand maps
+      // itself (mapRestPr). Every other read (statuses, combined status) keeps the already-mapped view shape.
+      fetchView: (viewArgs) => viewArgs.join(" ").endsWith("/pulls/9998")
+        ? { number: 9998, html_url: PR_URL, updated_at: "t", body, state: "open", merged: false, head: { ref: BRANCH, sha: HEAD } }
+        : { headRefOid: HEAD, headRefName: BRANCH, body, url: PR_URL, number: 9998 },
       fetchHead: () => {},
       loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/bin/true", enabledProviders: ["claude"] }) as Config,
       postReviewPending: async () => { effects.push("pending"); return { posted: true }; },
@@ -95,7 +100,7 @@ async function handReview(body: string, rest: string[], runReviewWith: (args: Ru
       runReview: runReviewWith,
       reviewerCodeFreshness: () => ({ status: "fresh", codeSha: HEAD, originMainSha: HEAD, advance: "none" }),
     } satisfies ReviewCommandDeps;
-    const code = await reviewCommand(host, BRANCH, rest, deps);
+    const code = await reviewCommand(host, prArg, rest, deps);
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const ledger = existsSync(ledgerPath)
       ? readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -185,6 +190,16 @@ test("W1-T14156 criterion 3: an explicit deterministic run says not_attempted_de
   assert.ok(line, "the console line names the reviewer outcome");
   assert.match(line, /reviewer_outcome: not_attempted_deterministic_mode;/);
   assert.ok(!lines.some((text) => /reviewer_outcome: not_attempted;/.test(text)));
+});
+
+test("W1-T14156 criterion 3: a deterministic run with no criteria keeps the bare not_attempted outcome", async () => {
+  const effects: string[] = [];
+  const { lines, ledger } = await handReview("A code change with no task trailer and no Acceptance block.",
+    operatorReviewArgs([...REPO_ARGS, "--execution-mode", "deterministic"]), realReview(effects));
+  const posted = ledger.find((row) => row.step === "review.posted");
+  assert.ok(posted, `a review.posted row is written; steps: ${ledger.map((row) => row.step).join(",")}`);
+  assert.equal(posted.reviewer_outcome, "not_attempted");
+  assert.ok(!lines.some((text) => /reviewer_outcome: not_attempted_deterministic_mode/.test(text)));
 });
 
 test("W1-T14156 criterion 4: an internal reviewCommand call with no flags stays deterministic", async () => {

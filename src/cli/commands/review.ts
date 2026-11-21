@@ -1278,7 +1278,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     // spawn still reported `not_attempted_plan_only`, i.e. the ledger lied in the one direction
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
-    deterministicMode: args.spawnReviewer === false,
+    // Only when criteria exist: a review with none has no semantic work to skip, so it keeps the
+    // bare `not_attempted` ("no criteria") value it always reported.
+    deterministicMode: args.spawnReviewer === false && criteria.length > 0,
   });
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
