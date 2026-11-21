@@ -331,7 +331,7 @@ test("W1-T13968 criterion 2: a refusal's row is written after spawnRunChild retu
   returned = true;
   assert.equal(launch.pid, FAKE_PID, "the run child started");
   assert.deepEqual(fx.bound, [FAKE_PID], "its reservation was bound");
-  assert.deepEqual(writes, [], "no refusal row was written before the launch handle returned");
+  assert.deepEqual(writes.slice(), [], "no refusal row was written before the launch handle returned"); // a copy: no never[] narrowing
   await settleIonice();
   assert.deepEqual(writes.map((w) => w.how).sort(), ["ionice", "nice"], "each refusal kind still writes its row afterwards");
   assert.ok(writes.every((w) => w.afterReturn && w.boundAtWrite === 1), JSON.stringify(writes));
