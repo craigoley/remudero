@@ -232,7 +232,7 @@ import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
-import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { assembleAdaptiveQueueFlow, createFixRoundUnionReader, readMemoryHeadroomFraction, type FixRoundReader } from "./lib/adaptive-wip.js";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -1896,7 +1896,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
+import { fixRoundsInFlight, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -26149,10 +26149,15 @@ function queueGovernorGateFor(
   readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
+  let fixRounds: FixRoundReader | undefined;
+  // W1-T13990: the dwell's fix rounds come from the ledger union, read off the loop; the live lines add newer rows, and
+  // this process's fix registry adds the rounds it admitted that are still running.
+  const fixRoundUnion = createFixRoundUnionReader(dirname(ledgerPath), { clock: clockFromMillisFn(now), readRunning: fixRoundsInFlight });
   const gate = (): QueueGovernorResult | undefined => {
     admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
+    fixRounds = fixRoundUnion.readerFor(lines);
     const nowMs = now();
     const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
     const adaptive = assembleAdaptiveQueueFlow({
@@ -26165,6 +26170,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
       stuckOwnedCount: adaptive.stuckOwnedCount,
+      movableStuckOwnedCount: adaptive.movableStuckOwnedCount,
       adaptiveBound: adaptive.adaptiveBound,
       headroomFraction: adaptive.headroomFraction,
     });
@@ -26192,12 +26198,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
-  return Object.assign(gate, { readAdmission: () => admission });
+  return Object.assign(gate, { readAdmission: () => admission, readFixRounds: (sinceMs: number) => fixRounds?.(sinceMs) });
 }
 
 /** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
  *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
-type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined; readFixRounds?: FixRoundReader };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
@@ -46153,7 +46159,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     log: ports.log ?? log,
     stageClock,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
-      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      surface: "full", controllerId: randomUUID(), queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
       activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
       readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
       readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),

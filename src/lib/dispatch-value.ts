@@ -714,6 +714,8 @@ function costOfDelayContext(
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
     // W1-T9323: an undatable task (an id the filing scan cannot read, a snapshot one selection behind, a
     // future date) is scored at age 0 and named as imputed, so it joins the stride order instead of trailing it.
+    // W1-T14214: an ops task is dated from the ops history (dispatch-filing-catalogs.ts), so for one it means a
+    // read one selection behind or an ops history that cannot be read at the bound commit, never "every ops id".
     const dated = filedAt !== undefined && Number.isFinite(filedAt) && filedAt <= nowMs;
     if (!dated) costOfDelayImputed.push(task.id);
     const estimate = estimates.get(deriveTaskClass(task));
