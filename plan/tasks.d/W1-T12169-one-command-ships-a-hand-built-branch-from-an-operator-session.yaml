@@ -53,6 +53,7 @@
     The command keeps its state in one directory for each run: status, history, logs and the process id.
     `authorPushEligibility` in scripts/preflight-author.mjs stays the only judge of a receipt.
     NOT IN SCOPE: the merge, any change to the author preflight, and the removal of the two shell scripts. The operator removes them after one week of use.
+    NO-INVARIANTS: the command is new and has no prior behaviour to keep; the shared modules it touches (authority, git-push, github-transport, worktree-git) gain the rows and helpers it calls, and their existing callers are covered by their own tests.
   falsifier: |
     Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Key a failure by its callback body instead of its file and title, edit only an assertion message in a test that fails on main, and criterion 3 must fail. Drop the lease and move the remote tip between the last read and the push, and criterion 4 must fail. Restore and require all to pass.
   note: |
