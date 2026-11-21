@@ -566,8 +566,10 @@ export type ProcOrphanMarkers = OrphanMarkers | undefined | "unreadable";
 
 /**
  * W1-T14087: a pid's markers from `/proc/<pid>/environ` (NUL-separated `KEY=value`), with no
- * child process. The same three names and result shape as the ps reader, and the same value: the
- * first entry of a name, cut at its first whitespace exactly as the ps token's `\S+` is.
+ * child process. The same three names and result shape as the ps reader, and the same value:
+ * the entries are joined with spaces, as `ps eww` prints them, and read by the ps token parser
+ * itself, so a repeated name picks the entry base's regex picks (the first one with a value: an
+ * empty or space-led entry is skipped) and every value is cut at its first whitespace.
  * ENOENT/ESRCH (the pid exited) and EACCES/EPERM (not ours: ps eww shows no environment either)
  * answer `undefined`, never attributable. Any other failure is `unreadable`, so the caller falls
  * back to ps. `readEnviron` is the fs seam.
@@ -585,12 +587,7 @@ export function readOrphanMarkersFromProc(
     if (code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM") return undefined;
     return "unreadable";
   }
-  const env = new Map<string, string>();
-  for (const entry of raw.toString("utf8").split("\0")) {
-    const eq = entry.indexOf("=");
-    if (eq > 0 && !env.has(entry.slice(0, eq))) env.set(entry.slice(0, eq), entry.slice(eq + 1));
-  }
-  return orphanMarkersFrom((name) => env.get(name)?.match(/^\S+/)?.[0]);
+  return orphanMarkersFromPsText(raw.toString("utf8").split("\0").join(" "));
 }
 
 /** The open sweep's single ps listing (pid -> its `command` column), or `failed`; absent outside a sweep. */
@@ -613,10 +610,11 @@ function parseMarkerListing(out: string): Map<number, string> {
  * macOS/Linux `ps eww` appends a process's environment after its argv for processes the caller
  * owns. Inside {@link sweepOrphanWorkers} that is ONE `ps eww -Ao pid=,command=` listing for the
  * whole sweep (`-A`, not `-e`: on macOS `-e` means "show environment", not "every process"), never
- * reused by a later sweep. A direct call outside a sweep reads one pid with
- * `ps eww -o command= -p <pid>` as before. A process this cannot introspect (permission, already
- * exited, or genuinely marker-less) yields `undefined`, the safe never-guess default the
- * blast-radius rule requires — this is deliberately NOT a fail-open "assume attributable" default.
+ * reused by a later sweep; a row's markers count only while its pid is still ours to signal. A
+ * direct call outside a sweep reads one pid with `ps eww -o command= -p <pid>` as before. A
+ * process this cannot introspect (permission, already exited, or genuinely marker-less) yields
+ * `undefined`, the safe never-guess default the blast-radius rule requires — this is deliberately
+ * NOT a fail-open "assume attributable" default.
  * `platform` and `readEnviron` are test seams, appended so every `(pid)` caller is unchanged.
  */
 export function defaultReadMarkers(
@@ -649,5 +647,24 @@ export function defaultReadMarkers(
   }
   if (sweep.listing === "failed") return undefined;
   const line = sweep.listing.get(pid);
-  return line === undefined ? undefined : orphanMarkersFromPsText(line);
+  const listed = line === undefined ? undefined : orphanMarkersFromPsText(line);
+  // The row is as old as the listing: markers it shows lead to a kill only while the pid is still ours.
+  return listed && stillOursToSignal(pid) ? listed : undefined;
+}
+
+/**
+ * W1-T14087: whether `pid` is, right now, a live process this daemon may signal — the check a
+ * listed row's markers pass before they can lead to a kill. Base read each pid's markers at its
+ * turn, so a pid that exited since the listing read undefined there; ESRCH answers false here for
+ * the same verdict. EPERM means the pid now belongs to another user's process, whose environment
+ * base's per-pid ps could not show (the listed row with markers was ours), so it answers false too.
+ */
+function stillOursToSignal(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    // ESRCH (exited), EPERM (pid reused by another user) or anything else: never attributable.
+    return false;
+  }
 }
