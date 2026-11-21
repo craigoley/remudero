@@ -11,7 +11,8 @@
  *
  * Here REFUSAL_CLASSES names each class once. A pass reads the ledger union for the items those classes open, records
  * `stuck_state.held` once per item, and probes an item only on an event its class names (a new public origin/main
- * commit, a new ops main commit, a daemon boot, memory pressure back to normal). A passing probe re-runs the refused
+ * commit, a public working-tree edit for a release refusal, a new ops main commit, a daemon boot, memory pressure
+ * back to normal). A passing probe re-runs the refused
  * action through its own path (`rmd approve` with the refused id, nothing else) or, for an action that retries itself,
  * records the clearance. It escalates once, only when its probe reads the cause still present after the event its
  * class names as clearing it, or after the class's own derived clearance bound (no fixed count, age or interval).
@@ -19,22 +20,24 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fixedClock, systemClock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
-import { defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
+import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
-import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, type ReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
+import { PlanError, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
+import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, loadLocalReleasePlan, loadPublicPlanWithDeferredDependencies, publicReleaseDependencyError, readReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
 
 type Row = Record<string, unknown>;
 
 /** `rmd approve`'s catalog refusal, written beside its console line so a gardener can see it. */
 export const APPROVE_RELEASE_REFUSED_STEP = "approve.release_refused";
+export const APPROVE_PUBLIC_REPLAY_FLAG = "--replay-public-digest=";
+export const APPROVE_WORKING_TREE_REPLAY_FLAG = "--replay-public-working-tree";
 export const STUCK_STATE_HELD_STEP = "stuck_state.held";
 export const STUCK_STATE_RETRIED_STEP = "stuck_state.retried";
 export const STUCK_STATE_CLEARED_STEP = "stuck_state.cleared";
@@ -42,8 +45,11 @@ export const STUCK_STATE_ESCALATED_STEP = "stuck_state.escalated";
 export const STUCK_STATE_RECORD_CHANGED_STEP = "stuck_state.record_changed";
 export const STUCK_STATE_FAILED_STEP = "stuck-state.gardener_failed";
 const STUCK_STATE_FILE = "stuck-state.json";
+const OPS_DESTINATION_OFF = "off";
 
-export type ClearingEvent = "public-main" | "ops-main" | "daemon-boot" | "memory-normal";
+type PublicPlanEvent = "public-main" | "public-working-tree";
+type CatalogEvent = PublicPlanEvent | "ops-main";
+export type ClearingEvent = CatalogEvent | "daemon-boot" | "memory-normal";
 export type RefusalClassName = "release-compose" | "fix-dispatch-catalog-unreadable" | "ops-dispatch-hold" | "garden-filing-destination-unreadable";
 
 /** One piece of held work: a class, its subject and the refusal's reason signature. */
@@ -56,13 +62,14 @@ export interface HeldItem {
   taskId?: string;
   prNumber?: number;
   garden?: string;
-  /** The ops record digest the refused release read (release-compose only). */
+  /** The record digest the refused release read (release-compose only). */
   digest?: string;
+  publicRelease?: { checkoutRoot?: string; publicCommit?: string; opsCommit?: string; workingTreeDigest?: string };
   /** A `stuck_state.escalated` row for this item is already in the ledger. */
   escalated?: boolean;
 }
 
-type Opened = Pick<HeldItem, "subject" | "signature" | "taskId" | "prNumber" | "garden" | "digest">;
+type Opened = Pick<HeldItem, "subject" | "signature" | "taskId" | "prNumber" | "garden" | "digest" | "publicRelease">;
 
 export interface RefusalClass {
   name: RefusalClassName;
@@ -92,10 +99,17 @@ export const REFUSAL_CLASSES: readonly RefusalClass[] = [
     opens: (row) => {
       const taskId = str(row.task_id), reason = str(row.reason);
       if (row.step !== APPROVE_RELEASE_REFUSED_STEP || row.class !== "release-compose" || !taskId || !reason) return undefined;
-      return { subject: `task:${taskId}`, signature: str(row.edge) ? `${reason} ${String(row.edge)}` : reason, taskId, ...(str(row.ops_record_digest) ? { digest: String(row.ops_record_digest) } : {}) };
+      const publicDigest = str(row.public_record_digest);
+      const digest = publicDigest ?? str(row.ops_record_digest);
+      const publicRelease = publicDigest === undefined ? {} : {
+        publicRelease: { checkoutRoot: str(row.public_checkout_root), publicCommit: str(row.public_commit),
+          opsCommit: str(row.ops_commit), workingTreeDigest: str(row.public_working_tree_digest) },
+      };
+      return { subject: `task:${taskId}`, signature: str(row.edge) ? `${reason} ${String(row.edge)}` : reason, taskId,
+        ...(digest === undefined ? {} : { digest }), ...publicRelease };
     },
     recovered: (row, item) => row.step === RELEASE_LEDGER_STEP && row.task_id === item.taskId,
-    probeOn: ["public-main", "ops-main", "daemon-boot"],
+    probeOn: ["public-main", "ops-main", "daemon-boot", "public-working-tree"],
     clearsOn: "daemon-boot",
     retry: "approve",
     escalatedBy: "gardener",
@@ -235,7 +249,7 @@ function rowEventStamps(rows: readonly Row[], untilMs = Number.POSITIVE_INFINITY
   return { ...(boot ? { "daemon-boot": String(boot.ts) } : {}), ...(normal ? { "memory-normal": String(normal.ts) } : {}) };
 }
 
-/** What a probe read: whether the cause is still present, and for a release, the ops record's current digest. */
+/** The cause's status and current record digest. A verified public probe includes the digest property even for an absent record. */
 export interface ProbeResult { present: boolean; reason?: string; digest?: string }
 
 export interface StuckStatePorts {
@@ -243,11 +257,11 @@ export interface StuckStatePorts {
   readRows: () => Row[] | Promise<Row[]>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   escalate: (e: Escalation) => string | null | undefined;
-  /** The external clearing events' current stamps (a commit sha); ledger events are read from the rows. */
-  eventStamps: Partial<Record<"public-main" | "ops-main", () => string | undefined | Promise<string | undefined>>>;
+  /** Current ref stamps and the public working-tree plan digest; ledger events are read from the rows. */
+  eventStamps: Partial<Record<CatalogEvent, (item?: HeldItem) => string | undefined | Promise<string | undefined>>>;
   probe: (item: HeldItem) => Promise<ProbeResult>;
-  /** The refused action's own path: `rmd approve <id>` with that id and no other argument. */
-  approve: (taskId: string) => Promise<number>;
+  /** The refused action's own path. A public replay passes its digest, source and recorded checkout. */
+  approve: (taskId: string, ...replay: string[]) => Promise<number>;
   nowMs?: () => number;
 }
 
@@ -300,17 +314,20 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   const { open, closedByLane } = scanStuckState(rows);
   const state = readState(ports.stateDir);
   const next: GardenState = { version: 1, items: {} };
-  let external: Partial<Record<ClearingEvent, string>> | undefined;
-  const stampsNow = async (): Promise<Partial<Record<ClearingEvent, string>>> => {
-    if (external === undefined) {
-      external = {};
-      for (const event of ["public-main", "ops-main"] as const) {
-        const read = ports.eventStamps[event];
-        const stamp = read ? await read() : undefined;
-        if (stamp !== undefined) external[event] = stamp;
-      }
+  const catalogStamps = new Map<string | undefined, Partial<Record<CatalogEvent, string>>>();
+  const ledgerStamps = rowEventStamps(rows);
+  const stampsNow = async (item: HeldItem, probeOn: readonly ClearingEvent[]): Promise<Partial<Record<ClearingEvent, string>>> => {
+    const stamps = { ...ledgerStamps };
+    for (const event of probeOn) {
+      if (event === "daemon-boot" || event === "memory-normal") continue;
+      const root = event === "ops-main" ? undefined : item.publicRelease?.checkoutRoot;
+      const cached = catalogStamps.get(root) ?? {};
+      catalogStamps.set(root, cached);
+      if (!(event in cached)) cached[event] = await ports.eventStamps[event]?.(item);
+      stamps[event] = cached[event];
     }
-    return { ...rowEventStamps(rows), ...external };
+    if (!item.publicRelease && stamps["ops-main"] === OPS_DESTINATION_OFF) delete stamps["ops-main"];
+    return stamps;
   };
   const escalateOnce = (item: HeldItem, entry: ItemState, why: string): void => {
     if (entry.escalated || item.escalated) return;
@@ -321,28 +338,47 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   const released = new Map<string, number>();
   for (const item of open) {
     const cls = classNamed(item.className)!;
-    const prior = state.items[item.key];
+    const { probeOn } = cls;
+    let prior = state.items[item.key];
     if (prior === undefined) {
       ports.log(STUCK_STATE_HELD_STEP, itemFields(item));
-      // The baseline: external stamps as first seen, ledger events as they stood when the refusal was written.
-      const baseline = { ...(await stampsNow()) }, before = rowEventStamps(rows, item.openedAt);
+      // A public refusal's recorded commits also catch catalog changes before the first pass.
+      const baseline = await stampsNow(item, probeOn), before = rowEventStamps(rows, item.openedAt);
       for (const event of ["daemon-boot", "memory-normal"] as const) baseline[event] = before[event];
-      next.items[item.key] = { stamps: baseline };
-      continue;
+      const evidence = item.publicRelease;
+      if (evidence) baseline["public-main"] = evidence.publicCommit;
+      if (evidence) baseline["ops-main"] = evidence.opsCommit;
+      if (evidence && evidence.publicCommit === undefined) baseline["public-working-tree"] = evidence.workingTreeDigest;
+      prior = next.items[item.key] = { stamps: baseline };
+      if (evidence === undefined) continue;
     }
     const entry: ItemState = { ...prior, stamps: { ...prior.stamps } };
     next.items[item.key] = entry;
     if (entry.recordChanged) continue;
-    const now = await stampsNow();
-    const changed = cls.probeOn.filter((event) => now[event] !== undefined && now[event] !== prior.stamps[event]);
+    const now = await stampsNow(item, probeOn);
+    const changed = probeOn.filter((event) => now[event] !== undefined && now[event] !== prior.stamps[event]);
     const bound = clearanceBound(item.className, rows);
     const overBound = bound !== undefined && nowMs - item.openedAt > bound.ms;
     // Crossing the bound probes once more before escalating, so a class that cleared with no event is never escalated.
     const ageProbe = changed.length === 0 && overBound && cls.escalatedBy === "gardener" && !entry.escalated && !item.escalated && !entry.ageProbed;
     if (changed.length === 0 && !ageProbe) continue;
-    for (const event of cls.probeOn) if (now[event] !== undefined) entry.stamps[event] = now[event];
     if (ageProbe) entry.ageProbed = true;
     const probed = await ports.probe(item);
+    // A public release can retry at the same ref after a failed catalog read.
+    if (!item.publicRelease || "digest" in probed) {
+      for (const event of probeOn) {
+        if (now[event] !== undefined) entry.stamps[event] = now[event];
+      }
+    }
+    const checkedRelease = cls.retry === "approve" && (probed.present
+      ? item.publicRelease !== undefined && "digest" in probed
+      : changed.length > 0);
+    if (checkedRelease && (item.digest === undefined || probed.digest !== item.digest)) {
+      entry.recordChanged = true;
+      ports.log(STUCK_STATE_RECORD_CHANGED_STEP, { ...itemFields(item), recorded_digest: item.digest ?? null, current_digest: probed.digest ?? null });
+      escalateOnce(item, entry, `The record of ${item.taskId} changed since the operator's refused release (digest ${item.digest ?? "unrecorded"} -> ${probed.digest ?? "absent"}); a changed record is never released on the operator's behalf. Re-run rmd approve ${item.taskId} if the new record should be released.`);
+      continue;
+    }
     if (probed.present) {
       const definitive = changed.includes(cls.clearsOn);
       if (cls.escalatedBy === "gardener" && (definitive || overBound)) {
@@ -359,14 +395,11 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
     }
     // A probe the bound alone triggered only decides escalation: a release re-runs on a clearing event, never on age.
     if (changed.length === 0) continue;
-    if (item.digest === undefined || probed.digest !== item.digest) {
-      entry.recordChanged = true;
-      ports.log(STUCK_STATE_RECORD_CHANGED_STEP, { ...itemFields(item), recorded_digest: item.digest ?? null, current_digest: probed.digest ?? null });
-      escalateOnce(item, entry, `The ops record of ${item.taskId} changed since the operator's refused release (digest ${item.digest ?? "unrecorded"} -> ${probed.digest ?? "absent"}); a changed record is never released on the operator's behalf. Re-run rmd approve ${item.taskId} if the new record should be released.`);
-      continue;
-    }
     const shared = released.get(item.taskId!);
-    const code = shared ?? await ports.approve(item.taskId!);
+    const evidence = item.publicRelease;
+    const replay = evidence ? [item.digest!, evidence.publicCommit === undefined ? "working_tree" : "origin/main"] : [];
+    if (evidence?.checkoutRoot !== undefined) replay.push(evidence.checkoutRoot);
+    const code = shared ?? await ports.approve(item.taskId!, ...replay);
     released.set(item.taskId!, code);
     if (shared === undefined) ports.log(STUCK_STATE_RETRIED_STEP, { ...itemFields(item), via: "rmd approve", exit_code: code, events: changed });
     if (code === 0) {
@@ -382,72 +415,109 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   writeAtomic(join(ports.stateDir, STUCK_STATE_FILE), `${JSON.stringify(next)}\n`);
 }
 
-/** The ops record's digest: the record as its catalog holds it, keys sorted, without the lookup's provenance stamp. */
-export function opsRecordDigest(task: Task): string {
-  const stable = (value: unknown): string => {
-    if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-    if (value !== null && typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      return `{${Object.keys(record).filter((k) => record[k] !== undefined && k !== "catalog").sort().map((k) => `${JSON.stringify(k)}:${stable(record[k])}`).join(",")}}`;
-    }
-    return JSON.stringify(value) ?? "null";
-  };
-  return createHash("sha256").update(stable(task)).digest("hex");
+/** A record with keys sorted, without the keys `drop` names (the lookup's provenance stamps), at every depth. */
+function stableRecord(value: unknown, drop: ReadonlySet<string>): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item, drop)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k], drop)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
-/** Pin the public ref before opening its plan blobs so the refusal names the commit it actually read. */
-async function readPinnedReleasePublicPlan(root: string): Promise<ReleasePublicPlan & { commit?: string }> {
-  try {
-    const runGit = defaultGitRunnerAsync(root);
-    const commit = (await runGit(["rev-parse", "--verify", "origin/main"])).trim();
-    return { read: "origin/main", commit, plan: await loadPlanAtRefAsync(root, "plan/tasks.yaml", commit, runGit) };
-  } catch (error) {
-    const reason = error instanceof Error ? "origin-main-unreadable" : "origin-main-thrown";
-    return { read: "working_tree", reason, plan: loadPlan(join(root, "plan", "tasks.yaml")) };
-  }
+/** The ops record's digest: the record as its catalog holds it, keys sorted, without the lookup's provenance stamp. */
+export function opsRecordDigest(task: Task): string {
+  return createHash("sha256").update(stableRecord(task, new Set(["catalog"]))).digest("hex");
+}
+
+const PUBLIC_RECORD_PROVENANCE = new Set(["catalog", "sourcePath"]);
+/**
+ * W1-T13785: a public record's digest. The file it was read from (sourcePath names the pinned commit) is provenance,
+ * not the record, so an unchanged record keeps its digest as main moves. The catalog is part of the input, so a record
+ * that moved between the catalogs never digests as the one the operator's refused release read.
+ */
+export function publicRecordDigest(task: Task): string {
+  return createHash("sha256").update(`public\0${stableRecord(task, PUBLIC_RECORD_PROVENANCE)}`).digest("hex");
+}
+
+function publicWorkingTreeDigest(plan: Plan): string {
+  return createHash("sha256").update(stableRecord(plan.tasks, PUBLIC_RECORD_PROVENANCE)).digest("hex");
 }
 
 type RefusalRow = Row & { run_id: string; task_id: string; step: string };
+
+/** A hold on a public edge (the public record itself, or the public task it depends on) is the composition's in any view. */
+function heldByPublicEdge(release: TaskReleasePlan | undefined, plan?: Plan): boolean {
+  return release?.outcome === "held" && plan?.byId.has(release.hold.task) === true;
+}
 
 /**
  * Resolve the approve decision and record composition refusals from the exact snapshots that made it.
  * The local/public fast paths keep their lookup order and open the ops snapshot only when needed.
  */
 export async function readApproveRelease(
-  taskId: string, localPlan: Plan, publicRoot: string, options: TaskLookupOptions, append: (row: RefusalRow) => void,
+  taskId: string, localPlan: Plan | undefined, publicRoot: string, options: TaskLookupOptions, append: (row: RefusalRow) => void,
+  expectedPublicDigest?: string, workingTreeReplay = false,
 ): Promise<TaskReleasePlan | undefined> {
+  if (localPlan === undefined) {
+    const read = await readOps(options.stateDir, options.api, options.opsSnapshot);
+    return verifiedReplayRelease(await readPublicReplay(taskId, publicRoot, workingTreeReplay, read), expectedPublicDigest);
+  }
   const lookup = { ...options };
   let publicCommit: string | undefined;
-  const release = await findApproveReleasePlan(taskId, localPlan, async () => {
-    const view = await readPinnedReleasePublicPlan(publicRoot);
+  let publicPlan: Plan | undefined;
+  const readPublic = async (keepUnseenDependencies = true) => {
+    const view = await readReleasePublicPlan(publicRoot, { keepUnseenDependencies });
     publicCommit = view.commit;
-    if (!view.plan.byId.has(taskId) && (view.read === "origin/main" || !localPlan.byId.has(taskId)) && lookup.opsSnapshot === undefined) {
+    publicPlan = view.plan;
+    // W1-T13785: a public hit composes too, so only a local hit the working tree alone answers opens no ops read.
+    const needsOps = view.plan.byId.has(taskId) || view.read === "origin/main" || !localPlan.byId.has(taskId);
+    if (needsOps && lookup.opsSnapshot === undefined) {
       const snapshot = await readOps(lookup.stateDir, lookup.api);
       if (snapshot.outcome !== "off" && snapshot.outcome !== "destination-unreadable") lookup.opsSnapshot = snapshot;
     }
     return view;
-  }, lookup);
-  const evidence = { publicCommit, opsSnapshot: lookup.opsSnapshot, append };
+  };
+  let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
+  if (!heldByPublicEdge(release, publicPlan)) {
+    const localError = publicReleaseDependencyError(localPlan);
+    if (localError && release?.outcome !== "held") throw localError;
+    if (!localError && publicPlan && publicReleaseDependencyError(publicPlan)) {
+      // W1-T13785 (operator ruling 2026-11-21): origin/main does not load strictly, so the strict loader's working-tree
+      // fallback composition IS the composition, as on origin/main; a hold only the deferred ref makes is not one.
+      // A hold both views make keeps origin/main's answer, and its commit for the refusal row.
+      const ref = { release, publicCommit, publicPlan };
+      release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
+      if (ref.release?.outcome === "held" && release?.outcome === "held") ({ release, publicCommit, publicPlan } = ref);
+    }
+  }
+  const evidence = { checkoutRoot: publicRoot, publicCommit, publicPlan, opsSnapshot: lookup.opsSnapshot, append };
   if (release?.outcome === "unreadable") recordApproveReleaseRefusal(taskId, { reason: release.reason }, evidence);
-  // Only a hold read from the public ref has a commit whose movement can prove it cleared.
-  if (release?.outcome === "held" && publicCommit !== undefined) {
+  if (release?.outcome === "held" && (publicCommit !== undefined || publicPlan?.byId.has(taskId))) {
     recordApproveReleaseRefusal(taskId, { reason: `held-${release.hold.reason}`, edge: compositionHoldEdge(release.hold) }, evidence);
   }
   return release;
 }
 
-/** A failed catalog read carries no replayable record. A composition refusal uses the snapshot that produced it. */
+/** A failed catalog read carries no replayable record. A composition refusal uses the snapshot that produced it.
+ *  W1-T13785: a subject the public view holds is a public record (approve resolves the public plan first), so its row
+ *  carries that record's digest as `public_record_digest`; an ops subject's row is unchanged. */
 export function recordApproveReleaseRefusal(
   taskId: string, refusal: { reason: string; edge?: string },
-  opts: { opsSnapshot?: OpsCatalogSnapshot; append: (row: RefusalRow) => void; publicCommit?: string },
+  opts: { opsSnapshot?: OpsCatalogSnapshot; append: (row: RefusalRow) => void; checkoutRoot?: string; publicCommit?: string; publicPlan?: Plan },
 ): void {
   const { reason } = refusal;
   if (!RELEASE_REFUSAL_REASON.test(reason)) return;
   try {
-    const task = opts.opsSnapshot?.plan?.byId.get(taskId);
+    const publicTask = opts.publicPlan?.byId.get(taskId);
+    const task = publicTask === undefined ? opts.opsSnapshot?.plan?.byId.get(taskId) : undefined;
+    const workingTree = publicTask !== undefined && opts.publicCommit === undefined
+      ? { public_working_tree_digest: publicWorkingTreeDigest(opts.publicPlan!) } : {};
     opts.append({ run_id: `APPROVE-${taskId}`, task_id: taskId, step: APPROVE_RELEASE_REFUSED_STEP, class: "release-compose", reason,
       ...(refusal.edge === undefined ? {} : { edge: refusal.edge }),
-      public_commit: opts.publicCommit ?? null, ops_commit: opts.opsSnapshot?.binding?.commit ?? null, ops_record_digest: task ? opsRecordDigest(task) : null });
+      public_commit: opts.publicCommit ?? null, ops_commit: opts.opsSnapshot?.binding?.commit ?? null, ops_record_digest: task ? opsRecordDigest(task) : null,
+      ...(publicTask && opts.checkoutRoot !== undefined ? { public_checkout_root: resolve(opts.checkoutRoot) } : {}),
+      ...(publicTask === undefined ? {} : { public_record_digest: publicRecordDigest(publicTask) }), ...workingTree });
   } catch (error) {
     // The refusal stands whatever happens here; a row that cannot be written only leaves the operator's re-run to him.
     console.error(`rmd approve: could not record the refusal of '${taskId}': ${String((error as Error)?.message ?? error)}`);
@@ -456,11 +526,90 @@ export function recordApproveReleaseRefusal(
 
 type OpsRead = OpsCatalogSnapshot | { outcome: "off" } | { outcome: "destination-unreadable" };
 
-async function readOps(stateDir?: string, api?: OpsCatalogApi): Promise<OpsRead> {
+async function readOps(stateDir?: string, api?: OpsCatalogApi, snapshot?: OpsCatalogSnapshot): Promise<OpsRead> {
   const destination = planDestinationRepository(stateDir);
   if (destination.outcome === "off") return { outcome: "off" };
   if (destination.outcome === "unreadable") return { outcome: "destination-unreadable" };
-  return readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
+  return snapshot ?? readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, api);
+}
+
+function publicReplayPlan(taskId: string, plan: Plan, read: OpsRead): TaskReleasePlan {
+  if (read.outcome !== "off") {
+    if (read.outcome !== "ok" || read.plan === undefined) return { outcome: "unreadable", reason: "public-replay-ops-unreadable" };
+    const composition = composeSecondaryPlan(plan, read.plan);
+    if (composition.outcome !== "ok") return { outcome: "unreadable", reason: `compose-${composition.outcome}` };
+    const hold = composition.held.get(taskId);
+    if (hold !== undefined) return { outcome: "held", hold };
+  }
+  if (publicReleaseDependencyError(plan)) {
+    return { outcome: "unreadable", reason: "public-replay-plan-invalid" };
+  }
+  return { outcome: "found", catalog: "public", plan };
+}
+
+async function readStrictReplayPlan(publicRoot: string): Promise<Plan | undefined> {
+  try {
+    return (await readReleasePublicPlan(publicRoot)).plan;
+  } catch (error) {
+    // Both views failed strict validation. Keep the original plan-invalid decision.
+    if (error instanceof PlanError) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * The composition's decision for a public replay and the digest of the record that composition resolved, over one ops
+ * snapshot. W1-T13785: `release` is the cause alone (what the probe reports), and `digest` is the one record both the
+ * probe reports and the retry checks. When origin/main does not load strictly, the strict fallback's composition is the
+ * composition (operator ruling 2026-11-21), so its decision and its record's digest replace the deferred ref's.
+ */
+async function resolvePublicReplay(
+  taskId: string, plan: Plan, read: OpsRead, readStrict?: () => Promise<Plan | undefined>,
+): Promise<{ release: TaskReleasePlan; digest?: string }> {
+  const release = publicReplayPlan(taskId, plan, read);
+  if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { release };
+  const record = plan.byId.get(taskId);
+  const moved = record === undefined && read.outcome === "ok" ? read.plan?.byId.get(taskId) : undefined;
+  const digest = record ? publicRecordDigest(record) : moved ? opsRecordDigest(moved) : undefined;
+  if (release.outcome === "unreadable" && release.reason === "public-replay-plan-invalid" && readStrict) {
+    const strictPlan = await readStrict();
+    if (strictPlan !== undefined) return resolvePublicReplay(taskId, strictPlan, read);
+  }
+  return { release, digest };
+}
+
+/**
+ * The retry's answer: the composition's decision when the digest the probe would report is the refused one, else a
+ * refusal. A moved record digests as ops and never matches a public digest; an absent record has no digest.
+ */
+function verifiedReplayRelease(result: Awaited<ReturnType<typeof resolvePublicReplay>> | undefined, expectedDigest: string | undefined): TaskReleasePlan {
+  if (result === undefined) return { outcome: "unreadable", reason: "public-replay-record-unverified" };
+  const malformed = result.release.outcome === "unreadable" && result.release.reason === "compose-malformed";
+  const verified = result.digest !== undefined && result.digest === expectedDigest;
+  return malformed || verified ? result.release : { outcome: "unreadable", reason: "public-replay-record-unverified" };
+}
+
+async function readPublicReplay(
+  taskId: string, root: string, workingTree: boolean, read: OpsRead,
+) {
+  let view: Awaited<ReturnType<typeof readReleasePublicPlan>>;
+  let plan: Plan;
+  try {
+    view = await readReleasePublicPlan(root, { keepUnseenDependencies: true });
+    if (!workingTree && view.read === "working_tree") return undefined;
+    plan = workingTree && view.read === "origin/main" ? loadPublicPlanWithDeferredDependencies(join(root, "plan", "tasks.yaml")) : view.plan;
+  } catch (error) {
+    // An unreadable checkout leaves the record unverified. It can become readable at the same ref.
+    if (error instanceof PlanError) return undefined;
+    throw error;
+  }
+  const result = await resolvePublicReplay(taskId, plan, read, workingTree ? undefined : () => readStrictReplayPlan(root));
+  if (workingTree && result.release.outcome === "found" && view.read === "origin/main" && view.plan.byId.has(taskId)) {
+    // A recovered ref can still hold the task, while the working tree owns the replay's record and pin.
+    const current = publicReplayPlan(taskId, view.plan, read);
+    if (current.outcome === "held") return { ...result, release: current };
+  }
+  return result;
 }
 
 /** The ops main commit, for the `ops-main` clearing event; undefined when there is no ops catalog or it cannot be read. */
@@ -468,8 +617,10 @@ export async function opsMainCommit(stateDir: string, api: OpsCatalogApi): Promi
   const destination = planDestinationRepository(stateDir);
   if (destination.outcome !== "named") return undefined;
   try {
-    const ref = await api(`repos/${destination.owner}/${destination.repo}/git/ref/heads/main`) as { object?: { sha?: unknown } };
-    return str(ref?.object?.sha);
+    // W1-T13785: the catalog read binds the repository's default branch, so that branch's movement is the event.
+    const repo = `repos/${destination.owner}/${destination.repo}`;
+    const branch = str((await api(repo) as { default_branch?: unknown } | undefined)?.default_branch);
+    return branch === undefined ? undefined : await readBranchSha(api, repo, branch);
   } catch (error) {
     // An unread ref is no event: the item keeps its last stamp and is probed when the ref next answers.
     void error;
@@ -486,7 +637,8 @@ export async function fixDispatchCauseProbe(cause: string, opts: { stateDir: str
 
 /** Each registered class's probe: the read that proves its cause gone, over the same reads the refused action makes. */
 export function productionStuckStateProbe(opts: {
-  stateDir: string; publicPlan: () => Plan | Promise<Plan>; api: OpsCatalogApi; destinationRead: () => Promise<unknown>;
+  stateDir: string; publicPlan: (item: HeldItem) => Plan | undefined | Promise<Plan | undefined>; api: OpsCatalogApi; destinationRead: () => Promise<unknown>;
+  strictPublicPlan?: () => Promise<Plan | undefined>; replayRoot?: (item: HeldItem) => string;
 }): (item: HeldItem) => Promise<ProbeResult> {
   return async (item) => {
     if (item.className === "garden-filing-destination-unreadable") {
@@ -499,17 +651,39 @@ export function productionStuckStateProbe(opts: {
     }
     const read = await readOps(opts.stateDir, opts.api);
     if (item.className === "fix-dispatch-catalog-unreadable") return read.outcome === "ok" || read.outcome === "off" ? { present: false } : { present: true, reason: `ops-${read.outcome}` };
+    if (item.publicRelease && (read.outcome === "off" || (read.outcome === "ok" && read.plan !== undefined))) {
+      const root = opts.replayRoot?.(item), workingTree = item.publicRelease.publicCommit === undefined;
+      const plan = root === undefined ? await opts.publicPlan(item) : undefined;
+      const result = root !== undefined
+        ? await readPublicReplay(item.taskId!, root, workingTree, read)
+        : plan && await resolvePublicReplay(item.taskId!, plan, read, opts.strictPublicPlan);
+      if (result === undefined) return { present: true, reason: workingTree ? "public-working-tree-unreadable" : "origin-main-unreadable" };
+      // The cause is the composition's decision; the resolved record's digest is reported beside it, never folded into it.
+      const { release, ...observed } = result;
+      return release.outcome === "found" ? { present: false, ...observed }
+        : { present: true, ...observed, reason: "reason" in release ? release.reason : release.outcome };
+    }
     if (read.outcome !== "ok" || read.plan === undefined) return { present: true, reason: `ops-${read.outcome}` };
-    const publicPlan = await opts.publicPlan();
+    const publicPlan = await opts.publicPlan(item);
+    if (publicPlan === undefined) return { present: true, reason: "origin-main-unreadable" };
     if (item.className === "ops-dispatch-hold") {
       const composed = composeSecondaryPlan(publicPlan, read.plan);
       return composed.outcome === "ok" ? { present: false } : { present: true, reason: `compose-${composed.outcome}` };
     }
-    const release: TaskReleasePlan = await findReleasePlanInCatalogs(item.taskId!, publicPlan, { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read });
+    const taskId = item.taskId!;
+    const lookup = { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read };
+    let release = await findReleasePlanInCatalogs(taskId, publicPlan, lookup);
+    // W1-T13785 (operator ruling 2026-11-21): beside an unloadable ref, the strict fallback decides, as approve does.
+    if (!heldByPublicEdge(release, publicPlan) && publicReleaseDependencyError(publicPlan)) {
+      const strict = await opts.strictPublicPlan?.();
+      if (strict === undefined) return { present: true, reason: "public-replay-plan-invalid" };
+      release = await findReleasePlanInCatalogs(taskId, strict, lookup);
+    }
     // A catalog refusal or a per-task hold keeps the cause present.
     if (release.outcome !== "found") return { present: true, reason: "reason" in release ? release.reason : `${release.outcome}` };
-    const record = read.plan.byId.get(item.taskId!);
-    return { present: false, ...(release.outcome === "found" && release.catalog === "ops" && record ? { digest: opsRecordDigest(record) } : {}) };
+    // W1-T13785: a public release names the public record's digest; a record that moved catalog digests apart.
+    const record = release.plan.byId.get(taskId);
+    return { present: false, ...(record === undefined ? {} : { digest: release.catalog === "ops" ? opsRecordDigest(record) : publicRecordDigest(record) }) };
   };
 }
 
@@ -524,15 +698,20 @@ export async function readStuckStateRows(stateDir: string, gardens: readonly str
 
 /**
  * The refused action's own path: the operator's `rmd approve <id>`, run as a child of this garden pass on the pass's own
- * node, loader and entry (so the child is approveCommand on the same tree, config and ledger), with that id and nothing
- * else. A child keeps approve's synchronous git and GitHub work off the daemon loop. Its exit code is the answer.
+ * node, loader and entry. A public retry also passes its verified record digest and checkout to approve.
  */
 export function approveInChild(opts: {
-  execPath?: string; execArgv?: readonly string[]; entry?: string; env?: NodeJS.ProcessEnv;
+  execPath?: string; execArgv?: readonly string[]; entry?: string; env?: NodeJS.ProcessEnv; publicRoot?: string;
   run?: (file: string, args: readonly string[], options: { encoding: "utf8"; env: NodeJS.ProcessEnv; maxBuffer: number }) => Promise<unknown>;
-} = {}): (taskId: string) => Promise<number> {
-  return async (taskId) => {
+} = {}): StuckStatePorts["approve"] {
+  return async (taskId, ...[expectedPublicDigest, publicSource, checkoutRoot]) => {
     const args = [...(opts.execArgv ?? process.execArgv), opts.entry ?? process.argv[1] ?? "", "approve", taskId];
+    if (expectedPublicDigest !== undefined) {
+      args.push(`${APPROVE_PUBLIC_REPLAY_FLAG}${expectedPublicDigest}`);
+      if (publicSource === "working_tree") args.push(APPROVE_WORKING_TREE_REPLAY_FLAG);
+      const root = checkoutRoot ?? opts.publicRoot;
+      if (root !== undefined) args.push("--repo-root", root);
+    }
     try {
       await (opts.run ?? execFileRouted)(opts.execPath ?? process.execPath, args,
         { encoding: "utf8", env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1" }, maxBuffer: 1 << 20 });
@@ -547,17 +726,29 @@ export function approveInChild(opts: {
 
 /** The production ports: the ledger union, the clearing events, every class's probe, and the approve path it is handed. */
 export function productionStuckStatePorts(ctx: {
-  stateDir: string; log: StuckStatePorts["log"]; escalate: StuckStatePorts["escalate"]; publicMainCommit: () => string | undefined;
-  publicRoot: string; destinationRead: () => Promise<unknown>; approve: (taskId: string) => Promise<number>; api?: OpsCatalogApi;
+  stateDir: string; log: StuckStatePorts["log"]; escalate: StuckStatePorts["escalate"]; publicMainCommit: (checkoutRoot: string) => string | undefined;
+  publicRoot: string; destinationRead: () => Promise<unknown>; approve: StuckStatePorts["approve"]; api?: OpsCatalogApi;
   /** The gardens whose filing refusals it reads (the registry's names). */
   gardenNames: readonly string[];
 }): StuckStatePorts {
   const api = ctx.api ?? defaultOpsCatalogApi();
+  const publicRoot = (item?: HeldItem) => item?.publicRelease?.checkoutRoot ?? ctx.publicRoot;
   return {
     stateDir: ctx.stateDir, log: ctx.log, escalate: ctx.escalate, approve: ctx.approve,
     readRows: () => readStuckStateRows(ctx.stateDir, ctx.gardenNames),
-    eventStamps: { "public-main": ctx.publicMainCommit, "ops-main": () => opsMainCommit(ctx.stateDir, api) },
-    probe: productionStuckStateProbe({ stateDir: ctx.stateDir, publicPlan: async () => (await readPinnedReleasePublicPlan(ctx.publicRoot)).plan,
-      api, destinationRead: ctx.destinationRead }),
+    eventStamps: { "public-main": item => ctx.publicMainCommit(publicRoot(item)),
+      "ops-main": () => planDestinationRepository(ctx.stateDir).outcome === "off" ? OPS_DESTINATION_OFF : opsMainCommit(ctx.stateDir, api),
+      "public-working-tree": item => {
+        try {
+          return publicWorkingTreeDigest(loadLocalReleasePlan(join(publicRoot(item), "plan", "tasks.yaml"), ctx.stateDir));
+        } catch (error) {
+          // An unreadable plan supplies no stamp; a readable edit can be observed on a later pass.
+          void error;
+          return undefined;
+        }
+      } },
+    probe: productionStuckStateProbe({ stateDir: ctx.stateDir,
+      publicPlan: async item => (await readReleasePublicPlan(ctx.publicRoot, { keepUnseenDependencies: item.className === "release-compose" })).plan,
+      replayRoot: publicRoot, strictPublicPlan: () => readStrictReplayPlan(ctx.publicRoot), api, destinationRead: ctx.destinationRead }),
   };
 }
