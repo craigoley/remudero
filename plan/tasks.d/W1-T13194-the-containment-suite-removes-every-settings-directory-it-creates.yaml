@@ -15,6 +15,9 @@
     - W1-T13190
   files:
     - test/containment.test.ts
+  # refusal-amendment (W1-T13194, run W1-T13194-1795269598459, 2026-11-21T21:10:15.388Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
+  #   worker evidence: W1-T13194: a filed proof already passes at the merge base, so branch run-W1-T13194-1795269598459 cannot open a PR
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:
