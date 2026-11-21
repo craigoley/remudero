@@ -1,0 +1,59 @@
+- id: W1-T14151
+  title: A fix-prompt lesson that wins on held-out rounds is offered to a task-keyed share of fix rounds, then promoted or rolled back by its outcome
+  repo: remudero
+  depends_on: [W1-T14137, W1-T14138]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the first machine-written change to a production prompt, behind a canary
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T4665, W1-T9640, W1-T9641, W1-T4113, W1-T14137, W1-T14138]
+  files:
+    - src/lib/fix-lane-gardener.ts
+    - src/lib/prompt-evolution.ts
+    - src/lib/experiment-promotion.ts
+    - src/cli/commands/fix.ts
+    - test/learning/a-winning-fix-prompt-lesson-enters-a-canary.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - Reflective prompt evolution over fix transcripts shipped: W1-T4665 (e02b8a69c), W1-T9640 (a lesson stays with the worker
+      model it came from) and W1-T9641.
+    - prompt-evolution.ts proposes candidate lessons, and proposePromptEvolutionPromotion (src/lib/experiment-promotion.ts:280) is
+      the bridge to the shadow, canary and rollback engine.
+    - Production uses it only as "Prompt lessons (shadow — nothing installed)" (src/lib/fix-lane-gardener.ts:689-705), so no lesson
+      has ever changed a prompt.
+    - GEPA-style reflective prompt evolution improved results with up to 35x fewer rollouts than reinforcement learning
+      (Agrawal et al., "GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning", ICLR 2026 oral).
+    - The fix lane's outcome per round is now recorded (W1-T14138).
+  design: |
+    1. Once a week, the fix-lane gardener takes each worker model's top lesson set from promptLessonsShadow and scores it on the
+       held-out half through proposePromptEvolutionPromotion's scorer. RECON first: if scoring re-runs paid workers, cap that spend
+       inside the existing cash allowance and record its cost.
+    2. A winner becomes an experiment-promotion canary.
+       - taskArmWithheld({ taskId, unit: "fix-prompt-lesson", share: 0.5 }) chooses which fix rounds, for that lesson's worker model
+         only (W1-T9640), get the lesson block appended to the fix prompt.
+       - The guards are next-head green rate and the commit-refused rate against the other half, with the canary engine's floor.
+       - stepCanary promotes or rolls back. A promoted lesson is installed for every round of that model; a rolled-back one is
+         removed.
+    3. The protocol is registered with eval-card's protocolHash before the first exposed round.
+
+    INVARIANT the-control-holds: while a lesson is in canary, the rounds outside its arm get the fix prompt exactly as on origin/main.
+  acceptance:
+    - claim: "A lesson that wins on the held-out half becomes a canary whose arm is drawn per task, for its own worker model only"
+      proof: "grep: W1-T14151 criterion 1: in test/learning/a-winning-fix-prompt-lesson-enters-a-canary.test.ts"
+    - claim: "invariant:the-control-holds — a round outside the lesson's arm gets the fix prompt byte-identical to origin/main"
+      kind: guard
+      proof: "grep: W1-T14151 criterion 2: in test/learning/a-winning-fix-prompt-lesson-enters-a-canary.test.ts"
+    - claim: "A canary whose arm is worse on next-head green or commit-refused rate rolls back and the lesson leaves the prompt"
+      proof: "grep: W1-T14151 criterion 3: in test/learning/a-winning-fix-prompt-lesson-enters-a-canary.test.ts"
+    - claim: "A promoted lesson is installed for every round of its model, and the protocol was registered before the first exposed round"
+      proof: "grep: W1-T14151 criterion 4: in test/learning/a-winning-fix-prompt-lesson-enters-a-canary.test.ts"
+    - claim: "The fix-lane gardener sends lessons through the promotion bridge"
+      proof: "grep: proposePromptEvolutionPromotion( in src/lib/fix-lane-gardener.ts"
+  falsifier: |
+    Apply the lesson to every round and criterion 2 must fail. Keep a losing lesson and criterion 3 must fail. Restore and
+    require all to pass.

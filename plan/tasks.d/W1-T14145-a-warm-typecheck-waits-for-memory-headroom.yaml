@@ -1,0 +1,61 @@
+- id: W1-T14145
+  title: A warm fleet typecheck waits for memory headroom against the recorded warm peak, as a cold one does, so concurrent sweep typechecks cannot drive the host into swap
+  repo: remudero
+  depends_on: [W1-T14143]
+  priority: 0.8
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # adds a wait before every warm typecheck
+  band_meaning: span
+  origin: operator-session#memory-thrash-2026-11-21
+  plan_refs: [W1-T7392, W1-T9951, W1-T14143]
+  files:
+    - src/lib/typecheck-buildinfo.ts
+    - src/lib/typecheck-run.ts
+    - src/lib/merge-probe.ts
+    - src/lib/commit-message.ts
+    - src/lib/worker-provider.ts
+    - src/lib/test-slot.ts # only if a headroom-only admission needs a new export
+    - test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21 12:49Z on the Azure host (read-only): load 216/215/171, 43 tasks in D state, memory PSI some
+    99.9% / full ~60%, 27 of 31 GiB used, 7 GiB swap, the daemon container at 22.2 of 25.5 GiB. The largest users were
+    four concurrent `tsc -p tsconfig.json --noEmit --incremental` in worktrees/sweep-W*, RSS 3.6 + 3.2 + 2.7 + 1.6 =
+    11.1 GiB, each about 25 min old.
+    OBSERVED in code at dd829e355: every fleet typecheck entry point admits only a cold check, and a warm one spawns
+    with no admission: src/lib/typecheck-run.ts runTypecheck (`if (cold) slot = acquireTestSlot(...)`),
+    src/lib/worker-provider.ts (typecheck:bwrap, a slot only when the buildinfo is unusable), src/lib/merge-probe.ts
+    (typecheck:merge-probe, the same), src/lib/commit-message.ts (typecheck:preflight, W1-T9951 admitStaticWork, only
+    when cold). src/lib/typecheck-buildinfo.ts sets TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES / 2 =
+    1.625 GiB from a 2026-10-20 measurement. W1-T7392 (merged) chose "a warm check runs exactly as today" on warm
+    measurements of 1,345-1,377 MB; 3 of the 4 observed checks were above the warm estimate and two were at or above
+    the cold estimate (3.25 GiB).
+    INFERRED: the four were warm or warm-labelled checks, since a cold one would have taken a slot. NOT W1-T13901
+    (heartbeat container CPU) or W1-T13902 (reviewer-regression blame clearing).
+    Supersedes W1-T7392's "a warm check runs exactly as today" on this evidence. Admitting by headroom, not by a slot
+    count, keeps the cheap case cheap when the host has room.
+  design: |
+    Each of the four entry points admits a warm check by memory headroom alone (never behind a suite ticket,
+    W1-T9951) against the warm peak, and runs only when admitted. The warm peak is the p95 of recent typecheck.peak
+    rows (W1-T14143) with warm true, over at least 50 rows; with fewer it is TYPECHECK_COLD_PEAK_BYTES. The admission
+    keeps the existing bounded wait and then runs (W1-T7392 never refuses), and writes the wait on the typecheck.peak
+    row.
+
+    INVARIANT never-refusing: the warm admission keeps the existing bounded wait and then runs, and records the wait on the typecheck.peak row.
+  acceptance:
+    - claim: "A warm check at each entry point is admitted by memory headroom alone (never behind a suite ticket, W1-T9951) against the warm peak, and runs only when admitted"
+      proof: "grep: W1-T14145 criterion 1 in test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts"
+    - claim: "The warm peak is the p95 of recent typecheck.peak rows with warm true, at least 50 rows, else TYPECHECK_COLD_PEAK_BYTES"
+      proof: "grep: W1-T14145 criterion 2 in test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts"
+    - claim: "invariant:never-refusing — the admission keeps the existing bounded wait and then runs, as W1-T7392 requires, and writes the wait on the typecheck.peak row"
+      kind: guard
+      proof: "grep: W1-T14145 criterion 3 in test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts"
+  falsifier: |
+    Let a warm check skip the admission: the test's headroom reader shows four warm checks started at once under a
+    headroom that holds one, and it fails.
+  note: |
+    Validation: on the next sweep burst, the heartbeat's memory PSI full stays below its pre-change level, and
+    typecheck.peak rows show waits instead of four overlapping starts.
