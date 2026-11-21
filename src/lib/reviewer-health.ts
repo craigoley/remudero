@@ -686,7 +686,9 @@ function evaluatorModelEvidenceText(j: EvaluatorModelJudgment): string {
 
 /** The divergence as an escalation: the evidence, the model's latest FAILs with their clauses (newest
  *  first, as many as the issue body holds; a FAIL whose review kept its reasons on the host is named with
- *  {@link REVIEW_EVIDENCE_RETAINED_ON_HOST} instead), and the action. It asks for no ruling and changes no route. */
+ *  {@link REVIEW_EVIDENCE_RETAINED_ON_HOST} instead), and the action. It asks for no ruling and changes no route.
+ *  The sweep treats a raw /pull/<number> anywhere in the issue as its closure referent. Use GitHub
+ *  PR references for the FAILs and escape that path in quoted clauses so recovery owns closure. */
 export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): Escalation {
   const build = (shown: readonly EvaluatorModelFail[]): Escalation => ({
     class: "MANUAL",
@@ -696,11 +698,14 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
       evaluatorModelEvidenceText(incident.evidence),
       "",
       `Its latest FAILs, newest first (${shown.length} of ${fails.length} remembered), with the clauses the review rows carry:`,
-      ...[...shown].reverse().flatMap((f) => [`- ${f.unit} (reviewer code ${f.sha.slice(0, 12)}, ${f.at})`,
-        ...(f.published ? f.clauses : [REVIEW_EVIDENCE_RETAINED_ON_HOST]).map((c) => `  - ${c}`)]),
+      ...[...shown].reverse().flatMap((f) => {
+        const reference = f.unit.replace(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)#/, "$1#$2 at ");
+        return [`- ${reference} (reviewer code ${f.sha.slice(0, 12)}, ${f.at})`,
+          ...(f.published ? f.clauses : [REVIEW_EVIDENCE_RETAINED_ON_HOST]).map((c) => `  - ${c}`)];
+      }),
       "",
       "Observe-only (W1-T13850): routing, verdicts, the reviewer-sha judgment and the healed tree are unchanged.",
-    ].join("\n"),
+    ].join("\n").replace(/\/pull\/(?=\d)/g, "/pull&#47;"),
     options: [{ label: "File a calibration task", detail: `File a task to calibrate ${incident.model}'s review against the known-answer set (W1-T12145) and the replay (W1-T13448).`, kind: { type: "operator-only" } }],
     recommendation: "File a calibration task",
     consequence: `Reviews keep running on ${incident.model} as routed, and its FAILs keep holding PRs.`,

@@ -15,10 +15,12 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
 import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
-import type { AsyncIssueGateway } from "#src/lib/escalate.js";
+import { NEEDS_HUMAN_LABEL, type AsyncIssueGateway } from "#src/lib/escalate.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
+import { runEscalationReconcile } from "#src/lib/sweep.js";
+import { buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 type Row = Record<string, unknown>;
@@ -111,7 +113,7 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
   /** The evaluation alone, as the daemon awaits it. Issue effects may still be pending. */
   const evaluateRouteOnly = (originMainSha: string | null) =>
     health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
-  return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, evaluateRouteOnly, steps: (step: string) => logs.filter((l) => l.step === step) };
+  return { queue, logs, created, closed, issues, reverts, ledgerPath, statePath, evaluate, evaluateOuter, evaluateRouteOnly, steps: (step: string) => logs.filter((l) => l.step === step) };
 }
 
 type ModelRow = Record<string, unknown> & { model: string };
@@ -321,6 +323,52 @@ test("W1-T13850 criterion 4: a divergence opens one incident naming its latest F
   assert.equal(h.steps("reviewer.model_divergence_closed").length, 1);
   assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents["gpt-6.2-sol"], undefined);
   assert.equal(h.created.length, 1);
+});
+
+test("W1-T13850 criterion 4: the sweep leaves the 29/31 model incident open when a cited FAIL PR goes terminal", async (t) => {
+  const h = harness(t);
+  await h.evaluate(null);
+  const { rows, solShas, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const latest = rows.at(-1)!;
+  const prUrl = String(latest.pr_url);
+  const prNumber = Number(prUrl.split("/").at(-1));
+  latest.reasons = [`proof executed and PASSED — (semantic downgrade): missing calibration for [this PR](${prUrl})`];
+  h.queue.push(...rows);
+  await h.evaluate(current);
+
+  assert.equal(h.created.length, 1);
+  const incident = { ...h.created[0]!, number: 1, url: "https://github.com/acme/remudero/issues/1" };
+  assert.match(incident.body, /failed 29 of 31.*against 17 of 172/);
+  assert.match(incident.body, /missing calibration for/);
+  const control = { number: 2, url: "https://github.com/acme/remudero/issues/2", body: `**Task:** control\nEvidence: ${prUrl}` };
+  for (const state of ["MERGED", "CLOSED"]) {
+    const candidates = await buildEscalationReconcileCandidatesAsync("acme", "remudero", { tasks: [], byId: new Map() }, h.ledgerPath, undefined, {
+      issues: { create: h.issues.create, listOpen: async (label) => label === NEEDS_HUMAN_LABEL ? [incident, control] : [] },
+      evidenceRootFor: () => undefined,
+      github: {
+        prByRef: (ref) => ref === prNumber ? { number: prNumber, url: prUrl, state } : null,
+        findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined,
+      },
+    });
+    const sweep = await runEscalationReconcile(candidates, {
+      closeIssue: () => assert.fail("dry run must not close issues"), ledgerPath: h.ledgerPath, runId: "reconcile-model-test", dryRun: true,
+    });
+    assert.deepEqual(sweep.results.filter((result) => result.outcome === "closed").map((result) => result.issueUrl), [control.url], state);
+    assert.deepEqual(candidates.map((candidate) => candidate.issueUrl), [control.url], "only the control has a PR referent");
+    await h.evaluate(current);
+    assert.equal(divergenceRows(h).at(-1)!.models.find((j) => j.model === SOL.model)?.state, "diverged");
+    assert.equal(h.created.length, 1);
+    assert.equal(h.closed.length, 0);
+    assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl, incident.url);
+  }
+  assert.ok(incident.body.includes(`acme/remudero#${prNumber}`), "the incident still identifies the cited PR");
+
+  h.queue.push(...repeat(300, () => verdict(solShas[0]!, SOL, "success")));
+  await h.evaluate(current);
+  assert.deepEqual(h.closed.map((close) => close.url), [incident.url]);
+  assert.match(h.closed[0]!.comment, /Back inside its baseline/);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model], undefined);
 });
 
 test("W1-T13850 criterion 5: invariant:observe-only — the model judgment changes no route, sha judgment or reviewer-sha incident", async (t) => {
