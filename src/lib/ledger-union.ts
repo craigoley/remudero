@@ -1026,8 +1026,11 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
  * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
+ * `untilTs` selects archives by verified row coverage for a closed window. Callers still filter individual rows.
  */
-export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
+export async function readLedgerUnionRawLinesAsync(
+  stateDir: string, opts: LedgerUnionRawReadOptions & { untilTs?: string } = {},
+): Promise<LedgerUnionRawRead> {
   const unread: string[] = [];
   const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs, (path) => {
     if (opts.refuseIncomplete) unread.push(path);
@@ -1036,6 +1039,7 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
+  const maximumTs = opts.untilTs === undefined ? undefined : Date.parse(opts.untilTs);
   const { rawLines, scan } = rawLineCollector(opts);
   let filesRead = 0;
 
@@ -1047,7 +1051,16 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   };
 
   const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
-    if (rotationBeforeWindow(entry, minimumTs)) return;
+    if (maximumTs === undefined) {
+      if (rotationBeforeWindow(entry, minimumTs)) return;
+    } else {
+      // Compaction combines nonadjacent rotations. Only verified row coverage can exclude a closed window.
+      const read = await readLedgerKeyManifest(stateDir, entry);
+      if (read.kind !== "unbuildable") {
+        const { minTs, maxTs } = read.manifest;
+        if (Date.parse(minTs ?? "") > maximumTs || (minimumTs !== undefined && Date.parse(maxTs ?? "") < minimumTs)) return;
+      }
+    }
     let buf: Buffer;
     try {
       const raw = await nodeReadFile(entry.path);
