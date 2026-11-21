@@ -161,13 +161,14 @@ test("the floor is advisory by default and refuses only when explicitly enforced
   assert.equal(ghReadCadenceDecision({ ...inWindow, mode: "enforce" }).allow, false);
 });
 
-test("unattended automation enforces the floor for its lifetime and restores the caller mode", async () => {
+test("a hand-run command waits at the floor for its lifetime and restores the caller mode", async () => {
   const env = {} as NodeJS.ProcessEnv;
   let inside: string | undefined;
   await withGhTransportFloor(() => {
     inside = env.RMD_GH_TRANSPORT_FLOOR;
   }, env);
-  assert.equal(inside, "enforce");
+  // W1-T12058: wait, not enforce — a refusal only made the operator re-run and restart the window.
+  assert.equal(inside, "wait");
   assert.equal(env.RMD_GH_TRANSPORT_FLOOR, undefined);
 
   env.RMD_GH_TRANSPORT_FLOOR = "advisory";

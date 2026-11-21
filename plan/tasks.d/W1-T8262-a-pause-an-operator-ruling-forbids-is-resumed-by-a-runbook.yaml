@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 10.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — the reversible remedy for a dispatch hold an operator ruling forbids
   band_meaning: blast-radius
   origin: "operator ruling 2026-10-11 (\"Release the pause on core. Pause should only impact serve until it's back.\") — make the ruling self-enforcing"
