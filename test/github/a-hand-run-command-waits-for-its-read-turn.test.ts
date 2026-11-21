@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmdirSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -360,4 +360,67 @@ test("W1-T12058 criterion 1: a search floor longer than a queue ticket's life is
   assert.deepEqual(stale, [], `the waiter's ticket went stale mid-wait, slept ${JSON.stringify(f.sleeps)}`);
   assert.ok(readGhReadCadenceStampMs(search)! >= start + WINDOW_MS + 45_000, "the read ran and stamped its turn");
   assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 225s for the 180s floor /);
+});
+
+/** A sibling holds the cadence lock until this read's lock retries have slept `holdMs`. */
+function holdLock(f: ReturnType<typeof fixture>, holdMs: number): GhReadCadenceDeps {
+  const lock = `${f.stamp}.lock`;
+  mkdirSync(lock);
+  let lockSleptMs = 0;
+  const sleep = f.deps.sleepSync!;
+  return {
+    ...f.deps,
+    sleepSync: (ms) => {
+      sleep(ms);
+      if (lockSleptMs < holdMs && (lockSleptMs += ms) >= holdMs) rmdirSync(lock);
+    },
+  };
+}
+
+test("W1-T12058 criterion 3: lock contention before the floor counts in the one line, which states the whole 175 s waited", async (t) => {
+  // Reviewer's counterexample (#19924 round 6): a five-second-old stamp and 0.5 s of initial lock
+  // contention. The read waited 175 s and printed 174.5 s: the lock retries before its first floor sleep were dropped.
+  const f = fixture(t);
+  const deps = holdLock(f, 500);
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  assert.equal(slept(f.sleeps), WINDOW_MS - AGE_MS, `0.5 s of lock retries, then the floor's rest, slept ${JSON.stringify(f.sleeps)}`);
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 175s for the cadence lock, then the 180s floor /);
+});
+
+test("W1-T12058 criterion 3: a read whose only wait was lock contention still prints its one line", async (t) => {
+  // Reviewer's counterexample (#19924 round 6): when the lock wait outlasted the floor, no notice was printed.
+  const f = fixture(t);
+  stampGhRead(f.stamp, "", f.now() - 2 * WINDOW_MS);
+  const deps = holdLock(f, 500);
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  assert.equal(slept(f.sleeps), 500, `only the lock retries, slept ${JSON.stringify(f.sleeps)}`);
+  assert.match(assertOneWaitLine(f.warnings, f.sleeps), /waited 0\.5s for the cadence lock on /);
+});
+
+test("W1-T12058 criterion 2: with advisory set, a stamp read that takes the whole shared gap sleeps nothing more, as on main", async (t) => {
+  // Reviewer's counterexample (#19924 round 6): the clock was read BEFORE the stamp, so a 1.5 s stamp read
+  // left the full gap still owed and the read slept 1.5 s more. Main reads the clock after the stamp: 0 s.
+  const f = fixture(t, "advisory");
+  let now = f.now();
+  const sleeps: number[] = [];
+  const deps: GhReadCadenceDeps = {
+    ...f.deps,
+    nowMs: () => now,
+    sleepSync: (ms) => { sleeps.push(ms); now += ms; },
+    // A sibling stamps just as the read looks, and the look itself takes the whole gap.
+    readStampMs: (path) => {
+      if (path !== f.stamp) return readGhReadCadenceStampMs(path);
+      const stampedAt = now;
+      now += DEFAULT_GH_SHARED_READ_GAP_MS;
+      return stampedAt;
+    },
+  };
+  await withGhTransportFloor(() => {
+    applyGhReadCadence([...READ], deps);
+  }, f.env);
+  assert.deepEqual(sleeps, [], "the stamp read itself spent the shared gap");
 });

@@ -1796,7 +1796,7 @@ interface GhReadCadencePlan {
   leaveQueue(): void;
   /** Names the phase the NEXT pause waits for, when it is not the one `turnRemainingMs` named. */
   notePauseReason(reason: "gap" | "floor-recheck"): void;
-  /** W1-T12058: adds a sleep about to run to the read's wait; `lock` counts only once a wait has begun. */
+  /** W1-T12058: adds a sleep about to run, a lock retry included, to the read's wait. */
   addPause(ms: number, lock?: boolean): void;
   /** Prints the read's one wait line, in wait mode, once its turn has come. */
   reportWait(): void;
@@ -1851,10 +1851,11 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   /** The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
    *  shared gap still protects the secondary limiter across sibling processes without making a
    *  normal sweep self-refuse after its first read. */
-  const sharedGapRemainingAt = (path: string, nowMs: number): number => {
+  const sharedGapRemainingAt = (path: string): number => {
     const latest = readStampMs(path);
     const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
-    const elapsed = latest === undefined ? undefined : nowMs - latest;
+    // The clock is read AFTER the stamp, as on main: a slow stamp read counts toward the gap.
+    const elapsed = latest === undefined ? undefined : now() - latest;
     return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
   };
   /** The queue, with every ticket whose process is gone, or that nobody refreshed for a window plus the
@@ -1891,7 +1892,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   let pausedMs = 0;
   const pauseS = (ms: number): number => Math.ceil(ms) / 1000;
   const addPause = (ms: number, lock = false): void => {
-    if (mode !== "wait" || ms <= 0 || (lock && pausedMs === 0)) return;
+    if (mode !== "wait" || ms <= 0) return;
     pauseWhy.add(lock ? "the cadence lock" : {
       floor: `the ${windowS}s floor`,
       queue: "queued gated reads ahead taking their slot (W1-T10271)",
@@ -1994,7 +1995,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedReadGapMs,
     sharedReadGapLoopBoundMs,
-    sharedGapRemainingMs: (path) => sharedGapRemainingAt(path, now()),
+    sharedGapRemainingMs: (path) => sharedGapRemainingAt(path),
     stampAfterGap: (path) => {
       // Stamp only after the gap so a concurrent process observes the completed transport slot.
       const nowMs = now();
