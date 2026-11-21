@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 16.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern (what a prime child yields to its caller, and the env it starts in); the seed module's refusal receipt and child env, its CLI and two caller sites, no change to materialization, verification or the sweep's rules
   band_meaning: span
   priority: 1

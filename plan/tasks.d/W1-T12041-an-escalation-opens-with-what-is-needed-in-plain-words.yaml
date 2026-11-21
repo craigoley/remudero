@@ -19,6 +19,8 @@
     - "src/lib/escalation-conversation.ts"
     - "src/lib/tick-read-worker.ts"
     - "test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts"
+    - "src/lib/escalation-answers.ts"
+    - "src/lib/issue-revalidation-garden.ts"
   status: queued
   attempts: 0
   acceptance:

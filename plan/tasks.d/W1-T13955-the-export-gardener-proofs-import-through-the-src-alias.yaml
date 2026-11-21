@@ -16,7 +16,7 @@
   files:
     - src/lib/export-gardener.ts
     - test/gardeners/the-export-gardener-proofs-import-through-the-src-alias.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When the root's package.json maps #src/* to ./src/*, the appended proof imports the source through #src and still passes at head and fails with the export restored"
