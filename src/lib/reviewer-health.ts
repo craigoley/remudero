@@ -30,9 +30,10 @@
  */
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
-import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
+import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation, type OpenIssue } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung.js";
@@ -683,7 +684,9 @@ function evaluatorModelEvidenceText(j: EvaluatorModelJudgment): string {
 /** The divergence as an escalation: the evidence, the model's latest FAILs with their clauses (newest
  *  first, as many as the issue body holds; a FAIL whose review kept its reasons on the host is named with
  *  {@link REVIEW_EVIDENCE_RETAINED_ON_HOST} instead), and the action. It asks for no ruling and changes no route. */
-export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[]): Escalation {
+export function evaluatorModelDivergenceEscalation(
+  incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[], bodyLimit = GITHUB_ISSUE_BODY_LIMIT,
+): Escalation {
   const build = (shown: readonly EvaluatorModelFail[]): Escalation => ({
     class: "MANUAL",
     taskId: incident.id,
@@ -701,9 +704,36 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
     recommendation: "File a calibration task",
     consequence: `Reviews keep running on ${incident.model} as routed, and its FAILs keep holding PRs.`,
   });
-  let shown = [...fails];
-  while (shown.length > 0 && renderIssueBody(build(shown)).length > GITHUB_ISSUE_BODY_LIMIT) shown = shown.slice(1);
-  return build(shown);
+  let shown = fails;
+  let draft = build(shown);
+  while (shown.length > 0 && renderIssueBody(draft).length > bodyLimit) {
+    shown = shown.slice(1);
+    draft = build(shown);
+  }
+  return draft;
+}
+
+function deliverModelIncident(
+  incident: EvaluatorModelIncident, fails: readonly EvaluatorModelFail[],
+  escalation: EscalateDeps<AsyncIssueGateway>, open: OpenIssue[],
+): Promise<string | null> {
+  const { issues } = escalation;
+  const draft = evaluatorModelDivergenceEscalation(incident, fails);
+  return tryEscalateAsync(draft, {
+    ...escalation,
+    issues: {
+      ...issues,
+      listOpen: async () => open,
+      create: (title, body, labels) => {
+        const excess = body.length - GITHUB_ISSUE_BODY_LIMIT;
+        if (excess <= 0) return issues.create(title, body, labels);
+        // Fit the FAIL list to the actual space left by the transport's metadata and footers.
+        const trimmed = evaluatorModelDivergenceEscalation(incident, fails, renderIssueBody(draft).length - excess);
+        const bounded = body.replace(draft.detail, () => trimmed.detail).slice(0, GITHUB_ISSUE_BODY_LIMIT);
+        return issues.create(title, bounded, labels);
+      },
+    },
+  });
 }
 
 /** Filed reviews can supply their own verified reasons. The ops producer removes those reasons. */
@@ -998,6 +1028,93 @@ export function saveReviewerHealthState(path: string, state: ReviewerHealthState
   writeAtomic(path, `${JSON.stringify(state)}\n`, { tmpTag: "reviewer-health" });
 }
 
+type ModelIncidentWork = {
+  pending: Promise<void>;
+  savedIncidents?: ReviewerHealthState["modelIncidents"];
+};
+
+const modelIncidentWork = new Map<string, ModelIncidentWork>();
+
+async function reconcileModelIncidents(
+  statePath: string, work: ModelIncidentWork, judged: EvaluatorModelJudgment[], openedAt: string,
+  readEvidence: typeof readReviewEvidenceRecord, escalation: EscalateDeps<AsyncIssueGateway>, log: ReviewerHealthLog,
+): Promise<void> {
+  const { modelIncidents: saved, modelFails } = loadReviewerHealthState(statePath);
+  let modelIncidents = saved;
+  try {
+    for (const j of judged) {
+      const pending = modelValue(modelIncidents, j.model);
+      const diverged = j.state === "diverged";
+      const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
+      if (diverged && pending?.issueUrl) continue;
+      if (!diverged && (pending === undefined || !overlap)) continue;
+      const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
+        provider: j.provider, openedAt, evidence: j };
+      modelIncidents = { ...modelIncidents, [j.model]: incident };
+
+      if (!incident.issueUrl) {
+        try {
+          const open = await escalation.issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [];
+          // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
+          incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
+          if (diverged && !incident.issueUrl) {
+            const fails = await publishedModelFails(modelValue(modelFails, j.model) ?? [], readEvidence, log);
+            incident.issueUrl = await deliverModelIncident(incident, fails, escalation, open);
+          }
+        } catch (error) {
+          // Leave the issue pending when the lookup or delivery fails so the next evaluation can retry.
+          reportModelHealthFailure(error, log);
+          continue;
+        }
+      }
+      if (diverged) {
+        if (incident.issueUrl) log("reviewer.model_divergence_opened", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: incident.issueUrl });
+        continue;
+      }
+      const { issueUrl } = incident;
+      if (issueUrl) {
+        if (!escalation.issues.closeWithComment) continue;
+        try {
+          await escalation.issues.closeWithComment(issueUrl, `Back inside its baseline (W1-T13850). ${evaluatorModelEvidenceText(j)}`);
+        } catch (error) {
+          log("reviewer.model_divergence_issue_close_failed", { incident_id: incident.id, issue_url: issueUrl, error: String((error as Error)?.message ?? error) });
+          continue;
+        }
+      }
+      delete modelIncidents[j.model];
+      if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
+    }
+  } finally {
+    if (modelIncidents !== saved) {
+      // Refresh after issue I/O so the merge keeps newer SHA counts, cursors and operator choices.
+      const latest = loadReviewerHealthState(statePath);
+      saveReviewerHealthState(statePath, { ...latest, modelIncidents });
+      work.savedIncidents = modelIncidents;
+    }
+  }
+}
+
+function queueModelIncidents(
+  statePath: string, judged: EvaluatorModelJudgment[], openedAt: string,
+  readEvidence: typeof readReviewEvidenceRecord, escalation: EscalateDeps<AsyncIssueGateway>, log: ReviewerHealthLog,
+): void {
+  const work: ModelIncidentWork = modelIncidentWork.get(statePath) ?? { pending: setImmediate() };
+  const pending = work.pending
+    .then(() => reconcileModelIncidents(statePath, work, judged, openedAt, readEvidence, escalation, log))
+    .catch((error: unknown) => {
+      // A delivery or save failure is recorded so the next evaluation can retry the lifecycle.
+      reportModelHealthFailure(error, log);
+    })
+    .finally(() => { if (work.pending === pending) modelIncidentWork.delete(statePath); });
+  work.pending = pending;
+  modelIncidentWork.set(statePath, work);
+}
+
+/** Test seam: wait for model issue delivery scheduled by the completed evaluations. */
+export async function settleReviewerModelIncidents(statePath: string): Promise<void> {
+  await modelIncidentWork.get(statePath)?.pending;
+}
+
 function signatureOf(rec: ReviewerShaRecord): string[] {
   return Object.keys(rec.reasons).sort();
 }
@@ -1020,6 +1137,7 @@ export async function evaluateReviewerHealthNow(
   clock: Pick<Clock, "iso">,
 ): Promise<ReviewerHealthDecision> {
   const state = loadReviewerHealthState(statePath);
+  const modelWork = modelIncidentWork.get(statePath);
   const read = await readRows(state.cursor);
 
   const isAncestor = (ancestor: string, descendant: string): Promise<boolean> =>
@@ -1141,58 +1259,6 @@ export async function evaluateReviewerHealthNow(
       baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
   };
 
-  /** W1-T13850, observe-only: judge every evaluator model, ledger the judgment, open one incident per newly
-   *  diverged model and close one whose interval overlaps its baseline again. It reads the counts and
-   *  writes only `modelIncidents`: no route, verdict, sha judgment or reviewer-sha incident. */
-  const judgeModels = async (): Promise<void> => {
-    const judged = judgeEvaluatorModels(state);
-    log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged: judged.filter((j) => j.state === "diverged").map((j) => j.model) });
-    for (const j of judged) {
-      const pending = modelValue(state.modelIncidents, j.model);
-      const diverged = j.state === "diverged";
-      const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
-      if (diverged && pending?.issueUrl) continue;
-      if (!diverged && (pending === undefined || !overlap)) continue;
-      const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
-        provider: j.provider, openedAt: clock.iso(), evidence: j };
-      state.modelIncidents = { ...state.modelIncidents, [j.model]: incident };
-
-      if (!incident.issueUrl) {
-        try {
-          const open = await escalation.issues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [];
-          // The incident's task ID follows the model even if the issue is retitled or the latest FAIL changes.
-          incident.issueUrl = open.find((issue) => escalationTaskId(issue.body) === incident.id)?.url ?? null;
-          if (diverged && !incident.issueUrl) {
-            const fails = await publishedModelFails(modelValue(state.modelFails, j.model) ?? [], input.readEvidence ?? readReviewEvidenceRecord, log);
-            incident.issueUrl = await tryEscalateAsync(evaluatorModelDivergenceEscalation(incident, fails), {
-              ...escalation, issues: { ...escalation.issues, listOpen: async () => open },
-            });
-          }
-        } catch (error) {
-          // Leave the issue pending when the lookup or delivery fails so the next evaluation can retry.
-          reportModelHealthFailure(error, log);
-          continue;
-        }
-      }
-      if (diverged) {
-        if (incident.issueUrl) log("reviewer.model_divergence_opened", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: incident.issueUrl });
-        continue;
-      }
-      const { issueUrl } = incident;
-      if (issueUrl) {
-        if (!escalation.issues.closeWithComment) continue;
-        try {
-          await escalation.issues.closeWithComment(issueUrl, `Back inside its baseline (W1-T13850). ${evaluatorModelEvidenceText(j)}`);
-        } catch (error) {
-          log("reviewer.model_divergence_issue_close_failed", { incident_id: incident.id, issue_url: issueUrl, error: String((error as Error)?.message ?? error) });
-          continue;
-        }
-      }
-      delete state.modelIncidents[j.model];
-      if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
-    }
-  };
-
   /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
    *  open incident's close against `current`. `live` false is the seed: history replayed, effects off. */
   const step = async (rows: Iterable<Record<string, unknown>>, current: string | null, live: boolean): Promise<void> => {
@@ -1249,16 +1315,21 @@ export async function evaluateReviewerHealthNow(
   } else {
     await step(read.rows, input.originMainSha, true);
   }
-  // Observe-only: the model judgment's own failure (a ledger append, say) never reaches the sha decision, its
-  // persistence or the route below. It is ledgered, and when even that append fails it goes to stderr.
+  state.cursor = read.cursor;
+  // A model issue write may have completed while this evaluation was reading or judging the SHA.
+  state.modelIncidents = modelWork?.savedIncidents ?? state.modelIncidents;
+  saveReviewerHealthState(statePath, state);
   try {
-    await judgeModels();
+    const judged = judgeEvaluatorModels(state);
+    const diverged = judged.filter((j) => j.state === "diverged").map((j) => j.model);
+    log("reviewer.model_divergence", { models: judged.map(evaluatorModelFields), diverged });
+    if (diverged.length > 0 || Object.keys(state.modelIncidents).length > 0 || modelIncidentWork.has(statePath)) {
+      queueModelIncidents(statePath, judged, clock.iso(), input.readEvidence ?? readReviewEvidenceRecord, escalation, log);
+    }
   } catch (error) {
-    // The caller still needs the SHA state and route if model judgment fails.
+    // Record a failed model observation after the SHA state has already been saved.
     reportModelHealthFailure(error, log);
   }
-  state.cursor = read.cursor;
-  saveReviewerHealthState(statePath, state);
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
   if (incident === null) return { route: "normal", reason: "no open reviewer-regression incident", current };

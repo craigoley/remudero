@@ -12,9 +12,10 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import * as health from "#src/lib/reviewer-health.js";
 import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
-import type { AsyncIssueGateway } from "#src/lib/escalate.js";
+import { renderIssueBody, type AsyncIssueGateway } from "#src/lib/escalate.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
@@ -49,6 +50,12 @@ function verdict(sha: string, evaluator: Evaluator, state: "success" | "failure"
 }
 
 const repeat = (n: number, make: () => Row): Row[] => Array.from({ length: n }, make);
+
+function gate() {
+  let open!: () => void;
+  const wait = new Promise<void>((resolve) => { open = resolve; });
+  return { open, wait };
+}
 
 /** The 11-19 counts: claude-sonnet-5-5 155 pass / 17 fail over 40 shas; gpt-6.2-sol 2 pass / 29 fail
  *  over 3 shas no Claude review ran on. */
@@ -95,12 +102,21 @@ function harness(t: TestContext, failLog: (step: string) => boolean = () => fals
   const git: health.GitText = async () => { throw new Error("no git: no sha regresses here"); };
   const iso = { iso: () => new Date(clock).toISOString() };
   const input = (originMainSha: string | null) => ({ originMainSha, ...(readEvidence ? { readEvidence } : {}) });
-  const evaluate = (originMainSha: string | null) =>
-    health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
-  /** The daemon's entry: any rejection of the evaluation routes normally. */
-  const evaluateOuter = (originMainSha: string | null) =>
-    health.evaluateReviewerHealth(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
-  return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, steps: (step: string) => logs.filter((l) => l.step === step) };
+  const settle = () => health.settleReviewerModelIncidents(statePath);
+  const evaluate = async (originMainSha: string | null) => {
+    const decision = await health.evaluateReviewerHealthNow(input(originMainSha), statePath, readRows, git, escalation, lane, log, iso);
+    await settle();
+    return decision;
+  };
+  const route = (originMainSha: string | null, read = readRows) =>
+    health.evaluateReviewerHealth(input(originMainSha), statePath, read, git, escalation, lane, log, iso);
+  const evaluateOuter = async (originMainSha: string | null) => {
+    const decision = await route(originMainSha);
+    await settle();
+    return decision;
+  };
+  return { queue, logs, created, closed, issues, reverts, statePath, evaluate, evaluateOuter, route, readRows, settle,
+    steps: (step: string) => logs.filter((l) => l.step === step) };
 }
 
 type ModelRow = Record<string, unknown> & { model: string };
@@ -312,6 +328,107 @@ test("W1-T13850 criterion 4: a divergence opens one incident naming its latest F
   assert.equal(h.created.length, 1);
 });
 
+test("W1-T13850 criterion 4: the delivered incident fits the issue limit when label provisioning adds a footer", async (t) => {
+  const h = harness(t);
+  await h.evaluate(null);
+  const sha = fake("large-model-incident");
+  h.issues.ensureLabel = async (label) => label !== "needs-action";
+  const create = h.issues.create;
+  h.issues.create = async (title, body, labels) => {
+    if (body.length > health.GITHUB_ISSUE_BODY_LIMIT) throw new Error(`issue body too long: ${body.length}`);
+    return create(title, body, labels);
+  };
+  const fails = Array.from({ length: 105 }, (_, i) => verdict(sha, SOL, "failure", {
+    reasons: [`(semantic downgrade): clause-${String(i).padStart(3, "0")} ${"x".repeat(473)}`],
+  }));
+  const passes = repeat(105, () => verdict(sha, SONNET, "success"));
+  const state = health.emptyReviewerHealthState();
+  health.ingestReviewerHealthRows(state, [...fails, ...passes]);
+  const evidence = health.judgeEvaluatorModels(state).find((j) => j.model === SOL.model)!;
+  const draft = renderIssueBody(health.evaluatorModelDivergenceEscalation({
+    ...SOL, id: `reviewer-model-divergence-${SOL.model}`, openedAt: tick(), evidence,
+  }, state.modelFails[SOL.model]!));
+  // Fill the remaining draft space independent of hostname length, so the footer forces a trim.
+  const latest = fails.at(-1)!.reasons as string[];
+  latest[0] += "x".repeat(health.GITHUB_ISSUE_BODY_LIMIT - draft.length);
+  h.queue.push(...fails, ...passes);
+  await h.evaluate(sha);
+
+  assert.equal(h.created.length, 1, "the gateway accepted the incident");
+  const { body } = h.created[0]!;
+  assert.match(body, /105 of 105.*against 0 of 105/);
+  assert.match(body, /clause-104/);
+  assert.doesNotMatch(body, /clause-000/);
+  assert.match(body, /File a calibration task/);
+  assert.match(body, /Degraded: label\(s\) needs-action/);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl,
+    "https://github.com/acme/remudero/issues/1");
+});
+
+test("W1-T13850 criterion 5: a blocked model issue lookup leaves both SHA saves and healed routes available", async (t) => {
+  const h = harness(t);
+  const incident = writeHealedState(h.statePath);
+  const { rows, solShas, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const lookup = gate();
+  const lookupStarted = gate();
+  let lookups = 0;
+  h.issues.listOpen = async () => {
+    lookups += 1;
+    lookupStarted.open();
+    await lookup.wait;
+    return [];
+  };
+  h.queue.push(...rows);
+
+  let first: health.ReviewerHealthDecision | undefined;
+  let second: health.ReviewerHealthDecision | undefined;
+  const firstRun = h.route(current).then((decision) => { first = decision; });
+  let secondRun: Promise<void> | undefined;
+  let thirdRun: Promise<health.ReviewerHealthDecision> | undefined;
+  const read = gate();
+  try {
+    await lookupStarted.wait;
+    await setImmediate();
+    assert.equal(lookups, 1, "the model issue lookup has started");
+    assert.equal(first?.route, "healed", "the first review routes while the lookup is blocked");
+    assert.deepEqual(health.shaCounts(health.loadReviewerHealthState(h.statePath).shas[solShas[0]!]!), { k: 0, n: 13 });
+
+    h.queue.push(verdict(solShas[0]!, SOL, "failure"));
+    secondRun = h.route(current).then((decision) => { second = decision; });
+    await setImmediate();
+    assert.deepEqual(second, first, "the next review also routes independently");
+    assert.equal(lookups, 1, "model incident attempts are serialized");
+    assert.deepEqual(health.shaCounts(health.loadReviewerHealthState(h.statePath).shas[solShas[0]!]!), { k: 0, n: 14 });
+
+    const reading = gate();
+    thirdRun = h.route(current, async () => {
+      reading.open();
+      await read.wait;
+      return h.readRows();
+    });
+    await reading.wait;
+    lookup.open();
+    await h.settle();
+    const delivered = health.loadReviewerHealthState(h.statePath);
+    assert.deepEqual(health.shaCounts(delivered.shas[solShas[0]!]!), { k: 0, n: 14 }, "delivery preserves the second SHA save");
+    assert.equal(delivered.modelIncidents[SOL.model]?.issueUrl, "https://github.com/acme/remudero/issues/1");
+  } finally {
+    lookup.open();
+    read.open();
+    await firstRun;
+    await secondRun;
+    await thirdRun;
+    await h.settle();
+  }
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.equal(saved.incident?.id, incident.id);
+  assert.deepEqual(health.shaCounts(saved.shas[solShas[0]!]!), { k: 0, n: 14 });
+  assert.equal(h.created.length, 1);
+  assert.equal(saved.modelIncidents[SOL.model]?.issueUrl, "https://github.com/acme/remudero/issues/1", "the third SHA save keeps the receipt");
+  assert.equal(divergenceRows(h).length, 3);
+});
+
 test("W1-T13850 criterion 5: invariant:observe-only — the model judgment changes no route, sha judgment or reviewer-sha incident", async (t) => {
   const { rows, solShas, claudeShas } = elevenNineteen();
   // The same rows with every evaluator and verdict state removed: what origin/main's sha judgment reads.
@@ -459,6 +576,20 @@ test("W1-T13850 criterion 4: a failed issue lookup leaves delivery pending and r
   await h.evaluate(current);
   assert.equal(h.created.length, 1);
   assert.equal(h.steps("reviewer.model_divergence_opened").length, 1);
+});
+
+test("W1-T13850 criterion 4: a failed delivery log still saves the issue receipt", async (t) => {
+  const h = harness(t, (step) => step === "reviewer.model_divergence_opened");
+  await h.evaluate(null);
+  const { rows, claudeShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  h.queue.push(...rows);
+  await h.evaluate(current);
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model]?.issueUrl,
+    "https://github.com/acme/remudero/issues/1");
+  assert.match(String(h.steps("reviewer.model_divergence_failed")[0]?.extra.error), /ledger append failed: reviewer\.model_divergence_opened/);
+  await h.evaluate(current);
+  assert.equal(h.created.length, 1);
 });
 
 test("W1-T13850 criterion 4: a failed close retains the issue and retries on overlap", async (t) => {
