@@ -56,16 +56,17 @@ function ownerAndHoldRows(over: Partial<LedgerLine> = {}): LedgerLine[] {
   ];
 }
 
-/** One sweep pass over `pr` with `rows` in its ledger; the act-time re-read answers `reread` (the view itself by default). */
+/** One sweep pass over `pr` with `rows` in its ledger; the act-time re-read answers `reread` (the view itself by default;
+ *  null passes no re-reader at all). */
 async function sweepOnce(t: TestContext, pr: OpenPrView, rows: LedgerLine[],
-  reread: SweepDeps["rereadPrAtAct"] = (view) => view) {
+  reread: SweepDeps["rereadPrAtAct"] | null = (view) => view) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14177-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledgerPath = join(dir, "ledger.ndjson");
   for (const row of rows) appendLedger(ledgerPath, row);
   const posted: OpenPrView[] = [];
   await runSweep([pr], {
-    ledgerPath, runId: "sweep-t14177", now: () => NOW, rereadPrAtAct: reread,
+    ledgerPath, runId: "sweep-t14177", now: () => NOW, ...(reread === null ? {} : { rereadPrAtAct: reread }),
     arm: () => assert.fail("pending review cannot arm"), close: () => assert.fail("unexpected close"),
     dispatchFix: () => assert.fail("unexpected fix"), escalate: () => assert.fail("unexpected escalation"),
     postReview: (candidate) => { posted.push(candidate); },
@@ -283,6 +284,9 @@ const REVIEWED_HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROO
 async function reviewAgainstClaim(refusal: string) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t14177-review-"));
   const effects: string[] = [];
+  const printed: string[] = [];
+  const originalLog = console.log;
+  console.log = (...parts: unknown[]) => { printed.push(parts.map(String).join(" ")); };
   try {
     const code = await reviewCommand(REVIEW_HOST, "run-PR-pending-1795288835761", ["--repo", "craigoley/remudero"], {
       resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
@@ -307,8 +311,9 @@ async function reviewAgainstClaim(refusal: string) {
     } satisfies ReviewCommandDeps);
     const rows: Array<Record<string, unknown>> = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
       .trim().split("\n").map((line) => JSON.parse(line));
-    return { code, effects, rows };
+    return { code, effects, rows, printed };
   } finally {
+    console.log = originalLog;
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -318,11 +323,30 @@ test("W1-T14177 criterion 2: rmd review returns another reviewer's claim refusal
     "remudero-review is already pending (owned by run review-PR20070-1795288900000) — host-independent claim; no-op");
   assert.equal(held.code, 2, "the refusal is the command's result");
   assert.deepEqual(held.effects, ["pending"], "no worktree, no reviewer, no status post");
-  assert.match(String(held.rows.find((row) => row.step === "review.stood_down")?.reason), /owned by run review-PR20070-/);
+  assert.equal(held.rows.find((row) => row.step === "review.stood_down")?.reason,
+    "another reviewer run (review-PR20070-1795288900000) holds this head's remudero-review claim");
+  // The holder id is read from GitHub: a control character in it never splits or colours the printed line.
+  const injected = await reviewAgainstClaim(
+    "remudero-review is already pending (owned by run review-PR20070-17952\u001b[31m\r\nFORGED: ok) — no-op");
+  assert.deepEqual(injected.effects, ["pending"]);
+  const line = injected.printed.find((text) => text.includes("not reviewed"));
+  assert.equal(line, "rmd review: PR #20070 not reviewed — another reviewer run (review-PR20070-1795231mFORGED:ok) holds this head's " +
+    "remudero-review claim", "one printed line, control characters stripped");
+  assert.ok(!injected.printed.some((text) => /[\u0000-\u001f]/.test(text) && text.includes("not reviewed")));
   // Controls: a dispatching sweep's own claim (handed to this review) and a drained no-op still review as before.
   for (const reason of ["remudero-review is already pending for 0000000 (owned by run SWEEP-1795288900000) — no-op (W1-T913 idempotent-per-input)",
     "a terminal success verdict is already posted for 0000000 — never regressing it to pending (W1-T913)"]) {
     const handed = await reviewAgainstClaim(reason);
     assert.deepEqual(handed.effects, ["pending", "materialize", "review"], reason);
   }
+});
+
+test("W1-T14177 criterion 2: the one-shot rmd sweep passes the act-time re-reader to its sweep, as the daemon's passes do", () => {
+  const source = readFileSync(join(REPO_ROOT, "src/cli/commands/sweep.ts"), "utf8");
+  const start = source.indexOf("export async function sweepCommand(");
+  assert.ok(start >= 0, "the one-shot command is in the source");
+  const oneShot = source.slice(start, source.indexOf("\nexport ", start + 1));
+  const call = oneShot.slice(oneShot.indexOf("runOneShotSweep("));
+  assert.match(call.slice(0, call.indexOf("DEFAULT_SWEEP_POLICY")), /\brereadPrAtAct: buildRereadPrAtAct\(owner, repo, ledgerPath,/,
+    "the one-shot runSweep deps carry a live re-reader");
 });

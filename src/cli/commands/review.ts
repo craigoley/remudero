@@ -126,13 +126,15 @@ const REVIEWER_RUN_ID = /^(?:dep-)?review-PR\d+-/;
  *  - a drained outbox;
  *  - a claim a dispatching lane posted for the review it hands off (the sweep's reviewer-code advance posts under its
  *    own SWEEP-* run, then admits this review).
- *  Returns the refusal's reason, which the caller returns instead of reviewing or posting. */
+ *  Returns a fixed reason naming the sanitised holder, which the caller returns instead of reviewing or posting. */
 export function pendingClaimHeldByAnotherRun(
   result: { posted: boolean; reason?: string; lifecycle?: unknown; outbox?: unknown }, runId: string,
 ): string | undefined {
   if (result.posted || result.lifecycle !== undefined || result.outbox !== undefined) return undefined;
-  const holder = /\(owned by run ([^)\s]+)\)/.exec(result.reason ?? "")?.[1];
-  return holder !== undefined && holder !== runId && REVIEWER_RUN_ID.test(holder) ? result.reason : undefined;
+  const holder = /\(owned by run ([^)]+)\)/.exec(result.reason ?? "")?.[1];
+  if (holder === undefined || holder === runId || !REVIEWER_RUN_ID.test(holder)) return undefined;
+  // The holder id is read from GitHub and the ledger: only run-id characters reach a log line.
+  return `another reviewer run (${holder.replace(/[^A-Za-z0-9._:-]/g, "")}) holds this head's remudero-review claim`;
 }
 
 export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";

@@ -723,7 +723,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
     updatedForWorkflowFromLedger, runOneShotSweep,
     handedOffHeadRiskJudge, codeScanningJudgeDeps,
     sweepEscalationReconcile, sweepEscalationTriage, runAutomaticBranchReapRung,
-    renderEscalationReconcileSummary,
+    renderEscalationReconcileSummary, buildRereadPrAtAct,
   } = host;
   const badArg = unknownArgError("sweep", rest, ["--repo"], ["--dry-run"]);
   if (badArg) {
@@ -755,11 +755,11 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   }
 
   let openPrs: OpenPrView[];
+  const planFilingFileCache = createPlanFilingFileCache();
+  const onPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   try {
     openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
-      ciGateSource, log,
-      planFilingFileCache: createPlanFilingFileCache(),
-      onPlanFilingClassification: createPlanFilingClassificationTelemetry(log),
+      ciGateSource, log, planFilingFileCache, onPlanFilingClassification,
     });
   } catch (e) {
     console.error(`### rmd sweep — could not list open PRs for ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
@@ -821,6 +821,11 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
       updatedForWorkflow,
       behindMainByPr,
       baseChangedFilesByPr,
+      // W1-T14177: the act-time re-check of a dead owner's proof reads GitHub's live status through this re-reader, as the
+      // daemon's two passes do; without one the re-check fails closed.
+      rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+        views: { planFilingFileCache, onPlanFilingClassification, ciGateSource, log },
+      }),
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
       planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
