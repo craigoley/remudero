@@ -578,3 +578,13 @@ test("W1-T13960 criterion 2: a sealed final message does not certify a stream wh
     completion: "incomplete", stdout: "complete", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
     textState: "complete", blocksState: "complete" });
 });
+
+test("W1-T13960 criterion 1: a final message spilled but read whole after a rebuilt line certifies", async () => {
+  // W1-T13951 reads a spilled agent_message whose payload fits the limit whole: that line lost no byte, so it opens
+  // the certificate as an intact line does.
+  const base = Buffer.byteLength(JSON.stringify(FINAL)) - 2;
+  const verdict = FINAL + "f".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 10 - base);
+  const line = eventLine({ type: "agent_message", text: verdict });
+  assert.ok(Buffer.byteLength(line) > CODEX_WORKER_STDOUT_MAX_BYTES, "the final line spills");
+  assert.deepEqual(await aroundTheVerdict([oversizedToolCall()], [], TURN_COMPLETED, verdict), CERTIFIED);
+});
