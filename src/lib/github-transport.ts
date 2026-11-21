@@ -744,7 +744,7 @@ function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return work;
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason);
-    if (signal.aborted) { work.catch(() => {}); stop(); return; }
+    if (signal.aborted) { work.catch(() => { /* the caller has stopped: the cadence wait settles on its own and nobody reads its outcome */ }); stop(); return; }
     signal.addEventListener("abort", stop, { once: true });
     work.then((value) => { signal.removeEventListener("abort", stop); resolve(value); },
       (error: unknown) => { signal.removeEventListener("abort", stop); reject(error); });
