@@ -204,6 +204,30 @@ test("W1-T14149 criterion 5: a step emitted through a named constant is resolved
 
 // ── precision of the emit and read positions ───────────────────────────────────────────────────
 
+test("W1-T14149: equality after String conversion reads the ledger step", () => {
+  const result = scan({
+    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("coerced.step"); log("coerced.label"); };',
+    "src/lib/reader.ts": [
+      "export const read = (row: { step: unknown; label: unknown }) =>",
+      '  String(row.step) === "coerced.step" || String(row.label) === "coerced.label";',
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("coerced.step"), ["src/lib/reader.ts"]);
+  assert.deepEqual(result.writeOnly, ["coerced.label"]);
+});
+
+test("W1-T14149: an equality predicate reads the steps in its receiver array", () => {
+  const result = scan({
+    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("predicate.match"); log("predicate.match.extra"); };',
+    "src/lib/reader.ts": [
+      'const ALLOWED = ["predicate.match"];',
+      "export const read = (row: { step: string }) => ALLOWED.some((candidate) => candidate === row.step);",
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("predicate.match"), ["src/lib/reader.ts"]);
+  assert.deepEqual(result.writeOnly, ["predicate.match.extra"]);
+});
+
 test("W1-T14149: console output, type annotations and reader queries are not emits", () => {
   const result = scan({
     "src/lib/noise.ts": [
