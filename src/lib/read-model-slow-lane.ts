@@ -17,7 +17,7 @@
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
  */
 import { threadName } from "./thread-names.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { collectCodeHealth } from "./code-health-collector.js";
 import { CODE_HEALTH_INTERVAL_MS, CODE_HEALTH_VIEW_NAME, readCodeHealthInventory } from "./code-health-view.js";
 import { codeHealthRepositoryStateDir, readCodeHealthCollectionFailure, readCodeHealthSnapshot } from "./code-health-store.js";
@@ -42,9 +42,12 @@ import { captureGardenerSpendSource } from "./gardener-spend.js";
 import type { SourceSnapshotWrite } from "./read-model-db.js";
 import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.js";
 import type { GitHub } from "./status.js";
+import type { Plan } from "./plan.js";
 import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
 import { startWorker } from "./child-entry-argv.js";
+import { BOARD_CATALOG_WIRE_VERSION, createWorkerBoardCatalogClient, isBoardCatalogReply, isBoardCatalogRequest,
+  type BoardCatalogReply, type BoardCatalogRequest } from "./serve-plan-reload.js";
 import { NO_INSTANCE_RATIFY } from "./instance-gateway.js";
 import { collectDailyProgress, type DailyProgressCollectionConfig } from "./daily-progress-collector.js";
 import type { DailyProgressPublication } from "./daily-progress-store.js";
@@ -68,6 +71,8 @@ export interface SlowLaneConfig {
   analytics?: { instances: Array<{ name: string; stateDir: string; repository?: string }>; intervalMs?: number; timeoutMs?: number };
   codeHealth?: { stateDir: string; instances: Array<{ name: string; stateDir: string; repository?: string }> };
   intervalMs?: number;
+  /** W1-T14114: the parent's board catalog wire version; matching it, the inbox units ask the parent for the ops catalog. */
+  catalogBridgeVersion?: number;
 }
 
 type SlowLaneData = SlowLaneConfig & { kind: typeof SLOW_LANE_KIND };
@@ -105,15 +110,17 @@ interface SlowLaneUnit {
 }
 
 function instanceInboxUnit(config: NonNullable<SlowLaneConfig["instanceInboxes"]>[number], clock: Clock,
-  captureOwnership: () => () => boolean, log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  captureOwnership: () => () => boolean, log: (step: string, extra?: Record<string, unknown>) => void, catalog?: SlowLaneCatalog): SlowLaneUnit {
   const [owner, repo] = config.repository.split("/");
   const snapshot = ownerSnapshotGithub(config.inboxRoot, owner, repo, clock);
+  const catalogRoot = dirname(config.ledgerPath);
   const deps: PanelGraphDeps = { ...config, github: slowLaneTraceGithub, statusGithub: snapshot().github, ratify: NO_INSTANCE_RATIFY,
-    inboxSourceIdentity: config };
+    inboxSourceIdentity: config, ...(catalog ? { inboxReferentPlan: (plan: Plan) => catalog.referentPlan(plan, catalogRoot) } : {}) };
   const memo: InboxRefreshMemo = {};
   return { name: `inbox:${config.instance}`, instance: config.instance, run: async () => {
     deps.inboxMayPersist = captureOwnership();
     deps.statusGithub = snapshot().github;
+    await catalog?.settle(catalogRoot);
     const refreshed = await refreshInboxClassification(deps, memo, clock);
     if (refreshed.written) log("inbox.classification_written", { instance: config.instance, repository: config.repository,
       proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
@@ -125,6 +132,46 @@ class SlowLaneGithubRefused extends RmdError {
   constructor() {
     super("read-model", GENERIC_EXIT_CODE, "the slow lane makes no GitHub call; it reads the owner's board snapshot");
   }
+}
+
+/** W1-T14114: how long an inbox pass waits for a catalog reply it just asked for before classifying without it. */
+export const SLOW_LANE_CATALOG_WAIT_MS = 2_000;
+
+/**
+ * W1-T14114: the inbox units' view of the ops catalog, through the parent's bridge (the board-worker pattern): the
+ * lane never reads GitHub itself. `settle` asks for a due refresh and waits, bounded, for its reply, so a pass right
+ * after the refresh interval does not classify against a pending catalog. `referentPlan` is the combined plan only
+ * while the catalog read is ok.
+ */
+export interface SlowLaneCatalog {
+  settle(root: string): Promise<void>;
+  referentPlan(plan: Plan, root: string): Plan | undefined;
+  accept(reply: BoardCatalogReply): void;
+}
+
+export function createSlowLaneCatalog(enabled: boolean, post: (request: BoardCatalogRequest) => void, clock: Clock,
+  waitMs = SLOW_LANE_CATALOG_WAIT_MS): SlowLaneCatalog {
+  const client = createWorkerBoardCatalogClient(enabled, post, clock);
+  const waiters = new Set<() => void>();
+  return {
+    settle: async (root) => {
+      if (!enabled || !client.revision(root).endsWith(":pending")) return;
+      await new Promise<void>((resolve) => {
+        const done = (): void => { clearTimeout(timer); waiters.delete(done); resolve(); };
+        const timer = setTimeout(done, waitMs);
+        timer.unref?.();
+        waiters.add(done);
+      });
+    },
+    referentPlan: (plan, root) => {
+      const context = client.current(plan, root);
+      return context?.outcome === "ok" ? context.plan : undefined;
+    },
+    accept: (reply) => {
+      client.accept(reply);
+      for (const done of [...waiters]) done();
+    },
+  };
 }
 
 /** The units never trace a PR; a call that reaches this is refused loudly rather than spawning a fetch. */
@@ -151,7 +198,8 @@ export function ownerSnapshotGithub(root: string, owner: string, repo: string, c
 }
 
 /** The inbox and feedback units: both read core's checkout, through one board gateway. */
-function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void, seams: Partial<PanelGraphDeps>): SlowLaneUnit[] {
+function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void, seams: Partial<PanelGraphDeps>, catalog?: SlowLaneCatalog): SlowLaneUnit[] {
+  const catalogRoot = dirname(config.ledgerPath);
   const [owner = "", repo = ""] = config.repository.split("/");
   const snapshot = seams.statusGithub ? undefined : ownerSnapshotGithub(config.inboxRoot, owner, repo, clock);
   const deps: PanelGraphDeps = {
@@ -163,6 +211,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
     github: slowLaneTraceGithub,
     statusGithub: seams.statusGithub ?? snapshot!().github,
     ratify: ratifyCliGateway(config.root, join(config.inboxRoot, "state", "logs")),
+    ...(catalog ? { inboxReferentPlan: (plan: Plan) => catalog.referentPlan(plan, catalogRoot) } : {}),
     ...seams,
   };
   /** Points the units at the owner's latest snapshot; the deps object stays the same, so the inbox memo keyed by it survives. */
@@ -178,6 +227,7 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
     name: "inbox",
     run: async () => {
       const github = githubSource();
+      await catalog?.settle(catalogRoot);
       const refreshed = await refreshInboxClassification(deps, memo, clock);
       if (refreshed.changed) log("inbox.classification_written", { proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
       return { views: [{ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: withSource(refreshed.bodies, github) }] };
@@ -420,6 +470,7 @@ export function runSlowLaneWorker(
   let analyticsEpoch = 0;
   let codeHealthEpoch = 0;
   const post = (message: SlowLaneMessage): void => port.postMessage(message);
+  const catalog = createSlowLaneCatalog(data.catalogBridgeVersion === BOARD_CATALOG_WIRE_VERSION, request => port.postMessage(request), clock);
   const analytics = data.analytics
     ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), () => {
       const leaseAtStart = leaseEpoch, viewAtStart = analyticsEpoch;
@@ -432,11 +483,11 @@ export function runSlowLaneWorker(
     const epoch = leaseEpoch, viewEpoch = codeHealthEpoch;
     return () => !stopped && held && leaseEpoch === epoch && codeHealthEpoch === viewEpoch && BUILT_MODES.has(modes[CODE_HEALTH_VIEW_NAME]);
   } }) : undefined;
-  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []),
+  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}, catalog) : []),
     ...(data.instanceInboxes ?? []).map(config => instanceInboxUnit(config, clock, () => {
       const startedEpoch = leaseEpoch;
       return () => !stopped && held && ownedInstances.has(config.instance) && leaseEpoch === startedEpoch;
-    }, log)),
+    }, log, catalog)),
     ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics, ...daily, ...(codeHealth ? [codeHealth] : [])];
   let cancel: () => void = () => {};
   const pass = async (): Promise<void> => {
@@ -463,6 +514,7 @@ export function runSlowLaneWorker(
     if (!stopped) cancel = schedule(() => void pass(), intervalMs);
   };
   port.on("message", (msg) => {
+    if (isBoardCatalogReply(msg)) return void catalog.accept(msg);
     if (msg.type === "views") {
       const next = (msg.modes ?? {}) as Record<string, unknown>;
       if (next[ANALYTICS_VIEW_NAME] !== modes[ANALYTICS_VIEW_NAME]) {
@@ -507,6 +559,8 @@ export interface SlowLane {
   lease(held: boolean, instances?: readonly string[], ownershipEpoch?: number): void;
   /** The view switches as the worker last read them: a unit whose view is off does not run. */
   views(modes: Record<string, string>): void;
+  /** W1-T14114: an ops catalog reply for the thread's inbox units. */
+  catalog(reply: BoardCatalogReply): void;
   close(): void;
 }
 
@@ -520,6 +574,8 @@ export function threadSlowLane(opts: {
   /** Each instance's analytics refresh, finished or failed. */
   onSnapshot?: (write: SourceSnapshotWrite) => void;
   onDailyProgress?: (publication: DailyProgressPublication, ownershipEpoch: number) => void;
+  /** W1-T14114: the thread's ops catalog requests, for the parent to relay to whoever owns the catalog read. */
+  onCatalogRequest?: (request: BoardCatalogRequest) => void;
   /** Times the work in flight when the thread dies. */
   clock?: Clock;
 }): SlowLane {
@@ -545,7 +601,11 @@ export function threadSlowLane(opts: {
     let termination: string | undefined;
     // Ahead of the lease, so a thread's first pass already knows which views are switched on.
     spawned.postMessage({ type: "views", modes });
-    spawned.on("message", (msg: SlowLaneMessage) => {
+    spawned.on("message", (msg: SlowLaneMessage | BoardCatalogRequest) => {
+      if (isBoardCatalogRequest(msg)) {
+        if (worker === spawned && !closed) opts.onCatalogRequest?.(msg);
+        return;
+      }
       if (msg.type === "begin") inFlight.set(`${msg.work.unit}|${msg.work.instance ?? ""}`, { ...msg.work, sinceMs: clock.now() });
       else if (msg.type === "end") inFlight.delete(`${msg.work.unit}|${msg.work.instance ?? ""}`);
       else if (msg.type === "log") opts.log(msg.step, msg.extra);
@@ -591,6 +651,9 @@ export function threadSlowLane(opts: {
       if (closed || JSON.stringify(next) === JSON.stringify(modes)) return;
       modes = { ...next };
       worker?.postMessage({ type: "views", modes });
+    },
+    catalog: (reply) => {
+      if (!closed) worker?.postMessage(reply);
     },
     close: () => {
       closed = true;

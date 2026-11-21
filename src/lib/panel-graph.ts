@@ -37,6 +37,7 @@ import {
   projectPlan,
   readLedgerLines,
   SERVE_KEEPS_CREDITS_IN_MEMORY,
+  taskIdFromRunBranch,
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -183,6 +184,9 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
+  /** W1-T14114: the board's catalog-combined plan (public plus ops) for this pass's public plan, only when the ops
+   *  catalog read is ok. It feeds the Inbox's board referents alone; the classifier's projection stays public. */
+  inboxReferentPlan?: (plan: Plan) => Plan | undefined;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
@@ -2181,12 +2185,38 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
-function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: LedgerLines) {
+/** The Inbox's projection and board referents for one plan read; exported for W1-T14114's test. */
+export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan, ledgerLines?: LedgerLines) {
   let openPrs: readonly PrRef[] | undefined;
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
-    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }),
-    observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: inboxBoardReferents(projection, openPrs) };
+  const statusDeps = { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
+  const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
+  return { projection, boardReferents: inboxBoardReferents(opsOwnTaskRows(deps, plan, projection, openPrs, statusDeps), openPrs) };
+}
+
+/**
+ * W1-T14114: an open PR whose own task is filed only in the ops catalog has no public projection row, so its
+ * escalation could never be verified. With an ok catalog, project just the ops tasks the open PRs claim (run branch
+ * or Remudero-Task trailer) and add their rows, for the board referents only. inboxBoardReferents still requires
+ * exactly one observable row, and the classifier's projection never sees these rows (W1-T12211).
+ */
+function opsOwnTaskRows(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
+  openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): Map<string, StatusProjection> {
+  const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
+  if (!combined || combined === plan) return projection;
+  const claimed = new Set<string>();
+  for (const pr of openPrs!) {
+    const head = taskIdFromRunBranch(pr.headRefName);
+    if (head) claimed.add(head);
+    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) claimed.add(match[1]);
+  }
+  const tasks = [...claimed].flatMap(id => {
+    const task = plan.byId.has(id) || projection.has(id) ? undefined : combined.byId.get(id);
+    return task ? [task] : [];
+  });
+  if (tasks.length === 0) return projection;
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
+  return new Map([...projection, ...rows]);
 }
 
 /**
