@@ -1636,8 +1636,8 @@ function archiveVersion(path: string): string | undefined {
  * replacements and see neither copy of a row. This read holds that lock, and refuses while anyone else
  * holds it; the identity checks below still catch a writer that bypasses the lock.
  */
-function readSkillDraftLedger(stateDir: string, step: readonly string[]): SkillDraftLedgerRead {
-  return withLedgerRotationLock(stateDir, () => readLockedSkillDraftLedger(stateDir, ledgerLivePath(stateDir), step));
+function readSkillDraftLedger(stateDir: string, step: readonly string[], tolerateMalformed = false): SkillDraftLedgerRead {
+  return withLedgerRotationLock(stateDir, () => readLockedSkillDraftLedger(stateDir, ledgerLivePath(stateDir), step, tolerateMalformed));
 }
 
 /**
@@ -1660,7 +1660,13 @@ function withLedgerRotationLock<T>(stateDir: string, action: () => T): T | Unmea
   }
 }
 
-function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: readonly string[]): SkillDraftLedgerRead {
+/**
+ * `tolerateMalformed`: skip a complete (newline-terminated) malformed line, as the house ledger readers do. Restore
+ * uses it: such a line says nothing about any draft's verdict. Expiry does not, since a malformed line can be an
+ * answer that would have kept its draft open. An unterminated live tail is refused either way, because the next
+ * append would join it.
+ */
+function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: readonly string[], tolerateMalformed = false): SkillDraftLedgerRead {
   const liveStat = () => statSync(livePath, { bigint: true, throwIfNoEntry: false });
   try {
     const before = liveStat();
@@ -1694,7 +1700,8 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
     });
     const torn = union.torn + unterminated;
     const incomplete = { unmeasured: `incomplete ledger union: ${union.unread.length} unread file(s), ${torn} torn row(s)` };
-    if (torn > archiveTorn || (!union.ok && (!union.liveFileRead || union.unread.includes(livePath)))) return incomplete;
+    const refuseTorn = tolerateMalformed ? unterminated > 0 : torn > archiveTorn;
+    if (refuseTorn || (!union.ok && (!union.liveFileRead || union.unread.includes(livePath)))) return incomplete;
     if (!union.liveFileRead) return { unmeasured: "incomplete ledger union: live ledger is missing" };
 
     // A writer that skips the lock can still publish or replace a file during the read.
@@ -1713,7 +1720,7 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
       return { unmeasured: "incomplete ledger union: live ledger changed during read" };
     }
     // An unreadable archive and a torn archive row leave the live file complete, so restore can still use it.
-    return union.ok && archiveTorn === 0 ? { rows: union.rows, liveVersion } : { ...incomplete, archivesUnreadable: true };
+    return union.ok && (tolerateMalformed || archiveTorn === 0) ? { rows: union.rows, liveVersion } : { ...incomplete, archivesUnreadable: true };
   } catch (error) {
     const reason = `incomplete ledger union: could not verify ledger files: ${String(error)}`;
     return { unmeasured: reason };
@@ -1745,6 +1752,12 @@ function measureSkillDraftWaits(firstSeen: Readonly<Record<string, string>>, row
   return { bound, sample: firstAnswer.size };
 }
 
+/**
+ * A draft is declined when ledger order says so (ledgerProposalVerdicts over the union, which is what the Inbox
+ * classifier reads) OR when time order says so. Ledger order alone misreads a compacted archive that put an older
+ * restore after a newer decline; time order alone misreads a decline written after a restore by a clock that was
+ * then corrected backwards. Either reading of "declined" keeps expiry off the draft.
+ */
 function skillDraftVerdicts(rows: SkillDraftLedgerRows): ReturnType<typeof ledgerProposalVerdicts> {
   const receipts: VerdictReceipt[] = [];
   const unordered: SkillDraftLedgerRows = [];
@@ -1754,12 +1767,16 @@ function skillDraftVerdicts(rows: SkillDraftLedgerRows): ReturnType<typeof ledge
     // An undated restore cannot establish that it came after a decline.
     else if (row.step !== "panel.proposal_restored") unordered.push(row);
   }
-  return ledgerProposalVerdicts([...mergeVerdictReceipts(receipts), ...unordered]);
+  const inLedgerOrder = ledgerProposalVerdicts(rows);
+  const inTimeOrder = ledgerProposalVerdicts([...mergeVerdictReceipts(receipts), ...unordered]);
+  const declined = new Map([...inTimeOrder.declined, ...inLedgerOrder.declined]);
+  const ratified = new Set([...inLedgerOrder.ratified, ...inTimeOrder.ratified]);
+  return { isRatified: (id) => ratified.has(id), isDeclined: (id) => declined.get(id), ratified, declined };
 }
 
 /** Restore can need an archived expiry receipt before the slow lane has retained it. */
 export function readSkillDraftVerdicts(stateDir: string): ReturnType<typeof skillDraftVerdicts> | UnmeasuredSkillDraftLedger {
-  const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS);
+  const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS, true);
   return "unmeasured" in union ? union : skillDraftVerdicts(union.rows);
 }
 

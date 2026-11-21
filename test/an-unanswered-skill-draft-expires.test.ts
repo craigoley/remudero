@@ -796,6 +796,25 @@ test("W1-T13859 criterion 3: an operator decline committed after the initial led
   } finally { s.done(); }
 });
 
+test("W1-T13859 criterion 3: a decline written after a restore by a corrected clock keeps the draft declined", () => {
+  const s = site();
+  try {
+    drafts(s);
+    const id = "skill-draft:old";
+    row(s, "panel.proposal_declined", id, "2026-11-10T00:00:00.000Z", { origin: "rmd-cli", reason: "first decline" });
+    row(s, "panel.proposal_restored", id, "2026-11-11T00:00:01.000Z", { origin: "rmd-cli" });
+    // The clock was corrected backwards: this later decline is stamped one second before the restore.
+    row(s, "panel.proposal_declined", id, "2026-11-11T00:00:00.000Z", { origin: "rmd-cli", reason: "declined again" });
+    assert.equal(ledgerProposalVerdicts(rows(s)).isDeclined(id), "declined again");
+    const ledger = readFileSync(s.ledgerPath);
+    const registry = readFileSync(s.registryPath);
+    assert.deepEqual(pass(s).expired, []);
+    assert.deepEqual(declinesOf(s, id).map(({ origin }) => origin), ["rmd-cli", "rmd-cli"]);
+    assert.deepEqual(readFileSync(s.ledgerPath), ledger);
+    assert.deepEqual(readFileSync(s.registryPath), registry);
+  } finally { s.done(); }
+});
+
 test("W1-T13859 criterion 3: the daemon's inbox responder only receives operator items and excludes skill drafts", () => {
   const s = site();
   try {
