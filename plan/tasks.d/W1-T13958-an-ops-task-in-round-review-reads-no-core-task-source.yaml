@@ -16,7 +16,7 @@
   files:
     - src/cli/commands/fix.ts
     - test/fix-lane/an-ops-task-in-round-review-reads-no-core-task-source.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The fix rung's reviewTask for an ops-catalog task carries no sourcePath that the promised follow-up reader would read from the core head, so its in-round review posts no cannot-evaluate promise source unavailable verdict"

@@ -1,0 +1,137 @@
+- id: W1-T14156
+  title: "A hand `rmd review <n>` runs the model reviewer by default, so its PASS is not a proof-only verdict; an explicit deterministic run says so in its reviewer_outcome"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it changes which reviews a hand run can pass and spans the CLI verb, the review command, reviewerOutcome and the flow observation; the deterministic judge, the status authority and every unattended caller stay as they are
+  origin: "operator-session#hand-review-not-attempted-2026-11-21"
+  plan_refs:
+    - W1-T2593
+    - W1-T63
+    - W1-T2472
+    - W1-T3387
+    - W1-T11428
+  files:
+    - src/run-task.ts
+    - src/cli/commands/review.ts
+    - src/lib/review.ts
+    - src/lib/review-flow-observation.ts
+    - test/event-driven-semantic-review.test.ts
+    - test/review/a-hand-review-runs-the-model-reviewer.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "The `review` verb in src/run-task.ts, given `<n> --repo craigoley/remudero` and no --execution-mode flag, reaches runReview with spawnReviewer true, requireSemanticReview true, a reviewerMount and the head task's budget_usd as budgetUsd"
+      proof: "grep: W1-T14156 criterion 1: in test/review/a-hand-review-runs-the-model-reviewer.test.ts"
+    - claim: "invariant:a-hand-pass-had-a-reviewer — a hand review with no --execution-mode flag whose reviewer worker throws (reviewerQueryFn rejects before any result) posts no remudero-review=success, arms no automerge, and writes a review.semantic_incomplete row naming the head sha"
+      kind: guard
+      proof: "grep: W1-T14156 criterion 2: in test/review/a-hand-review-runs-the-model-reviewer.test.ts"
+    - claim: "With `--execution-mode deterministic`, runReview gets spawnReviewer false, and both the console line and the review.posted row read reviewer_outcome not_attempted_deterministic_mode, never the bare not_attempted"
+      proof: "grep: W1-T14156 criterion 3: in test/review/a-hand-review-runs-the-model-reviewer.test.ts"
+    - claim: "reviewCommand called with no flags and no executionMode dep (the shape of the internal callers at src/run-task.ts reviewCommand(prNum) after a retro, plan or approve PR) is unchanged: runReview gets spawnReviewer false and requireSemanticReview false"
+      kind: guard
+      proof: "grep: W1-T14156 criterion 4: in test/review/a-hand-review-runs-the-model-reviewer.test.ts"
+    - claim: "The review-flow observation counts reviewer_outcome not_attempted, not_attempted_plan_only and not_attempted_deterministic_mode under semantic.notAttempted, and none of them under semantic.failed"
+      proof: "grep: W1-T14156 criterion 5: in test/review/a-hand-review-runs-the-model-reviewer.test.ts"
+    - claim: "The test that pinned a deterministic default for a manual review now pins the semantic default"
+      proof: "grep: manual rmd review runs the semantic reviewer by default in test/event-driven-semantic-review.test.ts"
+    - claim: "The CLI verb is the production caller of the default: src/run-task.ts calls reviewCommand with operatorReviewArgs(rest.slice(1))"
+      proof: "grep: reviewCommand(arg, operatorReviewArgs(rest\\.slice(1))) in src/run-task.ts"
+  rationale: |
+    WHY: a hand `rmd review <n>` posts remudero-review=success after only the deterministic proof
+    floor, with no model reviewer. The PASS text says "reviewer_outcome: not_attempted", which
+    reads like a capacity skip but is a fixed default. The unattended pipeline then merges on that
+    PASS. The model reviewer is the part that downgrades a criterion whose proof passes but does not
+    prove the claim, and in the same window it did that on most of the reviews it completed.
+    OBSERVED, read-only, Azure host, 2026-11-21 13:00-13:30Z (fleet ledger
+    ~/rmd-state2/state/ledger.ndjson plus the ledger.2026-11-1[89]*/2026-11-2* archives, rows from
+    2026-11-18T13:00Z, deduplicated by PR, head and run):
+    - Hand reviews at 13:14-13:15Z with `rmd review <n> --repo craigoley/remudero` in the daemon
+      container (code dd829e355) on #19873, #19919, #19924 and #19939 all posted "PASS ...
+      (reviewer_outcome: not_attempted; proof_exec: N/N observed on the PR head)"
+      (~/rmd-work/hand-reviews/*-20261121T1241.log). All four merged.
+    - review.posted rows whose review_decision_digest has the plain "v2:" prefix (the advisory,
+      deterministic policy) and reviewer_outcome not_attempted: 25 success and 4 pending on
+      remudero PRs, plus sandbox PRs 8, 16 and 17. Only 4 of the 25 heads also had a semantic
+      review on the same head. 22 of the 25 PRs merged (#19672 to #19948).
+    - Rows with the "required-semantic-v1:" digest (sweep and run-task, semantic mode) and
+      reviewer_outcome success: 379 failure rows where a criterion reason carries "proof executed
+      and PASSED on the PR head ... (semantic downgrade)", 216 success, 64 pending, 4 failure with
+      no downgrade. Plan-only skips (not_attempted_plan_only) are 255 success and 5 failure.
+    - Memory pressure is not the cause. The 13:14Z runs never reached a reviewer spawn: the
+      deterministic mode never sets spawnReviewer, so no admission or provider check ran.
+    CAUSE, in code on origin/main (17e986698; same lines at dd829e355):
+    - src/cli/commands/review.ts:2197 defaults executionMode to "deterministic", and :1970 says
+      "Operator CLI remains deterministic; only internal unattended callers opt in".
+      reviewOptionsFromFlags (:100-113) changes it only for --execution-mode semantic.
+    - spawnReviewer becomes true only inside `if (executionMode === "semantic")` (:2519-2554), and
+      runReview gets requireSemanticReview: executionMode === "semantic" (:2712). So a bare hand run
+      reaches runReview with spawnReviewer false; attemptReviewer is false (:1036), and
+      reviewerOutcome (src/lib/review.ts:11439-11461) returns the bare "not_attempted", the value
+      it also uses for "no criteria". The console line is built at review.ts:1818-1819.
+    - Sweep (src/cli/commands/sweep.ts:253-254) and run-task (src/run-task.ts:2804-2805) pass
+      executionMode "semantic". The CLI verb (src/run-task.ts:45459) passes nothing.
+    - The default is deliberate: W1-T2593 (#3583, 2026-09-01) criterion 4, "a manual `rmd review`
+      call remains deterministic-only by default, so this task changes unattended event processing
+      rather than silently adding operator-initiated spend", pinned by
+      test/event-driven-semantic-review.test.ts:115. Its safety argument is that the deterministic
+      judgeReview verdict binds and the model is advisory and downgrade-only (MASTER-PLAN rule 12).
+      Its own text allows a later decision to change this default. This is that decision:
+      * since #12954 (2026-10-19) the unattended policy is that "an unavailable reviewer is an
+        incomplete evaluation, not evidence that the code passed" (src/lib/required-semantic-review.ts:8);
+        a hand run is the one path still outside it, and its PASS is the same remudero-review
+        status that merges a PR;
+      * the cost argument is small: 25 hand code reviews in 3 days against about 660 semantic
+        reviews the daemon ran in the same window;
+      * downgrade-only still holds: the model cannot turn a floor FAIL into a PASS.
+    - src/lib/review-flow-observation.ts:87-88 counts only the exact "not_attempted" as not
+      attempted, so not_attempted_plan_only, and the new value, would count as failed.
+  design: |
+    INVARIANT a-hand-pass-had-a-reviewer: a hand `rmd review` with no --execution-mode flag posts
+    remudero-review=success only after the model reviewer completed with a verdict for every
+    criterion (or the change is plan-only, which W1-T2472 already skips).
+    1. src/cli/commands/review.ts: export operatorReviewArgs(rest: string[]): string[]. It returns
+       rest unchanged when rest has --execution-mode, else [...rest, "--execution-mode", "semantic"].
+       Change the :1970 comment to say the CLI verb defaults to semantic through operatorReviewArgs
+       and internal callers that pass no flag keep the deterministic default. Do not change the
+       :2197 default: the internal reviewCommand(prNum) callers in run-task.ts stay as they are.
+    2. src/run-task.ts:45459: the review verb calls reviewCommand(arg, operatorReviewArgs(rest.slice(1))).
+       Nothing else in run-task.ts changes. If the source-size ratchet trips, refresh its baseline
+       entry only for this line.
+    3. src/lib/review.ts reviewerOutcome: add an optional deterministicMode flag, checked after
+       planOnlySkip and before attempted, returning "not_attempted_deterministic_mode". runReview
+       passes deterministicMode: args.spawnReviewer === false. The plan-only and "no criteria"
+       values stay as they are.
+    4. src/lib/review-flow-observation.ts: notAttempted counts any reviewerOutcome that starts
+       with "not_attempted"; failed excludes them.
+    5. A semantic hand run whose reviewer cannot run already refuses through the required-semantic
+       path (requiredSemanticRefusal, review.semantic_incomplete). Do not add a second refusal;
+       criterion 2 pins that the CLI default reaches it.
+    6. Tests: test/review/a-hand-review-runs-the-model-reviewer.test.ts, titled "W1-T14156
+       criterion N: ...", driving reviewCommand with injected fetchView, materialize, runReview or
+       reviewerQueryFn and postStatus, the way test/event-driven-semantic-review.test.ts's
+       captureReview does. Criterion 1 calls reviewCommand(host, n, operatorReviewArgs([...])).
+       Change test/event-driven-semantic-review.test.ts:115 to "manual rmd review runs the semantic
+       reviewer by default" and assert the semantic arguments. Load test/setup/tmp-hygiene.ts in
+       every run; never point a test at the real state dir or post to GitHub.
+  falsifier: |
+    At origin/main the CLI verb passes rest.slice(1) as is: criterion 1 sees spawnReviewer false
+    and criterion 2 sees a success status with reviewer_outcome not_attempted. Change the :2197
+    default instead of the verb: criterion 4 sees spawnReviewer true for an internal caller.
+    Leave reviewerOutcome as it is: criterion 3 reads the bare not_attempted. Leave the exact
+    match in review-flow-observation.ts: criterion 5 counts not_attempted_plan_only as failed.
+    Add operatorReviewArgs but do not call it from the verb: criterion 7's grep finds nothing.
+  note: |
+    Id reserved for run-unfiled-1795267641432 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Not in scope: the internal reviewCommand(prNum) calls in src/run-task.ts after retro, plan and
+    approve PRs (mostly plan-only, which skips the reviewer anyway), the deterministic judge, the
+    status context, the reviewer mount and budget rules, and memory admission for reviewer spawns.
+    Until this deploys, hand reviewers should pass `--execution-mode semantic` to `rmd review`.
+    After deploy, check on the Azure host: a hand `rmd review <n>` on a code PR writes a
+    review.posted row with a required-semantic-v1 digest and a reviewer_outcome other than
+    not_attempted, and the ledger has no new v2-digest not_attempted success rows from hand runs.

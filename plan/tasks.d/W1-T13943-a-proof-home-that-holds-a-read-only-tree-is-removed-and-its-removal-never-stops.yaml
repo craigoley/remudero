@@ -1,7 +1,6 @@
 - id: W1-T13943
   title: A proof home that holds a read-only tree is removed, and its removal never stops the daemon (held follow-up)
   repo: remudero
-  priority: 1.1
   depends_on:
     - W1-T13819
   type: implement
@@ -22,7 +21,9 @@
     - src/run-task.ts
     - test/a-proof-home-that-holds-a-read-only-tree-is-removed.test.ts
     - test/host-capability-fixtures.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # duplicate held follow-up; W1-T13942 holds the same question
+  superseded_by: W1-T13942
   attempts: 0
   acceptance:
     - claim: "removeOwnedTree(dir) on a directory that holds a read-only tree (directories mode 0o555 and files mode 0o444, nested three deep, as a killed W1-T11468 test leaves its seed store) removes the whole directory and returns { ok: true }"
@@ -97,7 +98,9 @@
     Put rmSync(home, { recursive: true, force: true }) back in prepareProofChild's cleanup: criteria 2, 3 and 5
     must fail with EACCES. Make removeOwnedTree follow symbolic links: criterion 4 must fail. Leave the sweep on
     plain rmSync: criterion 6 must fail. Restore and require all to pass.
-  needs_input:
-    question: "Pull request https://github.com/craigoley/remudero/pull/19699 (task W1-T13819) cannot meet these criteria without your input. \"removeOwnedTree(dir) on a directory that holds a read-only tree (directories mode 0o555 and files mode 0o444, nested three deep, as a killed W1-T11468 test leaves its seed store) removes the whole directory and returns { ok: true }\"; \"Through defaultProofSpawner and defaultAsyncProofSpawner with the pass-through proof sandbox (test/helpers/pass-through-proof-sandbox.ts), a node child that exits 0 after it makes a read-only tree under its HOME returns its stdout, not an EACCES error, and its rmd-proof-home-* directory no longer exists, with nothing injected in place of the removal\"; \"invariant:a-proof-failure-stays-the-proof-failure — a child that makes the same read-only tree and exits 1 makes both spawners throw the child's own failure (its status and its stderr text), not EACCES, and the home is removed\"; \"invariant:only-the-owned-tree-changes — a symbolic link inside the directory that points at a read-only directory outside it is removed as a link; the outside directory, its files and their modes are byte-identical before and after\"; \"sweepStaleTempDirs removes a stale rmd- directory that holds a read-only tree and counts it as removed\". What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13819-1795174762831-669c:1:1795175059324) — Node separates pathname validation from descriptor chmod, and a reproduced rename between"
-    source_pr: https://github.com/craigoley/remudero/pull/19699
-    asked_at: 2026-11-20T11:58:01.568Z
+  note: |
+    WITHDRAWN 2026-11-20 (operator session): W1-T13943 is a duplicate of W1-T13942. Both are held
+    follow-ups of W1-T13819 for the same five criteria of https://github.com/craigoley/remudero/pull/19699,
+    and both ask the same question. The parked-pr remedy filed this copy again because the filing of
+    W1-T13942 was recorded as refused, so no held id was on record. W1-T13944 fixes that cause. W1-T13942
+    keeps the one question; this record keeps none.

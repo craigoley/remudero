@@ -1,0 +1,45 @@
+- id: W1-T14178
+  title: Find which writer posted the PASS that overrode two semantic FAILs on #19922 seven seconds before it merged, and why it carried no semantic downgrade
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: recon
+  verify: auto
+  risk: high # a PASS that overrides a semantic FAIL can merge unproven work
+  band_meaning: span
+  origin: operator-session#pr-backlog-sweep-2026-11-21
+  plan_refs: [W1-T14035]
+  files:
+    - docs/review-status-writers.md
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21 (host ledger and the GitHub status API, read-only) on #19922 head 66e66ab8941c, all with
+    reviewer code ebea9d1a5:
+    - 18:49:57Z pending, creator cao825: "review in progress (owned by run review-PR19922-1795286994954)".
+    - 19:00:03Z failure, creator remudero-fleet[bot]: "FAIL — unmet: A head whose checks are pending, whose
+      remudero-review ...". The ledger has run review-PR19922-1795287178193 (run_child pid 2089590):
+      review.reviewer verdict success at 18:59:52, automerge.disarmed, review.posted state failure at 19:00:04.
+    - 19:02:55Z failure, creator remudero-fleet[bot]: the daemon's post-review restore (run
+      review-PR19922-1795287774413, review.status_restored old pending -> new failure, delivered from the 19:00:04 run).
+    - 19:03:28Z success, creator cao825: "PASS — 3 criteria substantiated, no test theater". No core ledger row
+      names this post or run review-PR19922-1795286994954, and no host process ran rmd review 19922 at 19:04Z.
+    - The PR merged at 19:03:35Z, seven seconds later.
+    Same shape as the #19673 miss, where a deterministic-only PASS overrode a semantic FAIL.
+    INFERRED: the PASS came from a review run outside the core daemon's ledger, authenticated as the operator's
+    GitHub identity (cao825), most likely a hand run without --execution-mode semantic.
+  design: |
+    RECON, read-only; change no gate. 1. Find the writer of the 19:03:28Z PASS: search every ledger that can post as
+    cao825 (Azure host state dirs, the Mac hand lanes, cloud sessions' hand-review logs) for run
+    review-PR19922-1795286994954 and any review of 66e66ab89 at 19:03Z. 2. Name its execution mode, and why a later
+    deterministic PASS replaced a semantic FAIL for the same review input digest. 3. Record both, with the prevention
+    that would refuse a non-semantic PASS over a standing semantic FAIL, in docs/review-status-writers.md. Do not
+    build the prevention here; file it.
+
+    INVARIANT recon-names-the-writer: the finding names the writer of the overriding PASS by run id and host, or states which ledgers were searched and found nothing.
+  acceptance:
+    - claim: "invariant:recon-names-the-writer — docs/review-status-writers.md names the writer of the 19:03:28Z PASS on 66e66ab89 by run id and host, or the ledgers searched, and its execution mode"
+      kind: guard
+      proof: "grep: W1-T14178 overriding PASS writer in docs/review-status-writers.md"
+  falsifier: |
+    A finding that names no writer and no searched ledgers leaves the grep unmatched.

@@ -693,6 +693,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(lifetimeHistoryBackstop) && files.some((f) => lifetimeHistoryEdges.includes(f))) {
     pathReaders.push(lifetimeHistoryBackstop);
   }
+  // W1-T10557 (PR #13946): the import graph covers the source paths. Keep the two sibling routing edges explicit.
+  const claudeLogin = suitePath("test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts");
+  const claudeLoginSiblings = [
+    suitePath("test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts"),
+    suitePath("test/routing/the-console-signs-the-fleet-into-claude.test.ts"),
+  ];
+  if (input.files.has(claudeLogin) && claudeLoginSiblings.some((suite) => changedSet.has(suite))) {
+    pathReaders.push(claudeLogin);
+  }
   // W1-T6338: preserve the recorded dashboard/settings miss beyond the narrow arm's symbol reach.
   const viewSchemas = suitePath("test/every-view-body-matches-its-schema.test.ts");
   const viewSchemaEdges = ["src/lib/repo-dashboard-route.ts", suitePath("test/repo-settings-report-their-effective-values.test.ts")];
@@ -873,6 +882,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   ];
   if (input.files.has(infrastructureRerun) && files.some((f) => infrastructureRerunEdges.includes(f))) {
     pathReaders.push(infrastructureRerun);
+  }
+  // W1-T10644: recorded miss on coverage run 40212330452, PR #14196.
+  const cancelledCheckRequeue = suitePath("test/a-plan-only-pr-requeues-its-cancelled-check.test.ts");
+  const cancelledCheckRequeueEdges = [
+    "src/lib/sweep.ts",
+    suitePath("test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts"),
+  ];
+  if (input.files.has(cancelledCheckRequeue) && cancelledCheckRequeueEdges.some((edge) => changedSet.has(edge))) {
+    pathReaders.push(cancelledCheckRequeue);
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

@@ -447,6 +447,45 @@ export function evaluateReservationHolderConflicts(addedIds, occurrencesById, re
   return conflicts;
 }
 
+// The ops gate's strip rule (scripts/ops-gate.rb MOVED_FROM_LINE_RE, src/lib/plan.ts withoutOneMovedFromLine).
+const MOVED_FROM_LINE_RE = /^[ \t]+moved_from:[^\n]*\n?/gm;
+const MOVED_FROM_VALUE_RE = /^[ \t]+moved_from: remudero@([0-9a-f]{40})\n?$/;
+
+/**
+ * Added ids that are a VERIFIED MOVE from the public catalog (`rmd move-task`'s copy step): every file
+ * declaring the id carries exactly one `moved_from: remudero@<sha>` line, and with that line removed equals,
+ * byte for byte, the file at the same path in a commit reachable from the code root's `refs/remotes/origin/main`.
+ * That public record already passed the holder check under its own filer. Without proof of the public
+ * commit and matching file, the copy keeps the holder check. All Git reads are local to the code root.
+ */
+export function verifiedMoveIds(addedIds, occurrencesById, cwd, codeRoot, runGit = git) {
+  const moved = new Map();
+  if (codeRoot === undefined) return moved;
+  const gitOpts = { cwd: codeRoot, env: { GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" } };
+  let publicMain;
+  for (const id of addedIds) {
+    const files = occurrenceFiles(occurrencesById.get(id) ?? []);
+    let source;
+    const verified = files.length > 0 && files.every((file) => {
+      const text = readFileSync(join(cwd, file), "latin1");
+      const lines = text.match(MOVED_FROM_LINE_RE) ?? [];
+      const sha = lines.length === 1 ? MOVED_FROM_VALUE_RE.exec(lines[0])?.[1] : undefined;
+      if (sha === undefined) return false;
+      publicMain ??= runGit(["show-ref", "--verify", "--hash", "refs/remotes/origin/main"], gitOpts);
+      if (publicMain.error || publicMain.status !== 0) return false;
+      const type = runGit(["cat-file", "-t", sha], gitOpts);
+      if (type.error || type.status !== 0 || type.stdout.trim() !== "commit") return false;
+      const ancestry = runGit(["merge-base", "--is-ancestor", sha, publicMain.stdout.trim()], gitOpts);
+      if (ancestry.error || ancestry.status !== 0) return false;
+      const original = runGit(["cat-file", "blob", `${sha}:${file}`], { ...gitOpts, encoding: "latin1" });
+      source = sha;
+      return !original.error && original.status === 0 && original.stdout === text.replace(MOVED_FROM_LINE_RE, "");
+    });
+    if (verified) moved.set(id, source);
+  }
+  return moved;
+}
+
 /** W1-T6025: the four facts that tell one holder from another -- an unrecorded one says so. */
 function describeHolderFields(fields) {
   const v = (x) => (x === undefined || x === "" ? "<unrecorded>" : x);
@@ -989,9 +1028,15 @@ export function main(argv) {
     process.exitCode = 1;
   }
 
+  // A verified move copies a record the public catalog already holds under its own filer: announced, never silent.
+  const movedIds = verifiedMoveIds(addedAtHead.ids, occurrencesById, cwd, codeRoot);
+  for (const [id, sha] of movedIds) {
+    console.log(`task-id-existence: ${id} is a verified move of the public record at remudero@${sha} -- its reservation holder is the public filer, not this branch.`);
+  }
+  const holderIds = addedAtHead.ids.filter((id) => !movedIds.has(id));
   const holderReservation =
-    addedAtHead.ids.length === 0 ? reservation : resolveReservedIds(reservationRemote, cwd, { readHoldersFor: new Set(addedAtHead.ids) });
-  const holderConflicts = evaluateReservationHolderConflicts(addedAtHead.ids, occurrencesById, holderReservation, ownHeadRef, cwd);
+    holderIds.length === 0 ? reservation : resolveReservedIds(reservationRemote, cwd, { readHoldersFor: new Set(holderIds) });
+  const holderConflicts = evaluateReservationHolderConflicts(holderIds, occurrencesById, holderReservation, ownHeadRef, cwd);
   if (holderConflicts.length > 0) {
     console.error("\ntask-id-existence: FAILED -- the following added id(s) are HELD by a different reservation holder:\n");
     for (const c of holderConflicts) {
@@ -1005,13 +1050,16 @@ export function main(argv) {
       // note text on the same physical line -- see reservationHandoffNoteLine's comment for why
       // the old one-line fragment silently failed the very matcher it named once a note already
       // had content.
-      if (c.recordedBranch !== undefined && c.filerBranch) {
+      // W1-T13829: a named holder gets the same pasteable line; the matcher already accepts it. A lost
+      // takeover race does not, since that line does not clear it.
+      const handoffFrom = c.recordedBranch ?? (c.reason === "lost the takeover race" ? undefined : c.holderBranch);
+      if (handoffFrom !== undefined && c.filerBranch) {
         console.error(
           "    remedy: add this as a NEW line in the shard's note -- do not merge it into any " +
             "existing note text on the same line, or the check that requires it will not see it:",
         );
         console.error("        note: |");
-        console.error(`          ${reservationHandoffNoteLine(c.recordedBranch, c.filerBranch)}`);
+        console.error(`          ${reservationHandoffNoteLine(handoffFrom, c.filerBranch)}`);
       }
     }
     console.error(

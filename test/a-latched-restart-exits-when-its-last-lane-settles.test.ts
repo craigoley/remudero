@@ -57,7 +57,10 @@ async function phase(t: TestContext, mode: PassMode = "completed", sweepWallCloc
       rows.push({ step, extra });
       if (step === "daemon.sweep.abandoned") abandoned.resolve();
     },
-  }, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs });
+  }, { freshnessMinLifetimeMs: 0, laneCount: 1, max: 1, sweepRetriggerIntervalMs: 2 * windowMs, sweepWallClockBoundMs,
+    // W1-T13888 bounds the wait for a pass at the latch plus this limit, by a REAL timer. This mode reaches its third
+    // pass at 4 windows, past the 30-minute default (3 windows after the latch), so that timer would already be due.
+    ...(mode === "running-after-completed" ? { freshnessMaxDrainWaitMs: 6 * windowMs } : {}) });
   void run.then(() => { finished = true; });
   t.after(async () => {
     cleaning = true;
@@ -167,6 +170,7 @@ test("a running pass takes precedence over a previously completed pass since the
   await h.tick(4 * windowMs + 3);
   assert.equal(h.calls.length, 3);
   await h.settle();
+  await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(h.finished(), false);
   assert.equal(h.restart(), undefined);
   h.pass.resolve();

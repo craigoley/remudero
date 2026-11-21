@@ -1742,6 +1742,9 @@ test(selectedContract
   ? `selected child admission and resume retain current original source identity - ${contract}`
   : `selected child mixed version contracts never invent authority - actual ${contract} deferred arm`, { timeout: 60_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
+  // The selected read's 1.5 s default deadline expires on a loaded runner, so the row reads `timeout`
+  // instead of the digest outcome under test. Bound it at the contract maximum.
+  const READ_MS = 10_000;
   const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
   const repoDir = join(root, "repos", "remudero");
   const selected = join(root, "selected.yaml"), planPath = join(root, "tasks.yaml");
@@ -1769,7 +1772,7 @@ test(selectedContract
   let spawned = 0, attemptedPushes = 0;
   try {
     const selectedConfig: Config = { root, claudeBin: "/bin/true", installRoot: SELECTED_INSTALL_ROOT,
-      selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected } };
+      selectedRegistryMode: { mode: "shadow", instanceName: "fixture", registryPath: selected, timeoutMs: READ_MS } };
     const sweepRows: Array<Record<string, unknown>> = [];
     const effects = buildSweepEffects({ owner: "owner", repo: "remudero", config: selectedConfig,
       ledgerPath: join(root, "state", "ledger.ndjson"), runId: "selected-sweep", plan: { tasks: [], byId: new Map() } as Plan,
@@ -1812,7 +1815,7 @@ test(selectedContract
         await Promise.resolve();
         writeFileSync(selected, selectedText("live"));
         const replacement = join(root, "admission-replacement.yaml"); writeFileSync(replacement, selectedText("shadow"));
-        selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture" };
+        selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture", timeoutMs: READ_MS };
         return { plan: loadPlan(planPath), staleDispatch: false };
       } } : {}),
       implementPush: async () => { attemptedPushes++; },
@@ -1833,7 +1836,7 @@ test(selectedContract
         if (selectedContract) {
           writeFileSync(selected, selectedText("live"));
           const replacement = join(root, "replacement.yaml"); writeFileSync(replacement, selectedText("shadow"));
-          selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture" };
+          selectedConfig.selectedRegistryMode = { mode: "shadow", registryPath: replacement, instanceName: "fixture", timeoutMs: READ_MS };
           hold = applyOperatorMergeHold(join(root, "state/ledger.ndjson"), { action: "engage", by: "fixture owner",
             authority: "console-confirmed", reason: "review the admitted revision", prNumber: 1 }).current;
         }

@@ -20,7 +20,7 @@
     - src/lib/ledger-steps.ts
     - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
     - "src/lib/worker.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "runDraftRung does not spawn a cash draft whose estimated whole-run input (prompt tokens times the lane's expected request count, plus the output ceiling) is above openWeightEffectiveWindow for the routed deployment, and logs inbox.draft_cash_skipped with reason window"

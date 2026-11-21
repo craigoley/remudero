@@ -3,11 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high
   band_meaning: blast-radius
   priority: 1.24
-  status: queued
+  status: blocked
+  retirement: withdrawn  # withdrawn unanswered: escalated to a person 2026-10-22T03:29:10.227Z and held 30 days with no operator ruling (operator ruling 2026-10-13: silence re-judges, then retires; it never approves or releases). Its gardener re-files the cause from fresh evidence if it still costs. Withdrawn by the machine-filing judge (W1-T9043), 2026-11-21T04:15:39.124Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:coverage-shard:wn-tn-a-daemon-tree-behind-on-deploy-logic-still-defers-nami"

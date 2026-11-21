@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   priority: 2
-  budget_usd: 30.00
+  budget_usd: 4.50
   risk: high # Rule 19 span: the review command's post-record step, the fix-prompt finding join and the retro follow-up harvest input. One concern: handing each captured finding to an authority that already exists. No gate, verdict, status, arm or merge reads the route
   band_meaning: span
   origin: architect

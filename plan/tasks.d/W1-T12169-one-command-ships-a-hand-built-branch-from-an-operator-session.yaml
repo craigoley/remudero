@@ -23,6 +23,7 @@
     - src/lib/git-push.ts
     - src/lib/github-transport.ts
     - src/lib/worktree-git.ts
+    - test/authority-table.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -55,6 +56,9 @@
   falsifier: |
     Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Restore and require all to pass.
   note: |
+    files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): #19651 adds three caller-less AUTHORITY_TABLE rows
+    (hand-ship-push, hand-ship-open-pr, hand-ship-amend-pr), and test/authority-table.test.ts pins every caller-less row,
+    so the build must add the three rows to that pin.
     files: amendment 2026-11-20 (operator, approving the recommendation on the #19651 clarification): acceptance-author-gate refused #19651 as canonical-task-scope-exceeded for docs/cli-reference.md, src/lib/authority.ts, src/lib/git-push.ts, src/lib/github-transport.ts, src/lib/worktree-git.ts; each is a change the build needs.
     On a remote host the command runs the same preflight over ssh, in a worktree it brings there as a git bundle. The two scripts do this today.
     Findings from the hand lane on the Mac agent account, added 2026-11-11. The command must keep each of them.
