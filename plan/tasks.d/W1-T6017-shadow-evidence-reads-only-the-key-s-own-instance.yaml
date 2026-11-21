@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 3.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — which store a shadow diff's evidence is read from, across the modules it spans
   band_meaning: span
   origin: "2026-10-06 core-console architecture plan backlog E15 (shadow follow-up: scope readShadowEvidence to each key's instance)"

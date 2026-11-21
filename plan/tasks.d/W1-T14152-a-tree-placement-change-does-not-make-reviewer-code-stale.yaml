@@ -1,0 +1,176 @@
+- id: W1-T14152
+  title: "A main advance that changes only how a stale-code review gets its tree does not make the reviewer code stale, so delivered verdicts are not requeued or skipped for it"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # narrows the reviewer freshness key; a wrong narrowing lets a verdict from old reviewer logic gate a merge
+  origin: "operator-session#reviewer-code-advanced-requeues-2026-11-21"
+  plan_refs:
+    - W1-T4469
+    - W1-T12824
+    - W1-T11847
+    - W1-T14066
+    - W1-T3691
+    - W1-T10269
+    - W1-T3723
+  files:
+    - src/lib/self-sync.ts
+    - test/a-run-task-advance-is-classified-by-review-path.test.ts
+    - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
+    - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:verdict-code-only — the #19940 shape is immaterial. In a real git repository, reviewer code at a base commit and origin/main at a commit that changes only (a) hunks inside buildFreshTreeReviewRunner, prepareFreshOriginMainTree, inspectFreshReviewerWorktree, removePerAttemptTree, perAttemptTreePath, freshOriginMainTreeRunner and the FreshTreeReviewSeams type, (b) a new class declared beside them and referenced only by them, (c) an import line of src/run-task.ts that adds a binding used only inside those units, and (d) src/lib/reviewer-worktree-lease.ts: reviewerCodeFreshnessAt returns status fresh with advance immaterial"
+      kind: guard
+      proof: "grep: W1-T14152 criterion 1: in test/a-run-task-advance-is-classified-by-review-path.test.ts"
+    - claim: "invariant:closure-change-rereviews — a change inside the verdict closure still makes the code stale. On the criterion 1 fixture, each of these single changes, alone and together with the criterion 1 changes, returns status stale with the changed path in changedPaths: one code token in src/lib/review.ts; a hunk in runReview; a hunk in a helper only runReview calls; a hunk in reviewCommand; a hunk in spawnRmdReviewForFreshTree; an import line that adds a binding runReview uses; src/lib/reviewer-worktree-lease.ts together with src/lib/review.ts"
+      kind: guard
+      proof: "grep: W1-T14152 criterion 2: in test/a-run-task-advance-is-classified-by-review-path.test.ts"
+    - claim: "The tree-placement set fails closed. A placement unit renamed to a name not in REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK and reached from reviewCommand makes its hunk material (stale); a name in the set that is missing from the source changes nothing (the advance is judged as if the set did not name it); a missing review root still reads as material, as on origin/main"
+      proof: "grep: W1-T14152 criterion 3: in test/a-run-task-advance-is-classified-by-review-path.test.ts"
+    - claim: "The child argument list stays pinned. Reading the real src/run-task.ts, every deps.spawnReview call inside a unit named in REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK passes exactly [prArg, ...rest] as its argument list, and no other unit in the set calls spawn or spawnReview; the test fails with the unit name when either changes"
+      proof: "grep: W1-T14152 criterion 4: in test/a-run-task-advance-is-classified-by-review-path.test.ts"
+    - claim: "REVIEW_MATERIAL_ADVANCE_PATHS no longer lists src/lib/reviewer-worktree-lease.ts and still lists src/lib/review.ts, src/run-task.ts, src/lib/plan.ts, src/lib/task-linter.ts, package.json and package-lock.json; reviewAdvanceIsMaterial(['src/lib/reviewer-worktree-lease.ts']) is false and reviewAdvanceIsMaterial(['src/lib/reviewer-worktree-lease.ts', 'src/lib/review.ts']) is true"
+      proof: "grep: W1-T14152 criterion 5: in test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts"
+    - claim: "The sweep uses the same key. With reviewerCodeJudge over a real git repository: a delivered verdict at a code sha, then a placement-only advance of main (the criterion 1 change), writes no sweep.review_requeued row and posts no pending status; a following advance that changes src/lib/review.ts writes exactly one sweep.review_requeued row with reason reviewer-code-advanced and src/lib/review.ts in changed_paths, and a second sweep pass at the same main writes no second row"
+      proof: "grep: W1-T14152 criterion 6: in test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts"
+    - claim: the review-path walk stops at a named set of tree-placement units
+      proof: "grep: REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK in src/lib/self-sync.ts"
+  rationale: |
+    WHY: delivered review verdicts are thrown away when main advances with code that only decides
+    which tree a stale-code review runs in. That code never computes a verdict.
+    OBSERVED, read-only, in the Azure fleet ledger (~/rmd-state2/state/ledger.ndjson and the rotated
+    ledger.*.ndjson.gz, exact duplicate rows removed), 2026-11-19T08:20Z to 2026-11-21T12:25Z
+    (269 first-parent commits on main):
+    - 72 sweep.review_requeued rows with reason reviewer-code-advanced, over 46 pull requests; 68
+      have reviewer_code_freshness stale and 4 incomplete (the delivered verdict named no full code
+      sha). 6 rows have reason reviewer-image-changed. 46 review.skipped_stale_reviewer_code rows (42
+      "leased by another owner", 4 "not an exact clean detached checkout").
+    - Main moving is NOT what requeues. Of 269 commits, only 4 merges made the reviewer code stale.
+      Every stale row traces to one of them (git merge-base code_sha origin_main_sha, then git log
+      of the material paths in merge-base..origin_main_sha):
+      #19727 (096ba3f2b; judgeCriterion, buildReviewPrompt, parseReviewerVerdicts in review.ts): 36
+      requeues and 35 skips. #19669 (f313efa85; taskIdOwnershipFindingsAsync in review.ts): 5
+      requeues. #19605 (593c2168d; plan.ts): 5 requeues and 2 skips. #19940 (93b21bd1b, W1-T14066;
+      reviewer-worktree-lease.ts and the fresh-tree runner in run-task.ts): 22 requeues and 9 skips.
+      36 + 5 + 5 + 22 = 68; 35 + 2 + 9 = 46.
+    - The first three change what the reviewer judges or how; their requeues are correct. #19940
+      changes only how the parent process gets a tree for the review child. Running the repository's
+      own classifier (runTaskAdvanceTouchesReviewPath and reviewerCodeFreshnessAt from
+      src/lib/self-sync.ts, under tsx, on the real shas) gives: 72649c19..93b21bd1b^ and
+      4c8e0d16..93b21bd1b^ fresh (their run-task.ts hunks avoid the review path); 93b21bd1b^..93b21bd1b
+      stale, first because src/lib/reviewer-worktree-lease.ts is listed, and in run-task.ts because
+      "hunk @@ -640 +640 @@ meets the review path": the import adds ReviewerWorktreeLeasedError,
+      which is used only inside buildFreshTreeReviewRunner, a review root.
+    HOW REVIEWER CODE IS IDENTIFIED TODAY (origin/main dd829e355):
+    - A verdict records the full commit sha of the tree that computed it (reviewer_code_sha), and the
+      status carries it as "[review code <sha>]" (src/lib/review.ts:12248-12257). The sha is a commit,
+      not a digest, but freshness is not sha equality: src/lib/self-sync.ts:959
+      reviewerMainAdvanceSteps diffs merge-base..origin/main and calls the code stale only when
+      reviewAdvanceIsMaterialAtSteps (self-sync.ts:1396) finds a material path:
+      REVIEW_MATERIAL_ADVANCE_PATHS (self-sync.ts:1032, W1-T3735), with comment-only .ts changes
+      ignored (W1-T12824) and src/run-task.ts counted only for hunks that meet the units reached from
+      REVIEW_PATH_SYMBOLS_IN_RUN_TASK (self-sync.ts:1061, W1-T4469; walk in scanReviewPath at :1308).
+    - Every consumer uses that one predicate: the sweep requeue (src/lib/sweep.ts:15821
+      reviewerCodeRequeue, called at :24564 for mergeable, blocked-fixable, post-review and other
+      dispositions, through reviewerCodeJudge at self-sync.ts:926 wired in
+      src/cli/commands/sweep.ts:294-295); the restore and reuse paths (src/cli/commands/sweep.ts:337,
+      :409); the outbox drain (src/lib/review.ts:12794-12805); the publication refusal
+      (review.ts:12261); and the run child's start gate, which writes
+      review.skipped_stale_reviewer_code (src/lib/run-child.ts:1446-1492). So the merge gate already
+      accepts an older verdict sha when the advance is immaterial. The reviewer-image path
+      (sweep.ts:15763, W1-T9970) is separate and not changed.
+    - SAFETY PROPERTY: a verdict that gates a merge must come from reviewer logic that, for this
+      input, behaves as current main's would. Requeueing is how a verdict from old logic is replaced.
+      It must still happen for any change to code that decides a verdict.
+    WHY THE PLACEMENT UNITS CANNOT DECIDE A VERDICT: on a stale code sha, the gate
+    (run-child.ts:1446) hands the review to buildFreshTreeReviewRunner (src/run-task.ts:2061), which
+    finds or cuts a tree at origin/main, takes the tree lease, and calls spawnReview; the verdict is
+    computed by the child rmd review in that tree (spawnRmdReviewForFreshTree, run-task.ts:2309), and
+    the child records its own HEAD as reviewer_code_sha. The parent's tree code passes only the tree
+    path and the argument list [prArg, ...rest] (run-task.ts:2074). A wrong tree is caught by the same
+    judge, because the verdict carries the sha of the tree that computed it. The argument list is
+    pinned by criterion 4.
+    WHY NOT A WHOLE-CLOSURE DIGEST: the static import closure of src/lib/review.ts, src/run-task.ts
+    and src/cli/commands/review.ts (a regex walk of static and literal dynamic imports; 19 files
+    have a non-literal dynamic import) holds 737 files, nearly all of src. 71 of the 269 commits
+    touch it, against the 4 that today's key judged material. It would avoid 0 of the 68 stale
+    requeues (all 4 merges touch closure files) and make about 67 more merges material. Even one
+    level down, review.ts's 35 direct src/lib imports were touched by 5 commits that are not the 4,
+    all ledger and test-slot infrastructure (ledger.ts, ledger-union.ts, test-slot.ts). File
+    granularity is wrong in both directions; the symbol walk W1-T4469 added is the right grain, and
+    this task tightens its roots.
+    ESTIMATE: with this change, 22 of the 72 requeues (31%) and 9 of the 46 skips in the window
+    would not have happened. The other 46 requeues and 37 skips came from verdict-logic changes and
+    stay. The 4 incomplete requeues (verdicts delivered by work-fix-dispatch runs with no code sha)
+    are a separate fault and are not changed here.
+    No existing task covers this. W1-T4469 and W1-T12824 (merged) built the symbol walk and the
+    unused-import rule. W1-T11847 (merged) made a material advance requeue once per head. W1-T14066
+    (merged) is #19940 itself. W1-T12230 (queued) scores daemon restarts, not reviews. W1-T10269
+    (merged) blames regressions with the same walk; it gets the narrower walk too, which is
+    consistent: a placement unit cannot regress a verdict.
+  design: |
+    INVARIANT verdict-code-only: an advance of main makes delivered reviewer code stale only when it changes code that can decide a verdict; code that only finds, cuts, inspects, leases or removes the review child's tree is not such code.
+    INVARIANT closure-change-rereviews: every change that stale-judged before this task, other than the placement units and the lease file named here, still judges stale.
+    1. src/lib/self-sync.ts: remove "src/lib/reviewer-worktree-lease.ts" from
+       REVIEW_MATERIAL_ADVANCE_PATHS. Ground, in the comment: only src/run-task.ts imports it
+       (run-task.ts:640); it decides whether this process may use a tree path and never computes a
+       verdict. src/lib/affected-suites.ts:493-501 still reaches it through src/run-task.ts's
+       imports, so the review replay suite still runs in CI for a change to it. Do not edit
+       affected-suites.ts.
+    2. src/lib/self-sync.ts: remove "buildFreshTreeReviewRunner" from REVIEW_PATH_SYMBOLS_IN_RUN_TASK.
+       Add an exported const REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK = [
+       "buildFreshTreeReviewRunner", "FreshTreeReviewSeams", "FreshTreeTools", "freshTreeInspector",
+       "inspectFreshReviewerWorktree", "perAttemptTreePath", "prepareFreshOriginMainTree",
+       "inPerAttemptTree", "removePerAttemptTree", "freshOriginMainTreeRunner",
+       "UnprovenFreshTreeError" ], with the ground above as its comment. Before you commit, check
+       every name against origin/main's src/run-task.ts; drop any name whose unit also builds child
+       arguments, environment or installs (makeTreeRunnable stays OUT of the set: it prepares the
+       toolchain that proofs run under).
+    3. In scanReviewPath (self-sync.ts:1308), the walk never enters a unit whose name is in the
+       placement set: it is not added to reached, and its references are not followed. A unit
+       reached another way through a name not in the set is walked as today. A name in the set that
+       is not in the source is ignored. A missing root stays unreadable (material), as today. The
+       W1-T12824 import rule then needs no change: an import binding used only inside placement
+       units is not used by reached code.
+    4. Tests. Criteria 1 to 4 in test/a-run-task-advance-is-classified-by-review-path.test.ts (it
+       already builds run-task fixtures and git repositories with test/helpers/git-repo.ts). Build
+       the criterion 1 fixture as a small run-task.ts with the four roots plus the placement units,
+       shaped like the #19940 hunks (see git show -U0 93b21bd1b -- src/run-task.ts). Criterion 4
+       reads the real src/run-task.ts with readFileSync and splits units with the same scanner the
+       walk uses (export a small helper from self-sync.ts if needed; no new module). Criterion 5 in
+       test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts. Criterion 6 in
+       test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts, with the real
+       reviewerCodeJudge over a git repository, not an injected judge. Title each test
+       "W1-T14152 criterion N: ...". Load test/setup/tmp-hygiene.ts through the existing helpers for
+       any temp folder or HOME. No new test file (a new file importing src/run-task.ts trips the
+       affected-suite reach ratchet; these tests do not import it).
+    5. Before shipping, run the classifier by hand on the real history and put the output in the
+       PR body: reviewerCodeFreshnessAt for 93b21bd1b^ -> 93b21bd1b must be fresh with advance
+       immaterial, and for 096ba3f2b^ -> 096ba3f2b and 593c2168d^ -> 593c2168d must stay stale.
+    No new cap, constant bound, env var or config key. This task does not change src/run-task.ts,
+    src/lib/review.ts or any listed material path, so its own merge does not make the reviewer
+    code stale.
+    Not in scope: the 4 incomplete requeues, the reviewer-image requeue, the reviewer tree lease and
+    cleanup, and the soundness gap that review.ts's own src/lib imports are not material
+    (src/lib/reviewer-health.ts:409-428 already widens with them for blame).
+  falsifier: |
+    At origin/main, criterion 1's fixture is stale: reviewer-worktree-lease.ts is listed, and the
+    import binding is used by the root buildFreshTreeReviewRunner. Drop only the lease file: the
+    run-task hunks still read stale. Drop buildFreshTreeReviewRunner from the roots but leave the
+    walk entering it from reviewCommand: criterion 1 is still stale. Skip whole run-task.ts instead
+    of using the placement set: criterion 2's runReview and spawnRmdReviewForFreshTree cases read
+    fresh. Treat a missing placement name as unreadable: criterion 3's missing-name case reads
+    stale. Change the argument list in buildFreshTreeReviewRunner: criterion 4 fails naming it.
+    Leave the sweep on an injected judge: criterion 6 proves nothing about the shared predicate.
+  note: |
+    Id reserved for run-unfiled-1795265173185 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    After deploy, check: a main advance that changes only the placement units or the lease file
+    writes no sweep.review_requeued row with reason reviewer-code-advanced, and a change to
+    src/lib/review.ts still writes one per open pull request with a delivered verdict.

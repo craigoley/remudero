@@ -57,7 +57,24 @@ export interface BenchmarkCohort {
   servedModelObserved: number;
   apiCostUsd: number;
   subscriptionNotionalUsd: number;
+  /** W1-T13867: the verified outcome of the task behind each call in this cohort, from the same case-file join and
+   * cutoff as `verifiedTaskOutcome`, or that join's named unavailable reason. Recomputed on every snapshot. */
+  verifiedOutcome: CohortVerifiedOutcome | typeof NO_VERIFICATION_JOIN;
 }
+
+/** W1-T13867: one cohort's share of the W1-T4608 join, over its worker calls: an assignment that reached no worker
+ * call is not a call and is not counted. assignments = completed + endedWithoutCompletion + censored + unavailable,
+ * and `reasons` names every counted call not completed, as in BenchmarkVerifiedOutcome. */
+export interface CohortVerifiedOutcome {
+  assignments: number;
+  completed: number;
+  endedWithoutCompletion: number;
+  censored: number;
+  unavailable: number;
+  reasons: Record<string, number>;
+}
+
+const NO_VERIFICATION_JOIN = "unavailable-no-github-verification-join" as const;
 
 export interface CohortFieldCoverage {
   denominator: number;
@@ -200,13 +217,27 @@ function checkpointPath(stateDir: string): string {
   return join(stateDir, "benchmark-cohort-index.json");
 }
 
-function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
+/** `seen.identity` becomes the identity of the index this read returns: the file it read, or the one its migration
+ * published. A later rewrite publishes only while that index is still the one on disk. */
+function readCheckpoint(stateDir: string, io: CheckpointIO, seen: { identity: string | null }): Checkpoint {
   const legacy = join(stateDir, "benchmark-cohort-v1.json");
   const destination = checkpointPath(stateDir);
-  const path = existsSync(destination) ? destination : legacy;
+  let path = destination;
   let parsed: { version?: string; sources?: unknown; baselineSources?: unknown; sourceFaults?: unknown; lastGood?: unknown };
   try {
-    const encoded = readFileSync(path);
+    // Open, never test-then-open: the descriptor read is the file whose identity is recorded.
+    let fd: number;
+    try { fd = openSync(destination, "r"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+      path = legacy;
+      fd = openSync(legacy, "r");
+    }
+    let encoded: Buffer;
+    try {
+      if (path === destination) seen.identity = identityOf(fstatSync(fd, { bigint: true }));
+      encoded = readFileSync(fd);
+    } finally { closeSync(fd); }
     io.checkpointReadBytes += encoded.length;
     parsed = object(JSON.parse(encoded.toString())) ?? {};
   } catch (error) {
@@ -226,6 +257,7 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
         ...(validLastGood(parsed.lastGood, lastGoodSources, parsed.sourceFaults ?? [], parsed.baselineSources !== undefined)
           ? { lastGood: parsed.lastGood } : {}) };
       writeCheckpoint(stateDir, checkpoint, io);
+      seen.identity = publishedIdentities.get(io) ?? null;
       unlinkSync(legacy);
       return checkpoint;
     }
@@ -292,7 +324,51 @@ function readCheckpoint(stateDir: string, io: CheckpointIO): Checkpoint {
       ? { lastGood: parsed.lastGood } : {}) };
 }
 
-function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO): number {
+/** A file's identity. A publish renames a new file into place, so every publish changes it; a rename keeps the inode
+ * and the mtime, so the identity of a temporary file is the identity of the index it becomes. */
+function identityOf(stat: { ino: bigint; size: bigint; mtimeNs: bigint }): string {
+  return `${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+}
+
+/** The published index's identity, or null when none exists. */
+function indexIdentity(stateDir: string): string | null {
+  const stat = statSync(checkpointPath(stateDir), { bigint: true, throwIfNoEntry: false });
+  return stat ? identityOf(stat) : null;
+}
+
+/** The identity of the index each pass's writes last published, keyed by that pass's IO tally. */
+const publishedIdentities = new WeakMap<CheckpointIO, string>();
+const INDEX_LOCK_STALE_MS = 5_000;
+
+/** Every publication (identity check, rename, segment retirement) runs under one lock file, so to every other writer a
+ * rewrite's identity check and its rename are one step. A writer that meets a held lock never blocks the pass: it
+ * publishes nothing, and the next pass redoes its work from the index on disk. A lock older than INDEX_LOCK_STALE_MS,
+ * which only a writer that died holding it leaves, is broken. */
+function withIndexLock<T>(stateDir: string, publish: () => T): T | undefined {
+  const lock = `${checkpointPath(stateDir)}.lock`;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try { fd = openSync(lock, "wx"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "EEXIST") throw error;
+      const held = statSync(lock, { throwIfNoEntry: false });
+      if (held !== undefined && systemClock.now() - held.mtimeMs > INDEX_LOCK_STALE_MS) { unlinkSync(lock); continue; }
+      return undefined;
+    }
+  }
+  const mine = fstatSync(fd).ino;
+  try { return publish(); } finally {
+    // Release only this writer's own lock, never one another writer took after breaking a stale one.
+    if (statSync(lock, { throwIfNoEntry: false })?.ino === mine) unlinkSync(lock);
+    closeSync(fd);
+  }
+}
+
+/** With `expected`, this is a rewrite of the index this pass read, not a rebuild: it publishes only while that index
+ * is still the one on disk, and retires no segment, since another pass may have published the index that names it.
+ * Returns the bytes the published index holds, or undefined when this write published nothing. */
+function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: CheckpointIO,
+  expected?: { identity: string | null }): number | undefined {
   const sealedSegments = new Map<string, SegmentState>();
   const save = (source: SourceRecord): SegmentReference => {
     // V1 JSON gives the baseline and current copies of immutable evidence different identities.
@@ -335,17 +411,26 @@ function writeCheckpoint(stateDir: string, checkpoint: Checkpoint, io: Checkpoin
   const encoded = JSON.stringify({ ...checkpoint, version: "benchmark-cohort-segments-v2", sources, baselineSources });
   const destination = checkpointPath(stateDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
   try {
     writeFileSync(temporary, encoded);
-    io.checkpointWrittenBytes += Buffer.byteLength(encoded);
-    renameSync(temporary, destination);
+    const published = withIndexLock(stateDir, () => {
+      // A newer index from another pass wins: this pass's rewrite of an older one is dropped, never published over it.
+      if (expected && indexIdentity(stateDir) !== expected.identity) return false;
+      const identity = identityOf(statSync(temporary, { bigint: true }));
+      io.checkpointWrittenBytes += Buffer.byteLength(encoded);
+      renameSync(temporary, destination);
+      publishedIdentities.set(io, identity);
+      // A rewrite names exactly the segments it read and retires none.
+      if (!expected) for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
+        if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
+          unlinkSync(join(stateDir, entry.name));
+      }
+      // Measured under the lock, before another writer can retire a segment this index names.
+      return Buffer.byteLength(encoded) + [...retained].reduce((sum, segment) => sum + statSync(join(stateDir, segment)).size, 0);
+    });
+    return published === false ? undefined : published;
   } finally { if (existsSync(temporary)) unlinkSync(temporary); }
-  const retained = new Set([...sources, ...baselineSources ?? []].map((source) => source.segment));
-  for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
-    if (entry.isFile() && /^benchmark-cohort-segment-[a-zA-Z0-9.-]+\.ndjson$/.test(entry.name) && !retained.has(entry.name))
-      unlinkSync(join(stateDir, entry.name));
-  }
-  return Buffer.byteLength(encoded) + [...retained].reduce((sum, segment) => sum + statSync(join(stateDir, segment)).size, 0);
 }
 
 async function sourceHashes(path: string, prefixBytes?: number, throughBytes?: number): Promise<{ full: string; prefix?: string }> {
@@ -550,8 +635,25 @@ function finiteCost(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+/** W1-T13867: a snapshot carried past a pass that made no join of its own names the unavailable reason, rows and
+ * total alike; an earlier pass's join was made at that pass's cutoff and is never reported as a later one's. */
+function withoutJoin(snapshot: BenchmarkCohortSnapshot): BenchmarkCohortSnapshot {
+  return { ...snapshot, cohorts: snapshot.cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: NO_VERIFICATION_JOIN })),
+    verifiedTaskOutcome: NO_VERIFICATION_JOIN };
+}
+
+/** A pass that stops before joining persists its carried snapshot without the earlier join it held. */
+function dropJoin(checkpoint: Checkpoint): void {
+  if (checkpoint.lastGood) checkpoint.lastGood = withoutJoin(checkpoint.lastGood);
+}
+
+function hasJoin(snapshot: BenchmarkCohortSnapshot | undefined): boolean {
+  return snapshot !== undefined && (typeof snapshot.verifiedTaskOutcome !== "string"
+    || snapshot.cohorts.some((cohort) => typeof cohort.verifiedOutcome !== "string"));
+}
+
 function emptySnapshot(reason: string, lastGood?: BenchmarkCohortSnapshot): BenchmarkCohortSnapshot {
-  return lastGood ? { ...lastGood, state: "unavailable", reason, lastGoodAt: lastGood.asOf ?? undefined } : {
+  return lastGood ? { ...withoutJoin(lastGood), state: "unavailable", reason, lastGoodAt: lastGood.asOf ?? undefined } : {
     version: BENCHMARK_COHORT_VERSION, state: "unavailable", reason, asOf: null,
     sourceLineage: [], sourceRows: { assignments: 0, attempts: 0, terminals: 0,
       unmatchedAttempts: 0, unmatchedTerminals: 0, invalidAssignmentRows: 0,
@@ -687,7 +789,7 @@ function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
   return eligible;
 }
 
-type CohortAssignment = VerifiedAssignment & { exposure: Omit<ModelExposure, "verified" | "cost"> };
+type CohortAssignment = VerifiedAssignment & { cohortKey: string; exposure: Omit<ModelExposure, "verified" | "cost"> };
 
 function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): CohortAssignment[] {
   const index = indexEvidence(sources);
@@ -703,7 +805,7 @@ function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): Coho
     const billingMode = sameRunCall?.billing_mode;
     const servedModel = typeof sameRunCall?.served_model === "string" && sameRunCall.served_model ? sameRunCall.served_model : null;
     const requested = object(object(row.worker_assignment)?.requested)?.model;
-    assignments.push({ assignmentId: id,
+    assignments.push({ assignmentId: id, cohortKey: JSON.stringify(dimensions),
       taskId: typeof row.task_id === "string" ? row.task_id : null,
       runId: typeof row.run_id === "string" ? row.run_id : null,
       assignedAt: typeof row.ts === "string" ? row.ts : null,
@@ -798,11 +900,41 @@ function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAss
     coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
 }
 
+/** W1-T13867: give every cohort row its calls' verified outcomes, joined one assignment at a time against its task's
+ * case files at `cutoff`. Without case files every row names the join's unavailable reason, never a guessed outcome. */
+function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOutcome">[], assignments: CohortAssignment[],
+  caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohort[] {
+  if (!caseFiles) return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: NO_VERIFICATION_JOIN }));
+  const byTask = caseFilesByTask(caseFiles);
+  const tallies = new Map<string, CohortVerifiedOutcome>();
+  for (const assignment of assignments) {
+    // An assignment that never reached a worker call is not a call, so no row counts it.
+    if (!assignment.attempted) continue;
+    const tally = tallies.get(assignment.cohortKey)
+      ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} };
+    tallies.set(assignment.cohortKey, tally);
+    const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
+    tally.assignments += coverage.assignments;
+    tally.completed += coverage.completed;
+    tally.endedWithoutCompletion += coverage.endedWithoutCompletion;
+    tally.censored += coverage.censored;
+    tally.unavailable += coverage.unavailable;
+    for (const [reason, count] of Object.entries(coverage.reasons)) tally.reasons[reason] = (tally.reasons[reason] ?? 0) + count;
+    // The join censors only a call whose PR is open at the cutoff; the row names that reason too.
+    if (coverage.censored > 0) tally.reasons["open-at-cutoff"] = (tally.reasons["open-at-cutoff"] ?? 0) + coverage.censored;
+  }
+  return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: tallies.get(JSON.stringify(cohort.dimensions))
+    ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} } }));
+}
+
 function withVerifiedOutcome(snapshot: BenchmarkCohortSnapshot, sources: SourceRecord[], faults: SourceFault[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohortSnapshot {
-  if (!caseFiles) return snapshot;
+  // W1-T13867: a cached pass reports what a fresh pass with the same case files and cutoff reports, rows and totals
+  // alike (buildSnapshot computes these same fields the same way). Without case files it names the unavailable
+  // reason: an earlier pass's join was made at that pass's cutoff, and is never reported as this one's.
   const assignments = cohortAssignments(sources, faults);
-  return { ...snapshot, verifiedTaskOutcome: joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff),
+  return { ...snapshot, cohorts: withCohortOutcomes(snapshot.cohorts, assignments, caseFiles, cutoff),
+    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(assignments, caseFiles, cutoff) : NO_VERIFICATION_JOIN,
     modelDrift: deriveModelDrift(driftExposures(assignments, caseFiles, cutoff), cutoff),
     selfForecastCalibration: selfForecastCalibration(sources, assignments, caseFiles, cutoff) };
 }
@@ -853,7 +985,7 @@ function deriveSnapshot(
     const runId = evidence.row.run_id;
     if (typeof runId === "string" && runId.length > 0) runs.set(runId, (runs.get(runId) ?? 0) + 1);
   }
-  const groups = new Map<string, BenchmarkCohort>();
+  const groups = new Map<string, Omit<BenchmarkCohort, "verifiedOutcome">>();
   if (prior && dirtyKeys) for (const cohort of prior.cohorts) {
     const key = JSON.stringify(cohort.dimensions);
     if (!dirtyKeys.has(key)) groups.set(key, cohort);
@@ -948,7 +1080,7 @@ function deriveSnapshot(
       unmatchedTerminals: [...terminals.keys()].filter((id) => !assignments.has(id)).length,
       invalidAssignmentRows, attemptRowsWithoutAssignmentId, terminalRowsWithoutAssignmentId,
       conflictingAssignments, duplicateRows },
-    cohorts,
+    cohorts: withCohortOutcomes(cohorts, joined, caseFiles, asOf),
     coverage,
     verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
     modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
@@ -987,14 +1119,20 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   io: CheckpointIO): Promise<BenchmarkCohortPassResult> {
   const maxSources = opts.maxSources ?? 1;
   if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
-  const checkpoint = readCheckpoint(stateDir, io);
+  const readIdentity: { identity: string | null } = { identity: null };
+  const checkpoint = readCheckpoint(stateDir, io, readIdentity);
+  // A pass that stops before joining leaves no earlier join on disk; the rewrite yields to a newer index.
+  const unjoinOnDisk = (): number | undefined => hasJoin(checkpoint.lastGood)
+    ? writeCheckpoint(stateDir, { ...checkpoint, lastGood: withoutJoin(checkpoint.lastGood!) }, io, readIdentity) : undefined;
+  const bytesOf = (checkpointBytes: number | undefined) => checkpointBytes === undefined ? {} : { checkpointBytes };
   let current: ManifestEntry[];
   try { current = manifest(stateDir); }
   catch {
     // An unreadable ledger directory is not an observed empty cohort; preserve the last good snapshot.
     return { state: "unavailable", snapshot: emptySnapshot("ledger-source-unreadable", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
   }
-  if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood), scannedSources: 0, pendingSources: 0 };
+  if (current.length === 0) return { state: "unavailable", snapshot: emptySnapshot("ledger-source-missing", checkpoint.lastGood),
+    scannedSources: 0, pendingSources: 0, ...bytesOf(unjoinOnDisk()) };
   const known = new Map(checkpoint.sources.map((source) => [source.name, source]));
   const faults = new Map((checkpoint.sourceFaults ?? []).map((fault) => [fault.name, fault]));
   const changed = current.filter((entry) => {
@@ -1023,16 +1161,25 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
         : error instanceof Error && error.message === "ledger-live-not-a-file" ? "ledger-live-invalid-before-scan"
         : "ledger-live-unreadable-before-scan";
       return { state: "unavailable", snapshot: emptySnapshot(reason, checkpoint.lastGood),
-        scannedSources: 0, pendingSources: 1 };
+        scannedSources: 0, pendingSources: 1, ...bytesOf(unjoinOnDisk()) };
     }
   }
   if (changed.length === 0 && checkpoint.lastGood && !checkpoint.baselineSources
     && checkpoint.sources.length + faults.size === current.length) {
     const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0
       ? { ...checkpoint.lastGood, state: "unavailable" as const } : checkpoint.lastGood;
-    return { state: faults.size === 0 ? "complete" : checkpoint.lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
-      snapshot: withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
-        opts.nowIso ?? systemClock.iso()), scannedSources: 0, pendingSources: 0 };
+    const snapshot = withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
+      opts.nowIso ?? systemClock.iso());
+    // W1-T13867: the index left on disk holds the rows this pass reports, as a fresh pass's would.
+    const overlay = { cohorts: snapshot.cohorts, verifiedTaskOutcome: snapshot.verifiedTaskOutcome,
+      modelDrift: snapshot.modelDrift, selfForecastCalibration: snapshot.selfForecastCalibration };
+    const lastGood = checkpoint.lastGood;
+    // Only a change in the rows or the totals is written, so a repeated pass at a later cutoff stays a read.
+    const checkpointBytes = JSON.stringify([overlay.cohorts, overlay.verifiedTaskOutcome])
+      === JSON.stringify([lastGood.cohorts, lastGood.verifiedTaskOutcome]) ? undefined
+      : writeCheckpoint(stateDir, { ...checkpoint, lastGood: { ...lastGood, ...overlay } }, io, readIdentity);
+    return { state: faults.size === 0 ? "complete" : lastGood.cohorts.length > 0 ? "quarantined" : "unavailable",
+      snapshot, scannedSources: 0, pendingSources: 0, ...bytesOf(checkpointBytes) };
   }
   if (!checkpoint.baselineSources && checkpoint.sources.length > 0
     && (checkpoint.lastGood || checkpoint.sources.some((source) => !current.some((entry) => entry.name === source.name)))) {
@@ -1069,6 +1216,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   }).length;
   if (pendingSources > 0) {
+    dropJoin(checkpoint);
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "partial", snapshot: emptySnapshot("scan-incomplete", checkpoint.lastGood), scannedSources, pendingSources, checkpointBytes };
   }
@@ -1085,6 +1233,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     } catch (error) {
       const reason = error instanceof Error && error.message === "ledger-live-changed-after-scan"
         ? "ledger-live-changed-after-scan" : "ledger-live-unreadable-after-scan";
+      dropJoin(checkpoint);
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "partial", snapshot: emptySnapshot(reason, checkpoint.lastGood),
         scannedSources, pendingSources: 1, checkpointBytes };
@@ -1094,6 +1243,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     const successorFingerprints = new Set(checkpoint.sources.flatMap((source) => source.rows.map((row) => row.fingerprint)));
     if (checkpoint.sourceFaults.length === 0
       && checkpoint.baselineSources.some((source) => source.rows.some((row) => !successorFingerprints.has(row.fingerprint)))) {
+      dropJoin(checkpoint);
       const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
       return { state: "unavailable", snapshot: emptySnapshot("retired-source-evidence-not-reconciled", checkpoint.lastGood),
         scannedSources, pendingSources: 0, checkpointBytes };
@@ -1115,6 +1265,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
   }
   if (snapshot.sourceRows.conflictingAssignments > 0) {
+    dropJoin(checkpoint);
     const checkpointBytes = writeCheckpoint(stateDir, checkpoint, io);
     return { state: "unavailable", snapshot: emptySnapshot("conflicting-assignment-ids", checkpoint.lastGood),
       scannedSources, pendingSources: 0, checkpointBytes };
@@ -1302,7 +1453,9 @@ export async function runBenchmarkVerifiedOverlayPass(
     }
     const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed as TaskCaseFile[] });
     console.log(JSON.stringify({ event: "benchmark_cohort.verified_overlay", state: result.state,
-      verified_task_outcome: result.snapshot.verifiedTaskOutcome }));
+      verified_task_outcome: result.snapshot.verifiedTaskOutcome,
+      // W1-T13867: each cohort row's own outcome counts, so the analyst can score each model by result.
+      cohorts: result.snapshot.cohorts.map((cohort) => ({ dimensions: cohort.dimensions, verified_outcome: cohort.verifiedOutcome })) }));
     return 0;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;

@@ -163,9 +163,10 @@ function validateOptionalReason(body: unknown): { error: string } | OptionalReas
 /** Ledger one panel action, keyed by `ledgerPath` alone (not the full `PanelActionDeps`) so
  *  panel-graph.ts's routes, which have no `issues` gateway, can ledger through the same
  *  primitive rather than re-deriving the `run_id` shape a second time. */
-export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {}): PanelLedgerRow {
+export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {},
+  clock: Clock = systemClock): PanelLedgerRow {
   // W1-T4657: ts and run_id come from ONE clock read and are returned, so an executor can cite the row.
-  const ms = systemClock.now();
+  const ms = clock.now();
   const row: PanelLedgerRow = { step, ts: fixedClock(ms).iso(), run_id: `PANEL-${ms}` };
   appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });
   return row;
@@ -179,8 +180,8 @@ export interface PanelLedgerRow {
 }
 
 /** Ledger one panel action. Every route below funnels through this so the shape is uniform: step name, the caller's `origin`, plus whatever fields that action names. */
-function ledgerPanelAction(deps: PanelActionDeps, step: string, taskId: string, origin: string, extra: Record<string, unknown>): void {
-  appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra);
+function ledgerPanelAction(deps: PanelActionDeps, step: string, taskId: string, origin: string, extra: Record<string, unknown>, clock?: Clock): void {
+  appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra, clock);
 }
 
 /** Wrap a route body: parse JSON, run `validate` (an error string fails loud with a 400 before
@@ -702,13 +703,15 @@ export function buildAnswerQuestionRoute(deps: PanelActionDeps): Route {
     tier: "low",
     handler: jsonAction(validateAnswerQuestion, (input, req, res) => {
       const origin = bearerTokenId(req);
-      const ts = new Date().toISOString();
-      const recordedToQuestionStore = appendQuestionAnswer(deps.root, { ts, task: input.taskId, answer: input.answer, origin });
+      const at = fixedClock((deps.clock ?? systemClock).now()); // W1-T13940: one reading stamps the store line and the ledger row.
+      const answerId = randomUUID();
+      const recordedToQuestionStore = appendQuestionAnswer(deps.root, { ts: at.iso(), task: input.taskId, answer: input.answer, origin, answer_id: answerId });
       ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
         answer: input.answer,
+        answer_id: answerId,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
-      });
+      }, at);
       sendJson(res, 200, { ok: true, taskId: input.taskId, answer: input.answer });
     }),
   };
@@ -1065,12 +1068,20 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       const entry = recovered?.entry ?? captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
       const staged = recovered?.staged ?? queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
+      const answerId = randomUUID();
+      const at = fixedClock((deps.clock ?? systemClock).now());
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
-        ts: (deps.clock ?? systemClock).iso(),
+        ts: at.iso(),
         task: input.taskId,
         answer: input.text,
         origin,
+        answer_id: answerId,
       });
+      // W1-T13940: the daemon reads this row; config.root's store is not its own. A PR-<n> key holds no plan task, and
+      // its row would read as that PR's unfiled scope grant (fix-progress-judge.ts unfiledScopeGrant), which a reply never is.
+      if (!/^PR-\d+$/.test(input.taskId)) ledgerPanelAction(deps, "panel.question_answered", input.taskId, origin, {
+        answer: input.text, answer_id: answerId, flows_to: "plan/questions.ndjson", recorded_to_question_store: recordedToQuestionStore,
+      }, at);
       ledgerPanelAction(deps, "panel.escalation_replied", input.taskId, origin, {
         thread_id: threadId,
         feedback_id: entry.id,

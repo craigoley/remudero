@@ -1,0 +1,50 @@
+- id: W1-T14141
+  title: A learning the measured outcome says hurts becomes a retirement candidate in the knowledge gardener
+  repo: remudero
+  depends_on: [W1-T11115]
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # spans the knowledge gardener and the outcome estimator; the retirement still lands as a reviewed PR
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T4241, W1-T4110, W1-T11115]
+  files:
+    - src/lib/knowledge-gardener.ts
+    - src/lib/knowledge-outcome.ts
+    - test/learning/a-learning-that-hurts-is-proposed-for-retirement.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - src/lib/knowledge-outcome.ts (W1-T4241) estimates each contested learning's effect from the randomized budget draw, with
+      self-normalised inverse-propensity weights (Hajek, :72-93), and reads helps, hurts, no-detectable-effect or unmeasurable. Its
+      header says "SURFACE, DO NOT ACT" (:19-20).
+    - The measurement cadence writes the result as `knowledge.measured` (src/run-task.ts:22884-22893; runKnowledgeMeasurement,
+      src/lib/measurement-cadence.ts:2394). Only the digest reads it (src/lib/digest.ts:607, 631). A learning measured to hurt
+      keeps being injected.
+    - The knowledge gardener already retires learnings through reviewed PRs: candidateActions (src/lib/knowledge-gardener.ts:744-803)
+      with a per-certainty cap of 3 a pass (:162, :804-812), test pins and declined filters, and applyLearningActions (:820-850).
+    - W1-T11115 (queued) edits knowledge-outcome.ts, so this task follows it.
+  design: |
+    1. In the gardener's inventory, read the newest knowledge.measured outcomes, in the shape the digest reads (digest.ts:631-645).
+    2. In candidateActions, after the existing retire loop, add a `retire` action for each `hurts` verdict. Its certainty is
+       |effect| / se, and its reason names the effect, its standard error and the arm counts. The existing cap, pins, declined
+       filter and PR path apply unchanged.
+    3. helps, no-detectable-effect and unmeasurable never produce an action.
+    4. Change knowledge-outcome.ts's header from "SURFACE, DO NOT ACT" to say that only a hurts verdict feeds a retirement
+       candidate.
+
+    INVARIANT only-measured-harm-acts: a learning is proposed for retirement from this source only when its measured verdict is hurts.
+  acceptance:
+    - claim: "A learning whose newest measured verdict is hurts becomes one retire candidate whose reason names the effect, its standard error and the arm counts"
+      proof: "grep: W1-T14141 criterion 1: in test/learning/a-learning-that-hurts-is-proposed-for-retirement.test.ts"
+    - claim: "invariant:only-measured-harm-acts — helps, no-detectable-effect and unmeasurable verdicts produce no action"
+      kind: guard
+      proof: "grep: W1-T14141 criterion 2: in test/learning/a-learning-that-hurts-is-proposed-for-retirement.test.ts"
+    - claim: "The per-pass cap, test pins and declined filter apply to these candidates as to every other retire"
+      proof: "grep: W1-T14141 criterion 3: in test/learning/a-learning-that-hurts-is-proposed-for-retirement.test.ts"
+  falsifier: |
+    Propose a retire for an unmeasurable verdict and criterion 2 must fail. Skip the cap for these candidates and criterion 3 must
+    fail. Restore and require all to pass.

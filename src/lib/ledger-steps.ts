@@ -650,6 +650,15 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["stageSkillLifecycleForAction"],
     outcomes: ["RETIRE-CANDIDATE", "REVIEW-CANDIDATE", "INSUFFICIENT EVIDENCE"],
   },
+  {
+    step: "inbox.draft_cash_skipped",
+    meaning:
+      "A cash inbox draft was not started, because its estimated whole run was larger than the model's window " +
+      "(reason window) or the cash allowance left today (reason allowance). The refused cash run sent no request. " +
+      "The proposal stays due without an attempt key. A retry resumes any earlier paid work separately.",
+    writer: ["runDraftRung"],
+    outcomes: ["window", "allowance"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
