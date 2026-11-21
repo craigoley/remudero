@@ -2426,19 +2426,15 @@ export interface ParsedCodexEvents {
   retentionLoss: CodexRetentionLoss;
 }
 
-/** W1-T13960: what certifies a run with a line rebuilt from its spill. */
 export interface CodexRetentionLoss {
-  /** The last message arrived intact after every rebuilt line, then its turn.completed intact. */
   finalMessageSealed: boolean;
   rebuiltLines: number;
-  /** A budget cut is not a spill. */
   rebuiltDroppedBytes: number;
-  /** Spill files not holding their line's bytes: a veto only. */
   unaccountedSpills: number;
 }
 
-/** W1-T13960: main's all-complete rule, unless a line was rebuilt: then only a success with a complete final turn
- *  and stderr, whose only loss is in accounted rebuilt lines before its final message. */
+/** W1-T13960: main's rule; after a rebuilt line, only a success whose sole loss is accounted
+ *  rebuilt lines before its sealed final message. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
@@ -2821,7 +2817,7 @@ export class CodexJsonlAccumulator {
   private rebuiltLines = 0;
   private rebuiltDroppedBytes = 0;
   private unaccountedSpills = 0;
-  /** W1-T13960: a rebuilt line resets both, as one after the last intact message could be the final one. */
+  /** W1-T13960: a rebuilt line resets both: it could be the final message. */
   private messageOpen = false;
   private messageSealed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
@@ -2874,7 +2870,7 @@ export class CodexJsonlAccumulator {
       // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
       const whole = agent || lineBytes <= 320 * 1024;
       const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
-      // W1-T13960: a short or rewritten spill file only vetoes the upgrade.
+      // W1-T13960: a veto only.
       if (tail.fileBytes !== lineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
