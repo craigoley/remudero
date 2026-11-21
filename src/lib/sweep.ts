@@ -6904,10 +6904,23 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
     age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
 }
 
-/** W1-T14035 — the death proof is a snapshot of the ledger the view was built from. At action time a newer claim or hold
- *  row on this head by any other run than the named owner is a live reviewer the proof never saw, so the head waits
- *  (invariant live-claim-waits). With no owner named (a view no producer built), the alongside-CI lane's view waits on any
- *  claim newer than the judged one; a green-check view keeps main's behaviour. Names that run; undefined when it stands. */
+/** W1-T14177 — rows after which a review run holds no claim: it published (a hold included), stood down, was refused, or
+ *  recorded its decision. */
+const REVIEW_RUN_SETTLED_STEPS = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
+  "review.skipped_closed_lifecycle"]);
+
+/** W1-T14035/W1-T14177 — the death proof is a snapshot, proven about the run the view's ledger named for the live status the
+ *  view's rollup held (INVARIANT one-live-review-owner). THREAT MODEL at the moment the sweep admits a re-run on it:
+ *  (1) a live reviewer's claim row reached the ledger after the view was built: this function names it from the fresh ledger.
+ *      Only a LIVE replacement counts, another run whose claim row has no settled row of its own after it. A completed
+ *      hold holds nothing: reviewCommand continues past a claim no-op and records its pending hold under its own run id.
+ *  (2) GitHub accepted a live takeover before that reviewer's ledger append: the ledger cannot show it, so the sweep re-reads
+ *      the PR ({@link deadOwnerProofStillLive}) and admits only while the producer, on GitHub's live status, still binds the
+ *      same post to the same dead owner.
+ *  (3) a takeover lands after that re-read and before the admitted reviewer publishes: postReviewPending's own guard covers
+ *      it. It re-reads the live status, assesses only that status's writer, and leaves a young claim it cannot prove dead.
+ *  With no owner named (a view no producer built), the alongside-CI lane's view counts only a live claim newer than the
+ *  judged one, and a green-check view keeps main's behaviour. Returns the live run's name, or undefined. */
 export function deadOwnerProofSuperseded(
   pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId" | "reviewPendingSince" | "headSha" |
     "prUrl" | "taskId" | "checksState">,
@@ -6915,17 +6928,37 @@ export function deadOwnerProofSuperseded(
 ): string | undefined {
   if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true) return undefined;
   if (pr.reviewPendingOwnerRunId === undefined && pr.checksState !== "pending") return undefined;
-  let newest: Record<string, unknown> | undefined;
-  for (const line of lines) {
-    if (line.head_sha !== pr.headSha || (line.pr_url !== undefined ? line.pr_url !== pr.prUrl : line.task_id !== pr.taskId)) continue;
-    if (line.step === "review.pending_posted" || (line.step === "review.posted" && line.state === "pending")) newest = line;
-  }
-  if (newest === undefined) return undefined;
-  const run = typeof newest.run_id === "string" ? newest.run_id : "an unnamed run";
-  if (pr.reviewPendingOwnerRunId !== undefined) return newest.run_id === pr.reviewPendingOwnerRunId ? undefined : run;
-  const at = Date.parse(typeof newest.ts === "string" ? newest.ts : "");
   const since = Date.parse(pr.reviewPendingSince ?? "");
-  return newest.step === "review.pending_posted" && !(Number.isFinite(at) && Number.isFinite(since) && at <= since) ? run : undefined;
+  const live = new Map<string, boolean>();
+  for (const line of lines) {
+    const run = typeof line.run_id === "string" ? line.run_id : undefined;
+    if (run === undefined || run === pr.reviewPendingOwnerRunId) continue;
+    const claim = line.step === "review.pending_posted" && line.head_sha === pr.headSha &&
+      (line.pr_url !== undefined ? line.pr_url === pr.prUrl : line.task_id === pr.taskId);
+    const at = Date.parse(typeof line.ts === "string" ? line.ts : "");
+    if (claim && (pr.reviewPendingOwnerRunId !== undefined || !(Number.isFinite(at) && Number.isFinite(since) && at <= since))) {
+      live.set(run, true);
+    } else if (live.has(run) && typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) live.set(run, false);
+  }
+  return [...live].find(([, claimed]) => claimed)?.[0];
+}
+
+/** W1-T14177 — threat (2) of {@link deadOwnerProofSuperseded}: the act-time re-read view must be the same head, still carry
+ *  the producer's proof that the same owner is dead, name the same writer for the live status, and date that status the same
+ *  (GitHub's created_at). The producer re-binds a hold to its writer by GitHub's status id against the history's newest
+ *  entry (W1-T14035), so a takeover GitHub accepted, with any wording, fails one of these. Returns why it is stale. */
+export function deadOwnerProofStillLive(pr: OpenPrView, reread: OpenPrView | undefined): string | undefined {
+  if (reread === undefined) return "the act-time re-read found the PR no longer open";
+  if (reread.headSha !== pr.headSha) return `the head moved to ${reread.headSha.slice(0, 8)} since the death proof`;
+  if (reread.reviewPendingOwnerDead !== true || reread.reviewPendingOwnerRunId !== pr.reviewPendingOwnerRunId) {
+    return "GitHub's live remudero-review status no longer proves the same owner dead";
+  }
+  if (reread.reviewPendingStatusRunId !== pr.reviewPendingStatusRunId) {
+    return `GitHub's live remudero-review status was written by ${reread.reviewPendingStatusRunId ?? "an unknown run"}`;
+  }
+  return pr.reviewVerdictPostedAt !== undefined && reread.reviewVerdictPostedAt === pr.reviewVerdictPostedAt ? undefined
+    : `GitHub's live remudero-review status was posted at ${reread.reviewVerdictPostedAt ?? "an unread time"}, not the ` +
+      `${pr.reviewVerdictPostedAt ?? "(undated)"} post the death proof was bound to`;
 }
 
 /** W1-T14035 — the hold a dead claim also carries, named beside the dead owner in the alongside-CI reason. */
@@ -23793,14 +23826,26 @@ export async function runSweep(
       }
       // A re-post that a refusal or a backoff holds back is still a delivered key: it dedups, as it did before the shared rule.
       const deliveredDedups = deliveredRule.dedups || restore !== undefined;
-      // W1-T14035: a review the old death proof admits waits when the fresh ledger shows a live claim it never saw.
-      const liveRun = deliveredDedups || durableRefusal || retryBackoff !== undefined
-        ? undefined : deadOwnerProofSuperseded(pr, freshLines);
-      if (liveRun !== undefined) {
+      // W1-T14035/W1-T14177: a review the old death proof admits waits on a live replacement in the fresh ledger, or on
+      // GitHub's live status no longer being the post that proof was bound to (the threat model on deadOwnerProofSuperseded).
+      let stale: string | undefined;
+      if (!(deliveredDedups || durableRefusal || retryBackoff !== undefined)) {
+        const liveRun = deadOwnerProofSuperseded(pr, freshLines);
+        if (liveRun !== undefined) stale = `the fresh ledger holds a live claim by ${liveRun} on this head`;
+        else if (deps.rereadPrAtAct && pr.reviewState === "pending" && producerProvedOwnerDead(pr) &&
+          (pr.reviewPendingOwnerRunId !== undefined || pr.checksState === "pending")) {
+          try {
+            stale = deadOwnerProofStillLive(pr, await deps.rereadPrAtAct(pr));
+          } catch (error) {
+            // Reason: the error text is recorded in the wait reason, so the head waits and names the failed read.
+            stale = `the act-time re-read failed (${String((error as Error)?.message ?? error)})`;
+          }
+        }
+      }
+      if (stale !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return { ok: false, deduped: false, wait: true,
-          reason: `remudero-review owner proof superseded — the fresh ledger holds a newer claim or hold by ${liveRun} on this ` +
-            "head; waiting, re-deriving next sweep" };
+          reason: `remudero-review owner proof superseded — ${stale}; waiting, re-deriving next sweep` };
       }
       if (deliveredDedups || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
