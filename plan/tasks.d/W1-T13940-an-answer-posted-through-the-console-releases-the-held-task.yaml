@@ -28,6 +28,12 @@
     - test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts
     - test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
     - test/ledger-rotation.test.ts
+    - src/lib/human-gate.ts # amended 2026-11-21 for PR 19873: display.more comes from consumeHumanGateCounts
+    - src/lib/needs-you-view.ts # amended 2026-11-21 for PR 19873: passes the shown count to consumeHumanGateCounts
+    - src/lib/instance-gateway.ts # amended 2026-11-21 for PR 19873: already changed by the PR
+    - test/human-gate-surface-counts.test.ts
+    - test/human-gate-operator-items.test.ts
+    - test/human-gate-dependency-verification.test.ts
     - test/now-view.test.ts
     - test/the-needs-you-view-is-a-view-of-views.test.ts
     - test/the-operator-reaches-the-fleet-over-mcp.test.ts
@@ -157,3 +163,6 @@
     rmd mcp answer_question tool land in serve's own checkout (/home/node/rmd-serve-gens/<gen>) and
     never release the held task; the daemon reads only its own plan/questions.ndjson. W1-T11503's
     2026-11-12 answer is the recorded case. Filing only; not built.
+    Scope amendment 2026-11-21 for PR 19873 (review round 3): display.more is exact when every source that produced a gate the list leaves out is complete; needsYou.inbox stays a lower bound while any source is partial.
+    files adds src/lib/human-gate.ts (consumeHumanGateCounts computes display.more), src/lib/needs-you-view.ts (its caller), the
+    three human-gate count tests whose expectations may move, and src/lib/instance-gateway.ts, which the PR already changes.
