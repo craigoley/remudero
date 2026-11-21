@@ -7,8 +7,15 @@
  * again until an operator took the claim over by hand. Every stamp below is aged against the clock each case injects.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, deriveDisposition, type OpenPrView } from "#src/lib/sweep.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, type TestContext } from "node:test";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { reviewInputDigest } from "#src/lib/review.js";
+import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { buildOpenPrViews } from "#src/run-task.js";
 
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
@@ -22,6 +29,7 @@ function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "pending", checksPendingSince: minutesAgo(42), lastActivityAt: minutesAgo(42),
     createdAt: minutesAgo(60), priorStrikes: 0, unmetCriteria: [],
     reviewState: "pending", reviewPendingSince: minutesAgo(23), reviewPendingOwnerDead: true,
+    reviewVerdictPostedAt: new Date(NOW - 23 * 60_000 - 400).toISOString(),
     priorReviewAttemptsForInput: 0,
     ...over,
   } as OpenPrView;
@@ -101,4 +109,107 @@ test("W1-T14035 criterion 3: a stale-only pending claim past the ceiling still w
   const undated = deriveDisposition(deadClaimView({ reviewPendingOwnerDead: undefined, reviewPendingSince: undefined,
     lastActivityAt: undefined }), DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(undated.disposition, "wait", "an undated pending reads stale and still waits");
+});
+
+test("W1-T14035 criterion 1: a dead claim at a looping input keeps the CI-age guard and the stale-CI reason", () => {
+  const looped = { reviewInputDigest: "e".repeat(64),
+    reviewInputLoop: { admissions: 2, postsSinceLastAdmission: 1, posts: 1, lookedUpKey: "W1-T14035" } };
+  const justRegistered = deriveDisposition(deadClaimView({ ...looped, checksPendingSince: new Date(NOW - 30_000).toISOString() }),
+    DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(justRegistered.disposition, "wait", "checks pending 30 s wait, as the alongside-CI row's age guard says");
+  assert.doesNotMatch(justRegistered.reason, /post-review-loop/);
+  const atCeiling = deriveDisposition(deadClaimView({ ...looped, checksPendingSince: minutesAgo(DEFAULT_SWEEP_POLICY.pendingCeilingMinutes) }),
+    DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(atCeiling.disposition, "blocked-ambiguous");
+  assert.doesNotMatch(atCeiling.reason, /post-review-loop/, "the stale-CI reason keeps its precedence at the ceiling");
+  assert.match(atCeiling.reason, new RegExp(`checks pending ${DEFAULT_SWEEP_POLICY.pendingCeilingMinutes}m`));
+});
+
+/** A runSweep harness over one view, with the sweep's own ledger in a private directory. */
+function sweepHarness(t: TestContext) {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const posted: OpenPrView[] = [];
+  const deps: SweepDeps = {
+    ledgerPath, runId: "sweep-t14035", now: () => NOW,
+    arm: () => assert.fail("pending review cannot arm"), close: () => assert.fail("unexpected close"),
+    dispatchFix: () => assert.fail("unexpected fix"), escalate: () => assert.fail("unexpected escalation"),
+    postReview: (candidate) => { posted.push(candidate); },
+    reviewerCodeRecovery: { loadedCodeSha: "fresh-code", isLoadedCodeAtOrAfter: () => true, freshTreeReviewAvailable: true,
+      probeFreshness: async () => ({ status: "fresh", codeSha: "fresh-code", originMainSha: "fresh-code", advance: "none" }) },
+  };
+  return { ledgerPath, posted, deps };
+}
+
+test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undigested promise-harvest hold", async (t) => {
+  const h = sweepHarness(t);
+  const pr = deadClaimView({ reviewInputDigest: "e".repeat(64) });
+  appendLedger(h.ledgerPath, {
+    run_id: "review-PR19791-1795187698034", task_id: pr.taskId!, step: "review.posted", state: "pending",
+    pr_url: pr.prUrl, head_sha: pr.headSha, ts: minutesAgo(20),
+    decision_verdict: { state: "pending", criteria: [], promisedFollowUpObservation: {
+      state: "unknown", cause: "promise-harvest-incomplete", reason: "promise harvest unavailable: AbortError" } },
+  });
+  await runSweep([pr], h.deps, DEFAULT_SWEEP_POLICY);
+  const row = readLedgerLines(h.ledgerPath).findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
+  assert.ok(row, "the sweep disposed the head");
+  assert.equal(row.disposition, "post-review");
+  assert.equal(row.owner_gone_cause, "owner-pid-dead");
+  assert.equal(row.reason, "checks pending 42m, remudero-review owner proven dead (its promise harvest did not complete) — " +
+    "re-running one exact-input review alongside CI through the bounded post-review lane");
+  assert.equal(h.posted.length, 1);
+});
+
+/** #19791's head as the real view producer reads it: checks pending since 42m ago, the dead run's ledger row, and the
+ *  live `remudero-review` status the fetch returns. */
+function producedView(dir: string, liveStatus: { runId: string; createdAt?: string }): OpenPrView {
+  const ledgerPath = join(dir, "ledger.ndjson");
+  const sha = "d".repeat(40);
+  const prUrl = "https://github.com/o/r/pull/19791";
+  const body = "Remudero-Task: W1-T14035";
+  rmSync(ledgerPath, { force: true });
+  appendLedger(ledgerPath, {
+    run_id: "review-PR19791-dead", task_id: "W1-T14035", step: "review.pending_posted", ts: minutesAgo(23),
+    head_sha: sha, pr_url: prUrl, review_input_digest: reviewInputDigest(sha, body),
+    host: hostname(), owner_pid: 41, owner_started_at: minutesAgo(23),
+  });
+  const [pr] = buildOpenPrViews("o", "r", ledgerPath, {
+    requiredContexts: () => ["ci-gate"],
+    assessPendingOwner: (record) => record.runId === "review-PR19791-dead" ? "dead" : "active",
+    fetch: (args) => {
+      const path = args.at(-1)!;
+      if (path.includes("state=open")) return [{
+        number: 19791, html_url: prUrl, head: { ref: "run-W1-T14035-1795190000000", sha },
+        updated_at: minutesAgo(42), created_at: minutesAgo(60), body, auto_merge: null, state: "open",
+      }];
+      if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "in_progress", started_at: minutesAgo(42) }] };
+      if (path.includes("/status")) return { statuses: [{
+        context: "remudero-review", state: "pending",
+        description: `remudero-review: review in progress (owned by run ${liveStatus.runId})`,
+        ...(liveStatus.createdAt !== undefined ? { created_at: liveStatus.createdAt } : {}),
+      }] };
+      if (path.endsWith("/pulls/19791")) return { mergeable: true, mergeable_state: "blocked" };
+      return [];
+    },
+  });
+  assert.ok(pr);
+  return pr;
+}
+
+test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet waits, replayed from the view producer", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const own = producedView(dir, { runId: "review-PR19791-dead", createdAt: minutesAgo(23).replace(/\.\d{3}Z$/, "Z") });
+  assert.equal(own.checksState, "pending");
+  assert.equal(own.reviewPendingOwnerDead, true, "the producer read the dead run's row");
+  assert.equal(deriveDisposition(own, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review",
+    "the dead run's own status is released alongside CI");
+  const newer = producedView(dir, { runId: "review-PR19791-live", createdAt: minutesAgo(2).replace(/\.\d{3}Z$/, "Z") });
+  assert.equal(newer.reviewPendingOwnerDead, true, "the producer still judges the older dead run's row");
+  const live = deriveDisposition(newer, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(live.disposition, "wait", "the live status names a newer claim, so the active claim is not disposed");
+  assert.doesNotMatch(live.reason, /owner proven dead/);
+  const undated = producedView(dir, { runId: "review-PR19791-dead" });
+  assert.equal(deriveDisposition(undated, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait", "an undated live status is an unknown run");
 });

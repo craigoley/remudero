@@ -6603,7 +6603,7 @@ function reviewSetupRefusalRecorded(ledgerLines: ReadonlyArray<Record<string, un
 /** W1-T5863 — true when a post-review demand would re-admit an input the sweep has already admitted
  *  {@link REVIEW_INPUT_ADMISSION_BACKSTOP} times, with a completed post since, that the task-keyed
  *  attempt count still reads as zero. */
-function reviewDemandLooping(pr: OpenPrView): boolean {
+function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: number, now: number): boolean {
   const loop = pr.reviewInputLoop;
   return loop !== undefined &&
     pr.reviewInputDigest !== undefined &&
@@ -6611,18 +6611,39 @@ function reviewDemandLooping(pr: OpenPrView): boolean {
     pr.requiredContextsUnreadable !== true &&
     pr.reviewPostRefused !== true &&
     (pr.checksState === "green" || pr.checksState === "pending") &&
+    // W1-T14035: a dead pending claim is a review demand only where the alongside-CI row would admit it, so the loop
+    // backstop never pre-empts that row's CI-age guard (a 30 s pending waits) or the stale-CI row at the ceiling.
     (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none" ||
-      (pr.checksState === "pending" && pendingClaimOwnerProvenDead(pr))) &&
+      (pendingClaimOwnerProvenDead(pr) && alongsideCiReviewDue(pr, policy, now))) &&
     loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP &&
     loop.postsSinceLastAdmission >= 1;
 }
 
 /** W1-T14035 — the alongside-CI row's release of a pending claim: GitHub reads pending and the view producer's own process
  *  proof says its owner is dead. A derived cause (a refusal, a promise harvest, host load) also sets `reviewPendingOwnerDead`
- *  but proves no death, so it keeps waiting while checks run (invariant live-claim-waits), as {@link pendingHoldOwnerProvenDead}. */
-function pendingClaimOwnerProvenDead(pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone">): boolean {
-  return pr.reviewState === "pending" && pr.reviewPendingOwnerDead === true &&
-    (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead");
+ *  but proves no death, so it keeps waiting while checks run (invariant live-claim-waits), as {@link pendingHoldOwnerProvenDead}.
+ *  The proof is about the run whose ledger row the producer read, so it counts only while the LIVE status is that run's own
+ *  post: that run appends its `review.pending_posted` row only after GitHub accepts its status, so its status was created at or
+ *  before `reviewPendingSince`. A status created later is a newer claim whose row is not visible yet, and an undated side is
+ *  an unknown run; both wait. */
+function pendingClaimOwnerProvenDead(
+  pr: Pick<OpenPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingSince" | "reviewVerdictPostedAt">,
+): boolean {
+  if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true ||
+    (pr.reviewPendingOwnerGone !== undefined && pr.reviewPendingOwnerGone !== "owner-pid-dead")) return false;
+  const liveStatusAt = Date.parse(pr.reviewVerdictPostedAt ?? "");
+  const deadRowAt = Date.parse(pr.reviewPendingSince ?? "");
+  return Number.isFinite(liveStatusAt) && Number.isFinite(deadRowAt) && liveStatusAt <= deadRowAt;
+}
+
+/** W1-T14035 — the alongside-CI post-review row's own guards over a head whose checks are pending: CI registered at least a
+ *  minute ago and is under the ceiling, no exact-input attempt, no refusal and readable contexts. */
+function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+  const age = pendingAgeMinutes(pr, now);
+  return pr.checksState === "pending" &&
+    pr.requiredContextsUnreadable !== true && pr.reviewPostRefused !== true &&
+    (pr.priorReviewAttemptsForInput ?? 0) === 0 &&
+    age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
 }
 
 /** W1-T6047 — a DELIVERED verdict dedups a re-post only while GitHub does not contradict it. A
@@ -13324,7 +13345,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
-          return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
+          return `checks green, remudero-review owner proven dead` +
+            `${pr.reviewPendingOwnerGoneReason !== undefined ? ` (${pr.reviewPendingOwnerGoneReason})` : ""} — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
         return (
@@ -13378,17 +13400,12 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // OBSERVED 2026-11-20 on #19791: a reviewer died 5m in and its claim held the head until CI ended.
     disposition: "post-review",
     blocker: "awaiting-ci",
-    when: (pr, policy, _ageDays, now) => {
-      const age = pendingAgeMinutes(pr, now);
-      return pr.checksState === "pending" &&
-        (pr.reviewState === "none" || pendingClaimOwnerProvenDead(pr)) &&
-        pr.requiredContextsUnreadable !== true && pr.reviewPostRefused !== true &&
-        (pr.priorReviewAttemptsForInput ?? 0) === 0 &&
-        age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
-    },
+    when: (pr, policy, _ageDays, now) =>
+      (pr.reviewState === "none" || pendingClaimOwnerProvenDead(pr)) && alongsideCiReviewDue(pr, policy, now),
     reason: (pr, _policy, _ageDays, now) =>
       pr.reviewState === "pending"
-        ? `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, remudero-review owner proven dead — ` +
+        ? `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, remudero-review owner proven dead` +
+          `${pr.reviewPendingOwnerGoneReason !== undefined ? ` (${pr.reviewPendingOwnerGoneReason})` : ""} — ` +
           `re-running one exact-input review alongside CI through the bounded post-review lane`
         : `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, review never posted — ` +
           `running one exact-input review alongside CI through the bounded post-review lane`,
@@ -16818,12 +16835,15 @@ function promiseHarvestRetryView(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
 ): OpenPrView {
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
-  return incompletePromiseHarvestFromLedger(pr, lines)
-    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
-    : inconclusiveLoadLowered(pr, lines, sample)
-    ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
-    : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
-      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
+  const hold = incompletePromiseHarvestFromLedger(pr, lines) ? "promise-harvest-incomplete" as const
+    : inconclusiveLoadLowered(pr, lines, sample) ? "inconclusive-load" as const : undefined;
+  // W1-T14035: the view producer's own proof of death outranks a derived hold cause, which rides along as the reason, so a
+  // dead owner is still named (and released alongside CI) when the same head also carries a hold.
+  if (pr.reviewPendingOwnerDead === true && (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead")) {
+    return { ...pr, reviewPendingOwnerGone: "owner-pid-dead", ...(hold !== undefined ? { reviewPendingOwnerGoneReason:
+      hold === "promise-harvest-incomplete" ? "its promise harvest did not complete" : "its proof was inconclusive under host load" } : {}) };
+  }
+  return hold !== undefined ? { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: hold } : pr;
 }
 
 function completedRefusalRetryView(pr: OpenPrView, prior: PriorActions): OpenPrView {
