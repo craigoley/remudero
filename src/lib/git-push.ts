@@ -1,7 +1,8 @@
-import { execFile, execFileSync, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
@@ -455,6 +456,8 @@ interface PrePushGate {
   args: string[];
   input: string;
   env: NodeJS.ProcessEnv;
+  /** A required gate's verdict holds only for the remote tip it read: `ls-remote` args and the line it answered. */
+  sampled?: { args: string[]; line: string };
 }
 
 /**
@@ -468,12 +471,17 @@ function* prePushGateSteps(
   pushArgs: string[],
   read: (args: string[]) => string | Promise<string>,
   readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
+  required = false,
 ): Steps<PrePushGate | undefined> {
-  const pin = pinWorktreeGit(worktreePath);
-  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
-  if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  if (!required) {
+    const configured = yield* step(() => readConfig(pinWorktreeGit(worktreePath), "core.hooksPath"));
+    if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  }
   const hook = join(harnessHooksDir(), "pre-push");
-  if (!existsSync(hook)) return undefined;
+  if (!existsSync(hook)) {
+    if (required) throw new Error(`git-push: the required pre-push gate ${hook} is missing`);
+    return undefined;
+  }
   const tryRead = function* (args: string[]): Steps<string | undefined> {
     try {
       const out = String(yield* step(() => read(args))).trim();
@@ -487,19 +495,71 @@ function* prePushGateSteps(
   const remote = positional[0] ?? "origin";
   const refspec = positional[1] ?? "HEAD";
   const [src, dst] = refspec.includes(":") ? (refspec.split(":", 2) as [string, string]) : [refspec, undefined];
-  const headRef = yield* tryRead(["symbolic-ref", "-q", "HEAD"]);
+  const headRef = src === "HEAD" ? yield* tryRead(["symbolic-ref", "-q", "HEAD"]) : undefined;
+  const objectId = /^[0-9a-f]{40}$/;
   const localRef = src === "HEAD" ? (headRef ?? "HEAD") : src.startsWith("refs/") || /^[0-9a-f]{40,64}$/.test(src) ? src : `refs/heads/${src}`;
-  const localSha = (yield* tryRead(["rev-parse", src])) ?? ZERO_SHA;
   const remoteRef = dst ?? localRef;
-  // Unreadable reads as a new ref: the hook's only reader (identity-transition) abstains on it, and the
-  // push that follows reports the transport failure itself.
-  const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
+  const localArgs = ["rev-parse", src];
+  const remoteArgs = ["ls-remote", remote, remoteRef];
+  const localSha = required ? String(yield* step(() => read(localArgs))).trim() : (yield* tryRead(localArgs)) ?? ZERO_SHA;
+  const remoteLine = required ? String(yield* step(() => read(remoteArgs))).trim() : yield* tryRead(remoteArgs);
+  const remoteSha = remoteLine?.split(/\s+/)[0] || ZERO_SHA;
+  if (required && (!objectId.test(localSha) || localSha === ZERO_SHA ||
+    (remoteLine !== "" && remoteLine !== `${remoteSha}\t${remoteRef}`) || !objectId.test(remoteSha))) {
+    throw new Error("git-push: the required pre-push gate could not identify the local or remote ref");
+  }
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
-  const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
-  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env: prePushGateEnv() };
+  if (required && remoteSha !== ZERO_SHA) {
+    // Only a tip the head descends from may be updated: the push is a plain fast-forward from the tip the gate judged.
+    try {
+      yield* step(() => read(["merge-base", "--is-ancestor", remoteSha, localSha]));
+    } catch {
+      throw new Error(`git-push: the remote ${remoteRef} at ${remoteSha} is not an ancestor of ${localSha} here, so this push could ` +
+        "only replace it; fetch it, then rebuild on it");
+    }
+  }
+  const urlArgs = ["remote", "get-url", ...(required ? ["--push"] : []), remote];
+  const url = required ? String(yield* step(() => read(urlArgs))).trim() : (yield* tryRead(urlArgs)) ?? remote;
+  const env = prePushGateEnv();
+  // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
+  if (required) delete env.RMD_PREPUSH_GATES;
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env,
+    ...(required ? { sampled: { args: remoteArgs, line: remoteLine ?? "" } } : {}) };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
+
+const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|^open-pr-body-proof-precheck: .*could not be (?:compared|read)/m;
+const FALSIFIED_BODY_PROOF = /open-pr-body-proof-precheck: this push NEWLY FALSIFIES/;
+
+// The hook deliberately exits zero on several unreadable inputs. Match the checks' own results,
+// including named inapplicability and advisory results, after rejecting the hook's named failures.
+const REQUIRED_CHECKS = [
+  ["Rule 15", /^rule15-precheck: OK -- /m],
+  ["Rule 25", /^rule25-precheck: (?:OK|NOTICE) -- /m],
+  ["CI control-plane", /^ci-control-plane-precheck: (?:OK -- |SKIP -- this diff does not change a control-plane or capability-snapshot input$)/m],
+  ["test tier", /^test-tier-manifest: OK — /m],
+  ["head identity", /^head-identity-gate: (?:OK — |REFUSED — this head matches neither conforming form)/m],
+  ["worker branch shape", /^worker-branch-shape: OK — /m],
+  ["proof resolution", /^proof-resolve-precheck: (?:OK -- |SKIP -- (?:a plan-only filing|no task resolved|\S+ resolves no acceptance criteria)|remudero-review WILL REFUSE |[0-9]+ of .* grep proofs ALSO PASS )/m],
+] as const;
+const MEASURED_BODY = /^open-pr-body-proof-precheck: (?:OK -- |SKIP -- (?:the body's Remudero-Task: |the open PR's body carries no ## Acceptance proofs$|this branch has no open pull request$)|[0-9]+ body proof\(s\) already failing at the old tip)/m;
+
+function requiredGateOutcome(outcome: HookOutcome, gate: PrePushGate): HookOutcome {
+  if (outcome.refused) return outcome;
+  const stderr = String(outcome.out.stderr ?? "");
+  const text = `${String(outcome.out.stdout ?? "")}\n${stderr}`;
+  const unchecked = /^pre-push: .*(?:could not (?:read|be judged)|skipped, NOT passed|every check skipped).*$/m.exec(text);
+  const [, , , remoteSha] = gate.input.trim().split(" ");
+  const missing = REQUIRED_CHECKS.find(([, measured]) => !measured.test(text));
+  const reason = UNCHECKED_BODY_CHECK.test(text)
+    ? "the open PR's stored body proofs could not be checked"
+    : FALSIFIED_BODY_PROOF.test(text) ? "this push newly falsifies a proof in the open PR's stored body"
+    : missing ? `the pre-push gate reported no measured ${missing[0]} result`
+    : unchecked?.[0] ?? (remoteSha !== ZERO_SHA && !MEASURED_BODY.test(text) ? "the pre-push gate reported no measured open-PR body result" : undefined);
+  if (reason === undefined) return outcome;
+  return { refused: true, err: { ...outcome.out, stderr: `${stderr}${reason}\n`, reason } };
+}
 
 /** W1-T6120 — the gate's env is an ALLOWLIST: GH_TOKEN, GH_APP_* and provider keys stay with the push. Its git calls
  *  carry {@link HOST_GIT_CONFIG}, and {@link withGateHome} gives it a throwaway HOME. */
@@ -576,7 +636,8 @@ export function gateHookRefused(res: { error?: Error; status: number | null }): 
 }
 
 function gateFailureDetail(err: unknown): string {
-  const failed = err as { status?: unknown; signal?: unknown; code?: unknown; error?: { code?: unknown } } | null;
+  const failed = err as { status?: unknown; signal?: unknown; code?: unknown; error?: { code?: unknown }; reason?: unknown } | null;
+  if (typeof failed?.reason === "string") return failed.reason;
   const spawned = failed?.error?.code ?? (typeof failed?.code === "string" ? failed.code : undefined);
   if (spawned !== undefined && spawned !== "EPIPE") return `spawn ${String(spawned)}`;
   return typeof failed?.signal === "string" ? `signal ${failed.signal}` : `exit ${String(failed?.status ?? failed?.code)}`;
@@ -787,7 +848,8 @@ export function worktreePushExec(worktreePath: string, { verdicts = defaultPushG
   };
 }
 
-function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutcome> {
+function runHookAsync(worktreePath: string, gate: PrePushGate, signal?: AbortSignal): Promise<HookOutcome> {
+  if (signal !== undefined) return runStoppableHook(worktreePath, gate, signal);
   return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
     const child = execFile(gate.hook, gate.args, { cwd: worktreePath, env, encoding: "utf8", maxBuffer: GATE_MAX_BUFFER },
       (err, stdout, stderr) => resolveGate(err ? { refused: true, err: Object.assign(err, { stdout, stderr }) } : { refused: false, out: { stdout, stderr } }));
@@ -796,26 +858,122 @@ function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutc
   }));
 }
 
+const HOOK_STOP_GRACE_MS = 2_000;
+
+function signalHookGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try { process.kill(-pid, signal); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; return false; }
+}
+
+/** A stoppable hook leads its own process group. A stop signals the whole group, and the outcome settles only once
+ *  every member is gone: a SIGTERM-ignoring child of the hook shell is killed when the grace period ends. */
+function runStoppableHook(worktreePath: string, gate: PrePushGate, signal: AbortSignal): Promise<HookOutcome> {
+  return withGateHome(gate, (env) => new Promise<HookOutcome>((resolveGate) => {
+    const child = spawn(gate.hook, gate.args, { cwd: worktreePath, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    const out = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    let length = 0;
+    let failure: unknown;
+    let stopping: number | undefined;
+    let force: NodeJS.Timeout | undefined;
+    const stop = (reason: unknown) => {
+      failure ??= reason;
+      if (stopping !== undefined || child.pid === undefined) return;
+      const pid = child.pid;
+      stopping = systemClock.now() + HOOK_STOP_GRACE_MS;
+      signalHookGroup(pid, "SIGTERM");
+      // A member that ignores SIGTERM can hold the hook's pipes open, so the kill cannot wait for them to close.
+      force = setTimeout(() => signalHookGroup(pid, "SIGKILL"), HOOK_STOP_GRACE_MS);
+    };
+    const onAbort = () => stop(signal.reason);
+    for (const stream of ["stdout", "stderr"] as const) {
+      child[stream].on("data", (chunk: Buffer) => {
+        length += chunk.length;
+        if (length <= GATE_MAX_BUFFER) out[stream].push(chunk);
+        else stop(Object.assign(new Error(`${gate.hook}: output exceeded ${GATE_MAX_BUFFER} bytes`), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }));
+      });
+    }
+    let settled = false;
+    const settle = (code: number | null, killedBy: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(force);
+      signal.removeEventListener("abort", onAbort);
+      const stdout = Buffer.concat(out.stdout).toString("utf8"), stderr = Buffer.concat(out.stderr).toString("utf8");
+      if (failure !== undefined) resolveGate({ refused: true, err: { error: failure, message: String((failure as Error)?.message ?? failure), stdout, stderr } });
+      else if (code !== 0) resolveGate({ refused: true, err: Object.assign(new Error(`Command failed: ${gate.hook}`), { code, signal: killedBy, stdout, stderr }) });
+      else resolveGate({ refused: false, out: { stdout, stderr } });
+    };
+    child.stdin.on("error", (err: NodeJS.ErrnoException) => { if (err.code !== "EPIPE") stop(err); });
+    child.on("error", (err) => {
+      failure ??= err;
+      if (child.pid === undefined) settle(null, null); // it never started, so there is no group to wait for
+    });
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.on("close", (code, killedBy) => {
+      if (stopping === undefined || child.pid === undefined) return settle(code, killedBy);
+      const pid = child.pid;
+      const reaped = stopping + HOOK_STOP_GRACE_MS;
+      void (async () => {
+        while (signalHookGroup(pid, 0) && systemClock.now() < stopping!) await delay(50);
+        signalHookGroup(pid, "SIGKILL");
+        // A killed member leaves the group once it is reaped; the wait is bounded for a host whose init never reaps.
+        while (signalHookGroup(pid, 0) && systemClock.now() < reaped) await delay(20);
+      })().then(() => settle(code, killedBy), (error: unknown) => { failure ??= error; settle(code, killedBy); });
+    });
+    child.stdin.end(gate.input);
+  }));
+}
+
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient }: {
-    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>;
+  worktreePath: string, { prGates = true, requireGate = false, verdicts = requireGate ? undefined : defaultPushGateVerdicts(),
+    git = hostWorktreeGitAsync, push, refreshAmbient, signal }: {
+    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>; signal?: AbortSignal;
+    git?: typeof hostWorktreeGitAsync;
+    /** Run a fresh harness pre-push gate independently of the checkout's hooks configuration. */
+    requireGate?: boolean;
   } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
+    signal?.throwIfAborted();
     const pushArgs = leafArgs(worktreePath, args);
-    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a);
-    const gate = prGates
-      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
+    const read = (a: string[]) => git(worktreePath, a, { signal });
+    const gate = prGates || requireGate
+      ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requireGate))
       : undefined;
+    // A required gate yields no gate only when the remote already holds the verified head, so there is nothing
+    // to send. An ordinary push may not run in its place: if the ref were deleted after that read, the push would
+    // recreate it with none of the required checks run.
+    if (requireGate && gate === undefined) return;
     if (gate) {
-      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, () => runHookAsync(worktreePath, gate), verdicts, "worktreePushExecAsync"));
+      const runGate = async () => {
+        signal?.throwIfAborted();
+        return runHookAsync(worktreePath, gate, signal);
+      };
+      const outcome = requireGate ? requiredGateOutcome(await runGate(), gate)
+        : await runStepsAsync(pushGateSteps(worktreePath, gate, read, runGate, verdicts, "worktreePushExecAsync"));
+      signal?.throwIfAborted();
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
+    // A required gate judged the push from the remote tip it read. The push carries no force option: Git and the
+    // remote refuse it unless it fast-forwards, and the gate checked that the tip it read is an ancestor of the head.
+    // The tip is read again just before the push and must still be the one the gate judged. That re-read is not
+    // atomic with the push; only a lease is, and a lease is a force option, so this narrows the window, no more.
+    if (gate?.sampled !== undefined) {
+      const sampled = gate.sampled;
+      const now = String(await read(sampled.args)).trim();
+      if (now !== sampled.line) {
+        throw gateRefusal(worktreePath, pushArgs, { reason: `the remote ref moved after the pre-push gate read it (${
+          sampled.line.split(/\s+/)[0] || "absent"} -> ${now.split(/\s+/)[0] || "absent"}), so the gate's result does not cover this push` });
+      }
+    }
+    signal?.throwIfAborted();
     await pushWithAuthRetry(async (env) => {
       try {
-        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env });
+        signal?.throwIfAborted();
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
+        signal?.throwIfAborted();
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);
         throw pushFailure(err);

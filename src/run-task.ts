@@ -183,6 +183,7 @@ import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, r
 import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
+import { handShipEffects, isHandShipRunId, runHandShip } from "./lib/hand-ship.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
 import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -44125,9 +44126,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "hand-worktree",
-    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
-    summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] | rmd hand-worktree ship (--title <title> --body-file <path> | stop <run-id>)",
+    summary: "Create a worktree or preflight and ship a hand-built branch.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage. W1-T12169: run `ship` from the committed branch's worktree. Put a JSON array in the instance state directory's hand-ship-hosts.json. Each entry has name, target (local or SSH), and kind (mac or linux). An optional absolute checkout names a dependency donor; an SSH host without one runs `npm ci` in its private scratch checkout. Named test failures rerun on the selected host against the verified head and unchanged main. A red on main counts only when it matches the same test registration. The push requires a fresh harness pre-push gate with a result for each applicable check. Optional absolute pathPrefix prepends to PATH. Runs queue in the instance state directory. The command prints the run id, selected host and reading, and receipt decision. Keep the PR body file outside the worktree and supply an Acceptance: block when updating a PR. Use `ship stop` with the printed id to cancel a run from another session; that exact form alone (no other argument) skips the CLI freshness gate and ledgers one `self_sync.exempt` row naming the run id, so a stop still works on a behind, dirty checkout.",
   },
   {
     name: "worktree",
@@ -45241,6 +45242,19 @@ export function selfSyncRefusalSink(cmd: string | undefined, rest: string[], led
 export const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["doctor", "status", "preflight", "pr-owner", "gh-broker"]);
 
 /**
+ * W1-T12169 — THE ONE EXEMPT SUB-COMMAND. `rmd hand-worktree ship stop <run-id>` only writes a stop
+ * marker into a live run's own state directory; it reads no plan and dispatches nothing, and an
+ * operator reaches for it exactly when the checkout is behind and carries the edit being shipped.
+ * Exempt ONLY that exact shape — the verb, `ship`, `stop`, one well-formed run id and nothing else.
+ * `ship` itself, worktree creation and any malformed or extended stop keep the gate's refusal.
+ * Returns the run id when the argv is that shape, otherwise `undefined`.
+ */
+export function handShipStopRunId(cmd: string | undefined, rest: readonly string[]): string | undefined {
+  if (cmd !== "hand-worktree" || rest.length !== 3 || rest[0] !== "ship" || rest[1] !== "stop") return undefined;
+  return isHandShipRunId(rest[2]!) ? rest[2] : undefined;
+}
+
+/**
  * W1-T11788 — WHAT THE GATE WOULD HAVE SAID, WITHOUT LETTING IT ACT. Runs the CLI freshness check
  * for an exempt verb with a git runner that stops at `merge` (the check's only mutation; its fetch
  * moves `origin/main` alone) and no-op say/warn/reexec, so the tree and HEAD never move. A refusal
@@ -45254,6 +45268,8 @@ export function ledgerFreshnessExemption(
   env: NodeJS.ProcessEnv,
   checkFreshness?: typeof checkCliFreshness,
   ledgerPath: () => string = cliLedgerPathWithoutConfig,
+  /** W1-T12169: the exempt sub-command and its target, appended to the row's `reason`. */
+  detail?: string,
 ): ReturnType<typeof checkCliFreshness>["status"] | "exempt" | "would-sync" | "unassessed" {
   // The assess-only git runner below switches off the check's own test-runner guard, so keep it here.
   if (!checkFreshness && testRunnerOnItsOwnCheckout(repoDir, env)) return "guarded";
@@ -45269,11 +45285,12 @@ export function ledgerFreshnessExemption(
     });
   } catch (err) {
     if (err === mergeBlocked) return "would-sync";
-    console.error(`rmd ${cmd}: freshness assessment failed, proceeding (exempt verb): ${String(err)}`);
+    console.error(`rmd ${detail ?? cmd}: freshness assessment failed, proceeding (exempt): ${String(err)}`);
     return "unassessed";
   }
   if (result.status !== "refused") return result.status;
-  const row = { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "self_sync.exempt", verb: cmd, reason: result.reason };
+  const row = { run_id: `CLI-${systemClock.now()}`, task_id: "CLI", step: "self_sync.exempt", verb: cmd,
+    reason: detail ? `${result.reason} (${detail})` : result.reason };
   try {
     appendLedger(ledgerPath(), row);
   } catch (err) {
@@ -45569,7 +45586,14 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["move-task", (rest) => withGhTransportFloorMode("enforce", () => movePlanTask(rest, { ledger: (row) => appendLedger(ledgerPathFor(loadConfig()), row) }))],
   ["plan-destination", (rest) => planDestinationCommand(rest)],
-  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
+  [
+    "hand-worktree",
+    (rest) => rest[0] === "ship"
+      ? withGhTransportFloorMode("wait", () => runHandShip(rest.slice(1), {
+        cwd: process.cwd(), stateDir: () => join(loadConfig().root, "state"),
+      }, handShipEffects((file) => checkAcceptanceCommand([file]))))
+      : handWorktreeCommand(rest),
+  ],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [
@@ -45729,7 +45753,9 @@ const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS)
 
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(
-  assessBrokerFreshness: () => void,
+  /** Assesses the checkout read-only for an exempt invocation and ledgers a refusal it skips
+   *  (gh-broker; W1-T12169's `hand-worktree ship stop`, whose `detail` names the run). */
+  assessExemptFreshness: (cmd: string, detail?: string) => void,
   // W1-T79/W1-T221: the freshness check is injectable so a `callMain` test can drive the
   // "refused" branch below (its console.error+process.exit can't otherwise be covered — in CI
   // the real check returns "guarded", never "refused"). Default = the real self-sync check.
@@ -45783,7 +45809,7 @@ async function main(
   // PAUSE validates its target locally; --fleet retains its independent authenticated Git path.
   if (inspectionArgv[0] !== "stop" && inspectionArgv[0] !== "pause"
     && selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
-    return withInstanceRegistryRuntime(() => main(assessBrokerFreshness, deps));
+    return withInstanceRegistryRuntime(() => main(assessExemptFreshness, deps));
   }
   // FIRST, before argv is even read: a rejection escaping any line below (the freshness gate's
   // own spawns included) must reach a ledger row and a named exit code, not Node's default crash.
@@ -45941,7 +45967,12 @@ async function main(
     // Does NOT touch `checkCliFreshness`'s own predicate, message or ledger row (W1-T446 owns
     // that) — only where the gate applies, never what it decides (design (i)).
     // W1-T11788: the broker's skip is observable — one `self_sync.exempt` row, tree untouched.
-    if (cmd === "gh-broker") assessBrokerFreshness();
+    if (cmd === "gh-broker") assessExemptFreshness(cmd);
+  } else if (handShipStopRunId(cmd, rest) !== undefined) {
+    // W1-T12169 (operator ruling, option 2 "Exempt ship stop only, logged"): a stop must reach a
+    // run on the very checkout the gate refuses. Assessed read-only and ledgered like gh-broker's
+    // skip — one `self_sync.exempt` row whose reason names the sub-command and the run id.
+    assessExemptFreshness(cmd!, `hand-worktree ship stop ${rest[2]}`);
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
@@ -45979,7 +46010,9 @@ async function main(
 // Wire the synchronous checkout assessment at the CLI entry. The daemon-loop census can reach
 // the name `main` through unrelated fields named `main`, but the CLI alone supplies this effect.
 function runTaskCli(deps?: Parameters<typeof main>[1]): Promise<void> {
-  return main(() => ledgerFreshnessExemption("gh-broker", repoRoot, process.env, deps?.checkFreshness), deps);
+  return main((cmd, detail) => {
+    ledgerFreshnessExemption(cmd, repoRoot, process.env, deps?.checkFreshness, undefined, detail);
+  }, deps);
 }
 
 export { runTaskCli as main };

@@ -334,7 +334,7 @@ export function ghJson(
 const execFileAsync = (
   file: string,
   args: readonly string[],
-  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv },
+  opts: { encoding: BufferEncoding; maxBuffer: number; timeout: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal },
 ): Promise<{ stdout: string; stderr: string }> => execFileRouted(file, args, withGhCredentialEnv(file, args, opts));
 
 export type GhAsyncExecutor = typeof execFileAsync;
@@ -432,7 +432,7 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 }
 
 /** An explicit revalidation request; omitted preserves normal broker caching. */
-export interface GhJsonReadOptions { fresh?: true; }
+export interface GhJsonReadOptions { fresh?: true; signal?: AbortSignal; }
 
 export async function ghJsonAsync(
   args: string[],
@@ -458,27 +458,34 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
       encoding: "utf8",
       maxBuffer: DEFAULT_GH_MAX_BUFFER,
       timeout: DEFAULT_GH_CALL_TIMEOUT_MS,
+      ...(readOpts.signal === undefined ? {} : { signal: readOpts.signal }),
     }),
     execArgs,
     DEFAULT_GH_CALL_TIMEOUT_MS,
   )).stdout;
   // Only real transport coalesces; injected executors may have independent side effects.
+  readOpts.signal?.throwIfAborted();
   if (execAsync !== execFileAsync) {
-    await admitInstallationReadAsync(args);
+    await admitInstallationReadAsync(args, readOpts.signal);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
+  const key = readOpts.signal === undefined && ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
-    await admitInstallationReadAsync(args);
+    await admitInstallationReadAsync(args, readOpts.signal);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
-    const brokered = await ghBrokeredAsync(execArgs, readOpts);
+    // A signal never changes the route (broker first); it only ends the caller's wait.
+    const brokered = await untilAborted(ghBrokeredAsync(execArgs, readOpts), readOpts.signal);
     if (brokered !== undefined) return brokered;
-    await applyGhReadCadenceAsync(args);
+    readOpts.signal?.throwIfAborted();
+    await untilAborted(applyGhReadCadenceAsync(args), readOpts.signal);
+    readOpts.signal?.throwIfAborted();
     const inProcess = ghHttpReadFor(execArgs);
-    return inProcess === undefined ? run() : inProcess.send();
+    const output = inProcess === undefined ? await run() : await untilAborted(inProcess.send(), readOpts.signal);
+    readOpts.signal?.throwIfAborted();
+    return output;
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
   if (key === undefined) return request;
   asyncReadInFlight.set(key, request);
@@ -716,16 +723,32 @@ function admitInstallationReadSync(args: readonly string[]): void {
 
 const standDownFor = (reading: GhBudgetReading): never => { throw new GhPaceFloorStandDownError(reading); };
 
-async function admitInstallationReadAsync(args: readonly string[]): Promise<void> {
+/** `signal` ends the admission wait, so a stopped run settles at the stop. */
+async function admitInstallationReadAsync(args: readonly string[], signal?: AbortSignal): Promise<void> {
   if (!installationCoreRead(args)) return;
   const budget = githubInstallationBudget();
   for (;;) {
+    signal?.throwIfAborted();
     const admitted = budget.claimRead();
     if (admitted.ok) return;
     budget.noteThrottle(admitted.reason);
     // W1-T12820: a reset past the bound stands down, so the tick's pass goes on without this read.
-    await defaultTimerSleep(budget.resetWaitMs(admitted) ?? standDownFor(admitted.reading));
+    const waitMs = budget.resetWaitMs(admitted) ?? standDownFor(admitted.reading);
+    if (signal === undefined) await defaultTimerSleep(waitMs);
+    else await delay(waitMs, undefined, { signal });
   }
+}
+
+/** `work`, or the caller's stop if it comes first; `work` still settles on its own. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return work;
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    if (signal.aborted) { work.catch(() => { /* stopped: nobody reads this outcome */ }); stop(); return; }
+    signal.addEventListener("abort", stop, { once: true });
+    work.then((value) => { signal.removeEventListener("abort", stop); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", stop); reject(error); });
+  });
 }
 
 function noteInstallationRefusal(err: unknown): void {
