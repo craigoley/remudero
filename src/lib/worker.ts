@@ -226,6 +226,7 @@ import {
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
+  withObservedServedModel, forgetReturnedServedModel, observeReturnedServedModel,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -2516,6 +2517,14 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
+  forgetReturnedServedModel();
+  const result = await spawnWorkerUnobserved(args);
+  observeReturnedServedModel(result);
+  return result;
+}
+
+async function spawnWorkerUnobserved(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const attemptId = randomUUID();
   let assignment: WorkerSelectionAssignment | undefined;
   const onSelectionAssignment = args.onSelectionAssignment;
@@ -3314,7 +3323,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
-          cashController.signal.throwIfAborted();
+          // W1-T13868: a rung the abort cut short still names the model its responses reported, on the error that replaces it.
+          if (cashController.signal.aborted) {
+            const reason: unknown = cashController.signal.reason;
+            // The caller's own reason is thrown unchanged, as throwIfAborted would. A primitive cannot carry the record, so
+            // the call's table keeps it as the rung's returned result, which the failed attempt's reader falls back to.
+            if (reason === null || typeof reason !== "object") { observeReturnedServedModel(rung); throw reason; }
+            throw withObservedServedModel(reason as Error,
+              { servedModel: rung.servedModel ?? null, ...(rung.servedModelReason ? { servedModelReason: rung.servedModelReason } : {}) });
+          }
           rung.promptChars = executionPrompt.length;
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;

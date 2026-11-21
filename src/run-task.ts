@@ -1374,7 +1374,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -9300,54 +9300,8 @@ export async function dispatchBodyProofRepair(
 
 /** The verdict + ledger payload a worker's ERROR envelope maps to. */
 
-/**
- * The routing receipt fields for a terminal `verdict` row — the ONE helper every terminal
- * `verdict` writer in `runTaskBody` spreads. The assignment ID joins the pre-execution policy
- * decision to this terminal receipt; the receipt then names the worker result's served model,
- * token envelope, duration, cost, and worker-level success separately from the run verdict.
- * `routed_model` rides along only when present, the same "absent when unset" discipline
- * {@link workerLedgerFields} already keeps.
- *
- * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
- * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
- * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
- * absent means "not written"; `null` means "checked, no worker ran" (P48).
- */
-export function terminalVerdictFields(r: WorkerResult | null): {
-  provider?: WorkerResult["provider"];
-  model: string | null;
-  served_model: string | null;
-  routed_model?: string;
-  selection_assignment_id?: string;
-  tokens?: WorkerResult["tokens"];
-  worker_duration_ms?: number;
-  total_cost_usd?: number;
-  notional_cost_usd?: number;
-  /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
-  spend_role?: "restated";
-  success?: boolean;
-} {
-  if (!r) return { model: null, served_model: null };
-  // A successful result envelope can be followed by an SDK iterator error. The existing terminal
-  // verdict classifier treats that exact `{ isError: true, subtype: "success", apiError: false }`
-  // shape as clean success; routing telemetry must use the same outcome rather than reporting a
-  // completed call as a model failure. API errors and usage refusals remain unsuccessful even when
-  // their envelope subtype says `success`.
-  const success = !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
-  return {
-    model: r.model,
-    served_model: r.servedModel ?? null,
-    ...(r.provider ? { provider: r.provider } : {}),
-    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
-    ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
-    tokens: r.tokens,
-    ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
-    total_cost_usd: r.costUsd,
-    ...(r.provider === "codex" && r.notionalCostUsd !== undefined ? { notional_cost_usd: r.notionalCostUsd } : {}),
-    spend_role: "restated",
-    success,
-  };
-}
+/** {@link terminalVerdictFields} lives in ./lib/benchmark-run.ts (W1-T13868), so its served-model test needs no import of this file. */
+export { terminalVerdictFields };
 
 /**
  * Pure mapping from a worker's ERROR envelope to a terminal verdict. Returns
@@ -10796,54 +10750,9 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
   };
 }
 
-/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
- * The call/result/error is authoritative; evidence collection cannot change any of them. */
-export function recordBenchmarkWorkerAttempt(
-  call: () => Promise<WorkerResult>,
-  log: (step: string, fields: Record<string, unknown>) => void,
-  selected: () => { id: string } | undefined,
-  stopPolling: () => void,
-): Promise<WorkerResult> {
-  const failed = (error: unknown): void => {
-    try {
-      const assignment = selected();
-      log("worker.attempt", {
-        ...attemptAssignmentJoin(assignment?.id, true),
-        success: false,
-        worker_failure: "spawn-threw-before-result",
-        ...spawnFailureDetail(error, assignment !== undefined),
-      });
-    } catch { /* preserve the original worker error */ }
-  };
-  let workerCall: Promise<WorkerResult>;
-  try {
-    workerCall = call();
-  } catch (error) {
-    failed(error);
-    stopPolling();
-    throw error;
-  }
-  return workerCall.then((result) => {
-    try {
-      const resultId = result.selectionAssignmentId;
-      const selection = selected();
-      const assignmentId = resultId ?? selection?.id;
-      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
-      log("worker.attempt", {
-        ...attemptAssignmentJoin(assignmentId, false),
-        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
-        ...(result.isError || result.apiError || result.usageRefusal
-          ? { success: false }
-          : resultEnvelopeObserved ? { success: true } : {}),
-        ...benchmarkWorkerAttemptResources(result),
-      });
-    } catch { /* telemetry cannot alter the returned worker result */ }
-    return result;
-  }, (error: unknown) => {
-    failed(error);
-    throw error;
-  }).finally(stopPolling);
-}
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper (W1-T13868: it lives
+ * beside the non-dispatch receipt writer it shares the per-call served-model table with). */
+export { recordBenchmarkWorkerAttempt };
 
 /** Ledger non-dispatch assignments before execution; the worker catches sink failures. */
 function ledgerNonDispatchAssignment(
