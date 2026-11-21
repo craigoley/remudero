@@ -1,5 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
-import { newestLedgerTaskAnswer, newestTaskAnswer, type Task, type TaskInputAnswer } from "./plan.js";
+import { answerText, newestTaskAnswer, sharedAnswerEvidence, sharedAnswersPath, sharedTaskAnswer, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
@@ -5042,7 +5042,7 @@ export interface QuestionAnswerEntry {
   answer_id?: string;
   author_login?: string;
   authority?: string;
-  source?: "ledger";
+  source?: "ledger" | "store";
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -5083,62 +5083,42 @@ function questionStoreLines(repoRoot: string): unknown[] {
   return lines;
 }
 
-/** W1-T13940: the answer reader every needs_input check uses. It also honours the shared ledger's
- * panel.question_answered rows, which serve writes from any folder, and copies each honoured row into
- * this store once, so ledger rotation cannot take the answer back. The ledger is read from where the
- * last read stopped. */
+/** W1-T13940: the answer reader every needs_input check uses. It decides only from the shared evidence serve also reads
+ * (sharedTaskAnswer), and first publishes into that evidence each answer row and each of this checkout's store answers
+ * it lacks, so rotation cannot take a row back and a store answer serve cannot see is published before it counts. */
 export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string): TaskInputAnswer {
-  let tail: { dev: number; ino: number; head: string; offset: number; rows: Map<string, unknown[]> } | undefined;
-  const ledgerRows = (taskId: string): readonly unknown[] => {
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(ledgerPath, "r");
-      const stat = fs.fstatSync(fd);
-      const headBytes = Buffer.alloc(Math.min(256, stat.size));
-      fs.readSync(fd, headBytes, 0, headBytes.length, 0);
-      const head = headBytes.toString("latin1");
-      if (!tail || tail.dev !== stat.dev || tail.ino !== stat.ino || stat.size < tail.offset || !head.startsWith(tail.head)) {
-        tail = { dev: stat.dev, ino: stat.ino, head, offset: 0, rows: new Map() };
-      }
-      const fresh = Buffer.alloc(stat.size - tail.offset);
-      fs.readSync(fd, fresh, 0, fresh.length, tail.offset);
-      const end = fresh.lastIndexOf(10);
-      for (const raw of end < 0 ? [] : fresh.subarray(0, end).toString("utf8").split("\n")) {
-        if (!raw.includes('"panel.question_answered"')) continue;
-        try {
-          const row = JSON.parse(raw) as { task_id?: unknown };
-          if (typeof row.task_id === "string") tail.rows.set(row.task_id, [...(tail.rows.get(row.task_id) ?? []), row]);
-        } catch {
-          continue; // deliberate: a torn line is skipped, as every ledger reader does.
-        }
-      }
-      if (end >= 0) tail.offset += end + 1;
-      if (tail.head.length < 256) tail.head = head;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined; // deliberate: an unreadable ledger answers from the rows already read.
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-    return tail?.rows.get(taskId) ?? [];
-  };
+  const evidence = sharedAnswerEvidence(ledgerPath);
   return (taskId) => {
-    const lines = questionStoreLines(repoRoot);
-    const row = newestLedgerTaskAnswer(ledgerRows(taskId), taskId);
-    if (row === undefined) return newestTaskAnswer(lines, taskId);
-    const origin = typeof row.origin === "string" ? row.origin : "ledger";
-    const answerId = typeof row.answer_id === "string" ? row.answer_id : undefined;
-    // The store holds this row when an entry has its answer_id, or the same origin and text (the daemon's own GitHub reply).
-    const copied = lines.some((value) => {
-      const line = typeof value === "object" && value !== null ? value as Partial<QuestionAnswerEntry> : {};
-      return line.task === taskId && ((answerId !== undefined && line.answer_id === answerId) || (line.origin === origin && line.answer === row.answer));
-    });
-    if (!copied) {
-      appendQuestionAnswer(repoRoot, { ts: row.ts, task: taskId, answer: row.answer, origin,
+    const read = evidence();
+    const published = [...read.lines];
+    const candidates = read.answersUnreadable !== undefined ? [] : [
+      ...read.rows(taskId).map((value) => ({ value, source: "ledger" as const })),
+      ...questionStoreLines(repoRoot).map((value) => ({ value, source: "store" as const })),
+    ];
+    for (const { value, source } of candidates) {
+      const line = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+      const answer = answerText(line.answer);
+      if ((source === "ledger" ? line.task_id : line.task) !== taskId || answer === undefined) continue;
+      const origin = typeof line.origin === "string" ? line.origin : source;
+      const answerId = typeof line.answer_id === "string" ? line.answer_id : undefined;
+      // Published already when an entry has its answer_id, or the same origin and text (the daemon's own GitHub reply).
+      const held = published.some((other) => {
+        const entry = typeof other === "object" && other !== null ? other as Partial<QuestionAnswerEntry> : {};
+        return entry.task === taskId && ((answerId !== undefined && entry.answer_id === answerId) || (entry.origin === origin && entry.answer === answer));
+      });
+      if (held) continue;
+      const entry: QuestionAnswerEntry = { ts: typeof line.ts === "string" ? line.ts : "", task: taskId, answer, origin,
         ...(answerId === undefined ? {} : { answer_id: answerId }),
-        ...(typeof row.author_login === "string" ? { author_login: row.author_login } : {}),
-        ...(typeof row.authority === "string" ? { authority: row.authority } : {}), source: "ledger" });
+        ...(typeof line.author_login === "string" ? { author_login: line.author_login } : {}),
+        ...(typeof line.authority === "string" ? { authority: line.authority } : {}), source };
+      try {
+        appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(entry) + "\n");
+        published.push(entry);
+      } catch {
+        continue; // deliberate: an unpublished store answer releases nothing; a row still counts from the ledger, and the next read retries.
+      }
     }
-    return newestTaskAnswer([...lines, { task: taskId, answer: row.answer, ts: row.ts }], taskId);
+    return sharedTaskAnswer({ ...read, lines: published }, taskId);
   };
 }
 

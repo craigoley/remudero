@@ -30,10 +30,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveOwnerRepoAt } from "./owner-repo.js";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { daemonTargetRecordPath, loadPlan, readDaemonTargetRecord, type DaemonTargetRecord, type DaemonTargetRecordRead } from "./plan.js";
-
-// W1-T13940: the record's reader lives in plan.ts, which a library may import without evaluating argv.
-export { daemonTargetRecordPath, readDaemonTargetRecord, type DaemonTargetRecord, type DaemonTargetRecordRead };
+import { readFileIfExists } from "./fs-race-safe.js";
+import { loadPlan } from "./plan.js";
 
 // W1-T2922: keep the layout API surfaced from repo-location for the review proof, while
 // pure library callers import repo-layout.js directly so they do not evaluate repoRoot at import.
@@ -92,6 +90,13 @@ export function resolveOwnerRepo(): { owner: string; repo: string } {
   return resolveOwnerRepoAt(repoRoot);
 }
 
+/** W1-T10925: what the daemon wrote at boot about the repository it drains. */
+export interface DaemonTargetRecord { owner: string; repo: string; isSelf: boolean; checkoutRoot: string }
+
+export function daemonTargetRecordPath(stateDir: string): string {
+  return join(stateDir, "daemon-target.json");
+}
+
 /** W1-T10925: written at boot under `<config.root>/state`, so a verb run with `docker exec` in this
  *  instance can find the target's checkout. The daemon's launch argv is not visible to that verb. */
 export function writeDaemonTargetRecord(stateDir: string, record: DaemonTargetRecord): { written: true } | { written: false; reason: string } {
@@ -104,6 +109,35 @@ export function writeDaemonTargetRecord(stateDir: string, record: DaemonTargetRe
   } catch (e) {
     return { written: false, reason: `${path}: ${(e as Error).message}` };
   }
+}
+
+export type DaemonTargetRecordRead =
+  | { kind: "absent" }
+  | { kind: "unreadable"; reason: string }
+  | { kind: "record"; record: DaemonTargetRecord };
+
+/** An absent or malformed record means "no target", never a guess from the `repos/` listing. */
+export function readDaemonTargetRecord(stateDir: string): DaemonTargetRecordRead {
+  const path = daemonTargetRecordPath(stateDir);
+  let raw: string | undefined;
+  try {
+    raw = readFileIfExists(path);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  if (raw === undefined) return { kind: "absent" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
+  }
+  const r = parsed as Partial<DaemonTargetRecord> | null;
+  if (r === null || typeof r !== "object" || typeof r.owner !== "string" || typeof r.repo !== "string" ||
+    typeof r.isSelf !== "boolean" || typeof r.checkoutRoot !== "string" || r.checkoutRoot === "") {
+    return { kind: "unreadable", reason: `${path}: not an {owner, repo, isSelf, checkoutRoot} record` };
+  }
+  return { kind: "record", record: { owner: r.owner, repo: r.repo, isSelf: r.isSelf, checkoutRoot: r.checkoutRoot } };
 }
 
 export interface VerbPlanRootInput {

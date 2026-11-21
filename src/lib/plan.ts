@@ -1,5 +1,5 @@
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins } from "./operator-release.js";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -313,47 +313,85 @@ export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string):
 
 type LedgerTaskAnswer = Readonly<Record<string, unknown>> & { readonly ts: string; readonly answer: string };
 
-/** W1-T10925: what the daemon wrote at boot about the repository it drains. */
-export interface DaemonTargetRecord {
-  owner: string; repo: string; isSelf: boolean; checkoutRoot: string;
-  /** W1-T13940: the root whose plan/questions.ndjson the daemon's needs_input check reads. */
-  questionStoreRoot?: string;
+/** W1-T13940: the answers a needs_input reader published, beside the ledger in the state folder serve and the daemon both mount. */
+export function sharedAnswersPath(ledgerPath: string): string {
+  return join(dirname(ledgerPath), "question-answers.ndjson");
 }
 
-export function daemonTargetRecordPath(stateDir: string): string {
-  return join(stateDir, "daemon-target.json");
+export interface SharedAnswerEvidence {
+  lines: readonly unknown[];
+  rows: (taskId: string) => readonly unknown[];
+  /** Set when the answers file could not be read; a reader must then publish nothing. */
+  answersUnreadable?: string;
+  partial?: string;
 }
 
-export type DaemonTargetRecordRead =
-  | { kind: "absent" }
-  | { kind: "unreadable"; reason: string }
-  | { kind: "record"; record: DaemonTargetRecord };
-
-/** An absent or malformed record means "no target", never a guess from the `repos/` listing. */
-export function readDaemonTargetRecord(stateDir: string): DaemonTargetRecordRead {
-  const path = daemonTargetRecordPath(stateDir);
-  let raw: string | undefined;
-  try {
-    raw = readFileIfExists(path);
-  } catch (e) {
-    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
-  }
-  if (raw === undefined) return { kind: "absent" };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return { kind: "unreadable", reason: `${path}: ${(e as Error).message}` };
-  }
-  const r = parsed as Partial<DaemonTargetRecord> | null;
-  if (r === null || typeof r !== "object" || typeof r.owner !== "string" || typeof r.repo !== "string" ||
-    typeof r.isSelf !== "boolean" || typeof r.checkoutRoot !== "string" || r.checkoutRoot === "") {
-    return { kind: "unreadable", reason: `${path}: not an {owner, repo, isSelf, checkoutRoot} record` };
-  }
-  return { kind: "record", record: { owner: r.owner, repo: r.repo, isSelf: r.isSelf, checkoutRoot: r.checkoutRoot,
-    ...(typeof r.questionStoreRoot === "string" && r.questionStoreRoot !== "" ? { questionStoreRoot: r.questionStoreRoot } : {}) } };
+/** W1-T13940: the evidence every needs_input reader decides from, read from where the last read stopped. A checkout
+ * path names different folders in serve and the daemon, so no checkout's store is in it. */
+export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvidence {
+  let tail: { dev: number; ino: number; head: string; offset: number; rows: Map<string, unknown[]> } | undefined;
+  return () => {
+    const reasons: string[] = [];
+    let fd: number | undefined;
+    try {
+      fd = openSync(ledgerPath, "r");
+      const stat = fstatSync(fd);
+      const headBytes = Buffer.alloc(Math.min(256, stat.size));
+      readSync(fd, headBytes, 0, headBytes.length, 0);
+      const head = headBytes.toString("latin1");
+      if (!tail || tail.dev !== stat.dev || tail.ino !== stat.ino || stat.size < tail.offset || !head.startsWith(tail.head)) {
+        tail = { dev: stat.dev, ino: stat.ino, head, offset: 0, rows: new Map() };
+      }
+      const fresh = Buffer.alloc(stat.size - tail.offset);
+      readSync(fd, fresh, 0, fresh.length, tail.offset);
+      const end = fresh.lastIndexOf(10);
+      for (const raw of end < 0 ? [] : fresh.subarray(0, end).toString("utf8").split("\n")) {
+        if (!raw.includes('"panel.question_answered"')) continue;
+        try {
+          const row = JSON.parse(raw) as { task_id?: unknown };
+          if (typeof row.task_id === "string") tail.rows.set(row.task_id, [...(tail.rows.get(row.task_id) ?? []), row]);
+        } catch {
+          continue; // deliberate: a torn line is skipped, as every ledger reader does.
+        }
+      }
+      if (end >= 0) tail.offset += end + 1;
+      if (tail.head.length < 256) tail.head = head;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined;
+      else reasons.push(`the ledger ${ledgerPath} is unreadable: ${(error as Error).message}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const lines: unknown[] = [];
+    let answersUnreadable: string | undefined;
+    try {
+      let skipped = 0;
+      for (const raw of (readFileIfExists(sharedAnswersPath(ledgerPath)) ?? "").split("\n")) {
+        if (raw.trim() === "") continue;
+        try {
+          lines.push(JSON.parse(raw));
+        } catch {
+          // Collapses only JSON.parse's SyntaxError: a line torn by a concurrent append, or a malformed one. Not erased:
+          // the count makes the evidence `partial`, so the Inbox source reads partial, and the line releases no task.
+          skipped++;
+        }
+      }
+      if (skipped > 0) reasons.push(`the answers file has ${skipped} malformed line(s)`);
+    } catch (error) {
+      answersUnreadable = `the answers file ${sharedAnswersPath(ledgerPath)} is unreadable: ${(error as Error).message}`;
+      reasons.push(answersUnreadable);
+    }
+    const known = tail;
+    return { lines, rows: (taskId) => known?.rows.get(taskId) ?? [], ...(answersUnreadable ? { answersUnreadable } : {}),
+      ...(reasons.length > 0 ? { partial: reasons.join("; ") } : {}) };
+  };
 }
 
+/** W1-T13940: the one answer rule: the newest nonblank answer among the published answers and the live ledger rows. */
+export function sharedTaskAnswer(evidence: SharedAnswerEvidence, taskId: string): string | undefined {
+  const row = newestLedgerTaskAnswer(evidence.rows(taskId), taskId);
+  return newestTaskAnswer(row ? [...evidence.lines, { task: taskId, answer: row.answer, ts: row.ts }] : evidence.lines, taskId);
+}
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
 function needsInputRefusal(task: Task, inputAnswer?: TaskInputAnswer): string | undefined {

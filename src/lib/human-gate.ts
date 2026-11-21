@@ -721,7 +721,7 @@ export interface HumanGateCountSummary {
 }
 
 /** W1-T5373: the one adapter every needs-you surface reports through; `shown` is its displayed page. */
-export function consumeHumanGateCounts(projection: HumanGateProjection, display?: { shown: number; omitted?: readonly HumanGate[] }): HumanGateCountSummary {
+export function consumeHumanGateCounts(projection: HumanGateProjection, display?: { shown: number }): HumanGateCountSummary {
   const inboxGates = projection.gates.filter((gate) => gate.ownerSurface === "inbox");
   const exact = (count: HumanGateCount, n: number): HumanGateCount => count.count !== undefined ? { count: n } : { atLeast: n };
   const covered = new Set<HumanGateKind>(projection.gates.map((gate) => gate.kind));
@@ -739,8 +739,7 @@ export function consumeHumanGateCounts(projection: HumanGateProjection, display?
   const total = inbox.count ?? inbox.atLeast;
   return {
     inbox, byKind: projection.count.byKind, changeManagement: projection.count.changeManagement,
-    ...(display ? { display: { shown: display.shown, more: display.omitted !== undefined && omittedComplete(projection, display.omitted)
-      ? { count: display.omitted.length } : exact(inbox, Math.max(0, total - display.shown)) } } : {}),
+    ...(display ? { display: { shown: display.shown, more: exact(inbox, Math.max(0, total - display.shown)) } } : {}),
     kinds: { covered: HUMAN_GATE_KINDS.filter((kind) => covered.has(kind)), missing: HUMAN_GATE_KINDS.filter((kind) => !covered.has(kind)) },
     instances: [...names].sort(compareText).map((instance) => {
       const n = inboxGates.filter((gate) => instanceOf(gate) === instance).length;
@@ -759,31 +758,11 @@ export function unavailableHumanGateCounts(name: string, reason: string): HumanG
 
 /** How many distinct Inbox gates a displayed page covers, matched on instance and source condition. */
 export function shownHumanGates(projection: HumanGateProjection, shown: ReadonlyArray<{ instance: string; kind: HumanGateKind; subject: string }>): number {
-  return displayedHumanGates(projection, shown).shown;
-}
-
-/** W1-T13940: the Inbox gates a displayed page covers, counted, and the ones it leaves out. */
-export function displayedHumanGates(projection: HumanGateProjection, shown: ReadonlyArray<{ instance: string; kind: HumanGateKind; subject: string }>): { shown: number; omitted: HumanGate[] } {
   const condition = (kind: HumanGateKind, instance: string, subject: string): string =>
     JSON.stringify([kind === "manual_approval" ? "escalation" : kind, instance, subject]);
   const displayed = new Set(shown.map((row) => condition(row.kind, row.instance, row.subject)));
-  const omitted: HumanGate[] = [];
-  let count = 0;
-  for (const gate of projection.gates) {
-    if (gate.ownerSurface !== "inbox") continue;
+  return projection.gates.filter((gate) => {
     const [, instance = "", subject = ""] = gate.key.split(":");
-    if (displayed.has(condition(gate.kind, decodeURIComponent(instance), decodeURIComponent(subject)))) count++;
-    else omitted.push(gate);
-  }
-  return { shown: count, omitted };
-}
-
-/** Every source of the gates a page leaves out is complete: each such gate's instance has a source reading its kind, all complete. */
-function omittedComplete(projection: HumanGateProjection, omitted: readonly HumanGate[]): boolean {
-  // With nothing left out, the remainder keeps the Inbox total's qualifier: a partial source may hold more.
-  return omitted.length > 0 && omitted.every((gate) => {
-    const instance = decodeURIComponent(gate.key.split(":")[1] ?? "");
-    const readers = projection.sources.filter((source) => source.instance === instance && (SOURCE_KINDS[source.name] ?? []).includes(gate.kind));
-    return readers.length > 0 && readers.every((source) => source.state === "complete");
-  });
+    return gate.ownerSurface === "inbox" && displayed.has(condition(gate.kind, decodeURIComponent(instance), decodeURIComponent(subject)));
+  }).length;
 }

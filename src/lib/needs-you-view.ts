@@ -9,7 +9,7 @@
  */
 import { systemClock, type Clock } from "./clock.js";
 import { projectClassifiedHumanGates, projectProposalHumanGates } from "./ask-classification.js";
-import { consumeHumanGateCounts, displayedHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { consumeHumanGateCounts, shownHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import type { InboxClassification, InboxState } from "./inbox.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, type InboxViewData } from "./inbox-view.js";
 import type { NowDecision } from "./now-decisions.js";
@@ -158,12 +158,12 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     name: source.name, instance: source.instance ?? "core", state: source.state === "unavailable" ? "unavailable" : "partial",
     reason: source.reason ?? `source is ${source.state}`, gates: [],
   }))]);
-  const shown = displayedHumanGates(humanGates, [
+  const shown = shownHumanGates(humanGates, [
     ...decisions.map((decision) => ({ instance: decision.instance, ...decisionObservation(decision) })),
     ...(page?.items ?? []).map((item) => ({ instance: "core", kind: "proposal" as const, subject: item.proposalId })),
   ]);
   const data: NeedsYouData = {
-    humanGates, needsYou: consumeHumanGateCounts(humanGates, shown),
+    humanGates, needsYou: consumeHumanGateCounts(humanGates, { shown }),
     decisions: decisions.sort(newestFirst), ...(page ? { inbox: page } : {}), instances, ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
   // The newest input build: the one whose body this composition is the first to carry.

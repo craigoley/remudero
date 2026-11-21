@@ -17,6 +17,7 @@ import { inboxViewBodies } from "#src/lib/inbox-view.js";
 import { instanceRouteSet, mountUnderInstance } from "#src/lib/instance-gateway.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { composeNeedsYou } from "#src/lib/needs-you-view.js";
+import { projectHumanGates } from "#src/lib/human-gate.js";
 import { NOW_DECISIONS_CAP } from "#src/lib/now-decisions.js";
 import { createNowView, NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowViewContext, type NowViewData } from "#src/lib/now-view.js";
 import { buildAnswerQuestionRoute, buildEscalationReplyRoute, type PanelActionDeps } from "#src/lib/panel-actions.js";
@@ -26,7 +27,6 @@ import { assertRunnable, loadPlanFromYaml, TaskAdmissionError, type Plan } from 
 import { policyPath } from "#src/lib/policy.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import type { BoardCatalogClient, BoardCatalogContext } from "#src/lib/serve-plan-reload.js";
-import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
 import { createService } from "#src/lib/service.js";
 import type { GitHub } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -76,6 +76,19 @@ function storeLines(root: string): Array<Record<string, unknown>> {
 function rowsIn(path: string): Array<Record<string, unknown>> {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** Where the daemon's reader publishes answers: beside the shared ledger, in the state folder serve and the daemon both mount. */
+const sharedAnswersPath = (ledgerPath: string): string => join(dirname(ledgerPath), "question-answers.ndjson");
+
+/** The answers the daemon's reader published beside the shared ledger. */
+function published(ledgerPath: string): Array<Record<string, unknown>> {
+  return rowsIn(sharedAnswersPath(ledgerPath));
+}
+
+/** A boot record naming `questionStoreRoot`, as the previous round's daemon wrote it; this round's readers ignore it. */
+function writeTargetRecord(stateDir: string, record: Record<string, unknown>): void {
+  writeFileSync(join(stateDir, "daemon-target.json"), JSON.stringify(record));
 }
 
 function answerRows(path: string, taskId = TASK): Array<Record<string, unknown>> {
@@ -160,7 +173,7 @@ async function kick(daemonRoot: string, ledgerPath: string): Promise<{ ran: stri
 interface Stepped extends Clock { set(ms: number): void }
 
 /** Serve's side: a read model over the shared ledger, serve's question root, and the now view over both. */
-function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient; checkout?: true; noStoreRecord?: true } = {}) {
+function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs?: BoardCatalogClient; checkout?: true; recordServeRoot?: true } = {}) {
   const root = readModelFixtureDir(t, "t13940").dir;
   // The answer writers stamp their ledger rows with the system clock; the read model must not see them as future rows.
   let nowMs = Date.now();
@@ -169,19 +182,21 @@ function inbox(t: TestCtx, instance = "core", plans: { readPlan?: Plan; catalogs
   mkdirSync(ledgerDir, { recursive: true });
   const ledgerPath = join(ledgerDir, "ledger.ndjson");
   writeLedger([{ ts: clock.iso(), host: "h1", step: "daemon.tick" }], { dir: ledgerDir });
-  // The instance daemon's own checkout, apart from serve's root and the target checkout: its boot record names it.
+  // The instance daemon's own checkout, apart from serve's root and the target checkout.
   const daemonRoot = join(root, "daemon-checkout");
   mkdirSync(join(daemonRoot, "plan"), { recursive: true });
-  writeDaemonTargetRecord(ledgerDir, { owner: "craigoley", repo: instance === "core" ? "remudero" : "wreckterra", isSelf: instance === "core",
-    checkoutRoot: join(root, "instance-checkout"), ...(plans.noStoreRecord ? {} : { questionStoreRoot: daemonRoot }) });
+  const serveRoot = join(root, "serve-gen");
+  mkdirSync(join(serveRoot, "plan"), { recursive: true });
+  // recordServeRoot: the daemon's checkout path, opened in serve's namespace, is serve's own checkout (deploy/serve-container.sh
+  // mounts serve's code over the daemon's repo folder), so the recorded path names serve's folder there.
+  writeTargetRecord(ledgerDir, { owner: "craigoley", repo: instance === "core" ? "remudero" : "wreckterra", isSelf: instance === "core",
+    checkoutRoot: join(root, "instance-checkout"), questionStoreRoot: plans.recordServeRoot ? serveRoot : daemonRoot });
   const db = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
   onReadModelClose(t, () => db.close());
   const acquired = acquireLease(db, { clock, ttlMs: 1e12 });
   assert.ok(acquired.ok);
   const projector = createLedgerProjector({ ledgerDir, db, lease: acquired.lease, clock });
   projector.tick();
-  const serveRoot = join(root, "serve-gen");
-  mkdirSync(join(serveRoot, "plan"), { recursive: true });
   // A secondary instance's own checkout: its daemon's question store, beside the plan the view reads.
   const checkout = join(root, "instance-checkout");
   if (plans.checkout) mkdirSync(join(checkout, "plan"), { recursive: true });
@@ -233,12 +248,13 @@ test("W1-T13940 criterion 1: an answer through the real answer route, written to
   assert.deepEqual(released.ran, [TASK]);
   assert.ok(released.rows.some(({ step, data }) => step === "console.kick_dispatched" && data.task === TASK));
   assert.equal(released.rows.some(({ step }) => step === "console.kick_refused"), false);
-  const copied = storeLines(daemonRoot);
-  assert.equal(copied.length, 1, "the daemon copies the answer into its own store once");
+  const copied = published(ledgerPath);
+  assert.equal(copied.length, 1, "the daemon publishes the answer beside the shared ledger once");
   assert.deepEqual({ task: copied[0].task, answer: copied[0].answer, origin: copied[0].origin, answer_id: copied[0].answer_id, source: copied[0].source },
     { task: TASK, answer: "Use 5 passes.", origin: row.origin, answer_id: row.answer_id, source: "ledger" });
+  assert.equal(storeLines(daemonRoot).length, 0, "and writes nothing into its checkout, a path serve's namespace does not share");
   await kick(daemonRoot, ledgerPath);
-  assert.equal(storeLines(daemonRoot).length, 1, "a later pass copies nothing again");
+  assert.equal(published(ledgerPath).length, 1, "a later pass publishes nothing again");
 });
 
 test("W1-T13940 criterion 2: a GitHub issue reply still releases the task, and a second pass adds no store entry and no ledger row", async (t) => {
@@ -249,12 +265,12 @@ test("W1-T13940 criterion 2: a GitHub issue reply still releases the task, and a
   const reader = taskInputAnswerWithLedger(daemonRoot, ledgerPath);
   assert.equal(reader(TASK), "Use 5 passes.");
   assert.equal(refusal(daemonRoot, ledgerPath), undefined, "the GitHub answer releases the task");
-  const counts = () => [storeLines(daemonRoot).filter((line) => line.task === TASK).length, answerRows(ledgerPath).length];
-  assert.deepEqual(counts(), [1, 1], "the reader does not copy the daemon's own GitHub answer a second time");
+  const counts = () => [storeLines(daemonRoot).filter((line) => line.task === TASK).length, answerRows(ledgerPath).length, published(ledgerPath).length];
+  assert.deepEqual(counts(), [1, 1, 1], "the reader publishes the daemon's own GitHub answer once, from its row and its store line");
   assert.deepEqual(await readEscalationAnswers(daemonRoot, "RUN-2", issueReplyGateway(), { ledgerPath }, fixedClock(T0 + 1000)), { accepted: 0, ignored: 0, unreadable: 0 });
   assert.equal(reader(TASK), "Use 5 passes.");
   assert.equal(refusal(daemonRoot, ledgerPath), undefined);
-  assert.deepEqual(counts(), [1, 1], "a second pass over the same reply adds nothing");
+  assert.deepEqual(counts(), [1, 1, 1], "a second pass over the same reply adds nothing");
 });
 
 test("W1-T13940 criterion 3: a held task is one answerable decision in the needs-you list, its gate key matches, and an answer through the route removes it", async (t) => {
@@ -333,7 +349,7 @@ test("W1-T13940 criterion 4: the Inbox lists the held task exactly when the disp
     assert.equal(refused, fixture.refused, `${fixture.name}: the dispatch check`);
     assert.equal(held.length === 1, refused, `${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
     assert.equal(composed.humanGates.sources.find((source) => source.name === "held-tasks" && source.instance === "wreck")?.state, "complete",
-      `${fixture.name}: the held-task source read the daemon's store`);
+      `${fixture.name}: the held-task source read the shared evidence`);
   }
 
   const root = tempDir(t, "writers");
@@ -485,13 +501,13 @@ test("W1-T13940 criterion 3: past the decisions cap, the needs-you count says ho
   const listed = composed.decisions.filter((d) => d.kind === "task_question");
   assert.equal(gates.length, 51, "every held task is a gate");
   assert.equal(listed.length, 50, "the list keeps its cap");
-  // This fixture's GitHub, feedback-age and Inbox sources are partial, so the Inbox total is a lower bound; the question source is complete,
-  // and it alone produced the held task the list leaves out, so that count is exact.
+  // This fixture's GitHub, feedback-age and Inbox sources are partial, so they may hold Inbox gates no page shows: the
+  // remainder is a lower bound even though the question source is complete.
   assert.equal(composed.humanGates.sources.find((source) => source.name === "task-questions")?.state, "complete", "an absent store is a complete source");
   assert.ok(composed.needsYou.uncertain.length > 0, "control: other sources are partial");
   assert.deepEqual(composed.needsYou.inbox, { atLeast: 51 });
-  assert.deepEqual(composed.needsYou.display, { shown: 50, more: { count: 1 } }, "the count names the one the list leaves out, exactly");
-  assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.count ?? 0), gates.length, "the count and the list agree");
+  assert.deepEqual(composed.needsYou.display, { shown: 50, more: { atLeast: 1 } }, "the count names the one the list leaves out, as a lower bound");
+  assert.equal(composed.needsYou.display!.shown + (composed.needsYou.display!.more.atLeast ?? 0), gates.length, "the count and the list agree");
   assert.equal(composed.instances.find((i) => i.instance === "core")?.counts?.decisionsMore, 1, "the instance says one more decision exists");
 });
 
@@ -522,12 +538,12 @@ test("W1-T13940 criterion 4: a route answer repeated after a newer GitHub answer
   row(2000, "Use 3 passes.", "tok", { answer_id: "a-2" });
   assert.equal(read(), "Use 3 passes.", "the repeated route answer is newest while its row is live");
   // The design skips a copy when the store holds the same answer id or the same origin and text: a-1's copy has both.
-  assert.equal(storeLines(daemonRoot).filter((line) => line.origin === "tok").length, 1, "the repeated answer is not copied a second time");
+  assert.equal(published(ledgerPath).filter((line) => line.origin === "tok").length, 1, "the repeated answer is not copied a second time");
   writeFileSync(ledgerPath, "");
-  assert.equal(read(), "Use 5 passes.", "once the row is gone the store's newest answer answers, so the task stays released");
-  const lines = storeLines(daemonRoot).length;
+  assert.equal(read(), "Use 5 passes.", "once the row is gone the published newest answer answers, so the task stays released");
+  const lines = published(ledgerPath).length;
   read();
-  assert.equal(storeLines(daemonRoot).length, lines, "a later read copies nothing");
+  assert.equal(published(ledgerPath).length, lines, "a later read copies nothing");
 });
 
 test("W1-T13940 criterion 2: a GitHub reply whose store line and ledger row straddle a competing answer is copied by no later pass", (t) => {
@@ -542,12 +558,13 @@ test("W1-T13940 criterion 2: a GitHub reply whose store line and ledger row stra
   appendFileSync(store, `${JSON.stringify({ ts: at(500), task: TASK, answer: "Use 3 passes.", origin: "tok", answer_id: "a-1" })}\n`);
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(500), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "Use 3 passes.", answer_id: "a-1" })}\n`);
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(1000), run_id: "RUN-1", task_id: TASK, step: "panel.question_answered", origin: github, answer: "Use 5 passes." })}\n`);
-  const copiesOfReply = () => storeLines(daemonRoot).filter((line) => line.origin === github).length;
+  const copiesOfReply = () => published(ledgerPath).filter((line) => line.origin === github).length;
   for (const pass of [1, 2]) {
     assert.ok(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), `pass ${pass}: the task is answered`);
-    assert.equal(copiesOfReply(), 1, `pass ${pass}: the GitHub reply is in the store once`);
+    assert.equal(copiesOfReply(), 1, `pass ${pass}: the GitHub reply is published once`);
   }
-  assert.equal(storeLines(daemonRoot).length, 2, "no pass copies anything");
+  assert.equal(published(ledgerPath).length, 2, "no later pass publishes anything");
+  assert.equal(storeLines(daemonRoot).length, 2, "the checkout store is left as it was");
   assert.equal(answerRows(ledgerPath).length, 2, "no pass writes a ledger row");
 });
 
@@ -562,17 +579,17 @@ test("W1-T13940 criterion 4: a newer answer row with the same text but another o
   row(0, "issue#501:comment:9001");
   const read = () => taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
   assert.equal(read(), "Use 5 passes.");
-  assert.equal(storeLines(daemonRoot).length, 1, "control: the daemon's own GitHub reply is not copied");
+  assert.equal(published(ledgerPath).length, 1, "control: the daemon's own GitHub reply is published once, from its row and its store line");
   row(1000, "tok", { answer_id: "a-1", author_login: "craigoley" });
   assert.equal(read(), "Use 5 passes.");
   row(2000, "tok", { answer_id: "a-2" });
   assert.equal(read(), "Use 5 passes.");
   writeFileSync(ledgerPath, "");
-  assert.equal(read(), "Use 5 passes.", "the store still answers once the rows are gone");
-  const ids = storeLines(daemonRoot).filter((line) => line.source === "ledger").map((line) => [line.answer_id, line.origin, line.author_login ?? null, line.ts]);
-  assert.deepEqual(ids, [["a-1", "tok", "craigoley", at(1000)]], "the row with a new origin is copied; a-2's origin and text are already in the store");
+  assert.equal(read(), "Use 5 passes.", "the published answers still answer once the rows are gone");
+  const ids = published(ledgerPath).filter((line) => line.origin === "tok").map((line) => [line.answer_id, line.origin, line.author_login ?? null, line.ts]);
+  assert.deepEqual(ids, [["a-1", "tok", "craigoley", at(1000)]], "the row with a new origin is copied; a-2's origin and text are already published");
   read();
-  assert.equal(storeLines(daemonRoot).length, 2, "a later read copies nothing");
+  assert.equal(published(ledgerPath).length, 2, "a later read copies nothing");
 });
 
 test("W1-T13940 criterion 4: the answer route and the escalation reply route stamp the store line and the answer row from the one injected clock", async (t) => {
@@ -610,7 +627,7 @@ function completeCoreNeedsYou(t: TestCtx, plan: Plan, store: string) {
   writeFileSync(join(dirname(planPath), "questions.ndjson"), store);
   const daemonRoot = join(root, "daemon-checkout");
   mkdirSync(join(daemonRoot, "plan"), { recursive: true });
-  writeDaemonTargetRecord(ledgerDir, { owner: "craigoley", repo: "remudero", isSelf: true, checkoutRoot: daemonRoot, questionStoreRoot: daemonRoot });
+  writeTargetRecord(ledgerDir, { owner: "craigoley", repo: "remudero", isSelf: true, checkoutRoot: daemonRoot, questionStoreRoot: daemonRoot });
   writeFileSync(join(ledgerDir, "ledger.ndjson"), [{ ts: iso(-7_200_000), step: "daemon.boot", head_sha: "a".repeat(40) },
     { ts: iso(-1000), step: "daemon.freshness_not_stale", arm: "up_to_date" }].map((row) => `${JSON.stringify(row)}\n`).join(""));
   // Consenting, enrolled feedback-age evidence over a window that holds now: one triaged entry, every ledger form read.
@@ -686,12 +703,12 @@ test("W1-T13940 criterion 4: a ledger answer whose origin and text the store alr
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(1000), run_id: "PANEL-1", task_id: TASK, step: "panel.question_answered", origin: "tok", answer: "Use 5 passes.", answer_id: "a-2" })}\n`);
   for (const pass of [1, 2]) {
     assert.equal(taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK), "Use 5 passes.", `pass ${pass}: the task is answered`);
-    assert.equal(storeLines(daemonRoot).length, 1, `pass ${pass}: the store already holds that origin and text, so nothing is copied`);
+    assert.deepEqual(published(ledgerPath).map((line) => line.answer_id), ["a-2"], `pass ${pass}: the store line's origin and text are published already, so it is not published again`);
   }
   // Control: a row with a new origin and the same text is copied.
   appendFileSync(ledgerPath, `${JSON.stringify({ ts: at(2000), run_id: "PANEL-2", task_id: TASK, step: "panel.question_answered", origin: "tok-2", answer: "Use 5 passes.", answer_id: "a-3" })}\n`);
   taskInputAnswerWithLedger(daemonRoot, ledgerPath)(TASK);
-  assert.deepEqual(storeLines(daemonRoot).map((line) => line.answer_id), ["a-1", "a-3"]);
+  assert.deepEqual(published(ledgerPath).map((line) => line.answer_id), ["a-2", "a-3"]);
 });
 
 test("W1-T13940 criterion 3: with a partial question source and other partial sources, the held task the list leaves out is counted as a lower bound", (t) => {
@@ -727,13 +744,111 @@ test("W1-T13940 criterion 3: an answer only in a secondary instance's target che
   assert.equal(composed.needsYou.instances.find((i) => i.instance === "wreck")?.inbox.atLeast ?? composed.needsYou.instances.find((i) => i.instance === "wreck")?.inbox.count, 1, "and counted");
 });
 
-test("W1-T13940 criterion 4: a daemon target record that names no question store marks the held-task source partial", (t) => {
+test("W1-T13940 criterion 4: an unreadable shared answers file marks the held-task source partial, and the held task stays listed and held", (t) => {
   for (const instance of ["core", "wreck"]) {
-    const box = inbox(t, instance, { noStoreRecord: true });
+    const box = inbox(t, instance);
+    // A daemon-only store answer that cannot be published: the answers path is a folder.
+    writeFileSync(join(box.daemonRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: "Use 5 passes.", origin: "tok" })}\n`);
+    mkdirSync(sharedAnswersPath(box.ledgerPath));
+    assert.match(refusal(box.daemonRoot, box.ledgerPath) ?? "", /needs-input/, `${instance}: an answer that cannot be published releases nothing`);
     const { composed, held } = box.needsYou();
     assert.equal(held.length, 1, `${instance}: the held task is still listed`);
     const source = composed.humanGates.sources.find((s) => s.instance === instance && (s.name === "held-tasks" || s.name === "task-questions"));
     assert.equal(source?.state, "partial", `${instance}: the held-task source is partial`);
-    assert.match(source?.reason ?? "", /names no question store/);
+    assert.match(source?.reason ?? "", /answers file .* is unreadable/);
   }
+});
+
+test("W1-T13940 criterion 4: with serve's own checkout at the daemon's recorded path, a daemon-only or serve-only store answer leaves the Inbox and dispatch agreeing", (t) => {
+  const answerLine = (answer: string) => `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer, origin: "issue#501:comment:9001" })}\n`;
+  for (const instance of ["core", "wreck"]) {
+    for (const fixture of [{ name: "daemon-only", refused: false }, { name: "serve-only", refused: true }]) {
+      const box = inbox(t, instance, { recordServeRoot: true });
+      assert.notEqual(box.serveRoot, box.daemonRoot, "control: the two namespaces' folders differ");
+      writeFileSync(join(fixture.name === "daemon-only" ? box.daemonRoot : box.serveRoot, "plan", "questions.ndjson"), answerLine("Use 5 passes."));
+      assert.equal(answerRows(box.ledgerPath).length, 0, `${instance} ${fixture.name}: control: no ledger answer row`);
+      const refused = refusal(box.daemonRoot, box.ledgerPath) !== undefined;
+      const { held, gates, composed } = box.needsYou();
+      assert.equal(refused, fixture.refused, `${instance} ${fixture.name}: the dispatch check`);
+      assert.equal(held.length === 1, refused, `${instance} ${fixture.name}: the Inbox lists the task exactly when the dispatch check refuses it`);
+      assert.equal(gates.length, held.length, `${instance} ${fixture.name}: the held task is in the list and the count together, or in neither`);
+      if (refused) assert.equal(composed.decisions.some((d) => d.kind === "task_question" && d.taskId === TASK), true, `${instance} ${fixture.name}: listed before the cap`);
+    }
+  }
+});
+
+test("W1-T13940 criterion 3: a serve-only store answer leaves a held task in the decisions list or the left-out count past the cap", (t) => {
+  const ids = Array.from({ length: NOW_DECISIONS_CAP + 1 }, (_, i) => `W1-T9${String(4000 + i)}`);
+  const many: Plan = loadPlanFromYaml(ids.map((id, i) => `- id: ${id}
+  title: "held fixture ${i}"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  origin: architect
+  files: [src/lib/plan.ts]
+  needs_input:
+    question: "question ${i}?"
+    asked_at: "2026-11-14T20:${String(i).padStart(2, "0")}:00Z"
+`).join(""), "plan/tasks.d/W1-T94000-many.yaml");
+  const box = inbox(t, "wreck", { readPlan: many, recordServeRoot: true });
+  // Serve's checkout holds an answer for the first task; the daemon's store and the shared ledger hold none.
+  writeFileSync(join(box.serveRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: ids[0], answer: "Use 5 passes.", origin: "tok" })}\n`);
+  const { composed } = box.needsYou();
+  const listed = composed.decisions.filter((d) => d.kind === "task_question");
+  const more = composed.needsYou.display!.more;
+  assert.equal(listed.length, NOW_DECISIONS_CAP, "the list keeps its cap");
+  assert.equal(listed.length + (more.count ?? more.atLeast), NOW_DECISIONS_CAP + 1, "every held task is listed or counted as left out");
+  assert.equal(composed.humanGates.gates.filter((g) => g.kind === "task_question").length, NOW_DECISIONS_CAP + 1, "every held task is a gate");
+});
+
+test("W1-T13940 criterion 3: a partial proposal source keeps the left-out remainder a lower bound when no held task is left out", () => {
+  const escalation = { kind: "escalation" as const, subject: "W1-T90009", ownerSurface: "inbox" as const, openedAt: "2026-11-20T12:00:00.000Z",
+    url: null, reason: "an open escalation", resolutionVerb: "answer" as const };
+  // A core now body past its cap: the escalation is a gate, the decisions page shows none, and no held task exists.
+  const compose = (inboxPage: boolean) => {
+    const humanGates = projectHumanGates([{ name: "escalations", instance: "core", state: "complete", gates: [escalation] },
+      { name: "task-questions", instance: "core", state: "complete", gates: [] }]);
+    const data = { decisions: [], decisionsMore: 1, actions: [], humanGates } as unknown as NowViewData;
+    const now: ViewBodyEntry = { view: NOW_VIEW_NAME, key: "instance=core", version: NOW_VIEW_VERSION, generation: 1, etag: "now",
+      body: { view: NOW_VIEW_NAME, version: NOW_VIEW_VERSION, generatedAt: new Date(T0).toISOString(), asOf: null, stale: false, sources: [], data } };
+    const bodies = new Map([["now", now]]);
+    if (inboxPage) {
+      const lanes = inboxLanes({ proposals: [], classifications: [], ledgerLines: Object.assign([], { torn: 0, present: true }) }, tmpdir());
+      const page = inboxViewBodies(lanes, { name: "inbox-store:core", instance: "core", asOf: null, state: "fresh" }, "a".repeat(64)).find((b) => b.key === "section=needsYou")!;
+      bodies.set("inbox", { view: "inbox", key: page.key, version: 1, generation: 1, etag: "inbox",
+        body: { view: "inbox", version: 1, generatedAt: new Date(T0).toISOString(), asOf: null, stale: false, sources: page.sources, data: page.data } });
+    }
+    return composeNeedsYou(bodies, ["core"]).data;
+  };
+  const partial = compose(false);
+  assert.deepEqual(partial.humanGates.sources.filter((s) => s.state !== "complete").map((s) => s.name), ["proposals", "read-model:inbox@core"], "control: only the proposal side is partial");
+  assert.equal(partial.decisions.length, 0, "control: the escalation is left out of the page");
+  assert.deepEqual(partial.needsYou.display, { shown: 0, more: { atLeast: 1 } }, "unread proposals can add to the remainder, so it stays a lower bound");
+  const complete = compose(true);
+  assert.deepEqual(complete.needsYou.uncertain, [], "control: with the Inbox page read, every source is complete");
+  assert.deepEqual(complete.needsYou.display, { shown: 0, more: { count: 1 } }, "and the remainder is exact");
+});
+
+test("W1-T13940 criterion 4: an unreadable ledger or a torn answers line makes the evidence partial, and an answer that cannot be published releases nothing", async (t) => {
+  // Imported here so the rest of this file still loads against a tree without the shared reader.
+  const { sharedAnswerEvidence, sharedTaskAnswer } = await import("#src/lib/plan.js");
+  const stateDir = tempDir(t, "evidence");
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  mkdirSync(ledgerPath);
+  writeFileSync(sharedAnswersPath(ledgerPath), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: "Use 5 passes.", origin: "tok" })}\n{"task":\n`);
+  const read = sharedAnswerEvidence(ledgerPath)();
+  assert.match(read.partial ?? "", /the ledger .* is unreadable/);
+  assert.match(read.partial ?? "", /1 malformed line/);
+  assert.equal(read.answersUnreadable, undefined, "control: the answers file itself was read");
+  assert.equal(sharedTaskAnswer(read, TASK), "Use 5 passes.", "a whole published line still answers");
+  // The shared state folder is missing, so the daemon cannot publish its store answer: dispatch keeps the task held.
+  const daemonRoot = tempDir(t, "daemon");
+  mkdirSync(join(daemonRoot, "plan"), { recursive: true });
+  writeFileSync(join(daemonRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: TASK, answer: "Use 5 passes.", origin: "tok" })}\n`);
+  const missing = join(stateDir, "absent", "ledger.ndjson");
+  assert.match(refusal(daemonRoot, missing) ?? "", /needs-input/);
+  assert.equal(existsSync(sharedAnswersPath(missing)), false, "control: nothing was published");
 });
