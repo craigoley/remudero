@@ -509,7 +509,7 @@ test("a real sweep round's push frees the claim for its CI wait, and the round r
       const first = steps(logs, "fix.done")[0]?.extra?.branch_claim_run_id;
       assert.match(String(first), CLAIM_ID, JSON.stringify(logs.map((l) => l.step)));
       const wait = seen.find(([step]) => step === "ci-wait");
-      assert.deepEqual(wait, ["ci-wait", undefined], "the CI wait holds no claim");
+      assert.deepEqual(wait, ["ci-wait", first], "the CI wait holds the claim fix.done names");
       const after = seen.find(([step]) => step === "fix.ci_not_green");
       assert.match(String(after?.[1]), CLAIM_ID, "the round re-took the branch after its wait");
       assert.notEqual(after?.[1], first, "under a fresh claim");
