@@ -508,21 +508,21 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
 }
 
 /**
- * Each proposal's draft_input_key from its NEWEST lint-clean inbox.drafted row, by `ts` (a later row wins a tie, and
- * a row without a readable `ts` never outranks one with it). Design item 2: one key per proposal, so an older clean
- * input the proposal has since moved past never suppresses a draft.
+ * Every draft_input_key that has a lint-clean inbox.drafted row, per proposal. Design item 2 (invariant
+ * one-clean-draft-per-input): each clean input stays retired, so a proposal that returns to an input it already had
+ * (a retired proposal recreated under its stable id at the same anchors and reframe count) is not drafted again.
+ * Row order and `ts` do not decide which keys count, so a clock rollback cannot bring an input back.
  */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
-  const newest = new Map<string, { key: string; at: number }>();
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const clean = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row?.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
       typeof row.draft_input_key !== "string") continue;
-    const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-    const at = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
-    const prior = newest.get(row.proposal_id);
-    if (!prior || at >= prior.at) newest.set(row.proposal_id, { key: row.draft_input_key, at });
+    const keys = clean.get(row.proposal_id) ?? new Set<string>();
+    keys.add(row.draft_input_key);
+    clean.set(row.proposal_id, keys);
   }
-  return new Map([...newest].map(([id, { key }]) => [id, key]));
+  return clean;
 }
 
 function draftReceiptRow(row: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -665,7 +665,7 @@ export function draftsDueOnDaemon(
           (anchor.path === undefined || typeof anchor.path === "string")) &&
         (cachedInput.reframeHistory === undefined || Array.isArray(cachedInput.reframeHistory)) &&
         draftInputKey(cachedInput) === inputKey;
-    if (clean.get(p.id) === inputKey) {
+    if (clean.get(p.id)?.has(inputKey)) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }

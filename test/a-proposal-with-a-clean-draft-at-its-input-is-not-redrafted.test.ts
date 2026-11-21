@@ -264,7 +264,7 @@ test("the daemon selects fresh work when both live ledger reads fail", async t =
   assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing").map(row => row.proposal_id), [bare.id, archived.id]);
 });
 
-test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning to an earlier clean input drafts again", async t => {
+test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning to an earlier clean input skips drafting", async t => {
   const moved: Proposal = { ...bare, evidenceAnchors: [{ pattern: "export function draftsDueOnDaemon", path: "src/lib/inbox.ts", description: "a live anchor" }] };
   const other = { ...bare, id: "P13864-R" };
   const reframed: Proposal = { ...other, reframeHistory: [{ feedback: "narrow it" }] };
@@ -280,21 +280,21 @@ test("W1-T13864 criterion 4: new anchors and reframes draft once, and returning 
   fixture.append(cleanRow(moved));
   fixture.append(cleanRow(reframed));
 
-  // The newest clean input is `moved`'s: the older `bare` input is no longer retired, so going back to it drafts.
+  // Every clean input stays retired: going back to the earlier `bare` input after a restart does not draft it again.
   fixture.setProposals([bare, reframed]);
   const restartedPoll = fixture.newHook();
   await restartedPoll();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id]);
-  // The current input is still the newest clean one after a restart: it is not drafted, and its miss is logged once.
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
   fixture.setProposals([moved, reframed]);
   await restartedPoll();
   await fixture.newHook()();
-  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id, bare.id]);
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
+  // Each retired input's cache miss is logged once, however many polls and restarts see it.
   const misses = fixture.logs.filter(row => row.step === "inbox.draft_cache_missing" && row.proposal_id === bare.id);
-  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(moved)]);
+  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(bare), draftInputKey(moved)]);
 });
 
-test("W1-T13864 criterion 2: only the newest clean input stays retired regardless of receipt order or drafting lane", () => {
+test("W1-T13864 criterion 2: all clean inputs stay retired regardless of receipt order or drafting lane", () => {
   const moved: Proposal = { ...bare, evidenceAnchors: anchors };
   const dirtyInput: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
   const rows: Row[] = [
@@ -306,18 +306,16 @@ test("W1-T13864 criterion 2: only the newest clean input stays retired regardles
   const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>() };
   // The index may have found an older receipt after it had already recorded a newer one.
   for (const draftLedgerRows of [rows, [...rows].reverse()]) {
-    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [bare]);
+    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
     assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
     assert.deepEqual(draftsDueOnDaemon([dirtyInput], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), [dirtyInput]);
-    assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, draftInputKey(moved)]]));
+    assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, new Set([draftInputKey(bare), draftInputKey(moved)])]]));
   }
-  // A row without a readable ts never outranks a timestamped one, and a later row wins a tie.
-  const tie = "2026-11-20T00:00:05.000Z";
-  assert.equal(cleanDraftInputKeys([{ ...cleanRow(moved), ts: tie }, cleanRow(bare)]).get(bare.id), draftInputKey(moved));
-  assert.equal(cleanDraftInputKeys([{ ...cleanRow(moved), ts: tie }, { ...cleanRow(bare), ts: tie }]).get(bare.id), draftInputKey(bare));
+  // A row without a readable ts counts like any other clean row.
+  assert.deepEqual(cleanDraftInputKeys([cleanRow(bare)]), new Map([[bare.id, new Set([draftInputKey(bare)])]]));
 });
 
-test("W1-T13864 criterion 2: a clean draft published before a reframe does not retire its older input after the cache is lost", async t => {
+test("W1-T13864 criterion 2: a clean draft published before a reframe keeps its older input retired after the cache is lost", async t => {
   const scope = { repository: "o/r" };
   const stateDir = ownedFixtureDir(t, "clean-draft-reframed").dir;
   const ledgerPath = join(stateDir, LEDGER_FILENAME);
@@ -341,9 +339,43 @@ test("W1-T13864 criterion 2: a clean draft published before a reframe does not r
   // The drafts cache is lost; the daemon reads its receipts through the receipt index.
   const draftLedgerRows = indexInboxDraftReceipts(stateDir, scope.repository, rows, log);
   const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>(), draftLedgerRows };
-  assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, ctx, laneB), [bare], "the older clean input ::0 is due");
-  assert.deepEqual(draftsDueOnDaemon([reframed], {}, {}, 3, ctx, laneB), [], "the newest clean input ::1 is not");
-  assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, draftInputKey(reframed)]]));
+  assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, ctx, laneB), [], "the older clean input ::0 stays retired");
+  assert.deepEqual(draftsDueOnDaemon([reframed], {}, {}, 3, ctx, laneB), [], "the newer clean input ::1 is retired");
+  assert.deepEqual(cleanDraftInputKeys(draftLedgerRows), new Map([[bare.id, new Set([draftInputKey(bare), draftInputKey(reframed)])]]));
+});
+
+test("W1-T13864 criterion 2: after a clock rollback the current input's earlier-stamped clean receipt still retires it once its cache is lost", async t => {
+  const reframed: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
+  // The host clock went back between the two drafts: the current input ::1 was receipted with the EARLIER ts.
+  const fixture = hookFixture(t, [reframed], [
+    { ...cleanRow(bare), ts: "2026-11-20T12:00:00.000Z" },
+    { ...cleanRow(reframed), ts: "2026-11-20T11:00:00.000Z" },
+  ]);
+  await fixture.newHook()();
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, []);
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing").map(row => row.draft_input_key),
+    [draftInputKey(reframed)]);
+});
+
+test("W1-T13864 criterion 4: a proposal retired and recreated at reframe count 0 after clean drafts at 0 and 1 is not drafted, while a new round still drafts", async t => {
+  const reframed: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
+  const fixture = hookFixture(t, [bare], [
+    { ...cleanRow(bare), ts: "2026-11-20T11:00:00.000Z" },
+    { ...cleanRow(reframed), ts: "2026-11-20T12:00:00.000Z" },
+  ]);
+  // Reconciliation retired the unratified proposal and recreated its stable id at the same anchors and count 0.
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, []);
+  assert.equal(draftInputKey(bare).slice(-3), "::0");
+  // A new reframe round and a new anchor set are new inputs, and each still drafts.
+  const twice: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }, { feedback: "narrower" }] };
+  fixture.setProposals([twice]);
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, [twice.id]);
+  fixture.setProposals([{ ...bare, evidenceAnchors: anchors }]);
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, [twice.id, bare.id]);
 });
 
 test("W1-T13864 criterion 3: a legacy clean draft for an already reframed proposal survives both lane changes", () => {
