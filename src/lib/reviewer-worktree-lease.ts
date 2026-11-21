@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { systemClock } from "./clock.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createOrReadPublished, isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 
 interface ReviewerLease {
@@ -12,6 +13,11 @@ interface ReviewerLease {
   host: string;
   startedAt: string;
   run_id: string;
+}
+
+/** W1-T14066: a live holder in another process owns this tree; the borrow never ran its action. */
+export class ReviewerWorktreeLeasedError extends RmdError {
+  constructor() { super("git", GENERIC_EXIT_CODE, "reviewer worktree is leased by another owner"); }
 }
 
 const borrowers = new Map<string, { owner: ReviewerLease; raw: string; count: number }>();
@@ -53,10 +59,10 @@ function claim(path: string): { owner: ReviewerLease; raw: string; count: number
       return { owner, raw, count: 0 };
     }
     const holder = parseLease(publication.raw);
-    if (!staleLease(holder)) throw new Error("reviewer worktree is leased by another owner");
+    if (!staleLease(holder)) throw new ReviewerWorktreeLeasedError();
     const reclaimed = reclaimStaleLock(lock, { parseHolder: parseLease, isStale: staleLease,
       onReclaim: () => {}, onLostReclaim: () => {} });
-    if (reclaimed.outcome === "live") throw new Error("reviewer worktree is leased by another owner");
+    if (reclaimed.outcome === "live") throw new ReviewerWorktreeLeasedError();
   }
   throw new Error("reviewer worktree lease acquisition remained contested");
 }

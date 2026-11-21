@@ -2,6 +2,7 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  constants,
   cpSync,
   existsSync,
   fstatSync,
@@ -18,6 +19,7 @@ import {
   statSync,
   writeFileSync,
   writeSync,
+  type BigIntStats,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
@@ -26,6 +28,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { sameHost } from "./host-identity.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
 import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
@@ -228,6 +231,88 @@ export interface LedgerWriterDeps {
   writeLedger?: typeof appendLedger;
 }
 
+export class LedgerAppendConflict extends RmdError {
+  constructor(message: string) {
+    super("read-model", GENERIC_EXIT_CODE, message);
+  }
+}
+
+export function ledgerFileVersion(stat: BigIntStats): string {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+function openLedgerForAppend(path: string, expectedLiveVersion: string | undefined): number {
+  if (expectedLiveVersion === undefined) return openSync(path, "a+");
+  try {
+    return openSync(path, constants.O_RDWR | constants.O_APPEND);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new LedgerAppendConflict("live ledger is missing before the decline append");
+  }
+}
+
+function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): bigint {
+  const { size } = fstatSync(fd, { bigint: true });
+  const tail = Buffer.alloc(1);
+  if (size > 0n && (readSync(fd, tail, 0, 1, size - 1n) !== 1 || tail[0] !== 0x0a)) {
+    throw new LedgerAppendConflict("live ledger has an unterminated tail");
+  }
+  if (ledgerFileVersion(fstatSync(fd, { bigint: true })) !== expectedLiveVersion) {
+    throw new LedgerAppendConflict("live ledger changed before the decline append");
+  }
+  return size;
+}
+
+/**
+ * W1-T13859: a writer that takes no lock can append between the version check and this row, and no file
+ * primitive makes a check and an append one step. So check after the write: the row must sit exactly at the
+ * checked size. Any row before it means the decision read a ledger that has since grown (a complete row can
+ * change the expiry bound; an unterminated one now joins this row). Either way, withdraw this row and refuse.
+ */
+function verifyAppendAtCheckedSize(path: string, fd: number, checkedSize: bigint, row: Buffer): void {
+  const end = fstatSync(fd, { bigint: true }).size;
+  const span = Buffer.alloc(Number(end - checkedSize));
+  const read = span.length === 0 ? 0 : readSync(fd, span, 0, span.length, checkedSize);
+  const at = span.subarray(0, read).indexOf(row);
+  if (at === 0) return;
+  if (at < 0) throw new LedgerAppendConflict("live ledger lost the decline row after the append");
+  const torn = span[at - 1] !== 0x0a;
+  withdrawAppendedRow(path, fd, checkedSize + BigInt(at), row.length, torn);
+  throw new LedgerAppendConflict(torn
+    ? "live ledger gained an unterminated row before the decline append"
+    : "live ledger gained a row before the decline append");
+}
+
+/**
+ * Overwrite only this row's own bytes, so no other writer's bytes move. After a complete row they become a blank
+ * line, which ledger readers skip. After an unterminated row they become spaces with no newline, so that row stays
+ * unterminated as it was before this append: the next append meets the tail it would have met had this row never
+ * been written. An O_APPEND descriptor ignores the position on Linux, so this opens the path again and writes only
+ * while it is still the same file.
+ */
+function withdrawAppendedRow(path: string, appendFd: number, offset: bigint, length: number, torn: boolean): void {
+  const filler = Buffer.alloc(length, 0x20);
+  if (!torn) filler[length - 1] = 0x0a;
+  const appended = fstatSync(appendFd, { bigint: true });
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_WRONLY);
+  } catch (error) {
+    throw new LedgerAppendConflict(`could not withdraw the decline row: ${String(error)}`);
+  }
+  try {
+    const current = fstatSync(fd, { bigint: true });
+    if (current.dev !== appended.dev || current.ino !== appended.ino) {
+      throw new LedgerAppendConflict("could not withdraw the decline row: the live ledger was replaced");
+    }
+    if (writeSync(fd, filler, 0, length, Number(offset)) !== length) {
+      throw new LedgerAppendConflict("could not withdraw the decline row: short write");
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function appendLedger(
   path: string,
   line: LedgerLine,
@@ -237,6 +322,8 @@ export function appendLedger(
     actor?: () => LedgerActor;
     clock?: Clock;
     fstat?: (fd: number) => { mtimeMs: number };
+    /** Append only to the complete live file version used to make the decision. */
+    expectedLiveVersion?: string;
   } = {},
 ): void {
   const actor = (opts.actor ?? deriveLedgerActor)();
@@ -266,9 +353,11 @@ export function appendLedger(
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
   const rows = [buf];
   let behind: Buffer[];
-  const fd = openSync(path, "a+");
+  const fd = openLedgerForAppend(path, opts.expectedLiveVersion);
   try {
+    const checkedSize = opts.expectedLiveVersion === undefined ? undefined : verifyLedgerBeforeAppend(fd, opts.expectedLiveVersion);
     const written = writeSync(fd, buf, 0, buf.length);
+    if (checkedSize !== undefined && written === buf.length) verifyAppendAtCheckedSize(path, fd, checkedSize, buf);
     if (written !== buf.length) {
       console.error(
         `ledger: short write for ${path} (${written}/${buf.length} bytes written) — ` +
@@ -542,6 +631,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "implement.preopen_gate", // preopen-gate.ts counts the fleet streak across rotations.
   "implement.preopen_gate.alert", // preopen-gate.ts dedups raises and clears on recovery.
   "run.start",
+  "panel.question_answered", // W1-T13940: taskInputAnswerWithLedger releases a needs_input task from this row.
   "queue_judge.scorecard", // W1-T12551: the machine dispatch share reads the last completed queue-judge pass.
   "queue_judge.unavailable", // W1-T12551: and the unavailable passes after it.
   "daemon.in_flight_review_abandoned", // W1-T12229: restart-cycle recovery needs the pre-cancel review identity and age after rotation.
@@ -1470,14 +1560,21 @@ export function isRotationLockHolderStale(
  * Skip live holders immediately: append already landed and the holder's catch-up folds it in.
  * W1-T4820: judge other-container holders by age; treating daemon/serve peers as dead cut twin archives.
  * Falsifiers: test/ledger-rotation-is-locked.test.ts, test/the-status-board-reads-each-ledger-row-once.test.ts.
- * See docs/forensics/ledger.md#tryacquirerotationlock (R-1). */
-function tryAcquireRotationLock(lockPath: string): (() => void) | null {
-  const info: LedgerRotationLockInfo = { pid: process.pid, host: hostname(), startedAt: new Date().toISOString() };
+ * See docs/forensics/ledger.md#tryacquirerotationlock (R-1).
+ * W1-T13859: `rmd ledger-compact` holds it while it replaces archives, and the skill-draft expiry reader
+ * holds it while it reads the union, so no archive moves under a read that must be complete.
+ * Per-draft verdict locks use the same foreign-holder expiry policy and retain their legacy run id. */
+export function tryAcquireRotationLock(lockPath: string, runId?: string): (() => void) | null {
+  const info: LedgerRotationLockInfo & { run_id?: string; owner?: string } = {
+    pid: process.pid, host: hostname(), startedAt: new Date().toISOString(),
+    ...(runId === undefined ? {} : { run_id: runId, owner: randomUUID() }),
+  };
+  const raw = JSON.stringify(info);
   for (;;) {
     try {
       const fd = openSync(lockPath, "wx");
       try {
-        writeSync(fd, JSON.stringify(info));
+        writeSync(fd, raw);
       } finally {
         closeSync(fd);
       }
@@ -1492,10 +1589,10 @@ function tryAcquireRotationLock(lockPath: string): (() => void) | null {
       // "missing" | "reclaimed" | "lost" → retry the atomic create from the top.
     }
   }
-  // `force`: a lock some other actor already cleared (a reclaimer that mis-judged this holder
-  // stale) must not turn release into a throw — the rotation's own outcome was decided by the
-  // identity guard, not by whether the lock file survived.
-  return () => rmSync(lockPath, { force: true });
+  return () => {
+    // A reclaimed holder may still unwind later. Release only the lock acquired above.
+    reclaimStaleLock(lockPath, { parseHolder: (bytes) => bytes, isStale: (bytes) => bytes === raw, onReclaim: () => {} });
+  };
 }
 
 function datedArchivePath(path: string, now: Date): string {
@@ -1732,7 +1829,7 @@ export function compactRotations(
   io: {
     readRows: (path: string) => string[];
     write: (name: string, body: string) => void;
-    remove: (path: string) => void;
+    remove?: (path: string) => void;
     clock?: Clock;
   },
 ): LedgerCompactionResult {
@@ -1798,7 +1895,7 @@ export function compactRotations(
   const written = new Set(archiveNames);
   for (const path of sources) {
     if (written.has(basename(path))) continue;
-    io.remove(path);
+    io.remove?.(path);
   }
   return { sourceCount: sources.length, rowsWritten: rows.length, duplicatesCollapsed: read - rows.length, archiveName, archiveNames };
 }

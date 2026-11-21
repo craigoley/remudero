@@ -26,7 +26,7 @@
   # refusal-amendment (W1-T12271, run work-fix-dispatch-W1-T12271-1795099850819-4520@cf761b9a797c7d82afaf4446c1d966b519435374, 2026-11-19T15:28:16.790Z): the worker refused criterion 3 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The legacy implementation clears the terminal index when a rotation is unreadable, and the existing caller admits previously held heads when their entries are absent.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A second build of the sweep effects on the same state directory, in a new process, decompresses no rotated ledger file that the first build read"

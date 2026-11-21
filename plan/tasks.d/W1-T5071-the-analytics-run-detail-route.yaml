@@ -6,7 +6,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 25.00
+  budget_usd: 4.50
   risk: high
   band_meaning: span
   origin: "2026-10-01 core-console architecture Phase 4 design (§1.1 row 7, §1.3, §8 route exclusions, operator decision 1), arch-phase4-design.md"

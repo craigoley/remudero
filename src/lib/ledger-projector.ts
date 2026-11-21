@@ -61,6 +61,7 @@ export const LEDGER_PROJECTOR_DDL = `
     task_id TEXT, run_id TEXT, body TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS fact_task ON fact(task_id, seq) WHERE task_id IS NOT NULL;
   CREATE INDEX IF NOT EXISTS fact_step ON fact(step, ts_ms);
+  CREATE INDEX IF NOT EXISTS fact_task_run ON fact(task_id, run_id, seq) WHERE task_id IS NOT NULL AND run_id IS NOT NULL;
   CREATE TABLE IF NOT EXISTS fact_alias(task TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(task, seq)) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS quarantine(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, ts TEXT NOT NULL, step TEXT NOT NULL,
     ingested_ms INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;
