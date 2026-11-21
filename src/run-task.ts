@@ -8961,7 +8961,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   /** W1-T10339: digest of the PR body a TASKLESS PR was dispatched on — an input every stand-down records. */
   prBodySha256?: string;
 }): ReturnType<RunTaskCommandHost["runFixRung"]> {
-  return runFixRungFromModule(asyncFixRungOptions(opts, hostWorktreeGitAsync), fixCommandHost());
+  const options = asyncFixRungOptions(opts, hostWorktreeGitAsync);
+  return runFixRungFromModule(options, fixCommandHost());
 }
 
 function asyncFixRungOptions(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0], git: typeof hostWorktreeGitAsync) {
@@ -9001,6 +9002,36 @@ export function buildProofAmendmentGitOps(git: (worktreePath: string, args: stri
       return git(worktreePath, ["rev-parse", "HEAD"]).trim();
     },
   };
+}
+
+function requestFixScopeAmendment(
+  request: ScopeAmendmentRequest,
+  ...[params, io]: Parameters<typeof buildProofAmendmentWritePorts>
+): ScopeAmendmentOutcome {
+  const ports = buildProofAmendmentWritePorts(params, io);
+  if (io?.findShardFn || /^PR-\d+$/.test(request.taskId)) return requestScopeAmendment(request, ports);
+
+  const checkout = `${ports.worktreePathFor(request.taskId, request.prNumber)}-${randomUUID()}`;
+  try {
+    return requestScopeAmendment(request, {
+      ...ports,
+      // The writer probes after validating the ask and checking its ledger identity.
+      // Cut the tree here so the shard read sees the main revision worktreeAdd just fetched.
+      probeExisting: (branch) => {
+        const existing = ports.probeExisting(branch);
+        if (existing) return existing;
+        ports.worktreeAdd(ports.repoDir, checkout, branch);
+        return undefined;
+      },
+      findShard: (_dir, id) => ports.findShard(checkout, id),
+      worktreePathFor: () => checkout,
+      worktreeAdd: () => {},
+      worktreeRemove: () => {},
+    });
+  } finally {
+    // A shard can be refused before the writer reaches its own cleanup block.
+    if (existsSync(checkout)) ports.worktreeRemove(ports.repoDir, checkout);
+  }
 }
 
 /**
@@ -46357,7 +46388,7 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
-function fixCommandHost(): FixCommandHost {
+export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
     get CENSUS_PUSH_CHECK() { return CENSUS_PUSH_CHECK; },
@@ -46379,6 +46410,7 @@ function fixCommandHost(): FixCommandHost {
     get buildImportClosureRead() { return buildImportClosureRead; },
     get buildProofAmendmentGitOps() { return buildProofAmendmentGitOps; },
     get buildProofAmendmentWritePorts() { return buildProofAmendmentWritePorts; },
+    get requestFixScopeAmendment() { return requestFixScopeAmendment; },
     get buildSweepEffects() { return buildSweepEffects; },
     get checkFixCensusSnapshotAsync() { return checkFixCensusSnapshotAsync; },
     get readInheritedCensusContextAsync() { return readInheritedCensusContextAsync; },
