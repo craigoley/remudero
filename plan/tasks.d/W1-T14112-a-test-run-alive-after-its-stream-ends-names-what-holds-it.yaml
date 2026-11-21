@@ -11,7 +11,7 @@
   plan_refs: [W1-T11020, W1-T11049, W1-T1009]
   files:
     - scripts/pool-run-tally.mjs
-    - test/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts
+    - test/ci/suites/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -35,10 +35,10 @@
     INVARIANT names-without-holding: the observation never keeps a process alive and is written at most once per run.
   acceptance:
     - claim: "A run whose reporter stream ended but which a test-held child process keeps alive prints one alive-after-stream-end line naming that child's pid"
-      proof: "grep: W1-T14112 criterion 1: in test/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts"
+      proof: "grep: W1-T14112 criterion 1: in test/ci/suites/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts"
     - claim: "invariant:names-without-holding — a run that exits normally right after its stream ends prints no alive-after-stream-end line and its exit is not delayed by the observation"
       kind: guard
-      proof: "grep: W1-T14112 criterion 2: in test/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts"
+      proof: "grep: W1-T14112 criterion 2: in test/ci/suites/a-test-run-alive-after-its-stream-ends-names-what-holds-it.test.ts"
   falsifier: |
     Remove the timer: criterion 1's held run prints no alive-after-stream-end line. Make the timer ref'd: criterion
     2's normal run waits 60 s to exit.
