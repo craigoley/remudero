@@ -18759,45 +18759,70 @@ export function openEscalationStandDownSince(
 
 const OPEN_ESCALATION_HISTORY_STEPS: readonly string[] = ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"];
 const OPEN_ESCALATION_STEP_LINE = new RegExp(OPEN_ESCALATION_HISTORY_STEPS.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
-const openEscalationHistoryMemos = new Map<string, LedgerRotationMemo>();
+/** One state directory's open-escalation memo and the rotations each of the last two sweep passes reached. */
+interface OpenEscalationHistoryState { memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string> }
+const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>();
 
-/** A memo pass that keeps every rotation still listed on disk: a read with a later `since` skips older rotations, and
- *  the memo would otherwise drop them, so the next PR's wider window would load them again. A rotation's own
- *  size and mtime still decide every hit; one gone from disk is dropped. */
-function keepingListedRotations(memo: LedgerRotationMemo, stateDir: string, fsDeps: LedgerGrepFsDeps): LedgerRotationMemo {
-  const listed = (): string[] | undefined => {
-    try {
-      return ledgerRotationEntries(fsDeps.readdirSync(stateDir), stateDir).map((entry) => entry.path);
-    } catch (error) {
-      // Reason: an unlistable directory keeps nothing extra; the union read reports its own listing failure as unread.
-      return undefined;
-    }
-  };
-  return { ...memo, pass: (opts) => {
-    const pass = memo.pass(opts);
-    return { ...pass, complete: (retain) => pass.complete(retain ?? listed()) };
+/** The memo as one read sees it: each rotation the read reaches is recorded for this pass, and completing the read
+ *  keeps every rotation this pass or the one before reached. The union of one pass's windows is what the next pass
+ *  needs, so an older window's rotations are kept one pass and no longer. A rotation's own size and mtime still
+ *  decide every hit. */
+function retainingTheLastTwoPasses(state: OpenEscalationHistoryState): LedgerRotationMemo {
+  return { ...state.memo, pass: (opts) => {
+    const pass = state.memo.pass(opts);
+    return { ...pass,
+      rotationRecords: (entry, parse) => { state.reached.add(entry.path); return pass.rotationRecords(entry, parse); },
+      complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous]) };
   } };
 }
 
 /**
+ * W1-T13969: runSweep's pass boundary for {@link readOpenEscalationHistory}. The pass that ended becomes the previous
+ * one, and every rotation neither it nor this new pass has reached leaves the memo now, so a days-old window one PR
+ * once asked for is held for one pass beyond its last read, never for the process's lifetime. MEASURED 2026-11-20 on
+ * the fleet host: 241 rotations back to 2026-09-15, each ~25-minute rotation holding ~117 rows (173 KB) of the steps.
+ */
+export function beginOpenEscalationHistoryPass(ledgerPath: string): void {
+  const state = openEscalationHistoryStates.get(dirname(ledgerPath));
+  if (state === undefined) return;
+  state.previous = state.reached;
+  state.reached = new Set();
+  state.memo.pass().complete([...state.previous]);
+}
+
+/** W1-T13969: the summary row's fields for {@link openEscalationHistoryHeld}; none before any history read. */
+function openEscalationHistoryHeldFields(ledgerPath: string): Record<string, number> {
+  const held = openEscalationHistoryHeld(ledgerPath);
+  return held ? { open_escalation_memo_rotations: held.rotations, open_escalation_memo_rows: held.rows } : {};
+}
+
+/** What the open-escalation memo holds for `ledgerPath`'s state directory, for the pass's own summary row. */
+export function openEscalationHistoryHeld(ledgerPath: string): { rotations: number; rows: number } | undefined {
+  const state = openEscalationHistoryStates.get(dirname(ledgerPath));
+  if (state === undefined) return undefined;
+  const { archives, rows } = state.memo.retention();
+  return { rotations: archives, rows };
+}
+
+/**
  * W1-T13969 — the open-escalation history of `taskId` since `since`: origin/main's strict union read of the four steps,
- * answered from a rotation memo the sweep keeps for the process's lifetime, so a repeated pass over unchanged rotations
- * reads no archive bytes on the loop (a rotation is loaded off the loop once, and again only when its size or mtime
- * changes). MEASURED 2026-11-20: this read, then synchronous per PR and per pass, held the daemon loop 97.5 s in a day.
+ * answered from a rotation memo the sweep keeps across passes, so a repeated pass over unchanged rotations reads
+ * no archive bytes on the loop (a rotation is loaded off the loop once, and again only when its size or mtime changes,
+ * or after a pass that no read reached it; see {@link beginOpenEscalationHistoryPass}). MEASURED 2026-11-20: this read, then synchronous per PR and per pass, held the daemon loop 97.5 s in a day.
  * The rows equal readLedgerUnionRecordsSync's with the task's JSON-quoted id as `pattern`: a ledger line is
  * JSON.stringify's output, so that pattern matches the line exactly when it matches the row's own serialisation.
  */
 export async function readOpenEscalationHistory(ledgerPath: string, taskId: string, since: string | undefined,
   fsDeps: LedgerGrepFsDeps = realLedgerFs): Promise<LedgerUnionRecordRead> {
   const stateDir = dirname(ledgerPath);
-  let memo = openEscalationHistoryMemos.get(stateDir);
-  if (memo === undefined) {
-    memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
+  let state = openEscalationHistoryStates.get(stateDir);
+  if (state === undefined) {
+    const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
       { holder: "sweep.open-escalation-history", pattern: OPEN_ESCALATION_STEP_LINE });
-    openEscalationHistoryMemos.set(stateDir, memo);
+    openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set() });
   }
   const needle = JSON.stringify(taskId);
-  return readLedgerUnionRecordsMemoized(stateDir, keepingListedRotations(memo, stateDir, fsDeps), {
+  return readLedgerUnionRecordsMemoized(stateDir, retainingTheLastTwoPasses(state), {
     step: [...OPEN_ESCALATION_HISTORY_STEPS],
     since,
     // The memo is shared by every task, so its rows carry no task filter: the task is matched on each row instead.
@@ -21980,6 +22005,7 @@ export async function runSweep(
   const ledgerLines = [...readLedger(deps.ledgerPath)];
   const dependabotRoutes = dependabotReviewRoutes(ledgerLines);
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
+  beginOpenEscalationHistoryPass(deps.ledgerPath);
   const openEscalationSince = async (pr: OpenPrView): Promise<string | undefined> => {
     const taskId = fixLedgerTaskIdFor(pr);
     const key = `${pr.prNumber}@${pr.headSha}`;
@@ -28197,6 +28223,7 @@ export async function runSweep(
     total: summary.total,
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
+    ...openEscalationHistoryHeldFields(deps.ledgerPath),
     // W1-T11171: only a gated (light) pass has conflict shares to report.
     ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });

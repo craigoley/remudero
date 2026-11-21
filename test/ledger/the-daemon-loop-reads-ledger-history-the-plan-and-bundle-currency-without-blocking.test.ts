@@ -75,6 +75,7 @@ function heldPrSweep(t: TestContext, root: string) {
   const open: OpenIssue[] = [{ number: 19001, url: "https://github.com/acme/remudero/issues/19001", title: "[BLOCKED] review false-block",
     body: `**Task:** ${TASK}\n**Class:** BLOCKED\nhttps://github.com/acme/remudero/pull/${PR}\n**Head:** ${HEAD}\n**Cause:** review\n**Contract:** contract-A\n` }];
   const calls: string[] = [];
+  const logged: Array<Record<string, unknown>> = [];
   const issues: IssueGateway = {
     ensureLabel: () => true, listOpen: () => open,
     create: () => { calls.push("create"); return "https://github.com/acme/remudero/issues/2"; },
@@ -97,7 +98,7 @@ function heldPrSweep(t: TestContext, root: string) {
     dispatchFix: () => { calls.push("fix"); }, escalate: () => { calls.push("escalate"); },
     claimFixAdmission: () => ({ admitted: true }),
     readLiveState: (candidate: OpenPrView) => ({ ok: true, state: "OPEN", headSha: candidate.headSha }),
-    ledgerPath, runId: RUN, now: () => NOW, log: () => undefined,
+    ledgerPath, runId: RUN, now: () => NOW, log: (step: string, extra?: Record<string, unknown>) => { logged.push({ step, ...extra }); },
     appendLine: (path: string, row: LedgerLine) => appendLedger(path, { ts: stamp(0), ...row }),
   } as unknown as SweepDeps;
   const pr: OpenPrView = {
@@ -107,7 +108,7 @@ function heldPrSweep(t: TestContext, root: string) {
       reason: "the proof skips publication", proof_exec: "executed_pass" }],
     priorStrikes: 1, autoMergeArmed: false, lastActivityAt: stamp(-HOUR), body: `Builds it.\n\nRemudero-Task: ${TASK}\n`,
   };
-  return { ledgerPath, calls, sweep: () => runSweep([pr], deps) };
+  return { ledgerPath, calls, logged, sweep: () => runSweep([pr], deps) };
 }
 
 const seedRow = { step: "sweep.disposed", task_id: TASK, pr_number: PR, head_sha: HEAD, run_id: RUN,
@@ -141,6 +142,54 @@ test("W1-T13969 criterion 1: a repeated sweep pass over unchanged rotations read
   assert.equal(reads.counts.sync, 0, "a repeated pass over unchanged rotations reads no archive bytes on the loop");
   assert.equal(reads.counts.async, 0, "and loads no rotation again off the loop");
   assert.deepEqual(h.calls.filter((call) => call === "close"), [], "inside the SLO nothing is rebuilt");
+  const summaries = h.logged.filter((row) => row.step === "sweep.summary");
+  assert.equal(summaries.length, 2, "each pass writes its summary row");
+  assert.deepEqual([summaries[1]!.open_escalation_memo_rotations, summaries[1]!.open_escalation_memo_rows], [2, 2],
+    "the pass's summary row says what the history memo holds: both rotations, and their two rows of the history's steps");
+});
+
+/** Five rotations an hour apart, each holding one hold row of the task, and the live file's checkpoint. */
+function fiveRotations(root: string): string[] {
+  writeFileSync(join(root, "ledger.ndjson"), ndjson([seedRow]));
+  return [-10, -8, -6, -4, -2].map((hours) => {
+    const path = join(root, rotationName(hours * HOUR, hours % 4 === 0));
+    writeFileSync(path, hours % 4 === 0 ? gzipSync(ndjson([holdRow((hours - 0.5) * HOUR)])) : ndjson([holdRow((hours - 0.5) * HOUR)]));
+    return path;
+  });
+}
+
+test("W1-T13969 criterion 1: a rotation stays held only while this pass or the one before reached it", async (t) => {
+  const exports = sweepModule as unknown as Record<string, unknown>;
+  const read = exports.readOpenEscalationHistory as (ledgerPath: string, taskId: string, since: string | undefined) => Promise<LedgerUnionRecordRead>;
+  const begin = exports.beginOpenEscalationHistoryPass as (ledgerPath: string) => void;
+  const held = exports.openEscalationHistoryHeld as (ledgerPath: string) => { rotations: number; rows: number } | undefined;
+  assert.equal(typeof begin, "function", "sweep.ts exports the pass boundary runSweep calls");
+  const root = scratch(t, "passes");
+  const ledgerPath = join(root, "ledger.ndjson");
+  const rotations = fiveRotations(root);
+  const reads = countArchiveReads(t, root);
+  const old = stamp(-11 * HOUR), recent = stamp(-3 * HOUR);
+  // Pass 1: one PR's days-old checkpoint reaches R1..R5; another's recent one reaches R5.
+  begin(ledgerPath);
+  assert.equal((await read(ledgerPath, TASK, old)).rows.length, 6, "the old window reads every rotation's hold and the checkpoint");
+  await read(ledgerPath, TASK, recent);
+  assert.equal(reads.counts.async, rotations.length, "the first pass loads each rotation once, off the loop");
+  assert.deepEqual(held(ledgerPath), { rotations: 5, rows: 5 });
+  // Pass 2: only the recent window. R5, needed by both passes, is not read again; R1..R4 are kept one pass more.
+  reads.reset();
+  begin(ledgerPath);
+  await read(ledgerPath, TASK, recent);
+  assert.deepEqual(reads.counts, { sync: 0, async: 0 }, "a rotation needed by both passes is never re-read");
+  assert.deepEqual(held(ledgerPath), { rotations: 5, rows: 5 }, "the previous pass's rotations are still held during this pass");
+  // Pass 3 begins: no read of pass 2 reached R1..R4, so they leave the memo.
+  begin(ledgerPath);
+  assert.deepEqual(held(ledgerPath), { rotations: 1, rows: 1 }, "R1..R4 are no longer retained after a pass that did not reach them");
+  await read(ledgerPath, TASK, recent);
+  assert.deepEqual(reads.counts, { sync: 0, async: 0 }, "R5, read by pass 2, is still answered from the memo");
+  const again = await read(ledgerPath, TASK, old);
+  assert.equal(again.rows.length, 6, "an old window read again returns the same rows");
+  assert.equal(reads.counts.async, 4, "and loads only the four dropped rotations again, off the loop");
+  assert.equal(reads.counts.sync, 0);
 });
 
 test("W1-T13969 criterion 1: reads with different since windows keep every listed rotation, so neither reloads", async (t) => {
