@@ -89,9 +89,9 @@ const SEED_ROWS: readonly SeedRow[] = [
   },
   {
     step: "inbox.draft_history_partial",
-    meaning: "The daemon could only check part of the ledger for prior drafts. It still honored indexed receipts and those from readable files.",
-    writer: ["buildInboxDraftHook"],
-    outcomes: ["one or more draft history paths unreadable"],
+    meaning: "Some of the inbox draft history could not be read or the receipt index could not be updated. Readable receipts stay usable and completion publication continues.",
+    writer: ["buildInboxDraftHook", "retainDraftReceipts"],
+    outcomes: ["ledger path unreadable", "receipt index unavailable"],
   },
   {
     step: "judge_shadow.compared",
@@ -656,6 +656,15 @@ const SEED_ROWS: readonly SeedRow[] = [
       "each arm's terminal runs, merged runs and cost per merged PR.",
     writer: ["stageSkillLifecycleForAction"],
     outcomes: ["RETIRE-CANDIDATE", "REVIEW-CANDIDATE", "INSUFFICIENT EVIDENCE"],
+  },
+  {
+    step: "inbox.draft_cash_skipped",
+    meaning:
+      "A cash inbox draft was not started, because its estimated whole run was larger than the model's window " +
+      "(reason window) or the cash allowance left today (reason allowance). The refused cash run sent no request. " +
+      "The proposal stays due without an attempt key. A retry resumes any earlier paid work separately.",
+    writer: ["runDraftRung"],
+    outcomes: ["window", "allowance"],
   },
 ];
 

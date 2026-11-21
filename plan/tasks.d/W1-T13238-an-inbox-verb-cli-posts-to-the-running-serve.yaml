@@ -18,6 +18,7 @@
     - test/an-inbox-verb-cli-posts-to-the-running-serve.test.ts
     - src/lib/inbox-cli-serve.ts
     - "src/lib/config-schema.ts"
+    - "src/lib/panel-graph.ts"
   status: queued
   attempts: 0
   acceptance:

@@ -8,7 +8,7 @@
   verify: "auto"
   principles:
     tdd: strict
-  budget_usd: 12
+  budget_usd: 4.50
   risk: "high"
   band_meaning: "blast-radius"
   origin: "operator-approved-followups:2026-11-03"

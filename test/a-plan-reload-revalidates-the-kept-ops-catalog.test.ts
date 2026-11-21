@@ -89,7 +89,8 @@ test("W1-T13488 criterion 3: kept reads belong to their api, so another api read
   const dir = stateDir(t), a = upstream(record("OPS-T1")), b = upstream(record("OPS-T1"));
   await readBoardCatalogs(publicPlan, dir, a.api, clock);
   await readBoardCatalogs(publicPlan, dir, b.api, clock);
-  assert.ok(b.calls.some((c) => c.includes("/git/blobs/")), "a second api never reuses the first api's read");
+  assert.ok(b.calls.some((c) => c.endsWith("/git/ref/heads/main")) && b.calls.some((c) => c.includes("/git/commits/")) &&
+    b.calls.some((c) => c.includes("/git/trees/")), "a second api never reuses the first api's read: it re-reads the ref, the commit and the trees");
 });
 
 test("W1-T13618 criterion 1: a kept catalog confirmed within BOARD_CATALOG_REFRESH_MS answers with no GET at all", async (t) => {
