@@ -10726,8 +10726,6 @@ function stricterDirectionFor(file: string): "lower" | "higher" | undefined {
 
 export type InstrumentChangeDirection = "tightening" | "loosening" | "introduced" | "undetermined";
 
-/** Every `"key": <number>` pair on one diff line, as [key, value]. A line carrying no such pair
- *  yields nothing, which is what makes an unparseable hunk fall through to `undetermined` below. */
 /** Provenance/prose keys record when, where, how and why a number was captured, never an allowance.
  * Honest recapture must update them: cycle-baseline.json's `_methodology` derives counts at `capturedAtSha`.
  * Exclude `path`, `reason`, `id`, `testFile`, `target`, `literal`, `scopeConfig`: these scripts/*-baseline.json
@@ -10748,25 +10746,118 @@ function isInstrumentProvenanceKey(key: string): boolean {
   return key.startsWith("_") || INSTRUMENT_CAPTURE_KEYS.has(key);
 }
 
-/** The keys of every `"key": "string"` row on one line. Companion to {@link numericRowsOn}, which
- *  sees only numeric values and therefore cannot tell prose from an exemption entry. */
-function stringRows(text: string): string[] {
-  const out: string[] = [];
-  const re = /"([^"]+)"\s*:\s*"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) out.push(m[1]);
-  return out;
+/** One key/value pair an instrument's diff shows, on one side (old: context + removed lines; new: context + added).
+ *  `value` is the number, the string, or `undefined` for any other JSON value. `lines` index every line holding one
+ *  of its tokens, so a pair laid out over several lines (`"k":` then `0.98`, or `"k"` then `: 0.98`) is still one pair. */
+interface InstrumentPair { key: string; value: number | string | undefined; lines: number[] }
+
+/** One JSON token per match: a string, a complete JSON number (sign, fraction, exponent: `9e-1` is 0.9, never 9),
+ *  punctuation, a literal, or one run of anything else, which no pair may hold. Structurally total: `\s+` and `\S+`
+ *  between them match any character, so nothing is rejected here; a non-JSON run is the uncaptured `\S+` arm, and
+ *  the instrument-diff tests drive that arm through classifyInstrumentChange. */
+const INSTRUMENT_TOKEN_RE = /\s+|("(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*")|(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w.+-])|([{}[\]:,])|(true|false|null)(?!\w)|\S+/gy;
+
+/** The pairs one side of one hunk shows, and the lines a token no pair can hold sits on: a number or string with no
+ *  key in the hunk (its key lies outside it, or it is an array element), a colon with no key, or a non-JSON run.
+ *  W1-T3133's reading was one line at a time, so a key and its value on different lines (valid JSON) read as no pair
+ *  at all, and both a raise and a lowering classified `undetermined` (PR #20033's second review). */
+function instrumentSidePairs(lines: ReadonlyArray<{ index: number; text: string }>): { pairs: InstrumentPair[]; orphans: Set<number> } {
+  const pairs: InstrumentPair[] = [];
+  const orphans = new Set<number>();
+  let candidate: { key: string; line: number } | undefined; // a string that a colon would make a key
+  let pending: { key: string; lines: number[] } | undefined; // a key and its colon, awaiting a value
+  const strand = () => {
+    if (candidate) orphans.add(candidate.line);
+    for (const line of pending?.lines ?? []) orphans.add(line);
+    candidate = pending = undefined;
+  };
+  const settle = (value: InstrumentPair["value"], line: number, orphan: boolean) => {
+    if (pending) pairs.push({ key: pending.key, value, lines: [...pending.lines, line] });
+    else if (orphan) orphans.add(line);
+    pending = undefined;
+  };
+  for (const { index, text } of lines) {
+    INSTRUMENT_TOKEN_RE.lastIndex = 0;
+    for (let m = INSTRUMENT_TOKEN_RE.exec(text); m !== null && m[0] !== ""; m = INSTRUMENT_TOKEN_RE.exec(text)) {
+      const [token, str, num, punct, literal] = m;
+      if (str !== undefined) {
+        if (pending) settle(JSON.parse(str) as string, index, true);
+        else {
+          if (candidate) orphans.add(candidate.line);
+          candidate = { key: JSON.parse(str) as string, line: index };
+        }
+      } else if (num !== undefined) {
+        if (candidate) strand();
+        settle(Number(num), index, true);
+      } else if (punct === ":") {
+        if (candidate && !pending) {
+          pending = { key: candidate.key, lines: [candidate.line, index] };
+          candidate = undefined;
+        } else {
+          strand();
+          orphans.add(index);
+        }
+      } else if (punct === "{" || punct === "[" || literal !== undefined) {
+        // A container or a literal settles a pending key with a non-scalar value; with no key it pairs nothing.
+        if (pending) settle(undefined, index, false);
+        else {
+          strand();
+          if (literal !== undefined) orphans.add(index);
+        }
+      } else if (punct !== undefined) {
+        strand(); // `,` `}` `]`: a key still waiting for its value, or a bare string, is stranded
+      } else if (token.trim() !== "") {
+        strand();
+        orphans.add(index);
+      }
+    }
+  }
+  strand();
+  return { pairs, orphans };
 }
 
-function numericRowsOn(text: string): Array<[string, number]> {
-  const out: Array<[string, number]> = [];
-  // The whole JSON number grammar (sign, fraction, exponent), and only a complete one: `9e-1` read as 9
-  // turned a lowered 0.98 floor into "tightening". A token that is not a full JSON number yields no row,
-  // which leaves its line unaccountable and the file `undetermined`.
-  const re = /"([^"]+)"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w.+-])/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) out.push([m[1], Number(m[2])]);
-  return out;
+/** Every pair the instrument's diff changes, per side, hunk by hunk (a key never pairs across a hunk boundary), and
+ *  the added lines no pair accounts for. Lines before a file's first `@@` form one hunk, as {@link walkDiff} keeps them. */
+function instrumentDiffPairs(diff: string, file: string): {
+  lines: Array<{ kind: DiffLine["kind"]; text: string }>; removed: InstrumentPair[]; added: InstrumentPair[]; unaccounted: Set<number>;
+} {
+  const hunks: Array<Array<{ kind: DiffLine["kind"]; text: string; index: number }>> = [];
+  const lines: Array<{ kind: DiffLine["kind"]; text: string }> = [];
+  let current = "";
+  let hunk: Array<{ kind: DiffLine["kind"]; text: string; index: number }> | undefined;
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      current = raw.match(/\sb\/(\S+)\s*$/)?.[1] ?? "";
+      hunk = undefined;
+      continue;
+    }
+    if (raw.startsWith("+++ ")) {
+      const plus = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (plus !== "/dev/null") current = plus;
+      continue;
+    }
+    if (raw.startsWith("--- ")) continue;
+    if (current !== file) continue;
+    if (raw.startsWith("@@") || hunk === undefined) hunks.push((hunk = []));
+    if (raw.startsWith("@@")) continue;
+    const kind: DiffLine["kind"] = raw.startsWith("+") ? "add" : raw.startsWith("-") ? "del" : "ctx";
+    const line = { kind, text: kind === "ctx" && !raw.startsWith(" ") ? raw : raw.slice(1), index: lines.length };
+    lines.push(line);
+    hunk.push(line);
+  }
+  const removed: InstrumentPair[] = [];
+  const added: InstrumentPair[] = [];
+  const unaccounted = new Set<number>();
+  for (const h of hunks) {
+    const before = instrumentSidePairs(h.filter((l) => l.kind !== "add"));
+    const after = instrumentSidePairs(h.filter((l) => l.kind !== "del"));
+    removed.push(...before.pairs.filter((p) => p.lines.some((i) => lines[i]!.kind === "del")));
+    const changed = after.pairs.filter((p) => p.lines.some((i) => lines[i]!.kind === "add"));
+    added.push(...changed);
+    const held = new Set(changed.flatMap((p) => p.lines));
+    for (const l of h) if (l.kind === "add" && (after.orphans.has(l.index) || !held.has(l.index))) unaccounted.add(l.index);
+  }
+  return { lines, removed, added, unaccounted };
 }
 
 /** W1-T3133: classify one instrument's change. `introduced` requires a new file and an added/changed reader
@@ -10788,42 +10879,36 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
   const direction = stricterDirectionFor(file);
   if (direction === undefined) return "undetermined";
 
-  const lines = walkDiff(diff).filter((l) => l.file === file);
+  const { lines, removed, added, unaccounted } = instrumentDiffPairs(diff, file);
   if (lines.length === 0) return "undetermined";
 
-  const removedByKey = new Map<string, number>();
-  for (const l of lines) {
-    if (l.kind !== "del") continue;
-    for (const [k, v] of numericRowsOn(l.text)) removedByKey.set(k, v);
+  // One name with several removed values (a per-file ledger's `legacy` under two files, mutation's root and nightly
+  // `scorePct`) cannot say which old value an added one replaces, so any added value under that name is unaccountable.
+  const removedByKey = new Map<string, Set<number>>();
+  for (const p of removed) {
+    if (typeof p.value === "number") removedByKey.set(p.key, (removedByKey.get(p.key) ?? new Set()).add(p.value));
   }
-
-  let sawTightening = false;
-  for (const l of lines) {
-    if (l.kind === "del") {
-      // A removed row is strictly fewer exemptions / one less recorded allowance. Always tightening.
-      sawTightening = true;
-      continue;
-    }
+  // A removed row is strictly fewer exemptions / one less recorded allowance. Always tightening.
+  let sawTightening = lines.some((l) => l.kind === "del");
+  for (const [index, l] of lines.entries()) {
     if (l.kind !== "add") continue;
-    const rows = numericRowsOn(l.text);
-    if (rows.length === 0) {
-      // W1-T3182. A line carrying ONLY provenance/prose rows is skipped rather than treated as
-      // unaccountable: bailing here made this whole carve-out unreachable for the 8 of 19
-      // baselines that record a `capturedAt`, because a correct re-capture must refresh it.
-      // Anything else — including a line with no parseable row at all — still refuses.
-      const keys = stringRows(l.text);
-      if (keys.length > 0 && keys.every(isInstrumentProvenanceKey)) continue;
-      return "undetermined"; // a hunk this parser cannot account for
-    }
-    for (const [key, value] of rows) {
+    // W1-T3182: a line carrying ONLY provenance/prose rows is accountable (a correct re-capture must refresh
+    // `capturedAt`); anything else no pair accounts for -- including a line with no parseable row -- still refuses.
+    if (unaccounted.has(index)) return "undetermined"; // a hunk this parser cannot account for
+    // Each changed pair is judged once, at its last added line: its value may sit on a context line below.
+    for (const { key, value } of added.filter((p) => p.lines.filter((i) => lines[i]!.kind === "add").at(-1) === index)) {
+      if (typeof value === "string" && isInstrumentProvenanceKey(key)) continue;
+      if (typeof value !== "number") return "undetermined";
       const before = removedByKey.get(key);
       if (before === undefined) {
         // A brand-new key is admissible ONLY when it names a source file this diff also adds.
         if (!diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) return "undetermined";
         continue;
       }
-      if (value === before) continue;
-      const stricter = direction === "lower" ? value < before : value > before;
+      if (before.size !== 1) return "undetermined";
+      const [was] = before;
+      if (value === was) continue;
+      const stricter = direction === "lower" ? value < was : value > was;
       if (!stricter) return "loosening";
       sawTightening = true;
     }

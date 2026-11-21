@@ -5,7 +5,7 @@
  * gate all promote with no person in the loop, and every PR is merged without waiting on one (operator ruling). A bar
  * held as a TypeScript constant could therefore be loosened by any PR, silently. So the bars live in two baseline files
  * that scripts/baseline-monotonic-check.mjs, a REQUIRED check, holds monotonic against origin/main: a floor may only
- * rise and a ceiling only fall unless the file's `bumpRationale` changes to a fresh text naming the PR or task.
+ * rise and a ceiling only fall unless the file's `bumpRationale` names a PR or task its previous rationale did not.
  *
  * READ ON FIRST USE, NEVER AT IMPORT: judge-shadow.ts and experiment-promotion.ts sit in the import closure of about a
  * hundred src modules that load in a tree carrying src/ but not scripts/ (child-entry-argv.ts names that consumer

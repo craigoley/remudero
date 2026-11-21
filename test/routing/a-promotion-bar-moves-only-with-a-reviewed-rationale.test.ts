@@ -21,13 +21,17 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Direction = "increase" | "decrease";
 type Row = { path: string; field: string; direction: Direction };
+type Plan = { has: (ref: string) => boolean; unreadable?: string };
 /** The JavaScript gate has no declaration file. Keep its real import visible to test placement. */
 // @ts-expect-error The script is outside the repository's TypeScript project.
 const check = await import("#scripts/baseline-monotonic-check.mjs") as {
   SCORE_TABLE: Row[];
-  evaluateRow: (entry: Row, oldJson: Record<string, unknown> | undefined, newJson: Record<string, unknown>) => { status: string; detail: string };
+  evaluateRow: (entry: Row, oldJson: Record<string, unknown> | undefined, newJson: Record<string, unknown>, plan?: Plan) => { status: string; detail: string };
+  planTasks: (root: string) => Plan;
   main: (argv: string[]) => number;
 };
+/** This checkout's plan: W1-T2906 (the baseline-monotonic task) is a real task no promotion rationale cites yet. */
+const PLAN = check.planTasks(REPO_ROOT);
 
 const readJson = (path: string): Record<string, unknown> => JSON.parse(readFileSync(join(REPO_ROOT, path), "utf8")) as Record<string, unknown>;
 const FILES: Array<{ path: string; fields: readonly string[]; direction: Direction }> = [
@@ -74,8 +78,10 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
       assert.equal(check.evaluateRow(row, base, head).status, "regressed", `${field} loosened with base's own rationale`);
       assert.equal(check.evaluateRow(row, base, { ...head, bumpRationale: "loosened because it seemed fine" }).status, "regressed",
         `${field} loosened under a rationale that names no PR or task`);
-      assert.equal(check.evaluateRow(row, base, { ...head, bumpRationale: "Loosened by W1-T999999 after a reviewed replay." }).status,
+      assert.equal(check.evaluateRow(row, base, { ...head, bumpRationale: "Loosened by W1-T2906 after a reviewed replay." }, PLAN).status,
         "reviewed-bump", `${field} loosened under a fresh, task-naming rationale`);
+      assert.equal(check.evaluateRow(row, base, { ...head, bumpRationale: "Loosened by W1-T2906 after a reviewed replay." }).status,
+        "regressed", `${field}: with no plan to check it against, a task reference fails closed`);
       const tightened = { ...base, [field]: direction === "increase" ? value + 1 : value / 2 };
       assert.equal(check.evaluateRow(row, base, tightened).status, "ok", `${field} tightened needs no rationale`);
     }
@@ -96,6 +102,23 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: `${previous} Lowered by #20999 after a reviewed replay.` }).status,
     "reviewed-bump", "appending a reference the previous rationale did not name is a fresh review");
 
+  // References compare as NUMBERS, and a task must exist (PR #20033's second review: `W1-T012187` and `#0` passed).
+  const verdict = (old: Record<string, unknown>, bumpRationale: string, plan: Plan = PLAN) =>
+    check.evaluateRow(agree, old, { ...old, judgeMinAgreeShare: 0.9, bumpRationale }, plan);
+  assert.ok(PLAN.has("W1-T12187") && PLAN.has("W1-T2906"), "positive control: the plan holds the cited task and the fresh one");
+  for (const stale of [`${previous} W1-T012187`, `${previous} W1-T0012187.`, `${previous} #0`, `${previous} #00 and W1-T0.`]) {
+    assert.equal(verdict(floors, stale).status, "regressed", JSON.stringify(stale));
+  }
+  assert.equal(verdict({ ...floors, bumpRationale: "Reviewed in #7." }, "Lowered in #007.").status, "regressed", "#007 is #7");
+  const unknownTask = verdict(floors, `${previous} Lowered by W1-T99999999.`);
+  assert.equal(unknownTask.status, "regressed", "a task the plan does not hold reviews nothing");
+  assert.match(unknownTask.detail, /W1-T99999999 cannot count: no plan\/tasks\.d shard declares it/);
+  assert.equal(verdict(floors, `${previous} Lowered by W1-T2906.`).status, "reviewed-bump", "an existing task the old rationale did not cite");
+  assert.equal(verdict(floors, `${previous} Lowered by W1-T02906.`).status, "reviewed-bump", "zero padding still names the task");
+  const unreadable = verdict(floors, `${previous} Lowered by W1-T2906.`, check.planTasks(join(REPO_ROOT, "no-such-tree")));
+  assert.equal(unreadable.status, "regressed", "an unreadable plan counts no task reference");
+  assert.match(unreadable.detail, /W1-T2906 cannot count: cannot list plan\/tasks\.d under /);
+
   // The real CLI over the production rows, against a fixture repo whose HEAD holds today's two files and whose
   // working tree raises one ceiling: exit 1, naming the field.
   const repo = gitRepo({ scope: t, kind: "promotion-bars" });
@@ -112,6 +135,17 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   t.mock.method(console, "log", () => {});
   assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 1);
   assert.deepEqual(errors.filter((line) => line.includes("BLOCKED")).map((line) => /: (\w+) moved/.exec(line)?.[1]), ["poolMaxRejectedShare"]);
+
+  // The CLI checks a task reference against the plan of the tree it runs on: none in the fixture, then one.
+  const fresh = { ...ceilings, poolMaxRejectedShare: 0.5, bumpRationale: `${String(ceilings.bumpRationale)} Raised by W1-T2906.` };
+  writeFileSync(join(repo.dir, PROMOTION_CEILINGS_PATH), JSON.stringify(fresh));
+  errors.length = 0;
+  assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 1);
+  assert.match(errors.join("\n"), /W1-T2906 cannot count: cannot list plan\/tasks\.d under /);
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T2906-fixture.yaml"), "- id: W1-T2906\n");
+  errors.length = 0;
+  assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 0, errors.join("\n"));
 });
 
 test("the promotion bars the gardener, judge shadow pool and skill eval use are the baseline values", (t) => {
@@ -203,6 +237,46 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "judgeMaxBrier": 0.1,\n+  "judgeMaxBrier": 5e-2,\n'), "tightening");
   // A token that is not a whole JSON number is never read as its prefix: the file stays undetermined.
   assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinAgreeShare": 0.98,\n+  "judgeMinAgreeShare": 0.99.5,\n'), "undetermined");
+
+  // A key and its value on different lines are one pair (PR #20033's second review: both moves read `undetermined`).
+  const below = (from: string, to: string) => ` {\n   "judgeMinAgreeShare":\n-    ${from},\n+    ${to},\n   "skillEvalHeldOutTasks": 3,\n`;
+  assert.equal(classify(PROMOTION_FLOORS_PATH, below("0.98", "0.99")), "tightening");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, below("0.98", "0.90")), "loosening");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, below("0.98", "9e-1")), "loosening");
+  const ceilingBelow = (to: string) => `   "judgeMaxBrier"\n-    : 0.1,\n+    : ${to},\n`;
+  assert.equal(classify(PROMOTION_CEILINGS_PATH, ceilingBelow("0.05")), "tightening");
+  assert.equal(classify(PROMOTION_CEILINGS_PATH, ceilingBelow("0.2")), "loosening");
+  // The key outside the hunk (git cut it from the context): nothing pairs the number, so the file stays undetermined.
+  assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.99,\n"), "undetermined");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.90,\n"), "undetermined");
+});
+
+test("an instrument diff pairs each value with its own key, whatever the hunk's layout", () => {
+  const F = PROMOTION_FLOORS_PATH;
+  const diffOf = (...hunks: string[]) => [`diff --git a/${F} b/${F}`, `--- a/${F}`, `+++ b/${F}`, ...hunks.flatMap((h) => ["@@ -1,8 +1,8 @@", h])].join("\n");
+  const classify = (...hunks: string[]) => classifyInstrumentChange(diffOf(...hunks), [F], F);
+  // The key and the colon both changed, the value a context line: the rename is a new key, judged at the added line.
+  assert.equal(classify('-  "judgeMinPaired":\n+  "judgeMinPairedX":\n     200,\n'), "undetermined");
+  assert.equal(classify('-  "judgeMinPaired"\n+  "judgeMinPaired"\n   :\n-  200\n+  300\n'), "tightening");
+  // A key never pairs across a hunk boundary.
+  assert.equal(classify('   "judgeMinPaired":\n', "-    200,\n+    100,\n"), "undetermined");
+  // Prose over two lines is still prose; any other string, container or literal value is unaccountable.
+  assert.equal(classify('-  "capturedAt":\n+  "capturedAt":\n+    "2026-12-01",\n-    "2026-11-21",\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "tightening");
+  assert.equal(classify('+  "path":\n+    "src/lib/x.ts",\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "undetermined");
+  for (const value of ["{ }", "[200]", "true", "null"]) {
+    assert.equal(classify(`-  "judgeMinPaired": 200,\n+  "judgeMinPaired": ${value},\n`), "undetermined", value);
+  }
+  // One name with two removed values cannot say which one an added value replaces.
+  assert.equal(classify('-  "a": { "legacy": 9 },\n-  "b": { "legacy": 1 },\n+  "a": { "legacy": 3 },\n+  "b": { "legacy": 1 },\n'), "undetermined");
+  // Tokens no pair holds: an array element, a bare string, a colon with no key, a stray literal, a non-JSON run.
+  for (const line of ["+  200,", '+  "orphan",', "+  : 200,", "+  true,", '+  "judgeMinPaired" 200,', '+  "judgeMinPaired": : 200,',
+    "+  200 // was 100", '+  "judgeMinPaired": 2_00,', '+  "a" { },', '+  "a" true,', '+  "a": "\\q",']) {
+    assert.equal(classify(`-  "judgeMinPaired": 100,\n${line}\n`), "undetermined", line);
+  }
+  // A structural or blank added line holds no pair, as before.
+  assert.equal(classify('-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n+  },\n'), "undetermined");
+  assert.equal(classify('-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250\n+  }\n'), "undetermined");
+  assert.equal(classify('-  "judgeMinPaired": 200, "judgeMinAgreeShare": 0.98\n+  "judgeMinPaired": 250, "judgeMinAgreeShare": 0.99\n'), "tightening");
 });
 
 test("a source-only tree still loads the judge shadow pool and the canary guard, and names the missing bar file on first use", (t) => {
