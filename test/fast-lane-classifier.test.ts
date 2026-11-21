@@ -707,6 +707,7 @@ const FAST_LANE_WIRED_STEP_IDS = [
   "comment-load-ratchet",
   "expiring-fixture-census",
   "console-parity",
+  "write-only-ledger-step",
 ];
 
 const FAST_LANE_UNWIRED_SOURCE_ONLY_NAMED_STEP_IDS = ["claims", "containment-probe", "assertion-discrimination"];
