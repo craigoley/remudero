@@ -154,7 +154,19 @@
     5. Before shipping, run the classifier by hand on the real history and put the output in the
        PR body: reviewerCodeFreshnessAt for 93b21bd1b^ -> 93b21bd1b must be fresh with advance
        immaterial, and for 096ba3f2b^ -> 096ba3f2b and 593c2168d^ -> 593c2168d must stay stale.
-    6. Amendment (hand pre-build, 2026-11-21): test/reviewer-worktree-lease.test.ts has the test
+    6. Amendment (hand pre-build, 2026-11-21), replacing the root removal in step 2 and the "not
+       followed" rule in step 3: buildFreshTreeReviewRunner STAYS in REVIEW_PATH_SYMBOLS_IN_RUN_TASK
+       and is also in the placement set, and the walk PASSES THROUGH every placement unit: the unit is
+       not added to reached and its names do not count as used, but the units it references are
+       still walked. In the real src/run-task.ts, buildFreshTreeReviewRunner is reached only as a
+       root, so removing the root or not following placement references also drops
+       makeTreeRunnable, prepareWorktreeToolchain and pathOccupied from the walk, which breaks
+       closure-change-rereviews (makeTreeRunnable prepares the toolchain proofs run under). With the
+       pass-through, exactly the ten placement units leave the walk of the real file, and
+       reviewerCodeFreshnessAt still reads 93b21bd1b^ -> 93b21bd1b fresh. Criterion 2's test also
+       checks a hunk in a toolchain helper only placement units call, and that the real file keeps
+       makeTreeRunnable, prepareWorktreeToolchain and pathOccupied reached.
+    7. Amendment (hand pre-build, 2026-11-21): test/reviewer-worktree-lease.test.ts has the test
        "reviewer lease changes are material to the loaded reviewer code", which asserts
        reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts"]) is true. Step 1 makes it false
        on purpose (criterion 5), so that test changes to assert false with this task's ground. No
