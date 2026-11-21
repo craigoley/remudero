@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
@@ -20622,6 +20623,29 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+// W1-T13990: FIX_CLAIM_YIELDED_STEP is the step a fix claim refused BEFORE the capacity controller was consulted writes,
+// one row per refusal: the controller's own `fixes_refused` never counts it, and the focus gate's reader does.
+export { FIX_CLAIM_YIELDED_STEP };
+
+/** W1-T13990: {@link yieldingFixClaim}, with each refusal review precedence makes before the controller is consulted
+ *  ledgered as {@link FIX_CLAIM_YIELDED_STEP}, its cause named. A refusal the controller makes is its own row's. */
+export function countedYieldingFixClaim<P extends { prNumber: number; headSha?: string }>(
+  ...args: Parameters<typeof yieldingFixClaim<P>>
+): ReturnType<typeof yieldingFixClaim<P>> {
+  const [surface, inner, lines, nowMs, log, waiting, admitted] = args;
+  if (inner === undefined) return undefined;
+  let consulted = false;
+  const yielded = yieldingFixClaim<P>(surface, (pr) => { consulted = true; return inner(pr); }, lines, nowMs, log, waiting, admitted);
+  return (pr) => {
+    consulted = false;
+    const grant = yielded(pr);
+    if (!grant.admitted && !consulted) {
+      log?.(FIX_CLAIM_YIELDED_STEP, { surface, pr_number: pr.prNumber, head_sha: pr.headSha, cause: "review_precedence", reason: grant.reason });
+    }
+    return grant;
+  };
+}
+
 /** W1-T13990: the fix rounds this process admitted that have not ended: waiting for the work host to start their run child,
  *  running in process (their memory admission included), or running as a run child. A claim the capacity controller refuses
  *  releases its key before it reaches any of these; a round leaves them when its dispatch settles, done, refused or lost. */
@@ -22932,7 +22956,7 @@ export async function runSweep(
     }
   }
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
+  const capacityClaim = deps.claimFixAdmission ?? countedYieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -29878,7 +29902,7 @@ async function runSweepLightPassCore(
     readReviewReservations: () => unsettledSpawning,
     log: deps.log,
   });
-  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
+  const claimFixAdmission = countedYieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),

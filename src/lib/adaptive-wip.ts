@@ -105,8 +105,11 @@ export interface FixRoundAdmissions {
   /** Dispatch, retrigger and worker receipts (a signal, a refused commit, turns taken) for rounds the fix lane ran. */
   admitted: number;
   /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
-   *  `fixes_refused`), abandoned memory admissions, and dispatches refused later or lost. */
+   *  `fixes_refused`), claims review precedence refused before the controller was consulted, abandoned memory
+   *  admissions, and dispatches refused later or lost. */
   refused: number;
+  /** W1-T13990: {@link refused} by cause, present when any was refused. */
+  refusedCauses?: Partial<Record<FixRoundRefusalCause, number>>;
   /** Rounds the fix lane admitted that are still running now, from this process's fix registry: a round admitted in the
    *  window, or running at its start, has written no `fix.dispatch` yet. Absent when no registry was read. */
   running?: number;
@@ -114,8 +117,17 @@ export interface FixRoundAdmissions {
 /** Undefined when the fix lane's rows have not been read, or a refusal count in the window has no baseline. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
-const FIX_ROUND_RAN_STEPS = new Set(["fix.dispatch", "fix.retrigger"]);
-const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "fix.done", "sweep.fix_capacity", "sweep.fix.dispatch_failed"];
+/** W1-T13990: why a fix claim was refused. */
+export type FixRoundRefusalCause = "capacity" | "review_precedence" | "memory_admission_abandoned" | "dispatch_failed";
+
+/** The rows a round the lane admitted writes. A round that ends without `fix.dispatch` or `fix.done` still used its slot:
+ *  superseded by a head move, past its spawn bound, yielded to a recycle, or stood down. */
+const FIX_ROUND_RAN_STEPS = new Set(["fix.dispatch", "fix.retrigger", "fix.superseded", "fix.spawn_abandoned", "fix.round_yielded",
+  "fix.stood_down"]);
+/** The refusal review precedence makes before the capacity controller is consulted (sweep.ts countedYieldingFixClaim). */
+export const FIX_CLAIM_YIELDED_STEP = "sweep.fix.claim_yielded";
+const FIX_ROUND_STEPS: readonly string[] = [...FIX_ROUND_RAN_STEPS, "fix.done", "sweep.fix_capacity", "sweep.fix.dispatch_failed",
+  FIX_CLAIM_YIELDED_STEP];
 
 /** W1-T13990: a `fix.done` row a worker that ran wrote: ended by a signal, its result refused at commit (fix.ts writes that
  *  receipt after the worker and before any `fix.dispatch`), or one that took turns. An abandoned admission spawned none. */
@@ -128,7 +140,7 @@ function fixDoneRecordsWorker(line: Record<string, unknown>): boolean {
 /** W1-T13990: a reader over the fix-round rows in ledger lines already read, keeping only their times. */
 export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader {
   const admitted: number[] = [];
-  const refused: number[] = [];
+  const refused: { ts: number; cause: FixRoundRefusalCause }[] = [];
   const admittedRounds = new Map<string, number>();
   const abandonedRounds = new Set<unknown>();
   const dispatchFailures: { line: Record<string, unknown>; ts: number }[] = [];
@@ -153,7 +165,9 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       if (line.subtype !== "admission_abandoned" || abandonedRounds.has(line.round_id)) continue;
       if (typeof line.round_id === "string") abandonedRounds.add(line.round_id);
       if (runId !== "") refusedRuns.add(runId);
-      refused.push(ts);
+      refused.push({ ts, cause: "memory_admission_abandoned" });
+    } else if (line.step === FIX_CLAIM_YIELDED_STEP) {
+      refused.push({ ts, cause: "review_precedence" });
     } else if (line.step === "sweep.fix_capacity") {
       const count = line.fixes_refused;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
@@ -164,7 +178,7 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       // A fall means a new controller, whose whole count is new.
       const fresh = count >= prior ? count - prior : count;
       controllerRefused.set(key, count);
-      for (let i = 0; i < fresh; i++) refused.push(ts);
+      for (let i = 0; i < fresh; i++) refused.push({ ts, cause: "capacity" });
       if (fresh > 0) refusedRuns.add(runId);
     } else {
       dispatchFailures.push({ line, ts });
@@ -174,11 +188,17 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
   // A dispatch failure can report the same abandoned or refused child, in either ledger order.
   for (const { line, ts } of dispatchFailures) {
     if (abandonedRounds.has(line.round_id) || refusedRuns.has(line.child_run_id) || refusedRuns.has(line.admission_run_id)) continue;
-    refused.push(ts);
+    refused.push({ ts, cause: "dispatch_failed" });
   }
   // A window holding such a first row cannot tell its refusals from the ones before it: unknown, never idle or inflated.
-  return (sinceMs) => unbaselined.some((t) => t >= sinceMs) ? undefined
-    : { admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length };
+  return (sinceMs) => {
+    if (unbaselined.some((t) => t >= sinceMs)) return undefined;
+    const inWindow = refused.filter((r) => r.ts >= sinceMs);
+    const refusedCauses: Partial<Record<FixRoundRefusalCause, number>> = {};
+    for (const { cause } of inWindow) refusedCauses[cause] = (refusedCauses[cause] ?? 0) + 1;
+    return { admitted: admitted.filter((t) => t >= sinceMs).length, refused: inWindow.length,
+      ...(inWindow.length > 0 ? { refusedCauses } : {}) };
+  };
 }
 
 /** W1-T13990: the fix-round rows stamped at or after a time in a ledger directory, or undefined when unread. The focus gate
@@ -224,8 +244,14 @@ export function createFixRoundUnionReader(
   };
   let latest: { generation: string; startedAtMs: number; rows: ReadonlyArray<Record<string, unknown>> } | undefined;
   let inFlight: Promise<void> | undefined;
+  // W1-T13990: a window asked for while a read is in flight, newer than that read began. The read is then begun again
+  // once it ends, so a read begun before a dwell matured never leaves the matured window with no read begun inside it.
+  let followUpSinceMs: number | undefined;
   const start = (sinceMs: number): void => {
-    if (inFlight !== undefined) return;
+    if (inFlight !== undefined) {
+      followUpSinceMs = Math.max(followUpSinceMs ?? sinceMs, sinceMs);
+      return;
+    }
     const startedAtMs = opts.clock.now();
     // One window more before the dwell: a controller's `fixes_refused` is cumulative, so its rise in the dwell is read
     // against its last row before it. A controller with no row in that lookback is unknown (fixRoundReaderFor).
@@ -237,7 +263,12 @@ export function createFixRoundUnionReader(
     }).catch((error: unknown) => {
       void error; // A failed read is no reading, so the dwell is unknown and the hold stands.
       latest = undefined;
-    }).finally(() => { inFlight = undefined; });
+    }).finally(() => {
+      inFlight = undefined;
+      const next = followUpSinceMs;
+      followUpSinceMs = undefined;
+      if (next !== undefined && (latest === undefined || latest.startedAtMs < opts.clock.now())) start(next);
+    });
   };
   return {
     readerFor: (lines) => (sinceMs) => {
@@ -254,7 +285,7 @@ export function createFixRoundUnionReader(
       const rounds = fixRoundReaderFor(rows)(sinceMs);
       return rounds && opts.readRunning ? { ...rounds, running: opts.readRunning() } : rounds;
     },
-    settled: async () => { await inFlight; },
+    settled: async () => { while (inFlight !== undefined) await inFlight; },
   };
 }
 

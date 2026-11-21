@@ -32,6 +32,8 @@ export const FOCUS_DWELL_MS = 30 * 60_000;
 export const FOCUS_ENTERED_STEP = "focus.entered";
 export const FOCUS_EXITED_STEP = "focus.exited";
 export const FOCUS_RELEASED_STEP = "focus.released";
+/** W1-T13990: a matured dwell whose fix rounds are not read yet. The third answer: neither a round ran nor the lane idled. */
+export const FOCUS_ROUNDS_UNREAD_STEP = "focus.rounds_unread";
 export const FOCUS_FLAG_FAILED_STEP = "focus.flag_failed";
 
 export interface FocusReading {
@@ -119,8 +121,10 @@ export interface FocusGateOptions {
  * tier `focus` and no admission is offered for lane sizing; a deferring reading passes through unchanged.
  *
  * W1-T13990: a hold exists to turn build slots into fix capacity. When a whole dwell of it passes with no fix round
- * admitted (every dispatch refused for memory or capacity, or none attempted), those slots went unused: the hold is
- * released with one `focus.released` row, and re-entry waits a full dwell again.
+ * admitted (every claim refused for review precedence, capacity or memory, or none attempted), those slots went unused:
+ * the hold is released with one `focus.released` row naming each refusal's cause, and re-entry waits a full dwell again.
+ * The fix rounds are read on every consultation of a hold, so the first matured one decides from a completed read; while
+ * none has completed, one `focus.rounds_unread` row says so and the hold stands.
  */
 export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate {
   const clock = opts.clock ?? systemClock;
@@ -129,6 +133,8 @@ export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate
   // A hold restored at boot is judged on this process's own dwell, never on the flag's older `since`.
   let onSinceMs = state.on ? clock.now() : undefined;
   let held = false;
+  // One unread row per hold spell: a later completed read decides it, and a new hold may write its own.
+  let unreadLogged = false;
   const setFlag = (on: boolean, counts: Record<string, number>, reason: string): void => {
     const path = focusFilePath(opts.stateDir);
     try {
@@ -157,31 +163,46 @@ export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate
       // The file is the hold: removed by hand, it is released, and re-entry waits a full dwell again.
       state = { on: false };
       onSinceMs = undefined;
+      unreadLogged = false;
       opts.log(FOCUS_RELEASED_STEP, { ...counts, reason: `${FOCUS_FILE} was removed while focus held` });
     }
     const nowMs = clock.now();
     // The idle dwell is judged on the hold this consultation found, before any exit the reading below may make.
-    const rounds = state.on && onSinceMs !== undefined && nowMs - onSinceMs >= dwellMs
-      ? opts.readFixRounds?.(nowMs - dwellMs) : undefined;
+    const matured = state.on && onSinceMs !== undefined && nowMs - onSinceMs >= dwellMs;
+    // Before the dwell matures each consultation still asks, and the answer is unused: a reader whose read completes
+    // between consultations (the ledger union) then has a completed read when the first matured consultation asks.
+    const rounds = state.on ? opts.readFixRounds?.(nowMs - dwellMs) : undefined;
+    if (matured && rounds === undefined && opts.readFixRounds !== undefined && !unreadLogged) {
+      unreadLogged = true;
+      opts.log(FOCUS_ROUNDS_UNREAD_STEP, {
+        ...counts, reason: `the fix rounds of the last ${dwellMs / 60_000} minutes of focus are not read yet: ` +
+          "the hold stands until a completed read decides whether its build slots went unused",
+      });
+    }
     const decision = decideFocus(state, {
       stuckOwnedCount: counts.stuck_owned_count, movableStuckOwnedCount: reading.movableStuckOwnedCount,
       observedOpenCount: counts.observed_open_count, baseWipLimit: counts.base_wip_limit,
     }, nowMs, dwellMs);
     // A round admitted and still running holds the hold: its `fix.dispatch` is written only when its worker returns.
-    if (rounds !== undefined && rounds.admitted === 0 && (rounds.running ?? 0) === 0) {
+    if (matured && rounds !== undefined && rounds.admitted === 0 && (rounds.running ?? 0) === 0) {
       // One release, even when the leave bound matured too: the row names the unused hold and the stack it left on.
       const reason = `no fix round was admitted in ${dwellMs / 60_000} minutes of focus (${rounds.refused} refused): ` +
         `the build slots it held went unused${decision.changed ? `; ${decision.reason}` : ""}`;
       setFlag(false, counts, reason);
       state = { on: false };
       onSinceMs = undefined;
+      unreadLogged = false;
       opts.log(FOCUS_RELEASED_STEP, {
-        ...counts, cause: rounds.refused > 0 ? "fix_lane_refused" : "fix_lane_idle", refused_count: rounds.refused, reason,
+        ...counts, cause: rounds.refused > 0 ? "fix_lane_refused" : "fix_lane_idle", refused_count: rounds.refused,
+        ...(rounds.refusedCauses === undefined ? {} : { refused_causes: rounds.refusedCauses }), reason,
       });
     } else {
       if (decision.changed) {
         setFlag(decision.on, counts, decision.reason);
         onSinceMs = decision.on ? nowMs : undefined;
+        unreadLogged = false;
+        // A new hold starts its first read now, so a dwell later the first matured consultation can answer from it.
+        if (decision.on) opts.readFixRounds?.(nowMs - dwellMs);
         opts.log(decision.on ? FOCUS_ENTERED_STEP : FOCUS_EXITED_STEP, { ...counts, reason: decision.reason });
       }
       state = { on: decision.on, ...(decision.pendingSinceMs === undefined ? {} : { pendingSinceMs: decision.pendingSinceMs }) };
