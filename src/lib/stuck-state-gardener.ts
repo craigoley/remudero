@@ -446,10 +446,6 @@ function publicWorkingTreeDigest(plan: Plan): string {
 
 type RefusalRow = Row & { run_id: string; task_id: string; step: string };
 
-function heldByPublicEdge(release: TaskReleasePlan | undefined, plan?: Plan): boolean {
-  return release?.outcome === "held" && plan?.byId.has(release.hold.task) === true;
-}
-
 /**
  * Resolve the approve decision and record composition refusals from the exact snapshots that made it.
  * The local/public fast paths keep their lookup order and open the ops snapshot only when needed.
@@ -460,8 +456,7 @@ export async function readApproveRelease(
 ): Promise<TaskReleasePlan | undefined> {
   if (localPlan === undefined) {
     const read = await readOps(options.stateDir, options.api, options.opsSnapshot);
-    return (await readPublicReplay(taskId, publicRoot, workingTreeReplay, read, expectedPublicDigest))?.release
-      ?? { outcome: "unreadable", reason: "public-replay-record-unverified" };
+    return verifiedReplayRelease(await readPublicReplay(taskId, publicRoot, workingTreeReplay, read, expectedPublicDigest));
   }
   const lookup = { ...options };
   let publicCommit: string | undefined;
@@ -479,11 +474,13 @@ export async function readApproveRelease(
     return view;
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
-  if (!heldByPublicEdge(release, publicPlan)) {
+  // W1-T13785: the strict fallback can add a hold, never lift one. A record origin/main's composition holds stays held
+  // (and keeps that commit for its row) whatever an older working tree would compose.
+  if (release?.outcome !== "held") {
     const localError = publicReleaseDependencyError(localPlan);
-    if (localError && release?.outcome !== "held") throw localError;
-    if (!localError && publicPlan && publicReleaseDependencyError(publicPlan)) {
-      // An ops-only hold may be caused by a dependency the strict fallback supplies. Compose with the same ops snapshot.
+    if (localError) throw localError;
+    if (publicPlan && publicReleaseDependencyError(publicPlan)) {
+      // Match the strict ref loader's working-tree fallback for an unresolved public dependency, with the same ops snapshot.
       release = await findApproveReleasePlan(taskId, localPlan, () => readPublic(false), lookup);
     }
   }
@@ -553,23 +550,36 @@ async function readStrictReplayPlan(publicRoot: string): Promise<Plan | undefine
   }
 }
 
-/** The probe and retry verify the record in each public view they use, with one ops snapshot. */
+/**
+ * The composition's decision for a public replay and the record's current digest, over one ops snapshot.
+ * W1-T13785: `release` is the cause alone (what the probe reports); `verified` says the record in every view used still
+ * matches the refused digest. Only the retry refuses an unverified record; the probe leaves a changed or moved record
+ * to the gardener's digest check, which writes stuck_state.record_changed.
+ */
 async function resolvePublicReplay(
   taskId: string, plan: Plan, read: OpsRead, expectedDigest: string | undefined, readStrict?: () => Promise<Plan | undefined>,
-): Promise<{ release: TaskReleasePlan; digest?: string }> {
+): Promise<{ release: TaskReleasePlan; digest?: string; verified: boolean }> {
   const release = publicReplayPlan(taskId, plan, read);
-  if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { release };
+  if (release.outcome === "unreadable" && release.reason === "compose-malformed") return { release, verified: false };
   const record = plan.byId.get(taskId);
   const moved = record === undefined && read.outcome === "ok" ? read.plan?.byId.get(taskId) : undefined;
   const digest = record ? publicRecordDigest(record) : moved ? opsRecordDigest(moved) : undefined;
-  if (record === undefined || digest !== expectedDigest) {
-    return { release: { outcome: "unreadable", reason: "public-replay-record-unverified" }, digest };
-  }
+  const verified = record !== undefined && digest === expectedDigest;
   if (release.outcome === "unreadable" && release.reason === "public-replay-plan-invalid" && readStrict) {
     const strictPlan = await readStrict();
-    if (strictPlan !== undefined) return resolvePublicReplay(taskId, strictPlan, read, expectedDigest);
+    if (strictPlan !== undefined) {
+      const strict = await resolvePublicReplay(taskId, strictPlan, read, expectedDigest);
+      return { ...strict, verified: verified && strict.verified };
+    }
   }
-  return { release, digest };
+  return { release, digest, verified };
+}
+
+/** The retry's answer: the composition's decision over a verified record, or a refusal of an unverified one. */
+function verifiedReplayRelease(result: Awaited<ReturnType<typeof resolvePublicReplay>> | undefined): TaskReleasePlan {
+  if (result === undefined) return { outcome: "unreadable", reason: "public-replay-record-unverified" };
+  const malformed = result.release.outcome === "unreadable" && result.release.reason === "compose-malformed";
+  return malformed || result.verified ? result.release : { outcome: "unreadable", reason: "public-replay-record-unverified" };
 }
 
 async function readPublicReplay(
@@ -641,7 +651,8 @@ export function productionStuckStateProbe(opts: {
         ? await readPublicReplay(item.taskId!, root, workingTree, read, item.digest)
         : plan && await resolvePublicReplay(item.taskId!, plan, read, item.digest, opts.strictPublicPlan);
       if (result === undefined) return { present: true, reason: workingTree ? "public-working-tree-unreadable" : "origin-main-unreadable" };
-      const { release, ...observed } = result;
+      // The cause is the composition's decision; the record's digest is reported beside it, never folded into it.
+      const { release, verified: _verified, ...observed } = result;
       return release.outcome === "found" ? { present: false, ...observed }
         : { present: true, ...observed, reason: "reason" in release ? release.reason : release.outcome };
     }
@@ -655,7 +666,7 @@ export function productionStuckStateProbe(opts: {
     const taskId = item.taskId!;
     const lookup = { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read };
     let release = await findReleasePlanInCatalogs(taskId, publicPlan, lookup);
-    if (!heldByPublicEdge(release, publicPlan) && publicReleaseDependencyError(publicPlan)) {
+    if (release.outcome !== "held" && publicReleaseDependencyError(publicPlan)) {
       const strict = await opts.strictPublicPlan?.();
       if (strict === undefined) return { present: true, reason: "public-replay-plan-invalid" };
       release = await findReleasePlanInCatalogs(taskId, strict, lookup);
