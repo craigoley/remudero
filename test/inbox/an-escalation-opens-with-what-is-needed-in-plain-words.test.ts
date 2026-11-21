@@ -17,7 +17,10 @@ import {
   matchDuplicateEscalation,
   prReferentFromIssueText,
   renderIssueBody,
+  taskContractRevision,
   type Escalation,
+  type IssueGateway,
+  type OpenIssue,
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
 import { createEscalationConversationReader, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
@@ -33,6 +36,11 @@ import {
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { validateDecisionSummary } from "#src/lib/feedback.js";
 import { taskInputAnswer } from "#src/lib/worker.js";
+import {
+  buildSweepEffects, renderClarificationQuestion, stalledStageEscalationSummary, stallIssueBodyAtHead, type OpenPrView,
+} from "#src/lib/sweep.js";
+import type { Config } from "#src/lib/config.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 const prUrl = "https://github.com/fixture/repo/pull/12345";
 const otherPrUrl = "https://github.com/fixture/repo/pull/54321";
@@ -661,4 +669,98 @@ test("the layout marker grammar accepts only a writer marker: v1, a 16-hex nonce
   LAYOUT_MARKER_RE.lastIndex = 0;
   assert.equal(LAYOUT_MARKER_RE.test(renderIssueBody(escalation)), true);
   LAYOUT_MARKER_RE.lastIndex = 0;
+});
+
+// ── The sweep's one stall question per PR (src/lib/sweep.ts, scope amendment #20023) ──────────────
+
+const STALL_HEAD_A = "9dca5f8c614f2ec64134bdebbbc32c0204201234";
+const STALL_HEAD_B = "1b2c3d4e5f60718293a4b5c6d7e8f90112233445";
+const stallPr: OpenPrView = {
+  prNumber: 15520, prUrl: "https://github.com/craigoley/remudero/pull/15520", taskId: "W1-T10842", headSha: STALL_HEAD_A,
+  headRefName: "run-W1-T10842-1793300000000", reviewState: "none", checksState: "red", unmetCriteria: [], priorStrikes: 0,
+  lastActivityAt: "2026-10-29T20:20:00.000Z", autoMergeArmed: false,
+};
+const stallTask = { id: stallPr.taskId, files: ["src/lib/sweep.ts"], acceptance: [] } as unknown as Task;
+const stallReason = (blocker: string) => `PR stage stalled: #${stallPr.prNumber} ${stallPr.prUrl} — ${blocker} for 45 minutes ` +
+  "(BACKSTOP 30); since 2026-10-29T20:20:00.000Z; DIAGNOSIS: unknown signature";
+
+/** One stored stall issue, then a stall episode at `STALL_HEAD_B` offered to it through the sweep. */
+async function stallEpisode(t: TestContext, stored: Escalation, storedBody = renderIssueBody(stored)): Promise<{ issues: Array<OpenIssue & { labels: string[] }>; comments: string[]; edits: string[] }> {
+  const root = mkdtempSync(join(tmpdir(), "rmd-escalation-stall-layout-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const issues: Array<OpenIssue & { labels: string[] }> = [];
+  const comments: string[] = [];
+  const edits: string[] = [];
+  const gateway: IssueGateway = {
+    create(title, body, labels) {
+      const number = 17000 + issues.length;
+      issues.push({ number, url: `https://github.com/craigoley/remudero/issues/${number}`, title, body, labels });
+      return issues.at(-1)!.url;
+    },
+    listOpen: (label) => issues.filter((issue) => issue.labels.includes(label)),
+    comment: (url) => { comments.push(url); },
+    editBody(url, body) {
+      issues.find((issue) => issue.url === url)!.body = body;
+      edits.push(body);
+    },
+    closeWithComment() {},
+  };
+  gateway.create(escalationIssueTitle(stored), storedBody, ["needs-human"]);
+  const effects = buildSweepEffects({
+    owner: "craigoley", repo: "remudero", repoRoot: root, config: { claudeBin: "claude", root } as Config,
+    ledgerPath: join(root, "ledger.ndjson"), runId: "SWEEP-W1-T12041", log: () => {},
+    plan: { tasks: [stallTask], byId: new Map([[stallTask.id, stallTask]]) } as Plan,
+    issuesImpl: gateway, reloadPlanForFixImpl: () => undefined,
+    readJsonImpl: async () => { throw new Error("unexpected remote read"); },
+  });
+  const view = { ...stallPr, headSha: STALL_HEAD_B };
+  const reason = stallReason("escalated");
+  await effects.escalate(view, reason, { ...renderClarificationQuestion(view, reason), cause: "stage-stall" });
+  return { issues, comments, edits };
+}
+
+const storedStall: Escalation = {
+  class: "MANUAL", taskId: stallTask.id, headSha: STALL_HEAD_A, cause: "stage-stall",
+  summary: `PR ${stallPr.prUrl} needs a clarification — ${stalledStageEscalationSummary(stallReason("own-red"))}`, detail: stallReason("own-red"),
+  options: [{ label: "inspect", detail: "inspect the stalled stage" }], recommendation: "inspect",
+};
+
+test("W1-T12041 criterion 2: the stall rewrite moves the producer's Head, never a Head quoted in the detail", () => {
+  const subject = { ...escalation, detail: "```\n**Head:** old-head\n```" };
+  const moved = stallIssueBodyAtHead(renderIssueBody(subject), "new-head")!;
+  assert.ok(moved.includes(subject.detail));
+  assert.equal(escalationHeadSha(moved), "new-head");
+  assert.equal(escalationBodyInLegacyOrder(moved), legacyRender(subject).replace("**Head:** abc123", "**Head:** new-head"));
+  assert.equal(stallIssueBodyAtHead(legacyRender(subject), "new-head"), legacyRender(subject).replace("**Head:** abc123", "**Head:** new-head"));
+});
+
+test("W1-T12041 criterion 2: a clipped stall issue is found by the identity in its Details, not one quoted in Options", async (t) => {
+  // The title is clipped, so the sweep reads the stall identity off the body. An option quotes another PR's stall.
+  const stored = {
+    ...storedStall,
+    summary: `PR ${stallPr.prUrl} needs a clarification — ${"context ".repeat(40)}`,
+    options: [{ label: "inspect", detail: `Compare PR stage stalled: #99999 https://github.com/craigoley/remudero/pull/99999 — own-red; elsewhere` }],
+  };
+  assert.ok(escalationIssueTitle(stored).endsWith("…"));
+  assert.equal((await stallEpisode(t, stored, legacyRender(stored))).issues.length, 1, "the fields-first issue takes the episode");
+  const episode = await stallEpisode(t, stored);
+  assert.equal(episode.issues.length, 1, "the episode appends to the PR's one stall issue");
+  assert.deepEqual(episode.comments, [episode.issues[0]!.url]);
+});
+
+test("W1-T12041 criterion 2: the stall view drops the producer's Contract and the stored Head moves, never a quoted line", async (t) => {
+  // The detail quotes the CURRENT contract and an old head; the producer's own Contract field is older.
+  const current = taskContractRevision(stallTask);
+  const stored = {
+    ...storedStall, contractRevision: "rev-old",
+    detail: `${stallReason("own-red")}\n\n\`\`\`\n**Contract:** ${current}\n**Head:** old-diagnostic-head\n\`\`\``,
+  };
+  const legacyEpisode = await stallEpisode(t, stored, legacyRender(stored));
+  const episode = await stallEpisode(t, stored);
+  assert.equal(legacyEpisode.issues.length, 1, "the fields-first issue takes the episode");
+  assert.equal(episode.issues.length, 1, "the episode appends to the PR's one stall issue");
+  assert.deepEqual(episode.comments, [episode.issues[0]!.url]);
+  assert.equal(episode.edits.length, 1);
+  assert.equal(episode.edits[0], renderIssueBody(stored).replace(`**Head:** ${STALL_HEAD_A}`, `**Head:** ${STALL_HEAD_B}`));
+  assert.ok(episode.edits[0]!.includes(stored.detail));
 });
