@@ -124,10 +124,11 @@ function publicMain(t: TestContext, text: string) {
 }
 
 /** The refused public release and the gardener replay over an older detached checkout. */
-async function refusalFixture(t: TestContext, opsBranch = "main", bootText = PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record")) {
+async function refusalFixture(t: TestContext, opsBranch = "main", bootText = PUBLIC_TEXT.replace("held public fixture PUB-2", "older boot record"),
+  refusedText = PUBLIC_TEXT) {
   const fx = opsCatalog(t, record("PUB-2") + record("OPS-GOOD"), opsBranch);
   const main = publicMain(t, bootText);
-  main.publish(PUBLIC_TEXT);
+  main.publish(refusedText);
   const rows: Row[] = [];
   let now = NOW;
   const append = (row: Row) => rows.push({ ts: iso(now), ...row });
@@ -793,4 +794,65 @@ test("W1-T13785 criterion 4: an existing ops refusal beside an unrelated public-
   await runStuckStateGardener(ports);
   assert.deepEqual(retries, [[id]]);
   assert.deepEqual(steps(rows, "stuck_state.retried").map(row => [row.exit_code, row.events]), [[0, ["public-working-tree"]]]);
+});
+
+test("W1-T13785 criterion 4: a hand edit to a nested sourcePath in a held public record changes its digest, so the gardener never re-runs the edited release and writes stuck_state.record_changed", async t => {
+  // Review 2026-11-21 20:18Z: a human edit can set principles.sourcePath, which the loader keeps. Only the lookup's
+  // top-level sourcePath stamp is provenance; a nested field of the same name is part of the record.
+  const withSource = (path: string) => PUBLIC_TEXT.replace("  title: held public fixture PUB-2\n",
+    `  title: held public fixture PUB-2\n  principles:\n    tdd: strict\n    sourcePath: ${path}\n`);
+  const refused = withSource("plan/original.yaml"), edited = withSource("plan/edited-by-hand.yaml");
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t, "main", undefined, refused);
+  await pass();
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  main.publish(edited);
+  const current = (await readReleasePublicPlan(main.dir)).plan.byId.get("PUB-2")!;
+  assert.deepEqual(current.principles, { tdd: "strict", sourcePath: "plan/edited-by-hand.yaml" }, "the loader keeps the nested field");
+  assert.notEqual(publicRecordDigest(current), item.digest, "the edited record digests apart from the refused one");
+  fx.set(record("OPS-GOOD"));
+  assert.deepEqual(await ports.probe(item), { present: false, digest: publicRecordDigest(current) });
+  assert.deepEqual(await readApproveRelease("PUB-2", undefined, main.dir, fx.lookup, () => undefined, item.digest),
+    { outcome: "unreadable", reason: "public-replay-record-unverified" }, "the retry refuses the edited record");
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [], "the edited record is never released on the operator's behalf");
+  assert.deepEqual(steps(rows, "stuck_state.record_changed").map(row => [row.recorded_digest, row.current_digest]),
+    [[item.digest, publicRecordDigest(current)]]);
+});
+
+test("W1-T13785 criterion 5: an ops task on a public record that origin/main gives a public-to-ops edge, while the strict fallback's copy is sound, is answered from the fallback by approve and the probe, as on origin/main", async t => {
+  // Review 2026-11-21 20:18Z: the deferred ref's hold on the public edge of PUB-EDGED is not the composition's when
+  // origin/main does not load strictly (operator ruling 2026-11-21); the fallback, where PUB-EDGED is sound, decides.
+  const id = "OPS-ON-EDGED";
+  const main = publicMain(t, PUBLIC_TEXT);
+  const fx = opsCatalog(t, SOUND_OPS + record(id, ["PUB-EDGED"]));
+  const rows: Row[] = [];
+  const approve = (subject: string) => readApproveRelease(subject, loadPlan(main.planPath), main.dir, fx.lookup,
+    row => rows.push({ ts: iso(NOW), ...row }));
+  assert.deepEqual(await approve(id), { outcome: "held", hold: { reason: BAD_EDGE, task: id, dependsOn: "PUB-EDGED" } });
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  const ports = productionStuckStatePorts({
+    stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [], api: fx.api,
+    log: () => undefined, escalate: () => null, destinationRead: async () => undefined, approve: async () => 1,
+  });
+  main.publish(PUBLIC_TEXT + record("PUB-EDGED", ["OPS-GOOD"]));
+  writeFileSync(main.planPath, PUBLIC_TEXT + record("PUB-EDGED"));
+  const strict = await readReleasePublicPlan(main.dir), deferred = await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true });
+  assert.deepEqual([strict.read, deferred.read], ["working_tree", "origin/main"], "origin/main does not load strictly");
+  const opsSnapshot = await fx.read();
+  assert.equal(opsSnapshot.outcome, "ok");
+  const refView = composeSecondaryPlan(deferred.plan, opsSnapshot.plan!), fallbackView = composeSecondaryPlan(strict.plan, opsSnapshot.plan!);
+  assert.ok(refView.outcome === "ok" && fallbackView.outcome === "ok");
+  if (refView.outcome !== "ok" || fallbackView.outcome !== "ok") return;
+  assert.deepEqual(refView.held.get(id), { reason: BAD_EDGE, task: "PUB-EDGED", dependsOn: "OPS-GOOD" }, "the ref alone holds it on a public edge");
+  assert.equal(fallbackView.held.has(id), false, "the fallback's composition does not hold it");
+
+  const release = await approve(id);
+  assert.equal(release?.outcome, "found", `approve answers the fallback's decision (${JSON.stringify(release)})`);
+  assert.equal(release.catalog, "ops");
+  assert.deepEqual(release.plan, fallbackView.plan, "released from the strict fallback's composition");
+  assert.deepEqual(await ports.probe(item), { present: false, digest: item.digest }, "the probe reads the cause gone");
+  assert.equal((await approve("PUB-EDGED"))?.outcome, "held", "the public record whose own edge fails origin/main stays held");
 });

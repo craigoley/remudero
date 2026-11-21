@@ -415,12 +415,16 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   writeAtomic(join(ports.stateDir, STUCK_STATE_FILE), `${JSON.stringify(next)}\n`);
 }
 
-/** A record with keys sorted, without the keys `drop` names (the lookup's provenance stamps), at every depth. */
-function stableRecord(value: unknown, drop: ReadonlySet<string>): string {
-  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item, drop)).join(",")}]`;
+const NO_KEYS: ReadonlySet<string> = new Set();
+/**
+ * A record with keys sorted, without the top-level keys `drop` names (the lookup's provenance stamps). W1-T13785: only
+ * the record's own top level carries those stamps; a nested field of the same name (principles.sourcePath) is the record.
+ */
+function stableRecord(value: unknown, drop: ReadonlySet<string> = NO_KEYS): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item)).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k], drop)}`).join(",")}}`;
+    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
@@ -441,14 +445,17 @@ export function publicRecordDigest(task: Task): string {
 }
 
 function publicWorkingTreeDigest(plan: Plan): string {
-  return createHash("sha256").update(stableRecord(plan.tasks, PUBLIC_RECORD_PROVENANCE)).digest("hex");
+  return createHash("sha256").update(`[${plan.tasks.map((task) => stableRecord(task, PUBLIC_RECORD_PROVENANCE)).join(",")}]`).digest("hex");
 }
 
 type RefusalRow = Row & { run_id: string; task_id: string; step: string };
 
-/** A hold on a public edge (the public record itself, or the public task it depends on) is the composition's in any view. */
-function heldByPublicEdge(release: TaskReleasePlan | undefined, plan?: Plan): boolean {
-  return release?.outcome === "held" && plan?.byId.has(release.hold.task) === true;
+/**
+ * A public record held by its own edge on origin/main stays held in any view. W1-T13785 (operator ruling 2026-11-21):
+ * any other hold beside an unloadable ref, a dependant's on a public edge included, is decided by the strict fallback.
+ */
+function heldOnItsOwnPublicRecord(taskId: string, release: TaskReleasePlan | undefined, plan?: Plan): boolean {
+  return release?.outcome === "held" && release.hold.task === taskId && plan?.byId.has(taskId) === true;
 }
 
 /**
@@ -479,7 +486,7 @@ export async function readApproveRelease(
     return view;
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
-  if (!heldByPublicEdge(release, publicPlan)) {
+  if (!heldOnItsOwnPublicRecord(taskId, release, publicPlan)) {
     const localError = publicReleaseDependencyError(localPlan);
     if (localError && release?.outcome !== "held") throw localError;
     if (!localError && publicPlan && publicReleaseDependencyError(publicPlan)) {
@@ -674,7 +681,7 @@ export function productionStuckStateProbe(opts: {
     const lookup = { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read };
     let release = await findReleasePlanInCatalogs(taskId, publicPlan, lookup);
     // W1-T13785 (operator ruling 2026-11-21): beside an unloadable ref, the strict fallback decides, as approve does.
-    if (!heldByPublicEdge(release, publicPlan) && publicReleaseDependencyError(publicPlan)) {
+    if (!heldOnItsOwnPublicRecord(taskId, release, publicPlan) && publicReleaseDependencyError(publicPlan)) {
       const strict = await opts.strictPublicPlan?.();
       if (strict === undefined) return { present: true, reason: "public-replay-plan-invalid" };
       release = await findReleasePlanInCatalogs(taskId, strict, lookup);
