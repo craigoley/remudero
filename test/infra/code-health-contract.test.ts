@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -6,6 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { validateCodeHealthAssessment, type CodeHealthAssessment } from "#src/lib/code-health-contract.js";
+import { readCodeHealthQualityEvidence } from "#src/lib/code-health-collector.js";
+import { compareCodeHealthScanPair, validateCodeHealthProvenance, type CodeHealthProjectionInput } from "#src/lib/code-health-projection.js";
+import { qualityScanFromCollectedEvidence } from "#src/lib/codeql-quality-intake.js";
 import { buildRepositoryEvidenceInventory } from "#src/lib/daily-progress-contract.js";
 
 function assessment(): CodeHealthAssessment {
@@ -107,15 +111,17 @@ function originalOutput() {
   };
 }
 
-function exportOriginal(input: ReturnType<typeof originalOutput> | string, directoryMode = false) {
+type OriginalInput = Omit<ReturnType<typeof originalOutput>, "sarif"> & { sarif: unknown };
+
+function exportOriginal(input: OriginalInput | string, directoryMode = false) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-code-health-original-"));
   try {
     const output = join(dir, "metadata.json"), inputPath = join(dir, "input.json");
     const env = { ...process.env };
     let args = ["--input", inputPath];
     if (directoryMode) {
-      assert.notEqual(typeof input, "string");
-      const value = input as ReturnType<typeof originalOutput>;
+      assert.ok(typeof input !== "string");
+      const value = input;
       const sarifDir = join(dir, "sarif"); mkdirSync(sarifDir);
       writeFileSync(join(sarifDir, "original.sarif"), JSON.stringify(value.sarif));
       writeFileSync(join(sarifDir, "ignored.quality.sarif"), "invalid ignored security text");
@@ -125,7 +131,7 @@ function exportOriginal(input: ReturnType<typeof originalOutput> | string, direc
       Object.assign(env, { GITHUB_REPOSITORY: value.repository, GITHUB_SHA: value.analyzedSha,
         GITHUB_REF: value.ref, GITHUB_RUN_ID: value.runId, GITHUB_RUN_ATTEMPT: value.runAttempt,
         CODE_HEALTH_LANGUAGE: value.language, CODE_HEALTH_SARIF_ID: value.sarifId,
-        CODE_HEALTH_ANALYSIS_OUTCOME: "success" });
+        CODE_HEALTH_ANALYSIS_OUTCOME: value.analysisSucceeded ? "success" : "failure" });
       args = ["--sarif-dir", sarifDir, "--config", join(dir, "config.yml"), "--workflow", join(dir, "workflow.yml")];
     } else writeFileSync(inputPath, typeof input === "string" ? input : JSON.stringify(input));
     const child = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/code-health-provenance.mjs"), ...args, "--output", output],
@@ -135,6 +141,237 @@ function exportOriginal(input: ReturnType<typeof originalOutput> | string, direc
       metadata: existsSync(output) ? JSON.parse(readFileSync(output, "utf8")) : null };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
+
+// Descriptor, invocation, and artifact shape from the 2.27.3 example in docs/views.md.
+function extractedOutput(language = "javascript-typescript", family = "js") {
+  const input = originalOutput();
+  input.language = language;
+  const run = input.sarif.runs[0]!;
+  const id = `${family}/diagnostics/successfully-extracted-files`;
+  const expected = `${family}/baseline/expected-extracted-files`;
+  const descriptors = [
+    { id, properties: { id, kind: "diagnostic", tags: ["successfully-extracted-files"] } },
+    { id: expected, properties: { id: expected, kind: "diagnostic", tags: ["expected-extracted-files"] } },
+  ];
+  const extension = family === "py" ? "py" : family === "actions" ? "yml" : "ts";
+  const directory = family === "actions" ? ".github/workflows" : "src";
+  const location = (name: string, index: number) => ({ uri: `${directory}/${name}.${extension}`, uriBaseId: "%SRCROOT%", index });
+  const a = location("check%20file", 0);
+  const b = location("another", 1);
+  const pending = location("unprocessed", 2);
+  const notification = (id: string, index: number, artifactLocation: typeof a) => ({
+    descriptor: { id, index }, level: "none", message: { text: "" },
+    locations: [{ physicalLocation: { artifactLocation: { ...artifactLocation } } }],
+  });
+  const invocation = { executionSuccessful: true, toolExecutionNotifications: [
+    notification(id, 0, a), notification(id, 0, b), notification(id, 0, a), notification(expected, 1, pending),
+  ] };
+  const sarifRun = {
+    ...run, automationDetails: { id: `/language:${language}/` }, artifacts: [a, b, pending].map(location => ({ location })),
+    tool: { driver: { name: "CodeQL", semanticVersion: "2.27.3", rules: [{ id: `${family}/example` }], notifications: descriptors }, extensions: [] },
+    invocations: [invocation],
+  };
+  return { ...input, sarif: { ...input.sarif, runs: [sarifRun] } };
+}
+
+test("Code health preserves original extracted-file coverage with its own method identity", () => {
+  const paths = ["src/another.ts", "src/check file.ts"];
+  const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  for (const [language, family, expectedPaths] of [
+    ["javascript-typescript", "js", paths],
+    ["python", "py", ["src/another.py", "src/check file.py"]],
+    ["actions", "actions", [".github/workflows/another.yml", ".github/workflows/check file.yml"]],
+  ] as const) {
+    const input = extractedOutput(language, family);
+    const run = input.sarif.runs[0]!;
+    // A different encoding of the same file across both references still counts once.
+    run.invocations[0]!.toolExecutionNotifications[2]!.locations[0]!.physicalLocation.artifactLocation.uri =
+      run.artifacts[0]!.location.uri.replace("check", "%63heck");
+    const result = exportOriginal(input, true);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.metadata.state, "complete");
+    assert.equal(result.metadata.language, language);
+    assert.equal(result.metadata.completion.kind, "workflow-analysis-step");
+    assert.deepEqual(result.metadata.scope, { kind: "codeql-extracted-files", fileCount: 2, hash: hash(["codeql-extracted-files", expectedPaths]) });
+    assert.equal(JSON.parse(result.stdout).scopeMethod, "codeql-extracted-files");
+    assert.doesNotMatch(JSON.stringify(result), /check file|%20file|unprocessed|\.github\/workflows/);
+  }
+  const legacy = originalOutput();
+  legacy.sarif.runs[0]!.artifacts = paths.map(uri => ({ location: { uri }, roles: ["analysisTarget"] }));
+  assert.deepEqual(exportOriginal(legacy, true).metadata.scope, { kind: "explicit-analysis-targets", fileCount: 2, hash: hash(paths) });
+  const both = extractedOutput();
+  Object.assign(both.sarif.runs[0]!.artifacts[1]!, { roles: ["analysisTarget"] });
+  assert.deepEqual(exportOriginal(both, true).metadata.scope, { kind: "explicit-analysis-targets", fileCount: 1, hash: hash([paths[0]]) });
+  Object.assign(both.sarif.runs[0]!.artifacts[0]!, { roles: ["analysisTarget"], location: { uri: "../outside.ts" } });
+  assert.equal(exportOriginal(both, true).metadata.scope.hash, null);
+  const original = extractedOutput();
+  const endTimeUtc = "2026-10-27T04:59:00.000Z";
+  Object.assign(original.sarif.runs[0]!.invocations[0]!, { endTimeUtc });
+  assert.deepEqual(exportOriginal(original).metadata.completion, { kind: "original-invocations", state: "success", at: endTimeUtc });
+});
+
+test("Code health extracted-file evidence refuses inferred foreign and incomplete populations", () => {
+  type Input = ReturnType<typeof extractedOutput>;
+  const cases: Record<string, (input: Input, run: Input["sarif"]["runs"][number]) => void> = {
+    "missing original notifications": (_input, run) => { run.invocations[0]!.toolExecutionNotifications.length = 0; },
+    "expected files and findings only": (_input, run) => {
+      const notes = run.invocations[0]!.toolExecutionNotifications;
+      run.results = [{ locations: notes[0]!.locations }];
+      run.properties.metricResults = [{ baseline: 2000 }];
+      notes.splice(0, 3);
+    },
+    "foreign diagnostics": input => { input.language = "python"; input.sarif.runs[0]!.automationDetails.id = "/language:python/"; },
+    "foreign category": (_input, run) => { run.automationDetails.id = "/language:actions/"; },
+    "another revision": (_input, run) => { Object.assign(run, { versionControlProvenance: [{ revisionId: "b".repeat(40) }] }); },
+    "another repository": (input, run) => {
+      Object.assign(run, { versionControlProvenance: [{ revisionId: input.analyzedSha, repositoryUri: "https://github.com/foreign/atlas" }] });
+    },
+    "ambiguous descriptor": (_input, run) => { run.tool.driver.notifications.push(run.tool.driver.notifications[0]!); },
+    "nested descriptor conflict": (_input, run) => {
+      const descriptor = run.tool.driver.notifications[0]!;
+      run.tool.driver.notifications.push({ ...descriptor, id: "another/diagnostic", properties: { ...descriptor.properties, tags: [] } });
+    },
+    "descriptor conflict": (_input, run) => { run.invocations[0]!.toolExecutionNotifications[0]!.descriptor.index = 1; },
+    "extension descriptor reference": (_input, run) => {
+      Object.assign(run.invocations[0]!.toolExecutionNotifications[0]!.descriptor, { toolComponent: { index: 0 } });
+    },
+    "bad descriptor metadata": (_input, run) => { run.tool.driver.notifications[0]!.properties.tags = ["expected-extracted-files"]; },
+    "malformed descriptor tags": (_input, run) => { Object.assign(run.tool.driver.notifications[0]!.properties, { tags: 1 }); },
+    "unresolved file": (_input, run) => { run.invocations[0]!.toolExecutionNotifications[0]!.locations.length = 0; },
+    "result region": (_input, run) => {
+      Object.assign(run.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation, { region: { startLine: 1 } });
+    },
+    "conflicting index": (_input, run) => { run.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation.index = 1; },
+    "nested artifact": (_input, run) => { Object.assign(run.artifacts[0]!, { parentIndex: 1 }); },
+    "untrusted base": (_input, run) => { Object.assign(run, { originalUriBaseIds: { "%SRCROOT%": { uri: "file:///elsewhere/" } } }); },
+    "externalized population": (_input, run) => { Object.assign(run, { externalPropertyFileReferences: { artifacts: [{}] } }); },
+    "too many original notifications": (_input, run) => {
+      run.invocations[0]!.toolExecutionNotifications = new Array(100_001).fill({});
+    },
+    "multiple invocations": (_input, run) => { run.invocations.push(run.invocations[0]!); },
+    "foreign invocation container": (_input, run) => { Object.assign(run, { invocations: { ...run.invocations, length: 1 } }); },
+    "failed invocation": (_input, run) => { run.invocations[0]!.executionSuccessful = false; },
+    "missing completion": (_input, run) => { Object.assign(run.invocations[0]!, { executionSuccessful: undefined }); },
+    "workflow failure": input => { input.analysisSucceeded = false; },
+    "invalid end time": (_input, run) => { Object.assign(run.invocations[0]!, { endTimeUtc: "invalid clock" }); },
+    "execution error": (_input, run) => { run.invocations[0]!.toolExecutionNotifications[3]!.level = "error"; },
+  };
+  for (const uri of ["%2e%2e/private", "file:///private", "/private", "src/%ZZ", "src/%FF", "src%2fprivate", "src/%00"]) {
+    cases[uri] = (_input, run) => {
+      run.artifacts[0]!.location.uri = uri;
+      run.invocations[0]!.toolExecutionNotifications[0]!.locations[0]!.physicalLocation.artifactLocation.uri = uri;
+    };
+  }
+  for (const [name, mutate] of Object.entries(cases)) {
+    const input = extractedOutput();
+    mutate(input, input.sarif.runs[0]!);
+    const result = exportOriginal(input, true);
+    assert.equal(result.status, 0, name);
+    assert.equal(result.metadata.state, "partial", name);
+    assert.equal(result.metadata.scope.hash, null, name);
+    assert.equal(result.metadata.scope.fileCount, 0, name);
+    assert.equal(JSON.parse(result.stdout).codeql.extractedFiles, name === "missing original notifications" || name === "expected files and findings only" ? "absent" : "unverified", name);
+  }
+  const role = extractedOutput();
+  Object.assign(role.sarif.runs[0]!.artifacts[0]!, { roles: "not-an-analysisTarget" });
+  assert.equal(exportOriginal(role, true).metadata.scope.hash, null);
+});
+
+test("Code health source reader preserves extracted-file identity and comparison guards", async () => {
+  const first = extractedOutput();
+  const second = {
+    ...extractedOutput(), analyzedSha: "b".repeat(40), runId: "124", runAttempt: "2",
+    sarifId: "12345678-1234-1234-1234-123456789abd",
+  };
+  const read = (input: OriginalInput, directoryMode = true) => {
+    const { metadata, status, stderr } = exportOriginal(input, directoryMode);
+    assert.equal(status, 0, stderr);
+    const expected = { repository: input.repository, analyzedSha: input.analyzedSha, runId: input.runId, kind: "quality" } as const;
+    const artifact = validateCodeHealthProvenance(metadata, expected);
+    const scan = qualityScanFromCollectedEvidence({
+      ...expected, requiredLanguages: [input.language], artifacts: [metadata], collectedAt: artifact.observedAt,
+      analyses: [{ sarifId: input.sarifId, analyzedSha: input.analyzedSha, category: `/language:${input.language}`,
+        toolVersion: "2.27.3", rulesCount: 1, analysisKey: "analyze", environmentHash: "a".repeat(64),
+        createdAt: artifact.observedAt, error: "", warning: "" }],
+      source: { ok: true, alerts: [], analysisInstances: [] },
+    });
+    return { artifact, scan, expected };
+  };
+  const { artifact, scan, expected } = read(first);
+  assert.equal(artifact.scope.kind, "codeql-extracted-files");
+  assert.equal(scan.state, "complete");
+  const workflow = Buffer.from([
+    "jobs:", "  analyze:", "    strategy:", "      matrix:", "        language: [javascript-typescript]",
+    "    steps:", `      - uses: github/codeql-action/analyze@${"f".repeat(40)}`,
+  ].join("\n"));
+  const runId = Number(artifact.runId), sha = artifact.analyzedSha, name = `code-health-quality-${artifact.language}`;
+  const retained = await readCodeHealthQualityEvidence(artifact.repository, async args => {
+    if (args[0] === "run") {
+      const dir = args[args.indexOf("--dir") + 1]!;
+      assert.deepEqual(args, ["run", "download", artifact.runId, "--repo", artifact.repository, "--name", name, "--dir", dir]);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "code-health-quality.json"), JSON.stringify(artifact));
+      return "";
+    }
+    const route = args[1]!.slice(`repos/${artifact.repository}/`.length);
+    if (route === "commits/main") return JSON.stringify({ sha });
+    if (route.startsWith("actions/workflows/codeql.yml/runs?")) return JSON.stringify({
+      workflow_runs: [{ id: runId, head_sha: sha, head_branch: "main", status: "completed", path: ".github/workflows/codeql.yml" }],
+    });
+    if (route === `contents/.github/workflows/codeql.yml?ref=${sha}`) return JSON.stringify({
+      type: "file", encoding: "base64", size: workflow.length, content: workflow.toString("base64"),
+    });
+    if (route === `actions/runs/${runId}/artifacts?per_page=100`) return JSON.stringify({ total_count: 1, artifacts: [{
+      id: 1, name, expired: false, size_in_bytes: 1000,
+      workflow_run: { id: runId, head_sha: sha, head_branch: "main", repository_id: 1, head_repository_id: 1 },
+    }] });
+    assert.ok(route.startsWith("code-scanning/analyses?"), route);
+    return JSON.stringify([{ ref: "refs/heads/main", tool: { name: "CodeQL", version: artifact.toolVersion },
+      sarif_id: artifact.sarifId, commit_sha: sha, category: `/language:${artifact.language}`, analysis_key: "analyze", environment: "runner",
+      created_at: artifact.observedAt, rules_count: artifact.ruleCount, error: "", warning: "" }]);
+  });
+  const collection = { ...retained.quality, repository: first.repository, collectedAt: artifact.observedAt,
+    source: { ok: true as const, alerts: [], analysisInstances: [] } };
+  assert.equal(qualityScanFromCollectedEvidence(collection).scopeHash, scan.scopeHash);
+  assert.equal(qualityScanFromCollectedEvidence(collection).state, "complete");
+  const mismatched = collection.analyses.map(analysis => ({ ...analysis, category: "/language:actions" }));
+  assert.equal(qualityScanFromCollectedEvidence({ ...collection, analyses: mismatched }).state, "partial");
+
+  const rejects = [
+    { repository: "elsewhere/atlas" }, { analyzedSha: "c".repeat(40) }, { runId: "125" }, { runAttempt: "2" },
+    { completion: null }, { rawPaths: ["src/check file.ts"] }, { scope: { ...artifact.scope, hash: null } },
+    { scope: { ...artifact.scope, fileCount: 0 } }, { scope: { ...artifact.scope, fileCount: 100_001 } },
+  ];
+  for (const patch of rejects) assert.throws(() => validateCodeHealthProvenance({ ...artifact, ...patch }, expected), /invalid or belongs/);
+  const partial = { ...artifact, state: "partial", reasons: ["The exclusions are unavailable."] };
+  assert.equal(validateCodeHealthProvenance(partial, expected).scope.kind, "codeql-extracted-files");
+  assert.throws(() => validateCodeHealthProvenance({ ...partial, scope: { ...artifact.scope, hash: null } }, expected), /invalid or belongs/);
+  const coverage = { ...artifact, kind: "coverage", scanId: `coverage-nightly:${artifact.runId}`,
+    check: { id: "coverage-existing-tier", met: true, reason: "Measured." },
+    measurement: { branches: { covered: 1, total: 1 }, lines: { covered: 1, total: 1 } },
+  };
+  for (const key of ["runAttempt", "language", "sarifId", "completion", "ruleCount"] as const) delete coverage[key];
+  const expectedCoverage = { ...expected, kind: "coverage" } as const;
+  assert.throws(() => validateCodeHealthProvenance(coverage, expectedCoverage), /invalid or belongs/);
+  assert.equal(validateCodeHealthProvenance({ ...coverage, scope: { ...coverage.scope, kind: "instrumented-source-files" } }, expectedCoverage).kind, "coverage");
+
+  // Give the second independent workflow run a later clock without depending on the test runner's clock.
+  const newer = read(second).scan;
+  const observedAt = new Date(Math.max(Date.parse(scan.observedAt), Date.parse(newer.observedAt)) + 1).toISOString();
+  const current = { ...newer, observedAt };
+  const projection: CodeHealthProjectionInput = {
+    repository: first.repository, currentSha: second.analyzedSha, analyzedSha: second.analyzedSha,
+    observedAt: current.observedAt, nextDueAt: null, registry: { version: "v1", checks: [] }, scans: [current],
+    baseline: { analyzedSha: first.analyzedSha, policyVersion: "v1", scans: [scan] },
+  };
+  assert.equal(compareCodeHealthScanPair(projection, current, scan), "comparable");
+  const legacy = originalOutput();
+  legacy.sarif.runs[0]!.artifacts = [{ location: { uri: "src/check%20file.ts" }, roles: ["analysisTarget"] },
+    { location: { uri: "src/another.ts" }, roles: ["analysisTarget"] }];
+  const prior = read(legacy).scan;
+  assert.equal(prior.state, "complete");
+  assert.equal(compareCodeHealthScanPair(projection, current, { ...scan, scopeHash: prior.scopeHash }), "measurement_changed");
+});
 
 test("Code health accepts original semantic tool identity without granting unmeasured scope", () => {
   const input = originalOutput(), run = input.sarif.runs[0]!;
@@ -197,9 +434,9 @@ test("Code health exporter keeps original source diagnostics bounded and private
     version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod: "explicit-analysis-targets", countLimit: 20_000,
     tool: { codeql: true, semanticVersion: "absent", version: "valid", selected: "version" },
     artifacts: { shape: "array", count: 1, analysisTargets: 1 },
-    codeql: { metricResults: "array", metricCount: 3, baselineMetrics: 1, expectedFileDescriptors: 1, expectedFileNotifications: 1 },
+    codeql: { metricResults: "array", metricCount: 3, baselineMetrics: 1, expectedFileDescriptors: 1, expectedFileNotifications: 1, extractedFiles: "not-checked" },
   });
-  for (const malformed of [`{"${sentinel}": "${secretPath}", broken`, JSON.stringify({ sarif: sentinel }),
+  for (const malformed of ["null", "false", "0", `{"${sentinel}": "${secretPath}", broken`, JSON.stringify({ sarif: sentinel }),
     JSON.stringify({ ...input, sarif: { ...input.sarif, runs: [null] } })]) {
     const failed = exportOriginal(malformed);
     assert.equal(failed.status, 1);

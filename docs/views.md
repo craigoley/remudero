@@ -566,6 +566,29 @@ existing 64-KiB fleet budget reserves monetary payloads before optional worker-c
 Cached restart and HTTP reads require no ledger scan. Legacy/shadow disagreement remains subject
 to the existing parity gates; this source separation does not promote a view or authorize adoption.
 
+## Code health measurement scope
+
+The quality producer reads original SARIF from the CodeQL job and uses explicit analysis targets
+when available. When explicit targets are absent and extracted-file diagnostics can be verified,
+it records `codeql-extracted-files` for the configured language. The diagnostic must come from a
+successful invocation, and each location must resolve to a matching indexed artifact under
+CodeQL's source root.
+
+Published CodeQL 2.27.3 JavaScript SARIF shows the driver descriptor referenced by ID and index
+and one source-root artifact location per notification. The released queries select extracted files
+with a source-relative path. [SARIF example](https://github.com/snoopysecurity/dvws-node/blob/4221c04f132960a0ccca4bf5aa5f3a9f53172778/codeql-results.sarif)
+[JavaScript and TypeScript query](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/javascript/ql/src/Diagnostics/ExtractedFiles.ql)
+[Python query](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/python/ql/src/Diagnostics/ExtractedFiles.ql)
+[Actions query](https://github.com/github/codeql/blob/a1575b98a8cc19bcfa7bb6cb41be688cb3dae65c/actions/ql/src/Diagnostics/SuccessfullyExtractedFiles.ql)
+
+Expected-file baselines, result locations, and configured globs provide context only. Original
+SARIF with missing, ambiguous, or unsupported measurement evidence stays partial. The pinned CodeQL
+Action can omit diagnostic notifications from the original output. [CodeQL Action SARIF options](https://github.com/github/codeql-action/blob/33d7b85da1a04171e211befe2c739303b9a4c066/src/codeql.ts#L796-L838)
+
+The metadata records a file count and a method-bound scope hash, so an explicit-target baseline is
+incomparable with an extracted-file measurement. The metadata and structural diagnostic omit
+measured file paths and result messages. Each measurement covers the files reported by that run.
+
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 
 The console's hops (stream relay, refetch, render) are measured into core's own ledger
