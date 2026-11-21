@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 60.00
+  budget_usd: 4.50
   rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `daemon`, field `servedModel`: 17/38 joined worker calls (44.7%) against the field's 90.0% floor, first seen 2026-09-28T05:55:37Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). Daemon rows are written with lane: daemon and task_id DAEMON at src/run-task.ts (two appendLedger sites); src/lib/benchmark-evidence.ts names what each terminal field reads."
   design: |
     DIAGNOSE FIRST. Find which daemon-lane worker calls land without served_model: a provider whose stream carries no model id (W1-T4650 / W1-T4707 already name that as an unreportable reason, not missing data), or a daemon write path that drops WorkerResult.servedModel before appendLedger.

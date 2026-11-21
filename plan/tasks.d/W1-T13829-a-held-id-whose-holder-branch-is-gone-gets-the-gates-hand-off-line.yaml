@@ -19,7 +19,7 @@
     - test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts
     - scripts/task-id-existence-check.mjs
     - test/a-reservation-names-its-holder.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:only-the-gates-line — decidePlanRepair returns a hand-off decision only when a failing log's `HELD by a different reservation holder` section prints, for every held id, the remedy line `reservation hand-off: <holder> -> <filer>` with filer equal to the PR's head ref; an ALREADY DECLARED or ALREADY CLAIMED by another OPEN PR section, or a held id with no printed line, gets no hand-off decision"

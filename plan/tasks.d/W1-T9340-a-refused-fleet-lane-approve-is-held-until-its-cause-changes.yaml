@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — what releases a refused hand-off; it spans the lane's hold (fleet-lane.ts), the cached-draft re-lint it reuses (inbox-replay.ts) and the main-history dep the daemon wires (run-task.ts)
   band_meaning: span
   origin: "operator session 2026-10-13 (~23:15Z): clean ready proposals held a day after approves refused by since-fixed races and preflight refusals"

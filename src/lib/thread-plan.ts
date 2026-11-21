@@ -16,7 +16,7 @@ type PlanLoad = { plan: Plan; quarantined: QuarantinedTask[] };
  *  workers follow this instead of their file identity, and answer exactly what the main thread answers. */
 export type PlanPin = { path: string; repoDir: string; ref: string };
 /** W1-T5894: a pin carries the blobs main read at its ref and main's one gitMs, so a thread parses and never runs git. */
-type PinPost = { pin: PlanPin; text?: PlanText; gitMs?: number };
+export type PinPost = { pin: PlanPin; text?: PlanText; gitMs?: number };
 type PinMessage =
   | ({ type: "pin" } & PinPost)
   | { type: "ask" }
@@ -31,6 +31,8 @@ const held = new Map<string, { identity: string; load: PlanLoad; pinned?: true; 
 const pending = new Map<string, PinPost>();
 const published = new Map<string, PinPost>();
 const blobCaches = new Map<string, PlanBlobCache>();
+/** W1-T14052: receivers outside this process, which the channel below never reaches (the read-model child process). */
+const forwarders = new Set<(pinned: PinPost) => void>();
 let pinLog: PinLog | undefined;
 const pinIdentity = (pin: PlanPin): string => `ref:${pin.repoDir}@${pin.ref}`;
 const channel = new BroadcastChannel("remudero-thread-plan-pin");
@@ -90,6 +92,30 @@ export function publishThreadPlan(pin: PlanPin, load: PlanLoad & { text?: PlanTe
   const pinned: PinPost = { pin, text: load.text, gitMs: load.gitMs };
   published.set(pin.path, pinned);
   if (log) pinLog = log;
+  post({ type: "pin", ...pinned });
+  for (const send of forwarders) send(pinned);
+}
+
+/**
+ * W1-T14052: a BroadcastChannel reaches only this process's threads, so a read-model child process heard no pin and
+ * judged every view against its generation's unmoving working tree, statting each plan file per check. `send` gets
+ * every pin this thread has published, now, and each one it publishes later; the returned function stops it.
+ */
+export function forwardThreadPlans(send: (pinned: PinPost) => void): () => void {
+  for (const pinned of published.values()) send(pinned);
+  forwarders.add(send);
+  return () => void forwarders.delete(send);
+}
+
+/**
+ * W1-T14052: the child process's side of {@link forwardThreadPlans}. The pin is held here as if this thread had
+ * published it: this thread adopts it on its next read, every thread of this process gets it now, and a thread that
+ * starts later gets it when it asks. `log` receives each thread's adoption row.
+ */
+export function acceptForwardedThreadPlan(pinned: PinPost, log?: PinLog): void {
+  if (log) pinLog = log;
+  published.set(pinned.pin.path, pinned);
+  receiveThreadPlan(pinned);
   post({ type: "pin", ...pinned });
 }
 
