@@ -1,0 +1,52 @@
+- id: W1-T14114
+  title: An open core PR's escalation counts on its own task row when the task is filed in the ops catalog
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#console-update-failed-2026-11-20
+  plan_refs: [W1-T13957, W1-T12211, W1-T130]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/read-model-slow-lane.ts
+    - src/lib/read-model-worker.ts
+    - test/inbox/an-ops-filed-tasks-escalation-counts-on-its-own-task-row.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Live 2026-11-21 04:04Z, after W1-T13957 (#19888) reached serve: the core Inbox still reads partial, with
+    board-review:escalation:#19691, #19728 and #19721 referentUnverified. A read-only probe of serve's own inputs
+    (board snapshot, core plan, ledger) found each PR open, with a run-<taskId>-* head and one matching
+    Remudero-Task trailer, and ZERO core projection rows for W1-T13785, W1-T13855 and W1-T13850. Those tasks are
+    filed in the private ops catalog, not in core's plan/tasks.d. inboxBoardReferents finds no own-task row, so
+    the escalation count stays unverified and the whole core inbox is partial.
+    The board read already projects the combined catalog plan (board.ts: catalog?.plan ?? deps.plan). The inbox
+    classification is built in the read-model slow-lane thread (read-model-slow-lane.ts threadSlowLane), which has
+    no board catalog client, and panel-graph.ts projectInboxPlan projects the public plan only.
+  design: |
+    Give the slow-lane thread a board catalog client with the board-worker pattern: the thread uses
+    createWorkerBoardCatalogClient, and threadSlowLane bridges its requests with createBoardCatalogParentBridge
+    over the configured state roots. Give projectInboxPlan the catalog-combined plan, ONLY for its board
+    referents: when the client's current context is ok, project the combined plan and hand those rows to inboxBoardReferents; the classifier's own
+    projection stays on the public plan, so no private task field crosses the read-model boundary (W1-T12211).
+    The referents carry only an open/merged status and an escalation count. When the catalog read is not ok
+    (unreadable, stale, absent), keep today's public-only projection: an ops-filed task's escalation stays
+    unverified (W1-T130: cannot observe means wait). The client's memoized context is the only read; never start a
+    second ops read per inbox pass. UNVERIFIED: which thread spawns the slow lane (serve main or the read-model
+    worker); the builder forwards the slow lane's requests to whichever process already owns the catalog read, and
+    adds no new GET owner.
+
+    INVARIANT escalation-from-ops-own-task: an open core PR whose own task is filed only in an ok ops catalog takes its escalation count from that task's single projection row; an unreadable catalog leaves it unverified.
+  acceptance:
+    - claim: invariant:escalation-from-ops-own-task — an open PR whose own task row exists only in the ok ops catalog resolves open with its escalation count; with the catalog unreadable it stays unverified; no private task field reaches the inbox projection
+      proof: 'unit test: test/inbox/an-ops-filed-tasks-escalation-counts-on-its-own-task-row.test.ts'
+    - claim: the test names each case for this task
+      proof: 'grep: ops-filed own task row in test/inbox/an-ops-filed-tasks-escalation-counts-on-its-own-task-row.test.ts'
+  falsifier: |
+    Feed projectInboxPlan only the public plan: the ok-catalog case must fail (the PR resolves with no
+    escalation count).

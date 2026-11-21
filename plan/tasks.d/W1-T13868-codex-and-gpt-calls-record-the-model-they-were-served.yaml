@@ -16,8 +16,9 @@
     - src/lib/worker.ts
     - src/lib/review-findings.ts
     - src/cli/commands/review.ts
+    - src/run-task.ts
     - test/every-provider-names-its-served-model-or-why-not.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The benchmark cohort counts servedModelObserved only when a call row carries served_model
