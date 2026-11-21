@@ -19908,6 +19908,15 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+/** W1-T13990: the fix rounds this process admitted that have not ended: waiting for the work host to start their run child,
+ *  running in process (their memory admission included), or running as a run child. A claim the capacity controller refuses
+ *  releases its key before it reaches any of these; a round leaves them when its dispatch settles, done, refused or lost. */
+export function fixRoundsInFlight(): number {
+  let n = queuedHostFixes.size + childWorkCount("fix-dispatch");
+  for (const action of detachedSweepActions.values()) if (action.actionKind === "fix-dispatch") n++;
+  return n;
+}
+
 export type SweepRepairSurface = "full" | "light";
 
 /**

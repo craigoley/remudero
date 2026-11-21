@@ -106,8 +106,11 @@ export interface FixRoundAdmissions {
   /** Claims the capacity controller refused before any dispatch (each rise of a `sweep.fix_capacity` row's
    *  `fixes_refused`), and `sweep.fix.dispatch_failed` rows: dispatches refused later or lost. */
   refused: number;
+  /** Rounds the fix lane admitted that are still running now, from this process's fix registry: a round admitted in the
+   *  window, or running at its start, has written no `fix.dispatch` yet. Absent when no registry was read. */
+  running?: number;
 }
-/** Undefined when the fix lane's rows have not been read. */
+/** Undefined when the fix lane's rows have not been read, or a refusal count in the window has no baseline. */
 export type FixRoundReader = (sinceMs: number) => FixRoundAdmissions | undefined;
 
 /** The rows that record a round the fix lane ran, as `priorStrikesFor` and the sweep's `dispatchStarted` read them. */
@@ -120,6 +123,8 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
   const refused: number[] = [];
   // Each controller (one per pass, keyed by run and surface) writes its running refusal count from 0.
   const controllerRefused = new Map<string, number>();
+  // A controller whose first row read already counts refusals opened before these lines: its count has no baseline.
+  const unbaselined: number[] = [];
   // A run child refused at its own admission also ends lost: that loss is the same refusal, counted once.
   const refusedRuns = new Set<string>();
   for (const line of lines) {
@@ -133,6 +138,7 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       const count = line.fixes_refused;
       if (typeof count !== "number" || !Number.isInteger(count) || count < 0) continue;
       const key = `${runId}\0${String(line.surface)}`;
+      if (!controllerRefused.has(key) && count > 0) unbaselined.push(ts);
       const prior = controllerRefused.get(key) ?? 0;
       // A fall means a new controller, whose whole count is new.
       const fresh = count >= prior ? count - prior : count;
@@ -143,10 +149,13 @@ export function fixRoundReaderFor(lines: ReadonlyArray<Record<string, unknown>>)
       refused.push(ts);
     }
   }
-  return (sinceMs) => ({ admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length });
+  // A window holding such a first row cannot tell its refusals from the ones before it: unknown, never idle or inflated.
+  return (sinceMs) => unbaselined.some((t) => t >= sinceMs) ? undefined
+    : { admitted: admitted.filter((t) => t >= sinceMs).length, refused: refused.filter((t) => t >= sinceMs).length };
 }
 
-/** W1-T13990: the fix-round rows stamped at or after a time in a ledger directory, or undefined when unread. */
+/** W1-T13990: the fix-round rows stamped at or after a time in a ledger directory, or undefined when unread. The focus gate
+ *  asks from a window before the dwell, so each controller's last row before the dwell is read as its baseline. */
 export type FixRoundUnionRead = (stateDir: string, sinceMs: number) => Promise<ReadonlyArray<Record<string, unknown>> | undefined>;
 
 /** W1-T13990: the union's fix-round rows since `sinceMs`, rotations and the live file, read off the loop. Rotation keeps
@@ -164,14 +173,15 @@ export async function readFixRoundUnionRows(stateDir: string, sinceMs: number): 
 export interface FixRoundUnionReader {
   /** A reader for one consultation: the newest completed union read, joined once with the live `lines` the gate just
    *  read (rows written after that read began). Each call starts the next read when none is in flight. Undefined
-   *  while no read has completed, when the newest was unreadable, or when it began before `sinceMs`. */
+   *  while no read has completed, when the newest was unreadable, or when it began before `sinceMs`. With `readRunning`,
+   *  an answer also carries the rounds running now. */
   readerFor(lines: ReadonlyArray<Record<string, unknown>>): FixRoundReader;
   /** Settles when the read in flight does. */
   settled(): Promise<void>;
 }
 
 export function createFixRoundUnionReader(
-  stateDir: string, opts: { clock: Clock; read?: FixRoundUnionRead },
+  stateDir: string, opts: { clock: Clock; read?: FixRoundUnionRead; readRunning?: () => number },
 ): FixRoundUnionReader {
   const read = opts.read ?? readFixRoundUnionRows;
   let latest: { startedAtMs: number; rows: ReadonlyArray<Record<string, unknown>> | undefined } | undefined;
@@ -179,7 +189,10 @@ export function createFixRoundUnionReader(
   const start = (sinceMs: number): void => {
     if (inFlight !== undefined) return;
     const startedAtMs = opts.clock.now();
-    inFlight = Promise.resolve().then(() => read(stateDir, sinceMs)).then(
+    // One window more before the dwell: a controller's `fixes_refused` is cumulative, so its rise in the dwell is read
+    // against its last row before it. A controller with no row in that lookback is unknown (fixRoundReaderFor).
+    const baselineSinceMs = sinceMs - Math.max(0, startedAtMs - sinceMs);
+    inFlight = Promise.resolve().then(() => read(stateDir, baselineSinceMs)).then(
       (rows) => { latest = { startedAtMs, rows }; },
       (error: unknown) => {
         void error; // A failed read is no reading, so the dwell is unknown and the hold stands.
@@ -198,7 +211,8 @@ export function createFixRoundUnionReader(
       // In time order, so a pass's rows the read's window cut are its context, never a new controller.
       const stamp = (row: Record<string, unknown>): number => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
       const rows = [...snapshot.rows, ...live].sort((a, b) => (stamp(a) || 0) - (stamp(b) || 0));
-      return fixRoundReaderFor(rows)(sinceMs);
+      const rounds = fixRoundReaderFor(rows)(sinceMs);
+      return rounds && opts.readRunning ? { ...rounds, running: opts.readRunning() } : rounds;
     },
     settled: async () => { await inFlight; },
   };

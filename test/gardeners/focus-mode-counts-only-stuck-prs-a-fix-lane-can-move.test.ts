@@ -10,8 +10,8 @@ import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import { rotateLedger } from "#src/lib/ledger.js";
 import { loadPlan } from "#src/lib/plan.js";
 import {
-  DEFAULT_SWEEP_POLICY, checkQueueGovernor, createSweepFixAdmissionController, logQueueGovernorDeferral, type OpenPrView,
-  type QueueGovernorResult,
+  DEFAULT_SWEEP_POLICY, checkQueueGovernor, createSweepFixAdmissionController, detachSweepAction, fixRoundsInFlight,
+  logQueueGovernorDeferral, registerChildWork, resetChildWork, settleChildWork, type OpenPrView, type QueueGovernorResult,
 } from "#src/lib/sweep.js";
 import { withTempDir } from "#src/lib/tmp.js";
 import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
@@ -256,9 +256,18 @@ function capacityPasses(dir: string, runId: string, clockMs: () => number) {
     });
     for (const prNumber of claims) assert.equal(controller.claim({ prNumber } as OpenPrView).admitted, false);
   };
+  /** One controller held open across consultations, its claims judged when made: `free` gives it an idle host. */
+  const controller = (opts: { run?: string; surface?: "light" | "full"; free?: boolean } = {}) => {
+    const run = opts.run ?? runId;
+    const held = createSweepFixAdmissionController({
+      surface: opts.surface ?? "light", queueDepth: 1, hostWorkerBudget: 2, activeWorkers: opts.free ? 0 : 2, reviewReservations: 0,
+      log: (step, extra) => fixture.append([{ ts: new Date(clockMs()).toISOString(), run_id: run, task_id: "SWEEP", step, ...extra }]),
+    });
+    return (prNumber: number): boolean => held.claim({ prNumber } as OpenPrView).admitted;
+  };
   const lines = (): Array<Record<string, unknown>> => readFileSync(fixture.path, "utf8").split("\n").filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { lines, pass };
+  return { lines, pass, controller, append: fixture.append };
 }
 
 test("W1-T13990 criterion 2: a refusal the capacity controller writes as sweep.fix_capacity counts as a refused round", async () => {
@@ -282,9 +291,10 @@ test("W1-T13990 criterion 2: a refusal the capacity controller writes as sweep.f
   });
 });
 
-test("W1-T13990 criterion 2: a lost child counts once, and a controller whose opening row was not read still counts", () => {
+test("W1-T13990 criterion 2: a lost child counts once, and a controller whose opening row was not read counts from its baseline", () => {
   const at = (m: number) => new Date(T0 + m * MIN).toISOString();
   const read = adaptiveWip.fixRoundReaderFor([
+    { ts: at(-1), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 0 },
     { ts: at(1), run_id: "work-fix-dispatch-A", step: "sweep.fix_capacity", surface: "full", fixes_refused: 0 },
     { ts: at(1), run_id: "work-fix-dispatch-A", step: "sweep.fix_capacity", surface: "full", fixes_refused: 1 },
     { ts: at(2), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", child_run_id: "work-fix-dispatch-A" },
@@ -296,6 +306,24 @@ test("W1-T13990 criterion 2: a lost child counts once, and a controller whose op
   ]);
   assert.deepEqual(read(T0), { admitted: 0, refused: 5 },
     "A's refusal once (its lost child is the same refusal), B's lost child, 2 then a new controller's 1, a repeat adds none");
+});
+
+test("W1-T13990 criterion 2: a refusal count with no row before the window is unknown, never idle and never inflated", () => {
+  const at = (m: number) => new Date(T0 + m * MIN).toISOString();
+  const rows = [
+    { ts: at(4), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 2 },
+    { ts: at(6), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 3 },
+  ];
+  assert.equal(adaptiveWip.fixRoundReaderFor(rows)(T0), undefined,
+    "a controller first read at 2 opened before the window: how many of its 3 fell in the window is unknown");
+  assert.deepEqual(adaptiveWip.fixRoundReaderFor(rows)(Date.parse(at(5))), { admitted: 0, refused: 1 },
+    "its row before a later window is that window's baseline");
+  assert.deepEqual(adaptiveWip.fixRoundReaderFor([
+    { ts: at(-20), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 1 }, ...rows,
+  ])(T0), { admitted: 0, refused: 2 }, "a row before the window, read, baselines the rise in it");
+  assert.deepEqual(adaptiveWip.fixRoundReaderFor([
+    { ts: at(2), run_id: "DAEMON-1", step: "sweep.fix_capacity", surface: "light", fixes_refused: 0 }, ...rows,
+  ])(T0), { admitted: 0, refused: 3 }, "a controller opened in the window starts at 0");
 });
 
 test("W1-T13990 criterion 2: a hold whose every fix claim the capacity controller refused releases as refused, with the count", async () => {
@@ -357,11 +385,12 @@ function rotateLive(dir: string, atMs: number): void {
 
 /** A focus harness whose fix-round reader is the production one: the union of the rotations and the live file, read
  *  off the loop, joined with the live lines of each consultation. */
-function unionHarness(dir: string, read?: adaptiveWip.FixRoundUnionRead) {
+function unionHarness(dir: string, read?: adaptiveWip.FixRoundUnionRead, readRunning?: () => number) {
   let h: ReturnType<typeof harness> | undefined;
   const now = () => h!.now();
   const passes = capacityPasses(dir, "DAEMON-1", now);
-  const union = adaptiveWip.createFixRoundUnionReader(dir, { clock: clockFromMillisFn(now), ...(read ? { read } : {}) });
+  const union = adaptiveWip.createFixRoundUnionReader(dir, { clock: clockFromMillisFn(now), ...(read ? { read } : {}),
+    ...(readRunning ? { readRunning } : {}) });
   h = harness(dir, { readFixRounds: (sinceMs) => union.readerFor(passes.lines())(sinceMs) });
   return { ...h, passes, union };
 }
@@ -384,6 +413,31 @@ test("W1-T13990 criterion 2: a refusal whose sweep.fix_capacity rows rotated out
     assert.equal(released.length, 1);
     assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 1],
       "the rotated refusal is counted, so the row names the refused fix lane, not an idle one");
+  });
+});
+
+test("W1-T13990 criterion 2: one refusal before the dwell and one in it count one, read against the controller's row before the dwell", async () => {
+  await withTempDir("focus-movable", async (dir) => {
+    const h = unionHarness(dir);
+    const ageing = { stuck: 12, movable: 12 };
+    const on = enter(h);
+    // One controller spans the dwell's start, and every host worker is busy: each claim it judges is refused.
+    const claim = h.passes.controller();
+    h.consult(ageing, 2 * MIN);
+    assert.equal(claim(13), false, "refused before the dwell the release judges");
+    h.consult(ageing, 8 * MIN);
+    assert.equal(claim(14), false, "refused in the dwell");
+    rotateLive(dir, h.now() + MIN);
+    const archived = h.passes.lines().filter((line) => line.step === "sweep.fix_capacity");
+    assert.equal(archived.length, 0, "the controller's rows are in the archive alone");
+    assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS - 5 * MIN)?.tier, "focus", "the dwell matured before the union was read");
+    assert.ok(h.sinceAsked.at(-1)! > on + 2 * MIN, "the first refusal is before the window the release judges");
+    await h.union.settled();
+    assert.equal(h.consult(ageing, MIN), undefined, "a dwell with every claim refused releases the hold");
+    const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+    assert.equal(released.length, 1);
+    assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 1],
+      "the archived counter reads 2, but one of the two refusals came before the dwell");
   });
 });
 
@@ -439,6 +493,59 @@ test("W1-T13990 criterion 2: the union reader answers from a read begun inside t
     nowMs += 2 * focus.FOCUS_DWELL_MS;
     assert.equal(union.readerFor(lines())(nowMs - focus.FOCUS_DWELL_MS), undefined, "a read begun before the window is stale");
   });
+});
+
+/** A fix round this process admitted, started as run child R1 for #13, as `adoptChildWork` registers it. */
+function startFixChild(): void {
+  registerChildWork({ runId: "work-fix-dispatch-R1", kind: "fix-dispatch", taskId: "W1-T1", prNumber: 13, headSha: "a1", fixKey: "W1-T1@a1" });
+}
+
+test("W1-T13990 criterion 2: fixRoundsInFlight counts the fix rounds this process admitted until each settles", async () => {
+  resetChildWork();
+  try {
+    assert.equal(fixRoundsInFlight(), 0);
+    startFixChild();
+    registerChildWork({ runId: "work-review-R2", kind: "review", taskId: "W1-T2", prNumber: 14, headSha: "b1", reviewKey: "k" });
+    let finish!: () => void;
+    detachSweepAction(new Promise<void>((resolve) => { finish = resolve; }), { actionKind: "fix-dispatch", taskId: "W1-T3", fixKey: "W1-T3@c1" });
+    assert.equal(fixRoundsInFlight(), 2, "a run child and an in-process round count; a review does not");
+    settleChildWork("work-fix-dispatch-R1");
+    finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fixRoundsInFlight(), 0, "a settled round no longer counts");
+  } finally {
+    resetChildWork();
+  }
+});
+
+/** The 2026-11-20 shape on the production reader: the capacity controller admits a claim in the dwell, its round starts
+ *  as a run child, and the child is refused at its own admission and ends lost. */
+test("W1-T13990 criterion 2: a round admitted in the dwell and then refused is a refusal, and the hold is released", async () => {
+  resetChildWork();
+  try {
+    await withTempDir("focus-movable", async (dir) => {
+      const h = unionHarness(dir, undefined, fixRoundsInFlight);
+      const ageing = { stuck: 12, movable: 12 };
+      enter(h);
+      h.consult(ageing, 5 * MIN);
+      assert.equal(h.passes.controller({ free: true })(13), true, "the capacity controller admits the claim");
+      startFixChild();
+      h.consult(ageing, 5 * MIN);
+      assert.equal(h.passes.controller({ run: "work-fix-dispatch-R1", surface: "full" })(13), false, "the child is refused");
+      settleChildWork("work-fix-dispatch-R1");
+      h.passes.append([{ ts: new Date(h.now()).toISOString(), run_id: "DAEMON-1", step: "sweep.fix.dispatch_failed", pr_number: 13,
+        child_run_id: "work-fix-dispatch-R1", error: "fix dispatch refused: worker admission refused" }]);
+      assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS - 10 * MIN)?.tier, "focus");
+      await h.union.settled();
+      assert.equal(h.consult(ageing, MIN), undefined, "an admission whose dispatch was refused is no round run");
+      const released = h.rows.filter((r) => r.step === focus.FOCUS_RELEASED_STEP);
+      assert.equal(released.length, 1);
+      assert.deepEqual([released[0].fields.cause, released[0].fields.refused_count], ["fix_lane_refused", 1],
+        "the child's refusal, once: its loss is the same refusal");
+    });
+  } finally {
+    resetChildWork();
+  }
 });
 
 // ── criterion 3 ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -560,6 +667,38 @@ test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs 
     assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], "no release: a round ran in the dwell");
     assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
   });
+});
+
+test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — 12 ageing PRs hold focus while a round admitted in the dwell runs", async () => {
+  resetChildWork();
+  try {
+    await withTempDir("focus-movable", async (dir) => {
+      const h = unionHarness(dir, undefined, fixRoundsInFlight);
+      const ageing = { stuck: 12, movable: 12 };
+      enter(h);
+      h.consult(ageing, 5 * MIN);
+      // The capacity controller grants the claim and the round starts as a run child; its worker has not returned, so the
+      // round has written no fix.dispatch.
+      assert.equal(h.passes.controller({ free: true })(13), true, "the capacity controller admits the claim");
+      startFixChild();
+      assert.equal(h.passes.lines().some((line) => line.step === "fix.dispatch" || line.step === "fix.retrigger"), false);
+      assert.equal(h.consult(ageing, focus.FOCUS_DWELL_MS)?.tier, "focus");
+      for (let i = 0; i < 3; i++) {
+        await h.union.settled();
+        assert.equal(h.consult(ageing, MIN)?.tier, "focus", `12 ageing PRs above the leave bound hold while the round runs (${i})`);
+      }
+      assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP], "no release: an admitted round is running");
+      assert.equal(existsSync(join(dir, focus.FOCUS_FILE)), true);
+      // The worker returns: its fix.dispatch row is the round run, and the hold stays exactly as on origin/main.
+      h.passes.append([{ ts: new Date(h.now()).toISOString(), run_id: "work-fix-dispatch-R1", task_id: "W1-T1", step: "fix.dispatch", round_id: "r1" }]);
+      settleChildWork("work-fix-dispatch-R1");
+      await h.union.settled();
+      assert.equal(h.consult(ageing, MIN)?.tier, "focus");
+      assert.deepEqual(h.rows.map((r) => r.step), [focus.FOCUS_ENTERED_STEP]);
+    });
+  } finally {
+    resetChildWork();
+  }
 });
 
 test("W1-T13990 criterion 4: invariant:ageing-prs-still-focus — the FOCUS file's restore at boot and its release by hand are unchanged", async () => {

@@ -167,7 +167,8 @@ export function focusGateFor(gate: QueueGate, opts: FocusGateOptions): QueueGate
       stuckOwnedCount: counts.stuck_owned_count, movableStuckOwnedCount: reading.movableStuckOwnedCount,
       observedOpenCount: counts.observed_open_count, baseWipLimit: counts.base_wip_limit,
     }, nowMs, dwellMs);
-    if (rounds !== undefined && rounds.admitted === 0) {
+    // A round admitted and still running holds the hold: its `fix.dispatch` is written only when its worker returns.
+    if (rounds !== undefined && rounds.admitted === 0 && (rounds.running ?? 0) === 0) {
       // One release, even when the leave bound matured too: the row names the unused hold and the stack it left on.
       const reason = `no fix round was admitted in ${dwellMs / 60_000} minutes of focus (${rounds.refused} refused): ` +
         `the build slots it held went unused${decision.changed ? `; ${decision.reason}` : ""}`;
