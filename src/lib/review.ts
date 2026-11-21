@@ -8111,6 +8111,14 @@ export interface ReviewPromptInput {
   proofEvidencePath?: string;
 }
 
+/** W1-T14161: when a counterexample's input can (a)/(c) FAIL a criterion. Rendered in step 4 and the verdict contract. */
+export const COUNTEREXAMPLE_PRODUCER_RULE =
+  `A FAIL (a) or (c) that rests on a counterexample must name the production producer that can emit its input at ` +
+  `runtime: the caller, the file:line, or the external source (the kernel, GitHub, a human edit through a named ` +
+  `surface). A counterexample whose input only a test seam, an injected fixture or hand-forged bytes can produce, ` +
+  `and that no production producer emits, is (b): emit PASS and a REVIEW_FOLLOW_UP line. A preservation invariant ` +
+  `"exactly as on origin/main" is judged on the inputs production can produce.`;
+
 /** Render the prompt for a FRESH-context REVIEW worker (acceptance #1/#3). The worker is read-only plus gh: it reads
  * the diff, the criteria and the implement REPORT, and verdicts each criterion against its proof. It does NOT post the
  * status — the deny-floor (W1-T203) refuses any status POST from a worker — so it emits `REVIEW_VERDICT` lines and the
@@ -8202,6 +8210,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
       `   is an unavailable experiment, not a functional counterexample. Keep that distinction`,
       `   explicit instead of changing the proof or treating EPERM as a failed assertion.`,
     ]),
+    `   ${COUNTEREXAMPLE_PRODUCER_RULE}`,
     `5. When an implementation introduces a new input, field, option, or configuration`,
     `   value, trace each new input backwards through the production caller to the`,
     `   material producer that supplies its runtime value. Test fixtures that inject the`,
@@ -8255,6 +8264,7 @@ export function reviewerVerdictContract(count: number): string {
     `  REVIEW_FOLLOW_UP <n>: <the input and the result>`,
     `Emit PASS if (b) is the only finding. Emit the appropriate FAIL for a separate`,
     `(a) or (c) finding on the same criterion, alongside the follow-up line.`,
+    COUNTEREXAMPLE_PRODUCER_RULE,
     ``,
     `ON A FAIL, THE TEXT AFTER THE TOKEN IS THE WHOLE POINT. It is recorded verbatim`,
     `on that criterion's row and is the ONLY thing an author or operator ever sees`,
