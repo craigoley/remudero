@@ -963,7 +963,9 @@ export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
  *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
  *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
  *  `pr.terminal` row the direct merge writes, which is the only record of most merges. */
-export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done"];
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = [
+  "skills.selection", "pr.opened", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done",
+];
 /** Bootstrap draws for the cost comparison, the count retireCertainties uses. */
 export const SKILL_COST_BOOTSTRAP_DRAWS = 400;
 /** One-sided confidence for the cost rule and the percentile of verdict-to-merge time that settles a run. */
@@ -1194,12 +1196,13 @@ export function buildSkillEffectivenessReport(
   const isApart = (o: SelectionObservation): boolean => !inArm(o, true) && !inArm(o, false);
   const selectionsByRun = new Map<string, SelectionObservation[]>();
   for (const o of selectionByKey.values()) selectionsByRun.set(o.runId, [...(selectionsByRun.get(o.runId) ?? []), o]);
-  // A verdict of a run counted apart feeds nothing compared: not the settle window, not the clock, not a merge.
-  const verdictIsApart = (row: SkillLedgerRow): boolean => {
-    const own = selectionByKey.get(runTaskKey(row));
+  // A named task uses its own selection or an older task-less selection. Only task-less evidence can
+  // fall back to all selections for the run, where the cohort must be unambiguous.
+  const rowIsApart = (row: SkillLedgerRow): boolean => {
+    if (typeof row.run_id !== "string") return false;
+    const own = selectionByKey.get(runTaskKey(row)) ?? selectionByKey.get(`${row.run_id}\0`);
     if (own !== undefined) return isApart(own);
-    const ofRun = selectionsByRun.get(row.run_id as string);
-    return ofRun !== undefined && ofRun.every(isApart);
+    return typeof row.task_id !== "string" && (selectionsByRun.get(row.run_id)?.every(isApart) ?? false);
   };
 
   type Terminal = { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined };
@@ -1210,18 +1213,19 @@ export function buildSkillEffectivenessReport(
   const apartPrKeys = new Set<string>();
   const comparedPrKeys = new Set<string>();
   for (const row of rows) {
-    if (row.step !== "verdict" || typeof row.run_id !== "string" || typeof row.verdict !== "string") continue;
+    const verdict = row.step === "verdict" ? row.verdict : undefined;
+    if (typeof row.run_id !== "string" || (typeof verdict !== "string" && row.step !== "pr.opened")) continue;
     const prKey = effectivenessPrKey(row);
+    const apart = rowIsApart(row);
+    // A run may open a PR and then fail with a verdict that never names it.
+    if (prKey !== undefined) (apart ? apartPrKeys : comparedPrKeys).add(prKey);
+    if (typeof verdict !== "string") continue;
     anyVerdictKeys.add(runTaskKey(row));
     anyVerdictRuns.add(row.run_id);
-    if (verdictIsApart(row)) {
-      if (prKey !== undefined) apartPrKeys.add(prKey);
-      continue;
-    }
-    const terminal = { verdict: row.verdict, prKey, ms: rowMs(row), cost: rowCostUsd(row) };
+    if (apart) continue;
+    const terminal = { verdict, prKey, ms: rowMs(row), cost: rowCostUsd(row) };
     verdictByKey.set(runTaskKey(row), terminal);
     verdictByRun.set(row.run_id, terminal);
-    if (prKey !== undefined) comparedPrKeys.add(prKey);
   }
   // A row naming a task joins its own verdict, else its run's task-less one, never another task's; a row naming
   // no task joins any verdict of its run.
@@ -1237,8 +1241,10 @@ export function buildSkillEffectivenessReport(
   const fixCostByPr = new Map<string, number>();
   let latestMs: number | undefined;
   for (const row of rows) {
+    // PR openings supply attribution only.
+    if (row.step === "pr.opened") continue;
     if (isSkillSelection(row) && isApart(selectionByKey.get(runTaskKey(row))!)) continue;
-    if (row.step === "verdict" && typeof row.run_id === "string" && verdictIsApart(row)) continue;
+    if ((row.step === "verdict" || row.step === "fix.done") && rowIsApart(row)) continue;
     const prKey = row.step === "fix.done" ? effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url) : effectivenessPrKey(row);
     if (apartOnlyPr(prKey)) continue;
     const ms = rowMs(row);
