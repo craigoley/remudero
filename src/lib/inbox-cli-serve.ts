@@ -172,7 +172,7 @@ export const INBOX_INFORMATIONAL_ONLY_DETAIL = "This age observation is readable
 
 class InformationalVerdictRefused extends RmdError {
   constructor() {
-    super("inbox", 1, INBOX_INFORMATIONAL_ONLY_DETAIL);
+    super("usage", 1, INBOX_INFORMATIONAL_ONLY_DETAIL); // a refused verdict on information is a usage refusal, exit 1 as before
   }
 }
 
