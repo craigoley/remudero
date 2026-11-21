@@ -524,7 +524,9 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^(?:existing red)$"), "the isolated rerun selects the named failure");
     assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
     assert.ok(!spawned.at(-1)!.some((arg) => /expose-internals|node:internal/.test(decodeURIComponent(arg))), "with public runner flags only");
-    await assert.rejects(workspace.rerun("head", file, source.head, "other"), /the isolated rerun of "other" also ran "existing red"/);
+    // A row that is neither the target nor one of its ancestors is named and dropped, never read as the target.
+    assert.deepEqual(await workspace.rerun("main", file, base, "other"), []);
+    assert.match(f.lines.join("\n"), /main test\/ci\/example\.test\.ts: ignored "existing red", which is not "other" or one of its ancestors/);
     assert.deepEqual(await workspace.rerun("main", file, base), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
@@ -662,7 +664,8 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
-  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
+  // No `+`: a plain fast-forward refspec, leased on the absent ref the gate read (an empty lease: the ref must not exist).
+  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
   assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
   await assert.rejects(defaults.push(source, run), /changed during verification/);
@@ -1385,9 +1388,10 @@ test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic 
     assert.deepEqual(spaced.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(spaced));
     assert.deepEqual(ranSince(from), ["a > b c"], "the other path to the same spaced name does not run");
     from = readFileSync(commands, "utf8").length;
-    await assert.rejects(workspace.rerun("head", collision, source.head, "a > b c"),
-      /space-joined test name of "a b c" is ambiguous with "a > b c"/);
-    assert.deepEqual(ranSince(from), ["COLLISION"], "the run that could not be isolated is refused, not read");
+    const collided = await workspace.rerun("head", collision, source.head, "a > b c");
+    assert.deepEqual(collided.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(collided));
+    assert.deepEqual(ranSince(from), ["COLLISION"], "the colliding test runs, and only its row is dropped");
+    assert.match(f.lines.join("\n"), /ignored "a b c", which ran only because its space-joined name matches "a > b c"'s/);
     from = readFileSync(commands, "utf8").length;
     // Node's TAP writes `#` as `\#` and `\` as `\\`; the rerun selects the name Node registered.
     const escaped = await workspace.rerun("head", file, source.head, "hash \\# and back\\\\slash");
@@ -1461,7 +1465,7 @@ test("W1-T12169 criterion 4: a remote already at the verified head gets no push,
   // Positive control: a remote without the head runs the gate and then pushes.
   await withLiveWritesAllowed(() => defaults.push(source, offlinePushRun(f)));
   assert.equal(readFileSync(mark, "utf8"), "ran\n");
-  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
 });
 
 test("W1-T12169 criterion 5: a stoppable ship read still goes through a live broker, and a stop ends its wait there", async (t) => {
@@ -1500,4 +1504,111 @@ test("W1-T12169 criterion 5: a stoppable ship read still goes through a live bro
     answer(1);
     assert.deepEqual(shim.calls(), [], "no ship read bypassed the broker for direct gh");
   });
+});
+
+test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a top-level test is classified by its own row, never the other test's", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  // "a" > "b c" and the top-level "a b c" share the space-joined name the runner's filters match.
+  const tests = (nestedRed: boolean, topRed: boolean) => ['import { test } from "node:test";',
+    `test("a", async (context) => { await context.test("b c", () => { ${nestedRed ? 'throw new Error("nested red");' : ""} }); });`,
+    `test("a b c", () => { ${topRed ? 'throw new Error("top-level red");' : ""} });`, ""].join("\n");
+  // Main: the nested test passes and its namesake fails. Read as the target, the namesake would make it "also failing on main".
+  writeFileSync(join(repo.dir, file), tests(false, true));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "main: only the top-level namesake is red");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, file), tests(true, false));
+  repo.git("commit", "-am", "the hand change turns the nested test red and fixes its namesake");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const receipt = realReceipt(repo, source.head, mainSha);
+  assert.deepEqual(receipt.failureAttribution!.tests!.map((test) => test.title).sort(), ["a", "a > b c"]);
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({ preflight: async () => receipt, rerun: real.rerun, close: () => real.close() });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
+  const log = f.lines.join("\n");
+  assert.doesNotMatch(log, /comparison unavailable|also failing on main/, log);
+  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a > b c$/m);
+  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a$/m);
+  assert.match(log, /main test\/ci\/example\.test\.ts: ignored "a b c", which ran only because its space-joined name matches/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
+});
+
+test("W1-T12169 criterion 3: a test red on head and main stays also failing on main after a formatting-only edit to its registration", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), 'import { test } from "node:test";\ntest("green", () => {});\ntest("same red", () => { throw new Error("red"); });\n');
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "main: the test is red");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  // Whitespace, a comment, quote style and a type annotation change; no token that runs.
+  writeFileSync(join(repo.dir, file), [
+    'import { test } from "node:test";', 'test("green", () => {});', "test(  'same red' ,", "  (): void => {", "    // still red", "    throw new Error( 'red' );", "  } );", "",
+  ].join("\n"));
+  repo.git("commit", "-am", "the hand change only reformats the red test");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({ preflight: async () => realReceipt(repo, source.head, mainSha), rerun: real.rerun, close: () => real.close() });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
+  assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: same red$/m);
+  assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
+  assert.ok(f.calls.includes(`push ${source.head}`));
+});
+
+test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a tip that moves after the gate is never fast-forwarded", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo);
+  repo.git("commit", "--allow-empty", "-m", "an intermediate commit the remote may advance to");
+  const ancestor = repo.git("rev-parse", "HEAD");
+  repo.git("commit", "--allow-empty", "-m", "the verified head");
+  const verifiedHead = repo.git("rev-parse", "HEAD");
+  const remote = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-remote-`));
+  t.after(() => rmSync(remote, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  repo.git("push", "-q", remote, `${verifiedHead}:refs/heads/objects`, `${base}:refs/heads/${branch}`);
+  const tip = () => execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${branch}`], { encoding: "utf8" }).trim();
+  // The race, inside the gate: after the gate read the tip, the remote advances to an ancestor of the head.
+  const mark = harnessGate(t, `cat > /dev/null; git --git-dir=${shellQuote(remote)} update-ref refs/heads/${branch} "$(cat ${shellQuote(join(f.root, "advance"))})"; ` +
+    'echo "open-pr-body-proof-precheck: SKIP -- this branch has no open pull request"; echo ran >> "$MARK"');
+  const toRemote = (args: readonly string[]) => args.map((arg) => arg === "origin" ? remote : arg);
+  const pushes: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (cwd, args, options) => {
+    pushes.push([...args]);
+    return hostWorktreeGitAsync(cwd, toRemote(args), options);
+  });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    git: ((cwd, args, options) => hostWorktreeGitAsync(cwd, args[0] === "ls-remote" ? toRemote(args) : args, options)) satisfies typeof hostWorktreeGitAsync };
+  const source = await defaults.readSource(repo.dir, run);
+  writeFileSync(join(f.root, "advance"), ancestor);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stale info|rejected/);
+  assert.equal(readFileSync(mark, "utf8"), "ran\n");
+  assert.deepEqual(pushes, [["push", `--force-with-lease=refs/heads/${branch}:${base}`, "origin", `${verifiedHead}:refs/heads/${branch}`]]);
+  assert.equal(tip(), ancestor, "the gate judged the push from the base; a remote that moved since rejects it");
+  // A tip the head does not descend from is refused before the gate, so the lease can never replace a commit.
+  repo.git("switch", "-q", "--detach", base);
+  repo.git("commit", "--allow-empty", "-m", "someone else's commit");
+  const foreign = repo.git("rev-parse", "HEAD");
+  repo.git("push", "-q", remote, `${foreign}:refs/heads/${branch}`, "-f");
+  repo.git("switch", "-q", branch);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /is not an ancestor of .* so this push could only replace it/);
+  assert.equal(pushes.length, 1);
+  assert.equal(tip(), foreign);
+  // Positive control: an unmoved tip the head descends from takes the leased fast-forward.
+  execFileSync("git", ["--git-dir", remote, "update-ref", `refs/heads/${branch}`, base]);
+  writeFileSync(join(f.root, "advance"), base);
+  await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.equal(tip(), verifiedHead);
 });

@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { parse, type CallExpression, type Node } from "acorn";
+import { parse, tokenizer, type CallExpression, type Node } from "acorn";
 import { systemClock } from "./clock.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError } from "./drain-lock.js";
 import { gitPushRunBranchAsync, worktreePushExecAsync } from "./git-push.js";
@@ -178,7 +178,7 @@ const regexLiteral = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&
  *  register. Admitting each ancestor's space-joined name lets a dynamic parent register its subtests, and Node
  *  then admits every one of them, so `--test-skip-pattern` removes each test whose name and space-joined name
  *  are both off the target's path; Node runs a test only when both filters admit it. The space join can still
- *  name a different path, so the rerun's TAP is checked against the path afterwards ({@link pathRows}). */
+ *  name a different path, so the rerun's TAP rows are read by their ancestry afterwards ({@link pathRows}). */
 function isolatedTestArgs(title: string): string[] {
   const names = title.split(" > ").map(registeredName);
   const joined = names.map((_, index) => names.slice(0, index + 1).join(" ").trim());
@@ -188,26 +188,36 @@ function isolatedTestArgs(title: string): string[] {
     `--test-skip-pattern=^(?!(?:${onPath.map(regexLiteral).join("|")})$)`];
 }
 
-/** The rerun's rows must be the target and its ancestors and nothing else. A row off that path ran because its
- *  space-joined name collides with the path's, or because a filter admitted it in some other way; either way the
- *  run did not isolate the target, so it is refused rather than read. */
-function pathRows(rows: FailingTest[], title: string, tree: string, file: string): void {
+/** The rows that belong to the target: the target and its ancestors, read by their ancestry in the TAP nesting
+ *  (`a > b c`), never by the space-joined name the filters match. A test whose space-joined name collides with the
+ *  path's (`a b c`) can still run; it is named in the log and dropped, so its result never counts as the target's.
+ *  The run's summary is still checked against every row, the dropped ones included. */
+function pathRows(rows: FailingTest[], title: string, tree: string, file: string, log: (line: string) => void): FailingTest[] {
   const joined = (name: string) => name.split(" > ").join(" ");
-  const path = new Set(title.split(" > ").map((_, index, names) => joined(names.slice(0, index + 1).join(" > "))));
+  const kept: FailingTest[] = [];
   for (const row of rows) {
-    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) continue;
-    throw new Error(path.has(joined(row.title))
-      ? `${tree} ${file}: the space-joined test name of ${JSON.stringify(row.title)} is ambiguous with ` +
-        `${JSON.stringify(title)}, so Node's name filter cannot isolate it`
-      : `${tree} ${file}: the isolated rerun of ${JSON.stringify(title)} also ran ${JSON.stringify(row.title)}`);
+    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) { kept.push(row); continue; }
+    log(joined(row.title) === joined(title) || joined(title).startsWith(`${joined(row.title)} `)
+      ? `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which ran only because its space-joined name matches ${JSON.stringify(title)}'s`
+      : `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which is not ${JSON.stringify(title)} or one of its ancestors`);
   }
+  return kept;
 }
 
 /** A unique registration expression can be matched across line shifts. Identical expressions
  * at different call sites are ambiguous even when only one of them registered on a given run. */
 function locateDeclarations(text: string) {
   // Strip mode preserves the original offsets, including the locations in Node's TAP.
-  const source = parse(stripTypeScriptTypes(text), { ecmaVersion: "latest", sourceType: "module", locations: true });
+  const stripped = stripTypeScriptTypes(text);
+  const source = parse(stripped, { ecmaVersion: "latest", sourceType: "module", locations: true });
+  // A registration is its token sequence: whitespace, comments, quote style and type annotations do not
+  // change what a test runs, so a formatting-only edit leaves it the same registration on head and main.
+  const tokensOf = (start: number, end: number) => {
+    const span = stripped.slice(start, end);
+    return JSON.stringify([...tokenizer(span, { ecmaVersion: "latest" })].map((token) => [token.type.label,
+      // A string's value, so its quote style does not count; every other token as written.
+      token.type.label === "string" ? String((token as { value?: unknown }).value) : span.slice(token.start, token.end)]));
+  };
   const calls = new Map<string, string | null>();
   const counts = new Map<string, number>();
   const remember = (node: Node, declaration: string) => {
@@ -221,7 +231,7 @@ function locateDeclarations(text: string) {
     if (!value || typeof value !== "object" || !("type" in value)) return;
     if (value.type === "CallExpression") {
       const call = value as CallExpression;
-      const declaration = text.slice(call.start, call.end);
+      const declaration = tokensOf(call.start, call.end);
       counts.set(declaration, (counts.get(declaration) ?? 0) + 1);
       remember(call, declaration);
       if (call.callee.type === "MemberExpression") remember(call.callee.property, declaration);
@@ -778,7 +788,6 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         // A failing `it` in a `describe` reports two rows, but the summary counts one test: suites are not tests.
         const testRows = results.filter((test) => !test.describeRow);
         const targets = results.filter((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
-        if (title !== undefined) pathRows(results, title, tree, file);
         if (result.truncated || !summary || summary.cancelled !== 0 || testRows.length !== summary.tests ||
           testRows.filter((test) => test.failed).length !== summary.fail ||
           result.code !== (summary.fail === 0 ? 0 : 1) ||
@@ -800,7 +809,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           }
           for (const row of redTargets) row.declaration = identify(row.location);
         }
-        return results;
+        return title === undefined ? results : pathRows(results, title, tree, file, run.log);
       },
       close,
     };
