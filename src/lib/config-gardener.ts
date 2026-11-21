@@ -968,20 +968,20 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): { paths: s
 }
 
 /** One code point of a proven line. A control character other than tab, such as a CRLF file's carriage return, is
- *  `[[:cntrl:]]`, because a PR body cannot carry the byte. `|` is `.`, because the house Acceptance renderer quotes a proof
- *  holding `|`, and a quoted proof cannot also hold `"`. Every other character is the house literal escape
- *  ({@link escapeGrepLiteral}). */
-type LineAtom = { kind: "char"; ch: string } | { kind: "cntrl" } | { kind: "any" };
+ *  `[[:cntrl:]]`, because a PR body cannot carry the byte. Every other character, `|` and `"` included, is the house
+ *  literal escape ({@link escapeGrepLiteral}): the renderer quotes a proof holding `|` and reads it back verbatim, and a
+ *  bare `|` is literal in the executor's basic regex. */
+type LineAtom = { kind: "char"; ch: string } | { kind: "cntrl" };
 const isBodyUnsafeControl = (ch: string): boolean => ch !== "\t" && /[\0-\x1f\x7f]/.test(ch);
 /** POSIX `[:cntrl:]`, which grep matches: every C0 control character and DEL, tab included. */
 const isPosixControl = (ch: string | undefined): boolean => ch !== undefined && /[\0-\x1f\x7f]/.test(ch);
 
 function lineAtoms(line: string): LineAtom[] {
-  return [...line].map((ch): LineAtom => (isBodyUnsafeControl(ch) ? { kind: "cntrl" } : ch === "|" ? { kind: "any" } : { kind: "char", ch }));
+  return [...line].map((ch): LineAtom => (isBodyUnsafeControl(ch) ? { kind: "cntrl" } : { kind: "char", ch }));
 }
 
 function linePattern(line: string): string {
-  return `^${lineAtoms(line).map((a) => (a.kind === "cntrl" ? "[[:cntrl:]]" : a.kind === "any" ? "." : escapeGrepLiteral(a.ch))).join("")}$`;
+  return `^${lineAtoms(line).map((a) => (a.kind === "cntrl" ? "[[:cntrl:]]" : escapeGrepLiteral(a.ch))).join("")}$`;
 }
 
 /** The `grep:` proof that `path` holds `line` as one whole line, anchored at both ends, so `budget_usd: 5` never matches
@@ -991,13 +991,13 @@ export function exactLineProof(path: string, line: string): string {
 }
 
 /** What the executor's `grep -arn -- <pattern> <path>` answers for {@link exactLineProof}: some line of `text` matches every
- *  atom of `line` (the same character, any character for `|`, or a control character for a control character). */
+ *  atom of `line` (the same character, or a control character for a control character). */
 export function holdsExactLine(text: string, line: string): boolean {
   const atoms = lineAtoms(line);
   return text.split("\n").some((candidate) => {
     const chars = [...candidate];
     return chars.length === atoms.length &&
-      atoms.every((a, i) => a.kind === "any" || (a.kind === "cntrl" ? isPosixControl(chars[i]) : chars[i] === a.ch));
+      atoms.every((a, i) => (a.kind === "cntrl" ? isPosixControl(chars[i]) : chars[i] === a.ch));
   });
 }
 
