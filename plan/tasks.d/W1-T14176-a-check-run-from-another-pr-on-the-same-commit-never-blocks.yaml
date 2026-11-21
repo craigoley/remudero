@@ -1,0 +1,110 @@
+- id: W1-T14176
+  title: "ci-gate judges a PR only by the check runs of that PR's own workflow runs, so a failed run that another PR left on a shared head commit never holds the merge, where today it reads every check run on the commit"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: one filter in ci-gate.yml's runs_json, one env value and one permission in each of the two ci-gate jobs, and one test file; no change to REQUIRED, the dedupe or the wait
+  origin: "operator-session#ci-gate-reads-another-prs-runs-2026-11-21"
+  plan_refs:
+    - W1-T4400
+    - W1-T5695
+  files:
+    - .github/workflows/ci-gate.yml
+    - .github/workflows/ci.yml
+    - test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:foreign-run-never-blocks — the real runs_json step from ci-gate.yml, run with a fake gh and HEAD_REF=this-branch, sees a commitlint success from a workflow run of this-branch and a later commitlint failure from a workflow run of other-branch on the same SHA. The gate exits 0 and its gated list shows commitlint as success"
+      kind: guard
+      proof: "grep: W1-T14176 criterion 1: in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts"
+    - claim: "invariant:own-failure-still-blocks — a commitlint failure from a workflow run of this-branch still fails the gate and is named, also when a later commitlint success from a workflow run of other-branch is on the same SHA"
+      kind: guard
+      proof: "grep: W1-T14176 criterion 2: in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts"
+    - claim: "A posted check run (external_id run:<run>:<attempt>:job:<id>) counts only when <run> is a workflow run of this-branch: a posted proof-discrimination failure whose run belongs to other-branch does not block, and the same row with a run of this-branch does"
+      proof: "grep: W1-T14176 criterion 3: in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts"
+    - claim: "A required check that is present only from other-branch's runs is not ready: the gate waits and, with a small WAIT_CAP_SECONDS, ends with its TIMED OUT error, never a pass"
+      proof: "grep: W1-T14176 criterion 4: in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts"
+    - claim: "The gate fails closed: an empty HEAD_REF on a pull_request event, or a workflow-runs read that fails on every retry, exits 1 with a named error and never a pass. On a merge_group event no branch filter applies, and the existing ci-gate tests still pass unchanged"
+      proof: "grep: W1-T14176 criterion 5: in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts"
+    - claim: "ci.yml's ci-gate job gives the aggregation step the PR's head branch"
+      proof: "grep: HEAD_REF: in .github/workflows/ci.yml"
+  rationale: |
+    WHY: a PR can be held by a check that failed on a different PR.
+    OBSERVED 2026-11-21:
+    - PR #20014 (branch run-unfiled-1795266565131, a plan-only filing of W1-T14153) had head d7d80c5a7.
+    - PR #20016 (branch run-unfiled-1795267800000) was first pushed at 13:21Z with the same head commit,
+      then moved to 5391b45b6.
+    - #20016's pull_request runs at that first head (runs 44908449692 and 44908449659, head_branch
+      run-unfiled-1795267800000) left failed check runs on d7d80c5a7: commitlint (job 136858926641,
+      subject-case) and proof-discrimination (job 136858926491, a proof that matches at head and base).
+    - #20014's own runs of those checks passed. But #20014's ci-gate (jobs 136883481550 and
+      136899374538) listed "failure commitlint, coverage-ratchet, proof-discrimination" and held the merge.
+    - The workaround was a new head for #20014 (an update from main, df95c0c7c).
+    CAUSE (origin/main bb408941b, read from the code):
+    - .github/workflows/ci-gate.yml runs_json (lines 283-317) reads
+      repos/${REPO}/commits/${SHA}/check-runs?filter=all, groups by name and producer class (W1-T5695) and
+      keeps the latest row of each group. Nothing compares a row's workflow run with this PR, so the
+      latest row on the commit wins, whichever PR's run made it. #20016's runs were later, so they won.
+    - ci.yml's ci-gate job (line 2771 on) runs the same step through scripts/ci-gate-from-contract.mjs,
+      with SHA from the event and no branch value, so both copies of the gate have the defect.
+    - coverage-ratchet's cancelled path (ci.yml lines 2240-2251) compares its run's head with the head of
+      its OWN PR_NUMBER. #20016's run logged "SUPERSEDED ... the PR head is now 5391b45b6": a run of the
+      other PR judged the shared commit by the other PR's head. Its row is about #20016, not #20014. The
+      fix is in the aggregate, which stops reading that row for #20014, so coverage-ratchet is unchanged.
+    NOT EXPLAINED HERE: #20014 also had a task-id-existence failure (job 136890459930) with no readable
+    log. It is not in scope.
+    FILING-SIDE CAUSE, NOT IN SCOPE: the operator's hand tooling built #20016's branch on top of #20014's
+    commit, so both PRs had one head at first push. It did that because the plan load refuses a depends_on
+    on an id that is not on main (src/lib/plan.ts:967, "depends_on unknown task", also task-linter.ts:4041
+    and machine-filing-judge.ts:564). Accepting an id that is open in a landing PR would make the core plan
+    load read open PRs from GitHub. That is not a small change, so it is a separate decision. This task
+    makes a shared head harmless whatever made it.
+  design: |
+    INVARIANT foreign-run-never-blocks: on a pull_request event, the gate reads only the check runs of
+    workflow runs whose head_branch is this PR's head branch.
+    INVARIANT own-failure-still-blocks: the filter only removes other branches' rows; it never removes or
+    hides a row of this PR's own runs, and a read it cannot make fails closed.
+    CHOICE: filter by the workflow run's head_branch, before the W1-T5695 dedupe. Rejected:
+    - pull_requests[] on the check run or suite: on a shared commit it can list both PRs, so it does not
+      say which PR made the run.
+    - Comparing started_at with the PR's last push: a re-run of another PR's run after the push would
+      still win.
+    - Refusing a push whose head is another open PR's head: it stops only the hand-tooling path, not the
+      gate's defect.
+    1. Both ci-gate jobs get HEAD_REF: ${{ github.event.pull_request.head.ref }} in env (ci.yml: append
+       `|| ''` so a merge_group run has an empty value) and `actions: read` in permissions.
+    2. In ci-gate.yml's step, when the event is not merge_group: an empty HEAD_REF exits 1 with a named
+       error. runs_json first reads repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100 (paginate,
+       slurp, the same retry loop and unreadable_die as today). It keeps the workflow runs whose
+       head_branch equals HEAD_REF and takes their ids and check_suite_id values.
+    3. A check run is kept when its check_suite.id is one of those suite ids, or when its external_id
+       names (run:<run>:...) one of those run ids. A check run whose suite belongs to no workflow run on
+       the SHA (another app) is kept as today. Then the existing dedupe runs on the kept rows. Step 1's
+       wait, step 2's evaluate_fails and step 3's grace window read the same filtered list.
+    4. The step reads the event from GITHUB_EVENT_NAME, which both jobs have; ci-gate-from-contract.mjs
+       already passes the caller's env through, so it does not change.
+    5. Tests in test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts, titled
+       "W1-T14176 criterion N: ...". Extract the real step from ci-gate.yml as test/ci-gate-dedupe.test.ts
+       does, and use a fake gh that answers the check-runs and actions/runs paths with different fixtures.
+       Load test/setup/tmp-hygiene.ts.
+    MEASURE AFTER DEPLOY: push one commit to two PR branches, make one branch's commitlint fail (a bad
+    subject on its PR title), and see the other PR's ci-gate pass.
+  falsifier: |
+    On origin/main criterion 1 fails: the later other-branch failure is the latest commitlint row and the
+    gate exits 1. Filter by pull_requests[] instead: a fixture whose rows list both PRs still blocks.
+    Filter only job rows and not posted rows: criterion 3's other-branch posted failure still blocks.
+    Drop rows whose suite is unknown instead of keeping them: criterion 5's merge_group and existing tests
+    break. Let an empty HEAD_REF mean "no filter": criterion 5's pull_request case passes instead of
+    exiting 1.
+  note: |
+    Id reserved for run-unfiled-1795281799906 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    No test calls the real GitHub API.
+    Not in scope: the plan load's depends_on rule, coverage-ratchet's SUPERSEDED path, the
+    task-id-existence failure on #20014, and branch protection's own ci-gate context.
