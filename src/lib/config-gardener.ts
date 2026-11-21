@@ -963,11 +963,29 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
   return [...changed].sort();
 }
 
-/** A basic-regex pattern (the `grep:` dialect) matching exactly `line`, whatever its indentation. Anchored at both ends and
- *  with BRE metacharacters escaped, so `budget_usd: 5` never matches `budget_usd: 50.00` and a proof cannot read true on the
- *  tree it changes. */
+/** A basic-regex pattern (the `grep:` dialect) matching exactly `line`, whatever spaces surround it. Anchored at both ends and
+ *  with BRE metacharacters escaped, so `budget_usd: 5` never matches `budget_usd: 50.00`. */
 export function exactLineProofPattern(line: string): string {
-  return `^ *${line.trim().replace(/[\\.[\]*^$]/g, (c) => `\\${c}`)}$`;
+  return `^ *${line.trim().replace(/[\\.[\]*^$]/g, (c) => `\\${c}`)} *$`;
+}
+
+/** What `grep` reads for {@link exactLineProofPattern}: some line of `text` is `line`, whatever spaces surround it. */
+export function lineProofMatches(text: string, line: string): boolean {
+  const literal = line.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^ *${literal} *$`, "m").test(text);
+}
+
+/** The edits whose proof tells the reverted tree from the one before it. A proof for a path the rollback did not change, or
+ *  one that already matches the tree before it, would make the rollback PR read as done before it lands, and preflight
+ *  refuses such a PR as stale, so the canary keeps its edits and its class stays pending. */
+function provableRollbackEdits(edits: ConfigEdit[], changed: readonly string[], before: ReadonlyMap<string, string>, root: string): ConfigEdit[] {
+  return edits.filter((e) => changed.includes(e.path)).map((e) => {
+    const after = readFileIfExists(join(root, e.path)) ?? "";
+    if (!lineProofMatches(after, e.to) || lineProofMatches(before.get(e.path) ?? "", e.to)) {
+      throw new Error(`config gardener: the rollback proof for ${e.path} would not tell the revert from the tree before it`);
+    }
+    return e;
+  });
 }
 
 function acceptance(edits: ConfigEdit[]): string[] {
@@ -1114,12 +1132,14 @@ async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | u
   const ws = await deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
+    const before = new Map([...new Set(edits.map((e) => e.path))].map((path) => [path, readFileIfExists(join(ws.root, path)) ?? ""]));
     const paths = applyExactConfigRollback(ws.root, edits);
     if (paths.length === 0) {
       deps.log(`${CONFIG_GARDEN_NAME}.rollback_nothing_to_revert`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl });
       return undefined;
     }
-    const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
+    const proven = provableRollbackEdits(edits, paths, before, ws.root);
+    const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(proven)].join("\n");
     // A revert keeps its own PR. The shared task-files landing counts a path its open PR already holds as carried,
     // whatever that PR's content, so a budget revert riding it could be recorded while the canary's values stay.
     const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body, sealedLanding: false }), "config gardener");

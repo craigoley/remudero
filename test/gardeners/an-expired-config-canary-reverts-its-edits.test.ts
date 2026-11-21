@@ -20,6 +20,7 @@ import {
   CANARY_TTL_MS,
   CONFIG_GARDEN_CLASSES,
   exactLineProofPattern,
+  lineProofMatches,
   type ConfigGardenSources,
 } from "#src/lib/config-gardener.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type GardenLandOpts, type PrState } from "#src/lib/gardener.js";
@@ -137,6 +138,11 @@ async function thinExposedCanary() {
 test("an expired config canary lands a revert of its edits and releases its class unjudged", async () => {
   const { h, cohort, prUrl, classesBefore } = await thinExposedCanary();
   assert.equal(h.gardenState().pending?.prUrl, prUrl, "the canary holds the gardener while it is open");
+  // One shard was already put back by another change: its revert has nothing to do and proves nothing.
+  const restored = `plan/tasks.d/${cohort[0]}-x.yaml`;
+  const restoredPath = join(h.deps.repoRoot, restored);
+  writeFileSync(restoredPath, readFileSync(restoredPath, "utf8").replace(/^ {2}budget_usd: 9\.00$/m, "  budget_usd: 30.00"));
+  const before = new Map(cohort.map((id) => [`plan/tasks.d/${id}-x.yaml`, readFileSync(join(h.deps.repoRoot, `plan/tasks.d/${id}-x.yaml`), "utf8")]));
   h.advance(CANARY_TTL_MS + HOUR);
   const [result] = await h.tend();
 
@@ -146,13 +152,14 @@ test("an expired config canary lands a revert of its edits and releases its clas
   assert.equal(h.landed.length, 2, "the expiry lands a revert as its own PR");
   assert.match(h.landed[1]!.title, /^revert\(config\): /);
   assert.equal(h.landed[1]!.sealedLanding, false, "the revert keeps its own PR, never the shared task-files landing that counts a held path as carried");
-  assert.deepEqual(h.landed[1]!.paths, cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).sort(), "exactly the canary's files");
+  const reverted = cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).filter((p) => p !== restored).sort();
+  assert.deepEqual(h.landed[1]!.paths, reverted, "exactly the canary's files it still changes");
   assert.match(h.landed[1]!.body, /expired before its cohort cleared the floor/);
   const proofs = proofsOf(h.landed[1]!.body);
-  assert.equal(proofs.length, cohort.length, "one proof per reverted shard");
+  assert.deepEqual(proofs.map((p) => p.path).sort(), reverted, "one proof per reverted shard, none for the shard already restored");
   for (const { pattern, path } of proofs) {
     assert.equal(pattern, exactLineProofPattern("budget_usd: 30.00"));
-    assert.equal(grepFinds(pattern, "  budget_usd: 9.00\n"), false, `${path}'s proof is false on the canary's tree, so the revert PR is not stale`);
+    assert.equal(grepFinds(pattern, before.get(path)!), false, `${path}'s proof is false on the tree before the revert, so the revert PR is not stale`);
   }
   for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00", `${id}'s declared budget is restored`);
   for (const { pattern, path } of proofs) assert.equal(grepFinds(pattern, readFileSync(join(h.deps.repoRoot, path), "utf8")), true, `${path}'s proof holds after the revert`);
@@ -188,5 +195,10 @@ test("a revert's proof matches its own line exactly, never a longer value or a l
   assert.equal(grepFinds(pattern, "  budget_usd: 5\n"), true, "the reverted value");
   assert.equal(grepFinds(pattern, "  budget_usd: 50.00\n"), false, "a canary that raised 5 to 50.00 does not satisfy its own revert's proof");
   assert.equal(grepFinds(exactLineProofPattern("budget_usd: 9.00"), "  budget_usd: 9x00\n"), false, "a dot is literal");
+  assert.equal(grepFinds(exactLineProofPattern("  budget_usd: 30.00  "), "  budget_usd: 30.00  \n"), true, "a restored line keeps its trailing spaces");
+  assert.equal(grepFinds(exactLineProofPattern("budget_usd: 30.00"), "    budget_usd: 30.00 \n"), true, "any indentation and trailing spaces");
+  for (const [text, line] of [["  budget_usd: 50.00\n", "budget_usd: 5"], ["  budget_usd: 30.00  \n", "budget_usd: 30.00"], ["x: 9x00\n", "x: 9.00"]] as const) {
+    assert.equal(lineProofMatches(text, line), grepFinds(exactLineProofPattern(line), text), `the gardener's own check agrees with grep on ${JSON.stringify(text)}`);
+  }
   assert.equal(grepFinds(exactLineProofPattern("ci_judge: { model: sonnet, effort: low }"), "ci_judge: { model: sonnet, effort: low }\n"), true, "a mounts flow line");
 });
