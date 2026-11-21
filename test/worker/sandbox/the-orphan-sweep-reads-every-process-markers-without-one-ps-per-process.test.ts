@@ -4,10 +4,11 @@
  * `sweepOrphanWorkers` calls `readMarkers` for every candidate the host lists, and the daemon wires
  * `defaultReadMarkers`, which at base ran one synchronous `ps eww -o command= -p <pid>` per pid:
  * one fork of the daemon per process on the host, on the event loop. On Linux the markers are read
- * from `/proc/<pid>/environ` with no child; elsewhere one `ps eww -Ao pid=,command=` listing serves
- * the whole sweep.
+ * from `/proc/<pid>/{cmdline,environ}` with no child; elsewhere one `ps eww -Ao pid=,stat=,command=`
+ * listing serves the whole sweep.
  *
- * SEAMS. The fs seam is `defaultReadMarkers`'s trailing `platform` and `readEnviron` parameters. The spawn seam is
+ * SEAMS. The fs seam is `defaultReadMarkers`'s trailing `platform` and `readProcFile` parameters: a fake
+ * `/proc/<pid>/{cmdline,environ,stat}`, also read for a listed row's zombie check. The spawn seam is
  * process-wide: `child_process.execFileSync` is replaced and `syncBuiltinESMExports()` pushes the
  * replacement into the module's named import, so a ps call is counted whether or not the code
  * under test knows about any seam. That is what lets this suite run against base's source and
@@ -18,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -27,9 +28,12 @@ import type { OrphanMarkers, OrphanSweepReport } from "#src/lib/worker-containme
 
 const SCOPE = `rmd-v1-${"a".repeat(32)}`;
 const OTHER_SCOPE = `rmd-v1-${"b".repeat(32)}`;
-const LISTING_ARGS = ["eww", "-Ao", "pid=,command="];
+const LISTING_ARGS = ["eww", "-Ao", "pid=,stat=,command="];
+/** Round 2's listing, without the state column: served too, so a Round 3 test reads red there for its verdict. */
+const R2_LISTING_ARGS = ["eww", "-Ao", "pid=,command="];
 
-type Environ = "ours" | "EACCES" | "exited";
+/** `zombie`: exited and not yet waited for. Signal 0 still succeeds; ps and /proc show no argv or environment. */
+type Environ = "ours" | "EACCES" | "exited" | "zombie";
 interface FakeProc { cmd: string; env: Array<[string, string]>; environ: Environ }
 
 /** One host's processes. Each candidate stands for one verdict the sweep can reach. */
@@ -75,35 +79,56 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: fake`), { code });
 }
 
-/** What `ps eww` prints for `procs`: argv, then (only for a process we own) its environment. */
+/** The kernel's `comm` for a fake process: its argv[0]'s basename, at most 15 bytes. */
+const comm = (p: FakeProc) => (p.cmd.split(" ")[0].split("/").pop() ?? "").slice(0, 15);
+
+/**
+ * What `ps eww` prints for `procs`: argv, then (only for a process we own) its environment. A
+ * zombie prints `[comm] <defunct>` with no environment, as procps does; its state column is `Z`.
+ */
 function fakePs(procs: Map<number, FakeProc>, opts: { listingFails?: boolean } = {}) {
-  const column = (p: FakeProc) => (p.environ === "ours" ? `${p.cmd} ${p.env.map(([k, v]) => `${k}=${v}`).join(" ")}` : p.cmd);
+  const column = (p: FakeProc) =>
+    p.environ === "zombie" ? `[${comm(p)}] <defunct>` : p.environ === "ours" ? `${p.cmd} ${p.env.map(([k, v]) => `${k}=${v}`).join(" ")}` : p.cmd;
   return (args: readonly string[]): string => {
     if (args.length === 5 && args[0] === "eww" && args[1] === "-o" && args[2] === "command=" && args[3] === "-p") {
       const proc = procs.get(Number(args[4]));
       if (!proc || proc.environ === "exited") throw Object.assign(new Error("ps: exit 1"), { status: 1 });
       return `${column(proc)}\n`;
     }
-    if (JSON.stringify(args) === JSON.stringify(LISTING_ARGS)) {
+    const withState = JSON.stringify(args) === JSON.stringify(LISTING_ARGS);
+    if (withState || JSON.stringify(args) === JSON.stringify(R2_LISTING_ARGS)) {
       if (opts.listingFails) throw Object.assign(new Error("ps: listing failed"), { status: 1 });
-      const lines = [...procs].filter(([, p]) => p.environ !== "exited").map(([pid, p]) => `${String(pid).padStart(5)} ${column(p)}`);
-      return `${[...lines, "  999 /sbin/unrelated"].join("\n")}\n`;
+      const state = (p: FakeProc) => (withState ? `${(p.environ === "zombie" ? "Z" : "Ss").padEnd(4)} ` : "");
+      const lines = [...procs].filter(([, p]) => p.environ !== "exited").map(([pid, p]) => `${String(pid).padStart(5)} ${state(p)}${column(p)}`);
+      return `${[...lines, `  999 ${withState ? "S    " : ""}/sbin/unrelated`].join("\n")}\n`;
     }
     throw new Error(`unexpected ps args: ${JSON.stringify(args)}`);
   };
 }
 
-/** The fs seam: a fake `/proc/<pid>/environ`, recording every path read. */
-function fakeProc(procs: Map<number, FakeProc>, reads: string[], failAll?: string) {
+/**
+ * The fs seam: a fake `/proc/<pid>/{cmdline,environ,stat}`, recording every path read. `cmdline`
+ * and `stat` are world-readable, so another user's process (EACCES) refuses only `environ`. A
+ * zombie has an empty cmdline and environ and the state `Z`. `failEnviron` makes every environ
+ * read throw that code, so the caller falls back to ps.
+ */
+function fakeProc(procs: Map<number, FakeProc>, reads: string[], failEnviron?: string) {
   return (path: string): Buffer => {
     reads.push(path);
-    if (failAll) throw errno(failAll);
-    const proc = procs.get(Number(/^\/proc\/(\d+)\/environ$/.exec(path)?.[1]));
+    const [, pidText, file] = /^\/proc\/(\d+)\/(cmdline|environ|stat)$/.exec(path) ?? [];
+    if (failEnviron && file === "environ") throw errno(failEnviron);
+    const proc = procs.get(Number(pidText));
     if (!proc || proc.environ === "exited") throw errno("ENOENT");
+    if (file === "stat") return Buffer.from(`${pidText} (${comm(proc)}) ${proc.environ === "zombie" ? "Z" : "S"} 1 ${pidText} ${pidText} 0 -1\n`);
+    if (proc.environ === "zombie") return Buffer.alloc(0);
+    if (file === "cmdline") return Buffer.from(`${proc.cmd.split(" ").join("\0")}\0`, "utf8");
     if (proc.environ === "EACCES") throw errno("EACCES");
     return Buffer.from(proc.env.map(([k, v]) => `${k}=${v}\0`).join(""), "utf8");
   };
 }
+
+/** The /proc paths the reader reads for `pid`, in order. */
+const procReads = (pid: number) => [`/proc/${pid}/cmdline`, `/proc/${pid}/environ`, `/proc/${pid}/stat`];
 
 /**
  * The spawn seam: every `execFileSync("ps", ...)` the module makes while `fn` runs goes to `ps`
@@ -170,7 +195,7 @@ test("W1-T14087 criterion 1: on Linux a sweep over N candidates reads each one's
     calls,
   }), procs);
   assert.equal(calls.length, 0, `${calls.length} ps spawn(s) for ${CANDIDATE_PIDS.length} candidates: ${JSON.stringify(calls)}`);
-  assert.deepEqual(reads, CANDIDATE_PIDS.map((pid) => `/proc/${pid}/environ`), "every candidate is read from /proc, once");
+  assert.deepEqual(reads.filter((path) => path.endsWith("/cmdline")), CANDIDATE_PIDS.map((pid) => `/proc/${pid}/cmdline`), "every candidate is read from /proc, once");
   assert.deepEqual(report, EXPECTED_REPORT);
 });
 
@@ -182,7 +207,7 @@ test("W1-T14087 criterion 1: defaultReadMarkers on Linux returns a pid's run id,
     calls,
   }), procs);
   assert.equal(calls.length, 0, `a /proc read spawned ps: ${JSON.stringify(calls)}`);
-  assert.deepEqual(reads, ["/proc/101/environ"]);
+  assert.deepEqual(reads, procReads(101), "argv, environment, then state");
   assert.deepEqual(markers, { runId: "run-ended", taskId: "W1-T1", scope: SCOPE });
 });
 
@@ -196,7 +221,7 @@ test("W1-T14087 criterion 2: where /proc is not available one sweep spawns ONE p
     calls,
   }), procs);
   assert.deepEqual(calls, [LISTING_ARGS], `${calls.length} ps spawn(s) for ${CANDIDATE_PIDS.length} candidates`);
-  assert.deepEqual(reads, [], "no /proc read off Linux");
+  assert.deepEqual(reads.filter((path) => !path.endsWith("/stat")), [], "no argv or environment read from /proc off Linux, only a listed row's state");
   assert.deepEqual(report, EXPECTED_REPORT);
 });
 
@@ -208,13 +233,15 @@ test("W1-T14087 criterion 2: a /proc read that fails for a reason other than the
     calls,
   }), procs);
   assert.deepEqual(calls, [LISTING_ARGS], `${calls.length} ps spawn(s) for ${CANDIDATE_PIDS.length} unreadable environs`);
-  assert.equal(reads.length, CANDIDATE_PIDS.length, "each candidate tried /proc first");
+  // 107 exited: its cmdline read answers ENOENT before environ is tried, so it reads undefined there.
+  const tried = CANDIDATE_PIDS.filter((pid) => pid !== 107).map((pid) => `/proc/${pid}/environ`);
+  assert.deepEqual(reads.filter((path) => path.endsWith("/environ")), tried, "each candidate tried /proc first");
   assert.deepEqual(report, EXPECTED_REPORT);
 });
 
 test("W1-T14087 criterion 2: the listing belongs to one sweep and is never reused by the next", () => {
   const procs = hostProcs();
-  const readMarkers = (pid: number) => wc.defaultReadMarkers(pid, "darwin");
+  const readMarkers = (pid: number) => wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, []));
   const { first, second, calls } = withPsRecorded((args) => fakePs(procs)(args), (calls) => {
     const first = sweepWith(readMarkers, CANDIDATE_PIDS, procs).report;
     // Between sweeps pid 107 is reused by a new worker of this installation whose run has ended.
@@ -230,7 +257,7 @@ test("W1-T14087 criterion 2: the listing belongs to one sweep and is never reuse
 test("W1-T14087 criterion 2: a pid that exited between listing and read yields undefined exactly as at base", () => {
   const procs = hostProcs();
   const { inSweep, direct, calls } = withPsRecorded(fakePs(procs), (calls) => ({
-    inSweep: sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin"), [107]).report,
+    inSweep: sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, [])), [107]).report,
     direct: wc.defaultReadMarkers(107, "darwin"),
     calls,
   }), procs);
@@ -262,14 +289,14 @@ function sweepAfterListingChange(path: "darwin" | "linux-EIO", then: (procs: Map
   const served: string[] = [];
   const ps = (args: readonly string[]) => {
     const out = host(args);
-    if (JSON.stringify(args) === JSON.stringify(LISTING_ARGS)) {
+    if ([LISTING_ARGS, R2_LISTING_ARGS].some((listing) => JSON.stringify(listing) === JSON.stringify(args))) {
       served.push(out);
       then(procs);
     }
     return out;
   };
   const read = (pid: number) =>
-    path === "darwin" ? wc.defaultReadMarkers(pid, "darwin") : wc.defaultReadMarkers(pid, "linux", fakeProc(procs, [], "EIO"));
+    path === "darwin" ? wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, [])) : wc.defaultReadMarkers(pid, "linux", fakeProc(procs, [], "EIO"));
   return withPsRecorded(ps, (calls) => {
     const swept = sweepWith(read, [101], procs);
     const base = wc.defaultReadMarkers(101, "darwin");
@@ -283,7 +310,7 @@ for (const path of ["darwin", "linux-EIO"] as const) {
       procs.set(101, { ...procs.get(101)!, environ: "exited" });
     });
     assert.equal(served.length, 1, "control: the sweep was served one listing");
-    assert.match(served[0], new RegExp(`^\\s*101 claude --print .*${wc.RUN_ID_ENV}=run-ended`, "m"), "control: the listing captured 101 alive, with its markers");
+    assert.match(served[0], new RegExp(`^\\s*101 (?:Ss\\s+)?claude --print .*${wc.RUN_ID_ENV}=run-ended`, "m"), "control: the listing captured 101 alive, with its markers");
     assert.equal(base, undefined, "control: base's per-pid read of the exited pid answers undefined");
     assert.deepEqual(swept.report, { killed: [], leftAlone: [{ pid: 101, reason: "unattributable" }] });
     assert.deepEqual(swept.killedPids, [], "the exited pid is never signalled");
@@ -296,7 +323,7 @@ for (const path of ["darwin", "linux-EIO"] as const) {
       // 101 exits and its pid is taken by another user's process (its environment is not ours to read).
       procs.set(101, { cmd: "postgres: writer", environ: "EACCES", env: [["PATH", "/usr/bin"]] });
     });
-    assert.match(served[0], new RegExp(`^\\s*101 claude --print .*${wc.RUN_ID_ENV}=run-ended`, "m"), "control: the listing captured the first 101 with its markers");
+    assert.match(served[0], new RegExp(`^\\s*101 (?:Ss\\s+)?claude --print .*${wc.RUN_ID_ENV}=run-ended`, "m"), "control: the listing captured the first 101 with its markers");
     assert.equal(base, undefined, "control: base's per-pid read sees the new process, which shows no environment");
     assert.deepEqual(swept.report, { killed: [], leftAlone: [{ pid: 101, reason: "unattributable" }] });
     assert.deepEqual(swept.killedPids, []);
@@ -339,7 +366,7 @@ test("W1-T14087 criterion 3: every candidate reaches the same verdict from the s
     const perPidCalls = calls.length;
     const base = sweepWith((pid) => perPid.get(pid));
     const proc = sweepWith((pid) => wc.defaultReadMarkers(pid, "linux", fakeProc(procs, [])));
-    const listing = sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin"));
+    const listing = sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, [])));
     return { perPidCalls, base, proc, listing };
   }, procs);
   assert.equal(outcomes.perPidCalls, CANDIDATE_PIDS.length, "control: the base path really ran one ps per candidate");
@@ -416,6 +443,138 @@ test("W1-T14087 criterion 3: a repeated marker name gives the sweep base's verdi
   assert.deepEqual(proc.report, expected, "/proc: the same verdicts");
   assert.deepEqual(proc.killedPids, base.killedPids);
   assert.deepEqual(proc.ledger, base.ledger);
+});
+
+// ── Round 3: argv markers and zombies ───────────────────────────────────────────────────────────
+
+/** Round 3, finding 2: a live worker whose argv names an ACTIVE run and whose environment names a finished one. */
+function argvActiveEnvFinished(): Map<number, FakeProc> {
+  return new Map<number, FakeProc>([
+    [401, { cmd: `claude --print ${wc.RUN_ID_ENV}=run-live`, environ: "ours", env: [["PATH", "/bin"], [wc.RUN_ID_ENV, "run-ended"], [wc.TASK_ID_ENV, "W1-T401"], [wc.WORKER_SCOPE_ENV, SCOPE]] }],
+  ]);
+}
+
+test("W1-T14087 criterion 3: argv names an active run and the environment a finished one: run_active on the /proc path and the listing path, as base's per-pid ps", () => {
+  const procs = argvActiveEnvFinished();
+  const expected: OrphanSweepReport = { killed: [], leftAlone: [{ pid: 401, reason: "run_active", scope: SCOPE }] };
+  const { base, proc, listing } = withPsRecorded(fakePs(procs), () => {
+    const perPid = wc.defaultReadMarkers(401, "darwin");
+    return {
+      base: sweepWith(() => perPid, [401], procs),
+      proc: sweepWith((pid) => wc.defaultReadMarkers(pid, "linux", fakeProc(procs, [])), [401], procs),
+      listing: sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, [])), [401], procs),
+    };
+  }, procs);
+  assert.deepEqual(base.report, expected, "control: base's ps prints argv first, so its first match is argv's active run");
+  for (const [name, run] of [["/proc", proc], ["one listing", listing]] as const) {
+    assert.deepEqual(run.report, expected, `${name}: base's verdict`);
+    assert.deepEqual(run.killedPids, [], `${name}: never signalled`);
+    assert.deepEqual(run.ledger, [], `${name}: no ledger line`);
+  }
+});
+
+test("W1-T14087 criterion 3: the /proc reader reads argv then the environment, as ps eww prints them", () => {
+  const procs = argvActiveEnvFinished();
+  assert.deepEqual(wc.readOrphanMarkersFromProc(401, fakeProc(procs, [])), { runId: "run-live", taskId: "W1-T401", scope: SCOPE });
+  // A process with an empty cmdline that is not a zombie: ps prints `[comm]` and then its environment.
+  procs.set(402, { cmd: "", environ: "ours", env: [[wc.RUN_ID_ENV, "r402"], [wc.TASK_ID_ENV, "t402"]] });
+  const viaPs = withPsRecorded(fakePs(procs), () => wc.defaultReadMarkers(402, "darwin"));
+  assert.deepEqual(viaPs, { runId: "r402", taskId: "t402" }, "control: base's ps still shows the environment");
+  assert.deepEqual(wc.readOrphanMarkersFromProc(402, fakeProc(procs, [])), viaPs);
+});
+
+for (const path of ["darwin", "linux-EIO"] as const) {
+  test(`W1-T14087 criterion 2: a pid that exits after the shared listing and stays a zombie yields undefined exactly as at base, and is never signalled (${path})`, () => {
+    const { swept, base, served } = sweepAfterListingChange(path, (procs) => {
+      procs.set(101, { ...procs.get(101)!, environ: "zombie" });
+    });
+    assert.match(served[0], new RegExp(`^\\s*101 (?:Ss\\s+)?claude --print .*${wc.RUN_ID_ENV}=run-ended`, "m"), "control: the listing captured 101 alive, with its markers");
+    assert.equal(base, undefined, "control: base's per-pid ps of a zombie shows `[comm] <defunct>`, no markers");
+    assert.deepEqual(swept.report, { killed: [], leftAlone: [{ pid: 101, reason: "unattributable" }] });
+    assert.deepEqual(swept.killedPids, [], "the zombie's group is never signalled");
+    assert.deepEqual(swept.ledger, [], "and never recorded as reaped");
+  });
+}
+
+test("W1-T14087 criterion 2: a listed row whose state is Z yields no markers, whatever its command column shows", () => {
+  const procs = hostProcs();
+  const host = fakePs(procs);
+  // A listing that shows 101's markers on a zombie row.
+  const ps = (args: readonly string[]) => host(args).replace(/^(\s*101 )\S+(\s+)/m, "$1Z$2");
+  const { report, killedPids, calls } = withPsRecorded(ps, (calls) => ({
+    ...sweepWith((pid) => wc.defaultReadMarkers(pid, "darwin", fakeProc(procs, [])), [101, 105], procs),
+    calls,
+  }), procs);
+  assert.deepEqual(report, { killed: [], leftAlone: [{ pid: 101, reason: "unattributable" }, { pid: 105, reason: "run_active", scope: SCOPE }] });
+  assert.deepEqual(killedPids, []);
+  assert.deepEqual(calls, [LISTING_ARGS], "the state comes from the same one listing, no extra spawn");
+});
+
+test("W1-T14087 criterion 2: a candidate that became a zombie after the candidate listing yields undefined on the /proc path", () => {
+  const procs = hostProcs();
+  procs.set(101, { ...procs.get(101)!, environ: "zombie" });
+  const { report, killedPids, ledger } = withPsRecorded(fakePs(procs), () =>
+    sweepWith((pid) => wc.defaultReadMarkers(pid, "linux", fakeProc(procs, [])), [101], procs), procs);
+  assert.deepEqual(report, { killed: [], leftAlone: [{ pid: 101, reason: "unattributable" }] });
+  assert.deepEqual(killedPids, []);
+  assert.deepEqual(ledger, []);
+});
+
+test("W1-T14087 criterion 3: a zombie in /proc gives undefined, also when it exits between the environ read and the state read", () => {
+  const procs = hostProcs();
+  procs.set(101, { ...procs.get(101)!, environ: "zombie" });
+  assert.equal(wc.readOrphanMarkersFromProc(101, fakeProc(procs, [])), undefined, "an empty cmdline and environ with state Z");
+  // The exit lands after the environ read: the markers were read, then the state says Z.
+  for (const state of ["Z", "X"]) {
+    const live = hostProcs();
+    const reader = fakeProc(live, []);
+    const racing = (path: string) => (path === "/proc/101/stat" ? Buffer.from(`101 (claude) ${state} 1 101 101 0 -1\n`) : reader(path));
+    assert.deepEqual(wc.readOrphanMarkersFromProc(101, reader), { runId: "run-ended", taskId: "W1-T1", scope: SCOPE }, "control: alive, it is attributable");
+    assert.equal(wc.readOrphanMarkersFromProc(101, racing), undefined, `state ${state}: never attributable`);
+  }
+  // The state follows the LAST `)`: a command name may hold `) Z`.
+  const tricky = (path: string) => (path === "/proc/101/stat" ? Buffer.from("101 (a) Z b) S 1 101 101 0 -1\n") : fakeProc(hostProcs(), [])(path));
+  assert.deepEqual(wc.readOrphanMarkersFromProc(101, tricky), { runId: "run-ended", taskId: "W1-T1", scope: SCOPE });
+});
+
+test("W1-T14087 criterion 2: on Linux a real marked child that exits after the shared listing and stays a zombie is never reaped", async (t) => {
+  if (process.platform !== "linux") { t.skip("tells a zombie from /proc/<pid>/stat; Linux only"); return; }
+  const runId = `run-zombie-14087-${process.pid}`;
+  const marked = await markedChild({ [wc.RUN_ID_ENV]: runId, [wc.TASK_ID_ENV]: "W1-T14087", [wc.WORKER_SCOPE_ENV]: SCOPE });
+  const unmarked = await markedChild({});
+  try {
+    const until = Date.now() + 30_000;
+    while (wc.defaultReadMarkers(marked) === undefined && Date.now() < until) await delay(20);
+    const state = () => {
+      const stat = readFileSync(`/proc/${marked}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+    };
+    let zombie = false;
+    const killed: number[] = [];
+    const report = wc.sweepOrphanWorkers({
+      expectedScope: SCOPE,
+      listCandidates: () => [{ pid: unmarked, cmdline: "sh" }, { pid: marked, cmdline: "sh" }],
+      readMarkers: (pid) => {
+        if (pid === marked) {
+          // The listing was taken at the first candidate's read. Now the marked child dies; the
+          // event loop is blocked by this synchronous sweep, so nothing waits for it: a zombie.
+          process.kill(-marked, "SIGKILL");
+          const deadline = Date.now() + 10_000;
+          while (!(zombie = state() === "Z") && Date.now() < deadline) { /* spin: the loop must stay blocked */ }
+        }
+        return wc.defaultReadMarkers(pid, "darwin");
+      },
+      isRunActive: () => false,
+      kill: (pid) => killed.push(pid),
+      ledger: () => {},
+    });
+    assert.equal(zombie, true, "control: the child was a zombie at its lookup");
+    assert.deepEqual(report, { killed: [], leftAlone: [{ pid: unmarked, reason: "unattributable" }, { pid: marked, reason: "unattributable" }] });
+    assert.deepEqual(killed, []);
+  } finally {
+    stop(marked);
+    stop(unmarked);
+  }
 });
 
 // ── The real defaults (no fs or spawn fake) ─────────────────────────────────────────────────────

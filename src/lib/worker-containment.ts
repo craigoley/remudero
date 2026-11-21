@@ -564,66 +564,80 @@ function orphanMarkersFromPsText(text: string): OrphanMarkers | undefined {
 /** One environment read from `/proc`: markers, `undefined` (exited, not ours, or marker-less), or `unreadable`. */
 export type ProcOrphanMarkers = OrphanMarkers | undefined | "unreadable";
 
+/** A `/proc/<pid>/stat` line's state is zombie (`Z`) or dead (`X`); the state follows the LAST `)`. */
+function procStatIsZombie(stat: string): boolean {
+  const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+  return state === "Z" || state === "X";
+}
+
 /**
- * W1-T14087: a pid's markers from `/proc/<pid>/environ` (NUL-separated `KEY=value`), with no
- * child process. The same three names and result shape as the ps reader, and the same value:
- * the entries are joined with spaces, as `ps eww` prints them, and read by the ps token parser
- * itself, so a repeated name picks the entry base's regex picks (the first one with a value: an
- * empty or space-led entry is skipped) and every value is cut at its first whitespace.
- * ENOENT/ESRCH (the pid exited) and EACCES/EPERM (not ours: ps eww shows no environment either)
- * answer `undefined`, never attributable. Any other failure is `unreadable`, so the caller falls
- * back to ps. `readEnviron` is the fs seam.
+ * W1-T14087: a pid's markers from `/proc/<pid>/cmdline` and `/proc/<pid>/environ` (both
+ * NUL-separated), with no child process. It builds the text `ps eww -o command=` prints, argv
+ * then a space then the environment, each with NUL read as a space, and reads it with the ps
+ * token parser itself. So the first match wins as at base, argv included, a repeated name picks
+ * the entry base's regex picks (the first with a value) and every value is cut at its first
+ * whitespace. A zombie or dead process (`/proc/<pid>/stat` state `Z` or `X`, read last) answers
+ * `undefined`, as base's ps printed `[name] <defunct>` with no environment for it.
+ * ENOENT/ESRCH (the pid exited) and EACCES/EPERM (not ours) answer `undefined`, never
+ * attributable. Any other failure is `unreadable`, so the caller falls back to ps.
+ * `readProcFile` is the fs seam.
  */
 export function readOrphanMarkersFromProc(
   pid: number,
-  readEnviron: (path: string) => Buffer = (path) => readFileSync(path),
+  readProcFile: (path: string) => Buffer = (path) => readFileSync(path),
 ): ProcOrphanMarkers {
-  let raw: Buffer;
+  let text: string;
   try {
-    raw = readEnviron(`/proc/${pid}/environ`);
+    const words = (name: string) => readProcFile(`/proc/${pid}/${name}`).toString("utf8").split("\0").join(" ");
+    text = `${words("cmdline")} ${words("environ")}`;
+    if (procStatIsZombie(readProcFile(`/proc/${pid}/stat`).toString("utf8"))) return undefined;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     // Gone or not ours reads as unattributable, as base's ps did; anything else is a failure to say.
     if (code === "ENOENT" || code === "ESRCH" || code === "EACCES" || code === "EPERM") return undefined;
     return "unreadable";
   }
-  return orphanMarkersFromPsText(raw.toString("utf8").split("\0").join(" "));
+  return orphanMarkersFromPsText(text);
 }
 
-/** The open sweep's single ps listing (pid -> its `command` column), or `failed`; absent outside a sweep. */
-let sweepMarkerListing: { listing?: Map<number, string> | "failed" } | undefined;
+/** One row of the sweep's listing: its `command` column, and whether ps listed it as a zombie. */
+interface MarkerListingRow { command: string; zombie: boolean }
 
-/** Split a `ps eww -Ao pid=,command=` listing into each pid's command column. */
-function parseMarkerListing(out: string): Map<number, string> {
-  const rows = new Map<number, string>();
+/** The open sweep's single ps listing (pid -> its row), or `failed`; absent outside a sweep. */
+let sweepMarkerListing: { listing?: Map<number, MarkerListingRow> | "failed" } | undefined;
+
+/** Split a `ps eww -Ao pid=,stat=,command=` listing into each pid's state and command column. */
+function parseMarkerListing(out: string): Map<number, MarkerListingRow> {
+  const rows = new Map<number, MarkerListingRow>();
   for (const line of out.split("\n")) {
-    const m = line.match(/^\s*(\d+)\s(.*)$/);
-    if (m) rows.set(Number(m[1]), m[2]);
+    const m = line.match(/^\s*(\d+)\s+(\S+)\s(.*)$/);
+    if (m) rows.set(Number(m[1]), { command: m[3], zombie: m[2].startsWith("Z") });
   }
   return rows;
 }
 
 /**
- * Real-world marker read. On Linux it reads `/proc/<pid>/environ` with no child process
- * ({@link readOrphanMarkersFromProc}, W1-T14087). Elsewhere, or when that read is
+ * Real-world marker read. On Linux it reads `/proc/<pid>/{cmdline,environ,stat}` with no child
+ * process ({@link readOrphanMarkersFromProc}, W1-T14087). Elsewhere, or when that read is
  * `unreadable`, it parses `ps eww` output for `KEY=value` tokens matching the marker env names:
  * macOS/Linux `ps eww` appends a process's environment after its argv for processes the caller
- * owns. Inside {@link sweepOrphanWorkers} that is ONE `ps eww -Ao pid=,command=` listing for the
- * whole sweep (`-A`, not `-e`: on macOS `-e` means "show environment", not "every process"), never
- * reused by a later sweep; a row's markers count only while its pid is still ours to signal. A
+ * owns. Inside {@link sweepOrphanWorkers} that is ONE `ps eww -Ao pid=,stat=,command=` listing for
+ * the whole sweep (`-A`, not `-e`: on macOS `-e` means "show environment", not "every process"),
+ * never reused by a later sweep; a zombie row has no markers, and a row's markers count only while
+ * its pid is still a live process that is ours to signal. A
  * direct call outside a sweep reads one pid with `ps eww -o command= -p <pid>` as before. A
  * process this cannot introspect (permission, already exited, or genuinely marker-less) yields
  * `undefined`, the safe never-guess default the blast-radius rule requires — this is deliberately
  * NOT a fail-open "assume attributable" default.
- * `platform` and `readEnviron` are test seams, appended so every `(pid)` caller is unchanged.
+ * `platform` and `readProcFile` are test seams, appended so every `(pid)` caller is unchanged.
  */
 export function defaultReadMarkers(
   pid: number,
   platform: NodeJS.Platform = process.platform,
-  readEnviron?: (path: string) => Buffer,
+  readProcFile: (path: string) => Buffer = (path) => readFileSync(path),
 ): OrphanMarkers | undefined {
   if (platform === "linux") {
-    const fromProc = readOrphanMarkersFromProc(pid, readEnviron);
+    const fromProc = readOrphanMarkersFromProc(pid, readProcFile);
     if (fromProc !== "unreadable") return fromProc;
   }
   const ps = (args: string[]) => execFileSync("ps", args, { encoding: "utf8", maxBuffer: Number.POSITIVE_INFINITY });
@@ -639,17 +653,18 @@ export function defaultReadMarkers(
   }
   if (sweep.listing === undefined) {
     try {
-      sweep.listing = parseMarkerListing(ps(["eww", "-Ao", "pid=,command="]));
+      sweep.listing = parseMarkerListing(ps(["eww", "-Ao", "pid=,stat=,command="]));
     } catch {
       // Remembered for this sweep: every candidate reads unattributable, as base's failed per-pid ps did.
       sweep.listing = "failed";
     }
   }
   if (sweep.listing === "failed") return undefined;
-  const line = sweep.listing.get(pid);
-  const listed = line === undefined ? undefined : orphanMarkersFromPsText(line);
+  const row = sweep.listing.get(pid);
+  // A zombie row has no markers, as base's per-pid ps printed `[name] <defunct>` for it.
+  const listed = row === undefined || row.zombie ? undefined : orphanMarkersFromPsText(row.command);
   // The row is as old as the listing: markers it shows lead to a kill only while the pid is still ours.
-  return listed && stillOursToSignal(pid) ? listed : undefined;
+  return listed && stillOursToSignal(pid, readProcFile) ? listed : undefined;
 }
 
 /**
@@ -658,13 +673,23 @@ export function defaultReadMarkers(
  * turn, so a pid that exited since the listing read undefined there; ESRCH answers false here for
  * the same verdict. EPERM means the pid now belongs to another user's process, whose environment
  * base's per-pid ps could not show (the listed row with markers was ours), so it answers false too.
+ * Signal 0 succeeds on a zombie, so a pid that exited since the listing and is not yet waited for
+ * is told by its `/proc/<pid>/stat` state (`Z` or `X`), where a /proc exists: base's ps showed
+ * no markers for it. Where that read fails (no /proc), signal 0 alone decides.
  */
-function stillOursToSignal(pid: number): boolean {
+function stillOursToSignal(pid: number, readProcFile: (path: string) => Buffer): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     // ESRCH (exited), EPERM (pid reused by another user) or anything else: never attributable.
     return false;
   }
+  let stat: string;
+  try {
+    stat = readProcFile(`/proc/${pid}/stat`).toString("utf8");
+  } catch {
+    // No /proc on this host (or the read failed): the signal-0 answer above stands, as before.
+    return true;
+  }
+  return !procStatIsZombie(stat);
 }
