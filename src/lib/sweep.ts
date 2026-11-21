@@ -12231,12 +12231,8 @@ async function heldFollowUpsAtRefAsync(checkoutDir: string, ref: string): Promis
   // The target's own layout override places its plan: the one at `ref`, else the one in the working tree.
   const rel = (path: string) => relative(checkoutDir, path).split(sep).join("/");
   const overrideRel = rel(join(resolveRepoLayout(checkoutDir, () => undefined).stateDir, "layout.json"));
-  let layoutAtRef: string | undefined;
-  try {
-    layoutAtRef = await runGit(["show", `${ref}:${overrideRel}`]);
-  } catch {
-    layoutAtRef = undefined;
-  }
+  const overrideEntry = await runGit(["ls-tree", "--name-only", ref, "--", overrideRel]);
+  const layoutAtRef = overrideEntry.length === 0 ? undefined : await runGit(["show", `${ref}:${overrideRel}`]);
   const layout = resolveRepoLayout(checkoutDir, (path) => layoutAtRef ?? (existsSync(path) ? readFileSync(path, "utf8") : undefined));
   const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", rel(layout.planMonolith), `${rel(join(layout.planDir, "tasks.d"))}/`]);
   const paths = listing.split("\n").map((l) => l.trim()).filter((l) => /\.ya?ml$/.test(l));
