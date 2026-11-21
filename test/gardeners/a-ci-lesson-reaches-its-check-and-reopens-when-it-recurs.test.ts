@@ -12,6 +12,7 @@ import { episodesOf, FLOW_LADDER, ladderOrigin, ownRedCauseKey } from "#src/lib/
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus, selectLearnings } from "#src/lib/learnings.js";
 import { machineShardFilingRefusal } from "#src/lib/machine-filing.js";
 import {
+  CI_LEARNING_ID_RE,
   CI_LEARNING_LADDER_REOPEN,
   CI_LEARNING_REMEDY_SURFACE,
   ciLearningGateOf,
@@ -136,6 +137,8 @@ test("W1-T14140 criterion 4: a gate whose held lesson recurred is drafted again 
   assert.equal(ciLearningGateOf("ci-learning:130:ci-gate#r1"), "ci-gate");
   assert.equal(ciLearningReopenOf("ci-learning:130:ci-gate#r1"), 1);
   assert.equal(ciLearningReopenOf(base), 0);
+  assert.equal(CI_LEARNING_ID_RE.exec("ci-learning:130:ci-gate#r1")?.[2], "1");
+  assert.equal(CI_LEARNING_ID_RE.test("ci-learning:hand-fix:ci-gate@src/lib/x.ts#2"), false, "a hand-fix origin names no gate");
   assert.deepEqual(ciLearningRecordVerdict(shard, "criterion 4"), { ok: true, reason: "" });
   const task = loadPlanFromYaml(shard, "criterion 4").tasks[0]!;
   assert.equal(task.acceptance![0]!.proof, `unit test: ${ciLessonSelectionTestTitle("ci-learning:130:ci-gate#r1")}`);

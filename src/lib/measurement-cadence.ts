@@ -3156,7 +3156,8 @@ export function ciLearningShardId(finding: Pick<CiFailurePair, "pr" | "gate">, r
   return `ci-learning:${finding.pr}:${finding.gate}${reopen > 0 ? `#r${reopen}` : ""}`;
 }
 
-const CI_LEARNING_ID_RE = /^ci-learning:\d+:(.+?)(?:#r(\d+))?$/;
+/** A CI lesson's finding id: `ci-learning:<pr>:<gate>`, then `#r<N>` on a reopen. A hand-fix origin does not match. */
+export const CI_LEARNING_ID_RE = /^ci-learning:\d+:(.+?)(?:#r(\d+))?$/;
 
 /** The gate {@link ciLearningShardId} names, or undefined for another origin.
  *  Dedup by gate: a window's changing first PR made whole-id dedup re-file existing lessons.
