@@ -155,13 +155,15 @@ test("W1-T14137 criterion 2: two tasks fixed in one sweep pass draw independentl
 });
 
 const OLD_EPOCH = "zz-retired-epoch";
-const selectionRow = (runId: string, withheld: boolean, design: { epoch?: string; ts: string }): Row => ({
-  ts: design.ts, run_id: runId, step: "skills.selection", task_type: "implement",
+const selectionRow = (runId: string, withheld: boolean, design: { epoch?: string; ts: string; taskId?: string }): Row => ({
+  ts: design.ts, run_id: runId, ...(design.taskId === undefined ? {} : { task_id: design.taskId }),
+  step: "skills.selection", task_type: "implement",
   approved_eligible_names: ["proc"], path_filtered_names: [], selected_names: withheld ? [] : ["proc"],
   budget_omitted_names: [], budget_chars: 100, zero_selection: withheld, withheld_names: withheld ? ["proc"] : [],
   ...(design.epoch === undefined ? {} : { arm_unit: TASK_ARM_UNIT, arm_epoch: design.epoch }),
 });
-const verdict = (runId: string, v: string): Row => ({ run_id: runId, step: "verdict", verdict: v });
+const verdict = (runId: string, v: string, fields: Row | Record<string, unknown> = {}): Row =>
+  ({ run_id: runId, step: "verdict", verdict: v, ...fields });
 
 test("W1-T14137 criterion 3: the effectiveness report compares only the newest arm epoch's rows and reports run-keyed rows apart", () => {
   const legacy = { ts: "2026-11-01T00:00:00.000Z" };
@@ -200,6 +202,98 @@ test("W1-T14137 criterion 3: the effectiveness report compares only the newest a
   assert.equal(legacyOnly.control.observed_eligible_runs, 2);
   assert.deepEqual(legacyOnly.apart, []);
   assert.match(renderSkillEffectivenessReport(legacyOnly), /^arm design: before task-keyed arms \(run-keyed or observational rows\); apart, never pooled: none$/m);
+});
+
+// A sweep pass logs every task's fix-lane rows under its one pass-wide run id, each with its own task_id.
+const SWEEP_RUN = "SWEEP-1795001234567";
+
+test("W1-T14137 criterion 3, one sweep pass: two newest-epoch tasks in opposite arms under one run id both count", () => {
+  const newest = (taskId: string) => ({ epoch: SKILL_ARM_EPOCH, ts: "2026-11-21T00:00:00.000Z", taskId });
+  const rows: Row[] = [
+    selectionRow(SWEEP_RUN, true, newest("W1-T9101")), verdict(SWEEP_RUN, "no_diff", { task_id: "W1-T9101" }),
+    selectionRow(SWEEP_RUN, false, newest("W1-T9102")), verdict(SWEEP_RUN, "merged", { task_id: "W1-T9102" }),
+  ];
+  for (const order of [rows, [...rows].reverse()]) {
+    const report = buildSkillEffectivenessReport(order, "proc");
+    assert.equal(report.control.observed_eligible_runs, 1, "the withheld task is counted");
+    assert.equal(report.selected.observed_eligible_runs, 1, "the treated task is counted");
+    assert.deepEqual(report.control.outcomes, { no_diff: 1 }, "each task joins its own outcome");
+    assert.deepEqual(report.selected.outcomes, { merged: 1 });
+  }
+});
+
+test("W1-T14137 criterion 3, one sweep pass: two legacy rows under one run id both count, apart", () => {
+  const legacy = (taskId: string) => ({ ts: "2026-11-01T00:00:00.000Z", taskId });
+  const newest = { epoch: SKILL_ARM_EPOCH, ts: "2026-11-21T00:00:00.000Z" };
+  const legacyRun = "SWEEP-1794000000000";
+  const report = buildSkillEffectivenessReport([
+    selectionRow(legacyRun, true, legacy("W1-T9201")), verdict(legacyRun, "merged", { task_id: "W1-T9201" }),
+    selectionRow(legacyRun, false, legacy("W1-T9202")), verdict(legacyRun, "no_diff", { task_id: "W1-T9202" }),
+    selectionRow("new-treated", false, newest), verdict("new-treated", "merged"),
+    selectionRow("new-withheld", true, newest), verdict("new-withheld", "no_diff"),
+  ], "proc");
+  assert.deepEqual(report.apart, [{ design: "run-keyed", eligible_runs: 2, terminal_runs: 2 }]);
+  assert.equal(report.selected.observed_eligible_runs, 1);
+  assert.equal(report.control.observed_eligible_runs, 1);
+});
+
+const T0 = Date.parse("2026-11-21T00:00:00.000Z");
+const HOUR = 3_600_000;
+const iso = (ms: number): string => new Date(ms).toISOString();
+const PR = "https://github.com/acme/widgets/pull/";
+const merge = (n: number, ms: number): Row => ({ ts: iso(ms), step: "pr.terminal", pr_url: `${PR}${n}`, pr_number: n, state: "merged" });
+
+/** Ten treated runs whose PRs are still open, and ten controls of which five merged directly: INSUFFICIENT
+ *  EVIDENCE while the treated runs are pending, RETIRE-CANDIDATE once they settle unmerged. */
+const pendingComparison = (treatedMs: number, controlMs: number): Row[] => {
+  const rows: Row[] = [];
+  for (let i = 0; i < 10; i++) {
+    const at = { epoch: SKILL_ARM_EPOCH, ts: iso(treatedMs) };
+    rows.push(selectionRow(`t-${i}`, false, at), verdict(`t-${i}`, "handed_off", { ts: iso(treatedMs), pr_url: `${PR}${100 + i}` }));
+    const ctl = { epoch: SKILL_ARM_EPOCH, ts: iso(controlMs) };
+    rows.push(selectionRow(`c-${i}`, true, ctl), verdict(`c-${i}`, i < 5 ? "merged" : "no_diff", { ts: iso(controlMs), pr_url: `${PR}${200 + i}` }));
+  }
+  return rows;
+};
+
+/** Ten legacy run-keyed runs, handed off at `verdictMs` and merged at `mergedMs`, on PRs no current run shares. */
+const legacyMerges = (verdictMs: number, mergedMs: number): Row[] => Array.from({ length: 10 }, (_, i) => [
+  selectionRow(`legacy-${i}`, i % 2 === 0, { ts: iso(verdictMs) }),
+  verdict(`legacy-${i}`, "handed_off", { ts: iso(verdictMs), pr_url: `${PR}${900 + i}` }),
+  merge(900 + i, mergedMs),
+]).flat();
+
+/** The comparison with the `apart` counts left out: those name the added rows, and nothing else may move. */
+const comparison = (rows: Row[]): Record<string, unknown> => {
+  const { apart: _apart, ...rest } = buildSkillEffectivenessReport(rows, "proc");
+  return rest;
+};
+
+test("W1-T14137 criterion 3, fenced settle window: ten legacy merges leave the newest epoch's comparison and status byte-identical", () => {
+  // The current rows alone have five merge delays, below the horizon, so no settle window and the treated runs pend.
+  const current = pendingComparison(T0, T0 + 5 * HOUR);
+  const before = buildSkillEffectivenessReport(current, "proc");
+  assert.equal(before.status, "INSUFFICIENT EVIDENCE");
+  assert.equal(before.basis, "pending-shipment");
+  assert.equal(before.settle_window_ms, null);
+  assert.equal(before.selected.pending_merge_runs, 10);
+  // Ten legacy runs that merged an hour after their verdict, all before the current epoch began.
+  const withLegacy = [...current, ...legacyMerges(T0 - 30 * HOUR, T0 - 29 * HOUR)];
+  assert.equal(JSON.stringify(comparison(withLegacy)), JSON.stringify(comparison(current)));
+  assert.deepEqual(buildSkillEffectivenessReport(withLegacy, "proc").apart, [{ design: "run-keyed", eligible_runs: 10, terminal_runs: 10 }]);
+});
+
+test("W1-T14137 criterion 3, fenced clock: legacy merges dated after the newest epoch's rows do not settle its pending runs", () => {
+  // Ten direct merges with no skill row give a zero settle window; the treated runs pend until a later row is seen.
+  const neutral = Array.from({ length: 10 }, (_, i) => verdict(`direct-${i}`, "merged", { ts: iso(T0), pr_url: `${PR}${300 + i}` }));
+  const current = [...pendingComparison(T0 + 5 * HOUR, T0 + 5 * HOUR), ...neutral];
+  const before = buildSkillEffectivenessReport(current, "proc");
+  assert.equal(before.settle_window_ms, 0);
+  assert.equal(before.status, "INSUFFICIENT EVIDENCE");
+  assert.equal(before.selected.pending_merge_runs, 10);
+  // Legacy PRs handed off before the change and merged a day after it.
+  const withLegacy = [...current, ...legacyMerges(T0 - 30 * HOUR, T0 + 30 * HOUR)];
+  assert.equal(JSON.stringify(comparison(withLegacy)), JSON.stringify(comparison(current)));
 });
 
 test("the task arm is a pure function of its four inputs, pinned to its published hash", () => {

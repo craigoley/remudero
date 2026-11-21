@@ -1065,7 +1065,8 @@ export interface SkillEffectivenessReport {
   /** W1-T14137: the task-keyed arm epoch the comparison reads, the newest among this skill's rows (the one whose
    *  rows began last); null when no row carries one, and the run-keyed or observational rows are compared as before. */
   arm_epoch: string | null;
-  /** Eligible rows of every other assignment design, counted here and never pooled into the arms above. */
+  /** Eligible rows of every other assignment design, counted here and never pooled into the arms above. Their
+   *  verdicts, and PRs only they name, feed nothing compared: not the settle window, the clock or a merge. */
   apart: SkillEffectivenessApartRows[];
   /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
    *  versions were recorded. The comparison above pools every version listed here. */
@@ -1090,6 +1091,18 @@ export interface SkillEffectivenessVersion {
 }
 
 type SkillLedgerRow = Record<string, unknown>;
+
+/** One run's (and task's) `skills.selection` evidence for the skill a report is built for. */
+interface SelectionObservation {
+  runId: string;
+  /** False on a row that names no task: it joins any verdict of its run, as before W1-T14137. */
+  namesTask: boolean;
+  selected: boolean;
+  withheld?: boolean;
+  digest: string | null;
+  epoch: string | null;
+  startMs: number;
+}
 
 const stringArray = (value: unknown): string[] =>
   Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
@@ -1128,7 +1141,7 @@ const rowCostUsd = (row: SkillLedgerRow): number | undefined => {
 
 /**
  * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
- * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
+ * terminal `verdict` row that carries the same run id (and task id, W1-T14137).  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
  *
  * A direct merge records its own terminal verdict. Handed-off runs can merge under another run id
@@ -1140,58 +1153,110 @@ export function buildSkillEffectivenessReport(
   skillName: string,
   taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
-  const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined }>();
-  const mergedAtMs = new Map<string, number | undefined>();
-  const timedClosedPrKeys = new Set<string>();
-  const fixCostByPr = new Map<string, number>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null; epoch: string | null; startMs: number }>();
-  let latestMs: number | undefined;
-
+  // W1-T14137: one sweep pass logs every task's rows under its one pass-wide run id, so a selection is keyed by run
+  // AND task, and its outcome joins on the same pair (see terminalOf for a row or verdict that names no task).
+  const runTaskKey = (row: SkillLedgerRow): string =>
+    `${row.run_id as string}\0${typeof row.task_id === "string" ? row.task_id : ""}`;
+  const isSkillSelection = (row: SkillLedgerRow): row is SkillLedgerRow & { run_id: string } =>
+    row.step === "skills.selection" && row.task_type === taskType && typeof row.run_id === "string" &&
+    stringArray(row.approved_eligible_names).includes(skillName);
+  const selectionByKey = new Map<string, SelectionObservation>();
   for (const row of rows) {
-    const ms = rowMs(row);
-    if (ms !== undefined && (latestMs === undefined || ms > latestMs)) latestMs = ms;
-    if (isMergedLedgerRow(row)) {
-      const prKey = effectivenessPrKey(row);
-      if (prKey !== undefined) {
-        const prior = mergedAtMs.get(prKey);
-        mergedAtMs.set(prKey, prior === undefined ? ms : ms === undefined ? prior : Math.min(prior, ms));
-      }
-    }
-    if (row.step === PR_TERMINAL_STEP && row.state === "closed" && ms !== undefined) {
-      const prKey = effectivenessPrKey(row);
-      if (prKey !== undefined) timedClosedPrKeys.add(prKey);
-    }
-    if (row.step === "fix.done") {
-      const prKey = effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url);
-      const cost = rowCostUsd(row);
-      if (prKey !== undefined && cost !== undefined) fixCostByPr.set(prKey, (fixCostByPr.get(prKey) ?? 0) + cost);
-      continue;
-    }
-    if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
-      terminalVerdictByRun.set(row.run_id, { verdict: row.verdict, prKey: effectivenessPrKey(row), ms, cost: rowCostUsd(row) });
-      continue;
-    }
-    if (
-      row.step !== "skills.selection" ||
-      row.task_type !== taskType ||
-      typeof row.run_id !== "string"
-    ) continue;
-    const eligible = stringArray(row.approved_eligible_names);
-    if (!eligible.includes(skillName)) continue;
+    if (!isSkillSelection(row)) continue;
     const digests = row.skill_digests;
     const digest = digests !== null && typeof digests === "object" ? (digests as Record<string, unknown>)[skillName] : undefined;
-    selectionByRun.set(row.run_id, {
+    selectionByKey.set(runTaskKey(row), {
+      runId: row.run_id,
+      namesTask: typeof row.task_id === "string",
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
       digest: typeof digest === "string" ? digest : null,
       epoch: row.arm_unit === TASK_ARM_UNIT ? (typeof row.arm_epoch === "string" ? row.arm_epoch : "unrecorded-epoch") : null,
-      startMs: ms ?? Number.NEGATIVE_INFINITY,
+      startMs: rowMs(row) ?? Number.NEGATIVE_INFINITY,
     });
+  }
+
+  // W1-T14137: rows drawn per task and rows drawn per run are two designs, and two epochs are two experiments, so
+  // only the newest epoch's rows are compared: the one whose rows began last, whatever order the rows are read in.
+  const epochStartMs = new Map<string, number>();
+  for (const o of selectionByKey.values()) {
+    if (o.epoch !== null) epochStartMs.set(o.epoch, Math.min(epochStartMs.get(o.epoch) ?? Number.POSITIVE_INFINITY, o.startMs));
+  }
+  const armEpoch = [...epochStartMs]
+    .sort(([epochA, a], [epochB, b]) => (a !== b ? (a < b ? -1 : 1) : epochA < epochB ? -1 : epochA > epochB ? 1 : 0))
+    .at(-1)?.[0] ?? null;
+  const compared = (o: { epoch: string | null }): boolean => o.epoch === armEpoch;
+  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
+  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
+  const randomized = [...selectionByKey.values()].some((o) => compared(o) && o.withheld !== undefined);
+  const inArm = (o: SelectionObservation, treated: boolean): boolean =>
+    compared(o) && (randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated);
+  const isApart = (o: SelectionObservation): boolean => !inArm(o, true) && !inArm(o, false);
+  const selectionsByRun = new Map<string, SelectionObservation[]>();
+  for (const o of selectionByKey.values()) selectionsByRun.set(o.runId, [...(selectionsByRun.get(o.runId) ?? []), o]);
+  // A verdict of a run counted apart feeds nothing compared: not the settle window, not the clock, not a merge.
+  const verdictIsApart = (row: SkillLedgerRow): boolean => {
+    const own = selectionByKey.get(runTaskKey(row));
+    if (own !== undefined) return isApart(own);
+    const ofRun = selectionsByRun.get(row.run_id as string);
+    return ofRun !== undefined && ofRun.every(isApart);
+  };
+
+  type Terminal = { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined };
+  const verdictByKey = new Map<string, Terminal>();
+  const verdictByRun = new Map<string, Terminal>();
+  const anyVerdictKeys = new Set<string>();
+  const anyVerdictRuns = new Set<string>();
+  const apartPrKeys = new Set<string>();
+  const comparedPrKeys = new Set<string>();
+  for (const row of rows) {
+    if (row.step !== "verdict" || typeof row.run_id !== "string" || typeof row.verdict !== "string") continue;
+    const prKey = effectivenessPrKey(row);
+    anyVerdictKeys.add(runTaskKey(row));
+    anyVerdictRuns.add(row.run_id);
+    if (verdictIsApart(row)) {
+      if (prKey !== undefined) apartPrKeys.add(prKey);
+      continue;
+    }
+    const terminal = { verdict: row.verdict, prKey, ms: rowMs(row), cost: rowCostUsd(row) };
+    verdictByKey.set(runTaskKey(row), terminal);
+    verdictByRun.set(row.run_id, terminal);
+    if (prKey !== undefined) comparedPrKeys.add(prKey);
+  }
+  // A row naming a task joins its own verdict, else its run's task-less one, never another task's; a row naming
+  // no task joins any verdict of its run.
+  const terminalOf = (key: string, o: SelectionObservation): Terminal | undefined =>
+    verdictByKey.get(key) ?? (o.namesTask ? verdictByKey.get(`${o.runId}\0`) : verdictByRun.get(o.runId));
+  const hasAnyVerdict = (key: string, o: SelectionObservation): boolean =>
+    anyVerdictKeys.has(key) || (o.namesTask ? anyVerdictKeys.has(`${o.runId}\0`) : anyVerdictRuns.has(o.runId));
+  // A PR only an apart run names is that run's evidence: its merge, close and fix cost stay out of the comparison.
+  const apartOnlyPr = (prKey: string | undefined): boolean => prKey !== undefined && apartPrKeys.has(prKey) && !comparedPrKeys.has(prKey);
+
+  const mergedAtMs = new Map<string, number | undefined>();
+  const timedClosedPrKeys = new Set<string>();
+  const fixCostByPr = new Map<string, number>();
+  let latestMs: number | undefined;
+  for (const row of rows) {
+    if (isSkillSelection(row) && isApart(selectionByKey.get(runTaskKey(row))!)) continue;
+    if (row.step === "verdict" && typeof row.run_id === "string" && verdictIsApart(row)) continue;
+    const prKey = row.step === "fix.done" ? effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url) : effectivenessPrKey(row);
+    if (apartOnlyPr(prKey)) continue;
+    const ms = rowMs(row);
+    if (ms !== undefined && (latestMs === undefined || ms > latestMs)) latestMs = ms;
+    if (isMergedLedgerRow(row) && prKey !== undefined) {
+      const prior = mergedAtMs.get(prKey);
+      mergedAtMs.set(prKey, prior === undefined ? ms : ms === undefined ? prior : Math.min(prior, ms));
+    }
+    if (row.step === PR_TERMINAL_STEP && row.state === "closed" && ms !== undefined && prKey !== undefined) timedClosedPrKeys.add(prKey);
+    if (row.step === "fix.done") {
+      const cost = rowCostUsd(row);
+      if (prKey !== undefined && cost !== undefined) fixCostByPr.set(prKey, (fixCostByPr.get(prKey) ?? 0) + cost);
+    }
   }
 
   const isMerged = (prKey: string | undefined): boolean => prKey !== undefined && mergedAtMs.has(prKey);
   const delays: number[] = [];
-  for (const terminal of terminalVerdictByRun.values()) {
+  for (const terminal of verdictByKey.values()) {
     const mergedMs = terminal.verdict === "merged" ? terminal.ms
       : terminal.prKey === undefined ? undefined : mergedAtMs.get(terminal.prKey);
     if (terminal.ms !== undefined && mergedMs !== undefined) delays.push(Math.max(0, mergedMs - terminal.ms));
@@ -1201,8 +1266,8 @@ export function buildSkillEffectivenessReport(
 
   // Resolved only after every row is read: the merge row is written after the run's verdict, but a union
   // read need not return them in that order.
-  const resolve = (runId: string): { outcome: string; cost: number | undefined } | undefined => {
-    const terminal = terminalVerdictByRun.get(runId);
+  const resolve = (key: string, o: SelectionObservation): { outcome: string; cost: number | undefined } | undefined => {
+    const terminal = terminalOf(key, o);
     if (terminal === undefined) return undefined;
     const cost = terminal.cost === undefined ? undefined
       : terminal.cost + (terminal.prKey === undefined ? 0 : fixCostByPr.get(terminal.prKey) ?? 0);
@@ -1214,28 +1279,13 @@ export function buildSkillEffectivenessReport(
     return { outcome: terminal.verdict, cost };
   };
 
-  // W1-T14137: rows drawn per task and rows drawn per run are two designs, and two epochs are two experiments, so
-  // only the newest epoch's rows are compared: the one whose rows began last, whatever order the rows are read in.
-  const epochStartMs = new Map<string, number>();
-  for (const o of selectionByRun.values()) {
-    if (o.epoch !== null) epochStartMs.set(o.epoch, Math.min(epochStartMs.get(o.epoch) ?? Number.POSITIVE_INFINITY, o.startMs));
-  }
-  const armEpoch = [...epochStartMs]
-    .sort(([epochA, a], [epochB, b]) => (a !== b ? (a < b ? -1 : 1) : epochA < epochB ? -1 : epochA > epochB ? 1 : 0))
-    .at(-1)?.[0] ?? null;
-  const compared = (o: { epoch: string | null }): boolean => o.epoch === armEpoch;
-  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
-  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
-  const randomized = [...selectionByRun.values()].some((o) => compared(o) && o.withheld !== undefined);
-  const inArm = (o: { selected: boolean; withheld?: boolean; epoch: string | null }, treated: boolean): boolean =>
-    compared(o) && (randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated);
   const apartByDesign = new Map<string, SkillEffectivenessApartRows>();
-  for (const [runId, o] of selectionByRun) {
-    if (inArm(o, true) || inArm(o, false)) continue;
+  for (const [key, o] of selectionByKey) {
+    if (!isApart(o)) continue;
     const design = o.epoch ?? (o.withheld === undefined ? "observational" : "run-keyed");
     const apart = apartByDesign.get(design) ?? { design, eligible_runs: 0, terminal_runs: 0 };
     apart.eligible_runs++;
-    if (terminalVerdictByRun.has(runId)) apart.terminal_runs++;
+    if (hasAnyVerdict(key, o)) apart.terminal_runs++;
     apartByDesign.set(design, apart);
   }
 
@@ -1243,10 +1293,10 @@ export function buildSkillEffectivenessReport(
   const buildCohort = (selected: boolean): SkillEffectivenessArm => {
     const cohort = emptyCohort();
     const samples = selected ? costSamples.selected : costSamples.control;
-    for (const [runId, observation] of selectionByRun) {
+    for (const [key, observation] of selectionByKey) {
       if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
-      const resolved = resolve(runId);
+      const resolved = resolve(key, observation);
       if (!resolved) continue;
       const { outcome, cost } = resolved;
       cohort.terminal_runs++;
@@ -1255,7 +1305,7 @@ export function buildSkillEffectivenessReport(
       if (outcome === "not_merged") cohort.not_merged_runs++;
       if (PENDING_VERDICTS.includes(outcome)) cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
-      if (cost !== undefined) samples.push({ runId, cost, merged: outcome === "merged" });
+      if (cost !== undefined) samples.push({ runId: key, cost, merged: outcome === "merged" });
     }
     // Summed in run order, so the same rows in any order give the same figures.
     samples.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
@@ -1269,9 +1319,9 @@ export function buildSkillEffectivenessReport(
   const selected = buildCohort(true);
   const control = buildCohort(false);
   const versionByDigest = new Map<string | null, SkillEffectivenessVersion>();
-  for (const [runId, observation] of selectionByRun) {
+  for (const [key, observation] of selectionByKey) {
     const treated = inArm(observation, true);
-    if ((!treated && !inArm(observation, false)) || !terminalVerdictByRun.has(runId)) continue;
+    if ((!treated && !inArm(observation, false)) || terminalOf(key, observation) === undefined) continue;
     let version = versionByDigest.get(observation.digest);
     if (version === undefined) {
       version = { digest: observation.digest, selected_terminal_runs: 0, control_terminal_runs: 0 };
