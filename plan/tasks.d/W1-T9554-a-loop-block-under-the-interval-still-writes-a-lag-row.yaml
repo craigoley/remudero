@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — when a late tick is reported; it runs on every daemon tick and writes the ledger
   band_meaning: blast-radius
   origin: "operator session 2026-10-14: file the core daemon's remaining synchronous spawns that block its event loop (coordinator brief, bound-class item); standing rulings: no hard fixed thresholds (the bound is learned, not picked), automated flow"
