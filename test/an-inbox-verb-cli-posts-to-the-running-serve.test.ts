@@ -13,8 +13,10 @@ import { Duplex } from "node:stream";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { INBOX_VERBS, inboxVerbCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
-import type { Config } from "#src/lib/config.js";
-import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, serveFirstInboxActions, INBOX_CLI_DEFAULT_SERVE_PORT } from "#src/lib/inbox-cli-serve.js";
+import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, serveFirstInboxActions, verdictMayDifferOnServe, INBOX_CLI_DEFAULT_SERVE_PORT, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
+import { declinedWithReceipts } from "#src/lib/inbox-verdict-receipts.js";
+import { resolveServePort } from "#src/lib/serve.js";
+import type { PrRef } from "#src/lib/status.js";
 import { anchorFingerprint, applyProposalVerdict } from "#src/lib/inbox.js";
 import { buildPanelGraphRoutes, type PanelGraphDeps } from "#src/lib/panel-graph.js";
 import { createService } from "#src/lib/service.js";
@@ -113,7 +115,7 @@ test("W1-T13238 criterion 1: rmd archive posts to the running serve's write rout
   const { server, seen } = serve(actions);
   const port = SERVE_PORT;
   useHttpEndpoints(t, new Map([[port, server]]));
-  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const config = { resolveServePort, root: root(t), serve: { port } } as unknown as InboxCliServeConfig;
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
   assert.equal(result.code, 0);
   assert.deepEqual(result.out, [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })]);
@@ -135,32 +137,29 @@ test("W1-T13238 criterion 2: with no serve reachable the verb runs in-process an
 
   // No token: the target says why, and the CLI never mints one.
   const bare = root(t, null);
-  const target = inboxCliServeTarget({ root: bare } as unknown as Config);
+  const target = inboxCliServeTarget({ resolveServePort, root: bare } as unknown as InboxCliServeConfig);
   assert.ok("reason" in target && /no serve write token/.test(target.reason));
   const fallback = await captured(t, () => inboxVerbViaServe("snooze", ["P3", "--wake"],
-    { root: bare } as unknown as Config, () => fakeActions()));
+    { resolveServePort, root: bare } as unknown as InboxCliServeConfig, () => fakeActions()));
   assert.equal(fallback.code, 0);
   assert.deepEqual(fallback.out, [JSON.stringify({ ok: true, verb: "snooze", proposalId: "P3" })]);
   assert.deepEqual(fallback.err, ["rmd snooze: no serve write token (ENOENT); running in-process"]);
   assert.equal(existsSync(join(bare, "state", "service-tokens.json")), false);
 });
 
-test("W1-T13238: the CLI uses the configured port, then RMD_SERVE_PORT, then serve's default", (t) => {
+test("W1-T13238: the CLI uses the configured port, else serve's default, as standalone serve binds, and never RMD_SERVE_PORT", (t) => {
   const prior = process.env.RMD_SERVE_PORT;
   t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
-  const base = { root: root(t) };
+  const base = { resolveServePort, root: root(t) };
   const configured = { ...base, serve: { port: 9 } };
 
-  process.env.RMD_SERVE_PORT = "4400";
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(base), { url: "http://127.0.0.1:4400", token: TOKEN });
-  process.env.RMD_SERVE_PORT = "invalid";
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(base), { reason: "serve port must be an integer 1-65535" });
-
-  delete process.env.RMD_SERVE_PORT;
-  assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN });
-  assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN });
+  for (const env of ["4400", "invalid", undefined]) {
+    if (env === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = env;
+    assert.deepEqual(inboxCliServeTarget(configured), { url: "http://127.0.0.1:9", token: TOKEN }, `RMD_SERVE_PORT=${env}`);
+    assert.deepEqual(inboxCliServeTarget(base), { url: `http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT}`, token: TOKEN }, `RMD_SERVE_PORT=${env}`);
+  }
+  // A serve.port serve refuses to bind is no serve address: the CLI names serve's own refusal and runs in-process.
+  assert.deepEqual(inboxCliServeTarget({ ...base, serve: { port: 0 } }), { reason: "config serve.port must be an integer 1-65535, got 0" });
 });
 
 test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale RMD_SERVE_PORT answers 404", async (t) => {
@@ -175,21 +174,40 @@ test("W1-T13238 criterion 1: rmd archive reaches configured serve while a stale 
   });
   useHttpEndpoints(t, new Map([[port, server], [STALE_PORT, stale]]));
   process.env.RMD_SERVE_PORT = String(STALE_PORT);
-  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const config = { resolveServePort, root: root(t), serve: { port } } as unknown as InboxCliServeConfig;
   const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => { throw new Error("ran in-process"); }));
   assert.deepEqual(staleRequests, [], "the stale listener received no request or bearer");
   assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
   const request = { method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } };
   assert.deepEqual(seen, [request]);
 
+  // RMD_SERVE_PORT names no port serve binds (serve reads it from no environment), so it sends the bearer nowhere.
   process.env.RMD_SERVE_PORT = String(port);
-  const viaEnv = await captured(t, () => inboxVerbViaServe("archive", ["P7"], { root: config.root }, () => assert.fail("ran in-process")));
-  assert.deepEqual(viaEnv, result);
-  assert.deepEqual(seen, [request, request]);
+  const viaEnv = await captured(t, () => inboxVerbViaServe("archive", ["P7"], { resolveServePort, root: config.root }, () => fakeActions()));
+  assert.deepEqual(viaEnv.err[0], `rmd archive: no serve answered at http://127.0.0.1:${INBOX_CLI_DEFAULT_SERVE_PORT} (ECONNREFUSED); running in-process`);
+  assert.deepEqual(seen, [request]);
+});
+
+test("W1-T13238 criterion 1: with RMD_SERVE_PORT=4417 and no serve.port, rmd archive posts to the port standalone serve binds", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  process.env.RMD_SERVE_PORT = String(SERVE_PORT);
+  const config = { resolveServePort, root: root(t) } as unknown as InboxCliServeConfig;
+  // Serve's own bind-port choice, as serveCommand makes it for `rmd serve` with no --port: resolveServePort(rest, serve.port).
+  const bound = resolveServePort([], config.serve?.port);
+  assert.notEqual(bound, SERVE_PORT, "control: the launcher's variable is not the port serve binds");
+  const { server, seen } = serve(fakeActions());
+  const strayBearers: Array<string | undefined> = [];
+  const stray = createServer((req, res) => { strayBearers.push(req.headers.authorization); res.writeHead(404).end("{}"); });
+  useHttpEndpoints(t, new Map([[bound, server], [SERVE_PORT, stray]]));
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => assert.fail("ran in-process")));
+  assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
+  assert.deepEqual(seen, [{ method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+  assert.deepEqual(strayBearers, [], "nothing was sent to RMD_SERVE_PORT");
 });
 
 test("W1-T13238: without a serve write token, the CLI warns once and returns the local verdict", async (t) => {
-  const config = { root: root(t, null) };
+  const config = { resolveServePort, root: root(t, null) };
   const local = fakeActions();
   const result = await captured(t, () => inboxVerbViaServe("archive", ["refused"], config, () => local));
 
@@ -215,7 +233,7 @@ test("W1-T13238 criterion 2: a stalled serve connection has one two-second deadl
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
   const local = fakeActions();
-  const config = { root: root(t), serve: { port: SERVE_PORT } };
+  const config = { resolveServePort, root: root(t), serve: { port: SERVE_PORT } };
   const result = await captured(t, async () => {
     const run = inboxVerbViaServe("snooze", ["P3", "--wake"], config, () => local);
     await setImmediate(); // Let the HTTP request attach the pending socket before advancing the clock.
@@ -263,7 +281,7 @@ const verdictFind = (id: string) => id === "P1" ? { exists: true, classification
   : id === "Pd" ? { exists: true, classification: { proposalId: "Pd", state: "declined", declinedReason: "duplicate" } as never } : { exists: false };
 
 test("W1-T13238: decline warns when the write token is missing and returns the local refusal", async (t) => {
-  const config = { root: root(t, null) };
+  const config = { resolveServePort, root: root(t, null) };
   const args = ["Pgone", "--reason", "duplicate"];
   const connect = t.mock.method(Agent.prototype, "createConnection", () => assert.fail("attempted to connect without a token"));
   const result = await captured(t, () => proposalVerdictViaServe("decline", args, config, () =>
@@ -281,7 +299,7 @@ test("W1-T13238: decline warns when the write token is missing and returns the l
 });
 
 test("W1-T13238: restore warns when serve refuses the connection and records the local verdict", async (t) => {
-  const config = { root: root(t), serve: { port: 1 } };
+  const config = { resolveServePort, root: root(t), serve: { port: 1 } };
   const args = ["Pd", "--reason", "reconsidered"];
   const socket = Object.assign(new Socket(), { connecting: true });
   t.after(() => { socket.destroy(); });
@@ -307,7 +325,7 @@ test("W1-T13238: restore warns when serve refuses the connection and records the
 test("W1-T13238 criterion 2: after connection refusal, decline still records a ready age-only proposal", async (t) => {
   const port = SERVE_PORT;
   useHttpEndpoints(t);
-  const config = { root: root(t), serve: { port } };
+  const config = { resolveServePort, root: root(t), serve: { port } };
   const args = [AGE.id, "--reason", "noise"];
   const recorded: Array<[string, string, string]> = [];
   const result = await captured(t, () => proposalVerdictViaServe("decline", args, config, () =>
@@ -340,7 +358,7 @@ function verdictServe(): Server {
 test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same through serve as the in-process command", async (t) => {
   const port = SERVE_PORT;
   useHttpEndpoints(t, new Map([[port, verdictServe()]]));
-  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const config = { resolveServePort, root: root(t), serve: { port } } as unknown as InboxCliServeConfig;
   for (const [kind, id] of [["decline", "P1"], ["decline", "Pd"], ["decline", "Pgone"], ["restore", "Pd"], ["restore", "P1"]] as const) {
     const args = [id, "--reason", "duplicate"];
     const local = await captured(t, async () => proposalVerdictCommand(kind, args, verdictFind, () => {}));
@@ -354,7 +372,7 @@ test("W1-T13238 criterion 3: rmd decline and rmd restore print and exit the same
 });
 
 test("W1-T13238 criterion 3: decline and restore reject whitespace-only IDs before HTTP or local lookup", async (t) => {
-  const config = { root: root(t), serve: { port: 1 } };
+  const config = { resolveServePort, root: root(t), serve: { port: 1 } };
   const connect = t.mock.method(Agent.prototype, "createConnection", () => assert.fail("connected with a blank proposal ID"));
   const args = [" \t", "--reason", "duplicate"];
   for (const kind of ["decline", "restore"] as const) {
@@ -374,13 +392,13 @@ test("W1-T13238: rmd decline and rmd restore run in-process, saying why, when no
   let ran = 0;
   const inProcess = () => { ran++; return 0; };
 
-  const bare = await captured(t, () => proposalVerdictViaServe("decline", args, { root: root(t, null) } as unknown as Config, inProcess));
+  const bare = await captured(t, () => proposalVerdictViaServe("decline", args, { resolveServePort, root: root(t, null) } as unknown as InboxCliServeConfig, inProcess));
   assert.deepEqual(bare, { code: 0, out: [], err: ["rmd decline: no serve write token (ENOENT); running in-process"] });
   assert.equal(ran, 1);
 
   const port = SERVE_PORT;
   useHttpEndpoints(t);
-  const config = { root: root(t), serve: { port } } as unknown as Config;
+  const config = { resolveServePort, root: root(t), serve: { port } } as unknown as InboxCliServeConfig;
   const refused = await captured(t, () => proposalVerdictViaServe("restore", args, config, inProcess));
   assert.deepEqual(refused, { code: 0, out: [],
     err: [`rmd restore: no serve answered at http://127.0.0.1:${port} (ECONNREFUSED); running in-process`] });
@@ -423,7 +441,7 @@ function realVerdictServe(t: Ctx): { root: string; port: number; ledgerPath: str
 
 test("W1-T13238 criterion 3: the CLI preserves age-only verdicts when serve's real route declines to act", async (t) => {
   const world = realVerdictServe(t);
-  const config = { root: world.root, serve: { port: world.port } };
+  const config = { resolveServePort, root: world.root, serve: { port: world.port } };
   for (const kind of ["decline", "restore"] as const) {
     const args = [AGE.id, "--reason", "noise"];
     const recorded: Array<[string, string, string]> = [];
@@ -435,4 +453,69 @@ test("W1-T13238 criterion 3: the CLI preserves age-only verdicts when serve's re
     assert.deepEqual(recorded, kind === "decline" ? Array(2).fill(["panel.proposal_declined", AGE.id, "noise"]) : []);
   }
   assert.equal(readFileSync(world.ledgerPath, "utf8"), "", "the serve routes recorded no verdict");
+});
+
+/** A core-shaped root as test/a-decline-holds-until-the-state-it-judged-changes builds it: verify-human:W3-T7 declined
+ *  on 2026-10-13 while its dependencies were unmerged, and both have merged since, so serve's route re-opens it. */
+const PARKED = "verify-human:W3-T7";
+const PARKED_REASON = "Later-wave design-review skill whose dependencies are unmerged";
+function lapsedDeclineServe(t: Ctx): { root: string; ledgerPath: string; stateDir: string } {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-inbox-cli-lapse-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, "state"), planPath = join(dir, "plan", "tasks.yaml"), ledgerPath = join(stateDir, "ledger.ndjson");
+  mkdirSync(stateDir); mkdirSync(join(dir, "plan"));
+  const task = (id: string, status: string, dependsOn: string[] = [], verify = "auto") => `- id: ${id}\n  title: "A task"\n  repo: remudero\n` +
+    `  depends_on: [${dependsOn.join(", ")}]\n  type: implement\n  verify: ${verify}\n  risk: high\n  status: ${status}\n  attempts: 0\n` +
+    `  files: [test/parked.test.ts]\n  acceptance:\n    - claim: "parked evidence"\n      proof: "unit test: parked evidence"\n`;
+  writeFileSync(planPath, task("W3-T2", "merged") + task("W1-T44", "merged") + task("W3-T7", "queued", ["W3-T2", "W1-T44"], "human"));
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: PARKED, evidenceAnchors: [], conflictsWith: [],
+    summary: "W3-T7 was filed `verify: human`.\nJudge provenance: decision=needs_operator; observed_state=W3-T7:deps=0:cited=0.\n\nA parked ask." }] }));
+  writeFileSync(ledgerPath, JSON.stringify({ ts: "2026-10-13T02:56:30.145Z", run_id: "PANEL-1", task_id: PARKED, step: "panel.proposal_declined",
+    origin: "rmd-cli", reason: PARKED_REASON, observed_state: "W3-T7:deps=0:cited=0" }) + "\n");
+  writeFileSync(join(stateDir, "service-tokens.json"), JSON.stringify({ read: "cd".repeat(32), write: TOKEN }));
+  const prUrl = (id: string) => `https://github.com/o/r/pull/${id === "W3-T2" ? 2 : 44}`;
+  const taskOfUrl = (url: string) => (url.endsWith("/2") ? "W3-T2" : "W1-T44");
+  const deps: PanelGraphDeps = { root: dir, inboxRoot: dir, planPath, ledgerPath, github: { prView: () => null },
+    statusGithub: fakeGitHub({
+      findMergedByTrailer: (id: string): PrRef | null => (id !== "W3-T7" ? { number: 7, url: prUrl(id), state: "MERGED" } : null),
+      headRefName: (url: string) => (url.startsWith("https://github.com/o/r/pull/") ? `run-${taskOfUrl(url)}-1790000000000` : undefined),
+      prBody: (url: string) => (url.startsWith("https://github.com/o/r/pull/") ? `Remudero-Task: ${taskOfUrl(url)}\n` : undefined),
+    }), ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40) };
+  useHttpEndpoints(t, new Map([[SERVE_PORT, createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(deps) })]]));
+  return { root: dir, ledgerPath, stateDir };
+}
+
+const ledgerRows = (path: string): Array<Record<string, unknown>> =>
+  readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+
+test("W1-T13238 criterion 3: a verify-human decline serve re-opens after its dependencies merged prints and exits as in-process", async (t) => {
+  const world = lapsedDeclineServe(t);
+  const config = { resolveServePort, root: world.root, serve: { port: SERVE_PORT } };
+  const before = readFileSync(world.ledgerPath, "utf8");
+  // The in-process verdict as loadProposalForRatify classifies it: the ledger's decline, with no lapse applied.
+  const legacyFind = (id: string) => {
+    const declinedReason = declinedWithReceipts(ledgerRows(world.ledgerPath), world.stateDir)(id);
+    return id !== PARKED ? { exists: false } : { exists: true, classification: declinedReason === undefined
+      ? { proposalId: id, state: "ready" as const, reasons: [] } : { proposalId: id, state: "declined" as const, reasons: [], declinedReason } };
+  };
+  // What run-task.ts's proposalVerdictServeFirst passes: the live ledger and the retained receipts.
+  const legacyVerdict = (id: string) => verdictMayDifferOnServe(id, ledgerRows(world.ledgerPath), world.stateDir);
+  for (const kind of ["decline", "restore"] as const) {
+    const args = [PARKED, "--reason", "still not now"];
+    const recorded: Array<[string, string, string]> = [];
+    const inProcess = () => proposalVerdictInProcess(kind, args, legacyFind, (...row) => { recorded.push(row); });
+    const local = await captured(t, async () => inProcess());
+    const remote = await captured(t, () => proposalVerdictViaServe(kind, args, config, inProcess, { legacyVerdict }));
+    assert.deepEqual(remote, local, kind);
+    assert.deepEqual(local, kind === "decline"
+      ? { code: 1, out: [], err: [`rmd decline: ${PARKED} was already declined (${PARKED_REASON})`] }
+      : { code: 0, out: [`rmd restore: ${PARKED} RESTORED — it is back in the inbox and classifies as it would have before the decline`], err: [] });
+  }
+  assert.equal(readFileSync(world.ledgerPath, "utf8"), before, "serve's route recorded no second decline");
+  // Positive control: serve's real route does re-open this item, so a post would have printed a fresh decline receipt.
+  const posted = await captured(t, () => proposalVerdictViaServe("decline", [PARKED, "--reason", "still not now"], config, () => assert.fail("ran in-process")));
+  assert.deepEqual(posted, { code: 0, out: [`rmd decline: ${PARKED} DECLINED — take it back with rmd restore ${PARKED} --reason "<text>"`], err: [] });
+  // Only a verify-human decline that recorded an observed state can lapse; every other item still posts.
+  assert.equal(verdictMayDifferOnServe("board-review:stale:PR-7", ledgerRows(world.ledgerPath), world.stateDir), false);
+  assert.equal(verdictMayDifferOnServe(PARKED, [{ ts: "2026-10-13T02:56:30.145Z", task_id: PARKED, step: "panel.proposal_declined" }], join(world.root, "none")), false);
 });

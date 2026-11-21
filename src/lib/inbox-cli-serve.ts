@@ -9,10 +9,18 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import type { Config } from "./config.js";
 import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
+import { mergeVerdictReceipts, readVerdictReceipts, verdictReceiptOf } from "./inbox-verdict-receipts.js";
 
 /** serve.ts's DEFAULT_SERVE_PORT and serviceTokensPath, restated so this CLI stays out of serve's import cycle. */
 export const INBOX_CLI_DEFAULT_SERVE_PORT = 4317;
 const inboxCliTokensPath = (root: string): string => join(root, "state", "service-tokens.json");
+
+/**
+ * What the Inbox CLI needs to find the local serve. `resolveServePort` is serve.ts's own bind-port choice, handed in by
+ * the caller (run-task.ts, which already imports serve.ts) so the CLI picks the port exactly as `rmd serve` binds it
+ * without this module joining serve's import cycle (the affected-suite reach ratchet's largestScc).
+ */
+export type InboxCliServeConfig = Pick<Config, "root" | "serve"> & { resolveServePort: (rest: string[], configPort?: number) => number };
 
 /** W1-T13238: how long an Inbox verb waits to connect to the running serve before it runs in-process instead. */
 export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
@@ -20,15 +28,21 @@ export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
 /** W1-T13238: where the running serve's write routes listen, and the write token they take. */
 export interface InboxCliServeTarget { url: string; token: string }
 
-const validPort = (port: number): boolean => Number.isInteger(port) && port >= 1 && port <= 65_535;
-
 /**
- * A configured port identifies the local serve. When absent, use the launcher's port or the default.
+ * The local serve's address, chosen exactly as a standalone `rmd serve` chooses its bind port: serve.ts's own
+ * resolveServePort (config.resolveServePort) with no --port, so config serve.port, else DEFAULT_SERVE_PORT. No environment variable takes part,
+ * because serve reads none for its port; a launcher's RMD_SERVE_PORT reaches serve only as --port, which this CLI cannot
+ * see, so honouring it here dialled a port serve never bound (fleet review of PR #19685).
  * Resolve one address before sending the write token so a stale override cannot receive the bearer.
  */
-export function inboxCliServeTarget(config: Pick<Config, "root" | "serve">): InboxCliServeTarget | { reason: string } {
-  const port = config.serve?.port ?? Number(process.env.RMD_SERVE_PORT || INBOX_CLI_DEFAULT_SERVE_PORT);
-  if (!validPort(port)) return { reason: "serve port must be an integer 1-65535" };
+export function inboxCliServeTarget(config: InboxCliServeConfig): InboxCliServeTarget | { reason: string } {
+  let port: number;
+  try {
+    port = config.resolveServePort([], config.serve?.port);
+  } catch (error) {
+    // serve refuses to start on this port, so no serve listens on it: the reason makes the CLI run in-process.
+    return { reason: (error as Error).message };
+  }
   let write: unknown;
   try {
     write = (JSON.parse(readFileSync(inboxCliTokensPath(config.root), "utf8")) as { write?: unknown }).write;
@@ -100,7 +114,7 @@ function postInboxVerb(url: string, token: string, body: unknown, connectMs: num
 }
 
 /** W1-T13238: one CLI verb, serve first; build in-process actions only if the verb falls back. */
-export function inboxVerbViaServe(name: InboxVerbName, args: string[], config: Pick<Config, "root" | "serve">,
+export function inboxVerbViaServe(name: InboxVerbName, args: string[], config: InboxCliServeConfig,
   inProcess: () => InboxVerbActions): Promise<number> {
   const target = inboxCliServeTarget(config);
   if ("reason" in target) {
@@ -122,12 +136,15 @@ export function proposalVerdictReceipt(kind: "decline" | "restore", proposalId: 
  * prints exactly what the in-process command prints: the receipt on success, the route's detail on a refusal. Arguments
  * the route would not take, no serve target or no serve answering the connect run `inProcess`, which validates and acts.
  */
-export async function proposalVerdictViaServe(kind: "decline" | "restore", rest: string[], config: Pick<Config, "root" | "serve">,
-  inProcess: () => number, opts: { connectMs?: number } = {}): Promise<number> {
+export async function proposalVerdictViaServe(kind: "decline" | "restore", rest: string[], config: InboxCliServeConfig,
+  inProcess: () => number, opts: { connectMs?: number; legacyVerdict?: (proposalId: string) => boolean } = {}): Promise<number> {
   const proposalId = rest[0];
   const reason = rest.length === 3 && rest[1] === "--reason" ? rest[2] : undefined;
   // Anything but `<id> --reason <text>` is the in-process command's to refuse with its own usage line.
   if (proposalId === undefined || proposalId.trim() === "" || proposalId.startsWith("--") || reason === undefined || reason.trim() === "") return inProcess();
+  // A verdict serve's route could answer differently is the in-process command's, and nothing is posted: serve would
+  // already have recorded its own answer. Silent, because the printed answer must be the in-process one, byte for byte.
+  if (opts.legacyVerdict?.(proposalId)) return inProcess();
   const target = inboxCliServeTarget(config);
   if ("reason" in target) {
     console.error(`rmd ${kind}: ${target.reason}; running in-process`);
@@ -148,6 +165,22 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
   const detail = refusal?.detail ?? refusal?.error;
   console.error(`rmd ${kind}: ${typeof detail === "string" ? detail : `serve answered ${answer.status}`}`);
   return 1;
+}
+
+/**
+ * W1-T13238: could serve's verdict route answer this proposal differently from the in-process `rmd decline`/`restore`?
+ * Serve re-opens a declined verify-human item once the observed state its decline recorded has changed (W1-T10077's
+ * declineLapse, in classifyAllProposals): a later decline then records anew and exits 0, and a restore is refused as not
+ * declined. The in-process verdict (loadProposalForRatify) applies no lapse, so it answers "already declined" and exits
+ * 1, or restores. Telling a real lapse needs the dependencies' merge state, which is live gh, so this answers from the
+ * local ledger alone: a verify-human item whose newest verdict receipt is a decline that recorded an observed state,
+ * the only receipt declineLapse can lapse. A receipt that has not lapsed gives the same answer on both paths.
+ */
+export function verdictMayDifferOnServe(proposalId: string, ledgerRows: ReadonlyArray<Record<string, unknown>>, stateDir: string): boolean {
+  if (!/^verify-human:[A-Za-z0-9-]+$/.test(proposalId)) return false;
+  const receipts = mergeVerdictReceipts(readVerdictReceipts(stateDir), ledgerRows.flatMap((row) => verdictReceiptOf(row) ?? []));
+  const newest = receipts.findLast((receipt) => receipt.task_id === proposalId);
+  return newest?.step === "panel.proposal_declined" && newest.observed_state !== undefined;
 }
 
 /** Treat a whitespace-only ID as missing before the legacy verdict parser can look it up. */

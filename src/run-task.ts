@@ -254,7 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe } from "./lib/inbox-cli-serve.js";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, verdictMayDifferOnServe } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -39782,7 +39782,19 @@ export async function inboxActionCliCommand(name: InboxVerbName, rest: string[],
   })();
   if (deps) return inboxVerbCommand(name, rest, inProcess());
   // W1-T13238: the running serve's write route first, as the Console does; in-process only when no serve answers.
-  return inboxVerbViaServe(name, rest, config, inProcess);
+  return inboxVerbViaServe(name, rest, { ...config, resolveServePort }, inProcess);
+}
+
+/**
+ * W1-T13238: `rmd decline` and `rmd restore`, serve first. A verify-human decline serve could re-open (W1-T10077) stays
+ * on the in-process verdict, so the printed answer and exit code do not depend on the path taken.
+ */
+function proposalVerdictServeFirst(kind: ProposalVerdictKind, rest: string[]): Promise<number> {
+  const config = loadConfig();
+  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config), {
+    // ledger-read-intent: live — the in-process verdict this preserves reads the live file and the retained receipts.
+    legacyVerdict: (id) => verdictMayDifferOnServe(id, readLedgerLines(ledgerPathFor(config)), join(config.root, "state")),
+  });
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
@@ -45644,8 +45656,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     },
   ],
   // W1-T13238: the running serve's verdict route first, as the Console does; in-process only when no serve answers.
-  ["decline", (rest) => { const config = loadConfig(); return proposalVerdictViaServe("decline", rest, config, () => proposalVerdictCliCommand("decline", rest, config)); }],
-  ["restore", (rest) => { const config = loadConfig(); return proposalVerdictViaServe("restore", rest, config, () => proposalVerdictCliCommand("restore", rest, config)); }],
+  ["decline", (rest) => proposalVerdictServeFirst("decline", rest)],
+  ["restore", (rest) => proposalVerdictServeFirst("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [
