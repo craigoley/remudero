@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { appendLedger } from "#src/lib/ledger.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { reviewInputDigest } from "#src/lib/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
@@ -19,6 +19,7 @@ import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
+const DEAD_RUN = "review-PR19791-1795187698034";
 
 /** #19791's shape at 15:38:37Z: checks pending 42m, the dead run's pending claim posted at 15:15:10Z. */
 function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
@@ -30,6 +31,8 @@ function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
     createdAt: minutesAgo(60), priorStrikes: 0, unmetCriteria: [],
     reviewState: "pending", reviewPendingSince: minutesAgo(23), reviewPendingOwnerDead: true,
     reviewVerdictPostedAt: new Date(NOW - 23 * 60_000 - 400).toISOString(),
+    // The live status and the dead ledger row name the same run, as the view producer reads them.
+    reviewPendingOwnerRunId: DEAD_RUN, reviewPendingStatusRunId: DEAD_RUN,
     priorReviewAttemptsForInput: 0,
     ...over,
   } as OpenPrView;
@@ -155,7 +158,8 @@ test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undi
   const row = readLedgerLines(h.ledgerPath).findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
   assert.ok(row, "the sweep disposed the head");
   assert.equal(row.disposition, "post-review");
-  assert.equal(row.owner_gone_cause, "owner-pid-dead");
+  // The hold keeps its place as the cause, as on main; the producer's proof of death rides beside it.
+  assert.equal(row.owner_gone_cause, "promise-harvest-incomplete");
   assert.equal(row.reason, "checks pending 42m, remudero-review owner proven dead (its promise harvest did not complete) — " +
     "re-running one exact-input review alongside CI through the bounded post-review lane");
   assert.equal(h.posted.length, 1);
@@ -163,7 +167,7 @@ test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undi
 
 /** #19791's head as the real view producer reads it: checks pending since 42m ago, the dead run's ledger row, and the
  *  live `remudero-review` status the fetch returns. */
-async function producedView(dir: string, liveStatus: { runId: string; createdAt?: string }): Promise<OpenPrView> {
+async function producedView(dir: string, liveStatus: { runId: string; createdAt?: string; description?: string }): Promise<OpenPrView> {
   const ledgerPath = join(dir, "ledger.ndjson");
   const sha = "d".repeat(40);
   const prUrl = "https://github.com/o/r/pull/19791";
@@ -186,7 +190,7 @@ async function producedView(dir: string, liveStatus: { runId: string; createdAt?
       if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "in_progress", started_at: minutesAgo(42) }] };
       if (path.includes("/status")) return { statuses: [{
         context: "remudero-review", state: "pending",
-        description: `remudero-review: review in progress (owned by run ${liveStatus.runId})`,
+        description: liveStatus.description ?? `remudero-review: review in progress (owned by run ${liveStatus.runId})`,
         ...(liveStatus.createdAt !== undefined ? { created_at: liveStatus.createdAt } : {}),
       }] };
       if (path.endsWith("/pulls/19791")) return { mergeable: true, mergeable_state: "blocked" };
@@ -210,6 +214,62 @@ test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet wai
   const live = deriveDisposition(newer, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(live.disposition, "wait", "the live status names a newer claim, so the active claim is not disposed");
   assert.doesNotMatch(live.reason, /owner proven dead/);
-  const undated = await producedView(dir, { runId: "review-PR19791-dead" });
-  assert.equal(deriveDisposition(undated, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait", "an undated live status is an unknown run");
+  const otherWording = await producedView(dir, { runId: "review-PR19791-dead", description: "remudero-review: pending" });
+  assert.equal(deriveDisposition(otherWording, DEFAULT_SWEEP_POLICY, NOW).disposition, "wait",
+    "a live status that names no run is an unknown run");
+});
+
+test("W1-T14035 criterion 1: the dead run's own status is released alongside CI when it is undated or stamped after its row", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const createdAt of [undefined, minutesAgo(22).replace(/\.\d{3}Z$/, "Z")]) {
+    const pr = await producedView(dir, { runId: "review-PR19791-dead", createdAt });
+    assert.equal(pr.reviewPendingOwnerDead, true, "the producer proved the run named in the status dead");
+    assert.equal(pr.reviewPendingOwnerRunId, "review-PR19791-dead");
+    assert.equal(pr.reviewPendingStatusRunId, "review-PR19791-dead");
+    const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "post-review", `status created_at ${createdAt ?? "absent"} is the dead run's own claim`);
+    assert.match(r.reason, /^checks pending 42m, remudero-review owner proven dead — re-running one exact-input review alongside CI/);
+  }
+});
+
+test("W1-T14035 criterion 3: a live replacement claim posted in the same second as the dead row waits", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const sameSecond = minutesAgo(23).replace(/\.\d{3}Z$/, "Z");
+  const pr = await producedView(dir, { runId: "review-PR19791-live", createdAt: sameSecond });
+  assert.equal(pr.reviewPendingOwnerDead, true, "the producer still reports death from the old row");
+  assert.equal(pr.reviewVerdictPostedAt, sameSecond);
+  const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "wait", "the live status is another run's claim");
+  assert.doesNotMatch(r.reason, /owner proven dead/);
+});
+
+/** A `review.posted` pending row whose only unmet proof was inconclusive under a load of 41. */
+function inconclusiveLoadRow(pr: OpenPrView): LedgerLine {
+  return {
+    run_id: DEAD_RUN, task_id: pr.taskId!, step: "review.posted", state: "pending",
+    pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, ts: minutesAgo(20),
+    decision_verdict: { state: "pending", summary: "inconclusive-load", criteria: [{
+      claim: "the behaviour holds", proof: "unit test: holds", met: false, reason: "timed out under load",
+      proof_exec: "inconclusive_load", load: { start: { load1: 30 }, end: { load1: 41 } } }] },
+  };
+}
+
+test("W1-T14035 criterion 2: green checks with an inconclusive-load hold and a dead owner keep the load cause", async (t) => {
+  const h = sweepHarness(t);
+  const pr = deadClaimView({ checksState: "green", checksPendingSince: undefined, reviewInputDigest: "e".repeat(64) });
+  appendLedger(h.ledgerPath, inconclusiveLoadRow(pr));
+  await runSweep([pr], { ...h.deps, sampleLoad: () => ({ load1: 5 }) }, DEFAULT_SWEEP_POLICY);
+  const lines = readLedgerLines(h.ledgerPath);
+  const row = lines.findLast((r) => r.step === "sweep.disposed" && r.pr_number === 19791);
+  assert.ok(row, "the sweep disposed the head");
+  assert.equal(row.disposition, "post-review");
+  assert.equal(row.owner_gone_cause, "inconclusive-load");
+  assert.equal(row.reason, "checks green, its proof was inconclusive under host load and the host is quieter now — " +
+    "re-running the review lane on #19791");
+  const admitted = lines.findLast((r) => r.step === "sweep.review_admitted" && r.pr_number === 19791);
+  assert.ok(admitted, "the review was admitted");
+  assert.equal(admitted.prior_cause, "inconclusive-load");
+  assert.equal(h.posted.length, 1);
 });

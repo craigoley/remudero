@@ -609,6 +609,13 @@ export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefine
   return r?.startedAt;
 }
 
+/** W1-T14035: the run that owns the live `remudero-review` status, read off its own description ("owned by run <id>",
+ *  written by every pending post in review.ts). Absent or another wording is an unknown run, never a match. */
+export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
+  const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  return /\(owned by run ([^)\s]+)\)/.exec(r?.description ?? "")?.[1];
+}
+
 /** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
  * Ignore transient review.post_failed (must retry) and review.posted (live rollup carries it). */
 function reviewPostRefusedFor(
@@ -2623,6 +2630,9 @@ export function* openPrViewSteps(
       reviewPendingOwnerDead,
       reviewPendingOwnerGone: reviewPendingOwnerDead === true ? "owner-pid-dead" : undefined,
       reviewPendingOwnerGoneReason: undefined,
+      // W1-T14035: the dead row's run and the live status's run, so the sweep releases a claim only when they are one run.
+      reviewPendingOwnerRunId: currentPendingRecord?.runId ? currentPendingRecord.runId : undefined,
+      reviewPendingStatusRunId: reviewState === "pending" ? reviewStatusRunIdFromRollup(pr.statusCheckRollup) : undefined,
       reviewVerdictPostedAt,
       checksState,
       // W1-T13195: a failed rollup read is carried so the sweep waits instead of reading "none".
