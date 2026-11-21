@@ -17,8 +17,8 @@ import { judgeReview, postReviewPending, postReviewStatusGuarded, recoverPromise
   reviewLiveStatusWriterRun, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, type ReviewVerdict } from "#src/lib/review.js";
 import { catalogReviewPoster } from "#src/cli/commands/review.js";
 import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
-import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
-import { buildRereadPrAtAct } from "#src/run-task.js";
+import { fetchSinglePrRestAsync } from "#src/lib/open-prs-rest.js";
+import { attachPostedGateIds, buildOpenPrViewsAsync, type RawOpenPr } from "#src/lib/tick-read-worker.js";
 
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
@@ -184,7 +184,7 @@ async function producedView(
     history?: (live: string) => Array<{ id?: number; state: string; description: string }> },
   /** Runs after the dead run's claim row is written; a returned string is the live status description. */
   afterClaim?: (ledgerPath: string) => Promise<string | undefined>,
-  /** Build through run-task's single-PR re-read at act time instead of the whole-board producer. */
+  /** Build from the row buildRereadPrAtAct hands the producer at act time, instead of the board's list read. */
   via: "board" | "reread" = "board",
 ): Promise<OpenPrView> {
   const ledgerPath = join(dir, "ledger.ndjson");
@@ -222,10 +222,30 @@ async function producedView(
       return [];
   };
   const pr = via === "reread"
-    ? await buildRereadPrAtAct("o", "r", ledgerPath, { fetchAsync, views })({ prNumber: 19791 } as OpenPrView)
+    ? (await buildOpenPrViewsAsync("o", "r", ledgerPath, { ...views, fetchAsync, openPrRows: [await rereadRow(fetchAsync)] }))[0]
     : (await buildOpenPrViewsAsync("o", "r", ledgerPath, { ...views, fetchAsync }))[0];
   assert.ok(pr);
   return pr;
+}
+
+/** The row buildRereadPrAtAct (the act-time single-PR re-read) passes buildOpenPrViewsAsync as `openPrRows: [row]`:
+ *  fetchSinglePrRestAsync's REST row, whose rollup comes from rollupFromRest and so keeps no status id, with only the
+ *  check-run gate ids attached (attachPostedGateIds over the check-runs response its fetch tap remembers). Built here, so
+ *  this suite does not import that module. */
+async function rereadRow(fetchAsync: (args: string[]) => Promise<unknown>): Promise<RawOpenPr> {
+  const checkRuns = new Map<string, unknown>();
+  const row = await fetchSinglePrRestAsync("o", "r", 19791, async (args) => {
+    const response = await fetchAsync(args);
+    if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+    return response;
+  });
+  assert.equal(row.state, "OPEN");
+  assert.ok(row.statusCheckRollup);
+  attachPostedGateIds(row.statusCheckRollup, [...checkRuns.values()][0]);
+  const review = (row.statusCheckRollup as Array<{ context?: string; statusId?: number }>).find((c) => c.context === "remudero-review");
+  assert.ok(review, "the re-read row carries the live remudero-review entry");
+  assert.equal(review.statusId, undefined, "the re-read's rollup keeps no status id, as in production");
+  return row as unknown as RawOpenPr;
 }
 
 test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet waits, replayed from the view producer", async (t) => {
@@ -625,8 +645,8 @@ test("W1-T14035 criterion 3: a live hold that names itself and then quotes a dea
 test("W1-T14035 criterion 1: the single-PR re-read at act time carries the dead owner's proof for its own legacy hold", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  // run-task's buildRereadPrAtAct builds the rollup through a read that keeps no status id; the producer reads the combined
-  // status again for the id, so the same history and ledger that bind the owner on the board bind it here too.
+  // buildRereadPrAtAct builds the rollup through a read that keeps no status id (rereadRow reproduces its row); the
+  // producer reads the combined status again for the id, so the history and ledger that bind the owner on the board bind it here.
   for (const via of ["board", "reread"] as const) {
     const pr = await producedView(dir, { runId: DEAD, history: legacyHistory() }, async (ledgerPath) => {
       await publishHold(ledgerPath, DEAD, { catalog: "ops", legacy: true });
