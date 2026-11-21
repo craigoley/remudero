@@ -328,3 +328,64 @@ test("W1-T13951 criterion 2: an evicted spilled message of escaped newlines coun
     assert.equal(receipt.output_truncation.droppedBytes, payload);
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
+
+test("W1-T13951 criterion 1: backslash-heavy command output cut at the spill boundary stays a valid command event", async () => {
+  const child = reviewer();
+  try {
+    // The reviewer's counterexample: 2 MiB of encoded backslashes. The spilled tail (the line's last 256 KiB)
+    // opens on the second byte of a `\\` escape, so a cut that ignores escapes turns the valid event malformed.
+    const line = JSON.stringify({ type: "item.completed", item: { id: "item_7", type: "command_execution",
+      command: "/bin/bash -lc 'cat blob'", aggregated_output: "\\".repeat(1024 * 1024), exit_code: 10, status: "completed" } });
+    const suffix = line.length - line.lastIndexOf("\\") - 1;
+    assert.equal((262_144 - suffix) % 2, 1, "the tail opens inside an escape");
+    const final = "FINAL\n" + "f".repeat(1_048_517 - Buffer.byteLength(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "FINAL\n" } })));
+    const finalLine = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: final } });
+    assert.equal(Buffer.byteLength(finalLine), 1_048_517);
+    child.raw(line + "\n");
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === final, "the final message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    assert.equal(result.outputRetention?.stdout?.state, "complete");
+    assert.equal(result.isError, false);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 1: a retained diagnostic gives way to a final message that fits the limit alone", async () => {
+  const child = reviewer();
+  try {
+    // A Codex error event (a reconnect notice) is retained as a diagnostic; it must not take the room a whole
+    // final message needs.
+    child.raw(`${JSON.stringify({ type: "error", error: { message: "stream disconnected; retrying " + "r".repeat(2048) } })}\n`);
+    child.command("c".repeat(2 * 1024 * 1024));
+    const final = "FINAL\n" + "f".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 200);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.ok(result.text === final, "the final message is retained byte for byte");
+    assert.equal(result.outputRetention?.text.state, "complete");
+    const bytes = result.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    assert.ok(bytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+    assert.ok(result.outputTruncation!.retainedBytes <= CODEX_WORKER_STDOUT_MAX_BYTES);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});
+
+test("W1-T13951 criterion 2: an evicted message of escaped slashes counts the raw payload bytes the stream delivered", async () => {
+  const child = reviewer();
+  try {
+    // `\/` is a valid escape that JSON.stringify never writes: re-encoding the decoded text undercounts by half.
+    const payload = "\\/".repeat(1024 * 1024);
+    assert.equal(Buffer.byteLength(payload), 2_097_152);
+    child.raw(`{"type":"item.completed","item":{"type":"agent_message","text":"${payload}"}}\n`);
+    const final = "C".repeat(CODEX_WORKER_STDOUT_MAX_BYTES - 200);
+    child.message(final);
+    child.end();
+    const result = await child.run;
+    assert.equal(result.text, final);
+    assert.ok(!result.blocks.some(block => block.startsWith("////")), "the cut message was evicted");
+    assert.equal(result.outputTruncation!.droppedBytes, 2_097_152);
+    const receipt = child.ledger().find(row => row.step === "worker.output_truncated");
+    assert.equal(receipt.output_truncation.droppedBytes, 2_097_152);
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+});

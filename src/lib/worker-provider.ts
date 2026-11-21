@@ -2487,10 +2487,98 @@ function opensAsAgentMessage(head: string): boolean {
   return item !== null && new RegExp(`"type"${ws}:${ws}"agent_message"`).test(head.slice(item.index));
 }
 
-/** W1-T13951: a decoded text's size in the stream — its JSON-encoded string payload, quotes excluded. Every
- *  dropped-byte count uses this unit, so a spilled cut and a later eviction of the same text add up. */
-function streamBytes(text: string): number {
+/** W1-T13951: the JSON-encoded size of a marker this code wrote into a raw payload, quotes excluded. It is
+ *  used only for text this code encoded itself; source text is measured from the bytes the stream delivered. */
+function encodedBytes(text: string): number {
   return Buffer.byteLength(JSON.stringify(text)) - 2;
+}
+
+/** W1-T13951: the raw payload (still JSON-encoded, quotes excluded) of the string value at `path` in a line
+ *  that parsed, exactly as the stream delivered it — `\/` and `\u0041` keep their source width. The last
+ *  duplicate key wins, as in JSON.parse. */
+function rawStringValue(line: string, path: readonly string[]): string | undefined {
+  const keys: Array<string | undefined> = [];
+  const objects: boolean[] = [];
+  let expectKey = false;
+  let found: string | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\"") {
+      let j = i + 1;
+      while (j < line.length && line[j] !== "\"") j += line[j] === "\\" ? 2 : 1;
+      const raw = line.slice(i + 1, j);
+      if (objects.at(-1) && expectKey) {
+        keys[keys.length - 1] = JSON.parse(`"${raw}"`) as string;
+        expectKey = false;
+      } else if (keys.length === path.length && keys.every((key, at) => key === path[at])) found = raw;
+      i = j;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{");
+      keys.push(undefined);
+      expectKey = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keys.pop();
+      expectKey = false;
+    } else if (c === ",") expectKey = objects.at(-1) === true;
+  }
+  return found;
+}
+
+/** W1-T13951: the byte offset in a raw JSON string payload where its decoded UTF-8 byte offset `at` lies. */
+function rawOffsetOf(raw: string, at: number): number {
+  const utf8 = (unit: number) => unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+  let decoded = 0;
+  let bytes = 0;
+  let i = 0;
+  while (i < raw.length && decoded < at) {
+    const c = raw.charCodeAt(i);
+    if (c === 0x5c && raw[i + 1] === "u") {
+      const unit = parseInt(raw.slice(i + 2, i + 6), 16);
+      const low = raw[i + 6] === "\\" && raw[i + 7] === "u" ? parseInt(raw.slice(i + 8, i + 12), 16) : NaN;
+      if (unit >= 0xd800 && unit <= 0xdbff && low >= 0xdc00 && low <= 0xdfff) { decoded += 4; bytes += 12; i += 12; }
+      else { decoded += utf8(unit); bytes += 6; i += 6; }
+    } else if (c === 0x5c) { decoded += 1; bytes += 2; i += 2; }
+    else if (c >= 0xd800 && c <= 0xdbff && (raw.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { decoded += 4; bytes += 4; i += 2; }
+    else { const n = utf8(c); decoded += n; bytes += n; i += 1; }
+  }
+  return bytes;
+}
+
+/** W1-T13951: how many bytes past `offset` in a spilled line the next escape boundary lies — 0 unless the
+ *  offset falls inside a `\X` or `\uXXXX` sequence. A backslash run's parity decides, and the run is read
+ *  back from the spill file however long it is, so 2 MiB of encoded backslashes is cut on a pair boundary. */
+function escapeSkipAt(file: string, offset: number, tail: string): number {
+  const fd = openSync(file, "r");
+  try {
+    const chunk = Buffer.alloc(64 * 1024);
+    // The count of contiguous `\` bytes ending just before `end`.
+    const runBefore = (end: number) => {
+      let run = 0;
+      for (let pos = end; pos > 0;) {
+        const start = Math.max(0, pos - chunk.length);
+        const read = readSync(fd, chunk, 0, pos - start, start);
+        let k = read - 1;
+        while (k >= 0 && chunk[k] === 0x5c) k--;
+        run += read - 1 - k;
+        if (k >= 0 || read === 0) return run;
+        pos = start;
+      }
+      return run;
+    };
+    if (runBefore(offset) % 2 === 1) return tail.startsWith("u") ? 5 : 1;
+    const before = Buffer.alloc(Math.min(5, offset));
+    readSync(fd, before, 0, before.length, offset - before.length);
+    const hex = (byte: number | undefined) => byte !== undefined && /^[0-9a-fA-F]$/.test(String.fromCharCode(byte));
+    for (let j = 1; j <= 4; j++) {
+      const at = before.length - j - 1;
+      if (at < 0) break;
+      if (before[at] !== 0x5c || before[at + 1] !== 0x75) continue;
+      if (![...before.subarray(at + 2)].every(byte => hex(byte))) continue;
+      if (runBefore(offset - before.length + at + 1) % 2 === 1) return 5 - j;
+    }
+    return 0;
+  } finally { closeSync(fd); }
 }
 
 /** W1-T13951: a JSON text cut at a byte boundary may end inside an escape; drop the dangling part. */
@@ -2529,7 +2617,13 @@ class CodexJsonlAccumulator {
   private readonly blocks: string[] = [];
   /** W1-T13951: where each block holds a synthetic truncation marker — its bytes were never source output. */
   private readonly blockMarkers: Array<Array<{ at: number; len: number }>> = [];
+  /** W1-T13951: each block's payload as the stream delivered it (markers written in as this code encoded them),
+   *  so every dropped-byte count is in raw stream bytes, never a re-encoding of the decoded text. */
+  private readonly blockRaw: string[] = [];
   private readonly errors: string[] = [];
+  /** W1-T13951: an error's raw payload; undefined for a diagnostic this code wrote, which was never stream bytes. */
+  private readonly errorRaw: Array<string | undefined> = [];
+  private readonly errorMarkers: Array<Array<{ at: number; len: number }>> = [];
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -2616,22 +2710,15 @@ class CodexJsonlAccumulator {
       if (tail.state === "truncated") {
         // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
         // validates the envelope; a partial line can never certify a complete report.
-        // W1-T13951: never cut inside an escape. The head drops a dangling `\` or `\uXX`; a tail that opens on
-        // the quote of an escaped `\"` (its backslash omitted) is retried one byte later.
+        // W1-T13951: never cut inside an escape. The head drops a dangling `\` or `\uXX`; the tail starts at
+        // the next escape boundary, found from the parity of the backslash run before it in the spill file.
         const head = withoutDanglingJsonEscape(this.spillHead);
-        const build = (skip: number) => {
-          const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
-          const marker = this.truncationMarker(omitted);
-          return { omitted, marker, line: head + JSON.stringify(marker).slice(1, -1) + text.slice(skip) };
-        };
-        let cut = build(0);
-        if (text.startsWith("\"") && jsonParseStatus(cut.line).status === "unparseable") {
-          const retry = build(1);
-          if (jsonParseStatus(retry.line).status === "parsed") cut = retry;
-        }
-        line = cut.line;
-        cutMarker = { marker: cut.marker, textAt: decodedTextOffset(head) };
-        this.droppedBytes += cut.omitted;
+        const skip = escapeSkipAt(this.pendingFile!, tail.fileBytes! - Buffer.byteLength(text), text);
+        const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
+        const marker = this.truncationMarker(omitted);
+        line = head + JSON.stringify(marker).slice(1, -1) + text.slice(skip);
+        cutMarker = { marker, textAt: decodedTextOffset(head) };
+        this.droppedBytes += omitted;
       } else {
         line = text;
       }
@@ -2639,7 +2726,7 @@ class CodexJsonlAccumulator {
       if (tail.state === "truncated") lineEvidence = evidence;
       if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
         this.failed = true;
-        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pushError(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`, undefined);
         this.pending = "";
         this.spilling = false;
         this.spillHead = "";
@@ -2670,6 +2757,7 @@ class CodexJsonlAccumulator {
     if (this.droppedBytes > 0 && this.blocks.length > 1) {
       const marker = this.truncationMarker(this.droppedBytes);
       this.blocks.splice(1, 0, marker);
+      this.blockRaw.splice(1, 0, JSON.stringify(marker).slice(1, -1));
       this.blockMarkers.splice(1, 0, [{ at: 0, len: Buffer.byteLength(marker) }]);
     }
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
@@ -2727,17 +2815,27 @@ class CodexJsonlAccumulator {
     return `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
   }
 
-  private boundText(text: string, limit: number): string {
-    const raw = Buffer.from(text);
-    if (raw.length <= limit) return text;
-    const allowance = Math.max(0, limit - 80);
-    let head = Math.floor(allowance / 2);
-    let tail = raw.length - (allowance - head);
-    while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
-    while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
-    const dropped = streamBytes(raw.subarray(head, tail).toString());
-    this.droppedBytes += dropped;
-    return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
+  private pushError(text: string, raw: string | undefined): void {
+    this.errors.push(text);
+    this.errorRaw.push(raw);
+    this.errorMarkers.push([]);
+  }
+
+  private store(kind: "block" | "error") {
+    return kind === "block"
+      ? { texts: this.blocks, raws: this.blockRaw as Array<string | undefined>, markers: this.blockMarkers }
+      : { texts: this.errors, raws: this.errorRaw, markers: this.errorMarkers };
+  }
+
+  /** W1-T13951: a diagnostic gives way to a final message that fits the limit alone — the run's failure is
+   *  still recorded, and the error verdict keeps what room is left. */
+  private yieldErrorsTo(room: number): void {
+    const bytes = () => this.errors.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    while (this.errors.length && bytes() > room) {
+      if (this.errors.length > 1) this.evictEntry("error", this.errors.length - 1);
+      else if (room >= 128) { this.boundEntry("error", 0, room); break; }
+      else this.evictEntry("error", 0);
+    }
   }
 
   /** W1-T13951: a line that opens as an agent_message, judged from its first bytes. */
@@ -2751,7 +2849,8 @@ class CodexJsonlAccumulator {
    *  the retained errors is never cut. A message too large to fit alone is left to spill as before. */
   private reclaimFor(reserveBytes: number): void {
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
-    if (reserveBytes + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) return;
+    if (reserveBytes > CODEX_WORKER_STDOUT_MAX_BYTES) return;
+    if (reserveBytes + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - reserveBytes);
     // Beside the newest message an earlier one keeps 128 bytes for finish()'s marker block, and a head worth
     // keeping needs room for its own cut marker; with less room than that it goes whole.
     const room = CODEX_WORKER_STDOUT_MAX_BYTES - 128 - bytes(this.errors) - reserveBytes;
@@ -2765,21 +2864,30 @@ class CodexJsonlAccumulator {
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  /** W1-T13951: evicting a block drops its source bytes; a marker it carries was never source output. */
-  private evictBlock(index: number): void {
-    const block = this.blocks.splice(index, 1)[0]!;
-    const markers = this.blockMarkers.splice(index, 1)[0] ?? [];
-    const raw = Buffer.from(block);
-    const markerBytes = markers.reduce((sum, marker) => sum + streamBytes(raw.subarray(marker.at, marker.at + marker.len).toString()), 0);
-    this.droppedBytes += streamBytes(block) - markerBytes;
+  private evictBlock(index: number): void { this.evictEntry("block", index); }
+
+  private boundBlock(index: number, limit: number): void { this.boundEntry("block", index, limit); }
+
+  /** W1-T13951: evicting an entry drops its raw stream bytes; a marker it carries was never source output,
+   *  and a diagnostic this code wrote counts none. */
+  private evictEntry(kind: "block" | "error", index: number): void {
+    const { texts, raws, markers } = this.store(kind);
+    const text = Buffer.from(texts.splice(index, 1)[0]!);
+    const raw = raws.splice(index, 1)[0];
+    const own = markers.splice(index, 1)[0] ?? [];
+    this.retainedTruncated = true;
+    if (raw === undefined) return;
+    this.droppedBytes += Buffer.byteLength(raw)
+      - own.reduce((sum, marker) => sum + encodedBytes(text.subarray(marker.at, marker.at + marker.len).toString()), 0);
   }
 
-  /** {@link boundText} for a retained block: an earlier marker is never split, and its bytes are not counted
-   *  as dropped source (W1-T13951). */
-  private boundBlock(index: number, limit: number): void {
-    const raw = Buffer.from(this.blocks[index]!);
+  /** Keep an entry's head and tail within `limit` bytes: an earlier marker is never split, the dropped count is
+   *  the raw stream bytes of the cut, and a marker's bytes are never counted as dropped source (W1-T13951). */
+  private boundEntry(kind: "block" | "error", index: number, limit: number): void {
+    const { texts, raws, markers: allMarkers } = this.store(kind);
+    const raw = Buffer.from(texts[index]!);
     if (raw.length <= limit) return;
-    const markers = this.blockMarkers[index] ?? [];
+    const markers = allMarkers[index] ?? [];
     const allowance = Math.max(0, limit - 80);
     let head = Math.floor(allowance / 2);
     let tail = raw.length - (allowance - head);
@@ -2796,26 +2904,43 @@ class CodexJsonlAccumulator {
         }
       }
     }
-    const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
-      .reduce((sum, marker) => sum + streamBytes(raw.subarray(marker.at, marker.at + marker.len).toString()), 0);
-    const dropped = streamBytes(raw.subarray(head, tail).toString()) - covered;
-    this.droppedBytes += dropped;
+    const source = raws[index];
+    let dropped = tail - head;
+    if (source !== undefined) {
+      const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
+        .reduce((sum, marker) => sum + encodedBytes(raw.subarray(marker.at, marker.at + marker.len).toString()), 0);
+      const rawHead = rawOffsetOf(source, head);
+      const rawTail = rawOffsetOf(source, tail);
+      dropped = rawTail - rawHead - covered;
+      this.droppedBytes += dropped;
+    }
     const marker = this.truncationMarker(dropped);
     const markerLen = Buffer.byteLength(marker);
-    this.blocks[index] = raw.subarray(0, head).toString() + marker + raw.subarray(tail).toString();
-    this.blockMarkers[index] = [
+    texts[index] = raw.subarray(0, head).toString() + marker + raw.subarray(tail).toString();
+    if (source !== undefined) {
+      const rawBytes = Buffer.from(source);
+      raws[index] = rawBytes.subarray(0, rawOffsetOf(source, head)).toString() + JSON.stringify(marker).slice(1, -1)
+        + rawBytes.subarray(rawOffsetOf(source, tail)).toString();
+    }
+    allMarkers[index] = [
       ...markers.filter(kept => kept.at + kept.len <= head),
       { at: head, len: markerLen },
       ...markers.filter(kept => kept.at >= tail).map(kept => ({ at: kept.at - tail + head + markerLen, len: kept.len })),
     ];
+    this.retainedTruncated = true;
   }
 
   private boundRetained(): void {
     const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     const droppedBefore = this.droppedBytes;
-    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += streamBytes(this.errors.pop()!);
-    if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.evictEntry("error", this.errors.length - 1);
+    if (this.errors.length) this.boundEntry("error", 0, budget / 4);
+    // W1-T13951: a diagnostic never takes room the newest message needs to stay whole.
+    const newest = this.blocks.length ? Buffer.byteLength(this.blocks.at(-1)!) : 0;
+    if (newest <= CODEX_WORKER_STDOUT_MAX_BYTES && newest + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) {
+      this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - newest);
+    }
     // W1-T13951: the 128-byte reserve is for the marker block finish() inserts between two blocks; a lone
     // block gets none, so a final message that fits the limit alone keeps every byte.
     const blockBudget = (this.blocks.length === 1 ? CODEX_WORKER_STDOUT_MAX_BYTES : budget) - bytes(this.errors);
@@ -2852,7 +2977,7 @@ class CodexJsonlAccumulator {
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
-      this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      this.pushError(`unparseable Codex event: ${line.slice(0, 160)}`, undefined);
       this.failed = true;
       return "malformed";
     }
@@ -2876,6 +3001,7 @@ class CodexJsonlAccumulator {
       const markerAt = cutMarker?.textAt;
       const placed = cutMarker !== undefined && markerAt !== undefined && text.startsWith(cutMarker.marker, markerAt);
       this.blocks.push(text);
+      this.blockRaw.push(rawStringValue(line, ["item", "text"]) ?? JSON.stringify(text).slice(1, -1));
       this.blockMarkers.push(placed ? [{ at: Buffer.byteLength(text.slice(0, markerAt)), len: Buffer.byteLength(cutMarker!.marker) }] : []);
       this.lastBlockTruncated = cutMarker !== undefined;
       if (cutMarker !== undefined) this.retainedTruncated = true;
@@ -2905,7 +3031,8 @@ class CodexJsonlAccumulator {
       this.failed = true;
       this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
-      this.errors.push(message);
+      this.pushError(message, typeof event.error?.message === "string"
+        ? rawStringValue(line, ["error", "message"]) ?? JSON.stringify(message).slice(1, -1) : undefined);
       this.keptBytes += Buffer.byteLength(message, "utf8");
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
