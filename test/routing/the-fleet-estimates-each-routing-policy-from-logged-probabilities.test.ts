@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { type ReviewCommandHost, runReview } from "#src/cli/commands/review.js";
+import { benchmarkNonDispatchSpawn } from "#src/lib/benchmark-run.js";
 import type { Config } from "#src/lib/config.js";
 import { OUTCOME_PROPENSITY_TRIM } from "#src/lib/knowledge-outcome.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
@@ -29,7 +30,6 @@ import {
   selectWorkerProvider,
   spawnDecisionPoint,
 } from "#src/lib/worker-provider.js";
-import { ledgeredNonDispatchSpawn } from "#src/run-task.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { buildMeasurementCadenceDaemonHooks } from "#test/helpers/run-task-test.js";
@@ -607,7 +607,8 @@ const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encodi
 function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
 
 /** The review lane run for real (`runReview`, src/cli/commands/review.ts) through to its reviewer. The reviewer's
- *  spawn is the production receipt writer, run-task.ts's `ledgeredNonDispatchSpawn("review")`, called with whatever
+ *  spawn is the production receipt writer, `benchmarkNonDispatchSpawn("review")` (all run-task.ts's
+ *  `ledgeredNonDispatchSpawn` does, and importing run-task.ts would widen the reach ratchet), called with whatever
  *  work `runReview` puts on the call; only the provider call under it is a fixture, routed by the production auction and
  *  returning a passing verdict. Returns the rows the writer ledgered, each `ts` pinned to `at(n)`. */
 async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">,
@@ -645,7 +646,7 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
       GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
       acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
       attributeWorkerStreamEvent: unexpected,
-      ledgeredNonDispatchSpawn: (lane) => ledgeredNonDispatchSpawn(lane, provider),
+      ledgeredNonDispatchSpawn: (lane) => benchmarkNonDispatchSpawn(lane, provider),
       lintPlanForReview: unexpected, liveWorkerRunIds: new Set<string>(), materializeReviewWorktree: unexpected,
       readHeadShaRest: () => HEAD, readMainPlanTreeSha: unexpected,
       realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
