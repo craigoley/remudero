@@ -1,0 +1,47 @@
+- id: W1-T13957
+  title: An open PR's escalation counts on its own task row even when the task's PR source is none
+  repo: remudero
+  depends_on: []
+  priority: 0.6
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#console-update-failed-2026-11-20
+  plan_refs: [W1-T130]
+  files:
+    - src/lib/inbox-board-referents.ts
+    - test/inbox/an-open-prs-escalation-counts-on-its-own-task-row.test.ts
+    - src/lib/status.ts # amended 2026-11-20 for PR 19888: ghGateway.listOpenHeadBranches carries the PR body
+  status: queued
+  attempts: 0
+  rationale: |
+    Live 2026-11-20 (status.json 12:07:39Z): W1-T13785 (#19691 OPEN) and W1-T13855 (#19728 OPEN) are blocked
+    with needsHuman true and MANUAL escalation issues, but their projection rows carry no prNumber/prState
+    (source "none"). The PR numbers appear only as overlap entries on other tasks. inboxBoardReferents knows
+    each PR only from the open-PR batch and sets {status: "open"} with no unhandledEscalations, so
+    resolveBoardReferent (src/lib/inbox.ts) reads board-review:escalation:#19691 and #19728 as
+    referentUnverified, and inboxClassificationEvidence (src/lib/panel-graph.ts) marks the whole core inbox
+    partial. This has been true since at least 2026-11-19 05:09Z.
+  design: |
+    When an open PR from the open-PR batch has no projection row of its own, but exactly one projection row is
+    that PR's own task (task id from the run-<taskId>-* head branch or the Remudero-Task trailer), take that
+    row's needsHuman as the escalation count. Ambiguous or contradictory evidence stays unreadable (the W1-T130
+    rule: cannot observe means wait). A PR seen only as an overlap entry on another task never takes that task's
+    needsHuman. UNVERIFIED: whether the open-PR batch carries headRefName; the builder confirms it and adjusts
+    the lookup key.
+
+    Scope amendment 2026-11-20 for PR 19888: files adds src/lib/status.ts. Review on 475b1fe1c found the
+    Inbox CLI's ghGateway.listOpenHeadBranches drops the PR body, so ownTaskIds reads every open PR's body as
+    unread on that path; one mapping line carries REST's body, as the batched gateway already does.
+
+    INVARIANT escalation-from-own-task: an open PR's escalation count comes only from a single unambiguous projection row for its own task; a missing or contradictory row stays unreadable.
+  acceptance:
+    - claim: invariant:escalation-from-own-task — an open PR whose only projection row is its own task row (source none, needsHuman true) resolves open with 1 unhandled escalation; two contradicting rows stay unreadable; an overlap-only PR never takes another task's needsHuman
+      proof: 'unit test: test/inbox/an-open-prs-escalation-counts-on-its-own-task-row.test.ts'
+    - claim: the test names each of the three cases for W1-T13957
+      proof: 'grep: W1-T13957 own task row in test/inbox/an-open-prs-escalation-counts-on-its-own-task-row.test.ts'
+  falsifier: |
+    Drop the own-task lookup: the first case must fail (the PR resolves with no escalation count).

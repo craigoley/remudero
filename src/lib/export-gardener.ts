@@ -301,9 +301,32 @@ const EXPORT_GARDEN_TEST_HEADER = `import assert from "node:assert/strict";\nimp
 /** The title of the test that proves `a`'s export is gone — also the PR's claim and its proof. */
 const goneTitle = (a: { file: string; name: string }) => `${a.name} is not exported from ${basename(a.file, ".ts")}`;
 
-function goneTest(a: { file: string; name: string }): string {
-  const rel = posix.relative(posix.dirname(EXPORT_GARDEN_TEST_FILE), a.file).replace(/\.ts$/, ".js");
-  const spec = rel.startsWith(".") ? rel : `./${rel}`;
+/** True when `root`'s package.json maps `#src/*` to `./src/*`: then a proof imports through that
+ *  alias, since test/a-test-imports-through-the-subpath-alias.test.ts (W1-T9864) refuses a new
+ *  location-relative specifier and the gardener's PRs went red on it (#19731). */
+function rootMapsSrcAlias(root: string): boolean {
+  return readSrcAliasMap(root).status === "mapped";
+}
+
+/** The parsed `imports["#src/*"]` reading of `root`'s package.json. A manifest that does not parse is `unparsed`, never
+ *  `mapped`: the proof then keeps its location-relative specifier, whatever text the broken file holds. */
+function readSrcAliasMap(root: string): { status: "mapped" | "unmapped" | "unparsed"; reason?: string } {
+  const text = readFileIfExists(join(root, "package.json"));
+  if (text === undefined) return { status: "unmapped", reason: "no package.json" };
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(text);
+  } catch (error) {
+    return { status: "unparsed", reason: error instanceof Error ? error.message : String(error) };
+  }
+  const imports = (manifest as { imports?: Record<string, unknown> } | null)?.imports;
+  return imports?.["#src/*"] === "./src/*" ? { status: "mapped" } : { status: "unmapped", reason: "no #src/* mapping to ./src/*" };
+}
+
+function goneTest(a: { file: string; name: string }, srcAlias: boolean): string {
+  const js = a.file.replace(/\.ts$/, ".js");
+  const rel = posix.relative(posix.dirname(EXPORT_GARDEN_TEST_FILE), js);
+  const spec = srcAlias && js.startsWith("src/") ? `#${js}` : rel.startsWith(".") ? rel : `./${rel}`;
   return `\ntest("${goneTitle(a)}", async () => {\n  const module = await import(${JSON.stringify(spec)});\n  assert.equal(Object.hasOwn(module, "${a.name}"), false);\n});\n`;
 }
 
@@ -319,6 +342,7 @@ export function applyExportDeletions(
 ): ExportGardenAction[] {
   const done: ExportGardenAction[] = [];
   const testsPath = join(root, EXPORT_GARDEN_TEST_FILE);
+  const srcAlias = rootMapsSrcAlias(root);
   for (const a of actions) {
     const path = join(root, a.file);
     const text = readFileIfExists(path);
@@ -340,7 +364,7 @@ export function applyExportDeletions(
       beforeRename: () => readFileIfExists(path) === text,
     });
     if (!replaced) continue;
-    const appended = atomicWrite(testsPath, `${base}${base.endsWith("\n") ? "" : "\n"}${goneTest(a)}`, {
+    const appended = atomicWrite(testsPath, `${base}${base.endsWith("\n") ? "" : "\n"}${goneTest(a, srcAlias)}`, {
       beforeRename: () => readFileIfExists(testsPath) === tests,
     });
     if (!appended) {

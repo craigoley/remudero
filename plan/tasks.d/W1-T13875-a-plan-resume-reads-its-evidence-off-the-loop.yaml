@@ -17,10 +17,12 @@
   files:
     - src/lib/product-plan-operation.ts
     - test/dispatch/product-plan-operation.test.ts
+    - src/lib/ledger-union.ts
+    - test/ledger-union.test.ts
   status: queued
   attempts: 0
   acceptance:
-    - claim: "A resume of a refused hand-off reads no ledger evidence and answers refused"
+    - claim: "A resume of a refused hand-off reads no ledger evidence and answers refused; a legacy refusal (saved before refusals said whether anything ran) reads only its request-to-refusal window, once, and keeps the result"
       proof: "grep: W1-T13875: a resume of a refused hand-off reads no ledger evidence in test/dispatch/product-plan-operation.test.ts"
     - claim: "invariant:bounded-read — an evidence read past its bound answers unknown (never refused or proposed) and releases the journal lock"
       kind: guard
@@ -40,7 +42,10 @@
     INVARIANT bounded-read: an operation's evidence read takes at most PRODUCT_PLAN_LEDGER_READ_BOUND_MS (15 s), and a
     read past it answers no evidence (state unknown), so the journal lock is released.
     1. ledger() is async: no read for a refused hand-off that is not in flight; otherwise readLedgerUnionRawLinesAsync
-       (it yields between slices) raced with the bound.
+       (it yields between slices) raced with the bound. AMENDED 2026-11-20 (review of #19763): the old gateway also saved
+       a nonzero child exit, after a PR opened, as "refused", so a legacy refusal cannot skip its read without hiding
+       that proposal. A refusal saved by the fix is marked when nothing ran and reads nothing. A legacy refusal reads
+       only its request-to-refusal window (untilTs), once, and its result is kept.
     2. Final evidence (a proposal, an exit or a failure) is kept per operation, so it is read once.
     3. propose reads each record's evidence once and derives every observation from it (observeWith).
   falsifier: |

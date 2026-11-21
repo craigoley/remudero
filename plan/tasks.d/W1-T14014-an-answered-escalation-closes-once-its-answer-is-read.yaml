@@ -1,0 +1,54 @@
+- id: W1-T14014
+  title: An escalation the operator answered closes once the fleet has read the answer, and the judge budget goes to the oldest issues first
+  repo: remudero
+  depends_on: []
+  priority: 1.5
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 12.00
+  risk: medium # widens when the issue-revalidation garden may close an issue; every existing guard stays
+  origin: "operator-session#pr-backlog-round5-2026-11-20"
+  plan_refs:
+    - W1-T8864
+    - W1-T13220
+  files:
+    - src/lib/issue-revalidation-garden.ts
+    - test/gardeners/an-answered-escalation-closes-once-its-answer-is-read.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "An open MANUAL or GRILL escalation whose newest comment is the owner's answer, and whose answer the fleet has recorded as read, gets the action close with that answer as its citation"
+      proof: "grep: W1-T14014 criterion 1: in test/gardeners/an-answered-escalation-closes-once-its-answer-is-read.test.ts"
+    - claim: "When more issues need a judge than MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS allows, the judge slots go to the issues judged longest ago, or never"
+      proof: "grep: W1-T14014 criterion 2: in test/gardeners/an-answered-escalation-closes-once-its-answer-is-read.test.ts"
+    - claim: "invariant:unread-answer-keeps — an owner comment the fleet has not recorded as read still keeps the issue under the newer-operator-comment guard"
+      kind: guard
+      proof: "grep: W1-T14014 criterion 3: in test/gardeners/an-answered-escalation-closes-once-its-answer-is-read.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 on GitHub: seven GRILL escalations (#18953, #18961, #18988, #19078, #18911, #18935, #18944)
+    carried the owner's answer from 2026-11-17 and were still open three days later, until a hand sweep closed them.
+    Six more GRILL issues repeated a question already answered on three of those.
+    OBSERVED 2026-11-20 (host ledger, read only, 72 h): 37 issue_revalidation.pass rows, about 189 issues seen and 10
+    judged per pass, 6 closes. Of 5,999 verdict rows, 4,615 read "judge cap reached this pass; judged on a later pass".
+    Resolved verdicts kept: absence-only-citation 111, operator-owned-class 63, condition-reobserved 32.
+    OBSERVED at origin/main ca83732bd, src/lib/issue-revalidation-garden.ts:
+    - `decideAction` keeps any issue whose newest comment is an operator's ("newer-operator-comment"), and an
+      OPERATOR_OWNED_CLASSES issue (MANUAL, GRILL) only refreshes unless a fleet-observation rule resolved it.
+    - The pass walks issues in their listed order and gives a judge to the first ones not cached, up to the cap.
+    INFERRED: an answered escalation therefore never closes. The answer stays the newest comment, and the class is
+    operator-owned.
+  design: |
+    INVARIANT unread-answer-keeps: only an answer the fleet has recorded as read can close an issue.
+    1. Read how src/lib/escalation-answers.ts records that it consumed an owner answer for an escalation. Add a
+       deterministic rule beside terminalPrResolution: an issue whose newest operator comment is that consumed answer
+       resolves, citing the answer. It runs before the judge cap, like the terminal-referent rules.
+    2. Let that rule close an operator-owned class, as the stage-stall and terminal-referent rules may for MANUAL.
+    3. Order the issues that need a judge by their last judgement time, oldest first, never-judged first of all.
+    Keep maxClosesPerPass, the reobserved window and every other guard.
+  falsifier: |
+    Without rule 1, criterion 1's answered GRILL keeps "newer-operator-comment". Without step 3, criterion 2's oldest
+    issue stays "judge cap reached".
+  note: |
+    Id reserved for run-unfiled-1795190000000 with rmd next-task-id on the host.

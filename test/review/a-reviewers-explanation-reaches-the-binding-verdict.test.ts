@@ -65,7 +65,7 @@ async function fixture(t: TestContext, text: string, prior?: "same" | "old-engin
 }
 
 test("an explained semantic failure reaches the real binding verdict after a mechanical proof passes", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`);
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`);
   assert.equal(r.verdict.floorState, "success");
   assert.equal(r.verdict.criteria[0]?.proof_exec, "executed_pass");
   assert.equal(r.verdict.state, "failure");
@@ -74,20 +74,20 @@ test("an explained semantic failure reaches the real binding verdict after a mec
 });
 
 test("an older review engine cannot suppress a newly explained failure on the same head", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "old-engine");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "old-engine");
   assert.equal(r.verdict.state, "failure");
   assert.equal(r.arms, 0);
   assert.equal(r.rows.some(row => row.step === "review.downgrade_suppressed"), false);
 });
 
 test("an unreadable prior review contract cannot certify unchanged review input", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "unreadable");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "unreadable");
   assert.equal(r.verdict.state, "failure");
   assert.equal(r.arms, 0);
 });
 
 test("the existing stability rule still suppresses semantic noise on the same known contract", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "same");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "same");
   assert.equal(r.verdict.state, "success");
   assert.equal(r.rows.some(row => row.step === "review.downgrade_suppressed"), true);
 });
@@ -95,7 +95,10 @@ test("the existing stability rule still suppresses semantic noise on the same kn
 test("a bare semantic failure retains the existing mechanical-proof rule", async t => {
   const r = await fixture(t, "REVIEW_VERDICT 1: FAIL");
   assert.equal(r.verdict.state, "success");
+  assert.equal(r.verdict.criteria[0]?.proof_exec, "executed_pass");
   assert.ok(r.verdict.criteria[0]?.reason.includes("FAIL line named no reason"));
+  assert.equal(r.rows.some(row => row.step === "review.semantic_incomplete"), false);
+  assert.equal(r.rows.find(row => row.step === "review.posted")?.fields.state, "success");
 });
 
 test("a semantic pass does not add a failure clause", async t => {
@@ -106,19 +109,19 @@ test("a semantic pass does not add a failure clause", async t => {
 
 
 test("a changed body cannot borrow the prior body's semantic-stability protection", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "old-body");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "old-body");
   assert.equal(r.verdict.state, "failure");
   assert.equal(r.arms, 0);
 });
 
 test("a changed task contract cannot borrow the prior contract's semantic-stability protection", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "old-contract");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "old-contract");
   assert.equal(r.verdict.state, "failure");
   assert.equal(r.arms, 0);
 });
 
 test("an unreadable prior input identity cannot certify an unchanged body", async t => {
-  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL — ${explanation}`, "unreadable-input");
+  const r = await fixture(t, `REVIEW_VERDICT 1: FAIL (c) — ${explanation}`, "unreadable-input");
   assert.equal(r.verdict.state, "failure");
   assert.equal(r.arms, 0);
 });
