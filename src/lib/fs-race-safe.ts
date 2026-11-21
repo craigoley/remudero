@@ -4,6 +4,7 @@ import fs, { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, r
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { getEnvironmentData, isMainThread, setEnvironmentData } from "node:worker_threads";
 import { systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { sameHost } from "./host-identity.js";
@@ -416,20 +417,61 @@ export interface ProcessStartTimeSyscalls {
 
 const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync, platform: process.platform };
 
-/** The production seam resolves CLK_TCK once per process. Cache failures to bound the lookup to one spawn. */
+const CLOCK_RATE_KEY = "remudero.processStartTime.clockTicks";
+const CLOCK_RATE_UNSET = 0n;
+const CLOCK_RATE_FAILED = -1n;
+// The daemon's synchronous process probes have stalled for over eight seconds under load.
+const CLOCK_RATE_LOOKUP_GRACE_NS = 10_000_000_000n;
+
+function inheritClockRateCache(): BigInt64Array | undefined {
+  if (process.platform !== "linux") return undefined;
+  const inherited = getEnvironmentData(CLOCK_RATE_KEY);
+  if (inherited instanceof SharedArrayBuffer) return new BigInt64Array(inherited);
+  if (!isMainThread) return undefined;
+  const buffer = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT);
+  setEnvironmentData(CLOCK_RATE_KEY, buffer);
+  return new BigInt64Array(buffer);
+}
+
+// Serve loads this module before starting the board worker. Each replacement inherits the same
+// backing memory, and the first valid holder record triggers the lookup in whichever thread reads it.
+const processClockRate = inheritClockRateCache();
 const clockTicksBySeam = new WeakMap<ProcessStartTimeSyscalls, number | null>();
 
-function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, readClockRate: () => string): number | null {
-  const cached = clockTicksBySeam.get(sysImpl);
-  if (cached !== undefined) return cached;
-  let hz: number;
+function readClockTicks(readClockRate: () => string): number | null {
   try {
     const raw = readClockRate().trim();
-    hz = /^\d+$/.test(raw) ? Number(raw) : NaN;
+    const hz = /^\d+$/.test(raw) ? Number(raw) : NaN;
+    return Number.isSafeInteger(hz) && hz > 0 ? hz : null;
   } catch {
-    hz = NaN; // getconf failed, so future lookups rely on the portable ps probe.
+    return null; // getconf failed, so future lookups rely on the portable ps probe.
   }
-  const value = Number.isSafeInteger(hz) && hz > 0 ? hz : null;
+}
+
+function sharedClockTicks(cache: BigInt64Array, readClockRate: () => string): number | null | undefined {
+  let ticks = Atomics.load(cache, 0);
+  if (ticks === CLOCK_RATE_UNSET) {
+    // Store the negative monotonic deadline together with the claim so a terminating worker cannot
+    // leave a claim without an expiry. Only the thread that claimed the slot runs getconf.
+    const pending = -(process.hrtime.bigint() + CLOCK_RATE_LOOKUP_GRACE_NS);
+    ticks = Atomics.compareExchange(cache, 0, CLOCK_RATE_UNSET, pending);
+    if (ticks === CLOCK_RATE_UNSET) {
+      const rate = readClockTicks(readClockRate);
+      Atomics.store(cache, 0, rate === null ? CLOCK_RATE_FAILED : BigInt(rate));
+      return rate;
+    }
+  }
+  // While the lookup is in flight, give no start evidence without blocking or spawning ps. If the
+  // initializer exits before publishing, the expired claim takes the portable fallback.
+  if (ticks < CLOCK_RATE_FAILED && process.hrtime.bigint() < -ticks) return undefined;
+  return ticks > 0n ? Number(ticks) : null;
+}
+
+function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, readClockRate: () => string): number | null | undefined {
+  if (sysImpl === defaultProcessStartTimeSyscalls && processClockRate) return sharedClockTicks(processClockRate, readClockRate);
+  const cached = clockTicksBySeam.get(sysImpl);
+  if (cached !== undefined) return cached;
+  const value = readClockTicks(readClockRate);
   clockTicksBySeam.set(sysImpl, value);
   return value;
 }
@@ -516,6 +558,7 @@ export function defaultGetProcessStartTime(
     if (fields === null) return null;
     if (fields !== undefined) {
       const hz = clockTicksPerSecond(sysImpl, () => run("getconf", ["CLK_TCK"]));
+      if (hz === undefined) return null; // Another thread is resolving the clock rate.
       // Whole-second btime can put the answer up to 1 s before the true start.
       const startMs = hz === null ? NaN : fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
       // A start after now or before boot is a misread record, not a process: ask ps.

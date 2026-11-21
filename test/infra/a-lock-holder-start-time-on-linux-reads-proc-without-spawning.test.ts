@@ -1,10 +1,9 @@
 // W1-T11457: on Linux a lock holder's start time comes from /proc, not from a `ps` forked off the daemon.
-// The Mac has no /proc, so every Linux case drives defaultGetProcessStartTime through its
-// ProcessStartTimeSyscalls seam with pinned fixture text; CI on Linux is the first run against a real kernel
-// (the last test below, skipped elsewhere).
+// Use pinned procfs fixtures for parser cases on any platform and the real kernel for the Linux worker proof.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
+import { Worker } from "node:worker_threads";
 import { defaultGetProcessStartTime, isHolderStale, type ProcessStartTimeSyscalls } from "#src/lib/fs-race-safe.js";
 
 const PID = 4242;
@@ -318,6 +317,73 @@ test("W1-T11457 criterion 2: a failed CLK_TCK lookup falls back to ps and getcon
     const psCall = ["ps", PS_ARGS, { encoding: "utf8" }];
     assert.deepEqual(execCalls, [GETCONF_CALL, psCall, psCall], String(clkTck));
   }
+});
+
+test("W1-T11457 criterion 1: successive Linux workers in one process spawn getconf only once", {
+  skip: process.platform !== "linux",
+  timeout: 15_000,
+}, async (t) => {
+  type Probe = { pid: number; start: number | null; missing: number | null; spawns: string[] };
+  const runWorker = (duringLookup?: () => void) => new Promise<Probe>((resolve, reject) => {
+    const gate = duringLookup ? new Int32Array(new SharedArrayBuffer(4)) : undefined;
+    const worker = new Worker(`
+      const cp = require("node:child_process");
+      const { syncBuiltinESMExports } = require("node:module");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const spawns = [];
+      const exec = cp.execFileSync;
+      cp.execFileSync = (file, args, ...options) => {
+        spawns.push([file, ...args].join(" "));
+        if (file === "getconf" && workerData) {
+          parentPort.postMessage("clock lookup in progress");
+          if (Atomics.wait(workerData, 0, 0, 5000) === "timed-out") throw new Error("parent did not resume the lookup");
+        }
+        return exec(file, args, ...options);
+      };
+      syncBuiltinESMExports();
+      import("tsx/esm/api").then(async ({ register }) => {
+        register();
+        const { defaultGetProcessStartTime } = await import("#src/lib/fs-race-safe.js");
+        const start = defaultGetProcessStartTime(process.pid);
+        const missing = defaultGetProcessStartTime(2 ** 31 - 1);
+        parentPort.postMessage({ pid: process.pid, start, missing, spawns });
+      });
+    `, { eval: true, execArgv: [], workerData: gate });
+    t.after(async () => { await worker.terminate(); });
+    let result: Probe | undefined;
+    worker.on("message", (message) => {
+      if (message === "clock lookup in progress" && gate && duringLookup) {
+        try {
+          duringLookup();
+        } catch (error) {
+          reject(error);
+        } finally {
+          Atomics.store(gate, 0, 1);
+          Atomics.notify(gate, 0);
+        }
+      } else {
+        result = message;
+      }
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (code === 0 && result !== undefined) resolve(result);
+      else reject(new Error(`holder probe worker exited with ${code} without a successful probe`));
+    });
+  });
+
+  let concurrentStart: number | null | undefined;
+  const first = await runWorker(() => { concurrentStart = defaultGetProcessStartTime(process.pid); });
+  const replacement = await runWorker();
+  assert.equal(first.pid, process.pid);
+  assert.equal(replacement.pid, first.pid);
+  assert.ok(typeof first.start === "number" && first.start <= Date.now());
+  assert.equal(replacement.start, first.start);
+  assert.equal(first.missing, null);
+  assert.equal(replacement.missing, null);
+  assert.deepEqual(first.spawns, ["getconf CLK_TCK"]);
+  assert.deepEqual(replacement.spawns, [], "the replacement reads the holder with zero child processes");
+  assert.equal(concurrentStart, null, "a concurrent probe defers start-time judgment until the lookup finishes");
 });
 
 test("W1-T11457: the real default seam judges this live test process its own current holder", () => {
