@@ -9004,40 +9004,34 @@ export function buildProofAmendmentGitOps(git: (worktreePath: string, args: stri
   };
 }
 
-async function buildFixScopeAmendmentWritePorts(
+function requestFixScopeAmendment(
+  request: ScopeAmendmentRequest,
   ...[params, io]: Parameters<typeof buildProofAmendmentWritePorts>
-): Promise<ProofAmendmentWritePorts> {
-  const { worktreePath, taskId } = params;
-  if (io?.findShardFn || /^PR-\d+$/.test(taskId)) return buildProofAmendmentWritePorts(params, io);
+): ScopeAmendmentOutcome {
+  const ports = buildProofAmendmentWritePorts(params, io);
+  if (io?.findShardFn || /^PR-\d+$/.test(request.taskId)) return requestScopeAmendment(request, ports);
 
-  // Read the same base the amendment worktree starts from. Defer read errors until the
-  // writer needs the shard so it can still resume an existing amendment by identity.
-  const [observed] = await Promise.allSettled([findScopeAmendmentBaseShard(worktreePath, taskId)]);
-  return buildProofAmendmentWritePorts(params, {
-    ...io,
-    findShardFn: (dir, id) => {
-      if (dir !== worktreePath) return findTaskShard(dir, id);
-      if (observed.status === "rejected") throw observed.reason;
-      return observed.value;
-    },
-  });
-}
-
-async function findScopeAmendmentBaseShard(repoDir: string, taskId: string): Promise<ReturnType<typeof findTaskShard>> {
-  const base = (await hostWorktreeGitAsync(repoDir, ["rev-parse", "--verify", "refs/remotes/origin/main"])).trim();
-  const repoPath = (path: string) => relative(repoDir, path).split(sep).join("/");
-  const readOptionalBlob = async (path: string) => {
-    const result = await hostWorktreeGitAnswerAsync(repoDir, ["show", `${base}:${path}`]);
-    return result.status === 0 ? result.stdout : undefined;
-  };
-  const override = await readOptionalBlob(".remudero/layout.json");
-  const layout = resolveRepoLayout(repoDir, () => override);
-  const listing = await hostWorktreeGitAsync(repoDir, shardListingArgs(base, repoPath(join(layout.planDir, "tasks.d"))));
-  const shard = shardPathsFromListing(listing).find((path) => isTaskShardName(basename(path), taskId));
-  if (shard !== undefined) return { path: shard, text: await hostWorktreeGitAsync(repoDir, ["show", `${base}:${shard}`]) };
-  const path = repoPath(layout.planMonolith);
-  const text = await readOptionalBlob(path);
-  return text?.includes(`id: ${taskId}\n`) ? { path, text } : undefined;
+  const checkout = `${ports.worktreePathFor(request.taskId, request.prNumber)}-${randomUUID()}`;
+  try {
+    return requestScopeAmendment(request, {
+      ...ports,
+      // The writer probes after validating the ask and checking its ledger identity.
+      // Cut the tree here so the shard read sees the main revision worktreeAdd just fetched.
+      probeExisting: (branch) => {
+        const existing = ports.probeExisting(branch);
+        if (existing) return existing;
+        ports.worktreeAdd(ports.repoDir, checkout, branch);
+        return undefined;
+      },
+      findShard: (_dir, id) => ports.findShard(checkout, id),
+      worktreePathFor: () => checkout,
+      worktreeAdd: () => {},
+      worktreeRemove: () => {},
+    });
+  } finally {
+    // A shard can be refused before the writer reaches its own cleanup block.
+    if (existsSync(checkout)) ports.worktreeRemove(ports.repoDir, checkout);
+  }
 }
 
 /**
@@ -46416,7 +46410,7 @@ export function fixCommandHost(): FixCommandHost {
     get buildImportClosureRead() { return buildImportClosureRead; },
     get buildProofAmendmentGitOps() { return buildProofAmendmentGitOps; },
     get buildProofAmendmentWritePorts() { return buildProofAmendmentWritePorts; },
-    get buildFixScopeAmendmentWritePorts() { return buildFixScopeAmendmentWritePorts; },
+    get requestFixScopeAmendment() { return requestFixScopeAmendment; },
     get buildSweepEffects() { return buildSweepEffects; },
     get checkFixCensusSnapshotAsync() { return checkFixCensusSnapshotAsync; },
     get readInheritedCensusContextAsync() { return readInheritedCensusContextAsync; },
