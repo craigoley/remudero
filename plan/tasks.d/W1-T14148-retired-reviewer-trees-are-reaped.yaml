@@ -1,0 +1,162 @@
+- id: W1-T14148
+  title: "Reviewer trees under engines/worktrees are removed once origin/main has moved past them and no live lease holds them, and each pass ledgers the bytes it freed"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it removes git worktrees on every daemon tick and spans the lease module, a new reaper and the daemon wiring; a wrong keep rule would remove a tree a live review runs in
+  origin: "operator-session#reviewer-tree-disk-2026-11-21"
+  plan_refs:
+    - W1-T3723
+    - W1-T14066
+    - W1-T14067
+    - W1-T13897
+    - W1-T13222
+    - W1-T3378
+  files:
+    - src/lib/reviewer-tree-reaper.ts
+    - src/lib/reviewer-worktree-lease.ts
+    - src/cli/commands/daemon.ts
+    - test/review/retired-reviewer-trees-are-reaped.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:never-reap-a-leased-tree — a reviewer tree at an old sha, idle past the grace, whose <path>.lock names a live pid of another process (a spawned child) is kept with reason \"leased\" and still exists after the pass; the same holds for a tree this process is borrowing through withReviewerWorktreeLease when the pass runs inside the borrow's action"
+      kind: guard
+      proof: "grep: W1-T14148 criterion 1: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "A reviewer-<sha12> tree at a sha that is not origin/main, with no lock and a root mtime older than the grace, is removed through git: the directory is gone, `git worktree list --porcelain` no longer lists it, and one reviewer_tree.reaped ledger row names it in removed[] with its bytes, and bytes_freed equals the sum of removed[].bytes and is greater than 0"
+      proof: "grep: W1-T14148 criterion 2: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "A tree whose sha12 matches origin/main of the repository that registers it is kept with reason \"current-main\" however old it is"
+      proof: "grep: W1-T14148 criterion 3: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "A tree at an old sha whose root mtime is newer than the grace (DEFAULT_WORKTREE_REAP_GRACE_MS, from plan/policy.yaml worktreeReapGraceMs) is kept with reason \"recent-activity\""
+      proof: "grep: W1-T14148 criterion 4: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "A tree whose lock is unparseable is kept with reason \"lease-unknown\", and the pass writes a reviewer_tree.reaped row naming it in kept[] even though nothing was removed"
+      kind: guard
+      proof: "grep: W1-T14148 criterion 5: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "A per-attempt tree named reviewer-<sha12>-<pid>-<8hex> (W1-T14066) at an old sha, unleased and idle past the grace, is removed too; a directory whose name matches neither shape (reviewer-notes, approve-<sha12>-1-abcdef12) and any .lock file are left untouched"
+      proof: "grep: W1-T14148 criterion 6: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "invariant:removal-holds-the-lease — while the pass removes a tree (its remove port held open on an unresolved promise), withReviewerWorktreeLease on that path throws ReviewerWorktreeLeasedError and never runs its action; once the pass settles the tree's .lock file is gone"
+      kind: guard
+      proof: "grep: W1-T14148 criterion 7: in test/review/retired-reviewer-trees-are-reaped.test.ts"
+    - claim: "The daemon tick runs the pass: the sweepStrandedReviewWorktrees closure in src/cli/commands/daemon.ts awaits reapRetiredReviewerTreesAsync(config, log) after sweepStrandedReviewWorktreesAsync"
+      proof: "grep: reapRetiredReviewerTreesAsync(config, log) in src/cli/commands/daemon.ts"
+    - claim: The lease module exports the removal guard the reaper uses
+      proof: "grep: export async function removeUnderReviewerLease in src/lib/reviewer-worktree-lease.ts"
+  rationale: |
+    WHY: every stale-code review cuts a reviewer tree at the origin/main sha of that moment, and
+    nothing ever removes it. The trees pile up on the state volume, one per main sha that saw a
+    stale-code review. This frees DISK. It does not free the memory headroom the fix admission
+    reads (see MEMORY below); that is named here so nobody expects it to.
+    OBSERVED, read-only, Azure host, 2026-11-21 12:46-12:52Z:
+    - ~/rmd-state2/state/engines/worktrees (the daemon's /home/node/Remudero/state/engines/worktrees)
+      holds 25 trees, all reviewer-<sha12>, no per-attempt trees and no .lock files. 4.3 GB in all
+      (du --apparent-size), 166-180 MB each (plan/ 51 MB, test/ 80 MB, src/ 29 MB). Ages 3 h to
+      112 h. None is at origin/main (dd829e355cf8). 16 are registered by the daemon checkout
+      (rmd-state2/remudero/.git/worktrees), 9 by rmd-state2/repos/remudero. An earlier count was
+      45 trees and about 12 GB.
+    - The volume is /dev/nvme0n2p1 (ext4, 126 GB, 85% used, 19 GB free). The trees are files on
+      disk, not tmpfs: Shmem is 3 MB and no tmpfs holds more than 1.8 MB.
+    - Exits of fresh-tree reviews (review.ran_from_fresh_tree, 57 rows 2026-11-19T14:05Z to
+      2026-11-21T09:31Z): 31 exit 0; exit 1 is 13 verdict-failure, 2 verdict-pending, 1
+      threw-in-review; exit 2 is 7 closed-before-review, 3 verdict-not-posted. Those are review
+      outcomes (src/cli/commands/review.ts:2826-2875 maps a posted FAIL to 1 and a withheld verdict
+      to 2), not tree faults; no row names WorktreePointerRefusedError, ENOENT or a fetch failure.
+      The tree faults are in review.skipped_stale_reviewer_code: 101 "reviewer worktree is leased
+      by another owner" (the last at 09h, before W1-T14066 merged at 09:10Z and deployed) and 9
+      "not an exact clean detached checkout". W1-T14066 and W1-T14067 own those; this task does not.
+    CAUSE, in code on origin/main (dd829e355):
+    - src/run-task.ts:2061 buildFreshTreeReviewRunner calls prepareFreshOriginMainTree
+      (src/run-task.ts:2172), which cuts <worktreeRoot>/reviewer-<sha12> and keeps it for reuse.
+      worktreeRoot is join(root, "..", "worktrees") (src/run-task.ts:46019), and root is the engine
+      tree <state>/engines/<hash>, so the trees land in <state>/engines/worktrees. Only the
+      per-attempt trees are removed when they settle (removePerAttemptTree, src/run-task.ts:2192,
+      called by inPerAttemptTree, :2202); a failed removal says "left ... for the worktree reaper".
+    - No reaper reads that directory. runWorktreeReapRung (src/lib/worker.ts:7853) reaps only
+      worktreesDir(config) = join(config.root, "worktrees") (src/lib/worker.ts:5178, :7863).
+      sweepStrandedReviewWorktreesAsync (src/lib/review-worktree-reclaim.ts:129) only reads
+      review-PR* under worktreesDir. The engine prune (src/lib/engine-tree.ts:657-661) only removes
+      engines/<64-hex> and engines/.build-* names (src/lib/engine-paths.ts:9-11), so "worktrees" is
+      never touched. W1-T13222 only left the directory out of the state backup.
+    - The lease (src/lib/reviewer-worktree-lease.ts:44-67 claim, :70-104 withReviewerWorktreeLease)
+      is the one live-use signal: <path>.lock with pid, host, startedAt and run_id, stale by
+      isHolderStale; in-process borrows share one claim through the borrowers map.
+    MEMORY (what blocks fix dispatch, measured the same minutes):
+    - The refusal "live host capacity exhausted for this light pass (headroom ...)" is written at
+      src/lib/sweep.ts:21057. Its headroom is pressure.availableMib - pressure.floorMib
+      (src/lib/sweep.ts:20924) of the binding pool from readFixHostPressureOnce
+      (src/lib/sweep.ts:20631-20664): the smaller of host MemAvailable less the floor and the
+      daemon container's min(memory.high, memory.max) less its working set (memory.current less
+      inactive_file, readContainerMemoryHeadroom, src/lib/host-memory-shadow.ts:1701).
+    - Host: MemAvailable 4.0 GiB of 31.3 GiB, AnonPages 25 GiB, page cache 2.4 GiB, load 223 on
+      8 cores. Daemon container: memory.current 22.7 GB, anon 21.8 GB, file 0 (no page cache at
+      all), memory.high 15.6 GiB. So the trees hold no memory headroom: their pages are not even
+      cached, and reclaimable page cache is already outside the working set.
+    - The memory is live work: 22 open reservations in test-slots/host-memory (7 fix at 6492 MiB
+      each, 8 test at 2496, 5 review at about 1710, 2 garden), and four fix-worker `tsc --noEmit
+      --incremental` runs in sweep-W1-T* trees at 1.6, 2.7, 3.3 and 3.7 GB RSS. The latest refusals
+      read "headroom 4659 MiB over the floor ... a fix needs 6492 MiB (measured; typical 960)":
+      admission is refusing because live fixes hold the memory, as designed. Not in this task.
+  design: |
+    INVARIANT never-reap-a-leased-tree: a reviewer tree that a live lease holder (another process, or a borrow in this process) holds is never removed.
+    INVARIANT removal-holds-the-lease: the reaper removes a tree only while it holds that tree's lease itself, so a review that arrives mid-removal is refused the shared tree and cuts its own (W1-T14066) instead of running in a half-removed one.
+    POLICY, from live state only (no count, size or age ceiling of its own): keep the tree at the
+    registering repository's origin/main, keep every leased tree, keep a tree touched within the
+    existing worktree-reaper grace, remove the rest. No new constant, env var or config key.
+    1. src/lib/reviewer-worktree-lease.ts: export
+       removeUnderReviewerLease(worktree, remove: () => Promise<void>): Promise<"removed" | "leased">.
+       It returns "leased" when borrowers holds resolve(worktree); otherwise it calls claim() (a
+       ReviewerWorktreeLeasedError means "leased"; a corrupt lock rethrows), awaits remove(), and
+       then removes only its own claim with reclaimStaleLock (the own-run predicate the release in
+       withReviewerWorktreeLease uses), in finally. It does not call assertDirectory after remove.
+    2. src/lib/reviewer-tree-reaper.ts (new): export reapRetiredReviewerTreesAsync(config, log,
+       opts = {}) with injectable ports (listEntries, readOriginMain(repoDir), removeWorktree
+       defaulting to worktreeRemoveAsync from worker.ts, clock, graceMs defaulting to
+       DEFAULT_WORKTREE_REAP_GRACE_MS). Root: join(engineTreesRoot(join(config.root, "state")),
+       "worktrees"); a missing root is an empty pass. Candidates are directories named
+       /^reviewer-[0-9a-f]{12}(-\d+-[0-9a-f]{8})?$/; nothing else is read. For each one:
+       - read "<tree>/.git" ("gitdir: X"); X missing or unparseable keeps "unregistered". The
+         registering repo is the common dir of X (X/../..). Read its origin/main once per pass per
+         repo; unreadable keeps "main-unreadable".
+       - sha12 equal to that origin/main's first 12 hex keeps "current-main".
+       - root mtime (lstat) newer than now - graceMs keeps "recent-activity".
+       - otherwise measure its bytes (async walk with lstat, never following symlinks, summing
+         blocks * 512, so the node_modules link is not counted) and call
+         removeUnderReviewerLease(tree, () => removeWorktree(repoDir, tree)). "leased" keeps
+         "leased"; a throw keeps "lease-unknown" when the lock is unparseable, else
+         "removal-failed", and the pass goes on.
+       One pass at a time in a process (a module-level in-flight promise is returned to a second
+       caller). Ledger, through the log the daemon passes: step reviewer_tree.reaped with root,
+       removed [{name, bytes}], bytes_freed, kept [{name, reason}], written when anything was
+       removed or any keep reason is not current-main, leased or recent-activity.
+    3. src/cli/commands/daemon.ts:2574: the sweepStrandedReviewWorktrees closure awaits
+       sweepStrandedReviewWorktreesAsync(config, log) and then reapRetiredReviewerTreesAsync(config,
+       log). No new DaemonDeps hook; the tick already calls this closure every daemon tick.
+    4. Tests: test/review/retired-reviewer-trees-are-reaped.test.ts, titled "W1-T14148 criterion N:
+       ...". Each builds a real scratch repo with two commits and an origin remote, a config whose
+       root is a scratch dir, and real detached worktrees cut with git under
+       <root>/state/engines/worktrees; ages are set with utimesSync. The leased case writes a
+       reviewer-worktree-lease-v1 lock naming a spawned `sleep` child's pid. Import only the two
+       src/lib modules (not src/run-task.ts: the affected-suite reach ratchet). Run as
+       `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`; never point a test
+       at the real state dir.
+  falsifier: |
+    At origin/main nothing reads engines/worktrees: criterion 2's old tree is still there. Skip
+    the lease check: criterion 1's live-pid tree is removed. Check the lease but remove outside the
+    claim: criterion 7's withReviewerWorktreeLease runs its action. Compare with the daemon's own
+    loaded code sha instead of the registering repo's origin/main: criterion 3's tree is removed.
+    Leave out the grace: criterion 4's fresh tree is removed. Treat an unparseable lock as free:
+    criterion 5's tree is removed. Match only reviewer-<sha12>: criterion 6's per-attempt tree
+    stays. Wire the function only in a test: criterion 8's grep finds no call in daemon.ts.
+  note: |
+    Id reserved for run-unfiled-1795265250918 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: load test/setup/tmp-hygiene.ts in every test run; never delete a real tree to try it.
+    W1-T14067 (queued) also edits src/lib/reviewer-worktree-lease.ts; this task only adds an export.
+    Not in scope: the fix-admission memory estimate and fix-worker typecheck memory (MEMORY in the
+    rationale), review exits, review-PR* and approve-* trees under worktreesDir (their own reapers).
+    After deploy, check on the Azure host: within one daemon tick
+    ~/rmd-state2/state/engines/worktrees holds only the tree at origin/main plus leased ones, and
+    the ledger has a reviewer_tree.reaped row whose bytes_freed is about 4 GB.

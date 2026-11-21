@@ -16,6 +16,7 @@ import { prepareWorkerNativeCache } from "./worker-native-cache.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Worker } from "node:worker_threads";
 import {
   verifyCapabilityGrant,
@@ -169,8 +170,9 @@ interface CodexWorkerResult {
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number };
   tokenUsageState: "observed" | "partial" | "unavailable";
   modelUsage: Record<string, never>;
-  /** W1-T4650: always `null` — see {@link CODEX_SERVED_MODEL_REASON}, which says why. */
-  servedModel?: null;
+  /** W1-T13868: the model codex says the server rerouted every turn to, else `null` beside a named reason
+   * (see {@link codexServedModel}). Never the `--model` request echoed back. */
+  servedModel?: string | null;
   servedModelReason?: string;
   compactionEvents: [];
   compactionFailures: [];
@@ -2278,13 +2280,123 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
 export const CODEX_SERVED_MODEL_REASON =
   "codex exec --json names no model: its thread, turn and item events carry no model id";
 
+/**
+ * W1-T13868: THE ONE PLACE `codex exec --json` NAMES A SERVED MODEL. Verified against the codex-rs source at
+ * tag rust-v0.152.0 (the pinned CLI): the client reads the server's `openai-model` response header
+ * (codex-api/src/sse/responses.rs) and, ONLY when it differs from the requested model, emits ModelReroute, which
+ * exec projects as `item.completed` with `item: { type: "error", message: "model rerouted: <from> -> <to> (<reason>)" }`
+ * (exec/src/event_processor_with_jsonl_output.rs). At most one per turn. A match is logged, never streamed, so
+ * no reroute is NOT proof the request was served: it stays {@link CODEX_SERVED_MODEL_REASON}.
+ */
+export const CODEX_REROUTE_RE = /^model rerouted: (\S+) -> (\S+) \(/;
+/** Bounded like every retained codex field: a turn reroutes at most once, so more than this is not a real stream. */
+const CODEX_REROUTES_KEPT = 64;
+
+/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Any model name the stream
+ * reported is recorded: the latest one, which served the turn that produced the attempt's final answer. With none,
+ * `null` with {@link CODEX_SERVED_MODEL_REASON}, never the requested model. */
+export function codexServedModel(reroutes: readonly string[]): { servedModel: string | null; servedModelReason?: string } {
+  const latest = reroutes.at(-1);
+  return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
+}
+
+type ObservedServedModel = { servedModel: string | null; servedModelReason?: string };
+const observedServedModels = new WeakMap<object, ObservedServedModel>();
+/** W1-T13868: one call's own observations. A caller's abort reason can be ONE error shared by many calls (one signal,
+ * many calls), so an error-keyed table shared by every call lets one call overwrite another's evidence. */
+const callServedModels = new AsyncLocalStorage<readonly WeakMap<object, ObservedServedModel>[]>();
+
+/** W1-T13868: run one worker call with its own observation table, which {@link withObservedServedModel} writes to and
+ * the caller reads back with {@link observedServedModelOf}. Calls that share an error never share its evidence.
+ * A call opened inside another call's scope (a wrapper that stands aside for its caller's receipt) keeps the enclosing
+ * tables too: the record goes to each, so the receipt-owning caller reads what its inner call saw. */
+export function observeServedModelsPerCall<T>(observations: WeakMap<object, ObservedServedModel>, run: () => T): T {
+  return callServedModels.run([...(callServedModels.getStore() ?? []), observations], run);
+}
+
+/** W1-T13868: the key under which a call's table holds the served model of the result its worker RETURNED. A wrapper can
+ * still replace that result with its own error (the quiet-worker watchdog's QuietRoundEndedError ends a round after the
+ * worker came back), and that error names no model; the call's reader falls back to this record. */
+const RETURNED_RESULT_KEY: object = Object.freeze({ key: "returned-result-served-model" });
+
+/** W1-T13868: record, in every enclosing call's table, the served model of the result a worker returned. Outside any
+ * call's scope it records nothing. */
+export function observeReturnedServedModel(result: { servedModel?: string | null; servedModelReason?: string }): void {
+  const scoped = callServedModels.getStore();
+  if (scoped === undefined) return;
+  const record = { servedModel: typeof result.servedModel === "string" ? result.servedModel : null,
+    ...(result.servedModelReason !== undefined ? { servedModelReason: result.servedModelReason } : {}) };
+  for (const table of scoped) table.set(RETURNED_RESULT_KEY, record);
+}
+
+/** W1-T13868: forget a returned result's record in every enclosing call's table, as a new worker call starts, so a
+ * later call's replaced result is never read as an earlier call's. */
+export function forgetReturnedServedModel(): void {
+  for (const table of callServedModels.getStore() ?? []) { table.delete(RETURNED_RESULT_KEY); table.delete(THROWN_IN_CALL_KEY); }
+}
+
+/** W1-T13868: the key under which a call's table holds the latest record {@link withObservedServedModel} made for an
+ * error thrown inside the call. A wrapper can throw its own error in that error's place (the quiet-worker guard throws
+ * QuietRoundEndedError instead of the abort error the adapter threw), and its own error names no model. */
+const THROWN_IN_CALL_KEY: object = Object.freeze({ key: "thrown-in-call-served-model" });
+
+/** W1-T13868: the served model the latest error thrown inside this call carried, if any, whatever error replaced it. */
+export function thrownInCallServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(THROWN_IN_CALL_KEY);
+}
+
+/** W1-T13868: the served model of the result this call's worker returned before an error replaced it, if any. */
+export function returnedServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(RETURNED_RESULT_KEY);
+}
+
+/** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
+ * on the error, so the failed attempt's row records it like a returned result's row does. */
+export function withObservedServedModel<E extends Error>(error: E,
+  observed: ObservedServedModel): E & ObservedServedModel {
+  const record = { servedModel: observed.servedModel,
+    ...(observed.servedModelReason !== undefined ? { servedModelReason: observed.servedModelReason } : {}) };
+  // Inside a call's scope the record goes to that call's own table only: the error (perhaps a caller's frozen or
+  // shared abort reason) keeps its identity, is thrown unchanged, and carries nothing another call could read.
+  const scoped = callServedModels.getStore();
+  if (scoped !== undefined) {
+    // W1-T13868: also the call's latest thrown record, for a wrapper that then throws its own error in this one's place.
+    for (const table of scoped) { table.set(error, record); table.set(THROWN_IN_CALL_KEY, record); }
+    return error as E & ObservedServedModel;
+  }
+  // Outside any call scope: the side table holds even for a frozen error; the property copy is a convenience.
+  observedServedModels.set(error, record);
+  if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);
+  return error as E & ObservedServedModel;
+}
+
+/** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value:
+ * in `observations` when given, else in the current call's table, else in the table for code outside any call. */
+export function observedServedModelOf(error: unknown,
+  observations: WeakMap<object, ObservedServedModel> | undefined = callServedModels.getStore()?.at(-1)): ObservedServedModel | undefined {
+  if (error === null || typeof error !== "object") return undefined;
+  return (observations ?? observedServedModels).get(error);
+}
+
+/** W1-T13868: the record {@link withObservedServedModel} made OUTSIDE any call's scope, for this thrown value. A call's
+ * reader falls back to it: an observation made where no call's scope reached (a stream or a wrapper whose async context
+ * opened before the call's) would otherwise be lost. An in-scope record never lands here, so calls sharing an error
+ * inside their scopes still never read each other's evidence. */
+export function unscopedObservedServedModelOf(error: unknown): ObservedServedModel | undefined {
+  return error !== null && typeof error === "object" ? observedServedModels.get(error) : undefined;
+}
+
 interface CodexJsonEvent {
   type?: string;
   thread_id?: string;
+  /** Not streamed by codex 0.152.0; read when present (W1-T13868). */
+  model?: unknown;
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
   item?: {
     type?: string; text?: string; command?: string; aggregated_output?: string;
+    /** An `error` item's text; a model reroute is reported this way (see {@link CODEX_REROUTE_RE}). */
+    message?: string;
     /** A `file_change` item's changed paths; `kind` is "add", "update" or "delete". */
     changes?: ReadonlyArray<{ path?: unknown; kind?: unknown } | null>;
   };
@@ -2307,7 +2419,10 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  retention: { textTruncated: boolean; blocksTruncated: boolean };
   completion: CodexCompletionEvidence;
+  /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
+  reroutes?: string[];
 }
 
 export interface CodexOutputTruncation {
@@ -2472,11 +2587,191 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
+/** W1-T13951: a spilled line's top-level `type` and `item.type`, by one streaming pass in any key order. */
+function spilledLineTypes(file: string): { type?: string; itemType?: string; textBytes?: number } {
+  const out: { type?: string; itemType?: string; textBytes?: number } = {};
+  const keys: Array<string | undefined> = [];
+  const objects: boolean[] = [];
+  let expectKey = false;
+  let inString = false;
+  let escaped = false;
+  let captured: number[] = [];
+  let start = 0;
+  const fd = openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    for (let pos = 0, read = 0; (read = readSync(fd, buf, 0, buf.length, pos)) > 0; pos += read) {
+      for (let k = 0; k < read; k++) {
+        const b = buf[k]!;
+        if (inString && (escaped || b !== 0x22)) {
+          escaped = !escaped && b === 0x5c;
+          if (captured.length <= 64) captured.push(b);
+        } else if (inString) {
+          inString = false;
+          const text = captured.length <= 64 ? jsonStringOrUndefined(Buffer.from(captured).toString()) : undefined;
+          if (objects.at(-1) && expectKey) {
+            keys[keys.length - 1] = text;
+            expectKey = false;
+          } else if (keys.length === 1 && keys[0] === "type") out.type = text;
+          else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "type") out.itemType = text;
+          else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "text") out.textBytes = pos + k - start;
+        } else if (b === 0x22) {
+          inString = true;
+          captured = [];
+          start = pos + k + 1;
+        } else if (b === 0x7b || b === 0x5b) {
+          objects.push(b === 0x7b);
+          keys.push(undefined);
+          expectKey = b === 0x7b;
+        } else if (b === 0x7d || b === 0x5d) {
+          objects.pop();
+          keys.pop();
+          expectKey = false;
+        } else if (b === 0x2c) expectKey = objects.at(-1) === true;
+      }
+    }
+  } finally { closeSync(fd); }
+  return out;
+}
+
+function jsonStringOrUndefined(raw: string): string | undefined {
+  return /^(?:[^"\\\u0000-\u001f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*$/.test(raw) ? JSON.parse(`"${raw}"`) as string : undefined;
+}
+
+function readSpillHead(file: string, bytes: number): string {
+  const fd = openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(bytes);
+    let end = readSync(fd, buf, 0, bytes, 0);
+    let lead = end - 1;
+    while (lead > 0 && (buf[lead]! & 0xc0) === 0x80) lead--;
+    const width = buf[lead]! >= 0xf0 ? 4 : buf[lead]! >= 0xe0 ? 3 : buf[lead]! >= 0xc0 ? 2 : 1;
+    if (end > 0 && lead + width > end) end = lead;
+    return buf.subarray(0, end).toString();
+  } finally { closeSync(fd); }
+}
+
+/** W1-T13951: the raw JSON payload of the string at `path`, as delivered; the last duplicate key wins. */
+function rawStringValue(line: string, path: readonly string[]): { raw: string; at: number } | undefined {
+  const keys: Array<string | undefined> = [];
+  const objects: boolean[] = [];
+  let expectKey = false;
+  let found: { raw: string; at: number } | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\"") {
+      let j = i + 1;
+      while (j < line.length && line[j] !== "\"") j += line[j] === "\\" ? 2 : 1;
+      const raw = line.slice(i + 1, j);
+      if (objects.at(-1) && expectKey) {
+        keys[keys.length - 1] = JSON.parse(`"${raw}"`) as string;
+        expectKey = false;
+      } else if (keys.length === path.length && keys.every((key, at) => key === path[at])) found = { raw, at: i + 1 };
+      i = j;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{");
+      keys.push(undefined);
+      expectKey = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keys.pop();
+      expectKey = false;
+    } else if (c === ",") expectKey = objects.at(-1) === true;
+  }
+  return found;
+}
+
+/** W1-T13951: the payload as delivered, with the spill marker `cut` placed in it tracked. */
+function rawPayload(line: string, path: readonly string[], text: string, cut?: { at: number; marker: string }) {
+  const found = rawStringValue(line, path);
+  const raw = found?.raw ?? JSON.stringify(text).slice(1, -1);
+  const at = cut && found ? cut.at - found.at : -1;
+  return { raw, marks: at >= 0 && raw.startsWith(cut!.marker, at) ? [{ at, len: cut!.marker.length }] : [] };
+}
+
+function unitBytes(raw: string, stream: boolean): number {
+  return Buffer.byteLength(stream ? raw : JSON.parse(`"${raw}"`) as string);
+}
+
+function rawUnitEnd(raw: string, i: number): number {
+  if (raw[i] === "\\") {
+    if (raw[i + 1] !== "u") return i + 2;
+    const hi = parseInt(raw.slice(i + 2, i + 6), 16);
+    const lo = raw.startsWith("\\u", i + 6) ? parseInt(raw.slice(i + 8, i + 12), 16) : NaN;
+    return i + (hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff ? 12 : 6);
+  }
+  const c = raw.charCodeAt(i);
+  return i + (c >= 0xd800 && c <= 0xdbff && (raw.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1);
+}
+
+function rawUtf8(raw: string, i: number, end: number): number {
+  if (raw[i] === "\\") return end - i;
+  const c = raw.charCodeAt(i);
+  return end - i === 2 ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+}
+
+/** Bytes past `offset` to the next escape boundary, by the parity of the backslash run before it. */
+function escapeSkipAt(file: string, offset: number, tail: string): number {
+  const fd = openSync(file, "r");
+  try {
+    const chunk = Buffer.alloc(64 * 1024);
+    const runBefore = (end: number) => {
+      let run = 0;
+      for (let pos = end; pos > 0;) {
+        const start = Math.max(0, pos - chunk.length);
+        const read = readSync(fd, chunk, 0, pos - start, start);
+        let k = read - 1;
+        while (k >= 0 && chunk[k] === 0x5c) k--;
+        run += read - 1 - k;
+        if (k >= 0 || read === 0) return run;
+        pos = start;
+      }
+      return run;
+    };
+    if (runBefore(offset) % 2 === 1) return tail.startsWith("u") ? 5 : 1;
+    const before = Buffer.alloc(Math.min(5, offset));
+    readSync(fd, before, 0, before.length, offset - before.length);
+    const hex = (byte: number | undefined) => byte !== undefined && /^[0-9a-fA-F]$/.test(String.fromCharCode(byte));
+    for (let j = 1; j <= 4; j++) {
+      const at = before.length - j - 1;
+      if (at < 0) break;
+      if (before[at] !== 0x5c || before[at + 1] !== 0x75) continue;
+      if (![...before.subarray(at + 2)].every(byte => hex(byte))) continue;
+      if (runBefore(offset - before.length + at + 1) % 2 === 1) return 5 - j;
+    }
+    return 0;
+  } finally { closeSync(fd); }
+}
+
+function withoutDanglingJsonEscape(text: string): string {
+  const backslashesAtEnd = (value: string) => value.length - value.replace(/\\+$/, "").length;
+  const unicode = /\\u[0-9a-fA-F]{0,3}$/.exec(text);
+  if (unicode && backslashesAtEnd(text.slice(0, unicode.index)) % 2 === 0) return text.slice(0, unicode.index);
+  return backslashesAtEnd(text) % 2 === 1 ? text.slice(0, -1) : text;
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
-class CodexJsonlAccumulator {
+export class CodexJsonlAccumulator {
   private sessionId = "";
+  /** W1-T13951: blocks and errors hold raw JSON payloads until finish(), the one representation kept. */
   private readonly blocks: string[] = [];
+  private readonly blockMarkers: Array<Array<{ at: number; len: number }>> = [];
   private readonly errors: string[] = [];
+  private readonly errorSource: boolean[] = [];
+  private readonly errorMarkers: Array<Array<{ at: number; len: number }>> = [];
+  /** W1-T13951: an entry cut by a spill counts stream bytes, as its spill did; any other counts decoded bytes. */
+  private readonly blockStreamUnit: boolean[] = [];
+  private readonly errorStreamUnit: boolean[] = [];
+  private spillStart = 0;
+  private readonly reroutes: string[] = [];
+  /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
+  observedServedModel(): { servedModel: string | null; servedModelReason?: string } { return codexServedModel(this.reroutes); }
+  /** W1-T13868: record a model the stream named. Past the bound the newest name replaces the last kept one, so the
+   *  model that served the final turn is never dropped for an earlier one. */
+  private observeModel(model: string): void {
+    if (this.reroutes.length < CODEX_REROUTES_KEPT) this.reroutes.push(model);
+    else this.reroutes[CODEX_REROUTES_KEPT - 1] = model;
+  }
   private input = 0;
   private output = 0;
   private cacheRead = 0;
@@ -2491,9 +2786,9 @@ class CodexJsonlAccumulator {
   private droppedBytes = 0;
   private spilledBytes = 0;
   private spilling = false;
-  private spillHead = "";
-  private spillHeadFull = false;
   private spillEvidence?: Omit<FileTail, "text">;
+  private lastBlockTruncated = false;
+  private retainedTruncated = false;
   private failed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
@@ -2503,21 +2798,6 @@ class CodexJsonlAccumulator {
     private readonly observeMessage?: (text: string, tsMs: number) => void,
     private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
 
-  private appendSpillHead(part: string): void {
-    if (this.spillHeadFull) return;
-    const room = 64 * 1024 - Buffer.byteLength(this.spillHead);
-    if (room <= 0) { this.spillHeadFull = true; return; }
-    const bytes = Buffer.from(part);
-    const prefix = bytes.subarray(0, room);
-    if (bytes.length >= room) this.spillHeadFull = true;
-    for (let end = prefix.length; end > 0; end--) {
-      try {
-        this.spillHead += new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(0, end));
-        return;
-      } catch { /* A byte cut may end inside one multibyte character. */ }
-    }
-  }
-
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
     let offset = 0;
@@ -2526,13 +2806,12 @@ class CodexJsonlAccumulator {
       const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
+        this.spillStart = this.spilledBytes;
         this.spilledBytes += this.pendingLineBytes();
-        this.appendSpillHead(this.pending);
         this.pending = "";
         this.spilling = true;
       }
       if (this.spilling) {
-        this.appendSpillHead(part);
         appendFileSync(this.pendingFile!, part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
@@ -2547,44 +2826,68 @@ class CodexJsonlAccumulator {
   private consumePending(): void {
     let line = this.pending;
     let sourceBytes: number | undefined;
+    let lineEvidence: Omit<FileTail, "text"> | undefined;
+    let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
-      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const lineBytes = this.spilledBytes - this.spillStart;
+      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(this.pendingFile!) : {};
+      // W1-T13951: the cap binds the payload retained, not its envelope.
+      const payload = types.textBytes ?? Infinity;
+      const agent = types.type === "item.completed" && types.itemType === "agent_message"
+        && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
+      if (agent) this.reclaimFor(payload);
+      // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
+      const whole = agent || lineBytes <= 320 * 1024;
+      const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
       if (tail.state === "truncated") {
         // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
         // validates the envelope; a partial line can never certify a complete report.
-        const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
-        line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
-        this.droppedBytes += Math.max(0, omitted);
+        // W1-T13951: never cut inside an escape.
+        const head = withoutDanglingJsonEscape(readSpillHead(this.pendingFile!, 64 * 1024));
+        const skip = escapeSkipAt(this.pendingFile!, tail.fileBytes! - Buffer.byteLength(text), text);
+        const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
+        const marker = JSON.stringify(this.truncationMarker(omitted)).slice(1, -1);
+        line = head + marker + text.slice(skip);
+        cut = { at: head.length, marker };
+        this.droppedBytes += omitted;
       } else {
         line = text;
       }
-      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state !== "complete" && tail.state !== "truncated") this.spillEvidence = evidence;
+      if (tail.state === "truncated") lineEvidence = evidence;
       if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
         this.failed = true;
-        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pushError(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
         this.pending = "";
         this.spilling = false;
-        this.spillHead = "";
-        this.spillHeadFull = false;
         this.boundRetained();
         return;
       }
     }
     this.pending = "";
     this.spilling = false;
-    this.spillHead = "";
-    this.spillHeadFull = false;
-    this.consumeLine(line, sourceBytes);
+    const kind = this.consumeLine(line, sourceBytes, cut);
+    // W1-T13951: a command item cut in its output body is counted, not a stdout loss.
+    if (lineEvidence && kind !== "item.completed:command_execution") this.spillEvidence = lineEvidence;
+    if (lineEvidence && kind === "malformed") {
+      this.lastBlockTruncated = true;
+      this.retainedTruncated = true;
+    }
     if (this.pendingFile) this.boundRetained();
   }
 
   finish(): ParsedCodexEvents {
-    if (this.spilling || this.pending.trim()) this.consumePending();
+    if (this.spilling || this.pending) this.consumePending();
+    for (const held of [this.blocks, this.errors]) held.splice(0, held.length, ...held.map(raw => JSON.parse(`"${raw}"`) as string));
     const text = this.blocks.at(-1) ?? "";
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
-    else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
+    else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
+      const note = `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`;
+      const kept = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+      if (kept + Buffer.byteLength(note) <= CODEX_WORKER_STDOUT_MAX_BYTES) this.blocks.splice(1, 0, note);
+    }
     this.keptBytes = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     return {
       sessionId: this.sessionId,
@@ -2602,7 +2905,9 @@ class CodexJsonlAccumulator {
         : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
           ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
           : { state: "complete" },
+      retention: { textTruncated: this.lastBlockTruncated, blocksTruncated: this.lastBlockTruncated || this.retainedTruncated },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
+      ...(this.reroutes.length > 0 ? { reroutes: [...this.reroutes] } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
         limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
         retainedBytes: this.retainedBytes(),
@@ -2633,38 +2938,135 @@ class CodexJsonlAccumulator {
     return `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
   }
 
-  private boundText(text: string, limit: number): string {
-    const raw = Buffer.from(text);
-    if (raw.length <= limit) return text;
+  private pushError(text: string, raw?: string, marks: Array<{ at: number; len: number }> = []): void {
+    this.errors.push(raw ?? JSON.stringify(text).slice(1, -1));
+    this.errorSource.push(raw !== undefined);
+    this.errorMarkers.push(marks);
+    this.errorStreamUnit.push(marks.length > 0);
+    this.keptBytes += Buffer.byteLength(this.errors.at(-1)!);
+  }
+
+  private store(kind: "block" | "error") {
+    return kind === "block"
+      ? { texts: this.blocks, sources: [] as boolean[], markers: this.blockMarkers, units: this.blockStreamUnit }
+      : { texts: this.errors, sources: this.errorSource, markers: this.errorMarkers, units: this.errorStreamUnit };
+  }
+
+  private yieldErrorsTo(room: number): void {
+    const bytes = () => this.errors.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    while (this.errors.length && bytes() > room) {
+      if (this.errors.length > 1) this.evictEntry("error", this.errors.length - 1);
+      else if (room >= 128) { this.boundEntry("error", 0, room); break; }
+      else this.evictEntry("error", 0);
+    }
+  }
+
+  /** W1-T13951: free room so an agent_message that fits the limit alone is never cut. */
+  private reclaimFor(reserveBytes: number): void {
+    const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    if (reserveBytes > CODEX_WORKER_STDOUT_MAX_BYTES) return;
+    if (reserveBytes + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - reserveBytes);
+    const room = CODEX_WORKER_STDOUT_MAX_BYTES - 128 - bytes(this.errors) - reserveBytes;
+    const droppedBefore = this.droppedBytes;
+    while (this.blocks.length > 1 && bytes(this.blocks) > room) this.evictBlock(1);
+    if (this.blocks.length && bytes(this.blocks) > room) {
+      if (room >= 128) this.boundBlock(0, room);
+      else this.evictBlock(0);
+    }
+    if (this.droppedBytes > droppedBefore) this.retainedTruncated = true;
+    this.keptBytes = bytes(this.blocks) + bytes(this.errors);
+  }
+
+  private evictBlock(index: number): void { this.evictEntry("block", index); }
+
+  private boundBlock(index: number, limit: number): void { this.boundEntry("block", index, limit); }
+
+  private evictEntry(kind: "block" | "error", index: number): void {
+    const { texts, sources, markers, units } = this.store(kind);
+    const raw = texts.splice(index, 1)[0]!;
+    const own = markers.splice(index, 1)[0] ?? [];
+    const source = sources.splice(index, 1)[0] ?? kind === "block";
+    const stream = units.splice(index, 1)[0]!;
+    this.retainedTruncated = true;
+    if (source) this.droppedBytes += unitBytes(raw, stream) - own.reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), stream), 0);
+  }
+
+  /** Keep an entry's head and tail within `limit` bytes, never splitting an escape or a marker. */
+  private boundEntry(kind: "block" | "error", index: number, limit: number): void {
+    const { texts, sources, markers: allMarkers, units } = this.store(kind);
+    const raw = texts[index]!;
+    const total = Buffer.byteLength(raw);
+    if (total <= limit) return;
+    const markers = allMarkers[index] ?? [];
     const allowance = Math.max(0, limit - 80);
-    let head = Math.floor(allowance / 2);
-    let tail = raw.length - (allowance - head);
-    while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
-    while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
-    const dropped = tail - head;
-    this.droppedBytes += dropped;
-    return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
+    const headBytes = Math.floor(allowance / 2);
+    let head = 0;
+    let tail = raw.length;
+    for (let i = 0, bytes = 0; i < raw.length;) {
+      const end = rawUnitEnd(raw, i);
+      bytes += rawUtf8(raw, i, end);
+      if (bytes <= headBytes) head = end;
+      if (total - bytes <= allowance - headBytes) { tail = end; break; }
+      i = end;
+    }
+    for (let widened = true; widened;) {
+      widened = false;
+      for (const marker of markers) {
+        const end = marker.at + marker.len;
+        if (marker.at < tail && end > head && (marker.at < head || end > tail)) {
+          head = Math.min(head, marker.at);
+          tail = Math.max(tail, end);
+          widened = true;
+        }
+      }
+    }
+    const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
+      .reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), units[index]!), 0);
+    const dropped = unitBytes(raw.slice(head, tail), units[index]!) - covered;
+    if (kind === "block" || sources[index]) this.droppedBytes += dropped;
+    const marker = JSON.stringify(this.truncationMarker(dropped)).slice(1, -1);
+    texts[index] = raw.slice(0, head) + marker + raw.slice(tail);
+    allMarkers[index] = [
+      ...markers.filter(kept => kept.at + kept.len <= head),
+      { at: head, len: marker.length },
+      ...markers.filter(kept => kept.at >= tail).map(kept => ({ at: kept.at - tail + head + marker.length, len: kept.len })),
+    ];
+    this.retainedTruncated = true;
   }
 
   private boundRetained(): void {
     const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
-    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
-    if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
-    const blockBudget = budget - bytes(this.errors);
-    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
-    if (bytes(this.blocks) > blockBudget) {
-      if (this.blocks.length === 1) this.blocks[0] = this.boundText(this.blocks[0]!, blockBudget);
-      else {
-        const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
-        this.blocks[0] = this.boundText(this.blocks[0]!, headBudget);
-        this.blocks[1] = this.boundText(this.blocks[1]!, blockBudget - Buffer.byteLength(this.blocks[0]!));
-      }
+    const droppedBefore = this.droppedBytes;
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.evictEntry("error", this.errors.length - 1);
+    if (this.errors.length) this.boundEntry("error", 0, budget / 4);
+    const newest = this.blocks.length ? Buffer.byteLength(this.blocks.at(-1)!) : 0;
+    if (newest <= CODEX_WORKER_STDOUT_MAX_BYTES && newest + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) {
+      this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - newest);
     }
+    const blockBudget = (this.blocks.length === 1 ? CODEX_WORKER_STDOUT_MAX_BYTES : budget) - bytes(this.errors);
+    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.evictBlock(1);
+    if (bytes(this.blocks) > blockBudget) {
+      const last = this.blocks.at(-1);
+      if (this.blocks.length === 1) this.boundBlock(0, blockBudget);
+      else {
+        const lastBytes = Buffer.byteLength(this.blocks[1]!);
+        if (lastBytes > blockBudget - 128 && lastBytes <= CODEX_WORKER_STDOUT_MAX_BYTES - bytes(this.errors)) {
+          this.evictBlock(0);
+        } else {
+          const headBudget = lastBytes <= blockBudget - 128 ? blockBudget - lastBytes
+            : Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
+          this.boundBlock(0, headBudget);
+          this.boundBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        }
+      }
+      if (this.blocks.at(-1) !== last) this.lastBlockTruncated = true;
+    }
+    if (this.droppedBytes > droppedBefore) this.retainedTruncated = true;
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, cut?: { at: number; marker: string }): CodexEventByteKind | undefined {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
@@ -2673,9 +3075,9 @@ class CodexJsonlAccumulator {
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
-      this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      this.pushError(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
-      return;
+      return "malformed";
     }
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
@@ -2691,11 +3093,24 @@ class CodexJsonlAccumulator {
       this.turnInProgress = true;
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
-      this.blocks.push(event.item.text);
-      this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
+      const { raw, marks } = rawPayload(line, ["item", "text"], event.item.text, cut);
+      this.blocks.push(raw);
+      this.blockMarkers.push(marks);
+      this.blockStreamUnit.push(marks.length > 0);
+      this.lastBlockTruncated = cut !== undefined;
+      if (cut !== undefined) this.retainedTruncated = true;
+      this.keptBytes += Buffer.byteLength(raw);
       this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "item.completed") this.observeToolCalls(event.item);
+    if (event.type === "item.completed" && event.item?.type === "error" && typeof event.item.message === "string") {
+      const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
+      if (to !== undefined) this.observeModel(to);
+    }
+    // W1-T13868: codex 0.152.0 streams no model id on any event, but an event that does carry one (a later CLI, a
+    // proxy) names the model that served it, in stream order with the reroutes: the latest name is recorded.
+    const eventModel = cashResponseModel(event.model);
+    if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
       this.turnInProgress = false;
       this.completedTurns += 1;
@@ -2718,14 +3133,18 @@ class CodexJsonlAccumulator {
       this.failed = true;
       this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
-      this.errors.push(message);
-      this.keptBytes += Buffer.byteLength(message, "utf8");
+      if (typeof event.error?.message !== "string") this.pushError(message);
+      else {
+        const { raw, marks } = rawPayload(line, ["error", "message"], message, cut);
+        this.pushError(message, raw, marks);
+      }
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
       // adapter boundary while the text is known to be provider error evidence; never scan agent
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
+    return kind;
   }
 
   /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
@@ -3294,8 +3713,8 @@ async function withPrivateRegistryCodexProfile<T>(
     if (error instanceof InstanceRegistryRuntimeError) throw error;
     throw new InstanceRegistryRuntimeError("worker_profile_unavailable");
   }
-  let operationFailed = false, originalError: unknown;
-  try { await assertInstanceRegistryRuntimeCurrent(); return await operation(profile); }
+  let operationFailed = false, originalError: unknown, result: T | undefined;
+  try { await assertInstanceRegistryRuntimeCurrent(); result = await operation(profile); return result; }
   catch (error) { operationFailed = true; originalError = error; throw error; }
   finally {
     try {
@@ -3313,6 +3732,14 @@ async function withPrivateRegistryCodexProfile<T>(
       // Missing/replaced/unreadable evidence is not certified cleanup. Retain any original failure as cause.
       const error = new InstanceRegistryRuntimeError("worker_profile_cleanup_unknown");
       if (operationFailed) error.cause = originalError;
+      else {
+        // W1-T13868: the call already returned; its served model must outlive a cleanup failure that replaces it.
+        const served = (result as { servedModel?: unknown; servedModelReason?: unknown } | undefined);
+        if (served !== undefined && served !== null && typeof served === "object" && "servedModel" in served) {
+          withObservedServedModel(error, { servedModel: typeof served.servedModel === "string" ? served.servedModel : null,
+            ...(typeof served.servedModelReason === "string" ? { servedModelReason: served.servedModelReason } : {}) });
+        }
+      }
       throw error;
     } finally { closeSync(fd!); }
   }
@@ -5555,6 +5982,8 @@ function openWeightEndpoint(config: Config, model: string): string {
 
 /** W1-T4650: the named reasons a cash attempt reports no served model. */
 export const CASH_SERVED_MODEL_REASONS = {
+  // W1-T13868: a body that lands after the deadline aborted the attempt reaches only the late usage handler. The row is
+  // already written by then, so the reason says when, not that no reply ever came.
   noResponse: "no cash response was received, so none named the model that served it",
   unnamed: "a cash response named no model id",
   mixed: "cash responses in this attempt named different models",
@@ -5578,12 +6007,10 @@ export function cashResponseModel(model: unknown): string | undefined {
  */
 export function cashServedModel(named: readonly (string | undefined)[]): { servedModel: string | null; servedModelReason?: string } {
   if (named.length === 0) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse };
-  if (named.some((model) => model === undefined)) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed };
-  const distinct = [...new Set(named)].sort();
-  if (distinct.length > 1) {
-    return { servedModel: null, servedModelReason: `${CASH_SERVED_MODEL_REASONS.mixed}: ${distinct.join(", ")}` };
-  }
-  return { servedModel: distinct[0]! };
+  // W1-T13868: a call that received a model name records it, even when another response omitted or changed it. The
+  // latest named response wins: it produced the attempt's final answer. Never the requested deployment.
+  const latest = named.findLast((model) => model !== undefined);
+  return latest === undefined ? { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } : { servedModel: latest };
 }
 
 function openWeightResult(input: {
@@ -5805,6 +6232,8 @@ export async function spawnFoundryClaudeWorker(
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = foundryClaudeReceiptUsage(envelope);
           if (!usage) return;
           attempt.tokens = { input: usage.input_tokens, output: usage.output_tokens,
@@ -5847,7 +6276,6 @@ export async function spawnFoundryClaudeWorker(
         content?: Array<Record<string, unknown>>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const measured = foundryClaudeReceiptUsage(envelope);
       if (!measured) {
         settleOpenWeightBudget(config, { requestId, identity: pending!.identity, atIso: pending!.atIso, reason: "usage unavailable" });
@@ -6063,6 +6491,8 @@ export async function spawnOpenWeightWorker(
         args, deployment: selection.model, source: "openweight", endpoint, body,
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
+          // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
+          servedModels.push(cashResponseModel((envelope as { model?: unknown } | null)?.model));
           const usage = openWeightEnvelopeUsage(envelope, usesResponses);
           attempt.tokens = { input: validFoundryTokenCount(usage?.prompt_tokens) ? usage.prompt_tokens : 0,
             output: validFoundryTokenCount(usage?.completion_tokens) ? usage.completion_tokens : 0,
@@ -6134,7 +6564,6 @@ export async function spawnOpenWeightWorker(
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
-      servedModels.push(cashResponseModel(payload.model));
       const message = payload.choices?.[0]?.message;
       if (!message) throw new Error("openweight response has no assistant message");
       // A TRUNCATED REPLY IS A NAMED FAILURE, NOT A SHORT ANSWER. Checked AFTER settlement above so
@@ -6442,13 +6871,17 @@ async function spawnCodexWorkerInPrivateTemp(
           reason: `Codex stdout is not valid UTF-8: ${String((error as Error).message ?? error)}` };
       }
     }
-    const text = stdoutDecoder.write(chunk);
+    const room = CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES - stdoutBytes;
+    const observedAt = Date.now();
     stdoutBytes += chunk.length;
     if (stdoutBytes > CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES) {
       exceedOutputBudget("stdout", CODEX_WORKER_STDOUT_STREAM_BACKSTOP_BYTES, stdoutBytes);
+      // W1-T13868: the bytes still inside the budget are read after the limit's evidence is taken, so a complete
+      // reroute line among them names the served model however the chunks happened to split.
+      if (room > 0) stdout.push(stdoutDecoder.write(chunk.subarray(0, room)), observedAt);
       return;
     }
-    const observedAt = Date.now();
+    const text = stdoutDecoder.write(chunk);
     stdout.push(text, observedAt);
     if (/\"type\":\"agent_message\"/.test(text)) args.streamObserver?.({ kind: "working", tsMs: observedAt });
     else args.streamObserver?.({ kind: "message", tsMs: observedAt });
@@ -6467,8 +6900,9 @@ async function spawnCodexWorkerInPrivateTemp(
   try {
     const exit = await withWorkerGroupTeardown(pidRef, () => exitPromise, teardownOnce);
     await contained.outputClosed;
-    if (outputLimit) throw outputLimit;
-    if (timedOut) throw new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`);
+    if (outputLimit) throw withObservedServedModel(outputLimit, stdout.observedServedModel());
+    if (timedOut) throw withObservedServedModel(new Error(`Codex worker exceeded the ${args.clockBound?.boundMs}ms clock bound`),
+      stdout.observedServedModel());
     if (!stdoutFailure) {
       try { stdoutValidator.decode(); }
       catch (error) {
@@ -6487,12 +6921,12 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
-    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
     const textBytes = Buffer.byteLength(parsed.text);
     const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    // W1-T13951: judged by what lost bytes, not by any drop.
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
-      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
-      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      text: { state: parsed.retention.textTruncated ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: parsed.retention.blocksTruncated ? "truncated" : "complete", bytesRead: blockBytes },
       stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
@@ -6543,14 +6977,17 @@ async function spawnCodexWorkerInPrivateTemp(
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      servedModel: null,
-      servedModelReason: CODEX_SERVED_MODEL_REASON,
+      ...codexServedModel(parsed.reroutes ?? []),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
       qualitySuspect: false,
       workerDurationMs: Date.now() - startedAt,
     };
+  } catch (error) {
+    // W1-T13868: ANY failure after the stream named a model carries it (or the named reason) to the failed-attempt row.
+    if (error instanceof Error && observedServedModelOf(error) === undefined) withObservedServedModel(error, stdout.observedServedModel());
+    throw error;
   } finally {
     // W1-T8203: ledgered beside output_truncation, on success and on a failure that never parsed a result alike.
     const droppedStderr = stderrRetainer.truncation();

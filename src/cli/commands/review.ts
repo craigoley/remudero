@@ -38,7 +38,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -551,10 +551,14 @@ export async function reviewHostedCiFileEvidence(
 }
 
 // Project at the final write: status guards may replace a description with a private failure reason.
-function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
+// W1-T14035: a pending ops post keeps the run its guarded description names, so an ops hold names its owner as a public
+// one does; it carries no code provenance, as no pending post does.
+export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
   return catalog !== "ops" ? post : async options => {
     const description = `remudero-review: ${options.state} — detailed evidence retained on host`;
-    await post({ ...options, description: codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
+    const owner = options.state === "pending" ? reviewStatusOwnerRun(options.description) : undefined;
+    await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
+      : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
   };
 }
 
@@ -1031,6 +1035,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     effort: reviewerSpawnMount?.effort ?? null,
     sessionId: null,
   };
+  // W1-T13868: review.finding rows name why a reviewer's served model is null; the provenance type stays unchanged.
+  let reviewerServedModelReason: string | undefined;
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
@@ -1185,6 +1191,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewerSubtype = reviewer.subtype === "success" && terminalError ? terminalError : reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
+        reviewerServedModelReason = reviewerFields.served_model_reason;
         evaluatorProvenance = {
           provider: reviewerFields.provider ?? null,
           requestedModel: reviewerFields.model,
@@ -1728,7 +1735,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
-    provenance: evaluatorProvenance, log });
+    provenance: { ...evaluatorProvenance, servedModelReason: reviewerServedModelReason }, log });
   const followUps = reviewFollowUps(verdict.criteria, reviewerFindingText);
   for (const followUp of followUps) {
     log("review.follow_up_finding", { ...followUp, provider: evaluatorProvenance.provider,

@@ -92,7 +92,8 @@ test("the machine-readable reviewer verdict contract is byte-identical to its pr
   // for W1-T11209, which deliberately names the clause budget in the contract (its criterion 3), and once for
   // W1-T11428, which deliberately adds the UNABLE verdict form for a reviewer that could not inspect, and once for
   // W1-T13849, which requires tagged (a)/(c) FAILs and gives (b) its own REVIEW_FOLLOW_UP line.
+  // Re-measured for W1-T14161, which adds COUNTEREXAMPLE_PRODUCER_RULE to the contract's class block.
   const sha = (n: number) => createHash("sha256").update(reviewerVerdictContract(n), "utf8").digest("hex");
-  assert.equal(sha(1), "4fc50e751810239fb3821ae6fe9a5d0bfd8cb7fb2e0c4d2f7996b109c8776de5");
-  assert.equal(sha(3), "5e3a30194bb122349071e0922cdb38ea55e9cbdcf0ed71c953338d735143bb48");
+  assert.equal(sha(1), "8efeb9b562e45776e5d305b4011a1dac236967ede8bc0d09603e89e69dc78cc6");
+  assert.equal(sha(3), "1ed099388676681b3af24baea53f321244c93ce5165b3f64642616e49c63eb6d");
 });

@@ -38,6 +38,7 @@ import {
   projectPlan,
   readLedgerLines,
   SERVE_KEEPS_CREDITS_IN_MEMORY,
+  taskIdFromRunBranch,
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -184,6 +185,8 @@ export interface PanelGraphDeps {
   /** The status-derivation gateway (status.ts's `GitHub`) — a different shape from `github`
    *  above; backs the drain-preview and plan-view merged-set derivation. */
   statusGithub: GitHub;
+  /** W1-T14114: the ok ops catalog's combined plan, for the Inbox's board referents only. */
+  inboxReferentPlan?: (plan: Plan) => Plan | undefined;
   /** config.root holds inbox state (W1-T110); `root` holds the checkout. See serve.ts's
    * `fleetControlRoot` and docs/forensics/panel-graph.md for the split's history. */
   inboxRoot: string;
@@ -2183,12 +2186,60 @@ function prepareInboxPass(
   return { registryPath, proposals, ledgerLines, classifyOne };
 }
 
-function projectInboxPlan(deps: PanelGraphDeps, plan: Plan, ledgerLines?: LedgerLines) {
+/** The Inbox's projection and board referents for one plan read. */
+export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan, ledgerLines?: LedgerLines) {
   let openPrs: readonly PrRef[] | undefined;
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
-    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }),
-    observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: inboxBoardReferents(projection, openPrs) };
+  const statusDeps = { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
+  const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
+  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, statusDeps) };
+}
+
+/** W1-T14114: an ops-only task verifies only the one open PR that owns it unambiguously (W1-T130), outside the
+ *  projection inboxBoardReferents walks and the classifier's (W1-T12211). */
+function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
+  openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): ReturnType<typeof inboxBoardReferents> {
+  const referents = inboxBoardReferents(projection, openPrs);
+  const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
+  if (!combined || combined === plan) return referents;
+  const claimsOf = (pr: PrRef): Set<string> => {
+    const ids = new Set<string>();
+    const head = taskIdFromRunBranch(pr.headRefName);
+    if (head) ids.add(head);
+    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) ids.add(match[1]);
+    return ids;
+  };
+  const claimants = new Map<string, number>();
+  for (const pr of openPrs!) for (const id of claimsOf(pr)) claimants.set(id, (claimants.get(id) ?? 0) + 1);
+  const owners = new Map<string, PrRef>();
+  for (const pr of openPrs!) {
+    const state = referents.states.get(`#${pr.number}`);
+    if (pr.body === undefined || state?.status !== "open") continue;
+    const ids = claimsOf(pr);
+    if (ids.size !== 1) continue;
+    const [id] = ids;
+    if (claimants.get(id) !== 1 || plan.byId.has(id)) continue;
+    const task = combined.byId.get(id);
+    if (task) owners.set(id, pr);
+  }
+  if (owners.size === 0) return referents;
+  const tasks = [...owners.keys()].map(id => combined.byId.get(id)!);
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
+  const states = new Map(referents.states);
+  for (const [id, pr] of owners) {
+    const key = `#${pr.number}`;
+    const prior = states.get(key)!;
+    const row = rows.get(id);
+    const usable = row !== undefined && row.taskId === id && (row.prNumber === undefined || row.prNumber === pr.number)
+      && !row.merged && !row.indeterminate && !row.githubUnobservableSince && !row.escalationUnverified
+      && (row.prState === undefined || row.prState === "OPEN");
+    if (!usable) {
+      if (prior.unhandledEscalations !== undefined) states.delete(key);
+      continue;
+    }
+    states.set(key, { status: "open", unhandledEscalations: Math.max(prior.unhandledEscalations ?? 0, row.needsHuman ? 1 : 0) });
+  }
+  return { kind: "ok", states };
 }
 
 /**
