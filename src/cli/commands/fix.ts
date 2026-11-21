@@ -2332,6 +2332,19 @@ async function adoptableEvidenceHead(prUrl: string, head: string, readHead: () =
   }
 }
 
+/** W1-T13958: the ops catalog's blob labels ("tasks.yaml", "tasks.d/<file>") — never a core path. */
+const OPS_CATALOG_SOURCE_LABEL = /^tasks(?:\.yaml|\.d\/[^/]+)$/;
+
+/** W1-T13958: `task` without a `sourcePath` the core head cannot hold. A core-catalog task's
+ *  core plan shard path is kept (invariant core-task-source-kept). */
+export function withoutOpsCatalogSource<T extends object>(task: T): T {
+  const { sourcePath, catalog } = task as T & { sourcePath?: unknown; catalog?: unknown };
+  const ops = catalog === "ops" || (typeof sourcePath === "string" && OPS_CATALOG_SOURCE_LABEL.test(sourcePath));
+  if (!ops || sourcePath === undefined) return task;
+  const { sourcePath: _opsSourcePath, ...withoutSource } = task as T & { sourcePath?: unknown };
+  return withoutSource as T;
+}
+
 export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
@@ -5786,6 +5799,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         source: resolvedContract.source,
       });
     }
+    // W1-T13958: an ops-catalog task's `sourcePath` labels an ops blob ("tasks.d/<file>"); the core
+    // head checkout never holds it, so the promised follow-up reader would throw and post
+    // cannot-evaluate over the real verdict. Drop it, as the lane review's fresh contract does —
+    // on EVERY path: the sweep and `rmd fix` resolve the contract before the rung and wire no
+    // `resolveTaskContractAtHead`, so the marker is the resolved catalog, the task's own, or the
+    // ops label shape that ops-catalog-source.ts gives `Task.sourcePath`.
+    reviewTask = withoutOpsCatalogSource(reviewTask);
     review = await deps.runReview({
       owner: opts.reviewBase.owner,
       repo: opts.reviewBase.repo,

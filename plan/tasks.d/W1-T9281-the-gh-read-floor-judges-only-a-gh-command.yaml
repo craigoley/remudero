@@ -13,7 +13,9 @@
   files:
     - hooks/deny-floor.sh
     - test/the-gh-read-floor-judges-only-a-gh-command.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # 2026-11-20 operator: withdrawn as superseded by the ops-catalog deny-floor task (remudero-ops #227) that routes only an actual GitHub CLI invocation and carries this record's design; held so two builds never edit invokes_gh at once.
   priority: 2  # every session that writes about the floor in a commit message trips it, and a refused line still costs the caller a turn
   attempts: 0
   rationale: |

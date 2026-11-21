@@ -250,7 +250,8 @@ export async function readBoardCatalogs(readPublic: () => Plan | undefined, stat
   if (same && held) opsPlan = held.plan;
   else {
     kept.delete(repository);
-    const snapshot = await readOpsCatalogSnapshotAsync({ repository }, reader);
+    // W1-T13970: a blob sha this host's state dir holds is answered from it, whichever api reads.
+    const snapshot = await readOpsCatalogSnapshotAsync({ repository }, reader, { stateDir });
     if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return refused(snapshot.outcome === "ok" ? "missing-plan" : snapshot.outcome);
     if (snapshot.binding === undefined) return refused("identity-unavailable");
     opsPlan = snapshot.plan;
@@ -363,7 +364,8 @@ export function createBoardCatalogParentBridge(roots: readonly string[], post: (
         if (same && kept) payload = { observedAt: clock.iso(), plan: kept.plan };
         else {
           entry.kept = undefined;
-          const snapshot = await readOpsCatalogSnapshotAsync({ repository }, api);
+          // W1-T13970: the pool's root is the host state dir its selection is read from; its blob cache lives there too.
+          const snapshot = await readOpsCatalogSnapshotAsync({ repository }, api, { stateDir: root });
           payload = snapshot.outcome === "ok" && snapshot.plan && snapshot.binding
             ? { observedAt: clock.iso(), plan: snapshot.plan }
             : { observedAt: clock.iso(), reason: snapshot.outcome === "ok" ? "identity-unavailable" : snapshot.outcome };

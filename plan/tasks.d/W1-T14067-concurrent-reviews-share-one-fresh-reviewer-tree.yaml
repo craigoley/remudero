@@ -1,0 +1,55 @@
+- id: W1-T14067
+  title: Concurrent reviews share one fresh reviewer tree instead of the losers skipping their review
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 14.00
+  risk: high # spans reviewer-worktree-lease and run-child (Rule 19 sizing): who may hold the reviewer tree at once, and how a failed borrow settles
+  band_meaning: span
+  origin: "operator-session#pr-backlog-round6-2026-11-20"
+  plan_refs:
+    - W1-T12227
+    - W1-T12226
+  files:
+    - src/lib/reviewer-worktree-lease.ts
+    - src/lib/run-child.ts
+    - test/review/concurrent-reviews-share-one-fresh-reviewer-tree.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "Two review processes that borrow the same fresh reviewer worktree at once both run their review from it: the second borrow is admitted beside the first instead of throwing that the worktree is leased by another owner"
+      proof: "grep: W1-T14067 criterion 1: in test/review/concurrent-reviews-share-one-fresh-reviewer-tree.test.ts"
+    - claim: "A review that still cannot borrow the fresh tree is not settled as a finished review with no PR: it logs review.skipped_stale_reviewer_code with its reason and settles with an outcome the sweep re-admits on its next pass"
+      proof: "grep: W1-T14067 criterion 2: in test/review/concurrent-reviews-share-one-fresh-reviewer-tree.test.ts"
+    - claim: "invariant:rebuild-is-exclusive — the tree is never rebuilt, refreshed or removed while any borrower holds it, and a stale borrower is still reclaimed as today"
+      kind: guard
+      proof: "grep: W1-T14067 criterion 3: in test/review/concurrent-reviews-share-one-fresh-reviewer-tree.test.ts"
+  rationale: |
+    OBSERVED 2026-11-20 (host ledger, core), 17:38Z to 18:47Z: 31 review.skipped_stale_reviewer_code rows across 16
+    pull requests (#19515, #19695, #19701, #19721, #19791, #19801, #19871, #19875, #19888, #19890, #19907, #19908,
+    #19909, #19913, #19914, #19918). 28 of them carry fresh_tree "unavailable" with fresh_tree_reason "Error:
+    reviewer worktree is leased by another owner". The daemon's reviewer code was behind origin/main (code_sha
+    f3658256 against a8f9ce39, 33 changed paths), so every review needed the fresh tree.
+    Example, #19875 (head df2d05c, all CI green from 17:54Z): review children at 18:05:45, 18:20:13 and 18:23:12
+    each ran about 10 seconds, logged review.skipped_stale_reviewer_code, then run_child.settled fulfilled with
+    verdict no_pr and daemon.child_work_settled terminal. No remudero-review status was posted on the head for
+    over an hour.
+    OBSERVED at origin/main: src/lib/reviewer-worktree-lease.ts `claim` writes one owner (pid, host) into
+    `<tree>.lock` and throws "reviewer worktree is leased by another owner" for any live other holder. The in-process
+    `borrowers` map lets one process borrow many times, but each review runs in its own child process. The
+    fresh-tree fallback in src/lib/run-child.ts then logs the skip and returns exit 0, which settles as no_pr.
+  design: |
+    INVARIANT rebuild-is-exclusive: borrowing is shared; building, refreshing or removing the tree stays exclusive.
+    1. Make the lease a shared borrow across processes: the lock records each live borrower (pid, host, start), a
+       borrow adds itself, a release removes itself, and a stale borrower is reclaimed by the existing staleLease rule.
+    2. Building or refreshing the tree takes the lock only when no live borrower holds it, as today.
+    3. When a borrow still fails, the run-child fallback returns a retryable outcome with the reason, not exit 0, so
+       the sweep's next pass admits the review again; keep the review.skipped_stale_reviewer_code row and its fields.
+  falsifier: |
+    Revert step 1 and criterion 1's second borrower throws "reviewer worktree is leased by another owner".
+  note: |
+    Id reserved for run-unfiled-1795201470701 with rmd next-task-id on the host.
