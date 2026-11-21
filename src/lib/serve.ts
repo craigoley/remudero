@@ -3750,11 +3750,26 @@ export function startIncidentInvariantsMonitor(
     }
   };
 
+  // W1-T13203: a long profile still waiting for its lag sample is written when the monitor stops, never dropped; one whose
+  // sample did arrive keeps that sample's run, as the tick would have written it.
+  const flushPending = (): void => {
+    for (const profile of pending.splice(0)) {
+      const sample = sampleFor(profile.recoveredAtMs, profile.fields.lag_ms);
+      writeLedger(ledgerPath, loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.profile, profile.fields, sample?.atMs ?? profile.deliveredAtMs));
+    }
+  };
+
   const timer = setTimer(tick, intervalMs);
   timer.unref?.();
   return Object.assign(() => {
     clearTimer(timer);
     stallProfiler.stop();
+    try {
+      flushPending();
+    } catch (e) {
+      // Reported, not thrown: a stop must finish even when the ledger refuses the last profile rows.
+      deps.log?.("serve.incident_invariants.profile_flush_failed", { reason: String((e as Error)?.message ?? e) });
+    }
   }, { stallProfiler });
 }
 
