@@ -2321,25 +2321,34 @@ export interface CodexRetentionLoss {
   blocks: boolean;
   /** Spilled lines rebuilt from their bounded head and tail. */
   rebuiltLines: number;
-  /** Rebuilt lines that did not parse, or parsed to something other than a Codex event envelope: a partial line
-   *  never certifies. */
+  /** Rebuilt lines that did not parse, or parsed to something other than a valid Codex event of their kind: a
+   *  partial line never certifies. */
   rejectedRebuiltLines: number;
+  /** The bytes dropped from rebuilt lines; every other drop (a block or an error cut to the budget) is not a spill. */
+  rebuiltDroppedBytes: number;
+  /** Spilled lines whose file, when read back, did not hold exactly the bytes written for that line (removed,
+   *  recreated or rewritten under the run). It only vetoes certifying the spill; it never changes the result. */
+  unaccountedSpills: number;
 }
 
-/** W1-T13960: whether a Codex result's retained output is whole enough to count as complete. Every retention value
- *  but stdout must read complete, as before: the final turn's turn.completed, the final text, the blocks (both by
- *  their own lines' loss) and stderr. stdout may also read truncated, but only when that state came from spilled
- *  lines that were all rebuilt and parsed as valid envelopes; a stdout read malformed, unreadable or absent, or a
- *  rebuilt line that did not parse, stays incomplete. A partial line never certifies. */
+/** W1-T13960: whether a Codex result's retained output is whole enough to count as complete. Every value complete
+ *  is complete, as on origin/main. Otherwise it is complete only as a narrow upgrade, when every condition holds:
+ *  the original subtype is success; the final turn's turn.completed and stderr read complete; stdout reads truncated
+ *  by a spill; every spilled line was rebuilt into a valid event of its kind and its file held every byte written
+ *  for it; every dropped byte fell in those rebuilt lines; and neither the final text nor any retained block came
+ *  from a line that lost bytes (text and blocks read truncated on main whenever any byte dropped). Any condition
+ *  failing, or one it cannot decide, leaves origin/main's result. A partial line never certifies. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
-  parsed: Pick<ParsedCodexEvents, "retentionLoss">,
+  parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
 ): boolean {
-  const { stdout, ...rest } = retention;
-  if (Object.values(rest).some(value => typeof value === "object" && value.state !== "complete")) return false;
-  if (stdout === undefined || stdout.state === "complete") return true;
+  const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
+  if (!notComplete(retention)) return true;
+  const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
+  if (retention.originalSubtype !== "success" || notComplete(rest) || stdout?.state !== "truncated") return false;
   const loss = parsed.retentionLoss;
-  return stdout.state === "truncated" && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0;
+  return !loss.text && !loss.blocks && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0 && loss.unaccountedSpills === 0
+    && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
 }
 
 export interface CodexOutputTruncation {
@@ -2504,13 +2513,22 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13960: the event shape the stream parser reads: an object with a string type whose item, when present, is an
- *  object. A rebuilt line that parses to anything else is no Codex event and never certifies its spill. */
+/** W1-T13960: a valid Codex event of its kind, in the shapes consumeLine reads (CodexJsonEvent): an object with a
+ *  string type; an item.* event carries an object item with a string type, and an agent_message item a string
+ *  text; any other event's item, when present, is an object; a turn.completed's usage, when present, is an object
+ *  whose token fields, when present, are finite numbers. A rebuilt line that parses to anything else never
+ *  certifies its spill. */
 function isCodexEventEnvelope(value: unknown): boolean {
-  const isObject = (candidate: unknown) => typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
-  if (!isObject(value)) return false;
-  const { type, item } = value as { type?: unknown; item?: unknown };
-  return typeof type === "string" && (item === undefined || isObject(item));
+  const isObject = (candidate: unknown): candidate is Record<string, unknown> =>
+    typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+  if (!isObject(value) || typeof value.type !== "string") return false;
+  const { type, item, usage } = value;
+  if (type.startsWith("item.")) {
+    if (!isObject(item) || typeof item.type !== "string" || (item.type === "agent_message" && typeof item.text !== "string")) return false;
+  } else if (item !== undefined && !isObject(item)) return false;
+  if (type !== "turn.completed" || usage === undefined) return true;
+  return isObject(usage) && (["input_tokens", "cached_input_tokens", "output_tokens"] as const)
+    .every((field) => usage[field] === undefined || (typeof usage[field] === "number" && Number.isFinite(usage[field])));
 }
 
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
@@ -2541,6 +2559,8 @@ class CodexJsonlAccumulator {
   private blocksCut = false;
   private rebuiltLines = 0;
   private rejectedRebuiltLines = 0;
+  private rebuiltDroppedBytes = 0;
+  private unaccountedSpills = 0;
   /** W1-T13960: the bytes written to the spill file for the line now spilling, so its read must account for each. */
   private spillLineBytes = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
@@ -2582,8 +2602,7 @@ class CodexJsonlAccumulator {
       }
       if (this.spilling) {
         this.appendSpillHead(part);
-        // W1-T13960: an empty append writes nothing but would recreate a spill file removed under the run.
-        if (part) appendFileSync(this.pendingFile!, part);
+        appendFileSync(this.pendingFile!, part);
         this.spillLineBytes += Buffer.byteLength(part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
@@ -2600,13 +2619,11 @@ class CodexJsonlAccumulator {
     let sourceBytes: number | undefined;
     let rebuilt = false;
     if (this.spilling) {
-      let tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
       // W1-T13960: a spill accounts for its line only when its file holds every byte written for that line. A file
-      // removed, recreated or rewritten under the run reads as unreadable, as one that changed while being read does.
-      if ((tail.state === "complete" || tail.state === "truncated") && tail.fileBytes !== this.spillLineBytes) {
-        tail = { state: "unreadable", text: "", bytesRead: tail.bytesRead, fileBytes: tail.fileBytes,
-          reason: `spill file holds ${tail.fileBytes} of the ${this.spillLineBytes} bytes spilled for its line` };
-      }
+      // removed, recreated or rewritten under the run only vetoes certifying the spill: the read, its retention
+      // state and its dropped bytes stay exactly as origin/main reads them.
+      if (tail.fileBytes !== this.spillLineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
       if (tail.state === "truncated") {
@@ -2615,6 +2632,7 @@ class CodexJsonlAccumulator {
         const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
         line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
         this.droppedBytes += Math.max(0, omitted);
+        this.rebuiltDroppedBytes += Math.max(0, omitted);
         rebuilt = true;
         this.rebuiltLines += 1;
       } else {
@@ -2649,6 +2667,8 @@ class CodexJsonlAccumulator {
       blocks: this.blocksCut || this.blockLoss.some(Boolean),
       rebuiltLines: this.rebuiltLines,
       rejectedRebuiltLines: this.rejectedRebuiltLines,
+      rebuiltDroppedBytes: this.rebuiltDroppedBytes,
+      unaccountedSpills: this.unaccountedSpills,
     };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
@@ -6514,12 +6534,12 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
+    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
     const textBytes = Buffer.byteLength(parsed.text);
     const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
-    // W1-T13960: text and blocks read truncated by their own lines' loss, never because some other line lost bytes.
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
-      text: { state: parsed.retentionLoss.text ? "truncated" : "complete", bytesRead: textBytes },
-      blocks: { state: parsed.retentionLoss.blocks ? "truncated" : "complete", bytesRead: blockBytes },
+      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
       stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
@@ -6529,6 +6549,14 @@ async function spawnCodexWorkerInPrivateTemp(
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;
+    const subtype = parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+      : incomplete ? "error_incomplete_output" : "success";
+    // W1-T13960: the one upgrade over origin/main. A success with dropped bytes is a certified spill, whose
+    // predicate proved the final text's and the blocks' own lines lost nothing; every other result is main's.
+    if (subtype === "success" && droppedOutput) {
+      outputRetention.text = { state: "complete", bytesRead: textBytes };
+      outputRetention.blocks = { state: "complete", bytesRead: blockBytes };
+    }
     lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
@@ -6555,8 +6583,7 @@ async function spawnCodexWorkerInPrivateTemp(
       ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
       outputRetention,
-      subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
-        : incomplete ? "error_incomplete_output" : "success",
+      subtype,
       isError,
       exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),

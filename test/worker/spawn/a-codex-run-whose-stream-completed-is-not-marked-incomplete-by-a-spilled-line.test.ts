@@ -1,6 +1,8 @@
 // W1-T13960: a Codex run whose stream completed is not marked incomplete because ONE spilled intermediate stdout
-// line kept only its bounded tail. The spawn decides completeness through codexResultRetentionComplete: the
-// final message, the retained blocks and the final turn.completed decide it, and a partial line never certifies.
+// line kept only its bounded tail. The spawn decides completeness through codexResultRetentionComplete, a narrow
+// upgrade over origin/main's result: only error_incomplete_output can become success, and only when the spill is
+// the sole loss and every spilled line rebuilt into a valid event. Every other input keeps main's result, retention
+// and dropped bytes, which the criterion 2 and 3 tests pin as main's literal values. A partial line never certifies.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -163,7 +165,7 @@ const outcome = (result: Awaited<ReturnType<typeof spawnCodexWorker>>) => ({
   isError: result.isError,
 });
 
-test("W1-T13960 criterion 2: a spill read absent fails the run, at its newline and at EOF", async () => {
+test("W1-T13960 criterion 2: a spill removed just before its newline returns origin/main's success; one absent at EOF fails", async () => {
   const seen: Record<string, unknown> = {};
   for (const at of ["newline", "eof"] as const) {
     const child = codexRun();
@@ -173,55 +175,103 @@ test("W1-T13960 criterion 2: a spill read absent fails the run, at its newline a
       const line = oversizedCommand();
       await child.write(line);
       await child.spillHolds(Buffer.byteLength(line));
-      // The last stdout bytes of the line are in; the spill goes before it is read back (ENOENT at the read).
+      // The last stdout bytes of the line are in; the spill goes before it is read back. At the newline origin/main's
+      // empty append recreates the file empty, so the line reads as nothing; at EOF the read finds no file.
       unlinkSync(child.spillFile());
       if (at === "newline") {
         await child.write("\n");
         await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
         child.end();
       } else child.end("");
-      seen[at] = outcome(await child.run);
+      const result = await child.run;
+      seen[at] = { ...outcome(result), droppedBytes: result.outputTruncation?.droppedBytes };
     } finally { rmSync(child.home, { recursive: true, force: true }); }
   }
+  // The literal results of origin/main (merge-base ed3d78aaa9) for these streams: the spill accounting may only veto
+  // an upgrade, so it never turns main's success into error_codex.
   assert.deepEqual(seen, {
-    newline: { completion: "complete", stdout: "absent", subtype: "error_codex", isError: true },
-    eof: { completion: "incomplete", stdout: "absent", subtype: "error_codex", isError: true },
+    newline: { completion: "complete", stdout: "complete", subtype: "success", isError: false, droppedBytes: 0 },
+    eof: { completion: "incomplete", stdout: "absent", subtype: "error_codex", isError: true, droppedBytes: 0 },
   });
 });
 
-test("W1-T13960 criterion 2: a spill whose file no longer holds every byte spilled for its line fails the run", async () => {
+/** The bytes origin/main drops rebuilding a spill of `fileBytes` ASCII bytes: all but its 64 KiB head and 256 KiB tail. */
+const rebuiltDrop = (fileBytes: number) => fileBytes - 64 * 1024 - 256 * 1024;
+const MID_LINE_OUTPUT = 2 * CODEX_WORKER_STDOUT_MAX_BYTES;
+const MID_LINE_CUT = CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 8;
+
+/** A completed stream whose spill file goes mid-line, once the spill has begun: the next append recreates it holding
+ *  only the rest of the line, more than the bounded tail, so the read is rebuilt from the line's head and a shorter
+ *  file than the bytes spilled for it. */
+async function spillRecreatedShorterMidLine() {
+  const child = codexRun();
+  child.start();
+  await child.spawned;
+  const line = oversizedCommand(MID_LINE_OUTPUT);
+  await child.write(line.slice(0, MID_LINE_CUT));
+  await child.spillHolds(MID_LINE_CUT);
+  unlinkSync(child.spillFile());
+  await child.write(line.slice(MID_LINE_CUT));
+  await child.write("\n");
+  await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
+  child.end();
+  return { child, line, result: await child.run };
+}
+
+test("W1-T13960 criterion 2: a spill whose file no longer holds every byte spilled for its line keeps origin/main's result", async () => {
   const seen: Record<string, unknown> = {};
+  const expected: Record<string, unknown> = {};
   for (const damage of ["recreated-empty-after-an-earlier-rebuild", "unlinked-mid-line"] as const) {
-    const child = codexRun();
+    let child: ReturnType<typeof codexRun> | undefined;
     try {
-      child.start();
-      await child.spawned;
+      let result: Awaited<ReturnType<typeof spawnCodexWorker>>;
       if (damage === "recreated-empty-after-an-earlier-rebuild") {
-        // An earlier spilled line is rebuilt and parses; the later one's file is recreated empty before its read.
+        // An earlier spilled line is rebuilt and parses; the later one's file is recreated empty before its read,
+        // so the later line reads as nothing: no rebuilt line is rejected, yet a spill lost its bytes.
+        child = codexRun();
+        child.start();
+        await child.spawned;
         const line = oversizedCommand();
         await child.write(`${line}\n`);
         await child.write(line);
         await child.spillHolds(Buffer.byteLength(line));
         writeFileSync(child.spillFile(), "");
+        await child.write("\n");
+        await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
+        child.end();
+        result = await child.run;
+        expected[damage] = rebuiltDrop(Buffer.byteLength(line));
       } else {
-        // The file goes mid-line, once the spill has begun; the next append recreates it holding only the rest of
-        // the line, more than the bounded tail, so the read is rebuilt from the line's head and a foreign tail.
-        const line = oversizedCommand(2 * CODEX_WORKER_STDOUT_MAX_BYTES);
-        const cut = CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 8;
-        await child.write(line.slice(0, cut));
-        await child.spillHolds(cut);
-        unlinkSync(child.spillFile());
-        await child.write(line.slice(cut));
+        const run = await spillRecreatedShorterMidLine();
+        child = run.child;
+        result = run.result;
+        expected[damage] = rebuiltDrop(Buffer.byteLength(run.line) - MID_LINE_CUT);
       }
-      await child.write("\n");
-      await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
-      child.end();
-      const result = await child.run;
-      seen[damage] = { ...outcome(result), reasonNamesTheSpill: /spill/.test(result.outputRetention?.stdout?.reason ?? "") };
-    } finally { rmSync(child.home, { recursive: true, force: true }); }
+      seen[damage] = { ...outcome(result), droppedBytes: result.outputTruncation?.droppedBytes };
+    } finally { if (child) rmSync(child.home, { recursive: true, force: true }); }
   }
-  const failed = { completion: "complete", stdout: "unreadable", subtype: "error_codex", isError: true, reasonNamesTheSpill: true };
-  assert.deepEqual(seen, { "recreated-empty-after-an-earlier-rebuild": failed, "unlinked-mid-line": failed });
+  // origin/main's literal results: the run stays incomplete, stdout truncated, and the dropped bytes are main's.
+  const main = (droppedBytes: unknown) => ({ completion: "complete", stdout: "truncated", subtype: "error_incomplete_output",
+    isError: true, droppedBytes });
+  assert.deepEqual(seen, Object.fromEntries(Object.entries(expected).map(([damage, bytes]) => [damage, main(bytes)])));
+});
+
+test("W1-T13960 criterion 3: a spill recreated shorter mid-line keeps origin/main's truncated stdout and dropped bytes", async () => {
+  const { child, line, result } = await spillRecreatedShorterMidLine();
+  try {
+    const fileBytes = Buffer.byteLength(line) - MID_LINE_CUT;
+    // origin/main reads the shorter file as truncated and counts its omitted middle; 589,992 bytes for this fixture.
+    assert.equal(rebuiltDrop(fileBytes), 589_992);
+    assert.equal(result.outputRetention?.stdout?.state, "truncated");
+    assert.equal(result.outputRetention?.stdout?.fileBytes, fileBytes);
+    assert.equal(result.outputRetention?.text.state, "truncated");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
+    assert.deepEqual(result.outputTruncation, { limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
+      retainedBytes: result.outputTruncation?.retainedBytes, droppedBytes: rebuiltDrop(fileBytes), spilledBytes: Buffer.byteLength(line) });
+    const receipt = child.rows().find((row) => row.step === "worker.output_truncated");
+    assert.deepEqual(receipt?.output_truncation, result.outputTruncation);
+    assert.equal(result.subtype, "error_incomplete_output");
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
 
 test("W1-T13960 criterion 2: a rebuilt spilled line that parses but is not a Codex event envelope does not certify", async () => {
@@ -231,6 +281,9 @@ test("W1-T13960 criterion 2: a rebuilt spilled line that parses but is not a Cod
     "an array": JSON.stringify([filler]),
     "an object without a type": JSON.stringify({ payload: filler }),
     "an item that is not an object": JSON.stringify({ type: "item.completed", item: filler }),
+    "an item.completed with no item": JSON.stringify({ type: "item.completed", payload: filler }),
+    "an item without a string type": JSON.stringify({ type: "item.completed", item: { kind: "command_execution", payload: filler } }),
+    "an agent message without a string text": JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: [filler] } }),
   };
   const seen: Record<string, unknown> = {};
   for (const [shape, line] of Object.entries(shapes)) {
@@ -247,6 +300,38 @@ test("W1-T13960 criterion 2: a rebuilt spilled line that parses but is not a Cod
   // As on origin/main: the spill was rebuilt from its head and tail, and the run stays incomplete.
   const incomplete = { completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true };
   assert.deepEqual(seen, Object.fromEntries(Object.keys(shapes).map((shape) => [shape, incomplete])));
+});
+
+/** A completed stream whose sole turn.completed is the spilled, rebuilt line. */
+async function soleCompletionSpilled(completion: Record<string, unknown>) {
+  const child = codexRun();
+  try {
+    child.start();
+    await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
+    await child.write(`${JSON.stringify(completion)}\n`);
+    child.end("");
+    const result = await child.run;
+    return { ...outcome(result), rebuilt: (result.outputTruncation?.droppedBytes ?? 0) > 0 };
+  } finally { rmSync(child.home, { recursive: true, force: true }); }
+}
+
+test("W1-T13960 criterion 2: a rebuilt turn.completed whose usage is not an object of token counts does not certify", async () => {
+  const filler = "u".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16);
+  const seen = {
+    "a string usage": await soleCompletionSpilled({ type: "turn.completed", usage: filler }),
+    "a string token count": await soleCompletionSpilled({ type: "turn.completed", usage: { input_tokens: filler, output_tokens: 10 } }),
+  };
+  // As on origin/main: the final turn completed and the spill was rebuilt, and the run stays incomplete.
+  const incomplete = { completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true };
+  assert.deepEqual(seen, { "a string usage": incomplete, "a string token count": incomplete });
+});
+
+test("W1-T13960 criterion 1: a rebuilt sole turn.completed whose usage holds finite token counts certifies its spill", async () => {
+  // The positive control for the usage check: the same stream, the omitted bytes in a field beside a valid usage.
+  const filler = "u".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16);
+  assert.deepEqual(await soleCompletionSpilled({ type: "turn.completed",
+    usage: { input_tokens: 100, cached_input_tokens: 25, output_tokens: 10 }, detail: filler }),
+  { completion: "complete", stdout: "truncated", subtype: "success", isError: false, rebuilt: true });
 });
 
 test("W1-T13960 criterion 2: stdout that is not valid UTF-8 is still incomplete", async () => {
@@ -284,7 +369,7 @@ test("W1-T13960 criterion 2: a final agent message that was itself the truncated
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
 
-test("W1-T13960 step 2: an intermediate agent message that was the truncated line leaves only the blocks truncated", async () => {
+test("W1-T13960 criterion 2: an intermediate agent message that was the truncated line is still incomplete, as on origin/main", async () => {
   const child = codexRun();
   try {
     child.start();
@@ -293,7 +378,8 @@ test("W1-T13960 step 2: an intermediate agent message that was the truncated lin
     child.end();
     const result = await child.run;
     assert.equal(result.text, FINAL);
-    assert.equal(result.outputRetention?.text.state, "complete");
+    // Not upgraded, so the retention is origin/main's: any dropped byte reads text and blocks truncated.
+    assert.equal(result.outputRetention?.text.state, "truncated");
     assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.equal(result.subtype, "error_incomplete_output");
     assert.equal(result.isError, true);
