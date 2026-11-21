@@ -1,7 +1,7 @@
 /** Account-owned dependency generations. Checkout workspaces and caches stay private. */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
@@ -26,9 +26,9 @@ export interface DependencySeedOptions {
 }
 export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; replaced?: true; lockReclaimed?: true };
 
-/** W1-T13974: a seed key's lock records who holds it, so a holder that was SIGKILLed (a prime timeout, a container
- * recycle) can be told apart from one still installing. */
+/** Legacy owner records remain readable. New record names identify a particular lock owner. */
 const LOCK_OWNER = "owner.json";
+const LOCK_OWNER_TOKEN = /^owner\.(\d+)\.([a-f0-9]{64})\.(\d+|-)\.[a-f0-9-]{36}$/;
 type LockOwner = { pid: number; hostname: string; started_at_ms: number; process_start?: string; pid_namespace?: string };
 /** The reason a prime gives up on a held lock, and the marker of a prime that reclaimed a dead owner's lock. */
 const SEED_LOCK_HELD = "seed-lock-held";
@@ -99,22 +99,36 @@ function lockOwner(): LockOwner {
   return { pid: process.pid, hostname: hostname(), started_at_ms: systemClock.now(), ...(start ? { process_start: start } : {}), ...(namespace ? { pid_namespace: namespace } : {}) };
 }
 
-/** The lock directory's inode when its recorded owner provably died, else undefined. Provably dead means: this host
+function lockScope(host = hostname(), namespace = pidNamespace()): string {
+  return createHash("sha256").update(JSON.stringify([host, namespace])).digest("hex");
+}
+
+function lockOwnerToken(owner: LockOwner): string {
+  return `owner.${owner.pid}.${lockScope(owner.hostname, owner.pid_namespace)}.${owner.process_start ?? "-"}.${randomUUID()}`;
+}
+
+/** The owner record's path when its owner provably died, else undefined. Provably dead means: this host
  * (and, on Linux, this pid namespace) wrote it, and its pid is gone (ESRCH) or now names a different process (its start
  * time changed). Never by age, never on EPERM, never on a missing or unreadable owner: it may still be mid-write. */
-function deadLockOwner(lock: string): number | undefined {
+function deadLockOwner(lock: string): string | undefined {
   try {
-    const identity = lstatSync(lock).ino;
-    const owner = JSON.parse(readFileSync(join(lock, LOCK_OWNER), "utf8")) as Partial<LockOwner>;
-    if (owner.hostname !== hostname() || owner.pid_namespace !== pidNamespace() || !Number.isSafeInteger(owner.pid) || owner.pid! <= 0) return undefined;
-    try { process.kill(owner.pid!, 0); }
+    const name = readdirSync(lock).find((name) => name === LOCK_OWNER || LOCK_OWNER_TOKEN.test(name));
+    if (name === undefined) return undefined;
+    const record = join(lock, name);
+    const token = LOCK_OWNER_TOKEN.exec(name);
+    const legacy = token ? undefined : JSON.parse(readFileSync(record, "utf8")) as Partial<LockOwner>;
+    const pid = token ? Number(token[1]) : legacy?.pid;
+    const start = token ? token[3] : legacy?.process_start;
+    if (token ? token[2] !== lockScope() : legacy?.hostname !== hostname() || legacy?.pid_namespace !== pidNamespace()) return undefined;
+    if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    try { process.kill(pid, 0); }
     catch (error) {
       // ESRCH: the owner is gone, so its lock is reclaimable. EPERM (alive, another account's) or anything else proves
       // nothing, and the lock is left alone.
-      return (error as NodeJS.ErrnoException).code === "ESRCH" ? identity : undefined;
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? record : undefined;
     }
-    const live = processStart(owner.pid!);
-    return owner.process_start !== undefined && live !== undefined && live !== owner.process_start ? identity : undefined;
+    const live = processStart(pid);
+    return start !== undefined && start !== "-" && live !== undefined && live !== start ? record : undefined;
   } catch (error) {
     // Deliberate: a lock or owner that cannot be read (absent, mid-write, malformed, unreadable) proves nothing,
     // so the lock is waited on exactly as before.
@@ -123,12 +137,18 @@ function deadLockOwner(lock: string): number | undefined {
   }
 }
 
-/** Removes the judged lock, and only it: it is moved aside first, so a lock another waiter re-created in between is
- * put back rather than deleted. */
-function reclaimLock(lock: string, identity: number): boolean {
+/** Rename the dead owner's record to claim the existing lock before moving it. A competing waiter can only
+ * rename the old record, and the new name identifies the reclaimer if it dies before moving the lock. */
+function reclaimLock(lock: string, deadOwner: string, ownerToken: string): boolean {
+  const claimed = join(lock, ownerToken);
+  try { renameSync(deadOwner, claimed); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
   const tomb = `${lock}.reclaimed-${randomUUID()}`;
-  renameSync(lock, tomb);
-  if (lstatSync(tomb).ino !== identity) { renameSync(tomb, lock); return false; }
+  try { renameSync(lock, tomb); }
+  catch (error) { renameSync(claimed, deadOwner); throw error; }
   rmSync(tomb, { recursive: true, force: true });
   return true;
 }
@@ -589,20 +609,30 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
   const meta = dependencySeedIdentity(checkout, { ...opts, npmVersion: opts.npmVersion ?? npmVersion(opts.env ?? process.env, root) });
+  // The reviewer can still recover the key if this process dies while holding or waiting for the lock.
+  if (opts.proof) writeSync(2, `[seed ${meta.key}]\n`);
   const seed = join(root, meta.key);
   const lock = join(root, `${meta.key}.lock`);
+  const owner = lockOwner();
+  const ownerToken = lockOwnerToken(owner);
   let installed = false;
   // Serialize builders and GC. Never reclaim a lock by its age: only one whose recorded owner provably died
   // (deadLockOwner), at most once per prime. A proof prime waits the same lockWaitMs as any other (W1-T13974).
   const started = systemClock.now();
   const lockWaitMs = opts.lockWaitMs ?? 120_000;
-  let lockReclaimed = false, reclaimTried = false;
+  let lockReclaimed = false;
+  let triedOwner: string | undefined;
   while (true) {
     try { mkdirSync(lock, { mode: 0o700 }); break; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw withSeedKey(error, meta.key, opts.proof);
-      const dead = reclaimTried ? undefined : deadLockOwner(lock);
-      if (dead !== undefined) { reclaimTried = true; lockReclaimed = reclaimLock(lock, dead); continue; }
+      const dead = lockReclaimed ? undefined : deadLockOwner(lock);
+      if (dead !== undefined && dead !== triedOwner) {
+        triedOwner = dead;
+        try { lockReclaimed = reclaimLock(lock, dead, ownerToken); }
+        catch (error) { throw withSeedKey(error, meta.key, opts.proof); }
+        continue;
+      }
       if (systemClock.now() - started >= lockWaitMs) {
         throw withSeedKey(Object.assign(new Error(`${SEED_LOCK_HELD}: ${lock} is held by an owner this prime cannot prove dead (EEXIST)`), { code: "EEXIST" }), meta.key, opts.proof);
       }
@@ -613,7 +643,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   const targetStage = join(checkout, `.rmd-dependency-stage-${randomUUID()}`);
   const reclaimed = lockReclaimed ? { lockReclaimed: true as const } : {};
   try {
-    writeJsonAtomic(join(lock, LOCK_OWNER), lockOwner());
+    writeJsonAtomic(join(lock, ownerToken), owner);
     if (!existsSync(join(seed, "ready.json"))) {
       mkdirSync(stage, { mode: 0o700 });
       for (const [name, content] of Object.entries(meta.files)) {

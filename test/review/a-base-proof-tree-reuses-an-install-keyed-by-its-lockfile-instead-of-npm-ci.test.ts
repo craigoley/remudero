@@ -5,11 +5,12 @@
 // root (so the state dir resolves exactly as the daemon resolves it), a fake `npm` first on PATH that logs every
 // call, and the real dependency-seeds prime child.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync, type ExecFileSyncOptions } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import { dependencySeedIdentity, materializeDependencySeed, sweepDependencySeeds } from "#src/lib/dependency-seeds.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
@@ -172,6 +173,18 @@ function installedVitest(dir: string): string | undefined {
 const isSeedPrime = (call: readonly string[], root: string) =>
   call[0] === process.execPath && call.includes("prime") && call.includes("--proof") && call[call.indexOf("--root") + 1] === root;
 
+const execChild = promisify(execFile);
+
+function asyncWithPreload(file: string, env?: NodeJS.ProcessEnv): NonNullable<Parameters<typeof ensureDepsAsync>[3]> {
+  return async (command, args, options) => {
+    if (args.includes("--proof")) {
+      assert.equal(options.timeout, undefined, "the state-dir prime owns its wait and install bounds");
+      args = ["--import", file, ...args];
+    }
+    return (await execChild(command, args, { ...options, env: { ...options.env, ...env }, encoding: "utf8", timeout: 15_000 })).stdout;
+  };
+}
+
 test("W1-T13974 criterion 1: a reviewer's proof tree with no configured seed root primes from the state-dir store, and a second tree on its lockfile runs no npm install", async () => {
   const w = world();
   await inWorld(w, undefined, () => {
@@ -326,38 +339,49 @@ test("W1-T13974 criterion 3: a seed prime that fails falls back to npm ci and it
   });
 });
 
-test("W1-T13974 criterion 3: a failed account prime falls back to npm ci and its row says npm-ci, never none", async () => {
+test("W1-T13974 criterion 4: a failed account prime leaves the runner unavailable as at base", async () => {
   const w = world();
   const account = join(w.root, "account-seeds");
   await inWorld(w, undefined, async () => {
-    writeFileSync(account, "not a directory"); // the account's opted-in store cannot be made, so every prime fails
+    writeFileSync(account, "not a directory");
     writeFileSync(join(w.home, ".config", "remudero", "dependency-seeds.json"), JSON.stringify({ enabled: true, root: account }));
     const sync = owned(w), later = owned(w);
     const calls: string[][] = [];
-    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF), true, "npm ci installs the runner");
-    assert.ok(isSeedPrime(calls[0]!, account), "the account's prime was tried first, as today");
-    assert.deepEqual(calls[1], ["npm", ...PROOF_INSTALL_ARGS], "then npm ci in the tree");
-    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
-    assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later]);
-    const fallen = rows(w);
-    assert.deepEqual(fallen.map((row) => [row.checkout, row.install, row.seed_store, row.ok]), [[sync, "npm-ci", "account", true], [later, "npm-ci", "account", true]]);
-    for (const row of fallen) assert.match(row.reason ?? "", /dependency-seeds: /, "the row carries the prime's own refusal");
-    assert.equal(existsSync(w.store), false, "the state-dir store is not reached when the account opted in");
+    assert.equal(ensureDeps(sync, recordingExec(calls), pinnedVitestCli(sync), PROOF), false);
+    assert.equal(calls.length, 1);
+    assert.ok(isSeedPrime(calls[0]!, account), "the account's configured prime was attempted");
+    assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), false);
+    assert.deepEqual(npmCalls(w), [], "a failed account prime leaves both trees without an install");
+    assert.deepEqual(rows(w).map((row) => [row.checkout, row.install, row.seed_store, row.ok]),
+      [[sync, "none", "account", false], [later, "none", "account", false]]);
+    for (const row of rows(w)) assert.match(row.reason ?? "", /dependency-seeds: /);
+    assert.equal(existsSync(w.store), false);
   });
 });
 
-test("W1-T13974 criterion 3: a reviewer checkout primed without an instance config still writes its one row, in the default instance's state dir", async () => {
+test("W1-T13974 criterion 1: without instance config both paths share one seed in the default state dir", async () => {
   const w = world();
   await inWorld(w, undefined, async () => {
-    rmSync(join(w.home, ".config", "remudero", "config.json")); // loadConfig's default root is then ~/Remudero
+    rmSync(join(w.home, ".config", "remudero", "config.json"));
     const fallback = join(w.home, "Remudero", "state");
+    const store = join(fallback, STORE);
     const sync = owned(w), later = owned(w);
-    assert.equal(ensureDeps(sync, execFileSync, pinnedVitestCli(sync), PROOF), true);
+    const key = primeKey(sync);
+    const calls: string[][] = [];
+    const exec = ((command: string, args: readonly string[], options: ExecFileSyncOptions) => {
+      assert.equal(options.timeout, undefined, "the synchronous state-dir prime also owns its wait and install bounds");
+      return recordingExec(calls)(command, args, options);
+    }) as typeof execFileSync;
+    assert.equal(ensureDeps(sync, exec, pinnedVitestCli(sync), PROOF), true);
+    assert.ok(isSeedPrime(calls[0]!, store));
+    const initialNpmCalls = npmCalls(w);
     assert.equal(await ensureDepsAsync(later, pinnedVitestCli(later), PROOF), true);
+    assert.deepEqual(npmCalls(w), initialNpmCalls, "the second prime starts no npm process");
+    assert.equal(installs(w).length, 1);
     assert.deepEqual(rowsIn(fallback).map((row) => [row.checkout, row.install, row.seed_key, row.seed_store, row.ok]),
-      [[sync, "npm-ci", null, null, true], [later, "npm-ci", null, null, true]], "one row per primed checkout");
-    assert.deepEqual(installs(w).map((call) => call.cwd), [sync, later], "with no instance named, the tree takes npm ci as at base");
-    assert.equal(existsSync(join(fallback, STORE)), false, "no store is made in a state dir no config named");
+      [[sync, "fresh", key, "state-dir", true], [later, "reused", key, "state-dir", true]]);
+    assert.ok(existsSync(join(store, key, "ready.json")));
+    assert.equal(existsSync(w.store), false);
   });
 });
 
@@ -436,6 +460,30 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — a linked node
   });
 });
 
+test("W1-T13974 criterion 4: a link that appears during a prime remains an existing install", async () => {
+  const w = world();
+  await inWorld(w, undefined, () => {
+    const shared = join(w.root, "shared");
+    installVitest(shared);
+    writeFileSync(join(shared, "node_modules", "vitest", "vitest.mjs"), "");
+    const matching = owned(w), mismatched = owned(w, "5.0.6");
+    const calls: string[][] = [];
+    const exec = ((command: string, args: readonly string[], options: ExecFileSyncOptions) => {
+      if (isSeedPrime([command, ...args], w.store)) {
+        symlinkSync(join(shared, "node_modules"), join(options.cwd as string, "node_modules"), "dir");
+      }
+      return recordingExec(calls)(command, args, options);
+    }) as typeof execFileSync;
+    assert.equal(ensureDeps(matching, exec, pinnedVitestCli(matching), PROOF), true);
+    assert.equal(ensureDeps(mismatched, exec, pinnedVitestCli(mismatched), PROOF), true);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((call) => isSeedPrime(call, w.store)));
+    assert.deepEqual(npmCalls(w), []);
+    assert.deepEqual(rows(w).map((row) => [row.install, row.ok]), [["none", true], ["none", false]]);
+    assert.equal(installedVitest(shared), "5.0.5");
+  });
+});
+
 test("W1-T13974 criterion 4: invariant:proof-results-unchanged — an unreadable instance or seed config keeps today's outcome", async () => {
   const w = world();
   await inWorld(w, undefined, async () => {
@@ -450,11 +498,6 @@ test("W1-T13974 criterion 4: invariant:proof-results-unchanged — an unreadable
     assert.deepEqual(rowsIn(join(w.home, "Remudero", "state")).map((row) => [row.checkout, row.install]), [[noState, "npm-ci"]],
       "its row goes to the default instance's state dir");
     rmSync(config, { recursive: true });
-    const noConfig = owned(w); // no instance config at all: no state dir either
-    const noConfigCalls: string[][] = [];
-    assert.equal(ensureDeps(noConfig, recordingExec(noConfigCalls), pinnedVitestCli(noConfig), PROOF), true);
-    assert.deepEqual(noConfigCalls, [["npm", ...PROOF_INSTALL_ARGS]]);
-    assert.equal(existsSync(w.store), false);
     writeFileSync(config, JSON.stringify({ root: join(w.root, "instance") }));
 
     // An account seed config with no root throws, as at base: the sync path installs nothing, the async path rejects.
@@ -647,6 +690,95 @@ test("W1-T13974 criterion 2: a seed lock whose owner died on this host is reclai
     assert.equal((result as { lockReclaimed?: boolean }).lockReclaimed, true);
     assert.equal(existsSync(join(w.store, `${directKey}.lock`)), false);
     assert.deepEqual(readdirSync(w.store).filter((name) => name.includes(".reclaimed-")), [], "no reclaimed lock is left behind");
+  });
+});
+
+test("W1-T13974 criterion 2: concurrent reclaimers of one dead owner still make one install", async () => {
+  const w = world();
+  await inWorld(w, undefined, async () => {
+    const a = owned(w), b = owned(w);
+    const key = primeKey(a);
+    const lock = holdLock(w, key, ownerOf(deadPid()));
+    const preload = join(w.root, "race.mjs");
+    writeFileSync(preload, `
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const root = ${JSON.stringify(w.root)}, lock = ${JSON.stringify(lock)};
+const rename = fs.renameSync, leader = process.env.RECLAIM_LEADER === "1";
+const clock = new Int32Array(new SharedArrayBuffer(4));
+function wait(file) {
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(root + "/" + file)) {
+    if (Date.now() >= deadline) throw new Error("reclaim fixture timed out waiting for " + file);
+    Atomics.wait(clock, 0, 0, 5);
+  }
+}
+fs.renameSync = (from, to) => {
+  const movesLock = from === lock && to.startsWith(lock + ".reclaimed-");
+  if (from === lock + "/owner.json" || movesLock) {
+    if (!leader) {
+      fs.writeFileSync(root + "/both-saw-dead-owner", "");
+      wait("lock-moved");
+      try { return rename(from, to); }
+      finally { fs.writeFileSync(root + "/loser-tried-rename", ""); }
+    }
+    wait("both-saw-dead-owner");
+    rename(from, to);
+    if (movesLock) {
+      fs.writeFileSync(root + "/lock-moved", "");
+      wait("loser-tried-rename");
+    }
+    return;
+  }
+  return rename(from, to);
+};
+syncBuiltinESMExports();
+`);
+    assert.deepEqual(await Promise.all([
+      ensureDepsAsync(a, pinnedVitestCli(a), PROOF, asyncWithPreload(preload, { RECLAIM_LEADER: "1" })),
+      ensureDepsAsync(b, pinnedVitestCli(b), PROOF, asyncWithPreload(preload)),
+    ]), [true, true]);
+    assert.ok(existsSync(join(w.root, "loser-tried-rename")), "both children reached the reclaim syscall");
+    assert.equal(installs(w).length, 1);
+    assert.deepEqual(rows(w).map((row) => row.install).sort(), ["fresh", "reused"]);
+    assert.deepEqual(rows(w).map((row) => row.seed_key), [key, key]);
+    assert.equal(existsSync(lock), false);
+  });
+});
+
+test("W1-T13974 criterion 3: a killed prime and a reclaim error both retain the resolved key in their fallback row", async () => {
+  const w = world();
+  await inWorld(w, undefined, async () => {
+    const killed = owned(w), refused = owned(w, "5.0.6");
+    const killedKey = primeKey(killed), refusedKey = primeKey(refused);
+    const lock = holdLock(w, refusedKey, ownerOf(deadPid()));
+    const preload = join(w.root, "fault.mjs");
+    writeFileSync(preload, `
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const mkdir = fs.mkdirSync, rename = fs.renameSync, lock = ${JSON.stringify(lock)};
+fs.mkdirSync = (path, ...args) => {
+  if (path === ${JSON.stringify(join(w.store, `${killedKey}.lock`))}) process.kill(process.pid, "SIGKILL");
+  return mkdir(path, ...args);
+};
+fs.renameSync = (from, to) => {
+  if (from === lock || from === lock + "/owner.json") {
+    throw Object.assign(new Error("fixture refused stale lock rename"), { code: "EACCES" });
+  }
+  return rename(from, to);
+};
+syncBuiltinESMExports();
+`);
+    const exec = asyncWithPreload(preload);
+    assert.equal(await ensureDepsAsync(killed, pinnedVitestCli(killed), PROOF, exec), true);
+    assert.equal(await ensureDepsAsync(refused, pinnedVitestCli(refused), PROOF, exec), true);
+    const recorded = rows(w);
+    assert.deepEqual(recorded.map((row) => [row.checkout, row.install, row.seed_key, row.ok]),
+      [[killed, "npm-ci", killedKey, true], [refused, "npm-ci", refusedKey, true]]);
+    assert.match(recorded[0]!.reason ?? "", /SIGKILL/);
+    assert.match(recorded[1]!.reason ?? "", /fixture refused stale lock rename/);
+    assert.deepEqual(installs(w).map((call) => call.cwd), [killed, refused]);
+    assert.ok(existsSync(join(lock, "owner.json")), "the refused reclaim leaves the stale owner record");
   });
 });
 
