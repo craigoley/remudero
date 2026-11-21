@@ -29,15 +29,24 @@ import {
   type SweepDeps,
 } from "#src/lib/sweep.js";
 import { InflightLockError, acquireInflightLock, readInflightLock, type InflightLockInfo } from "#src/lib/inflight-lock.js";
+import { fixedClock } from "#src/lib/clock.js";
+import { readMemoryLedger, type HostMemoryLedgerOptions } from "#src/lib/host-memory-ledger.js";
+import { resetLearnedEstimateCacheForTests } from "#src/lib/host-memory-learning.js";
+import { reserveRunChild } from "#src/lib/run-child-reservation.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import type { Config } from "#src/lib/config.js";
+import type { Mount } from "#src/lib/mounts.js";
 import type { Plan, Task } from "#src/lib/plan.js";
+import type { ReviewVerdict } from "#src/lib/review.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import {
   buildSweepEffects,
   captureRegisteredFixOwnerSnapshot,
   fixBranchClaimKey,
+  harnessCommitForShellLessWorker,
   registeredFixWorktreeOwner,
   removeAbandonedFixWorktreeOwner,
+  runFixRung,
   waitForCiGreen,
   type BuildSweepEffectsDeps,
 } from "#test/helpers/run-task-test.js";
@@ -81,11 +90,12 @@ async function waitForFile(path: string): Promise<void> {
 
 const keyFor = (branch: string): string => fixBranchClaimKey("acme", "remudero", branch);
 
-/** A round that pushed PUSHED, wrote fix.done under CLAIM and then started its CI wait. */
+/** A round that pushed PUSHED, kept CLAIM through its fix.done into its CI wait, and then started that wait. */
 function waitingRound(nowMs: number): Row[] {
   return [
     { ts: new Date(nowMs - 120_000).toISOString(), run_id: ROUND, task_id: TASK, step: "fix.done",
-      pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: CLAIM, head_sha: "3179eb03", pushed_head_sha: PUSHED },
+      pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: CLAIM, head_sha: "3179eb03", pushed_head_sha: PUSHED,
+      ci_wait_holds_claim: true, round_started_at_ms: nowMs - 180_000, process_start: PROCESS_START },
     { ts: new Date(nowMs - 110_000).toISOString(), run_id: ROUND, task_id: TASK, step: "run.awaiting_external", waiting_on: "ci",
       pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: CLAIM, head_sha: PUSHED, process_start: PROCESS_START,
       round_started_at_ms: nowMs - 180_000 },
@@ -309,9 +319,11 @@ test("W1-T13991 criterion 3: independent sweep processes charge at most one fix 
     assert.equal(h.deferred().length, 1, "the parked round receives its own head's failure before admission");
     assert.deepEqual(h.admitted, []);
 
-    await runSweep([redPr("foreign")], deps, DEFAULT_SWEEP_POLICY);
-    assert.deepEqual(h.dispatched, [PR], "a foreign head can be redispatched while the old round waits");
-    assert.deepEqual(h.admitted, [PR]);
+    // The parked child's CI wait freed its charge, not the PR's admission: a head someone else pushed waits for it.
+    const foreign = await runSweep([redPr("foreign")], deps, DEFAULT_SWEEP_POLICY);
+    assert.match(foreign.actions[0].reason, /already holds admission/, "no second round on the PR while the first child runs");
+    assert.deepEqual(h.admitted, []);
+    assert.deepEqual(h.dispatched, []);
   } finally {
     writeFileSync(park, "");
     writeFileSync(settle, "");
@@ -319,6 +331,10 @@ test("W1-T13991 criterion 3: independent sweep processes charge at most one fix 
     if ("error" in settled) throw settled.error;
     assert.deepEqual(JSON.parse(settled.value.stdout), { charges: ["charged", "released"] });
   }
+  // Once the first child has ended, the foreign head is redispatched as on origin/main.
+  await runSweep([redPr("foreign")], { ...h.deps, fixAdmissionLockDir: dir }, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(h.dispatched, [PR], "a foreign head is redispatched once the old round has ended");
+  assert.deepEqual(h.admitted, [PR]);
 });
 
 test("W1-T13991 criterion 4: a dead round, an ended round and a head someone else moved are reclaimed as on origin/main", async (t) => {
@@ -338,7 +354,8 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
       (step): [string, Row[], Partial<FixRoundLiveProbe>] =>
         [step, [...waitingRound(nowMs), { ts: later, run_id: ROUND, pr_number: PR, step }], {}]),
     ["the round is past its spawn bound", waitingRound(nowMs), { nowMs: nowMs + BOUND_MS - 150_000 }],
-    ["the round never started its wait", waitingRound(nowMs).slice(0, 1), {}],
+    ["the round's fix.done released its claim, as on origin/main", waitingRound(nowMs).map((row) =>
+      row.step === "fix.done" ? { ...row, ci_wait_holds_claim: undefined } : row), {}],
   ];
   for (const [name, rows, over] of cases) {
     writeFileSync(ledger, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
@@ -367,19 +384,24 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
   const dirty = sweepHarness(t, { live: true });
   assert.equal(dirty.deps.deferToLiveFixRound!({ ...redPr(), mergeState: "dirty" } as OpenPrView, dirty.rows), undefined);
 
-  // The claim key, and the release on every ending path: without a re-take under a given id, no claim is held
-  // through a wait (the operator run-task path); with one, a replacement holder is never unlinked.
+  // The claim key, and the release on every ending path: without a keep, no claim is held through a wait (the operator
+  // run-task path) and fix.done releases it; with one, the claim is never released before the wait, and a replacement
+  // holder is never unlinked.
   assert.equal(keyFor("run-X-1"), "fix-branch--acme--remudero--run-X-1");
   const key = keyFor("run-W1-T900-hold");
   const plain = fixRoundBranchClaim(acquireInflightLock(inflightDir, key, { run_id: "P1" }), () => "refused");
-  assert.equal(plain.holdForWait, undefined);
+  assert.equal(plain.keepForWait, undefined);
   plain.release();
-  const retakeAs = (id: string) => reclaimFixRoundBranch({ inflightDir, claimKey: key, claimRunId: id, roundEnded: () => false, ownsWorktree: () => true });
-  const claim = fixRoundBranchClaim(acquireInflightLock(inflightDir, key, { run_id: "R1" }), () => retakeAs("R2"), retakeAs);
-  claim.release();
-  assert.equal(readInflightLock(inflightDir, key), null, "fix.done still releases the claim");
-  assert.equal(claim.holdForWait!(), undefined);
-  assert.equal(readInflightLock(inflightDir, key)?.run_id, "R1", "the wait holds the claim fix.done named");
+  assert.equal(readInflightLock(inflightDir, key), null, "a plain claim's fix.done releases it, as on origin/main");
+  const retake = (id: string) => () => reclaimFixRoundBranch({ inflightDir, claimKey: key, claimRunId: id, roundEnded: () => false, ownsWorktree: () => true });
+  const keep = () => ({ process_start: PROCESS_START });
+  const claim = fixRoundBranchClaim(acquireInflightLock(inflightDir, key, { run_id: "R1" }), retake("R2"), keep);
+  assert.deepEqual(claim.keepForWait!(), { process_start: PROCESS_START });
+  assert.equal(readInflightLock(inflightDir, key)?.run_id, "R1", "the wait keeps the claim fix.done names, never released");
+  const refusing = fixRoundBranchClaim(acquireInflightLock(inflightDir, keyFor("run-W1-T900-refuse"), { run_id: "Q1" }), retake("Q2"),
+    () => "this round's process start is unreadable");
+  assert.equal(refusing.keepForWait!(), "this round's process start is unreadable", "a refused keep leaves fix.done to release it");
+  refusing.release();
   rmSync(join(inflightDir, `${key}.lock`));
   const successor = acquireInflightLock(inflightDir, key, { run_id: "SUCCESSOR" });
   assert.equal(claim.reacquire(), "branch claim held by SUCCESSOR", "a replaced claim stands the round down as before");
@@ -387,9 +409,8 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
   successor.release();
 
   // Recycle and error paths release directly, before the normal post-CI ownership check.
-  const ending = fixRoundBranchClaim(acquireInflightLock(inflightDir, key, { run_id: "ENDING" }), () => retakeAs("R3"), retakeAs);
-  ending.release();
-  assert.equal(ending.holdForWait!(), undefined);
+  const ending = fixRoundBranchClaim(acquireInflightLock(inflightDir, key, { run_id: "ENDING" }), retake("R3"), keep);
+  assert.deepEqual(ending.keepForWait!(), { process_start: PROCESS_START });
   rmSync(join(inflightDir, `${key}.lock`));
   const replacement = acquireInflightLock(inflightDir, key, { run_id: "REPLACEMENT" });
   try {
@@ -450,9 +471,102 @@ test("W1-T13991 criterion 3: a hosted round holds the PR's admission through the
   assert.ok(seen.atReservation !== undefined, "the sweep's admission lock is held while the host reserves the child's memory");
   assert.equal(seen.atReservation, seen.inEnvelope, "the envelope names that holder for the child");
   assert.match(String(seen.overlapping), /already holds admission/, "an overlapping round for the PR is refused before any reservation");
-  assert.ok(seen.inChild !== undefined && seen.inChild !== seen.atReservation, "the child adopted the lock in place");
+  assert.equal(seen.inChild, seen.atReservation, "the child adopted the lock in place, under the sweep's run id");
   assert.deepEqual(charges, [`SWEEP-A@${PUSHED}`, "SWEEP-A:released", "child", "child:released"], "one round charged at a time");
   assert.equal(holder(fixAdmissionLockPath(dir, redPr())), undefined, "the lock is free once the child ends");
+});
+
+test("W1-T13991 criterion 3: a hosted child's live memory reservation keeps the PR's admission held across a foreign head move until the host settles it", async (t) => {
+  resetLearnedEstimateCacheForTests();
+  const root = scratch(t, "reserved");
+  const dir = join(root, "fix-admission");
+  // The host's real reservation path (reserveRunChild over a host memory ledger), on a fixture ledger under this root.
+  const memory = join(root, "memory");
+  mkdirSync(memory, { recursive: true });
+  writeFileSync(join(memory, ".ledger-id"), "fixture-ledger\n");
+  const generation = { containerId: "container", initStart: "proc:1" };
+  const ledger: HostMemoryLedgerOptions = {
+    location: () => ({ dir: memory, scope: "local" }), root, ownerPid: process.pid,
+    instance: () => ({ name: "fixture", hostUnique: true }), generation: () => generation,
+    probe: () => ({ state: "alive", start: "proc:1" }), clock: fixedClock(1000), log: () => {},
+    listProcesses: () => ({ complete: true, rows: [] }),
+  };
+  const reserveDeps = { ledger, store: { location: ledger.location, root, instance: () => ({ name: "fixture" }), clock: fixedClock(1000) },
+    admission: { policy: () => ({ mode: "shadow" }) as never } };
+  const held = () => readMemoryLedger(ledger)!.entries.filter((entry) =>
+    entry.workerClass === "fix" && entry.status === "owned" && !entry.occupancyReleased).length;
+  const rows: Row[] = [];
+  const nowMs = Date.now();
+  const depsFor = (runId: string): SweepDeps => ({
+    ledgerPath: join(root, "ledger.ndjson"), runId, now: () => nowMs, detachFixWait: true, fixAdmissionLockDir: dir,
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: new Date(nowMs).toISOString(), ...row }); },
+    log: (step, extra) => { rows.push({ ts: new Date(nowMs).toISOString(), step, ...(extra ?? {}) }); },
+    claimFixAdmission: () => ({ admitted: true, release: () => {} }),
+    dispatchFix: () => assert.fail("a hosted fix never runs in process"),
+    arm: () => assert.fail("a red PR must not arm"), close: () => assert.fail("no close is due"),
+    escalate: () => assert.fail("nothing is escalated"),
+  });
+  const gate = () => { let open!: () => void; const opened = new Promise<void>((resolve) => { open = resolve; }); return { open, opened }; };
+  const inWait = gate();
+  const childEnds = gate();
+  const hostSettles = gate();
+  const reservedFor: string[] = [];
+  const mostHeld: number[] = [];
+  const children: Promise<unknown>[] = [];
+  t.after(() => { installDetachedWorkHost(undefined); resetChildWork(); });
+  installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async (input) => {
+      const first = reservedFor.length === 0;
+      // The host reserves the child's memory before it spawns, and keeps it until it settles the child.
+      const reservation = await reserveRunChild({ lane: "sweep-fix", root, runId: `work-${reservedFor.length}`, taskId: TASK, entryKind: "tsx" },
+        reserveDeps);
+      reservedFor.push(input.envelope.pr.headSha);
+      mostHeld.push(held());
+      const child = runFixDispatchChild({ envelope: input.envelope }, {
+        readLivePr: async () => ({ state: "OPEN", headSha: input.envelope.pr.headSha }),
+        readTask: () => ({ found: true, merged: false, retired: false }),
+        hold: () => undefined, log: () => {},
+        claimFixAdmission: () => ({ admitted: true, release: () => {} }),
+        dispatcher: () => ({ dispatchFix: async (_pr: OpenPrView, _evidence: unknown, onPhase: (phase: string) => void) => {
+          if (!first) return;
+          onPhase("ci-wait");
+          inWait.open();
+          await childEnds.opened;
+        } }),
+      } as never);
+      children.push(child);
+      // As run-child's onEnd: the process ends, the host releases its reservation, and only then is the child settled.
+      const settled = child.then(() => hostSettles.opened).finally(() => reservation.releaseOccupancy());
+      return { runId: `work-fix-dispatch-${reservedFor.length}`, settled };
+    },
+  });
+  await runSweep([redPr()], depsFor("SWEEP-A"), DEFAULT_SWEEP_POLICY);
+  await inWait.opened;
+  assert.equal(held(), 1, "the first child holds its reservation through its CI wait");
+
+  // Someone else pushes a new head while the first child waits: no second round is admitted, so none is reserved.
+  const moved = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-B"), DEFAULT_SWEEP_POLICY);
+  assert.match(String(moved.actions.find((action) => action.prNumber === PR)?.reason), /already holds admission/);
+  assert.deepEqual(reservedFor, [PUSHED]);
+
+  // The child's process has ended, but the host has not settled it: its reservation is still held, and so is the PR.
+  childEnds.open();
+  await children[0];
+  assert.equal(held(), 1);
+  const ended = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-C"), DEFAULT_SWEEP_POLICY);
+  assert.match(String(ended.actions.find((action) => action.prNumber === PR)?.reason), /already holds admission/);
+  assert.deepEqual(reservedFor, [PUSHED]);
+
+  // Settlement releases the reservation, then the admission: the moved head is redispatched, as on origin/main.
+  hostSettles.open();
+  await drainDetachedSweepActions();
+  assert.equal(held(), 0);
+  await runSweep([redPr("f00dfeed")], depsFor("SWEEP-D"), DEFAULT_SWEEP_POLICY);
+  await drainDetachedSweepActions();
+  await Promise.all(children);
+  assert.deepEqual(reservedFor, [PUSHED, "f00dfeed"]);
+  assert.deepEqual(mostHeld, [1, 1], "at most one fix round's memory is reserved for the PR at any time");
 });
 
 test("W1-T13991 criterion 4: an abandoned admission lock another host left in shared state never blocks this host's redispatch", async (t) => {
@@ -475,14 +589,20 @@ test("W1-T13991 criterion 5: the wait belongs to the exact round and another PR'
   const [done, wait] = waitingRound(nowMs);
   const unrelated = { run_id: ROUND, pr_number: PR + 1, ts: new Date(nowMs).toISOString() };
   assert.equal(fixRoundIsLiveOnHead([done, wait, { ...unrelated, step: "fix.dispatch" }], probe), true);
-  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, ...unrelated }], probe), false);
-  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, waiting_on: "pr" }], probe), false);
-  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, head_sha: "f00dfeed" }], probe), false);
-  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, round_id: "OTHER" }], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([done], probe), true, "the fix.done that kept the claim reads live before its first wait row");
+  assert.equal(fixRoundIsLiveOnHead([{ ...done, ci_wait_holds_claim: undefined }, wait], probe), false, "a released claim reads ended");
+  assert.equal(fixRoundIsLiveOnHead([{ ...done, process_start: undefined }, wait], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([{ ...done, round_started_at_ms: undefined }, wait], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([{ ...done, pushed_head_sha: "f00dfeed" }, wait], probe), false);
+  assert.equal(fixRoundIsLiveOnHead([{ ...done, branch_claim_run_id: "OTHER" }, wait], probe), false);
   assert.equal(fixRoundIsLiveOnHead([done, wait, { ...unrelated, pr_number: PR, step: "fix.dispatch" }], probe), false);
 });
 
 // ── the sweep's real dispatchFix and fix rung ───────────────────────────────────────────────
+
+/** The rows that end a round's wait (fixRoundIsLiveOnHead): a racing sweep may take the claim only after one of them. */
+const RACE_ENDS = new Set(["fix.ci_not_green", "fix.stood_down", "fix.commit_refused", "fix.review", "fix.dispatch",
+  "fix.exhausted", "sweep.fix.error", "run.freshness_handoff", "fix.live_round_resumed"]);
 
 const PLAN: Plan = (() => {
   const tasks = [{ id: TASK, title: TASK, risk: "low", acceptance: [
@@ -501,219 +621,346 @@ function worker(text: string): WorkerResult {
   };
 }
 
-test("W1-T13991 criterion 2: red checks and failing reviews resume the round in its own worktree with the original criterion index", async (t) => {
-  for (const failure of ["review", "public-criterion", "check", "check-pending", "foreign-head", "marker-error"] as const) {
-    const root = scratch(t, `rung-${failure}`);
-    const repo = "scratch-w1t13991";
-    // A checkout of a bare origin under <root>/repos/<repo>, with the run branch pushed.
-    const origin = gitRepo({ bare: true, kind: "w1t13991-origin" });
-    t.after(() => origin.cleanup());
-    const seed = gitRepo({ kind: "w1t13991-seed" });
-    seed.addRemote("origin", origin.dir);
-    seed.git("push", "--quiet", "origin", "main");
-    seed.git("checkout", "--quiet", "-b", BRANCH);
-    commitInsideFixture(seed.dir, seed.dir, "seed.txt", "chore: ours");
-    seed.git("push", "--quiet", "origin", BRANCH);
-    seed.git("checkout", "--quiet", "main");
-    mkdirSync(join(root, "repos"), { recursive: true });
-    renameSync(seed.dir, join(root, "repos", repo));
-    mkdirSync(join(root, "worktrees"), { recursive: true });
-    const ledger = join(root, "ledger.ndjson");
-    const key = fixBranchClaimKey("acme", repo, BRANCH);
-    const logs: Row[] = [];
-    const spawns: SpawnWorkerArgs[] = [];
-    const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number;
-      lockAtWaitRow?: string | null; racerRefused?: boolean } = {};
-    let waits = 0;
-    let successor: InflightLockInfo | undefined;
-    const shim = ghShim([
-      { when: "commits/cafe1234/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] }) },
-      { when: "commits/cafe1234/status", stdout: JSON.stringify({ state: "failure", statuses: [] }) },
-      { when: "headRefName", stdout: JSON.stringify({ headRefName: BRANCH, headRefOid: "cafe1234", body: "" }) },
-      { when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: "cafe1234", ref: BRANCH }, base: { sha: "deadbeef" } }) },
-      { when: "statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [{ __typename: "CheckRun", name: "coverage-shard (1/12)",
-        status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/2" }] }) },
-      { when: "", stdout: "{}" },
-    ], { kind: "w1t13991" });
-    const oldPath = process.env.PATH;
-    process.env.PATH = `${shim.dir}:${oldPath}`;
+type RungFailure = "review" | "public-criterion" | "check" | "check-pending" | "check-and-review" | "foreign-head" | "marker-error";
+
+/** One live round through the sweep's real dispatchFix and fix rung, with a concurrent sweep racing it at every
+ *  interleaving point from its fix.done to the end of its wait, and `failure` arriving on its own head while it waits. */
+async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
+  const root = scratch(t, `rung-${failure}`);
+  const repo = "scratch-w1t13991";
+  // A checkout of a bare origin under <root>/repos/<repo>, with the run branch pushed.
+  const origin = gitRepo({ bare: true, kind: "w1t13991-origin" });
+  t.after(() => origin.cleanup());
+  const seed = gitRepo({ kind: "w1t13991-seed" });
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "--quiet", "origin", "main");
+  seed.git("checkout", "--quiet", "-b", BRANCH);
+  commitInsideFixture(seed.dir, seed.dir, "seed.txt", "chore: ours");
+  seed.git("push", "--quiet", "origin", BRANCH);
+  seed.git("checkout", "--quiet", "main");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  renameSync(seed.dir, join(root, "repos", repo));
+  mkdirSync(join(root, "worktrees"), { recursive: true });
+  const ledger = join(root, "ledger.ndjson");
+  const key = fixBranchClaimKey("acme", repo, BRANCH);
+  const logs: Row[] = [];
+  const spawns: SpawnWorkerArgs[] = [];
+  const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number;
+    racerRefused?: boolean } = {};
+  // A concurrent sweep at every interleaving point from the round's fix.done to the end of its wait: before and after
+  // each ledger row, so between every claim operation the round makes. Each must find the claim held and live.
+  const race = { state: "before" as "before" | "open" | "closed", pushed: undefined as string | undefined, points: 0, lost: [] as string[] };
+  const raceAt = (point: string) => {
+    race.points++;
+    const inflightDir = join(root, "state", "inflight");
     try {
-      const effects = buildSweepEffects({
-        resolveTaskContractAtHeadImpl: () => ({ criteria: PLAN.tasks[0].acceptance }),
-        owner: "acme", repo, config: { root } as never, ledgerPath: ledger, runId: "SWEEP-W1T13991", plan: PLAN,
-        policy: DEFAULT_SWEEP_POLICY,
-        log: (step: string, fields?: Row) => {
-          const row = { ts: new Date().toISOString(), run_id: "SWEEP-W1T13991", step, ...(fields ?? {}) };
-          // The first wait row that reads the round live: the claim fix.done released must not be re-taken yet.
-          if (step === "run.awaiting_external" && fields?.branch_claim_run_id !== undefined && seen.lockAtWaitRow === undefined) {
-            seen.lockAtWaitRow = readInflightLock(join(root, "state", "inflight"), key)?.run_id ?? null;
-          }
-          logs.push(row);
-          appendFileSync(ledger, `${JSON.stringify(row)}\n`);
-        },
-        spawnImpl: (async (args: SpawnWorkerArgs) => {
-          spawns.push(args);
-          commitInsideFixture(root, args.cwd, `fix-${spawns.length}.txt`, "fix(ci): repair the check");
-          return worker("REPORT\nfixed\nCOMMIT_MESSAGE: fix(ci): repair the check");
-        }) as never,
-        registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => registeredFixWorktreeOwner(repoDir, branchRef),
-        registeredOwnerRecovery: {
-          capture: (args: Parameters<typeof captureRegisteredFixOwnerSnapshot>[0]) => captureRegisteredFixOwnerSnapshot(args,
-            { processCensus: () => ({ state: "clear", scanned: 1 }) }),
-          remove: (repoDir: string, ownerPath: string) => removeAbandonedFixWorktreeOwner(repoDir, ownerPath),
-        },
-        pushFixRoundImpl: async () => undefined,
-        waitForCiGreenImpl: async (url: string, waitLog: (step: string, extra?: Row) => void, _every: number,
-          poll: { sleep: (ms: number) => Promise<void>; readJson: (args: string[]) => Promise<unknown> }) => {
-          if (++waits > 1) return { state: "red", sha: logs.findLast((row) => row.step === "fix.done")?.pushed_head_sha };
-          const done = logs.find((row) => row.step === "fix.done")!;
-          // GitHub now reads the head this round pushed.
-          const head = String(done.pushed_head_sha);
-          shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: head, ref: BRANCH }, base: { sha: "deadbeef" } }) });
-          shim.addRoute({ when: "headRefName", stdout: JSON.stringify({ headRefName: BRANCH, headRefOid: head, body: "" }) });
-          const logWait = (step: string, extra?: Row) => {
-            waitLog(step, extra);
-            if (step === "run.awaiting_external") seen.heldDuringWait = readInflightLock(join(root, "state", "inflight"), key)?.run_id;
-          };
-          const handoff = (view: OpenPrView) => {
-            seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound(view,
-              readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
-          };
-          if (failure === "check" || failure === "check-pending" || failure === "foreign-head") {
-            let polls = 0;
-            // The rollup lags the red the sweep saw: only the hand-off names the failing check.
-            if (failure === "check-pending") shim.addRoute({ when: "statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [] }) });
-            return waitForCiGreen(url, logWait, 0, {
-              sleep: async () => {
-                await poll.sleep(0);
-                if (failure === "foreign-head") {
-                  shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false,
-                    head: { sha: "f00dfeed", ref: BRANCH }, base: { sha: "deadbeef" } }) });
+      const taken = acquireFixRoundClaim(inflightDir, key, "RACER", (id, held) =>
+        fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: race.pushed!, processStart: undefined })));
+      taken.handle.release();
+      race.lost.push(point);
+    } catch (error) {
+      if (!(error instanceof InflightLockError)) throw error;
+    }
+  };
+  let waits = 0;
+  let successor: InflightLockInfo | undefined;
+  const shim = ghShim([
+    { when: "commits/cafe1234/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] }) },
+    { when: "commits/cafe1234/status", stdout: JSON.stringify({ state: "failure", statuses: [] }) },
+    { when: "headRefName", stdout: JSON.stringify({ headRefName: BRANCH, headRefOid: "cafe1234", body: "" }) },
+    { when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: "cafe1234", ref: BRANCH }, base: { sha: "deadbeef" } }) },
+    { when: "statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [{ __typename: "CheckRun", name: "coverage-shard (1/12)",
+      status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/2" }] }) },
+    { when: "", stdout: "{}" },
+  ], { kind: "w1t13991" });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  try {
+    const effects = buildSweepEffects({
+      resolveTaskContractAtHeadImpl: () => ({ criteria: PLAN.tasks[0].acceptance }),
+      owner: "acme", repo, config: { root } as never, ledgerPath: ledger, runId: "SWEEP-W1T13991", plan: PLAN,
+      policy: DEFAULT_SWEEP_POLICY,
+      log: (step: string, fields?: Row) => {
+        const row = { ts: new Date().toISOString(), run_id: "SWEEP-W1T13991", step, ...(fields ?? {}) };
+        if (step === "fix.done" && race.state === "before") {
+          race.pushed = String(fields?.pushed_head_sha);
+          race.state = "open";
+        }
+        const ends = RACE_ENDS.has(step);
+        if (race.state === "open") raceAt(`before ${step}`);
+        if (ends && race.state === "open") race.state = "closed";
+        logs.push(row);
+        appendFileSync(ledger, `${JSON.stringify(row)}\n`);
+        if (race.state === "open") raceAt(`after ${step}`);
+      },
+      spawnImpl: (async (args: SpawnWorkerArgs) => {
+        spawns.push(args);
+        commitInsideFixture(root, args.cwd, `fix-${spawns.length}.txt`, "fix(ci): repair the check");
+        return worker("REPORT\nfixed\nCOMMIT_MESSAGE: fix(ci): repair the check");
+      }) as never,
+      registeredWorktreeOwnerImpl: (repoDir: string, branchRef: string) => registeredFixWorktreeOwner(repoDir, branchRef),
+      registeredOwnerRecovery: {
+        capture: (args: Parameters<typeof captureRegisteredFixOwnerSnapshot>[0]) => captureRegisteredFixOwnerSnapshot(args,
+          { processCensus: () => ({ state: "clear", scanned: 1 }) }),
+        remove: (repoDir: string, ownerPath: string) => removeAbandonedFixWorktreeOwner(repoDir, ownerPath),
+      },
+      pushFixRoundImpl: async () => undefined,
+      waitForCiGreenImpl: async (url: string, waitLog: (step: string, extra?: Row) => void, _every: number,
+        poll: { sleep: (ms: number) => Promise<void>; readJson: (args: string[]) => Promise<unknown> }) => {
+        if (++waits > 1) return { state: "red", sha: logs.findLast((row) => row.step === "fix.done")?.pushed_head_sha };
+        const done = logs.find((row) => row.step === "fix.done")!;
+        // GitHub now reads the head this round pushed.
+        const head = String(done.pushed_head_sha);
+        shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: head, ref: BRANCH }, base: { sha: "deadbeef" } }) });
+        shim.addRoute({ when: "headRefName", stdout: JSON.stringify({ headRefName: BRANCH, headRefOid: head, body: "" }) });
+        const logWait = (step: string, extra?: Row) => {
+          waitLog(step, extra);
+          if (step === "run.awaiting_external") seen.heldDuringWait = readInflightLock(join(root, "state", "inflight"), key)?.run_id;
+        };
+        const handoff = (view: OpenPrView) => {
+          seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound(view,
+            readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
+        };
+        if (failure === "check" || failure === "check-pending" || failure === "check-and-review" || failure === "foreign-head") {
+          let polls = 0;
+          // The rollup lags the red the sweep saw: only the hand-off names the failing check.
+          if (failure === "check-pending") shim.addRoute({ when: "statusCheckRollup", stdout: JSON.stringify({ statusCheckRollup: [] }) });
+          return waitForCiGreen(url, logWait, 0, {
+            sleep: async () => {
+              await poll.sleep(0);
+              if (failure === "foreign-head") {
+                shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false,
+                  head: { sha: "f00dfeed", ref: BRANCH }, base: { sha: "deadbeef" } }) });
+              }
+            },
+            requiredContexts: () => ["coverage-shard (1/12)"],
+            readJson: async (args) => {
+              if (args[1].includes("commits/f00dfeed/check-runs")) {
+                seen.foreignPolls = (seen.foreignPolls ?? 0) + 1;
+                if (seen.foreignPolls === 1) {
+                  const inflightDir = join(root, "state", "inflight");
+                  const taken = acquireFixRoundClaim(inflightDir, key, "SUCCESSOR", (id, held) =>
+                    fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: "f00dfeed" })));
+                  assert.equal(taken.endedRunId, done.branch_claim_run_id);
+                  successor = taken.handle.info;
+                  t.after(() => taken.handle.release());
                 }
-              },
-              requiredContexts: () => ["coverage-shard (1/12)"],
-              readJson: async (args) => {
-                if (args[1].includes("commits/f00dfeed/check-runs")) {
-                  seen.foreignPolls = (seen.foreignPolls ?? 0) + 1;
-                  if (seen.foreignPolls === 1) {
-                    const inflightDir = join(root, "state", "inflight");
-                    const taken = acquireFixRoundClaim(inflightDir, key, "SUCCESSOR", (id, held) =>
-                      fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: "f00dfeed" })));
-                    assert.equal(taken.endedRunId, done.branch_claim_run_id);
-                    successor = taken.handle.info;
-                    t.after(() => taken.handle.release());
-                  }
-                  const failed = seen.foreignPolls > 1;
-                  return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
-                    conclusion: failed ? "failure" : null }] };
-                }
-                if (args[1].includes(`commits/${head}/check-runs`) && failure === "check-pending") {
-                  // The sweep hands the red over while this head's checks still read pending: the hand-off ends the wait.
-                  // Poll 1 starts the wait (its row reads the round live); the hand-off lands at poll 2, checks still pending.
-                  if (++polls === 2) handoff({ ...redPr(head), redRequiredChecks: [HANDED_CHECK],
-                    ciFailures: [{ name: HANDED_CHECK, logTail: "Error: the red the sweep handed over" }] } as OpenPrView);
-                  if (polls > 2) seen.waitedOut = true;
-                  const stuck = polls > 4; // never reached when the hand-off ends the wait; it bounds a red run
-                  return { check_runs: [{ name: "coverage-shard (1/12)", status: stuck ? "completed" : "in_progress",
-                    conclusion: stuck ? "failure" : null }] };
-                }
-                if (args[1].includes(`commits/${head}/check-runs`)) {
-                  const failed = ++polls > 1;
-                  if (failed) handoff(redPr(head));
-                  return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
-                    conclusion: failed ? "failure" : null }] };
-                }
-                if (args[1].endsWith("/status")) return { statuses: [] };
-                if (args[1].includes("actions/runs?")) return { workflow_runs: [] };
-                return poll.readJson(args);
-              },
-            });
+                const failed = seen.foreignPolls > 1;
+                return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
+                  conclusion: failed ? "failure" : null }] };
+              }
+              if (args[1].includes(`commits/${head}/check-runs`) && failure === "check-pending") {
+                // The sweep hands the red over while this head's checks still read pending: the hand-off ends the wait.
+                // Poll 1 starts the wait (its row reads the round live); the hand-off lands at poll 2, checks still pending.
+                if (++polls === 2) handoff({ ...redPr(head), redRequiredChecks: [HANDED_CHECK],
+                  ciFailures: [{ name: HANDED_CHECK, logTail: "Error: the red the sweep handed over" }] } as OpenPrView);
+                if (polls > 2) seen.waitedOut = true;
+                const stuck = polls > 4; // never reached when the hand-off ends the wait; it bounds a red run
+                return { check_runs: [{ name: "coverage-shard (1/12)", status: stuck ? "completed" : "in_progress",
+                  conclusion: stuck ? "failure" : null }] };
+              }
+              if (args[1].includes(`commits/${head}/check-runs`)) {
+                const failed = ++polls > 1;
+                // check-and-review: the terminal poll reads a required check red while the sweep hands over a failing
+                // review on the same head, during that same poll.
+                if (failed) handoff(failure === "check-and-review" ? reviewGatePr(head) : redPr(head));
+                return { check_runs: [{ name: "coverage-shard (1/12)", status: failed ? "completed" : "in_progress",
+                  conclusion: failed ? "failure" : null }] };
+              }
+              if (args[1].endsWith("/status")) return { statuses: [] };
+              if (args[1].includes("actions/runs?")) return { workflow_runs: [] };
+              return poll.readJson(args);
+            },
+          });
+        }
+        logWait("run.awaiting_external", { waiting_on: "ci", head_sha: head });
+        if (failure === "review") {
+          // A sweep racing the round into its wait: it reads the re-taken claim, and the wait beside it.
+          try {
+            acquireFixRoundClaim(join(root, "state", "inflight"), key, "RACER", (id, held) =>
+              fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: head, processStart: undefined })));
+            seen.racerRefused = false;
+          } catch (error) {
+            seen.racerRefused = error instanceof InflightLockError;
           }
-          logWait("run.awaiting_external", { waiting_on: "ci", head_sha: head });
-          if (failure === "review") {
-            // A sweep racing the round into its wait: it reads the re-taken claim, and the wait beside it.
-            try {
-              acquireFixRoundClaim(join(root, "state", "inflight"), key, "RACER", (id, held) =>
-                fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: head, processStart: undefined })));
-              seen.racerRefused = false;
-            } catch (error) {
-              seen.racerRefused = error instanceof InflightLockError;
-            }
-          }
-          if (failure === "marker-error") {
-            mkdirSync(fixRoundHandoffPath(root, String(done.branch_claim_run_id)), { recursive: true });
-            await poll.sleep(0);
-            return { state: "freshness_handoff", sha: head, recycle: "fixture recycle" };
-          }
-          const sleeping = poll.sleep(0);
-          handoff(failure === "public-criterion" ? {
-            ...reviewGatePr(head),
-            actionableGateFailures: [],
-            unmetCriteria: [{ claim: UNMET, proof: "unit test: takes it", met: false, reason: "public criterion still unmet",
-              proof_exec: "executed_pass" }],
-          } : reviewGatePr(head));
-          await sleeping;
-          seen.waitedOut = true;
-          return "pending" as never;
-        },
-      } as unknown as BuildSweepEffectsDeps);
-      // The round was dispatched on an earlier red ("ci"); the new failure on its own push is another.
-      const pr = { ...redPr("cafe1234"), prUrl: `https://github.com/acme/${repo}/pull/${PR}`, redRequiredChecks: ["ci"],
-        ciFailures: [{ name: "ci", logTail: "Error: the first red" }] } as OpenPrView;
-      await effects.dispatchFix(pr as never, { unmetCriteria: [], ciFailures: pr.ciFailures } as never);
-    } finally {
-      process.env.PATH = oldPath;
-      rmSync(shim.dir, { recursive: true, force: true });
-    }
-    const steps = (step: string) => logs.filter((row) => row.step === step);
-    const firstDone = steps("fix.done")[0];
-    assert.equal(seen.lockAtWaitRow, null, `${failure}: the wait row lands before the claim is re-taken`);
-    if (failure === "review") assert.equal(seen.racerRefused, true, "a racing sweep reads the live wait and keeps off the claim");
-    assert.equal(seen.heldDuringWait, firstDone?.branch_claim_run_id, `${failure}: the waiting round holds the claim fix.done named`);
-    assert.deepEqual(readInflightLock(join(root, "state", "inflight"), key), successor ?? null,
-      `${failure}: cleanup never removes a successor's claim`);
-    if (failure === "foreign-head") {
-      const stoodDown = steps("fix.stood_down")[0];
-      assert.equal(stoodDown?.site, "rung.branch_claim");
-      assert.equal(stoodDown?.reason, "branch claim held by SUCCESSOR");
-      assert.equal(seen.foreignPolls, 2, "the ordinary CI wait reaches its terminal poll before the old round checks ownership");
-      assert.equal(steps("fix.live_round_resumed").length, 0);
-      assert.equal(spawns.length, 1, "the old round releases instead of striking on the foreign head");
-      continue;
-    }
-    if (failure === "marker-error") {
-      assert.ok(steps("sweep.fix.handoff_unreadable").length > 0);
-      assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false);
-      assert.equal(steps("fix.live_round_resumed").length, 0);
-      assert.equal(steps("fix.stood_down")[0]?.reason, "recycle_yield");
-      assert.equal(steps("sweep.fix.error").length, 0);
-      continue;
-    }
-    const failureKind = failure === "check" || failure === "check-pending" ? "check" : "review";
-    assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id,
-      failure: failureKind, handedOff: true });
-    assert.equal(seen.waitedOut, undefined, `${failure}: the hand-off ended the wait at its next poll`);
-    const resumed = steps("fix.live_round_resumed");
-    assert.equal(resumed.length, 1, `${failure}: ${JSON.stringify(logs.map((row) => row.step))}`);
-    assert.equal(resumed[0].failure, failureKind);
-    assert.equal(resumed[0].head_sha, firstDone?.pushed_head_sha);
-    assert.ok(spawns.length >= 2, `${failure}: the round struck again: ${JSON.stringify(logs.slice(logs.indexOf(resumed[0])).map((row) => [row.step, row.reason ?? row.site]))}`);
-    assert.equal(spawns[1].cwd, spawns[0].cwd, `${failure}: in its own worktree`);
-    if (failure === "review") assert.match(String(spawns[1].prompt), new RegExp(REMEDY), "the strike targets the handed gate remedy");
-    else if (failure === "public-criterion") {
-      const prompt = String(spawns[1].prompt);
-      assert.match(prompt, /public criterion still unmet/);
-      assert.match(prompt, new RegExp(UNMET));
-      assert.doesNotMatch(prompt, new RegExp(HOLDOUT));
-    }
-    else {
-      assert.ok(logs.indexOf(steps("fix.ci_not_green")[0]) > logs.indexOf(resumed[0]), "the wait reads the handed red");
-      if (failure === "check-pending") {
-        assert.match(String(spawns[1].prompt), new RegExp(HANDED_CHECK.replace(/[()/]/g, "\\$&")),
-          "the strike targets the handed red, though the rollup lags it");
-      } else assert.match(String(spawns[1].prompt), /coverage-shard \(1\/12\)/, "the strike targets the red check");
-    }
-    assert.deepEqual(steps("fix.stood_down").filter((row) => /a later round reclaimed/.test(String(row.reason))), []);
-    assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false, `${failure}: the round removed its hand-off when it ended`);
+        }
+        if (failure === "marker-error") {
+          mkdirSync(fixRoundHandoffPath(root, String(done.branch_claim_run_id)), { recursive: true });
+          await poll.sleep(0);
+          return { state: "freshness_handoff", sha: head, recycle: "fixture recycle" };
+        }
+        const sleeping = poll.sleep(0);
+        handoff(failure === "public-criterion" ? {
+          ...reviewGatePr(head),
+          actionableGateFailures: [],
+          unmetCriteria: [{ claim: UNMET, proof: "unit test: takes it", met: false, reason: "public criterion still unmet",
+            proof_exec: "executed_pass" }],
+        } : reviewGatePr(head));
+        await sleeping;
+        seen.waitedOut = true;
+        return "pending" as never;
+      },
+    } as unknown as BuildSweepEffectsDeps);
+    // The round was dispatched on an earlier red ("ci"); the new failure on its own push is another.
+    const pr = { ...redPr("cafe1234"), prUrl: `https://github.com/acme/${repo}/pull/${PR}`, redRequiredChecks: ["ci"],
+      ciFailures: [{ name: "ci", logTail: "Error: the first red" }] } as OpenPrView;
+    await effects.dispatchFix(pr as never, { unmetCriteria: [], ciFailures: pr.ciFailures } as never);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(shim.dir, { recursive: true, force: true });
   }
+  const steps = (step: string) => logs.filter((row) => row.step === step);
+  const firstDone = steps("fix.done")[0];
+  assert.ok(race.points >= 4, `${failure}: the racing sweep ran at ${race.points} points: ${JSON.stringify(logs.map((row) => [row.step, row.reason ?? row.error]))}`);
+  assert.deepEqual(race.lost, [], `${failure}: a concurrent sweep never takes the claim between fix.done and the wait's end`);
+  if (failure === "review") assert.equal(seen.racerRefused, true, "a racing sweep reads the live wait and keeps off the claim");
+  assert.equal(seen.heldDuringWait, firstDone?.branch_claim_run_id, `${failure}: the waiting round holds the claim fix.done named`);
+  assert.deepEqual(readInflightLock(join(root, "state", "inflight"), key), successor ?? null,
+    `${failure}: cleanup never removes a successor's claim`);
+  if (failure === "foreign-head") {
+    const stoodDown = steps("fix.stood_down")[0];
+    assert.equal(stoodDown?.site, "rung.branch_claim");
+    assert.equal(stoodDown?.reason, "branch claim held by SUCCESSOR");
+    assert.equal(seen.foreignPolls, 2, "the ordinary CI wait reaches its terminal poll before the old round checks ownership");
+    assert.equal(steps("fix.live_round_resumed").length, 0);
+    assert.equal(spawns.length, 1, "the old round releases instead of striking on the foreign head");
+    return;
+  }
+  if (failure === "marker-error") {
+    assert.ok(steps("sweep.fix.handoff_unreadable").length > 0);
+    assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false);
+    assert.equal(steps("fix.live_round_resumed").length, 0);
+    assert.equal(steps("fix.stood_down")[0]?.reason, "recycle_yield");
+    assert.equal(steps("sweep.fix.error").length, 0);
+    return;
+  }
+  const handedKind = failure === "check" || failure === "check-pending" ? "check" : "review";
+  // The strike's target: a red the wait itself read keeps origin/main's CI repair path over a review handed in that poll.
+  const failureKind = failure === "check-and-review" ? "check" : handedKind;
+  assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id,
+    failure: handedKind, handedOff: true });
+  assert.equal(seen.waitedOut, undefined, `${failure}: the hand-off ended the wait at its next poll`);
+  const resumed = steps("fix.live_round_resumed");
+  assert.equal(resumed.length, 1, `${failure}: ${JSON.stringify(logs.map((row) => row.step))}`);
+  assert.equal(resumed[0].failure, failureKind);
+  assert.equal(resumed[0].head_sha, firstDone?.pushed_head_sha);
+  assert.ok(spawns.length >= 2, `${failure}: the round struck again: ${JSON.stringify(logs.slice(logs.indexOf(resumed[0])).map((row) => [row.step, row.reason ?? row.site]))}`);
+  assert.equal(spawns[1].cwd, spawns[0].cwd, `${failure}: in its own worktree`);
+  if (failure === "review") assert.match(String(spawns[1].prompt), new RegExp(REMEDY), "the strike targets the handed gate remedy");
+  else if (failure === "public-criterion") {
+    const prompt = String(spawns[1].prompt);
+    assert.match(prompt, /public criterion still unmet/);
+    assert.match(prompt, new RegExp(UNMET));
+    assert.doesNotMatch(prompt, new RegExp(HOLDOUT));
+  }
+  else {
+    assert.ok(logs.indexOf(steps("fix.ci_not_green")[0]) > logs.indexOf(resumed[0]), "the wait reads the handed red");
+    if (failure === "check-pending") {
+      assert.match(String(spawns[1].prompt), new RegExp(HANDED_CHECK.replace(/[()/]/g, "\\$&")),
+        "the strike targets the handed red, though the rollup lags it");
+    } else assert.match(String(spawns[1].prompt), /coverage-shard \(1\/12\)/, "the strike targets the red check");
+    if (failure === "check-and-review") {
+      assert.doesNotMatch(String(spawns[1].prompt), new RegExp(REMEDY), "the review handed in the same poll does not take the strike");
+      assert.equal(resumed[0].handed_failure, "review");
+      assert.equal(resumed[0].precedence, "ci_red");
+      assert.equal(steps("fix.ci_not_green").length >= 1, true, "the CI repair path ran, as on origin/main");
+    }
+  }
+  assert.deepEqual(steps("fix.stood_down").filter((row) => /a later round reclaimed/.test(String(row.reason))), []);
+  assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false, `${failure}: the round removed its hand-off when it ended`);
+}
+
+test("W1-T13991 criterion 1: a concurrent sweep at every interleaving point from fix.done to the wait's end finds the live round's claim held", async (t) => {
+  for (const failure of ["review", "check-pending", "foreign-head"] as const) await rungCase(t, failure);
+});
+
+test("W1-T13991 criterion 2: red checks and failing reviews resume the round in its own worktree with the original criterion index", async (t) => {
+  for (const failure of ["public-criterion", "check", "check-and-review", "marker-error"] as const) await rungCase(t, failure);
+});
+
+// ── the first red after a foreign push, against origin/main's wiring ────────────────────────
+
+const FOREIGN = "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeed";
+const OWN_HEADS = ["11ddc2fe11ddc2fe11ddc2fe11ddc2fe11ddc2fe", "22eeda0022eeda0022eeda0022eeda0022eeda00"];
+const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 };
+
+/** One rung on a CI red: strike 1 pushes its own head, a human pushes FOREIGN during the first CI wait, and GitHub
+ *  reads the required check red on FOREIGN. `wiring` is origin/main's plain claim, or the claim kept into the wait. */
+async function firstRedAfterForeignPush(t: TestContext, wiring: "origin-main" | "kept") {
+  const root = scratch(t, `foreign-${wiring}`);
+  const repo = gitRepo({ kind: `w1t13991-foreign-${wiring}` });
+  t.after(() => repo.cleanup());
+  const inflightDir = join(root, "inflight");
+  const key = keyFor(BRANCH);
+  let claims = 0;
+  const retake = () => acquireInflightLock(inflightDir, key, { run_id: `CLAIM-${++claims}` });
+  const first = acquireInflightLock(inflightDir, key, { run_id: "CLAIM-0" });
+  const branchClaim = wiring === "kept" ? fixRoundBranchClaim(first, retake, () => ({ process_start: PROCESS_START }))
+    : fixRoundBranchClaim(first, retake);
+  t.after(() => branchClaim.release());
+  const rows: Row[] = [];
+  const issues: string[] = [];
+  let commits = 0;
+  let spawns = 0;
+  const noReview: ReviewVerdict & { headSha: string; reviewerOutcome: string } = { state: "failure", headSha: "3179eb03",
+    reviewerOutcome: "failure", testTheater: false, summary: "no review yet", floorDegraded: false, capped: false,
+    keywordOnly: false, planOnly: false, criteria: [] };
+  const outcome = await runFixRung({
+    taskId: TASK, runId: "SWEEP-W1T13991", task: { id: TASK, title: TASK, files: ["src/fix.ts"] },
+    prUrl: `https://github.com/acme/remudero/pull/${PR}`, branch: BRANCH, worktreePath: repo.dir,
+    initialSessionId: "session-0", mount: MOUNT, settingsFile: join(root, "settings.json"),
+    config: { root, workerProviders: { harnessCommitsFix: true } } as Config,
+    budgetUsd: 10, strikeCap: 2, initialReview: noReview, ciFailures: [{ name: "ci", logTail: "Error: the first red" }],
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo.dir, reviewerMount: MOUNT },
+    deps: {
+      spawn: async () => {
+        spawns++;
+        return worker("REPORT\nFIX_OUTCOME: FIXED\nCOMMIT_MESSAGE: fix(ci): repair the red");
+      },
+      // GitHub reads the head a human pushed during the wait, and its required check red: no review has run.
+      waitForCiGreen: async (_url, log) => {
+        log("run.awaiting_external", { waiting_on: "ci", head_sha: OWN_HEADS[commits - 1] });
+        return { state: "red", sha: FOREIGN };
+      },
+      fetchCiFailures: async () => [{ name: "ci", logTail: "Error: red on the head a human pushed" }],
+      runReview: async () => noReview,
+      fetchPrBody: async () => "REPORT",
+      push: () => {},
+      readRemoteBranchHead: async () => OWN_HEADS[commits - 1],
+      readLiveState: async () => ({ ok: true, state: "OPEN" }),
+      readLiveHead: async () => ({ ok: true, headSha: FOREIGN, author: "human-x" }),
+      issues: {
+        create: (title: string) => { issues.push(title); return `https://github.com/acme/remudero/issues/${issues.length}`; },
+        listOpen: () => [], comment: () => {},
+      },
+      ledgerPath: join(root, "ledger.ndjson"), ledgerLines: () => rows,
+      log: (step, extra) => { rows.push({ ts: new Date().toISOString(), task_id: TASK, step, ...extra }); },
+      say: () => {}, account: (result) => result,
+      worktreeHasUncommittedChanges: () => true,
+      harnessCommitForShellLessWorker: (input) => harnessCommitForShellLessWorker(input,
+        { commit: () => ({ committed: true, sha: OWN_HEADS[commits++]!, undeclared: [] }), ahead: () => 1 }),
+      branchClaim,
+    },
+  });
+  // What the rung decided, without the fields that name a round, a claim, a clock or the wait's own identity.
+  const decisions = rows.filter((row) => row.step !== "run.awaiting_external").map((row) =>
+    [row.step, row.site, row.reason, row.strike, row.fix_outcome, row.pushed_head_sha, row.head_sha, row.issue_url]);
+  return { outcome: { outcome: outcome.outcome, strikes: outcome.strikes, reason: outcome.reason, issueUrl: outcome.issueUrl },
+    decisions, issues, spawns, firstDone: rows.find((row) => row.step === "fix.done") };
+}
+
+test("W1-T13991 criterion 4: the first red after a foreign push behaves exactly as on origin/main, with no authorship guard armed", async (t) => {
+  const main = await firstRedAfterForeignPush(t, "origin-main");
+  const kept = await firstRedAfterForeignPush(t, "kept");
+  assert.equal(main.firstDone?.ci_wait_holds_claim, undefined, "origin/main's wiring releases the claim at fix.done");
+  assert.equal(kept.firstDone?.ci_wait_holds_claim, true, "this change keeps the claim into the wait");
+  // origin/main on this path: no review ran, so no authorship guard is armed, nothing names the foreign head, and no
+  // needs-human issue is opened for it; the rung strikes again on the red (and escalates only on exhaustion).
+  assert.equal(main.issues.some((title) => /non-rung|branch moved/.test(title)), false);
+  assert.equal(main.spawns, 2);
+  assert.equal(main.decisions.some((row) => /non-rung push/.test(String(row[2]))), false);
+  assert.deepEqual(kept.outcome, main.outcome, "the rung's outcome is origin/main's");
+  assert.deepEqual(kept.issues, main.issues, "no needs-human issue that origin/main would not open");
+  assert.equal(kept.spawns, main.spawns);
+  assert.deepEqual(kept.decisions, main.decisions, "row for row, the rung decides as origin/main does");
 });

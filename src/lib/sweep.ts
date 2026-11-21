@@ -5268,14 +5268,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             });
           }
           // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it. W1-T13991: and held through its CI wait.
-          const retakeAs = (claimRunId: string) => reclaimFixRoundBranch({
+          const retake = () => reclaimFixRoundBranch({
             inflightDir,
             claimKey,
-            claimRunId,
+            claimRunId: fixRoundClaimId(runId, pr.prNumber, nowMsImpl()),
             roundEnded,
             ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
           });
-          branchClaim = fixRoundBranchClaim(taken.handle, () => retakeAs(fixRoundClaimId(runId, pr.prNumber, nowMsImpl())), retakeAs);
+          // The claim is never free between fix.done and the wait: the round keeps it, and its fix.done names the wait.
+          // A conflict round's claim ends at its fix.done, as before.
+          const keepForWait = evidence.mergeConflict !== undefined ? undefined : (held: InflightLockHandle) => {
+            const processStart = fixRoundProcessStart(process.pid);
+            if (processStart === undefined) return "this round's process start is unreadable";
+            const path = fixRoundHandoffPath(config.root, held.info.run_id);
+            // The hand-off directory exists before fix.done, so a sweep that reads the live round can hand it a failure.
+            mkdirSync(dirname(path), { recursive: true });
+            handoffPaths.set(path, pr.headSha);
+            return { process_start: processStart };
+          };
+          branchClaim = fixRoundBranchClaim(taken.handle, retake, keepForWait);
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
@@ -15423,35 +15434,32 @@ function fixRoundProcessStart(pid: number): string | undefined {
 }
 
 /**
- * W1-T13991 — true when the claim's holder pushed `headSha` itself (the newest `fix.done` naming the claim),
- * then wrote its CI wait for that head, has written nothing since that ends the wait, and has the
- * same process identity on this host within its spawn bound.
+ * W1-T13991 — true when the claim's holder pushed `headSha` itself and its `fix.done` (the newest naming the claim)
+ * says the round kept that claim, never released, into its CI wait for that head; when it has written nothing since that
+ * ends the wait; and when it has the same process identity on this host within its spawn bound. The `fix.done` row
+ * carries the wait's identity because the claim is held from before that row to the wait's end: no reader can see the
+ * row without a holder, or a holder whose row reads it ended. A `fix.done` that released its claim reads ended, as before.
  */
 export function fixRoundIsLiveOnHead(lines: ReadonlyArray<Record<string, unknown>>, probe: FixRoundLiveProbe): boolean {
   const doneIndex = lines.findLastIndex((row) => row.step === "fix.done" && row.branch_claim_run_id === probe.holder.run_id);
   const done = lines[doneIndex];
   if (typeof done?.run_id !== "string" || typeof done.round_id !== "string" || typeof done.pr_number !== "number" ||
-    typeof done.ts !== "string" || done.pushed_head_sha !== probe.headSha ||
+    typeof done.ts !== "string" || done.pushed_head_sha !== probe.headSha || done.ci_wait_holds_claim !== true ||
+    typeof done.round_started_at_ms !== "number" || typeof done.process_start !== "string" ||
     probe.holder.host === undefined || !sameHost(probe.holder.host, probe.hostname)) return false;
-  let wait: Record<string, unknown> | undefined;
   for (let i = doneIndex + 1; i < lines.length; i++) {
     const row = lines[i];
     if (row.run_id !== done.run_id || row.pr_number !== done.pr_number) continue;
-    if (row.step === "run.awaiting_external" && row.waiting_on === "ci" && row.round_id === done.round_id &&
-      row.branch_claim_run_id === probe.holder.run_id && row.head_sha === probe.headSha) wait ??= row;
-    else if (row.step === "fix.ci_not_green" || row.step === "fix.stood_down" || row.step === "fix.commit_refused" ||
+    if (row.step === "fix.ci_not_green" || row.step === "fix.stood_down" || row.step === "fix.commit_refused" ||
       row.step === "fix.review" || row.step === "fix.dispatch" || row.step === "fix.done" || row.step === "fix.exhausted" ||
       row.step === "sweep.fix.error" || row.step === "run.freshness_handoff" || row.step === "fix.live_round_resumed") return false;
   }
-  if (typeof wait?.ts !== "string" || typeof wait.round_started_at_ms !== "number" || typeof wait.process_start !== "string") return false;
-  const waitedAt = Date.parse(wait.ts);
-  const ageMs = probe.nowMs - wait.round_started_at_ms;
+  const ageMs = probe.nowMs - done.round_started_at_ms;
   const doneAt = Date.parse(done.ts);
-  if (!(wait.round_started_at_ms <= doneAt && doneAt <= waitedAt && waitedAt <= probe.nowMs &&
-    ageMs <= probe.boundMs)) return false;
+  if (!(done.round_started_at_ms <= doneAt && doneAt <= probe.nowMs && ageMs <= probe.boundMs)) return false;
   const pid = probe.holder.pid;
   return Number.isSafeInteger(pid) && pid > 0 && probe.isPidAlive(pid) &&
-    (probe.processStart ?? fixRoundProcessStart)(pid) === wait.process_start;
+    (probe.processStart ?? fixRoundProcessStart)(pid) === done.process_start;
 }
 
 /** W1-T13991 — the new failure the sweep hands the live round on its own head, one file per claim identity. */
@@ -15574,7 +15582,9 @@ export function fixAdmissionLockPath(dir: string, pr: Pick<OpenPrView, "prUrl">,
 /** W1-T13991 — a PR's fix admission: the charge, and the per-PR lock that holds it. */
 interface FixAdmissionLock { path: string; owner: InflightLockInfo }
 type PrFixAdmission =
-  | { admitted: true; release?: () => void; releaseCharge?: () => void; lock?: FixAdmissionLock }
+  /** `adopted`: the lock is the dispatching sweep's, which frees it at the hosted child's settlement; `release` then frees
+   *  only the charge. */
+  | { admitted: true; release?: () => void; releaseCharge?: () => void; lock?: FixAdmissionLock; adopted?: true }
   | { admitted: false; reason: string };
 
 function readFixAdmissionHolder(path: string): InflightLockInfo | null {
@@ -15596,8 +15606,11 @@ function claimFixAdmissionForPr(
 ): PrFixAdmission {
   if (dir === undefined) return charge(pr);
   const path = fixAdmissionLockPath(dir, pr);
-  const owner = { run_id: randomUUID(), pid: process.pid, host: hostname(), startedAt: systemClock.iso() };
-  if (inherited !== undefined && sameFixClaim(readFixAdmissionHolder(path), inherited)) {
+  const adopted = inherited !== undefined && sameFixClaim(readFixAdmissionHolder(path), inherited);
+  // An adopted lock keeps the sweep's run id, so the sweep frees it at settlement; its pid becomes this process's, so a
+  // sweep that dies first leaves a lock that still reads live while this child runs.
+  const owner = { run_id: adopted ? inherited.run_id : randomUUID(), pid: process.pid, host: hostname(), startedAt: systemClock.iso() };
+  if (adopted) {
     writeAtomic(path, JSON.stringify(owner));
   } else {
     const stale = reclaimStaleLock(path, {
@@ -15614,13 +15627,24 @@ function claimFixAdmissionForPr(
     grant = charge(pr);
     if (!grant.admitted) return grant;
     const releaseCapacity = grant.release;
+    if (adopted) return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, adopted: true, release: () => releaseCapacity?.() };
     return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, release: () => {
       try { releaseCapacity?.(); }
       finally { release(); }
     } };
   } finally {
-    if (grant?.admitted !== true) release();
+    if (grant?.admitted !== true && !adopted) release();
   }
+}
+
+/** W1-T13991 — free a PR's admission lock this sweep took, whichever process now holds it under that run id: the hosted
+ *  child adopts it in place, and the sweep frees it once the host has settled the child and released its reservation. */
+function releaseFixAdmissionLineage(path: string, owner: InflightLockInfo): void {
+  reclaimStaleLock(path, {
+    parseHolder: (raw) => parseInflightLockInfo(raw) ?? "unreadable",
+    isStale: (candidate) => candidate !== "unreadable" && candidate.run_id === owner.run_id && !!candidate.host && candidate.host === owner.host,
+    onReclaim: () => {},
+  });
 }
 
 export function deferToLiveFixRound(
@@ -15800,18 +15824,19 @@ export interface FixRoundBranchClaim {
   last(): InflightLockHandle;
   /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
   verify?(): string | undefined;
-  /** W1-T13991: re-take the claim the last `fix.done` released, under that id, for the CI wait; a string is why not. */
-  holdForWait?(): string | undefined;
+  /** W1-T13991: keep the held claim, unreleased, through this round's `fix.done` into its CI wait. The fields name the
+   *  wait on that `fix.done` row; a string is why the claim cannot be kept, and the caller then releases it as before. */
+  keepForWait?(): Record<string, unknown> | string;
 }
 
-/** W1-T13991: `retakeAs` re-takes a claim under a given id; without it no claim is held through a CI wait. */
+/** W1-T13991: `keep` readies a held claim for its CI wait and returns the fields that read the wait live; without it no
+ *  claim is held through a CI wait. */
 export function fixRoundBranchClaim(
-  first: InflightLockHandle, retake: () => InflightLockHandle | string, retakeAs?: (claimRunId: string) => InflightLockHandle | string,
+  first: InflightLockHandle, retake: () => InflightLockHandle | string, keep?: (held: InflightLockHandle) => Record<string, unknown> | string,
 ): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
   let verificationRequired = false;
-  let releasedId: string | undefined;
   let heldForWait = false;
   const identity = () => {
     if (!held) return "branch claim is not held";
@@ -15849,17 +15874,15 @@ export function fixRoundBranchClaim(
     id: () => held?.info.run_id,
     release: () => {
       releaseHeld();
-      releasedId = held?.info.run_id ?? releasedId;
       held = undefined;
       heldForWait = false;
     },
-    ...(retakeAs === undefined ? {} : { holdForWait: () => {
-      if (held || releasedId === undefined) return held ? undefined : "no released claim to hold";
-      const next = retakeAs(releasedId);
-      if (typeof next === "string") return next;
-      held = last = next;
+    ...(keep === undefined ? {} : { keepForWait: () => {
+      if (!held) return "branch claim is not held";
+      const live = keep(held);
+      if (typeof live === "string") return live;
       heldForWait = true;
-      return undefined;
+      return live;
     } }),
     reacquire: () => {
       // W1-T13991: a claim held through the wait is handed back after it; a replacement holder is never unlinked.
@@ -20899,16 +20922,9 @@ export async function recheckFixDispatch(
  * lost, never as success), not a quiet return.
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
-  const decided = readFixDispatchEnvelope(inputs.envelope);
-  try {
-    await runAdmittedFixDispatchChild(decided, deps);
-  } finally {
-    // W1-T13991: a child that ends before it adopts the sweep's admission lock frees it; an adopted one is no longer its holder.
-    const inherited = decided?.fixAdmissionOwner;
-    if (decided?.fixAdmissionLockDir !== undefined && inherited !== undefined) {
-      releaseOwnedFixClaim(fixAdmissionLockPath(decided.fixAdmissionLockDir, decided.pr), inherited);
-    }
-  }
+  // W1-T13991: an admission lock the dispatching sweep handed this child is never freed here, adopted or not. The host keeps
+  // this child's memory reservation until it settles the child, and the sweep frees the lock only then.
+  await runAdmittedFixDispatchChild(readFixDispatchEnvelope(inputs.envelope), deps);
 }
 
 async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefined, deps: FixDispatchChildPorts): Promise<void> {
@@ -20945,7 +20961,8 @@ async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefi
     throw new Error(`fix dispatch refused: ${reason}`);
   }
   hostedFixGrants.add(prUrl);
-  let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]> | undefined;
+  let grant: PrFixAdmission | undefined;
+  let chargeHeld = true;
   try {
     try {
       grant = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-admission", () =>
@@ -20968,10 +20985,11 @@ async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefi
     const outcome = await effects.dispatchFix(
       envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
       (phase) => {
-        if (phase === "ci-wait" && envelope.fixAdmissionLockDir !== undefined && grant?.admitted) {
-          const release = grant.release;
-          grant = undefined;
-          release?.();
+        // W1-T13991: the CI wait frees the charge only. The PR's admission lock stays held, so no second round on this PR,
+        // on any head, is admitted while this child still holds the host's memory reservation.
+        if (phase === "ci-wait" && grant?.admitted && grant.lock !== undefined && chargeHeld) {
+          chargeHeld = false;
+          grant.releaseCharge?.();
         }
         deps.onPhase?.(phase);
         deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
@@ -20982,7 +21000,9 @@ async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefi
     if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
   } finally {
     try {
-      if (grant?.admitted) grant.release?.();
+      if (grant?.admitted && (chargeHeld || grant.lock === undefined)) grant.release?.();
+      // A lock this child claimed itself (no sweep handed it one) is its own to free, after its charge.
+      else if (grant?.admitted && grant.lock !== undefined && !grant.adopted) releaseOwnedFixClaim(grant.lock.path, grant.lock.owner);
     } finally {
       hostedFixGrants.delete(prUrl);
     }
@@ -24314,11 +24334,12 @@ export async function runSweep(
       return false;
     } finally {
       queuedHostFixes.delete(claim.fixKey);
-      // No child took the lock: free it. A launched child adopts it, or frees it when it ends; its settlement is the backstop.
+      // No child launched: free the lock now. A launched child may adopt it in place, but never frees it: the host holds the
+      // child's memory reservation until it settles the child, so the lock is freed at that settlement, whoever holds it.
       if (heldAdmission !== undefined) {
         const { path, owner } = heldAdmission.lock;
-        if (!launched) releaseOwnedFixClaim(path, owner);
-        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseOwnedFixClaim(path, owner)).catch((error: unknown) => {
+        if (!launched) releaseFixAdmissionLineage(path, owner);
+        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseFixAdmissionLineage(path, owner)).catch((error: unknown) => {
           // A failed release leaves the lock for the stale-holder check; record it so the leak is visible.
           log("sweep.fix.admission_release_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
         });

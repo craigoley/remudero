@@ -2401,7 +2401,6 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     bodyRepairFallback,
     allCiFailuresAreGeneratorFixable,
     runGeneratorFixForCiFailures,
-    branchAuthorshipStandDownReason,
     ciGateSha,
     ciLogNamedSourcePaths,
     mainOwnedPaths,
@@ -5049,12 +5048,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const fixClaimFields: Record<string, unknown> = {};
     // W1-T6003: a claim released before this round's fix.done (the flake path's CI wait) is still named on it.
     let releasedClaimId: string | undefined;
+    // W1-T13991: the claim this round kept, never released, from before its fix.done into its CI wait for its own push.
+    let keptForWait: { headSha: string; claimRunId: string } | undefined;
     const releaseRoundClaim = (): void => {
       releasedClaimId ??= deps.branchClaim?.id();
       deps.branchClaim?.release();
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
-    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding) => deps.log("fix.done", {
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
@@ -5084,14 +5085,24 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       // the envelope, which is what keeps this row checkable after `mounts.yaml` moves. Omitted
       // rather than `undefined` when the spawn configured no cap.
       ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
+      ...waitFields,
     });
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
       releaseRoundClaim();
     };
-    const logPushedRoundDone = (landing: FixRoundLanding): void => { // W1-T9618: only a landed round is FIXED; one that did not land spends no strike
-      logFixDone(landing.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing);
+    const logPushedRoundDone = (landing: FixRoundLanding, waitsNext: boolean): void => { // W1-T9618: only a landed round is FIXED; one that did not land spends no strike
+      const pushedHeadSha = landing.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined;
+      // W1-T13991: a round about to wait on CI for its own push keeps its claim through this row instead of releasing it,
+      // and the row names that wait, so no reader ever sees this fix.done without a live holder. Any refusal: as before.
+      const kept = waitsNext && pushedHeadSha !== undefined ? deps.branchClaim?.keepForWait?.() : undefined;
+      const claimRunId = deps.branchClaim?.id();
+      if (kept !== undefined && typeof kept !== "string" && pushedHeadSha !== undefined && claimRunId !== undefined) {
+        keptForWait = { headSha: pushedHeadSha, claimRunId };
+        logFixDoneRow(pushedHeadSha, undefined, landing,
+          { ...kept, ci_wait_holds_claim: true, round_started_at_ms: fixRoundStartedAtMs });
+      } else logFixDone(pushedHeadSha, undefined, landing);
       if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
     };
     const pushThrew = (error: unknown): FixRoundLanding => ({ landed: false, outcome: "failed", reason: String((error as Error)?.message ?? error).slice(0, 500) });
@@ -5473,7 +5484,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       landing = pushThrew(error);
       throw error;
     } finally {
-      logPushedRoundDone(landing);
+      logPushedRoundDone(landing, roundPush === undefined);
     }
     if (roundPush === "refused") continue;
     if (roundPush) return { ...roundPush, strikes: unlandedStrikes() };
@@ -5495,42 +5506,33 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       },
     );
 
-    const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
-    if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
-    // W1-T13991: the first wait row, which reads this round live, lands BEFORE the claim fix.done released is re-taken. A
-    // sweep that reads the re-taken claim then also reads the wait, so it never judges the claim ended on fix.done alone.
-    let waitHoldsClaim: boolean | undefined;
+    // W1-T13991: the wait rows name the claim this round kept through its fix.done. The authorship guard is armed only
+    // where origin/main arms it: after a review of the round's own head, never by the push alone.
     const logCiWait: Parameters<typeof deps.waitForCiGreen>[1] = (step, extra) => {
-      if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
-        deps.branchClaim?.holdForWait === undefined || waitHoldsClaim === false) return deps.log(step, extra);
-      const live = (claimRunId: string | undefined) =>
-        ({ ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: claimRunId });
-      if (waitHoldsClaim === undefined) {
-        const claimRunId = deps.branchClaim.id() ?? releasedClaimId;
-        if (claimRunId === undefined) {
-          waitHoldsClaim = false;
-          return deps.log(step, extra);
-        }
-        deps.log(step, live(claimRunId));
-        waitHoldsClaim = deps.branchClaim.holdForWait() === undefined;
-        return;
+      if (keptForWait === undefined || step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== keptForWait.headSha) {
+        return deps.log(step, extra);
       }
-      deps.log(step, live(deps.branchClaim.id()));
+      deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: keptForWait.claimRunId });
     };
     const waited = opts.waitForOwnHeadCi === undefined
       ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
-      : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, pushedHead);
-    const resumed = opts.liveRoundHandoff?.();
-    const ci = resumed?.failure === "check" && host.ciGateState(waited) !== "red"
-      ? { state: "red" as const, sha: resumed.headSha } : waited;
+      : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, keptForWait?.headSha);
+    const handed = opts.liveRoundHandoff?.();
+    // W1-T13991: origin/main's precedence. A terminal red the wait itself read takes the CI repair path, even when a
+    // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
+    const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
+    const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return claimLostAfterCi;
-    if (resumed) {
-      deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: resumed.headSha, failure: resumed.failure });
+    if (handed) {
+      deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: handed.headSha, failure: resumed?.failure ?? "check",
+        ...(resumed === undefined ? { handed_failure: handed.failure, precedence: "ci_red" } : {}) });
     }
     if (resumed?.review) {
+      // A review of the round's own head, as origin/main's own review below: it arms the authorship guard for that head.
+      rungOwnHeadSha = resumed.headSha;
       currentPinnedSha = currentPrHeadSha = resumed.headSha;
       handedReview = resumed;
       review = resumed.review;
