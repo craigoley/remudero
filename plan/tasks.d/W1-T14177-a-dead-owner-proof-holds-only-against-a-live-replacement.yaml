@@ -13,6 +13,7 @@
   files:
     - src/lib/sweep.ts
     - src/cli/commands/review.ts
+    - src/cli/commands/sweep.ts # amended 2026-11-21 for PR 20070: the one-shot sweep path wires the act-time re-reader the other two paths already pass
     - test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts
   status: queued
   attempts: 0
@@ -41,3 +42,5 @@
   falsifier: |
     Let any pending hold supersede the proof: criterion 1's completed hold keeps the retry waiting. Re-check the
     ledger only: criterion 2's GitHub-only takeover admits a second review.
+  note: |
+    files: amendment 2026-11-21 (PR 20070 review round 1): criterion 2 asks the act-time re-check to fail closed when no re-reader is wired. The daemon and light sweep pass buildRereadPrAtAct; the one-shot rmd sweep path in src/cli/commands/sweep.ts does not, so failing closed there would hold every dead-owner retry that path admits. The build wires the same re-reader into that path. No criterion changes.
