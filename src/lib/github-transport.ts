@@ -466,20 +466,20 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Only real transport coalesces; injected executors may have independent side effects.
   readOpts.signal?.throwIfAborted();
   if (execAsync !== execFileAsync) {
-    await admitInstallationReadAsync(args);
+    await admitInstallationReadAsync(args, readOpts.signal);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
   const key = readOpts.signal === undefined && ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
-    await admitInstallationReadAsync(args);
+    await admitInstallationReadAsync(args, readOpts.signal);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
     const brokered = readOpts.signal === undefined ? await ghBrokeredAsync(execArgs, readOpts) : undefined;
     if (brokered !== undefined) return brokered;
     readOpts.signal?.throwIfAborted();
-    await applyGhReadCadenceAsync(args);
+    await untilAborted(applyGhReadCadenceAsync(args), readOpts.signal);
     readOpts.signal?.throwIfAborted();
     const inProcess = readOpts.signal === undefined ? ghHttpReadFor(execArgs) : undefined;
     const output = inProcess === undefined ? await run() : await inProcess.send();
@@ -722,16 +722,33 @@ function admitInstallationReadSync(args: readonly string[]): void {
 
 const standDownFor = (reading: GhBudgetReading): never => { throw new GhPaceFloorStandDownError(reading); };
 
-async function admitInstallationReadAsync(args: readonly string[]): Promise<void> {
+/** A caller's `signal` ends the admission wait: a stopped run settles at the stop, not when the budget resets. */
+async function admitInstallationReadAsync(args: readonly string[], signal?: AbortSignal): Promise<void> {
   if (!installationCoreRead(args)) return;
   const budget = githubInstallationBudget();
   for (;;) {
+    signal?.throwIfAborted();
     const admitted = budget.claimRead();
     if (admitted.ok) return;
     budget.noteThrottle(admitted.reason);
     // W1-T12820: a reset past the bound stands down, so the tick's pass goes on without this read.
-    await defaultTimerSleep(budget.resetWaitMs(admitted) ?? standDownFor(admitted.reading));
+    const waitMs = budget.resetWaitMs(admitted) ?? standDownFor(admitted.reading);
+    if (signal === undefined) await defaultTimerSleep(waitMs);
+    else await delay(waitMs, undefined, { signal });
   }
+}
+
+/** `work`, or the caller's stop when it comes first. The cadence wait keeps its queue turn and lock to itself and
+ *  settles on its own; only the caller stops waiting for it. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return work;
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason);
+    if (signal.aborted) { work.catch(() => {}); stop(); return; }
+    signal.addEventListener("abort", stop, { once: true });
+    work.then((value) => { signal.removeEventListener("abort", stop); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", stop); reject(error); });
+  });
 }
 
 function noteInstallationRefusal(err: unknown): void {

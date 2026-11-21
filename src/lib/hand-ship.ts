@@ -159,8 +159,18 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
 
 function escapeTestName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
-/** Build a fail-closed Node test filter that admits the target's names and skips its siblings. */
-function isolatedTestPatterns(source: string, title: string, expectedCount = 1): string[] | null | undefined {
+/** The Node test filter for the receipt's literal title: each name in it, escaped, and nothing else. */
+function literalTestPattern(title: string): string[] {
+  return ["--test-name-pattern", `^(?:${title.split(" > ").map(escapeTestName).join("|")})$`];
+}
+
+/** Build a Node test filter that admits the target's names and skips its siblings. The target is always selected
+ *  by the literal title the receipt names. The source only adds skips for sibling names it can read literally: a
+ *  computed title, such as test(`case ${name}`), cannot be read there, so the filter then skips nothing, and the
+ *  rerun's own rows are matched to the target by its full title and counted. `null` means the source registers no
+ *  test by the target's name, so on main the test does not exist. */
+function isolatedTestPatterns(source: string, title: string, expectedCount = 1): string[] | null {
+  const literal = literalTestPattern(title);
   type Token = { kind: "identifier" | "punctuation" | "string"; value: string; literal?: boolean };
   const tokens: Token[] = [];
   let ambiguous = false;
@@ -170,7 +180,7 @@ function isolatedTestPatterns(source: string, title: string, expectedCount = 1):
     if (source.startsWith("//", i)) { const end = source.indexOf("\n", i + 2); i = end < 0 ? source.length : end + 1; continue; }
     if (source.startsWith("/*", i)) {
       const end = source.indexOf("*/", i + 2);
-      if (end < 0) return undefined;
+      if (end < 0) return literal;
       i = end + 2;
       continue;
     }
@@ -183,7 +193,7 @@ function isolatedTestPatterns(source: string, title: string, expectedCount = 1):
         if (source[i] === quote) { closed = true; break; }
         i += 1;
       }
-      if (!closed) return undefined;
+      if (!closed) return literal;
       tokens.push({ kind: "string", value: source.slice(start, i), literal: !dynamic });
       i += 1;
       continue;
@@ -213,7 +223,7 @@ function isolatedTestPatterns(source: string, title: string, expectedCount = 1):
     if (first?.kind !== "string" || first.literal !== true) { ambiguous = true; continue; }
     registrations.push(first.value);
   }
-  if (ambiguous) return undefined;
+  if (ambiguous) return literal;
   if (registrations.length === 0) return null;
   const target = title.split(" > ");
   if (!registrations.includes(target.at(-1)!)) return null;
@@ -222,14 +232,13 @@ function isolatedTestPatterns(source: string, title: string, expectedCount = 1):
   const targetNames = new Set(target);
   for (const name of targetNames) {
     const expected = target.filter((part) => part === name).length + (name === target.at(-1) ? expectedCount - 1 : 0);
-    if (counts.get(name) !== expected) return undefined;
+    if (counts.get(name) !== expected) return literal;
   }
   const skipped = [...new Set(registrations.filter((name) => !targetNames.has(name)))];
-  if (skipped.length === 0) return ["--test-name-pattern", `^(?:${target.map(escapeTestName).join("|")})$`];
+  if (skipped.length === 0) return literal;
   const skipAlternatives = skipped.map(escapeTestName).join("|");
-  if (skipAlternatives.length > 24_000) return undefined;
-  return ["--test-name-pattern", `^(?:${target.map(escapeTestName).join("|")})$`,
-    "--test-skip-pattern", `^(?:${skipAlternatives})$`];
+  if (skipAlternatives.length > 24_000) return literal;
+  return [...literal, "--test-skip-pattern", `^(?:${skipAlternatives})$`];
 }
 
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
@@ -765,11 +774,10 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         // The checkout lives on the host that runs the test, so its source is read there too.
         const text = title === undefined ? "" : host.target === "local" ? readFileSync(join(cwd, file), "utf8")
           : await command(["cat", "--", file], { cwd });
-        const namePattern = title === undefined ? [] : isolatedTestPatterns(text, title, expectedCount);
-        if (title !== undefined && namePattern === null && tree === "main") return [];
-        if (title !== undefined && (namePattern === undefined || namePattern === null)) {
-          throw new Error(`${tree} ${file}: could not isolate the named test and its ancestors`);
-        }
+        const found = title === undefined ? [] : isolatedTestPatterns(text, title, expectedCount);
+        if (found === null && tree === "main") return [];
+        // On head the receipt says the test ran, so a name the source does not show literally is still selected by it.
+        const namePattern = found ?? literalTestPattern(title!);
         const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...(namePattern ?? []),
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });

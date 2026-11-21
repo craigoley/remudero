@@ -8,6 +8,8 @@ import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
 import { authorPushEligibility, failingTestsFromTap, pinnedNodeReexec, testSummary } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
+import { configureGithubInstallationBudget } from "#src/lib/github-transport.js";
+import type { InstallationBudget } from "#src/lib/github-installation-budget.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
@@ -604,10 +606,11 @@ test("cancellation reaches both a local child and the SSH supervisor", async (t)
 });
 
 /** A stand-in harness hook. By default it reports a measured Rule 15 pass, as the harness hook's rule15-precheck prints. */
-function harnessGate(t: TestContext, script: string, rule15 = true): string {
+function harnessGate(t: TestContext, script: string, rule15 = true, rule25 = rule15): string {
   const hooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-hooks-`));
   const mark = join(hooks, "ran");
-  const measured = rule15 ? 'echo "rule15-precheck: OK -- no criterion field added or edited in the plan"\n' : "";
+  const measured = (rule15 ? 'echo "rule15-precheck: OK -- no criterion field added or edited in the plan"\n' : "") +
+    (rule25 ? 'echo "rule25-precheck: OK -- no instrument path rides with a src/ product path"\n' : "");
   writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${measured}${script.replaceAll("$MARK", mark)}\n`);
   chmodSync(join(hooks, "pre-push"), 0o755);
   const saved = { hooks: process.env.RMD_HARNESS_HOOKS_DIR, gates: process.env.RMD_PREPUSH_GATES };
@@ -1058,4 +1061,112 @@ test("W1-T12169 criterion 5: a stop during a Git call settles only after the Git
   const stopped = await calling.then(() => undefined, (error: unknown) => error);
   assert.equal(liveProcess(pid), false, "the Git child's SIGTERM-ignoring member is gone before the stop is reported");
   assert.match(String((stopped as Error)?.message), /stop requested/);
+});
+
+test("W1-T12169 criterion 3: a failing test registered with a computed title is rerun by its literal title on head and main and classified", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  const cases = (red: string[]) => [
+    'import { test } from "node:test";',
+    `const red = new Set(${JSON.stringify(red)});`,
+    'for (const name of ["alpha", "beta", "gamma"]) test(`case ${name}`, () => { if (red.has(name)) throw new Error(`red ${name}`); });',
+    'test("other", () => {});',
+    "",
+  ].join("\n");
+  writeFileSync(join(repo.dir, file), cases(["alpha"]));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "a computed-title test is already red on main");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, file), cases(["alpha", "beta"]));
+  repo.git("commit", "-am", "the hand change turns another computed case red");
+  const tap = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"), file],
+    { cwd: repo.dir, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT" && key !== "NODE_OPTIONS")) });
+  const named = failingTestsFromTap(tap.stdout, realpathSync(repo.dir)) as { file: string; title: string }[];
+  assert.deepEqual(named.map((test) => test.title).sort(), ["case alpha", "case beta"], `${tap.stdout}\n${tap.stderr}`);
+  const summary = testSummary(tap.stdout);
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const reruns: string[] = [];
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({
+    preflight: async () => ({
+      headSha: source.head, baseSha: mainSha, verdict: "failed",
+      steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
+        name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
+        testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
+      }],
+      failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
+    }),
+    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    close: () => real.close(),
+  });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
+  const log = f.lines.join("\n");
+  assert.doesNotMatch(log, /could not isolate|comparison unavailable/, log);
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: case alpha$/m);
+  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: case beta$/m);
+  assert.deepEqual(reruns.sort(), ["head case alpha", "head case beta", "main case alpha", "main case beta"]);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
+});
+
+test("W1-T12169 criterion 4: a required pre-push gate refuses a push whose Rule 25 check was unreadable or not measured", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const quiet = async (push: () => Promise<void>) => {
+    const writes = { out: process.stdout.write, err: process.stderr.write };
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try { await push(); } finally { process.stdout.write = writes.out; process.stderr.write = writes.err; }
+  };
+  // A measured Rule 15 pass, then each of the harness hook's exact Rule 25 lines that exit 0 without measuring it.
+  harnessGate(t, 'cat > /dev/null; echo "pre-push: rule25-precheck could not read the diff — not blocking on an unreadable check" >&2; exit 0', true, false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 25/);
+  harnessGate(t, 'cat > /dev/null; echo "pre-push: scripts/rule25-precheck.mjs absent — skipped, NOT passed" >&2; exit 0', true, false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 25/);
+  harnessGate(t, "cat > /dev/null; exit 0", true, false);
+  await assert.rejects(quiet(() => withLiveWritesAllowed(() => defaults.push(source, run))), /Rule 25/);
+  assert.deepEqual(requests, [], "an unmeasured Rule 25 check never lets the push go");
+  // Rule 25 is advisory: its measured NOTICE is a result, reported by the review and not refused by it.
+  harnessGate(t, 'cat > /dev/null; echo "rule25-precheck: NOTICE -- this diff changes a measurement INSTRUMENT and src/ PRODUCT code together." >&2; exit 0', true, false);
+  await quiet(() => withLiveWritesAllowed(() => defaults.push(source, run)));
+  assert.equal(requests.length, 1, "a measured Rule 25 result lets the push go");
+});
+
+test("W1-T12169 criterion 5: a stop while a GitHub read waits for admission settles the run at the stop", async (t) => {
+  const f = fixture(t);
+  let waits = 0;
+  const reading = { remaining: 0, limit: 5000, reset: Math.floor(Date.now() / 1000) + 3600, resource: "core" };
+  const refusing: InstallationBudget = {
+    consumers: undefined, record() {}, admit: () => ({ ok: true }), noteRead() {}, noteThrottle() {},
+    claimRead: () => { waits += 1; return { ok: false, waitUntil: reading.reset, reason: "share", reading, allowance: 0, reads: 0 }; },
+    allowance: () => 0, takeThrottleRows: () => [], threadInput: () => undefined, readGapMs: () => 0,
+    // A long wait for the first refusal; a second refusal stands down, so an unstoppable wait still ends offline.
+    resetWaitMs: () => waits > 1 ? undefined : 10_000,
+  };
+  configureGithubInstallationBudget(refusing);
+  t.after(() => configureGithubInstallationBudget(undefined));
+  // The production GitHub adapter, so the read goes through the transport's own admission wait.
+  f.effects.findPull = handShipEffects(() => 0).findPull;
+  const first = runHandShip(f.args, f.options, f.effects);
+  while (waits === 0) await delay(20);
+  const state = join(f.root, "hand-ship");
+  const id = readdirSync(state).find((name) => /^rmd-ship-/.test(name))!;
+  const requested = Date.now();
+  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
+  const settled = await Promise.race([first, delay(3_000, "still waiting")]);
+  assert.equal(settled, 1, "the run settles at the stop, not when the budget's reset passes");
+  assert.ok(Date.now() - requested < 3_000);
+  assert.equal(waits, 1, "the stopped read never asks for admission again");
+  assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });

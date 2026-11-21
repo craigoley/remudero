@@ -517,24 +517,37 @@ const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|open-pr-body-proof-p
 /** The check's line for a proof the push newly falsifies. On a cached body the check only reports it. */
 const FALSIFIED_BODY_PROOF = /open-pr-body-proof-precheck: this push NEWLY FALSIFIES/;
 
-/** The harness hook's lines for a Rule 15 check it could not run or whose diff it could not read. Both exit 0. */
-const UNREAD_RULE15_CHECK = /rule15-precheck could not read the diff|rule15-precheck: could not read the diff|scripts\/rule15-precheck\.mjs absent|pre-push: no tsx loader under/;
+/** Each required rule the harness hook runs: the hook's lines for a check it could not run or whose diff it could
+ *  not read (it exits 0 on both), and the check's own line for a diff it read and judged. hooks/pre-push runs
+ *  rule15-precheck and rule25-precheck; the measured line is the only evidence the rule was checked. Rule 25 is
+ *  advisory: rule25-precheck's NOTICE is a measured result the review reports and does not refuse. */
+const REQUIRED_RULES = [
+  { rule: "Rule 15", unread: /rule15-precheck could not read the diff|rule15-precheck: could not read the diff|scripts\/rule15-precheck\.mjs absent|pre-push: no tsx loader under/,
+    measured: /^rule15-precheck: OK -- /m },
+  { rule: "Rule 25", unread: /rule25-precheck could not read the diff|rule25-precheck: could not read the diff|scripts\/rule25-precheck\.mjs absent|pre-push: no tsx loader under/,
+    measured: /^rule25-precheck: (?:OK|NOTICE) -- /m },
+] as const;
 
-/** rule15-precheck's own line for a diff it read and judged clean: the only evidence Rule 15 was measured. */
-const MEASURED_RULE15_PASS = /^rule15-precheck: OK -- /m;
+function unmeasuredRule(text: string): string | undefined {
+  for (const { rule, unread, measured } of REQUIRED_RULES) {
+    if (unread.test(text)) return `the pre-push gate could not read the diff for its ${rule} check, so ${rule} was not checked`;
+    if (!measured.test(text)) return `the pre-push gate reported no measured ${rule} result, so ${rule} was not checked`;
+  }
+  return undefined;
+}
 
 /** A required gate never reads an unjudged open-PR body check as a pass, and never pushes a newly falsified body
  *  proof: its caller wrote the cached body from a read made just before the push, so that body is the stored one.
- *  Nor does it read a Rule 15 check as a pass unless the check says it read the diff and found it clean: the hook
- *  exits 0 on an unreadable diff, so an unmeasured Rule 15 would otherwise let the push go with that check skipped. */
+ *  Nor does it read a required rule's check (Rule 15, Rule 25) as a pass unless the check says it read the diff and
+ *  judged it: the hook exits 0 on an unreadable diff, so an unmeasured rule would otherwise let the push go with that
+ *  check skipped. */
 function requiredGateOutcome(outcome: HookOutcome): HookOutcome {
   if (outcome.refused) return outcome;
   const text = `${String(outcome.out.stdout ?? "")}\n${String(outcome.out.stderr ?? "")}`;
   const reason = UNCHECKED_BODY_CHECK.test(text)
     ? "the open PR's stored body could not be read, so its open-PR body proofs were not checked"
     : FALSIFIED_BODY_PROOF.test(text) ? "this push newly falsifies a proof in the open PR's stored body"
-    : UNREAD_RULE15_CHECK.test(text) ? "the pre-push gate could not read the diff for its Rule 15 check, so Rule 15 was not checked"
-    : !MEASURED_RULE15_PASS.test(text) ? "the pre-push gate reported no measured Rule 15 result, so Rule 15 was not checked" : undefined;
+    : unmeasuredRule(text);
   if (reason === undefined) return outcome;
   return { refused: true, err: { ...outcome.out, stderr: `${String(outcome.out.stderr ?? "")}${reason}\n`, reason } };
 }
