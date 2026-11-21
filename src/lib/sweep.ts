@@ -2544,6 +2544,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readOpenEscalations",
   "reconcilePrimaryShadowAlert",
   "deferToLiveFixRound", // W1-T13991
+  "fixAdmissionLockDir", // W1-T13991
 ] as const;
 
 export function productionFixProgressJudge(opts: {

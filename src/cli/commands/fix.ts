@@ -5492,12 +5492,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
 
     const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
     if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
-    const waited = await (opts.waitForOwnHeadCi ?? deps.waitForCiGreen)(opts.prUrl, (step, extra) => {
+    const logCiWait: Parameters<typeof deps.waitForCiGreen>[1] = (step, extra) => {
       if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
         deps.branchClaim?.holdForWait === undefined) return deps.log(step, extra);
       if (deps.branchClaim.holdForWait() !== undefined) return deps.log(step, extra);
       deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: deps.branchClaim.id() });
-    }, pushedHead);
+    };
+    const waited = opts.waitForOwnHeadCi === undefined
+      ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
+      : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, pushedHead);
     const resumed = opts.liveRoundHandoff?.();
     const ci = resumed?.failure === "check" && host.ciGateState(waited) !== "red"
       ? { state: "red" as const, sha: resumed.headSha } : waited;
