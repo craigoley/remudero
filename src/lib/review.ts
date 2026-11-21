@@ -10760,7 +10760,10 @@ function stringRows(text: string): string[] {
 
 function numericRowsOn(text: string): Array<[string, number]> {
   const out: Array<[string, number]> = [];
-  const re = /"([^"]+)"\s*:\s*(-?\d+(?:\.\d+)?)/g;
+  // The whole JSON number grammar (sign, fraction, exponent), and only a complete one: `9e-1` read as 9
+  // turned a lowered 0.98 floor into "tightening". A token that is not a full JSON number yields no row,
+  // which leaves its line unaccountable and the file `undetermined`.
+  const re = /"([^"]+)"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w.+-])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) out.push([m[1], Number(m[2])]);
   return out;

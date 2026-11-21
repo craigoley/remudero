@@ -5,7 +5,7 @@
 // PR that edited the JSON to a lower floor (or a higher ceiling) passed its own ratchet by
 // construction, because every ratchet reads its baseline from the PR's own tree. This checks each
 // row in SCORE_TABLE against `git show <base>:<path>` and refuses a regression unless the working
-// tree also carries a fresh `bumpRationale` naming the PR/task that reviewed it.
+// tree's `bumpRationale` names a PR or task the base's rationale did not -- the one that reviewed it.
 //
 // SCOPE, drawn from the LEDGER/FLOOR line src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS
 // comment already states: a SCORE FLOOR (or ceiling) grades a falsifier, so lowering (or raising)
@@ -57,6 +57,7 @@ export const SCORE_TABLE = [
 ];
 
 const PR_REFERENCE_RE = /(#\d+|W1-T\d+)/;
+const PR_REFERENCES_RE = /#\d+|W1-T\d+/g;
 
 /** `true` when `newValue` moved the WRONG way for `direction` -- the ratchet's own regression. */
 export function isRegression(oldValue, newValue, direction) {
@@ -68,12 +69,25 @@ export function bumpRationaleNamesAPr(rationale) {
   return typeof rationale === "string" && rationale.trim().length > 0 && PR_REFERENCE_RE.test(rationale);
 }
 
+/** Every `#<n>` and `W1-T<n>` reference `rationale` names; none for a non-string. */
+export function rationaleReferences(rationale) {
+  return new Set(typeof rationale === "string" ? rationale.match(PR_REFERENCES_RE) ?? [] : []);
+}
+
+/** A FRESH rationale names a PR or task the previous rationale did not. Differing text is not enough:
+ *  a stale rationale with a space or a sentence appended differs byte-for-byte and reviews nothing new. */
+export function rationaleNamesANewReview(newRationale, oldRationale) {
+  if (!bumpRationaleNamesAPr(newRationale)) return false;
+  const previous = rationaleReferences(oldRationale);
+  return [...rationaleReferences(newRationale)].some((ref) => !previous.has(ref));
+}
+
 /**
  * Pure verdict for one {@link SCORE_TABLE} row. `oldJson` is `undefined` when the file did not
  * exist at the base ref -- a brand-new baseline has nothing to regress against and always passes.
- * A regression passes only when `newJson.bumpRationale` names a PR/task AND differs from
- * `oldJson.bumpRationale` -- a stale rationale, carried over from an earlier reviewed move, must
- * not cover a fresh one.
+ * A regression passes only when `newJson.bumpRationale` names a PR or task the previous rationale
+ * did not ({@link rationaleNamesANewReview}) -- a stale rationale, carried over from an earlier
+ * reviewed move, must not cover a fresh one, however its text is padded.
  */
 export function evaluateRow(entry, oldJson, newJson) {
   const { path, field, direction } = entry;
@@ -91,14 +105,14 @@ export function evaluateRow(entry, oldJson, newJson) {
   if (!isRegression(oldValue, newValue, direction)) {
     return { ...entry, status: "ok", ok: true, oldValue, newValue, detail: `${path}: ${field} ${oldValue} -> ${newValue}, not a regression` };
   }
-  if (bumpRationaleNamesAPr(newJson.bumpRationale) && newJson.bumpRationale !== oldJson.bumpRationale) {
+  if (rationaleNamesANewReview(newJson.bumpRationale, oldJson.bumpRationale)) {
     return {
       ...entry,
       status: "reviewed-bump",
       ok: true,
       oldValue,
       newValue,
-      detail: `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main, but a fresh bumpRationale names the review`,
+      detail: `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main, but its bumpRationale names a PR or task the previous rationale did not`,
     };
   }
   const kind = direction === "increase" ? "floor" : "ceiling";
@@ -110,8 +124,9 @@ export function evaluateRow(entry, oldJson, newJson) {
     newValue,
     detail:
       `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main -- the WRONG direction for this ${kind}. ` +
-      `Restore it, or if the move is deliberate and reviewed, add a fresh "bumpRationale" string to ${path} naming the PR ` +
-      `(a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json already follows.`,
+      `Restore it, or if the move is deliberate and reviewed, write a "bumpRationale" in ${path} that names a PR or task ` +
+      `the previous rationale did not (a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json ` +
+      `already follows. Rewording or padding the old rationale does not count.`,
   };
 }
 

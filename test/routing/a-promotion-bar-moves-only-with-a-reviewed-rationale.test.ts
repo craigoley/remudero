@@ -81,6 +81,21 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
     }
   }
 
+  // A stale rationale padded or extended reviews nothing new (PR #20033's review: 0.98 -> 0.90 plus one space). Only
+  // a PR or task the previous rationale did not name makes it fresh.
+  const floors = readJson(PROMOTION_FLOORS_PATH);
+  const agree = check.SCORE_TABLE.find((r) => r.path === PROMOTION_FLOORS_PATH && r.field === "judgeMinAgreeShare");
+  assert.ok(agree);
+  const previous = String(floors.bumpRationale);
+  assert.match(previous, /W1-T12187/, "positive control: the base rationale names the reference the restatement below repeats");
+  const lowered = { ...floors, judgeMinAgreeShare: 0.9 };
+  for (const stale of [`${previous} `, `${previous}\n`, `${previous} Reviewed again.`, `${previous} See W1-T12187 again.`,
+    "Restated: W1-T4113, W1-T12187 and W1-T12417."]) {
+    assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: stale }).status, "regressed", JSON.stringify(stale));
+  }
+  assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: `${previous} Lowered by #20999 after a reviewed replay.` }).status,
+    "reviewed-bump", "appending a reference the previous rationale did not name is a fresh review");
+
   // The real CLI over the production rows, against a fixture repo whose HEAD holds today's two files and whose
   // working tree raises one ceiling: exit 1, naming the field.
   const repo = gitRepo({ scope: t, kind: "promotion-bars" });
@@ -179,6 +194,15 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 100,\n'), "loosening");
   assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "judgeMaxBrier": 0.1,\n+  "judgeMaxBrier": 0.05,\n'), "tightening");
   assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "judgeMaxBrier": 0.1,\n+  "judgeMaxBrier": 0.2,\n'), "loosening");
+
+  // Any valid JSON number is read at its true value (PR #20033's review: a lowered 0.98 written `9e-1` read as 9).
+  assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinAgreeShare": 0.98,\n+  "judgeMinAgreeShare": 9e-1,\n'), "loosening");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinAgreeShare": 0.98,\n+  "judgeMinAgreeShare": 9.9E-1,\n'), "tightening");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 1e+2,\n'), "loosening");
+  assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "canaryMaxCostRatio": 1.25,\n+  "canaryMaxCostRatio": 1e1,\n'), "loosening");
+  assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "judgeMaxBrier": 0.1,\n+  "judgeMaxBrier": 5e-2,\n'), "tightening");
+  // A token that is not a whole JSON number is never read as its prefix: the file stays undetermined.
+  assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinAgreeShare": 0.98,\n+  "judgeMinAgreeShare": 0.99.5,\n'), "undetermined");
 });
 
 test("a source-only tree still loads the judge shadow pool and the canary guard, and names the missing bar file on first use", (t) => {
