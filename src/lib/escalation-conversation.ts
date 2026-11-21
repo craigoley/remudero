@@ -92,17 +92,26 @@ function sourceOf(raw: unknown, issueUrl: string): EscalationIssueSource | undef
 export const MACHINE_FIELDS_RE = /\r?\n\r?\n## Machine fields\r?\n/;
 
 /**
- * Where the native writer put its machine fields. A body that opens with `**Class:**` then
- * `**Task:**` is the old order (fields first). Otherwise the fields follow the LAST "## Machine
- * fields" heading (W1-T12041), so a same-named heading quoted in the prose above cannot replace them.
+ * Where the native writer put its machine fields. A body whose first paragraph names a `**Task:**`
+ * is the old order (fields first), whatever field leads it. Otherwise the fields follow the LAST
+ * "## Machine fields" heading (W1-T12041), so a same-named heading quoted in the prose above cannot
+ * replace them; the new writer quotes field-shaped lines above that heading, so its first paragraph
+ * never names a Task.
  */
 function sourceLayout(body: string): { order: "fields-first" | "machine-fields-last"; header: string; fieldsAt: number } {
   const [first = ""] = body.split(/\r?\n\r?\n/, 1);
-  if (/^\*\*Class:\*\* [^\r\n]*\r?\n\*\*Task:\*\* /.test(body)) return { order: "fields-first", header: first, fieldsAt: 0 };
+  if (/^\*\*Task:\*\*/m.test(first)) return { order: "fields-first", header: first, fieldsAt: 0 };
   const last = [...body.matchAll(new RegExp(MACHINE_FIELDS_RE, "g"))].at(-1);
   if (last === undefined) return { order: "fields-first", header: first, fieldsAt: 0 };
   const [fields = ""] = body.slice(last.index + last[0].length).split(/\r?\n\r?\n/, 1);
   return { order: "machine-fields-last", header: fields, fieldsAt: last.index };
+}
+
+/** Undo the new writer's quoting of field-shaped lines above its machine fields (escalate.ts
+ *  quoteMachineFieldLines adds exactly one leading space to each), so the detail reads back as written. */
+const QUOTED_MACHINE_FIELD_LINE_RE = /^ (?= *\*\*(?:Class|Task|Host|Run|Head|Cause|Contract|Full summary \(JSON\)):\*\*)/gm;
+function unquoteMachineFieldLines(text: string): string {
+  return text.replace(QUOTED_MACHINE_FIELD_LINE_RE, "");
 }
 
 /** Parse only the native writer's anchored metadata and sections, never instructions from prose. */
@@ -145,12 +154,12 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
     // W1-T12041: the summary leads, the raw detail sits under its own heading after the recommendation.
     const details = /^## Details\r?$/m.exec(afterRecommendation);
     if (!details || layout.fieldsAt <= recommendationAt) return undefined;
-    recommendationText = afterRecommendation.slice(0, details.index);
+    recommendationText = unquoteMachineFieldLines(afterRecommendation.slice(0, details.index));
     const tail = afterRecommendation.slice(details.index + details[0].length, layout.fieldsAt - (recommendationAt + recommendationHeaders[0]![0].length));
     const footer = tail.lastIndexOf("\n_Opened automatically by Remudero ");
-    detail = (footer === -1 ? tail : tail.slice(0, footer)).trim();
+    detail = unquoteMachineFieldLines(footer === -1 ? tail : tail.slice(0, footer)).trim();
     if (source.body.startsWith("## Decision Summary\n") || source.body.startsWith("## Decision Summary\r\n")) {
-      decisionSummary = source.body.slice(0, optionsAt).trimEnd();
+      decisionSummary = unquoteMachineFieldLines(source.body.slice(0, optionsAt).trimEnd());
     }
   } else {
     detail = source.body.slice(header.length, optionsAt).trim();

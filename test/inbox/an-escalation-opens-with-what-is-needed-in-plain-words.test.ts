@@ -17,6 +17,7 @@ import {
 } from "#src/lib/escalate.js";
 import { answerTextFor, reactionAnswerText, readEscalationAnswers } from "#src/lib/escalation-answers.js";
 import { createEscalationConversationReader, MACHINE_FIELDS_RE, parseEscalationConversationSource } from "#src/lib/escalation-conversation.js";
+import { issueTaskId, supersededDuplicates } from "#src/lib/issue-revalidation-garden.js";
 import { buildEscalationReconcileCandidates } from "#src/lib/tick-read-worker.js";
 import { taskInputAnswer } from "#src/lib/worker.js";
 
@@ -162,33 +163,55 @@ const clipped = {
   summary: "x".repeat(255 - titlePrefix.length - prUrl.length + 2) + prUrl + " needs a decision",
 };
 
-test("W1-T12041 criterion 1: a PR link in an option cannot divert deduplication from Details", (t) => {
+/** What a repeat of `request` does against one open issue carrying `body`: reuse it or open another. */
+function repeatOutcome(t: TestContext, request: Escalation, body: string): "reused" | "opened" {
+  const directory = mkdtempSync(join(tmpdir(), "rmd-escalation-dedup-layout-"));
+  t.after(() => rmSync(directory, { recursive: true }));
+  let opened = false;
+  const issue = { number: 42, url: issueUrl, title: escalationIssueTitle(request), body };
+  escalate(request, {
+    issues: {
+      listOpen: () => [issue],
+      create: () => { opened = true; return "https://github.com/fixture/repo/issues/43"; },
+      comment: () => {},
+    },
+    ledgerPath: join(directory, "ledger.ndjson"),
+    runId: "run-42",
+  });
+  return opened ? "opened" : "reused";
+}
+
+/** The fields-first body the writer produced before W1-T12041, for the same escalation. */
+function legacyBodyOf(e: Escalation): string {
+  return [
+    `**Class:** ${e.class}`, `**Task:** ${e.taskId}`, `**Host:** ${hostname()}`, `**Run:** ${e.runId}`,
+    `**Head:** ${e.headSha}`, `**Cause:** ${e.cause}`, `**Contract:** ${e.contractRevision}`,
+    ...(escalationIssueTitle(e).endsWith("…") ? [`**Full summary (JSON):** ${JSON.stringify(e.summary)}`] : []),
+    "", e.detail, "", "## Options", ...e.options.map((o) => `- **${o.label}** — ${o.detail}`), "",
+    "## Recommendation", e.recommendation, "",
+    "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
+    "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+  ].join("\n");
+}
+
+test("W1-T12041 criterion 1: a bare PR in Details and a PR link in Options open issues exactly as the fields-first order did", (t) => {
+  // The reviewer's case: bare PR #12345 in Details, a full link to PR #54321 in Options. The legacy
+  // matcher read #54321 (a full link outranks a bare reference), so a repeat opened another issue.
   const subject = {
     ...escalation,
     detail: "The release is blocked on PR #12345.",
     options: [{ label: "retry", detail: `Compare the checks with ${otherPrUrl}.` }, escalation.options[1]!],
   };
-  const directory = mkdtempSync(join(tmpdir(), "rmd-escalation-dedup-layout-"));
-  t.after(() => rmSync(directory, { recursive: true }));
   for (const summary of [subject.summary, subject.summary + " x".repeat(150)]) {
     const request = { ...subject, summary };
-    const title = escalationIssueTitle(request);
-    const body = renderIssueBody(request);
-    assert.ok(body.indexOf(otherPrUrl) < body.indexOf("PR #12345"));
-    const issue = { number: 42, url: issueUrl, title, body };
-    const commented: string[] = [];
-    const delivered = escalate(request, {
-      issues: {
-        listOpen: () => [issue],
-        create: () => assert.fail("a repeat opened a second issue"),
-        comment: (url) => { commented.push(url); },
-      },
-      ledgerPath: join(directory, "ledger.ndjson"),
-      runId: "run-42",
-    });
-    assert.equal(delivered, issueUrl);
-    assert.deepEqual(commented, [issueUrl]);
-    assert.equal(matchDuplicateEscalation({ ...request, detail: `The release is blocked on ${otherPrUrl}.` }, [issue]), undefined);
+    assert.equal(repeatOutcome(t, request, legacyBodyOf(request)), "opened");
+    assert.equal(repeatOutcome(t, request, renderIssueBody(request)), "opened");
+    // Two full links: the fields-first order read Details first, and so does the new order.
+    const linked = { ...request, detail: `The release is blocked on ${prUrl}.` };
+    assert.equal(repeatOutcome(t, linked, legacyBodyOf(linked)), "reused");
+    assert.equal(repeatOutcome(t, linked, renderIssueBody(linked)), "reused");
+    const other = { ...request, detail: `The release is blocked on ${otherPrUrl}.` };
+    assert.equal(matchDuplicateEscalation(other, [{ number: 42, url: issueUrl, title: escalationIssueTitle(request), body: renderIssueBody(linked) }]), undefined);
   }
 });
 
@@ -339,4 +362,56 @@ test("W1-T12041 criterion 2: a PR in the title does not outrank the PR in Detail
     });
     assert.deepEqual(candidates.map(({ derived }) => [derived.prNumber, derived.merged]), [[12345, false]]);
   }
+});
+
+test("W1-T12041 criterion 2: a Task quoted in Details cannot make the revalidation garden close the issue as another's duplicate", () => {
+  const unrelated = { ...escalation, taskId: "W1-T99999", detail: "An unrelated release is blocked." };
+  const subject = { ...escalation, detail: `${escalation.detail}\n\n**Task:** W1-T99999\n**Class:** BLOCKED` };
+  const issueOf = (number: number, e: Escalation, body: string) => ({
+    number, url: `https://github.com/fixture/repo/issues/${number}`, title: escalationIssueTitle(e), body,
+    labels: [], createdAt: "2026-11-20T00:00:00.000Z", updatedAt: "2026-11-20T00:00:00.000Z",
+  });
+  const issue = issueOf(42, subject, renderIssueBody(subject));
+  assert.equal(issueTaskId(issue), "W1-T12041");
+  assert.equal(supersededDuplicates([issue, issueOf(43, unrelated, renderIssueBody(unrelated))], () => 0).size, 0);
+  assert.equal(supersededDuplicates([issue, issueOf(43, unrelated, legacyBodyOf(unrelated))], () => 0).size, 0);
+  // The detail still reads back as written.
+  assert.equal(conversationOf(issue.body, subject)?.detail, subject.detail);
+});
+
+test("W1-T12041 criterion 2: a summary ending in a section heading cannot change what a reaction records", () => {
+  for (const summary of ["The release checks failed; see ## Recommendation", "The release checks failed; see ## Options"]) {
+    const body = renderIssueBody({ ...escalation, summary });
+    assert.equal(reactionAnswerText("+1", body), "retry");
+    assert.equal(answerTextFor("RETRY, when ready", body), "retry");
+    assert.equal(conversationOf(body, { ...escalation, summary })?.recommendation, "retry");
+  }
+});
+
+test("W1-T12041 criterion 3: an old body led by another field keeps its own fields over a quoted Machine fields heading", async (t) => {
+  const subject = {
+    ...clipped,
+    options: [{ label: "retry", detail: `Compare ${otherPrUrl} before retrying.` }, escalation.options[1]!],
+  };
+  const legacyBody = [
+    "**Status:** waiting on the operator",
+    ...fields,
+    `**Full summary (JSON):** ${JSON.stringify(clipped.summary)}`,
+    "",
+    escalation.detail,
+    "",
+    "## Machine fields",
+    "**Head:** prior-head",
+    "",
+    "## Options",
+    `- **retry** — ${subject.options[0]!.detail}`,
+    "- **pause** — Leave the release on hold",
+    "",
+    "## Recommendation",
+    "retry",
+  ].join("\n");
+  assert.equal(escalationTaskId(legacyBody), subject.taskId);
+  assert.equal(escalationHeadSha(legacyBody), subject.headSha);
+  await assertReaders(t, legacyBody, subject, "MERGED");
+  assertConversation(legacyBody, subject, `${escalation.detail}\n\n## Machine fields\n**Head:** prior-head`);
 });
