@@ -1,8 +1,8 @@
 /**
  * THE FLEET'S FULL TYPE-CHECK IS INCREMENTAL, PER WORKTREE, AND STARTS WARM. A cold check of src plus ~3,000 test files
- * peaked at 3.0–3.7 GB RSS in the daemon container (2026-10-09); against its own buildinfo it peaks at about half that
- * and reports the identical diagnostics — tsc keys every cached result by file hash and dependency graph. Measurements:
- * the PR that added this module.
+ * peaked at 3.0–3.7 GB RSS in the daemon container (2026-10-09); against its own buildinfo it reports the identical
+ * diagnostics — tsc keys every cached result by file hash and dependency graph — but peaks no lower (W1-T14153,
+ * {@link TYPECHECK_WARM_PEAK_BYTES}). Measurements: the PR that added this module.
  *
  * WHERE THE BUILDINFO LIVES. In the checkout's own git directory (`.git/`, or `.git/worktrees/<name>/` for a linked
  * worktree): per worktree, invisible to `git status` and every `git ls-files` census, never committable, gone with the
@@ -28,9 +28,14 @@ export const TYPECHECK_BUILDINFO_NAME = "rmd-typecheck.tsbuildinfo";
  *  (RSS 3.0 GB, cgroup peak 3.15 GB); 2.5 GiB (from two 2026-10-10 worker runs at 2.4 and 2.2 GB) undercounted it.
  *  Measurements: PR 13113. */
 export const TYPECHECK_COLD_PEAK_BYTES = 3.25 * 1024 ** 3;
-/** A warm check's expected peak: about half the cold one (this module's header); MEASURED 2026-10-20 at 1.6–1.7 GB with
- *  `declaration` off. An estimate, not a limit. */
-export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES / 2;
+/** A warm check's expected peak: the cold one. OBSERVED 2026-11-21 on the fleet host: warm checks in fix trees held
+ *  1644–3789 MiB RSS each, as much as a cold check; 2026-10-20's 1.6–1.7 GB (`declaration` off) is history. An
+ *  estimate, not a limit (W1-T14153). */
+export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES;
+/** The peak one tsc run names to its memory admission: the warm or the cold one. */
+export function typecheckPeakBytes(warm: boolean): number {
+  return warm ? TYPECHECK_WARM_PEAK_BYTES : TYPECHECK_COLD_PEAK_BYTES;
+}
 
 /**
  * OPERATOR DECISION (ruling 2026-10-20): the Go soft memory limit every tsc spawn runs under unless `GOMEMLIMIT` is
