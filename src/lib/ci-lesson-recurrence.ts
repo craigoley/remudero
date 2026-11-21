@@ -23,7 +23,7 @@ export function parseCiLearningId(findingId: string): { gate: string; reopen: nu
 
 /** The gate {@link CI_LEARNING_ID_RE} names, or undefined for another origin.
  *  Dedup by gate: a window's changing first PR made whole-id dedup re-file existing lessons.
- *  Evidence: 2026-09-29 plan/tasks.d audit, retained in the W1-T11007 review record. */
+ *  Evidence: the 2026-09-29 audit of the plan shards, retained in the W1-T11007 review record. */
 export function ciLearningGateOf(findingId: string): string | undefined {
   return parseCiLearningId(findingId)?.gate;
 }
