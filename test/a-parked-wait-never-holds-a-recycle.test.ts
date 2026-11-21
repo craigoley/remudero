@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { requestPause } from "../src/lib/fleet-control.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { recyclePauseDetail } from "../src/lib/recycle-yield.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
@@ -18,7 +19,7 @@ import type { Task } from "../src/lib/plan.js";
 import type { GitHub } from "../src/lib/status.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
 import { commitInsideFixture } from "./helpers/fixture-commit.js";
-import { ghShim } from "./helpers/gh-shim.js";
+import { ghShim, withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -38,7 +39,7 @@ function fixture(t: { after(fn: () => void): void }) {
   return { root, rows, log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, extra }); } };
 }
 
-function pending(root: string, options: { onPoll?: (n: number) => void; doneAt?: number; pr?: boolean } = {}): PollDeps {
+function pending(root: string, options: { onPoll?: (n: number) => void; doneAt?: number; pr?: boolean; readPr?: PollDeps["readJson"] } = {}): PollDeps {
   let polls = 0;
   return {
     readJson: async (args) => {
@@ -46,6 +47,7 @@ function pending(root: string, options: { onPoll?: (n: number) => void; doneAt?:
       if (path.includes("/pulls/1")) {
         polls++;
         options.onPoll?.(polls);
+        if (options.readPr) return options.readPr(args);
         return { number: 1, state: "open", merged: !!options.pr && polls === options.doneAt, head: { sha: HEAD } };
       }
       if (path.includes("/check-runs")) return { check_runs: [{ name: "ci", status: polls === options.doneAt ? "completed" : "in_progress", conclusion: polls === options.doneAt ? "success" : null }] };
@@ -74,7 +76,8 @@ async function sweepWait(root: string, log: (step: string, extra?: Record<string
     openTaskIdsFromPlanImpl: () => new Set(),
     readPackageScriptsImpl: () => ({}),
     worktreeRemoveImpl: () => {},
-    waitForCiGreenImpl: (url, waitLog, everySec, deps) => waitForCiGreen(url, waitLog, everySec, { ...pollIo, ...deps }),
+    readJsonImpl: pollIo.readJson,
+    waitForCiGreenImpl: (url, waitLog, everySec, deps) => waitForCiGreen(url, waitLog, everySec, { ...pollIo, ...deps, sleep: pollIo.sleep }),
     runFixRungImpl: async (opts) => {
       await working?.();
       const ci = await opts.deps.waitForCiGreen(URL, opts.deps.log);
@@ -208,7 +211,11 @@ test("W1-T5140: an operator pause keeps the sweep CI wait until it turns green",
   const { root, rows, log } = fixture(t);
   requestPause(root, "investigating deploy/recycle-container.sh");
   let polls = 0;
-  await sweepWait(root, log, pending(root, { doneAt: 3, onPoll: (n) => { polls = n; } }), async () => {});
+  const endpoint = "repos/acme/remudero/pulls/1";
+  await withGhShim([{ when: endpoint, stdout: JSON.stringify({ number: 1, state: "open", head: { sha: HEAD } }) }], async (shim) => {
+    await sweepWait(root, log, pending(root, { doneAt: 3, onPoll: (n) => { polls = n; }, readPr: ghJsonAsync }), async () => {});
+    assert.deepEqual(shim.calls(), Array.from({ length: 3 }, () => `api ${endpoint}`));
+  }, { parent: root });
   assert.equal(polls, 3);
   assert.ok(!rows.some((r) => r.step === "inflight.recycle_yield"));
   assert.deepEqual(readdirSync(join(root, "state", "inflight")), []);

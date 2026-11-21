@@ -23350,7 +23350,7 @@ export async function runSweep(
         live_round_run_id: live.liveRoundRunId, claim_run_id: live.claimRunId, failure: live.failure });
       return { ok: false, reason: `deferred to the live fix round ${live.liveRoundRunId} waiting on CI for ${pr.headSha}` };
     }
-    // The head-specific key still identifies telemetry and dedup; admission follows the PR across pushes.
+    // Preserve head-specific claims for dispatches that do not reserve worker capacity.
     const heldKey = fixDispatchKeysByPr.get(pr.prNumber) ??
       [...childWork.values()].find((work) => work.kind === "fix-dispatch" && work.prNumber === pr.prNumber)?.fixKey ??
       (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
@@ -23407,14 +23407,16 @@ export async function runSweep(
       fixAdmissionSince.set(fixKey, lastDone.admission_since_ms);
     }
     const abandon = new AbortController();
+    const reservesAdmission = claimFixAdmission !== undefined ||
+      (deps.detachFixWait && !deps.dryRun && installedWorkHost?.spawnFix !== undefined && installedWorkHost.mode() === "on");
     inFlightFixKeys.add(fixKey);
-    fixDispatchKeysByPr.set(pr.prNumber, fixKey);
+    if (reservesAdmission) fixDispatchKeysByPr.set(pr.prNumber, fixKey);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       inFlightFixKeys.delete(fixKey);
-      fixDispatchKeysByPr.delete(pr.prNumber);
+      if (reservesAdmission) fixDispatchKeysByPr.delete(pr.prNumber);
       if (!abandon.signal.aborted) fixAdmissionSince.delete(fixKey);
       fixCapacityReleases.get(pr.prNumber)?.();
       fixCapacityReleases.delete(pr.prNumber);
