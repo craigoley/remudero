@@ -168,6 +168,7 @@ import {
   invariantFindingLedgerLine,
   LOOP_LAG_MAX_STALL_BOUND_MS,
   loopStallLedgerLine,
+  RUNTIME_LOOP_STALL_PROFILE_STEP,
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { startLoopStallProfiler, type LoopStallProfiler, type LoopStallProfilerOptions, type LoopStallSteps } from "./loop-stall-profiler.js";
@@ -3656,7 +3657,7 @@ export const SERVE_LOOP_LAG_RESOLUTION_MS = 20;
 
 /** W1-T10074: serve's loop-stall profiler rows, written beside `runtime.loop_lag` under serve's own prefix. */
 export const SERVE_LOOP_STALL_STEPS: LoopStallSteps = {
-  profile: "runtime.loop_stall_profile",
+  profile: RUNTIME_LOOP_STALL_PROFILE_STEP,
   failed: "runtime.loop_stall_profile_failed",
 };
 
@@ -3688,55 +3689,61 @@ export function startIncidentInvariantsMonitor(
   const clearTimer = deps.clearInterval ?? clearInterval;
   const intervalMs = deps.intervalMs ?? INCIDENT_INVARIANTS_INTERVAL_MS;
   const stallProfiler = startLoopStallProfiler({ ...deps.stallProfiler, steps: SERVE_LOOP_STALL_STEPS });
-  const readings: { atMs: number; lag: EventLoopLag }[] = [];
-  const pending: { recoveredAtMs: number; deliveredAtMs: number; fields: Record<string, unknown> }[] = [];
+  type StallSample = { atMs: number; lag: EventLoopLag };
+  type PendingProfile = { recoveredAtMs: number; deliveredAtMs: number; lagMs: number; fields: Record<string, unknown> };
+  let collecting: StallSample | undefined;
+  const pending: PendingProfile[] = [];
   // The histogram and watchdog use separate timers. Allow one turn of each at the sample boundary.
   const samplingSlackMs = 2 * SERVE_LOOP_LAG_RESOLUTION_MS;
   // The histogram rounds up to the top of a bucket at three significant digits.
   const durationSlackMs = (maxMs: number) => samplingSlackMs + maxMs / 1_000;
-  const sampleFor = (recoveredAtMs: number, lagMs: unknown) => readings.find(({ atMs, lag }) =>
+  const fitsSample = ({ atMs, lag }: StallSample, { recoveredAtMs, lagMs }: PendingProfile): boolean =>
     recoveredAtMs > atMs - lag.windowMs - samplingSlackMs && recoveredAtMs <= atMs + samplingSlackMs &&
-    typeof lagMs === "number" && Math.abs(lag.maxMs - lagMs) <= durationSlackMs(lag.maxMs));
+    Math.abs(lag.maxMs - lagMs) <= durationSlackMs(lag.maxMs);
   const stallLog = (step: string, fields?: Record<string, unknown>, recoveredAtMs?: number): void => {
     const deliveredAtMs = clock.now();
     if (step === SERVE_LOOP_STALL_STEPS.profile && fields && recoveredAtMs !== undefined &&
         typeof fields.lag_ms === "number" &&
         fields.lag_ms > LOOP_LAG_MAX_STALL_BOUND_MS - durationSlackMs(LOOP_LAG_MAX_STALL_BOUND_MS)) {
-      const sample = sampleFor(recoveredAtMs, fields.lag_ms);
-      if (sample === undefined) {
-        pending.push({ recoveredAtMs, deliveredAtMs, fields });
-        return;
-      }
-      writeLedger(ledgerPath, loopStallLedgerLine(step, fields, sample.atMs));
+      pending.push({ recoveredAtMs, deliveredAtMs, lagMs: fields.lag_ms, fields });
       return;
     }
     writeLedger(ledgerPath, loopStallLedgerLine(step, fields, deliveredAtMs));
+  };
+
+  // A watchdog callback can land on either side of its sample's tick. Settle after one more tick
+  // so all plausible candidates can compete. Multiple matches leave the maximum unattributed.
+  const flushProfiles = (settled: StallSample | undefined, nowMs?: number): void => {
+    const candidates = settled ? pending.filter((profile) => fitsSample(settled, profile)) : [];
+    const linked = candidates.length === 1 ? candidates[0] : undefined;
+    for (let index = 0; index < pending.length;) {
+      const profile = pending[index]!;
+      if (nowMs !== undefined && !candidates.includes(profile) &&
+          (nowMs - profile.deliveredAtMs < intervalMs || (collecting && fitsSample(collecting, profile)))) {
+        index++;
+        continue;
+      }
+      const lagAtMs = profile === linked ? settled?.atMs : undefined;
+      const line = loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.profile, profile.fields, profile.deliveredAtMs, lagAtMs);
+      writeLedger(ledgerPath, line, nowMs === undefined ? undefined : { clock: fixedClock(nowMs) });
+      pending.splice(index, 1);
+    }
   };
 
   const tick = (): void => {
     const nowMs = clock.now();
     try {
       const lag = eventLoopLag();
+      const settled = collecting;
+      const stalled = lag !== undefined && lag.maxMs > LOOP_LAG_MAX_STALL_BOUND_MS;
       if (lag) {
-        const stalled = lag.maxMs > LOOP_LAG_MAX_STALL_BOUND_MS;
         // Include the long stall in this evaluation even if appending advances the clock.
         writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs), stalled ? { clock: fixedClock(nowMs) } : undefined);
-        if (stalled) readings.push({ atMs: nowMs, lag });
         // Never throws: the profiler turns its own start, heartbeat and watchdog failures into its failure row.
         stallProfiler.observe({ lagMs: lag.p99Ms, intervalMs: SERVE_LOOP_LAG_RESOLUTION_MS }, stallLog);
       }
-      while (readings[0] && readings[0].atMs < nowMs - intervalMs) readings.shift();
-      for (let index = 0; index < pending.length;) {
-        const profile = pending[index]!;
-        const sample = sampleFor(profile.recoveredAtMs, profile.fields.lag_ms);
-        if (sample || nowMs - profile.deliveredAtMs >= intervalMs) {
-          writeLedger(ledgerPath, loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.profile, profile.fields,
-            sample?.atMs ?? profile.deliveredAtMs), { clock: fixedClock(nowMs) });
-          pending.splice(index, 1);
-        } else {
-          index++;
-        }
-      }
+      collecting = stalled ? { atMs: nowMs, lag } : undefined;
+      flushProfiles(settled, nowMs);
     } catch (e) {
       deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
     }
@@ -3750,22 +3757,13 @@ export function startIncidentInvariantsMonitor(
     }
   };
 
-  // W1-T13203: a long profile still waiting for its lag sample is written when the monitor stops, never dropped; one whose
-  // sample did arrive keeps that sample's run, as the tick would have written it.
-  const flushPending = (): void => {
-    for (const profile of pending.splice(0)) {
-      const sample = sampleFor(profile.recoveredAtMs, profile.fields.lag_ms);
-      writeLedger(ledgerPath, loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.profile, profile.fields, sample?.atMs ?? profile.deliveredAtMs));
-    }
-  };
-
   const timer = setTimer(tick, intervalMs);
   timer.unref?.();
   return Object.assign(() => {
     clearTimer(timer);
     stallProfiler.stop();
     try {
-      flushPending();
+      flushProfiles(collecting);
     } catch (error) {
       // The service logger writes to the same ledger. Use stderr so shutdown can continue.
       try {

@@ -81,24 +81,23 @@ for (const callbackOffsetMs of [-5, 5]) {
         deliverProfile(-5, callbackOffsetMs < 0 ? NOW - 10 : NOW - silentMs - 1_000);
         nowMs = NOW;
         tick();
-        if (callbackOffsetMs > 0) {
-          const initial = readLedgerLines(path).find((row) => row.name === LOOP_LAG_RULE_ID);
-          assert.ok(initial, "the lag tick detects the stall before the profile is delivered");
-          assert.doesNotMatch(String(initial.message), /top:/);
-          deliverProfile(callbackOffsetMs, NOW - 10);
-          nowMs = NOW + intervalMs;
-          tick();
-        }
+        const initial = readLedgerLines(path).find((row) => row.name === LOOP_LAG_RULE_ID);
+        assert.ok(initial, "the lag tick detects the stall immediately");
+        assert.match(String(initial.message), new RegExp(`max=${maxMs}ms`));
+        if (callbackOffsetMs > 0) deliverProfile(callbackOffsetMs, NOW - 10);
+        nowMs = NOW + intervalMs;
+        tick();
         const rows = readLedgerLines(path);
         const long = rows.find((row) => row.step === RUNTIME_LOOP_LAG_STEP && row.maxMs === maxMs);
-        const profile = rows.find((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP);
         assert.ok(long);
+        const profiles = rows.filter((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP);
+        const profile = profiles.find((row) => row.run_id === long.run_id);
         assert.ok(profile);
-        assert.equal(profile.run_id, long.run_id);
         assert.ok(Array.isArray(profile.top_inclusive) && profile.top_inclusive.length === 4);
         if (callbackOffsetMs > 0) {
-          assert.ok(rows.some((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP && row.run_id === `RUNTIME-${NOW - 5}`),
-            "the unmatched watchdog profile keeps its own run ID");
+          assert.equal(profiles.length, 2);
+          assert.equal(profiles.filter((row) => row.run_id === long.run_id).length, 1,
+            "the out-of-window profile is still written under a separate run ID");
         }
         const incident = rows.filter((row) => row.step === "incident.event" && row.name === LOOP_LAG_RULE_ID).at(-1);
         assert.ok(incident);
@@ -114,6 +113,85 @@ for (const callbackOffsetMs of [-5, 5]) {
     });
   });
 }
+
+for (const longestFirst of [false, true]) {
+  for (const shorterMs of [30_050, 30_100]) {
+    test(`W1-T13203 criterion 2: competing stalls (${shorterMs}ms and 30150ms, largest delivered first: ${longestFirst})`, async () => {
+      await withTempDir("serve-competing-stalls", (dir) => {
+        const path = join(dir, "ledger.ndjson");
+        const watchdog = Object.assign(new EventEmitter(), { unref() {}, async terminate() { return 0; } });
+        const intervalMs = INCIDENT_INVARIANTS_INTERVAL_MS;
+        let nowMs = NOW - 65_000;
+        let tick: (() => void) | undefined;
+        const stop = startIncidentInvariantsMonitor(path, {
+          clock: { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() },
+          eventLoopLag: () => ({ p50Ms: 20, p99Ms: 108.6, maxMs: nowMs === NOW ? 30_150 : 200, windowMs: 65_000 }),
+          setInterval: ((cb: () => void) => { tick = cb; return { unref() {} }; }) as unknown as typeof setInterval,
+          clearInterval: () => {},
+          writeLedger: (ledger, line, options) =>
+            appendLedger(ledger, line, { ...options, clock: options?.clock ?? fixedClock(nowMs) }),
+          stallProfiler: { spawn: () => watchdog as unknown as Worker },
+        });
+        const deliver = (longest: boolean) => {
+          const silentMs = longest ? 30_150 : shorterMs;
+          const frame = longest ? { function: "classifyAllProposals", url: "file:///src/panel-graph.ts", line: 1 }
+            : { function: "shorterStall", url: "file:///src/shorter.ts", line: 1 };
+          const fold: StallFold = {
+            chunks: 1, profiledUs: 29_000_000,
+            inclusive: new Map([[frame.function, { frame, us: 29_000_000 }]]),
+            self: new Map(), callers: new Map(), syncSpawn: new Map(), syncSpawnUs: 0,
+          };
+          watchdog.emit("message", { kind: "profile", beat: longest ? 2 : 1,
+            recoveredAtMs: longest ? NOW - 10 : NOW - 32_000, silent_ms: silentMs, unprofiled_ms: 1_000, fold });
+        };
+        try {
+          assert.ok(tick);
+          tick();
+          nowMs = NOW - 5;
+          deliver(longestFirst);
+          nowMs = NOW;
+          tick();
+          deliver(!longestFirst); // Same clock millisecond as the histogram row, after its append.
+          nowMs += intervalMs;
+          tick();
+
+          const rows = readLedgerLines(path);
+          const long = rows.find((row) => row.step === RUNTIME_LOOP_LAG_STEP && row.maxMs === 30_150);
+          assert.ok(long);
+          const profiles = rows.filter((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP);
+          assert.deepEqual(profiles.map((row) => row.lag_ms).sort(), [shorterMs, 30_150]);
+          const linked = profiles.filter((row) => row.run_id === long.run_id);
+          const incidents = rows.filter((row) => row.step === "incident.event" && row.name === LOOP_LAG_RULE_ID);
+          assert.equal(incidents.length, 2);
+          for (const incident of incidents) {
+            assert.match(String(incident.message), /max=30150ms/);
+            assert.doesNotMatch(String(incident.message), /shorterStall/);
+          }
+          if (shorterMs === 30_100) {
+            assert.deepEqual(linked, [], "both durations fit the timer tolerance, so neither profile claims the maximum");
+            assert.ok(incidents.every((incident) => !String(incident.message).includes("top:")));
+          } else {
+            assert.deepEqual(linked.map((row) => row.lag_ms), [30_150]);
+            assert.match(String(incidents.at(-1)?.message), /top: classifyAllProposals \(panel-graph\.ts\)$/);
+          }
+        } finally {
+          stop();
+        }
+      });
+    });
+  }
+}
+
+test("W1-T13203 criterion 2: legacy lag runs with duplicate profile rows remain unattributed", () => {
+  const reading = lag(0.5, 108.6, 30_150);
+  const profile = { ts: reading.ts, run_id: reading.run_id, step: RUNTIME_LOOP_STALL_PROFILE_STEP,
+    top_inclusive: [{ function: "classifyAllProposals", url: "file:///src/panel-graph.ts" }] };
+  assert.match(loopLag([reading, profile])?.message ?? "", /top: classifyAllProposals \(panel-graph\.ts\)/);
+  const duplicate = { ...profile, top_inclusive: [{ function: "shorterStall", url: "file:///src/shorter.ts" }] };
+  const finding = loopLag([reading, duplicate, profile]);
+  assert.ok(finding);
+  assert.doesNotMatch(finding.message, /top:/);
+});
 
 test("W1-T13203 criterion 3: invariant:p99-path-unchanged — a p99 breach under the max bound reads as before", () => {
   const p99 = loopLag([lag(10, LOOP_LAG_P99_BOUND_MS + 100, 2_000), lag(0.5, LOOP_LAG_P99_BOUND_MS + 100, 2_000)]);

@@ -157,7 +157,9 @@ export const RUNTIME_LOOP_STALL_PROFILE_STEP = "runtime.loop_stall_profile";
 /** W1-T13203: up to three `function (file)` pairs from the profile row on the stalled minute's run_id. */
 function stallTopFrames(window: readonly IncidentInvariantRow[], runId: unknown): string | undefined {
   if (typeof runId !== "string") return undefined;
-  const profile = window.find((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP && row.run_id === runId);
+  const profiles = window.filter((row) => row.step === RUNTIME_LOOP_STALL_PROFILE_STEP && row.run_id === runId);
+  if (profiles.length !== 1) return undefined;
+  const [profile] = profiles;
   const frames = Array.isArray(profile?.top_inclusive) ? (profile.top_inclusive as unknown[]).slice(0, 3) : [];
   const named = frames.map((frame) => {
     const entry = (frame ?? {}) as Record<string, unknown>;
@@ -485,9 +487,12 @@ export function eventLoopLagLedgerLine(lag: EventLoopLag, nowMs: number): Ledger
   };
 }
 
-/** W1-T10074: one row of serve's loop-stall profiler (loop-stall-profiler.ts) — its profile or its failure — on the
- *  SAME run and task as the {@link eventLoopLagLedgerLine} row it explains, so one grep reads a stalled minute's lag
- *  beside the frames that held it. `step` comes after the fields, so no field can rename the row. */
-export function loopStallLedgerLine(step: string, fields: Record<string, unknown> | undefined, nowMs: number): LedgerLine {
-  return { ...fields, run_id: `RUNTIME-${nowMs}`, task_id: "INCIDENT", step };
+/** A linked profile shares its lag row's run. Standalone profiles have their own prefix to avoid a
+ *  false match when a profile and a lag sample are delivered in the same millisecond. */
+export function loopStallLedgerLine(
+  step: string, fields: Record<string, unknown> | undefined, nowMs: number, lagAtMs?: number,
+): LedgerLine {
+  const runId = step === RUNTIME_LOOP_STALL_PROFILE_STEP && lagAtMs === undefined
+    ? `RUNTIME-STALL-${nowMs}` : `RUNTIME-${lagAtMs ?? nowMs}`;
+  return { ...fields, run_id: runId, task_id: "INCIDENT", step };
 }
