@@ -165,6 +165,7 @@ export type ProviderRoutingWriteInput = ProviderRoutingWriteBase &
     | { state: "not-probed" }
     | { state: "selected"; capacities: readonly ProviderCapacity[]; selection: ProviderSelection }
     | { state: "blocked"; capacities: readonly ProviderCapacity[] }
+    | { state: "invalidate-credits" }
   );
 
 export function providerRoutingStatusPath(root: string): string {
@@ -381,7 +382,7 @@ function projectModelHealth(value: unknown): ProviderRoutingModelHealthStatus | 
   };
 }
 
-function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
+function projectWrite(input: Exclude<ProviderRoutingWriteInput, { state: "invalidate-credits" }>): ProviderRoutingStatus {
   if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
   if (!Number.isFinite(input.cacheValidMs) || input.cacheValidMs <= 0) {
     throw new Error("provider routing freshness bound is invalid");
@@ -441,7 +442,7 @@ function probedRecord(target: string): Record<string, unknown> | undefined {
     const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
     return parsed.state === "selected" || parsed.state === "blocked" ? parsed : undefined;
   } catch {
-    // Absent, unreadable or malformed holds no reading worth keeping, so the not-probed write lands.
+    // An absent, unreadable or malformed snapshot has no probed reading to keep.
     return undefined;
   }
 }
@@ -451,11 +452,22 @@ function probedRecord(target: string): Record<string, unknown> | undefined {
  *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
 export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
   const target = providerRoutingStatusPath(root);
-  const projected = projectWrite(input);
-  const kept = input.state === "not-probed" ? probedRecord(target) : undefined;
-  const record = kept
-    ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
-    : projected;
+  let record: ProviderRoutingStatus | Record<string, unknown>;
+  if (input.state === "invalidate-credits") {
+    const kept = probedRecord(target);
+    if (kept?.state !== "selected" || typeof kept.observedAt !== "string" ||
+        !(Date.parse(kept.observedAt) <= input.observedAtMs) || !Array.isArray(kept.providers)) return;
+    const codex = kept.providers.find((row) => row?.provider === "codex" && row.creditsLane === true);
+    if (!codex) return;
+    delete codex.creditsLane;
+    record = kept;
+  } else {
+    const projected = projectWrite(input);
+    const kept = input.state === "not-probed" ? probedRecord(target) : undefined;
+    record = kept
+      ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
+      : projected;
+  }
   const payload = `${JSON.stringify(record)}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
@@ -821,13 +833,13 @@ export function creditsLaneRoom(status: ProviderRoutingStatus, nowMs: number): b
   const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
   const ageMs = Number.isFinite(observedMs) ? Math.max(0, nowMs - observedMs) : Number.POSITIVE_INFINITY;
   if (status.freshness !== "fresh" && !(status.freshness === "stale" && ageMs <= PROVIDER_ROUTING_READING_MAX_AGE_MS)) return false;
-  // The policy on the status is the newest one written (a not-probed write replaces only it), so a
-  // retained codex row whose provider the current policy cannot route carries nothing.
+  // A policy-only write can leave windows from disabled providers in the retained reading.
   const routable = status.policy?.routableProviders ?? status.enabledProviders;
   if (routable === undefined || !routable.includes("codex")) return false;
   const providers = status.providers ?? [];
   const ceiling = 100 - status.reservePercent;
-  const subscriptionHeadroom = providers.some((row) => row.readable && row.creditsLane !== true && row.windows.length > 0 &&
+  const subscriptionHeadroom = providers.some((row) => routable.includes(row.provider) &&
+    row.readable && row.creditsLane !== true && row.windows.length > 0 &&
     row.windows.every((window) => window.usedPercent < ceiling));
   return !subscriptionHeadroom && providers.some((row) => row.provider === "codex" && row.creditsLane === true);
 }

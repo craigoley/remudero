@@ -1670,6 +1670,8 @@ function selectCodexAttributionModel(
 
 export interface CodexCapacityDeps {
   now?: () => number;
+  /** Deadline clock for an injected app-server spawn. */
+  monotonicNow?: () => number;
   spawn?: (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
   timeoutMs?: number;
   requestedModel?: string;
@@ -1789,12 +1791,9 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
 export async function readCodexRuntime(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs" | "monotonicNow"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
-    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
-     *  production would defeat the very stall this measurement exists to detect. */
-    monotonicNow?: () => number;
     /** Receives each spawned app-server's exit, so an off-thread probe can let it be reaped before its thread ends. */
     onChildSpawned?: (exited: Promise<void>) => void;
   },
@@ -1941,7 +1940,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs" | "monotonicNow"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -2260,15 +2259,17 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
       if (b == null) return b;
       const credits = parseCodexCredits(b);
       if (!credits) return b;
-      const before = codexCreditsFor(old ?? genericCodexBucket(previousRates), previousRates).credits;
+      const before = codexCreditsFor(old ?? undefined, previousRates).credits;
       const balance = projectedCreditsBalance({ readAt: current.readAt, credits },
         previous ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
       return balance === null ? b : { ...b, [projectedCodexCreditsBalance]: balance };
     };
     // Project each balance before models look up inherited credits, so both checks use the same pool.
-    const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, genericCodexBucket(previousRates)),
+    const previousGeneric = genericCodexBucket(previousRates);
+    const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, previousGeneric),
       rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
-        .map(([id, b]) => [id, carryBalance(b, previousRates?.rateLimitsByLimitId?.[id])])) };
+        .map(([id, b]) => [id, carryBalance(b, id === "codex" && currentRates.rateLimits == null
+          ? previousGeneric : previousRates?.rateLimitsByLimitId?.[id])])) };
     let hasUnresetWindow = false;
     let rejectedWindow: string | undefined;
     const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,

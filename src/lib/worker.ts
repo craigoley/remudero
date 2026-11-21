@@ -2866,10 +2866,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined;
-      // W1-T13855: publish the blocked auction BEFORE any fallback spawn, so a reader of the routing status
-      // (the review widener's creditsLaneRoom) never keeps trusting the prior selection's credits lane.
-      const blockedAuction = error instanceof ProviderCapacityBlockedError;
-      if (blockedAuction) publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+      // A fallback can still serve the work. Retire the previous credits signal without changing the review's quota reading.
+      const spawnFallback = (fallback: SpawnWorkerArgs) => {
+        publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
+        return spawnWorker(fallback);
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2882,7 +2883,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
-          return await spawnWorker({
+          return await spawnFallback({
             ...args,
             mountProvider: "cash",
             cashSqueezed: true,
@@ -2916,6 +2917,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
             error.message += `; ${held}`;
+            publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
             throw error;
           }
         }
@@ -2925,7 +2927,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             reason: "no subscription had readable headroom",
             requested_model: args.model,
           }));
-          return await spawnWorker({
+          return await spawnFallback({
             ...args,
             mountProvider: "cash" as WorkerProviderId,
             cashSqueezed: true,
@@ -2943,8 +2945,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           }));
           // No "selected" status is written here: the auction really did block, and there is no
           // ProviderSelection to report -- inventing one would be the fabricated telemetry this
-          // design refuses. The blocked status was published above, before any fallback.
-          return await spawnWorker({
+          // design refuses.
+          return await spawnFallback({
             ...args,
             mountProvider: "cash" as WorkerProviderId,
             // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
@@ -2974,7 +2976,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnWorker({
+          return await spawnFallback({
             ...args,
             mountProvider: "claude" as WorkerProviderId,
             routingFallback: { rule: "overflow-fallback", capacities },
@@ -2985,7 +2987,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           refusal: overflowRefusal,
         }));
       }
-      if (!blockedAuction) publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+      publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
       throw error;
     }
     publishProviderRoutingStatus({ ...statusBase, state: "selected", capacities, selection, preferenceBypass });

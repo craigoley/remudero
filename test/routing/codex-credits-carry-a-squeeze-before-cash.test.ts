@@ -75,14 +75,16 @@ function scratchRoot(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13855-`));
 }
 
-type Mode = "ok" | "timeout" | "rpc" | "null-quota";
+type Mode = "ok" | "timeout" | "starved" | "rpc" | "null-quota";
+type GenericSource = "both" | "top-level" | "by-id";
 /** A Codex app-server stand-in over stdio with configurable quota results. */
 function codexAccount(t: test.TestContext) {
   clearCodexCapacityCache();
   const root = scratchRoot();
   const cfg: Config = { root, claudeBin: "/unused", workerProviders: {
     enabled: ["claude", "codex"], codexBin: "/bin/sh", codexHome: join(root, "codex"), capacityCacheMs: 1, reservePercent: 5 } };
-  const state = { now: START, used: 97, mode: "ok" as Mode, balance: BALANCE as string, extras: {} as Record<string, unknown>,
+  const state = { now: START, used: 97, mode: "ok" as Mode, balance: BALANCE as string,
+    genericSource: "both" as GenericSource, extras: {} as Record<string, unknown>,
     reset: Math.floor((START + 3 * 86_400_000) / 1000), buckets: {} as Record<string, unknown>, models: [SOL] };
   const spawn = () => {
     const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough();
@@ -90,13 +92,15 @@ function codexAccount(t: test.TestContext) {
     stdin.on("data", (chunk) => {
       for (const line of String(chunk).trim().split("\n")) {
         const request = JSON.parse(line) as { id?: number };
-        if (state.mode === "timeout") continue;
+        if (state.mode === "timeout" || state.mode === "starved") continue;
         if (request.id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
         if (request.id === 2) {
           if (state.mode === "rpc") { stdout.write(`${JSON.stringify({ id: 2, error: { message: "fixture RPC refused" } })}\n`); continue; }
           const bucket = { limitId: "codex", primary: { usedPercent: state.used, windowDurationMins: 10080, resetsAt: state.reset },
             credits: { hasCredits: true, unlimited: false, balance: state.balance }, ...state.extras };
-          const result = state.mode === "null-quota" ? null : { rateLimits: bucket, rateLimitsByLimitId: { codex: bucket, ...state.buckets } };
+          const result = state.mode === "null-quota" ? null : {
+            ...(state.genericSource === "by-id" ? {} : { rateLimits: bucket }),
+            rateLimitsByLimitId: { ...(state.genericSource === "top-level" ? {} : { codex: bucket }), ...state.buckets } };
           stdout.write(`${JSON.stringify({ id: 2, result })}\n`);
         }
         if (request.id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: state.models, nextCursor: null } })}\n`);
@@ -104,8 +108,12 @@ function codexAccount(t: test.TestContext) {
     });
     return proc as never;
   };
-  const read = (over: Record<string, unknown> = {}) => readCodexCapacity(cfg, { spawn, now: () => state.now, timeoutMs: 10,
-    requestedModel: "sonnet", requestedEffort: "high", reservePercent: 5, capabilities: CAPABILITIES, ...over });
+  const read = (over: Record<string, unknown> = {}) => {
+    let probeClock = 0;
+    const probeTiming = state.mode === "starved" ? { monotonicNow: () => (probeClock += 2_000) } : {};
+    return readCodexCapacity(cfg, { spawn, now: () => state.now, timeoutMs: 10,
+      requestedModel: "sonnet", requestedEffort: "high", reservePercent: 5, capabilities: CAPABILITIES, ...probeTiming, ...over });
+  };
   /** The next probe times out `ageMs` after the last good reading. */
   const fail = (ageMs = 61_000) => { state.now += ageMs; state.mode = "timeout"; };
   t.after(() => { clearCodexCapacityCache(); rmSync(root, { recursive: true, force: true }); });
@@ -126,7 +134,7 @@ async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed =
   const assignments: WorkerSelectionAssignment[] = [];
   let cashSpawns = 0, codexSpawns = 0;
   try {
-    await spawnWorker({
+    const result = await spawnWorker({
       cwd: root, permissionMode: "bypassPermissions" as const, settingsFile: join(REPO_ROOT, "settings", "worker.json"),
       prompt: "work", env: {}, model: "sonnet", effort: "high", tools: ["Read", "Grep", "Glob", "RunCheck"],
       config: { claudeBin: "/unused", root, dailyCapUsd: 20, workerProviders: { enabled: ["claude", "codex", "cash"],
@@ -148,11 +156,11 @@ async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed =
       queryFn: (() => (async function* () {
         yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "s", total_cost_usd: 0, num_turns: 1 };
       })()) as never,
-    } as SpawnWorkerArgs).catch((error: unknown) => error);
+    } as SpawnWorkerArgs);
+    return { result, assignments, cashSpawns, codexSpawns, decision: assignments.at(-1)?.routing.decision };
   } finally {
     if (!status) rmSync(root, { recursive: true, force: true });
   }
-  return { assignments, cashSpawns, codexSpawns, decision: assignments.at(-1)?.routing.decision };
 }
 
 test("W1-T13855 criterion 1: a timed-out probe carries a credits-lane last-good reading to codex instead of cash", async (t) => {
@@ -202,6 +210,27 @@ test("W1-T13855 criterion 1: a timed-out probe carries a credits-lane last-good 
     assert.equal(carriedSol.modelDecision?.options.find((option) => option.id === SOL61.id)?.reason, "quota-unreadable");
     assert.equal(selectWorkerProvider([claudeAt(99), carriedSol], 5, 0.999).lane, "codex-credits");
   }
+});
+
+test("W1-T13855 criterion 1: a starved probe carries the funded 97 percent reading into the worker assignment", async (t) => {
+  const account = codexAccount(t);
+  const seeded = await account.read();
+  assert.equal(seeded.windows[0]?.usedPercent, 97);
+  assert.equal(seeded.credits?.balance, Number(BALANCE));
+  account.fail();
+  account.state.mode = "starved";
+
+  const carried = await account.read();
+  const spawn = await routeSpawn(account);
+  assert.match(carried.detail ?? "", /app-server deadline overran/);
+  assert.equal(spawn.decision?.rule, "codex-credits", carried.detail);
+  assert.equal(carried.carriedForward?.failureKind, "starved");
+  assert.equal(carried.windows[0]?.usedPercent, 97 + 97 / (4 * 86_400_000) * 61_000);
+  assert.equal(providerEligibility(carried, 5).lane, "codex-credits");
+  assert.deepEqual(spawn.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue,
+    { path: "carried", tier: "codex-credits", projectedBalance: Number(BALANCE), ageMs: 61_000, failureKind: "starved" });
+  assert.equal(spawn.codexSpawns, 1);
+  assert.equal(spawn.cashSpawns, 0);
 });
 
 test("borrowed credits project from the generic bucket's own history", async (t) => {
@@ -669,6 +698,16 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
     a.state.now += 3_600_000; a.state.balance = "10"; clearCodexCapacityCache(); await a.read();
     a.fail(6 * 3_600_000);
   });
+  await refused("burned out when the generic bucket is exposed only by ID", async (a) => {
+    a.state.balance = "20";
+    a.state.genericSource = "top-level";
+    assert.equal((await a.read()).credits?.balance, 20);
+    a.state.now += 3_600_000;
+    a.state.balance = "10";
+    a.state.genericSource = "by-id";
+    assert.equal((await a.read()).credits?.balance, 10);
+    a.fail(6 * 3_600_000);
+  });
   // Control: the same burn half an hour on still carries (10 - 5 > 0), so the projection is what refuses.
   const soon = codexAccount(t);
   soon.state.balance = "20"; await soon.read();
@@ -693,6 +732,32 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
     await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; await a.read(); clearCodexCapacityCache(); a.fail();
   });
   await refused("absent", async (a) => { await a.read(); rmSync(a.lastGood); clearCodexCapacityCache(); a.fail(); });
+});
+
+test("W1-T13855 criterion 9: a newly visible model with its own credits starts without measured credit burn", async (t) => {
+  const account = codexAccount(t);
+  account.state.balance = "20";
+  account.state.models = [SOL61];
+  const previous = await account.read();
+  assert.equal(previous.model, SOL61.id);
+  assert.equal(previous.credits?.balance, 20);
+
+  account.state.now += 3_600_000;
+  account.state.balance = "10";
+  account.state.models.push(SOL);
+  account.state.buckets.sol = { limitName: SOL.id,
+    primary: { usedPercent: 97, windowDurationMins: 10080, resetsAt: account.state.reset },
+    credits: { hasCredits: true, unlimited: false, balance: "10" } };
+  assert.equal((await account.read()).credits?.balance, 10);
+  account.fail(6 * 3_600_000);
+
+  const spawn = await routeSpawn(account);
+  assert.equal(spawn.decision?.rule, "codex-credits");
+  assert.equal(spawn.assignments.at(-1)?.selected.model, SOL.id);
+  assert.deepEqual(spawn.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue,
+    { path: "carried", tier: "codex-credits", projectedBalance: 10, ageMs: 6 * 3_600_000, failureKind: "timeout" });
+  assert.equal(spawn.codexSpawns, 1);
+  assert.equal(spawn.cashSpawns, 0);
 });
 
 test("W1-T13855 criterion 10: the credits lane lifts no memory, CPU or host-worker bound", async (t) => {
@@ -761,13 +826,62 @@ test("W1-T13855 criterion 6 (carryCodexCapacity reserve pass): a malformed unres
   assert.equal(carried.carriedForward, undefined);
 });
 
+test("W1-T13855 criterion 7: lapsed Claude headroom cannot veto Codex credits after a Codex-only policy update", (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const nowMs = START + 120_000;
+  const capacities = [claudeAt(94), creditsCodex()];
+  statusFor(root, START, capacities);
+  const before = readProviderRoutingStatus(root, { now: () => nowMs });
+  assert.equal(before.freshness, "stale");
+  assert.equal(reviewProviderObservation(before, nowMs).creditsLane, undefined, "Claude is above reserve and routable");
+
+  const policy = resolveProviderRoutingPolicy(root, { workerProviders: { enabled: ["codex"], reservePercent: 5 } });
+  writeProviderRoutingStatus(root, { enabledProviders: ["codex"], reservePercent: 5, observedAtMs: nowMs,
+    cacheValidMs: 60_000, policy, state: "not-probed" });
+  const after = readProviderRoutingStatus(root, { now: () => nowMs });
+  assert.equal(after.freshness, "stale");
+  assert.equal(after.providers?.find((row) => row.provider === "claude")?.windows[0]?.usedPercent, 94);
+  assert.deepEqual(after.policy?.routableProviders, ["codex"]);
+  assert.equal(reviewProviderObservation(after, nowMs).creditsLane, true);
+  const width = (status: ProviderRoutingStatus) =>
+    selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), POLICY, hostHealthy(nowMs, status), BOUNDS).decision;
+  assert.equal(width(before).reason, "provider-headroom");
+  assert.equal(width(after).reason, "healthy-window");
+});
+
+test("W1-T13855 criterion 4: an ordinary successful cash fallback leaves a healthy review observation intact", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  account.state.used = 40;
+  await routeSpawn(account, 80, { root, write: true });
+  const before = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.equal(before.state, "selected");
+  assert.equal(before.providers?.find((row) => row.provider === "codex")?.creditsLane, undefined);
+
+  account.state.now += 5_000;
+  account.state.used = 99;
+  account.state.balance = "0";
+  const fallback = await routeSpawn(account, 99, { root, write: true });
+  assert.equal(fallback.decision?.rule, "cash-fallback");
+  assert.equal(fallback.cashSpawns, 1);
+  assert.equal(fallback.result.isError, false);
+  const after = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.deepEqual(after, before);
+  const review = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), POLICY,
+    hostHealthy(account.state.now, after), BOUNDS).decision;
+  assert.equal(review.reason, "healthy-window");
+  assert.equal(review.effectiveWidth, BOUNDS.baseWidth);
+});
+
 test("W1-T13855 criterion 7 (creditsLaneRoom from review-capacity): a cash fallback after credits ran out leaves no credits room", async (t) => {
   const account = codexAccount(t);
   const root = scratchRoot();
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const first = await routeSpawn(account, 99, { root, write: true });
   assert.equal(first.decision?.rule, "codex-credits", "control: the first spawn rides the credits lane");
-  assert.equal(routingStatus.creditsLaneRoom(readProviderRoutingStatus(root, { now: () => account.state.now }), account.state.now), true,
+  const before = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.equal(routingStatus.creditsLaneRoom(before, account.state.now), true,
     "control: the first spawn's status shows credits room");
   account.state.now += 5_000;
   account.state.balance = "0";
@@ -775,6 +889,13 @@ test("W1-T13855 criterion 7 (creditsLaneRoom from review-capacity): a cash fallb
   assert.equal(second.decision?.rule, "cash-fallback", "control: with no credits the auction falls to cash");
   assert.equal(second.cashSpawns, 1);
   const status = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.deepEqual(status, unflagged(before), "fallback removes only the prior credits signal");
   assert.equal(routingStatus.creditsLaneRoom(status, account.state.now), false, "the newer auction refused codex");
   assert.equal(reviewProviderObservation(status, account.state.now).creditsLane, undefined);
+
+  const newerAt = account.state.now + 1_000;
+  const newer = statusFor(root, newerAt, [claudeAt(99), creditsCodex()]);
+  assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
+  assert.deepEqual(readProviderRoutingStatus(root, { now: () => newerAt }), newer,
+    "a fallback cannot invalidate a more recent credits observation");
 });
