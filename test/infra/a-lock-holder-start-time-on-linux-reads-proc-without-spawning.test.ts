@@ -95,8 +95,8 @@ test("W1-T11457 criterion 1: a holder's start time uses procfs and a cached CLK_
   }
 });
 
-test("W1-T11457 criterion 1: a comm holding spaces and ') (' is parsed after the LAST ')'", () => {
-  const { sys, execCalls } = linuxSeam(healthy(777, "node) (name 9 9 9"));
+test("W1-T11457 criterion 1: a comm holding spaces, a newline and ') (' is parsed after the LAST ')'", () => {
+  const { sys, execCalls } = linuxSeam(healthy(777, "node) (name\n9 9 9"));
   assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 7_770);
   assert.deepEqual(execCalls, [GETCONF_CALL]);
 });
@@ -229,6 +229,25 @@ test("W1-T11457 criterion 2: a stat record with ppid removed and a non-numeric e
   // The field count and state letter still match, and vsize (14 days of ticks) sits in the start-time slot.
   const noPpid = pidStatFields(123_456).filter((_, i) => i !== 1);
   assertTakesPs(pidStatLine([...noPpid, "x"]), "ppid removed, non-numeric exit_code appended");
+});
+
+test("W1-T11457 criterion 2: a numeric second line cannot shift vsize into a live holder's start time", (t) => {
+  t.mock.method(Date, "now", () => LONG_UPTIME_NOW);
+  const elapsedSec = 20 * 86_400;
+  const start = LONG_UPTIME_NOW - elapsedSec * 1000;
+  const startTicks = (start / 1000 - BTIME_SEC) * 100; // linuxSeam reports CLK_TCK=100
+  const noPpid = pidStatFields(startTicks).filter((_, i) => i !== 1);
+  const files = {
+    "/proc/stat": procStat(),
+    "/proc/1/stat": pidStat(0, "init", 1),
+    [`/proc/${PID}/stat`]: `${pidStatLine(noPpid)}0\n`,
+  };
+  const { sys, execCalls } = linuxSeam(files, formatEtime(elapsedSec));
+  const held = { pid: PID, startedAt: new Date(start).toISOString() };
+  const opts = { isPidAlive: () => true, getProcessStartTime: (pid: number) => defaultGetProcessStartTime(pid, sys) };
+  assert.equal(isHolderStale(held, opts), false, "the fallback keeps the live holder");
+  assert.deepEqual(execCalls, [GETCONF_CALL, ["ps", PS_ARGS, { encoding: "utf8" }]]);
+  assert.equal(defaultGetProcessStartTime(PID, sys), start, "the malformed record returns today's ps result");
 });
 
 test("W1-T11457 criterion 2: a stat record with a non-numeric field in the middle takes the ps path", (t) => {

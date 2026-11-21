@@ -459,8 +459,8 @@ function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { 
   const prefix = `${pid} (`;
   const close = stat.lastIndexOf(")");
   if (!stat.startsWith(prefix) || close < prefix.length || stat[close + 1] !== " ") return undefined;
-  // Only the exact layout is read: a missing or extra field shifts another number into field 22.
-  const fields = stat.slice(close + 1).trim().split(/\s+/);
+  // Strip one final newline and split on spaces so a second line cannot supply a missing field.
+  const fields = stat.slice(close + 2, stat.endsWith("\n") ? -1 : undefined).split(" ");
   if (fields.length !== PROC_PID_STAT_FIELDS_AFTER_COMM || !/^[A-Ztx]$/.test(fields[0])) return undefined;
   // Linux prints every field after the state as a decimal integer (nice may be negative): any other is a misread.
   if (!fields.slice(1).every((field) => /^-?\d+$/.test(field))) return undefined;
