@@ -17,6 +17,8 @@
     - src/lib/benchmark-run.ts
     - src/cli/commands/review.ts
     - test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts
+    - "src/cli/commands/review.ts"
+    - "src/lib/benchmark-run.ts"
   status: queued
   attempts: 0
   rationale: |
