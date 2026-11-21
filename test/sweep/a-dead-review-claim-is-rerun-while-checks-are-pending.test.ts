@@ -171,7 +171,9 @@ test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undi
  *  live `remudero-review` status the fetch returns. */
 async function producedView(
   dir: string,
-  liveStatus: { runId: string; createdAt?: string; description?: string },
+  liveStatus: { runId: string; createdAt?: string; description?: string;
+    /** The head's `remudero-review` statuses newest first, given the live description; absent answers an unreadable read. */
+    history?: (live: string) => Array<{ state: string; description: string }> },
   /** Runs after the dead run's claim row is written; a returned string is the live status description. */
   afterClaim?: (ledgerPath: string) => Promise<string | undefined>,
 ): Promise<OpenPrView> {
@@ -196,6 +198,10 @@ async function producedView(
         number: 19791, html_url: prUrl, head: { ref: "run-W1-T14035-1795190000000", sha },
         updated_at: minutesAgo(42), created_at: minutesAgo(60), body, auto_merge: null, state: "open",
       }];
+      if (path.includes("/statuses")) {
+        if (liveStatus.history === undefined) throw new Error("status history unreadable");
+        return liveStatus.history(liveStatus.description!).map((entry) => ({ context: "remudero-review", ...entry }));
+      }
       if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "in_progress", started_at: minutesAgo(42) }] };
       if (path.includes("/status")) return { statuses: [{
         context: "remudero-review", state: "pending",
@@ -219,7 +225,7 @@ test("W1-T14035 criterion 3: a newer live claim the ledger has not shown yet wai
   assert.equal(deriveDisposition(own, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review",
     "the dead run's own status is released alongside CI");
   const newer = await producedView(dir, { runId: "review-PR19791-live", createdAt: minutesAgo(2).replace(/\.\d{3}Z$/, "Z") });
-  assert.equal(newer.reviewPendingOwnerDead, true, "the producer still judges the older dead run's row");
+  assert.equal(newer.reviewPendingOwnerDead, undefined, "the dead row is not the live status's owner, so no proof is carried");
   const live = deriveDisposition(newer, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(live.disposition, "wait", "the live status names a newer claim, so the active claim is not disposed");
   assert.doesNotMatch(live.reason, /owner proven dead/);
@@ -247,7 +253,7 @@ test("W1-T14035 criterion 3: a live replacement claim posted in the same second 
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const sameSecond = minutesAgo(23).replace(/\.\d{3}Z$/, "Z");
   const pr = await producedView(dir, { runId: "review-PR19791-live", createdAt: sameSecond });
-  assert.equal(pr.reviewPendingOwnerDead, true, "the producer still reports death from the old row");
+  assert.equal(pr.reviewPendingOwnerDead, undefined, "the old row's death proves nothing about the live claim's owner");
   assert.equal(pr.reviewVerdictPostedAt, sameSecond);
   const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(r.disposition, "wait", "the live status is another run's claim");
@@ -377,12 +383,15 @@ test("W1-T14035 criterion 1: an ops hold the catalog poster redacted is released
 
 /** GitHub's created_at for a status posted `m` minutes ago: whole seconds, as REST returns it. */
 const postedAgo = (m: number): string => minutesAgo(m).replace(/\.\d{3}Z$/, "Z");
+const claimBy = (run: string) => ({ state: "pending", description: `remudero-review: review in progress (owned by run ${run})` });
+/** GitHub's history newest first: the live hold, any `between` posts, then the dead run's own claim (or `claim`). */
+const legacyHistory = (between: Array<{ state: string; description: string }> = [], claim = claimBy(DEAD)) =>
+  (live: string) => [{ state: "pending", description: live }, ...between, claim];
 
 test("W1-T14035 criterion 1: a hold posted before pending posts named their run is bound by its ledger row", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  // publishHold writes the dead run's review.posted row at 20m ago; GitHub stamped the hold no later than that.
-  const pr = await producedView(dir, { runId: DEAD, createdAt: postedAgo(20) },
+  const pr = await producedView(dir, { runId: DEAD, createdAt: postedAgo(20), history: legacyHistory() },
     (ledgerPath) => publishHold(ledgerPath, DEAD, { legacy: true }));
   assert.equal(pr.reviewPendingStatusRunId, DEAD, "the dead run's newest pending row posted that summary");
   assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW).disposition, "post-review");
@@ -426,7 +435,7 @@ test("W1-T14035 criterion 3: a hold the ledger does not bind to the dead run sti
   ];
   for (const [label, afterClaim] of cases) {
     const pr = await producedView(dir, { runId: DEAD }, afterClaim);
-    assert.equal(pr.reviewPendingOwnerDead, true, `${label}: the producer still proves the claiming run dead`);
+    assert.equal(pr.reviewPendingOwnerDead, undefined, `${label}: the dead run is not proven the live status's owner`);
     assert.notEqual(pr.reviewPendingStatusRunId, DEAD, `${label}: the live status is not bound to the dead run`);
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(r.disposition, "wait", label);
@@ -434,42 +443,61 @@ test("W1-T14035 criterion 3: a hold the ledger does not bind to the dead run sti
   }
 });
 
-test("W1-T14035 criterion 1: a legacy ops hold the dead run posted before its own row is released alongside CI", async (t) => {
+test("W1-T14035 criterion 1: reviewPendingOwnerDead true with no run ids is disposed post-review alongside CI", () => {
+  const r = deriveDisposition(deadClaimView({ reviewPendingOwnerRunId: undefined, reviewPendingStatusRunId: undefined }),
+    DEFAULT_SWEEP_POLICY, NOW);
+  assert.equal(r.disposition, "post-review", "the producer's flag alone is the proof; the sweep compares no run ids");
+  assert.equal(r.blocker, "awaiting-ci");
+  assert.match(r.reason, /^checks pending 42m, remudero-review owner proven dead — re-running one exact-input review alongside CI/);
+});
+
+test("W1-T14035 criterion 1: a legacy hold the dead run posted is released when GitHub's clock is ahead of the host's", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  // The reviewer deployed before every pending post named its run redacts a hold to the same text for every run, with or
-  // without code provenance. Only its post time ties it to the dead run: posted no later than that run's review.posted row.
-  for (const [wording, createdAt] of [[OPS_HOLD, postedAgo(20)], [`${OPS_HOLD} [review code ${"c".repeat(40)}]`, postedAgo(21)]]) {
-    const pr = await producedView(dir, { runId: DEAD, createdAt }, async (ledgerPath) => {
-      await publishHold(ledgerPath, DEAD, { catalog: "ops", legacy: true });
-      return wording;
+  // The dead run's review.posted row is stamped 20m ago by the host; GitHub dates its hold later. No clock is compared: the
+  // hold is the one post after the dead run's own claim in GitHub's order, and the dead run has one hold row since that claim.
+  const cases: Array<[string, "ops" | undefined, string | undefined]> = [
+    ["a legacy ops hold", "ops", OPS_HOLD],
+    ["a legacy ops hold with code provenance", "ops", `${OPS_HOLD} [review code ${"c".repeat(40)}]`],
+    ["a legacy public hold", undefined, undefined],
+  ];
+  for (const [label, catalog, wording] of cases) {
+    const pr = await producedView(dir, { runId: DEAD, createdAt: postedAgo(19), history: legacyHistory() }, async (ledgerPath) => {
+      const summary = await publishHold(ledgerPath, DEAD, { catalog, legacy: true });
+      return wording ?? summary;
     });
-    assert.equal(pr.reviewPendingOwnerDead, true, "the producer proved the claiming run dead");
-    assert.equal(pr.reviewPendingStatusRunId, DEAD, `${wording}: the dead run posted the live hold before its row`);
+    assert.equal(pr.reviewPendingStatusRunId, DEAD, `${label}: GitHub's order ties the hold to the dead run's claim`);
+    assert.equal(pr.reviewPendingOwnerDead, true, `${label}: the producer proved the status's own owner dead`);
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
-    assert.equal(r.disposition, "post-review", wording);
+    assert.equal(r.disposition, "post-review", label);
     assert.match(r.reason, /^checks pending 42m, remudero-review owner proven dead — re-running one exact-input review alongside CI/);
   }
 });
 
-test("W1-T14035 criterion 3: the same unmarked hold text posted after the dead run's last row waits", async (t) => {
+test("W1-T14035 criterion 3: a newer unmarked hold in the same second as the dead run's row waits", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  // A live legacy reviewer posts text identical to the dead run's hold before its own ledger row is visible: the text
-  // cannot tell the two apart, the post time can. Posted after the dead run's last row, or undated, it is no proven owner.
-  const cases: Array<[string, string | undefined, "ops" | undefined]> = [
-    ["an ops hold posted 2m ago", postedAgo(2), "ops"],
-    ["an ops hold posted one second after the dead row", new Date(NOW - 20 * 60_000 + 1000).toISOString().replace(/\.\d{3}Z$/, "Z"), "ops"],
-    ["a public hold with the dead run's own summary posted 2m ago", postedAgo(2), undefined],
-    ["an undated public hold with the dead run's own summary", undefined, undefined],
+  // A live legacy reviewer whose claim was refused posts the same text as the dead run's hold, in the same second as the dead
+  // run's row, before any row of its own is visible. GitHub lists both posts: one more unmarked post than the dead run has
+  // hold rows, so the live status has no proven owner.
+  const sameSecond = postedAgo(20);
+  const cases: Array<[string, "ops" | undefined, (live: string) => Array<{ state: string; description: string }>]> = [
+    ["an ops hold after the dead run's ops hold", "ops", legacyHistory([{ state: "pending", description: OPS_HOLD }])],
+    ["a public hold with the dead run's own summary after its hold", undefined,
+      (live) => legacyHistory([{ state: "pending", description: live }])(live)],
+    ["an ops hold after another run's claim", "ops", legacyHistory([], claimBy("review-PR19791-live"))],
+    ["an ops hold after a terminal post", "ops", legacyHistory([{ state: "failure", description: "remudero-review: failure" }])],
+    ["an ops hold GitHub lists over a newer post than the rollup read", "ops",
+      (live) => [{ state: "pending", description: `${live} (newer)` }, ...legacyHistory()(live)]],
+    ["an unreadable status history", "ops", undefined as never],
   ];
-  for (const [label, createdAt, catalog] of cases) {
-    const pr = await producedView(dir, { runId: DEAD, createdAt }, async (ledgerPath) => {
+  for (const [label, catalog, history] of cases) {
+    const pr = await producedView(dir, { runId: DEAD, createdAt: sameSecond, history }, async (ledgerPath) => {
       const summary = await publishHold(ledgerPath, DEAD, { catalog, legacy: true });
       return catalog === "ops" ? OPS_HOLD : summary;
     });
-    assert.equal(pr.reviewPendingOwnerDead, true, `${label}: the producer still proves the older run dead`);
     assert.equal(pr.reviewPendingStatusRunId, undefined, `${label}: the live hold is bound to no run`);
+    assert.equal(pr.reviewPendingOwnerDead, undefined, `${label}: no proof about the live status's owner`);
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(r.disposition, "wait", label);
     assert.doesNotMatch(r.reason, /owner proven dead/, label);

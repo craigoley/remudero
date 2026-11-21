@@ -6877,18 +6877,12 @@ function producerProvedOwnerDead(
 }
 
 /** W1-T14035 — the alongside-CI row's release of a pending claim: GitHub reads pending and the view producer's own process
- *  proof says its owner is dead (invariant live-claim-waits). The proof is about the run whose ledger row the producer read,
- *  so it counts only while the LIVE status was published by that same run (a claim's own "owned by run", or a hold bound to
- *  its publishing row by the producer): a status owned by another run is a newer claim whose row is not visible yet, and an
- *  unknown run on either side waits. Timestamps are not compared: GitHub's and the host's clocks
- *  differ, a status can be undated, and a live claim can land in the same second as the dead row. */
+ *  proof says its owner is dead (invariant live-claim-waits). The producer sets that proof only when the live status is the
+ *  judged run's own post, so the flag alone suffices here and a status of another or an unknown run never carries it. */
 function pendingClaimOwnerProvenDead(
-  pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven" |
-    "reviewPendingOwnerRunId" | "reviewPendingStatusRunId">,
+  pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven">,
 ): boolean {
-  return pr.reviewState === "pending" && producerProvedOwnerDead(pr) &&
-    pr.reviewPendingOwnerRunId !== undefined && pr.reviewPendingOwnerRunId !== "" &&
-    pr.reviewPendingStatusRunId === pr.reviewPendingOwnerRunId;
+  return pr.reviewState === "pending" && producerProvedOwnerDead(pr);
 }
 
 /** W1-T14035 — the alongside-CI post-review row's own guards over a head whose checks are pending: CI registered at least a
@@ -8485,11 +8479,10 @@ export interface OpenPrView {
   reviewPendingOwnerDead?: boolean;
   reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
   reviewPendingOwnerGoneReason?: string;
-  /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. */
+  /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
-  /** W1-T14035 — the run that published the live `remudero-review` status: the one a claim names ("owned by run <id>"),
-   *  or, for a hold that names none, the run whose `review.posted` pending row posted that description
-   *  (tick-read-worker's reviewPendingStatusRunId); absent when unknown. */
+  /** W1-T14035 — the run that published the live `remudero-review` status (tick-read-worker's reviewPendingStatusRunId);
+   *  absent when unknown. Evidence only: the producer sets `reviewPendingOwnerDead` only when it equals the judged run. */
   reviewPendingStatusRunId?: string;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
