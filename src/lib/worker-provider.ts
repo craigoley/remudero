@@ -4591,6 +4591,59 @@ export function readOpenWeightAllowance(config: Config,
   }) };
 }
 
+/** W1-T13863: a cash draft's whole-run fit, read before its first paid request. Reserves nothing. */
+export type CashDraftFit =
+  | { fits: true }
+  | { fits: false; reason: "window"; deployment: string | null; estimatedTokens: number; windowTokens?: number }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: number; allowanceError?: never }
+  | { fits: false; reason: "allowance"; deployment: string; estimatedTokens: number; estimatedUsd: number;
+      leftUsd: null; allowanceError: string };
+
+export interface CashDraftFitInput {
+  deployment: string;
+  promptChars: number;
+  promptBytes?: number;
+  expectedRequests: number;
+  squeezed?: boolean;
+  atIso: string;
+}
+
+export class CashDraftSkippedError extends RmdError {
+  constructor(readonly fit: Extract<CashDraftFit, { fits: false }>) {
+    super("usage", 1, `cash draft skipped before transport: ${fit.reason}`);
+  }
+}
+
+export class CashDraftResumeBlockedError extends RmdError {
+  constructor() {
+    super("usage", 1, "no eligible cash deployment after excluding previously paid draft work");
+  }
+}
+
+/** Check the deployment and billing posture selected by the router. */
+export function cashDraftFit(config: Config, input: CashDraftFitInput): CashDraftFit {
+  const { deployment, squeezed, atIso } = input;
+  const expectedRequests = Math.max(1, Math.ceil(input.expectedRequests));
+  const promptBytes = input.promptBytes ?? input.promptChars;
+  const estimatedTokens = openWeightEstimatedTokens(promptBytes) * expectedRequests + OPENWEIGHT_MAX_COMPLETION_TOKENS;
+  const windowTokens = openWeightEffectiveWindow(deployment, learnedCashLimit(deployment, cashDeploymentEndpoint(config, deployment)));
+  if (windowTokens === undefined || estimatedTokens > windowTokens) {
+    return { fits: false, reason: "window", deployment, estimatedTokens, windowTokens };
+  }
+  const estimatedUsd = openWeightReservationUsd(deployment, promptBytes) * expectedRequests;
+  let leftUsd: number;
+  try {
+    leftUsd = readOpenWeightAllowance(config, { deployments: [deployment], atIso, squeezed }).deployments[0]!.remainingUsd;
+  } catch (error) {
+    return { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd: null,
+      allowanceError: String(error).slice(0, 512) };
+  }
+  return estimatedUsd > leftUsd
+    ? { fits: false, reason: "allowance", deployment, estimatedTokens, estimatedUsd, leftUsd }
+    : { fits: true };
+}
+
 /** How many times a compare-and-swap may lose its race before the reservation gives up. A loss
  *  needs a PEER to have committed between this call's read and its rename, so a handful of retries
  *  covers any realistic interleaving; the bound only stops a pathological peer spinning us forever. */
