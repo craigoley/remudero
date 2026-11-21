@@ -24220,7 +24220,10 @@ export async function runSweep(
       if (heldAdmission !== undefined) {
         const { path, owner } = heldAdmission.lock;
         if (!launched) releaseOwnedFixClaim(path, owner);
-        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseOwnedFixClaim(path, owner)).catch(() => {});
+        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseOwnedFixClaim(path, owner)).catch((error: unknown) => {
+          // A failed release leaves the lock for the stale-holder check; record it so the leak is visible.
+          log("sweep.fix.admission_release_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+        });
       }
     }
     if (hosted === undefined) return false;
