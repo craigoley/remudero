@@ -203,6 +203,25 @@ for (const changed of [
   });
 }
 
+for (const changed of [
+  "src/lib/sweep.ts",
+  "test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts",
+]) {
+  test(`W1-T10644: the cancelled-check requeue suite is selected for ${changed}`, () => {
+    const suite = "test/a-plan-only-pr-requeues-its-cancelled-check.test.ts";
+    const files = new Map([...Object.entries(TREE), [suite, ""], [changed, ""]]);
+    const selection = selectAffectedSuites([changed], { files, pathReaders: [], symbolSuites: [] });
+    assert.equal(selection.fullRun, false);
+    assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+    assert.ok(selection.narrow?.includes(suite), `${changed} must select ${suite} in the narrow candidate`);
+    const unrelated = selectAffectedSuites(["src/a.ts"], { files, pathReaders: [] });
+    assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+    files.delete(suite);
+    const absent = selectAffectedSuites([changed], { files, pathReaders: [] });
+    assert.ok(!absent.suites.includes(suite), "a suite absent from the tree must not be selected");
+  });
+}
+
 test("W1-T9511: the env-name suite is selected for each recorded miss edge", () => {
   const suite = "test/every-env-name-a-source-file-reads-is-registered.test.ts";
   const edges = [

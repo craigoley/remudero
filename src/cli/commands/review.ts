@@ -1035,6 +1035,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     effort: reviewerSpawnMount?.effort ?? null,
     sessionId: null,
   };
+  // W1-T13868: review.finding rows name why a reviewer's served model is null; the provenance type stays unchanged.
+  let reviewerServedModelReason: string | undefined;
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
@@ -1189,6 +1191,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewerSubtype = reviewer.subtype === "success" && terminalError ? terminalError : reviewer.subtype;
         reviewerExit = reviewer.exit;
         const reviewerFields = workerLedgerFields(reviewer);
+        reviewerServedModelReason = reviewerFields.served_model_reason;
         evaluatorProvenance = {
           provider: reviewerFields.provider ?? null,
           requestedModel: reviewerFields.model,
@@ -1732,7 +1735,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
   recordReviewFindings(findingCapture, { taskId: task.id, prUrl, headSha, decisionDigest,
-    provenance: evaluatorProvenance, log });
+    provenance: { ...evaluatorProvenance, servedModelReason: reviewerServedModelReason }, log });
   const followUps = reviewFollowUps(verdict.criteria, reviewerFindingText);
   for (const followUp of followUps) {
     log("review.follow_up_finding", { ...followUp, provider: evaluatorProvenance.provider,

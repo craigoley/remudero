@@ -17,6 +17,7 @@
     - src/lib/github-transport.ts
     - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
     - test/the-transport-paces-its-own-reads.test.ts
+    - test/next-task-id-waits-for-the-shared-read-floor.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -34,6 +35,10 @@
     files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): the-transport-paces-its-own-reads pins
     withGhTransportFloor's default as enforce, and that wrapper's only caller is the `rmd review` CLI dispatch
     (the daemon calls reviewCommand in-process under withDaemonGhTransportFloor), so the build must update that pin.
+    files: amendment 2026-11-21 for PR 19924 (review round 3): a wait that a foreign stamp extends mid-wait
+    cannot be stated honestly in one line printed up front, so each pause prints its own line with the length it
+    sleeps. The W1-T7957 test in next-task-id-waits-for-the-shared-read-floor pins exactly one line for such a wait
+    (60s printed for a 210s wait), so the build must update that pin to require each printed length to equal its sleep.
   design: |
     Change the default mode for a hand-run command from enforce to wait. The window, the burst and the search limiter are unchanged. Print one line when the command waits.
     NOT IN SCOPE: the daemon's mode, the window's length, and the hook in hooks/deny-floor.sh.
