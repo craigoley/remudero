@@ -415,44 +415,35 @@ export interface ProcessStartTimeSyscalls {
 
 const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync, platform: process.platform };
 
-/** The aux-vector entry in which the kernel hands every process its CLK_TCK (what `getconf CLK_TCK` returns). */
-const AT_CLKTCK = 17n;
-/** W1-T11457: CLK_TCK per seam, kept once read; a failed read is retried on the next call. */
-const clockTicksBySeam = new WeakMap<ProcessStartTimeSyscalls, number>();
+/** The production seam resolves CLK_TCK once per process. Cache failures to bound the lookup to one spawn. */
+const clockTicksBySeam = new WeakMap<ProcessStartTimeSyscalls, number | null>();
 
-/** CLK_TCK from `/proc/self/auxv`, or `undefined`. Read as 64-bit little-endian word pairs: a 32-bit or
- *  big-endian vector never shows type 17 beside a nonzero rate there, so it reads `undefined` and takes ps. */
-function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, read: (path: string) => Buffer): number | undefined {
+function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, readClockRate: () => string): number | null {
   const cached = clockTicksBySeam.get(sysImpl);
   if (cached !== undefined) return cached;
-  const auxv = read("/proc/self/auxv");
-  for (let at = 0; at + 16 <= auxv.length; at += 16) {
-    const type = auxv.readBigUInt64LE(at);
-    if (type === 0n) break; // AT_NULL ends the vector
-    if (type !== AT_CLKTCK) continue;
-    const hz = Number(auxv.readBigUInt64LE(at + 8));
-    if (hz <= 0) return undefined;
-    clockTicksBySeam.set(sysImpl, hz);
-    return hz;
+  let hz: number;
+  try {
+    const raw = readClockRate().trim();
+    hz = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  } catch {
+    hz = NaN; // getconf failed, so future lookups rely on the portable ps probe.
   }
-  return undefined;
+  const value = Number.isSafeInteger(hz) && hz > 0 ? hz : null;
+  clockTicksBySeam.set(sysImpl, value);
+  return value;
 }
 
-/** W1-T11457: a pid's start from /proc with no child process: `/proc/stat`'s btime plus `/proc/<pid>/stat`'s
- *  start ticks (field 22) over CLK_TCK. `null` for a pid with no stat file, as ps answers; `undefined` for any
- *  other read or parse failure, which takes the ps path. btime is whole seconds, so this sits up to 1 s before
- *  the true start and never after ps's answer: it never calls a holder stale that ps would call live. */
-function procStartTimeMs(pid: number, sysImpl: ProcessStartTimeSyscalls): number | null | undefined {
+/** Read `/proc/stat`'s btime and `/proc/<pid>/stat`'s start ticks (field 22).
+ *  A missing PID stat file returns `null`. Other failures return `undefined` for the ps fallback. */
+function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { btimeSec: number; startTicks: number } | null | undefined {
   const read = sysImpl.readFileSync ?? fs.readFileSync;
   let btimeSec: number;
-  let hz: number | undefined;
   try {
     btimeSec = Number(/^btime (\d+)$/m.exec(read("/proc/stat").toString("utf8"))?.[1]);
-    hz = clockTicksPerSecond(sysImpl, read);
   } catch {
     return undefined; // procfs unreadable here; ps still answers
   }
-  if (!Number.isFinite(btimeSec) || hz === undefined) return undefined;
+  if (!Number.isSafeInteger(btimeSec)) return undefined;
   let stat: string;
   try {
     stat = read(`/proc/${pid}/stat`).toString("utf8");
@@ -461,9 +452,13 @@ function procStartTimeMs(pid: number, sysImpl: ProcessStartTimeSyscalls): number
     return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
   }
   // comm (field 2) is parenthesised and may hold spaces and ") (", so fields count from after the LAST ")".
+  const prefix = `${pid} (`;
   const close = stat.lastIndexOf(")");
-  const startTicks = close < 0 ? NaN : Number(stat.slice(close + 1).trim().split(/\s+/)[19]);
-  return Number.isFinite(startTicks) ? btimeSec * 1000 + (startTicks * 1000) / hz : undefined;
+  if (!stat.startsWith(prefix) || close < prefix.length || stat[close + 1] !== " ") return undefined;
+  const startTicksText = stat.slice(close + 1).trim().split(/\s+/)[19];
+  if (startTicksText === undefined || !/^\d+$/.test(startTicksText)) return undefined;
+  const startTicks = Number(startTicksText);
+  return Number.isSafeInteger(startTicks) ? { btimeSec, startTicks } : undefined;
 }
 
 /** `ps -o etime=`'s `[[DD-]HH:]MM:SS` elapsed-time format, in ms — or `null` for anything that
@@ -488,13 +483,19 @@ export function defaultGetProcessStartTime(
   pid: number,
   sysImpl: ProcessStartTimeSyscalls = defaultProcessStartTimeSyscalls,
 ): number | null {
+  const run = (command: string, args: string[]): string => sysImpl.execFileSync(command, args, { encoding: "utf8" });
   if (sysImpl.platform === "linux") {
-    const fromProc = procStartTimeMs(pid, sysImpl);
-    if (fromProc !== undefined) return fromProc;
+    const fields = readProcStartFields(pid, sysImpl);
+    if (fields === null) return null;
+    if (fields !== undefined) {
+      const hz = clockTicksPerSecond(sysImpl, () => run("getconf", ["CLK_TCK"]));
+      // Whole-second btime can put the answer up to 1 s before the true start.
+      if (hz !== null) return fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
+    }
   }
   let raw: string;
   try {
-    raw = sysImpl.execFileSync("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }) as string;
+    raw = run("ps", ["-o", "etime=", "-p", String(pid)]);
   } catch {
     return null;
   }

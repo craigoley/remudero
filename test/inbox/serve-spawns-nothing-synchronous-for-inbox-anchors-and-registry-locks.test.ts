@@ -91,14 +91,19 @@ function recordSyncSpawns(t: TestContext): SpawnRecord {
   return record;
 }
 
-/** W1-T11457: on Linux fs-race-safe reads a start time from /proc and starts no child; elsewhere it still runs ps. */
+/** W1-T11457: Linux uses /proc after a one-time CLK_TCK lookup. */
 const onLinux = process.platform === "linux";
 
-test("the pre-import recorder catches fs-race-safe's captured synchronous ps syscall where one happens (none on Linux)", (t) => {
+test("the pre-import recorder sees one Linux clock lookup and no child on the next PID read", (t) => {
   const spawns = recordSyncSpawns(t);
-  defaultGetProcessStartTime(process.pid);
-  if (onLinux) assert.deepEqual(spawns.calls, [], "on Linux the default seam reads /proc and starts no child");
-  else assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), spawns.calls.join("\n"));
+  assert.equal(typeof defaultGetProcessStartTime(process.pid), "number");
+  if (onLinux) {
+    assert.deepEqual(spawns.calls.splice(0), ['execFileSync:getconf ["CLK_TCK"]']);
+    assert.equal(typeof defaultGetProcessStartTime(process.pid), "number");
+    assert.deepEqual(spawns.calls, [], "a warm Linux lookup is spawn-free");
+  } else {
+    assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), spawns.calls.join("\n"));
+  }
 });
 
 const isGitGrep = (call: string): boolean => call.startsWith("execFile:git ") && call.includes('"grep"');

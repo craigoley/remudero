@@ -11,6 +11,7 @@ const PID = 4242;
 const BTIME_SEC = 1_795_000_000;
 const PS_ETIME = "   05:30\n"; // what the ps spy answers: 5 min 30 s elapsed
 const PS_ARGS = ["-o", "etime=", "-p", String(PID)];
+const GETCONF_CALL = ["getconf", ["CLK_TCK"], { encoding: "utf8" }];
 
 /** `/proc/<pid>/stat`: pid, (comm), fields 3..21, starttime (field 22), then a tail. */
 function pidStat(startTicks: number | string, comm = "node", pid = PID): string {
@@ -22,26 +23,18 @@ function procStat(btimeSec: number = BTIME_SEC): string {
   return `cpu  10 0 20 300 0 0 0 0 0 0\ncpu0 10 0 20 300 0 0 0 0 0 0\nintr 12345 0 1\nctxt 999\nbtime ${btimeSec}\nprocesses 77\n`;
 }
 
-/** `/proc/self/auxv` on a 64-bit little-endian kernel: (type, value) word pairs ending in AT_NULL. */
-function auxv(pairs: Array<[number, number]>): Buffer {
-  const buf = Buffer.alloc(pairs.length * 16);
-  pairs.forEach(([type, value], i) => {
-    buf.writeBigUInt64LE(BigInt(type), i * 16);
-    buf.writeBigUInt64LE(BigInt(value), i * 16 + 8);
-  });
-  return buf;
-}
-const AT_PAGESZ = 6, AT_CLKTCK = 17, AT_HWCAP = 16;
-const auxvWithHz = (hz: number): Buffer => auxv([[AT_HWCAP, 0xbfebfbff], [AT_PAGESZ, 4096], [AT_CLKTCK, hz], [0, 0]]);
-
 function errno(code: string, path: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: ${path}`), { code });
 }
 
-type FixtureFile = string | Buffer | NodeJS.ErrnoException;
+type FixtureFile = string | NodeJS.ErrnoException;
 
-/** A Linux seam over pinned files. Every exec is recorded; it answers like `ps -o etime=` or throws. */
-function linuxSeam(files: Record<string, FixtureFile>, ps: string | Error = PS_ETIME, platform: NodeJS.Platform | "unnamed" = "linux") {
+function linuxSeam(
+  files: Record<string, FixtureFile>,
+  ps: string | Error = PS_ETIME,
+  platform: NodeJS.Platform | "unnamed" = "linux",
+  clkTck: string | Error = "100\n",
+) {
   const execCalls: unknown[][] = [];
   const reads: string[] = [];
   const sys: ProcessStartTimeSyscalls = {
@@ -51,20 +44,20 @@ function linuxSeam(files: Record<string, FixtureFile>, ps: string | Error = PS_E
       const file = files[path];
       if (file === undefined) throw errno("ENOENT", path);
       if (file instanceof Error) throw file;
-      return Buffer.isBuffer(file) ? file : Buffer.from(file);
+      return Buffer.from(file);
     },
     execFileSync: ((...args: unknown[]) => {
       execCalls.push(args);
-      if (ps instanceof Error) throw ps;
-      return ps;
+      const answer = args[0] === "getconf" ? clkTck : ps;
+      if (answer instanceof Error) throw answer;
+      return answer;
     }) as unknown as typeof execFileSync,
   };
   return { sys, execCalls, reads };
 }
 
-const healthy = (hz = 100, startTicks: number | string = 123_456, comm = "node"): Record<string, FixtureFile> => ({
+const healthy = (startTicks: number | string = 123_456, comm = "node"): Record<string, FixtureFile> => ({
   "/proc/stat": procStat(),
-  "/proc/self/auxv": auxvWithHz(hz),
   [`/proc/${PID}/stat`]: pidStat(startTicks, comm),
 });
 
@@ -74,19 +67,27 @@ function assertTodaysPsResult(start: number | null, before: number, after: numbe
   assert.ok(start >= before - 330_000 && start <= after - 330_000, `start ${start} is 5:30 before the call`);
 }
 
-test("W1-T11457 criterion 1: a holder's start time is /proc/stat's btime plus its /proc/<pid>/stat start ticks over CLK_TCK, with no ps spawned", () => {
+test("W1-T11457 criterion 1: a holder's start time uses procfs and a cached CLK_TCK independent of Linux ABI", () => {
   for (const [hz, expectedOffsetMs] of [[100, 1_234_560], [250, 493_824], [1000, 123_456]] as const) {
-    const { sys, execCalls, reads } = linuxSeam(healthy(hz));
-    assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + expectedOffsetMs, `CLK_TCK ${hz} is the kernel's, read from the aux vector`);
-    assert.deepEqual(execCalls, [], "no child process is spawned on the Linux path");
-    assert.deepEqual([...reads].sort(), ["/proc/4242/stat", "/proc/self/auxv", "/proc/stat"]);
+    const files = healthy();
+    const { sys, execCalls, reads } = linuxSeam(files, PS_ETIME, "linux", `${hz}\n`);
+    assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + expectedOffsetMs, `uses the reported CLK_TCK ${hz}`);
+    assert.deepEqual(execCalls, [GETCONF_CALL], "the cold lookup initializes the clock rate once");
+    assert.deepEqual([...reads].sort(), ["/proc/4242/stat", "/proc/stat"]);
+    execCalls.length = 0;
+    reads.length = 0;
+    files["/proc/stat"] = procStat(BTIME_SEC + 1);
+    files[`/proc/${PID}/stat`] = pidStat(123_456 + hz);
+    assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + expectedOffsetMs + 2000);
+    assert.deepEqual(execCalls, [], "the next Linux lookup spawns no child process");
+    assert.deepEqual([...reads].sort(), ["/proc/4242/stat", "/proc/stat"]);
   }
 });
 
 test("W1-T11457 criterion 1: a comm holding spaces and ') (' is parsed after the LAST ')'", () => {
-  const { sys, execCalls } = linuxSeam(healthy(100, 777, "evil) (name 9 9 9"));
+  const { sys, execCalls } = linuxSeam(healthy(777, "node) (name 9 9 9"));
   assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 7_770);
-  assert.deepEqual(execCalls, []);
+  assert.deepEqual(execCalls, [GETCONF_CALL]);
 });
 
 test("W1-T11457 criterion 1: a pid with no /proc/<pid>/stat is null, the same no-evidence answer ps gives, and no ps is spawned", () => {
@@ -95,15 +96,6 @@ test("W1-T11457 criterion 1: a pid with no /proc/<pid>/stat is null, the same no
   const { sys, execCalls } = linuxSeam(files);
   assert.equal(defaultGetProcessStartTime(PID, sys), null);
   assert.deepEqual(execCalls, [], "a gone pid is answered from /proc, not by asking ps");
-});
-
-test("W1-T11457 criterion 1: CLK_TCK is read once per seam and reused, while btime and the pid are read on every call", () => {
-  const { sys, execCalls, reads } = linuxSeam(healthy());
-  assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 1_234_560);
-  assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 1_234_560);
-  assert.equal(reads.filter((p) => p === "/proc/self/auxv").length, 1, "the aux vector is read once");
-  assert.equal(reads.filter((p) => p === "/proc/stat").length, 2);
-  assert.deepEqual(execCalls, []);
 });
 
 /** `ps -o etime=`'s `[[DD-]HH:]MM:SS` for whole seconds. */
@@ -126,10 +118,9 @@ test("W1-T11457 criterion 1: for one process, the /proc start is never later tha
         const trueStartMs = bootWallMs + sinceBootMs;
         const files: Record<string, FixtureFile> = {
           "/proc/stat": procStat(Math.floor(bootWallMs / 1000)),
-          "/proc/self/auxv": auxvWithHz(hz),
           [`/proc/${PID}/stat`]: pidStat(ticks),
         };
-        const fromProc = defaultGetProcessStartTime(PID, linuxSeam(files).sys);
+        const fromProc = defaultGetProcessStartTime(PID, linuxSeam(files, PS_ETIME, "linux", `${hz}\n`).sys);
         const before = Date.now();
         const etime = formatEtime(Math.floor((before - kernelStartMs) / 1000));
         const fromPs = defaultGetProcessStartTime(PID, linuxSeam(files, etime, "darwin").sys);
@@ -162,15 +153,12 @@ test("W1-T11457 criterion 2: a /proc read or parse failure on Linux falls back t
     ["/proc/stat absent (no procfs mounted)", { ...healthy(), "/proc/stat": errno("ENOENT", "/proc/stat") }],
     ["/proc/stat unreadable", { ...healthy(), "/proc/stat": errno("EACCES", "/proc/stat") }],
     ["/proc/stat with no btime line", { ...healthy(), "/proc/stat": "cpu  1 2 3\nctxt 9\n" }],
-    ["aux vector unreadable", { ...healthy(), "/proc/self/auxv": errno("EACCES", "/proc/self/auxv") }],
-    ["aux vector with no AT_CLKTCK", { ...healthy(), "/proc/self/auxv": auxv([[AT_PAGESZ, 4096], [0, 0]]) }],
-    ["aux vector with a zero AT_CLKTCK", { ...healthy(), "/proc/self/auxv": auxv([[AT_CLKTCK, 0], [0, 0]]) }],
-    ["aux vector in a 32-bit layout", { ...healthy(), "/proc/self/auxv": Buffer.from(new Uint32Array([AT_PAGESZ, 4096, AT_CLKTCK, 100, 0, 0]).buffer) }],
     ["/proc/<pid>/stat unreadable", { ...healthy(), [`/proc/${PID}/stat`]: errno("EACCES", `/proc/${PID}/stat`) }],
     ["/proc/<pid>/stat vanished mid-read", { ...healthy(), [`/proc/${PID}/stat`]: errno("ESRCH", `/proc/${PID}/stat`) }],
     ["/proc/<pid>/stat with no ')'", { ...healthy(), [`/proc/${PID}/stat`]: "4242 node S 1 2 3\n" }],
+    ["/proc/<pid>/stat with no '('", { ...healthy(), [`/proc/${PID}/stat`]: pidStat(123_456).replace("(", "") }],
     ["/proc/<pid>/stat truncated before field 22", { ...healthy(), [`/proc/${PID}/stat`]: "4242 (node) S 1 4242 4242 0\n" }],
-    ["/proc/<pid>/stat with a non-numeric start", { ...healthy(100, "x1") }],
+    ["/proc/<pid>/stat with a non-numeric start", healthy("x1")],
   ];
   for (const [label, files] of cases) {
     const { sys, execCalls } = linuxSeam(files);
@@ -183,15 +171,31 @@ test("W1-T11457 criterion 2: a /proc read or parse failure on Linux falls back t
   }
 });
 
-test("W1-T11457 criterion 2: an unreadable CLK_TCK is not cached, so the next call reads /proc again once it heals", (t) => {
+test("W1-T11457 criterion 2: malformed start ticks take the original ps path", (t) => {
   const now = BTIME_SEC * 1000 + 2_000_000;
   t.mock.method(Date, "now", () => now);
-  const files = { ...healthy(), "/proc/self/auxv": errno("EACCES", "/proc/self/auxv") as FixtureFile };
+  const files = healthy();
   const { sys, execCalls } = linuxSeam(files);
-  assert.equal(defaultGetProcessStartTime(PID, sys), now - 330_000);
-  files["/proc/self/auxv"] = auxvWithHz(100);
   assert.equal(defaultGetProcessStartTime(PID, sys), BTIME_SEC * 1000 + 1_234_560);
-  assert.deepEqual(execCalls, [["ps", PS_ARGS, { encoding: "utf8" }]], "only the failed call asked ps");
+  assert.deepEqual(execCalls, [GETCONF_CALL]);
+  for (const ticks of ["-1", "0x10", "+10", "1.5", "1e3", "9".repeat(400)]) {
+    files[`/proc/${PID}/stat`] = pidStat(ticks);
+    execCalls.length = 0;
+    assert.equal(defaultGetProcessStartTime(PID, sys), now - 330_000, `invalid field 22: ${ticks}`);
+    assert.deepEqual(execCalls, [["ps", PS_ARGS, { encoding: "utf8" }]]);
+  }
+});
+
+test("W1-T11457 criterion 2: a failed CLK_TCK lookup falls back to ps and getconf runs only once", (t) => {
+  const now = BTIME_SEC * 1000 + 2_000_000;
+  t.mock.method(Date, "now", () => now);
+  for (const clkTck of [new Error("getconf failed"), "0\n", "0x64\n", "100.5\n", "9007199254740992\n"]) {
+    const { sys, execCalls } = linuxSeam(healthy(), PS_ETIME, "linux", clkTck);
+    assert.equal(defaultGetProcessStartTime(PID, sys), now - 330_000);
+    assert.equal(defaultGetProcessStartTime(PID, sys), now - 330_000);
+    const psCall = ["ps", PS_ARGS, { encoding: "utf8" }];
+    assert.deepEqual(execCalls, [GETCONF_CALL, psCall, psCall], String(clkTck));
+  }
 });
 
 test("W1-T11457: the real default seam judges this live test process its own current holder", () => {
