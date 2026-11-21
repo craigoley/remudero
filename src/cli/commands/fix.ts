@@ -55,7 +55,7 @@ import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWE
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
-import { pendingQualityGateNames } from "../../lib/sweep.js";
+import { pendingQualityGateNames, type LiveRoundHandoff } from "../../lib/sweep.js";
 import { dropDerivativeAggregateCiFailure } from "../../lib/derivative-ci-failure.js";
 import { ghJson, parseReport, foreignTreeStandDownReason, workerTranscript, worktreeAdd, worktreeRemove, type SpawnWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, workerContinuation } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
@@ -2358,6 +2358,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   prBodySha256?: string;
   /** W1-T12710: a stronger-worker round's earlier rounds on its stalled criterion: diff summary and outcome each. */
   failedApproaches?: readonly string[];
+  /** W1-T13991: the new failure the sweep handed this round while it waited on CI for its own push, taken once per wait. */
+  liveRoundHandoff?: () => LiveRoundHandoff | undefined;
+  waitForOwnHeadCi?: (
+    prUrl: string,
+    log: Parameters<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>[1],
+    ownHead: string | undefined,
+  ) => ReturnType<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>;
 },
   host: FixCommandHost,
 ): ReturnType<RunTaskCommandHost["runFixRung"]> {
@@ -2394,6 +2401,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     bodyRepairFallback,
     allCiFailuresAreGeneratorFixable,
     runGeneratorFixForCiFailures,
+    branchAuthorshipStandDownReason,
     ciGateSha,
     ciLogNamedSourcePaths,
     mainOwnedPaths,
@@ -2477,6 +2485,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       settingsFile: opts.settingsFile,
     });
   let review = opts.initialReview;
+  let handedReview: LiveRoundHandoff | undefined;
   let reconstructedReviewChecked = false;
   let bodyCoverageSelfHealAttempted = false;
   const proofDiscriminationStillNeedsRepair = () =>
@@ -3980,8 +3989,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
+    const criterionIndices = handedReview?.review === review ? handedReview.criterionIndices
+      : review === opts.initialReview ? opts.initialCriterionIndices : undefined;
     const rawUnmet = review.criteria.map((c, index) => {
-      const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
+      const criterionIndex = criterionIndices?.[index] ?? index + 1;
       return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
     }).filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
@@ -4024,12 +4035,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // `reviewer-unmet` off the review's own `summary` (see the guard immediately below for
     // what happens if it recurs) — see `test/escalation-evidence-floor.test.ts`, W1-T487,
     // protected and out of this task's scope.
+    const gateFailureSeed = handedReview?.review === review ? handedReview?.actionableGateFailures
+      : strikes === 0 ? opts.actionableGateFailures : undefined;
     const gateFailuresNow: ActionableGateFailure[] | undefined =
       currentMergeConflict === undefined && !noReviewYet && unmet.length === 0
-        ? strikes === 0 && opts.actionableGateFailures !== undefined
+        ? gateFailureSeed !== undefined
           ? // W1-T10574: re-filter the seed through the single-form producer so an unfixable-in-place
             // reason (rule 15 / entanglement) never reaches the pre-strike dispatch.
-            actionableGateFailuresFromReasons(opts.actionableGateFailures.map((f) => f.reason))
+            actionableGateFailuresFromReasons(gateFailureSeed.map((f) => f.reason))
           : actionableGateFailuresFromReasons(reviewLedgerReasons(review))
         : undefined;
 
@@ -5482,11 +5495,35 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       },
     );
 
-    const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+    const pushedHead = landing.remoteHead ?? expectedHeadShaForPush;
+    if (deps.branchClaim?.holdForWait !== undefined && pushedHead !== undefined) rungOwnHeadSha = pushedHead;
+    const logCiWait: Parameters<typeof deps.waitForCiGreen>[1] = (step, extra) => {
+      if (step !== "run.awaiting_external" || extra?.waiting_on !== "ci" || extra.head_sha !== pushedHead || pushedHead === undefined ||
+        deps.branchClaim?.holdForWait === undefined) return deps.log(step, extra);
+      if (deps.branchClaim.holdForWait() !== undefined) return deps.log(step, extra);
+      deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: deps.branchClaim.id() });
+    };
+    const waited = opts.waitForOwnHeadCi === undefined
+      ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
+      : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, pushedHead);
+    const resumed = opts.liveRoundHandoff?.();
+    const ci = resumed?.failure === "check" && host.ciGateState(waited) !== "red"
+      ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
     if (handoff) return handoff;
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return claimLostAfterCi;
+    if (resumed) {
+      deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: resumed.headSha, failure: resumed.failure });
+    }
+    if (resumed?.review) {
+      currentPinnedSha = currentPrHeadSha = resumed.headSha;
+      handedReview = resumed;
+      review = resumed.review;
+      noReviewYet = false;
+      currentMergeConflict = undefined;
+      continue;
+    }
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
