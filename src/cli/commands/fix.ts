@@ -5540,6 +5540,16 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       currentMergeConflict = undefined;
       continue;
     }
+    if (resumed?.failure === "conflict") {
+      // W1-T13991: main moved under the round's own head. The next strike's pre-strike merge read takes the conflict in
+      // this worktree, as a conflict round does; a head that turns out to merge leaves nothing red, and the round stands
+      // down for the sweep instead of striking on what it already pushed.
+      currentPinnedSha = currentPrHeadSha = resumed.headSha;
+      noReviewYet = true;
+      currentCiFailures = [];
+      currentMergeConflict = undefined;
+      continue;
+    }
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;

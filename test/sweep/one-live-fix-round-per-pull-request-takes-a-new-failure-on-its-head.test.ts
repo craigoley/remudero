@@ -15,8 +15,10 @@ import {
   drainDetachedSweepActions,
   fixAdmissionLockPath,
   fixRoundBranchClaim,
+  fixAdmissionHolderStale,
   fixRoundClaimEnded,
   fixRoundHandoffPath,
+  fixRoundHoldsBranch,
   fixRoundIsLiveOnHead,
   readFixRoundHandoff,
   installDetachedWorkHost,
@@ -149,6 +151,9 @@ function sweepHarness(t: TestContext, opts: { live: boolean; seam?: boolean; isP
       deferToLiveFixRound: (pr: OpenPrView, lines: ReadonlyArray<Row>) => deferToLiveFixRound(pr, lines, {
         inflightDir, stateRoot: root, claimKeyFor: keyFor, nowMs, boundMs: BOUND_MS,
         isPidAlive: opts.isPidAlive ?? (() => true), processStart: opts.processStart ?? (() => PROCESS_START), hostname: hostname() }),
+      fixRoundHoldsBranch: (pr: OpenPrView, lines: ReadonlyArray<Row>) => fixRoundHoldsBranch(pr, lines, {
+        inflightDir, claimKeyFor: keyFor, nowMs, boundMs: BOUND_MS,
+        isPidAlive: opts.isPidAlive ?? (() => true), processStart: opts.processStart ?? (() => PROCESS_START), hostname: hostname() }),
     }),
   };
   return { root, inflightDir, rows, deps, dispatched, admitted, nowMs, goLive,
@@ -249,6 +254,28 @@ test("W1-T13991 criterion 1: a live waiting round keeps its claim, and the next 
   assert.equal(existsSync(dirname(retiredPath)), false);
 });
 
+test("W1-T13991 criterion 1: a merge into main that conflicts the live round's own head defers to that round, with its row", async (t) => {
+  const conflicted = (headSha = PUSHED): OpenPrView => ({ ...redPr(headSha), checksState: "green", redRequiredChecks: [], ciFailures: [],
+    reviewState: "pending", mergeState: "dirty",
+    mergeConflict: { files: [{ path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 0 }], oursLog: "ours", theirsLog: "theirs" } }) as OpenPrView;
+  const policy = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
+  const h = sweepHarness(t, { live: true });
+  const pass = await runSweep([conflicted()], h.deps, policy);
+  assert.deepEqual(h.dispatched, [], JSON.stringify(pass.actions));
+  assert.equal(h.deferred().length, 1, JSON.stringify(pass.actions));
+  assert.equal(h.deferred()[0].failure, "conflict");
+  assert.equal(readFixRoundHandoff(fixRoundHandoffPath(h.root, CLAIM))?.failure, "conflict", "the round is handed the conflict");
+  await runSweep([conflicted()], h.deps, policy);
+  assert.deepEqual(h.dispatched, [], "no second round on the conflicted head while the first waits");
+  assert.equal(h.deferred().length, 1);
+
+  // A conflict on a head someone else moved, or under a round that is gone, is the sweep's own, as on origin/main.
+  const moved = sweepHarness(t, { live: true });
+  assert.equal(moved.deps.deferToLiveFixRound!(conflicted("f00dfeed"), moved.rows), undefined);
+  const dead = sweepHarness(t, { live: true, isPidAlive: () => false });
+  assert.equal(dead.deps.deferToLiveFixRound!(conflicted(), dead.rows), undefined);
+});
+
 test("W1-T13991 criterion 3: independent sweep processes charge at most one fix round per PR", async (t) => {
   const h = sweepHarness(t, { live: false });
   const dir = join(h.root, "fix-admission");
@@ -307,6 +334,7 @@ test("W1-T13991 criterion 3: independent sweep processes charge at most one fix 
     assert.match(refused.refusal, /already holds admission/);
 
     const deps = { ...h.deps, fixAdmissionLockDir: dir };
+    // The first child still holds its charge (no CI wait yet), so a moved head waits for it rather than adding a second.
     const refusedSweep = await runSweep([current], deps, DEFAULT_SWEEP_POLICY);
     assert.match(refusedSweep.actions[0].reason, /already holds admission/);
     assert.deepEqual(h.admitted, []);
@@ -319,22 +347,19 @@ test("W1-T13991 criterion 3: independent sweep processes charge at most one fix 
     assert.equal(h.deferred().length, 1, "the parked round receives its own head's failure before admission");
     assert.deepEqual(h.admitted, []);
 
-    // The parked child's CI wait freed its charge, not the PR's admission: a head someone else pushed waits for it.
+    // The parked child's CI wait gave its charge back. A head someone else pushed is redispatched at once, as on
+    // origin/main, and its charge replaces the spent one: the PR is never charged for two rounds.
     const foreign = await runSweep([redPr("foreign")], deps, DEFAULT_SWEEP_POLICY);
-    assert.match(foreign.actions[0].reason, /already holds admission/, "no second round on the PR while the first child runs");
-    assert.deepEqual(h.admitted, []);
-    assert.deepEqual(h.dispatched, []);
+    assert.doesNotMatch(foreign.actions[0].reason, /already holds admission/, "a head someone else moved is not held by the old round");
+    assert.deepEqual(h.admitted, [PR]);
+    assert.deepEqual(h.dispatched, [PR]);
   } finally {
     writeFileSync(park, "");
     writeFileSync(settle, "");
     const settled = await firstResult;
     if ("error" in settled) throw settled.error;
-    assert.deepEqual(JSON.parse(settled.value.stdout), { charges: ["charged", "released"] });
+    assert.deepEqual(JSON.parse(settled.value.stdout), { charges: ["charged", "released"] }, "the old child's charge went back at its CI wait");
   }
-  // Once the first child has ended, the foreign head is redispatched as on origin/main.
-  await runSweep([redPr("foreign")], { ...h.deps, fixAdmissionLockDir: dir }, DEFAULT_SWEEP_POLICY);
-  assert.deepEqual(h.dispatched, [PR], "a foreign head is redispatched once the old round has ended");
-  assert.deepEqual(h.admitted, [PR]);
 });
 
 test("W1-T13991 criterion 4: a dead round, an ended round and a head someone else moved are reclaimed as on origin/main", async (t) => {
@@ -380,9 +405,6 @@ test("W1-T13991 criterion 4: a dead round, an ended round and a head someone els
     assert.deepEqual(h.dispatched, [PR], name);
     assert.equal(h.deferred().length, 0, name);
   }
-  // A conflicted head is a conflict round's, as before.
-  const dirty = sweepHarness(t, { live: true });
-  assert.equal(dirty.deps.deferToLiveFixRound!({ ...redPr(), mergeState: "dirty" } as OpenPrView, dirty.rows), undefined);
 
   // The claim key, and the release on every ending path: without a keep, no claim is held through a wait (the operator
   // run-task path) and fix.done releases it; with one, the claim is never released before the wait, and a replacement
@@ -476,11 +498,9 @@ test("W1-T13991 criterion 3: a hosted round holds the PR's admission through the
   assert.equal(holder(fixAdmissionLockPath(dir, redPr())), undefined, "the lock is free once the child ends");
 });
 
-test("W1-T13991 criterion 3: a hosted child's live memory reservation keeps the PR's admission held across a foreign head move until the host settles it", async (t) => {
+/** The host's real reservation path (reserveRunChild over a host memory ledger), on a fixture ledger under `root`. */
+function hostReservations(root: string) {
   resetLearnedEstimateCacheForTests();
-  const root = scratch(t, "reserved");
-  const dir = join(root, "fix-admission");
-  // The host's real reservation path (reserveRunChild over a host memory ledger), on a fixture ledger under this root.
   const memory = join(root, "memory");
   mkdirSync(memory, { recursive: true });
   writeFileSync(join(memory, ".ledger-id"), "fixture-ledger\n");
@@ -493,41 +513,62 @@ test("W1-T13991 criterion 3: a hosted child's live memory reservation keeps the 
   };
   const reserveDeps = { ledger, store: { location: ledger.location, root, instance: () => ({ name: "fixture" }), clock: fixedClock(1000) },
     admission: { policy: () => ({ mode: "shadow" }) as never } };
-  const held = () => readMemoryLedger(ledger)!.entries.filter((entry) =>
-    entry.workerClass === "fix" && entry.status === "owned" && !entry.occupancyReleased).length;
-  const rows: Row[] = [];
-  const nowMs = Date.now();
-  const depsFor = (runId: string): SweepDeps => ({
-    ledgerPath: join(root, "ledger.ndjson"), runId, now: () => nowMs, detachFixWait: true, fixAdmissionLockDir: dir,
+  return {
+    reserve: (runId: string) => reserveRunChild({ lane: "sweep-fix", root, runId, taskId: TASK, entryKind: "tsx" }, reserveDeps),
+    held: () => readMemoryLedger(ledger)!.entries.filter((entry) =>
+      entry.workerClass === "fix" && entry.status === "owned" && !entry.occupancyReleased).length,
+  };
+}
+
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  return { open, opened };
+}
+
+function hostedDeps(root: string, rows: Row[], nowMs: number, runId: string, over: Partial<SweepDeps> = {}): SweepDeps {
+  return {
+    ledgerPath: join(root, "ledger.ndjson"), runId, now: () => nowMs, detachFixWait: true, fixAdmissionLockDir: join(root, "fix-admission"),
     readLedger: () => rows, appendLine: (_path, row) => { rows.push({ ts: new Date(nowMs).toISOString(), ...row }); },
     log: (step, extra) => { rows.push({ ts: new Date(nowMs).toISOString(), step, ...(extra ?? {}) }); },
     claimFixAdmission: () => ({ admitted: true, release: () => {} }),
+    // No round holds the branch: the old round's claim ended when someone else moved its head.
+    fixRoundHoldsBranch: (pr, lines) => fixRoundHoldsBranch(pr, lines, { inflightDir: join(root, "inflight"), claimKeyFor: keyFor,
+      nowMs, boundMs: BOUND_MS, isPidAlive: () => true, hostname: hostname() }),
     dispatchFix: () => assert.fail("a hosted fix never runs in process"),
     arm: () => assert.fail("a red PR must not arm"), close: () => assert.fail("no close is due"),
     escalate: () => assert.fail("nothing is escalated"),
-  });
-  const gate = () => { let open!: () => void; const opened = new Promise<void>((resolve) => { open = resolve; }); return { open, opened }; };
+    ...over,
+  };
+}
+
+test("W1-T13991 criterion 4: a head someone else moves under a hosted child's CI wait is redispatched at once, and its charge replaces the spent one", async (t) => {
+  const root = scratch(t, "replaced");
+  const host = hostReservations(root);
+  const rows: Row[] = [];
+  const nowMs = Date.now();
   const inWait = gate();
   const childEnds = gate();
-  const hostSettles = gate();
   const reservedFor: string[] = [];
-  const mostHeld: number[] = [];
   const children: Promise<unknown>[] = [];
+  // The fix admission's own charge, per child: charged on admission, given back at the CI wait or the child's end.
+  let charged = 0;
+  let mostCharged = 0;
   t.after(() => { installDetachedWorkHost(undefined); resetChildWork(); });
   installDetachedWorkHost({
     hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
     spawnFix: async (input) => {
       const first = reservedFor.length === 0;
-      // The host reserves the child's memory before it spawns, and keeps it until it settles the child.
-      const reservation = await reserveRunChild({ lane: "sweep-fix", root, runId: `work-${reservedFor.length}`, taskId: TASK, entryKind: "tsx" },
-        reserveDeps);
+      const reservation = await host.reserve(`work-${reservedFor.length}`);
       reservedFor.push(input.envelope.pr.headSha);
-      mostHeld.push(held());
       const child = runFixDispatchChild({ envelope: input.envelope }, {
         readLivePr: async () => ({ state: "OPEN", headSha: input.envelope.pr.headSha }),
         readTask: () => ({ found: true, merged: false, retired: false }),
         hold: () => undefined, log: () => {},
-        claimFixAdmission: () => ({ admitted: true, release: () => {} }),
+        claimFixAdmission: () => {
+          mostCharged = Math.max(mostCharged, ++charged);
+          return { admitted: true, release: () => { charged--; } };
+        },
         dispatcher: () => ({ dispatchFix: async (_pr: OpenPrView, _evidence: unknown, onPhase: (phase: string) => void) => {
           if (!first) return;
           onPhase("ci-wait");
@@ -536,37 +577,82 @@ test("W1-T13991 criterion 3: a hosted child's live memory reservation keeps the 
         } }),
       } as never);
       children.push(child);
-      // As run-child's onEnd: the process ends, the host releases its reservation, and only then is the child settled.
-      const settled = child.then(() => hostSettles.opened).finally(() => reservation.releaseOccupancy());
+      const settled = child.finally(() => reservation.releaseOccupancy());
       return { runId: `work-fix-dispatch-${reservedFor.length}`, settled };
     },
   });
-  await runSweep([redPr()], depsFor("SWEEP-A"), DEFAULT_SWEEP_POLICY);
+  await runSweep([redPr()], hostedDeps(root, rows, nowMs, "SWEEP-A"), DEFAULT_SWEEP_POLICY);
   await inWait.opened;
-  assert.equal(held(), 1, "the first child holds its reservation through its CI wait");
+  assert.equal(charged, 0, "the first child's CI wait gave its charge back");
+  const lock = fixAdmissionLockPath(join(root, "fix-admission"), redPr());
+  const spent = JSON.parse(readFileSync(lock, "utf8")) as Row;
+  assert.equal(spent.charge_released, true, "the lock records the spent charge");
 
-  // Someone else pushes a new head while the first child waits: no second round is admitted, so none is reserved.
-  const moved = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-B"), DEFAULT_SWEEP_POLICY);
-  assert.match(String(moved.actions.find((action) => action.prNumber === PR)?.reason), /already holds admission/);
-  assert.deepEqual(reservedFor, [PUSHED]);
+  // Someone else pushes a new head while the first child waits: it is redispatched as on origin/main.
+  const moved = await runSweep([redPr("f00dfeed")], hostedDeps(root, rows, nowMs, "SWEEP-B"), DEFAULT_SWEEP_POLICY);
+  await drainDetachedSweepActions();
+  assert.doesNotMatch(String(moved.actions.find((action) => action.prNumber === PR)?.reason), /already holds admission/);
+  assert.deepEqual(reservedFor, [PUSHED, "f00dfeed"]);
+  assert.equal(mostCharged, 1, "the moved head's charge replaced the spent one: one round charged at a time");
 
-  // The child's process has ended, but the host has not settled it: its reservation is still held, and so is the PR.
   childEnds.open();
-  await children[0];
-  assert.equal(held(), 1);
-  const ended = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-C"), DEFAULT_SWEEP_POLICY);
-  assert.match(String(ended.actions.find((action) => action.prNumber === PR)?.reason), /already holds admission/);
-  assert.deepEqual(reservedFor, [PUSHED]);
+  await Promise.all(children);
+  await drainDetachedSweepActions();
+  assert.equal(host.held(), 0);
+});
 
-  // Settlement releases the reservation, then the admission: the moved head is redispatched, as on origin/main.
+test("W1-T13991 criterion 3: a hosted child the kernel reaps before its host settles it keeps the PR's admission until that settlement", async (t) => {
+  const root = scratch(t, "reaped");
+  const rows: Row[] = [];
+  const nowMs = Date.now();
+  const hostSettles = gate();
+  const admitted: string[] = [];
+  const seen: { overlapping?: string; childPid?: number; lock?: Row } = {};
+  const script = `
+    import { runFixDispatchChild } from "#src/lib/sweep.js";
+    const { envelope } = JSON.parse(process.argv[1]);
+    await runFixDispatchChild({ envelope }, {
+      readLivePr: async () => ({ state: "OPEN", headSha: envelope.pr.headSha }),
+      readTask: () => ({ found: true, merged: false, retired: false }),
+      hold: () => undefined, log: () => {},
+      claimFixAdmission: () => ({ admitted: true, release: () => {} }),
+      // The child dies in its worker phase, charge held: no finally runs, as when the kernel reaps it.
+      dispatcher: () => ({ dispatchFix: async () => { console.log(JSON.stringify({ pid: process.pid })); process.exit(0); } }),
+    });
+  `;
+  const depsFor = (runId: string) => hostedDeps(root, rows, nowMs, runId, {
+    claimFixAdmission: (view) => { admitted.push(`${runId}@${view.headSha}`); return { admitted: true, release: () => {} }; },
+  });
+  let spawns = 0;
+  t.after(() => { installDetachedWorkHost(undefined); resetChildWork(); });
+  installDetachedWorkHost({
+    hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
+    spawnFix: async (input) => {
+      if (spawns++ > 0) return { runId: `work-fix-dispatch-${spawns}`, settled: Promise.resolve() };
+      const ran = await child(script, { envelope: input.envelope });
+      seen.childPid = (JSON.parse(ran.stdout) as { pid: number }).pid;
+      seen.lock = JSON.parse(readFileSync(fixAdmissionLockPath(join(root, "fix-admission"), input.envelope.pr), "utf8")) as Row;
+      // The child is gone; its host has not settled it, so its reservation is still held.
+      const overlapping = await runSweep([redPr("f00dfeed")], depsFor("SWEEP-B"), DEFAULT_SWEEP_POLICY);
+      seen.overlapping = overlapping.actions.find((action) => action.prNumber === PR)?.reason;
+      return { runId: "work-fix-dispatch-1", settled: hostSettles.opened };
+    },
+  });
+  await runSweep([redPr()], depsFor("SWEEP-A"), DEFAULT_SWEEP_POLICY);
+  assert.equal(seen.lock?.pid, seen.childPid, "the child adopted the lock");
+  assert.equal(seen.lock?.settler_pid, process.pid, "and names the sweep that settles it");
+  assert.match(String(seen.overlapping), /already holds admission/, "a reaped child's lock is not freed by its dead pid");
+  assert.deepEqual(admitted, [`SWEEP-A@${PUSHED}`], "no second charge for the PR before the host settles the first");
+  const holder = seen.lock as unknown as Parameters<typeof fixAdmissionHolderStale>[0];
+  assert.equal(fixAdmissionHolderStale(holder, (pid) => pid === process.pid), false, "the settler is alive: held");
+  assert.equal(fixAdmissionHolderStale(holder, () => false), true, "no process can settle it: free");
+
+  // Settlement frees the PR: the moved head is then admitted, as on origin/main.
   hostSettles.open();
   await drainDetachedSweepActions();
-  assert.equal(held(), 0);
-  await runSweep([redPr("f00dfeed")], depsFor("SWEEP-D"), DEFAULT_SWEEP_POLICY);
+  await runSweep([redPr("f00dfeed")], depsFor("SWEEP-C"), DEFAULT_SWEEP_POLICY);
   await drainDetachedSweepActions();
-  await Promise.all(children);
-  assert.deepEqual(reservedFor, [PUSHED, "f00dfeed"]);
-  assert.deepEqual(mostHeld, [1, 1], "at most one fix round's memory is reserved for the PR at any time");
+  assert.deepEqual(admitted, [`SWEEP-A@${PUSHED}`, "SWEEP-C@f00dfeed"]);
 });
 
 test("W1-T13991 criterion 4: an abandoned admission lock another host left in shared state never blocks this host's redispatch", async (t) => {
@@ -589,7 +675,14 @@ test("W1-T13991 criterion 5: the wait belongs to the exact round and another PR'
   const [done, wait] = waitingRound(nowMs);
   const unrelated = { run_id: ROUND, pr_number: PR + 1, ts: new Date(nowMs).toISOString() };
   assert.equal(fixRoundIsLiveOnHead([done, wait, { ...unrelated, step: "fix.dispatch" }], probe), true);
-  assert.equal(fixRoundIsLiveOnHead([done], probe), true, "the fix.done that kept the claim reads live before its first wait row");
+  // The wait itself, not the fix.done that kept the claim, reads the round waiting: a CI read that returns red or green
+  // at once writes no wait row, and the round reads ended, as on origin/main.
+  assert.equal(fixRoundIsLiveOnHead([done], probe), false, "a fix.done with no wait row after it reads ended");
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, head_sha: "f00dfeed" }], probe), false, "a wait row for another head");
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, branch_claim_run_id: undefined }], probe), false, "a wait row naming no claim");
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, process_start: "proc:45678" }], probe), false, "another process's wait row");
+  assert.equal(fixRoundIsLiveOnHead([done, { ...wait, round_id: `${ROUND}:2` }], probe), false, "another round's wait row");
+  assert.equal(fixRoundIsLiveOnHead([wait, done], probe), false, "a wait row before the fix.done");
   assert.equal(fixRoundIsLiveOnHead([{ ...done, ci_wait_holds_claim: undefined }, wait], probe), false, "a released claim reads ended");
   assert.equal(fixRoundIsLiveOnHead([{ ...done, process_start: undefined }, wait], probe), false);
   assert.equal(fixRoundIsLiveOnHead([{ ...done, round_started_at_ms: undefined }, wait], probe), false);
@@ -621,10 +714,12 @@ function worker(text: string): WorkerResult {
   };
 }
 
-type RungFailure = "review" | "public-criterion" | "check" | "check-pending" | "check-and-review" | "foreign-head" | "marker-error";
+type RungFailure = "review" | "public-criterion" | "check" | "check-pending" | "check-and-review" | "foreign-head" | "marker-error"
+  | "restored-head" | "conflict";
 
 /** One live round through the sweep's real dispatchFix and fix rung, with a concurrent sweep racing it at every
- *  interleaving point from its fix.done to the end of its wait, and `failure` arriving on its own head while it waits. */
+ *  interleaving point from its wait row for its own push to the end of that wait, and `failure` arriving on its own
+ *  head while it waits. */
 async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
   const root = scratch(t, `rung-${failure}`);
   const repo = "scratch-w1t13991";
@@ -638,6 +733,13 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
   commitInsideFixture(seed.dir, seed.dir, "seed.txt", "chore: ours");
   seed.git("push", "--quiet", "origin", BRANCH);
   seed.git("checkout", "--quiet", "main");
+  if (failure === "conflict") {
+    // A merge into main that conflicts the round's own head while it waits.
+    writeFileSync(join(seed.dir, "seed.txt"), "main moved\n");
+    seed.git("add", "seed.txt");
+    seed.git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "--no-verify", "-m", "chore: main");
+    seed.git("push", "--quiet", "origin", "main");
+  }
   mkdirSync(join(root, "repos"), { recursive: true });
   renameSync(seed.dir, join(root, "repos", repo));
   mkdirSync(join(root, "worktrees"), { recursive: true });
@@ -647,7 +749,7 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
   const spawns: SpawnWorkerArgs[] = [];
   const seen: { heldDuringWait?: string; deferral?: unknown; waitedOut?: boolean; foreignPolls?: number;
     racerRefused?: boolean } = {};
-  // A concurrent sweep at every interleaving point from the round's fix.done to the end of its wait: before and after
+  // A concurrent sweep at every interleaving point from the round's wait row to the end of its wait: before and after
   // each ledger row, so between every claim operation the round makes. Each must find the claim held and live.
   const race = { state: "before" as "before" | "open" | "closed", pushed: undefined as string | undefined, points: 0, lost: [] as string[] };
   const raceAt = (point: string) => {
@@ -682,15 +784,15 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
       policy: DEFAULT_SWEEP_POLICY,
       log: (step: string, fields?: Row) => {
         const row = { ts: new Date().toISOString(), run_id: "SWEEP-W1T13991", step, ...(fields ?? {}) };
-        if (step === "fix.done" && race.state === "before") {
-          race.pushed = String(fields?.pushed_head_sha);
-          race.state = "open";
-        }
+        if (step === "fix.done" && race.state === "before") race.pushed = String(fields?.pushed_head_sha);
         const ends = RACE_ENDS.has(step);
         if (race.state === "open") raceAt(`before ${step}`);
         if (ends && race.state === "open") race.state = "closed";
         logs.push(row);
         appendFileSync(ledger, `${JSON.stringify(row)}\n`);
+        // The race opens at the round's wait row for its own push: before it the round reads ended, as on origin/main.
+        if (step === "run.awaiting_external" && race.state === "before" && race.pushed !== undefined &&
+          fields?.head_sha === race.pushed && fields?.branch_claim_run_id !== undefined) race.state = "open";
         if (race.state === "open") raceAt(`after ${step}`);
       },
       spawnImpl: (async (args: SpawnWorkerArgs) => {
@@ -721,6 +823,31 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
           seen.deferral = (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound(view,
             readFileSync(ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row));
         };
+        if (failure === "restored-head") {
+          // The first poll reads a head someone else pushed; a later push restores this round's own head, and the sweep
+          // then hands the round a red on it.
+          let polls = 0;
+          shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: "f00dfeed", ref: BRANCH }, base: { sha: "deadbeef" } }) });
+          return waitForCiGreen(url, logWait, 0, {
+            sleep: async () => {
+              await poll.sleep(0);
+              shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, head: { sha: head, ref: BRANCH }, base: { sha: "deadbeef" } }) });
+            },
+            requiredContexts: () => ["coverage-shard (1/12)"],
+            readJson: async (args) => {
+              if (args[1].includes("commits/f00dfeed/check-runs")) return { check_runs: [{ name: "coverage-shard (1/12)", status: "in_progress", conclusion: null }] };
+              if (args[1].includes(`commits/${head}/check-runs`)) {
+                if (++polls === 1) handoff(redPr(head));
+                if (polls > 1) seen.waitedOut = true;
+                const stuck = polls > 3;
+                return { check_runs: [{ name: "coverage-shard (1/12)", status: stuck ? "completed" : "in_progress", conclusion: stuck ? "failure" : null }] };
+              }
+              if (args[1].endsWith("/status")) return { statuses: [] };
+              if (args[1].includes("actions/runs?")) return { workflow_runs: [] };
+              return poll.readJson(args);
+            },
+          });
+        }
         if (failure === "check" || failure === "check-pending" || failure === "check-and-review" || failure === "foreign-head") {
           let polls = 0;
           // The rollup lags the red the sweep saw: only the hand-off names the failing check.
@@ -790,6 +917,15 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
           return { state: "freshness_handoff", sha: head, recycle: "fixture recycle" };
         }
         const sleeping = poll.sleep(0);
+        if (failure === "conflict") {
+          // GitHub now reads the round's own head unmergeable.
+          shim.addRoute({ when: `pulls/${PR}`, stdout: JSON.stringify({ state: "open", merged: false, mergeable: false,
+            mergeable_state: "dirty", head: { sha: head, ref: BRANCH }, base: { sha: "deadbeef", ref: "main" } }) });
+          handoff({ ...redPr(head), checksState: "green", redRequiredChecks: [], ciFailures: [], mergeState: "dirty" } as OpenPrView);
+          await sleeping;
+          seen.waitedOut = true;
+          return "pending" as never;
+        }
         handoff(failure === "public-criterion" ? {
           ...reviewGatePr(head),
           actionableGateFailures: [],
@@ -811,7 +947,7 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
   }
   const steps = (step: string) => logs.filter((row) => row.step === step);
   const firstDone = steps("fix.done")[0];
-  assert.ok(race.points >= 4, `${failure}: the racing sweep ran at ${race.points} points: ${JSON.stringify(logs.map((row) => [row.step, row.reason ?? row.error]))}`);
+  assert.ok(race.points >= 2, `${failure}: the racing sweep ran at ${race.points} points: ${JSON.stringify(logs.map((row) => [row.step, row.reason ?? row.error]))}`);
   assert.deepEqual(race.lost, [], `${failure}: a concurrent sweep never takes the claim between fix.done and the wait's end`);
   if (failure === "review") assert.equal(seen.racerRefused, true, "a racing sweep reads the live wait and keeps off the claim");
   assert.equal(seen.heldDuringWait, firstDone?.branch_claim_run_id, `${failure}: the waiting round holds the claim fix.done named`);
@@ -826,6 +962,21 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
     assert.equal(spawns.length, 1, "the old round releases instead of striking on the foreign head");
     return;
   }
+  if (failure === "conflict") {
+    assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id,
+      failure: "conflict", handedOff: true });
+    assert.equal(seen.waitedOut, undefined, "the hand-off ended the wait at its next poll");
+    const resumed = steps("fix.live_round_resumed");
+    assert.equal(resumed.length, 1);
+    assert.equal(resumed[0].failure, "conflict");
+    assert.equal(resumed[0].head_sha, firstDone?.pushed_head_sha);
+    const reentered = steps("fix.merge_mode_reentered");
+    assert.equal(reentered.length, 1, `the round took the conflict in its own worktree: ${JSON.stringify(logs.slice(logs.indexOf(resumed[0])).map((row) => [row.step, row.reason ?? row.site ?? row.error]))}`);
+    assert.equal(reentered[0].head_sha, firstDone?.pushed_head_sha);
+    assert.deepEqual(reentered[0].conflicted_files, ["seed.txt"]);
+    assert.deepEqual(steps("fix.stood_down").filter((row) => /a later round reclaimed/.test(String(row.reason))), []);
+    return;
+  }
   if (failure === "marker-error") {
     assert.ok(steps("sweep.fix.handoff_unreadable").length > 0);
     assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false);
@@ -834,7 +985,7 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
     assert.equal(steps("sweep.fix.error").length, 0);
     return;
   }
-  const handedKind = failure === "check" || failure === "check-pending" ? "check" : "review";
+  const handedKind = failure === "check" || failure === "check-pending" || failure === "restored-head" ? "check" : "review";
   // The strike's target: a red the wait itself read keeps origin/main's CI repair path over a review handed in that poll.
   const failureKind = failure === "check-and-review" ? "check" : handedKind;
   assert.deepEqual(seen.deferral, { liveRoundRunId: "SWEEP-W1T13991", claimRunId: firstDone?.branch_claim_run_id,
@@ -870,12 +1021,12 @@ async function rungCase(t: TestContext, failure: RungFailure): Promise<void> {
   assert.equal(existsSync(fixRoundHandoffPath(root, String(firstDone?.branch_claim_run_id))), false, `${failure}: the round removed its hand-off when it ended`);
 }
 
-test("W1-T13991 criterion 1: a concurrent sweep at every interleaving point from fix.done to the wait's end finds the live round's claim held", async (t) => {
-  for (const failure of ["review", "check-pending", "foreign-head"] as const) await rungCase(t, failure);
+test("W1-T13991 criterion 1: a concurrent sweep at every interleaving point from the wait row to the wait's end finds the live round's claim held", async (t) => {
+  for (const failure of ["review", "check-pending", "foreign-head", "restored-head"] as const) await rungCase(t, failure);
 });
 
 test("W1-T13991 criterion 2: red checks and failing reviews resume the round in its own worktree with the original criterion index", async (t) => {
-  for (const failure of ["public-criterion", "check", "check-and-review", "marker-error"] as const) await rungCase(t, failure);
+  for (const failure of ["public-criterion", "check", "check-and-review", "marker-error", "conflict"] as const) await rungCase(t, failure);
 });
 
 // ── the first red after a foreign push, against origin/main's wiring ────────────────────────
