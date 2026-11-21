@@ -110,7 +110,12 @@ test("W1-T7957: a read stamped during the wait extends the remaining floor", asy
       if (asyncRead) await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], deps);
       else applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["sleep:60000", "sleep:150000", "stamp:1210000"]);
-      assert.equal(f.warnings.length, 1, "one read prints one wait notice");
+      // W1-T12058: each pause is printed as it starts with the length it sleeps, so the stamp that
+      // lands mid-wait earns a second line for its 150 s extension, not a 60 s forecast for 210 s.
+      const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
+      const printed = waits.map((line) => Number(/waiting ([0-9.]+)s /.exec(line)?.[1]));
+      assert.deepEqual(printed, [60, 150], `each pause printed with its length: ${JSON.stringify(waits)}`);
+      assert.match(waits[1]!, /waiting 150s more for the 180s floor .*\(210s in all\)$/);
       f.events.length = 0;
       applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["stamp:1210000"], "the completed wait earns the invocation's burst");
