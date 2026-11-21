@@ -17,11 +17,13 @@ import { createHash } from "node:crypto";
 import { heldOutLeaks, replayIdleGate, type CorpusProofOutcome, type GoldenCorpusItem, type ReplayIdleSignal } from "./golden-corpus.js";
 import { gradeHeadWithReviewerExecutor, PAIRED_ATTEMPT_MAX_BUDGET_USD, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedAttemptResult, type PairedGrade, type PairedGrader } from "./paired-trial.js";
+import { promotionFloor } from "./promotion-bars.js";
 import { replayOptIn } from "./replay-harness.js";
 import { createSkillEvalControl, type SkillEvalControl, type SkillEvalControlInput } from "./skill-eval-control.js";
 
-/** K: held-out tasks per draft, per the operator's 2026-10-13 ruling. */
-export const SKILL_EVAL_HELD_OUT_TASKS = 3;
+/** K: held-out tasks per draft, per the operator's 2026-10-13 ruling. A promotion bar: scripts/promotion-floors-baseline.json's
+ *  `skillEvalHeldOutTasks` (src/lib/promotion-bars.ts), like {@link SKILL_EVAL_TRIALS_PER_ARM} and {@link SKILL_EVAL_MIN_MEAN_GAIN}. */
+export const SKILL_EVAL_HELD_OUT_TASKS = promotionFloor("skillEvalHeldOutTasks");
 
 /** Task types a held-out attempt can run: the sealed attempt path renders `renderImplementPrompt`. */
 export const SKILL_EVAL_ATTEMPTABLE_TASK_TYPES: readonly string[] = ["implement"];
@@ -119,7 +121,10 @@ export function selectHeldOutTasks(opts: HeldOutSelectionInput): HeldOutSelectio
 }
 
 /** R: trials per arm per held-out task, per the operator's 2026-10-13 ruling. */
-export const SKILL_EVAL_TRIALS_PER_ARM = 2;
+export const SKILL_EVAL_TRIALS_PER_ARM = promotionFloor("skillEvalTrialsPerArm");
+
+/** The mean with-skill minus without-skill pass rate a draft must EXCEED; at 0 any gain passes and none refuses. */
+export const SKILL_EVAL_MIN_MEAN_GAIN = promotionFloor("skillEvalMinMeanGain");
 
 /** The two arms. They share one pinned stack; the draft in the prompt's skills part is the only difference. */
 export const SKILL_EVAL_ARMS = ["with-skill", "without-skill"] as const;
@@ -214,7 +219,7 @@ export function skillEvalVerdict(attempts: readonly Pick<SkillEvalAttempt, "task
   if (delta === null || diffs.length < SKILL_EVAL_HELD_OUT_TASKS) {
     return refuse("too-few-measurable-tasks", `${diffs.length} of ${SKILL_EVAL_HELD_OUT_TASKS} held-out tasks were measurable`);
   }
-  if (delta <= 0) return refuse("no-benefit", `the mean with-skill minus without-skill pass rate is ${delta}`);
+  if (delta <= SKILL_EVAL_MIN_MEAN_GAIN) return refuse("no-benefit", `the mean with-skill minus without-skill pass rate is ${delta}`);
   const regressed = diffs.filter((d) => d.diff < 0).map((d) => d.taskId);
   if (regressed.length > 0) return refuse("per-task-regression", `the draft lowers the pass rate on ${regressed.join(", ")}`);
   return { verdict: "pass", reason: "held-out-benefit", detail: `mean pass-rate gain ${delta} with no task regressed`, ...base };

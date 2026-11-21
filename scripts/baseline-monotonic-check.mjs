@@ -5,7 +5,8 @@
 // PR that edited the JSON to a lower floor (or a higher ceiling) passed its own ratchet by
 // construction, because every ratchet reads its baseline from the PR's own tree. This checks each
 // row in SCORE_TABLE against `git show <base>:<path>` and refuses a regression unless the working
-// tree also carries a fresh `bumpRationale` naming the PR/task that reviewed it.
+// tree's `bumpRationale` names a PR or task the base's rationale did not -- the one that reviewed it.
+// References compare as numbers, and a `W1-T<n>` counts only when <root>/plan/tasks.d holds its shard.
 //
 // SCOPE, drawn from the LEDGER/FLOOR line src/lib/review.ts's ENTANGLEMENT_EXEMPT_INSTRUMENTS
 // comment already states: a SCORE FLOOR (or ceiling) grades a falsifier, so lowering (or raising)
@@ -18,7 +19,7 @@
 // measure (bad JSON, an unreadable file, invalid arguments). A run that cannot measure must never
 // report OK.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
@@ -39,28 +40,92 @@ export const SCORE_TABLE = [
   { path: "scripts/cycle-baseline.json", field: "maxCycles", direction: "decrease" },
   { path: "scripts/claude-md-budget-baseline.json", field: "capBytes", direction: "decrease" },
   { path: "scripts/learnings-budget-baseline.json", field: "capChars", direction: "decrease" },
+  // THE AUTOMATIC-PROMOTION BARS (src/lib/promotion-bars.ts reads them). The fleet promotes its own changes with no
+  // person in the loop, so a bar grades the fleet the way a score floor grades a falsifier: loosening it lets a worse
+  // change through. One row per field the loader reads; the promotion-bar suite fails on a field with no row here.
+  { path: "scripts/promotion-floors-baseline.json", field: "canaryMinTasksPerSide", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "judgeMinPaired", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "judgeMinAgreeShare", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalHeldOutTasks", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalTrialsPerArm", direction: "increase" },
+  { path: "scripts/promotion-floors-baseline.json", field: "skillEvalMinMeanGain", direction: "increase" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "judgeMaxNoAnswerShare", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "judgeMaxBrier", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "poolMaxRejectedShare", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "poolMaxMedianCaseUsd", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "canaryMaxCostRatio", direction: "decrease" },
+  { path: "scripts/promotion-ceilings-baseline.json", field: "canaryMaxMergeRateDrop", direction: "decrease" },
 ];
 
-const PR_REFERENCE_RE = /(#\d+|W1-T\d+)/;
+const PR_REFERENCES_RE = /#(\d+)|W1-T(\d+)/g;
+const PLAN_SHARD_RE = /^w1-t(\d+)(?:-.*)?\.ya?ml$/i;
 
 /** `true` when `newValue` moved the WRONG way for `direction` -- the ratchet's own regression. */
 export function isRegression(oldValue, newValue, direction) {
   return direction === "increase" ? newValue < oldValue : newValue > oldValue;
 }
 
-/** A reviewed bump names itself: non-empty, and carrying a `#<n>` or `W1-T<n>` reference. */
+/** Every reference `rationale` names, each as a canonical `#<n>` or `W1-T<n>` key. The number is read as an
+ *  integer, so leading zeros name the same reference (`W1-T012187` is `W1-T12187`, `#007` is `#7`), and a zero
+ *  (`#0`, `W1-T0`) names nothing. None for a non-string. */
+export function rationaleReferences(rationale) {
+  const refs = new Set();
+  if (typeof rationale !== "string") return refs;
+  for (const [, pr, task] of rationale.matchAll(PR_REFERENCES_RE)) {
+    const n = BigInt(pr ?? task);
+    if (n > 0n) refs.add(pr === undefined ? `W1-T${n}` : `#${n}`);
+  }
+  return refs;
+}
+
+/** A reviewed bump names itself: at least one {@link rationaleReferences} reference. */
 export function bumpRationaleNamesAPr(rationale) {
-  return typeof rationale === "string" && rationale.trim().length > 0 && PR_REFERENCE_RE.test(rationale);
+  return rationaleReferences(rationale).size > 0;
+}
+
+/** No plan to check a task reference against, so none counts. The default for a caller that passes no plan. */
+export const NO_PLAN = Object.freeze({ has: () => false, unreadable: "no plan was given to check task references against" });
+
+/** The tasks a `W1-T<n>` reference may name: one per `<root>/plan/tasks.d/W1-T<n>-*.yaml` (either case). A plan
+ *  directory that cannot be listed counts no task, and `unreadable` says why. A `#<n>` PR cannot be proven offline. */
+export function planTasks(root) {
+  let names;
+  try {
+    names = readdirSync(join(root, "plan", "tasks.d"));
+  } catch (e) {
+    return { has: () => false, unreadable: `cannot list plan/tasks.d under ${root} (${String(e.message ?? e)})` };
+  }
+  const ids = new Set();
+  for (const name of names) {
+    const m = PLAN_SHARD_RE.exec(name);
+    if (m && BigInt(m[1]) > 0n) ids.add(`W1-T${BigInt(m[1])}`);
+  }
+  return { has: (ref) => ids.has(ref) };
+}
+
+/** The references in `newRationale` that review THIS move: absent from `oldRationale` as numbers, and, for a task,
+ *  a shard in `plan`. A padded, re-spelled or zero-padded copy of an old reference reviews nothing new.
+ *  `unknownTasks` are the new task references `plan` does not hold. */
+export function freshReviewReferences(newRationale, oldRationale, plan = NO_PLAN) {
+  const previous = rationaleReferences(oldRationale);
+  const fresh = [];
+  const unknownTasks = [];
+  for (const ref of rationaleReferences(newRationale)) {
+    if (previous.has(ref)) continue;
+    if (ref.startsWith("W1-T") && !plan.has(ref)) unknownTasks.push(ref);
+    else fresh.push(ref);
+  }
+  return { fresh, unknownTasks };
 }
 
 /**
  * Pure verdict for one {@link SCORE_TABLE} row. `oldJson` is `undefined` when the file did not
  * exist at the base ref -- a brand-new baseline has nothing to regress against and always passes.
- * A regression passes only when `newJson.bumpRationale` names a PR/task AND differs from
- * `oldJson.bumpRationale` -- a stale rationale, carried over from an earlier reviewed move, must
- * not cover a fresh one.
+ * A regression passes only when `newJson.bumpRationale` names a PR or task the previous rationale
+ * did not ({@link freshReviewReferences}; a task must be in `plan`) -- a stale rationale, carried
+ * over from an earlier reviewed move, must not cover a fresh one, however its text is padded.
  */
-export function evaluateRow(entry, oldJson, newJson) {
+export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN) {
   const { path, field, direction } = entry;
   if (oldJson === undefined) {
     return { ...entry, status: "new", ok: true, detail: `${path}: new baseline file, nothing at origin/main to compare against` };
@@ -76,17 +141,20 @@ export function evaluateRow(entry, oldJson, newJson) {
   if (!isRegression(oldValue, newValue, direction)) {
     return { ...entry, status: "ok", ok: true, oldValue, newValue, detail: `${path}: ${field} ${oldValue} -> ${newValue}, not a regression` };
   }
-  if (bumpRationaleNamesAPr(newJson.bumpRationale) && newJson.bumpRationale !== oldJson.bumpRationale) {
+  const { fresh, unknownTasks } = freshReviewReferences(newJson.bumpRationale, oldJson.bumpRationale, plan);
+  if (fresh.length > 0) {
     return {
       ...entry,
       status: "reviewed-bump",
       ok: true,
       oldValue,
       newValue,
-      detail: `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main, but a fresh bumpRationale names the review`,
+      detail: `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main, but its bumpRationale names ${fresh.join(", ")}, which the previous rationale did not`,
     };
   }
   const kind = direction === "increase" ? "floor" : "ceiling";
+  const unknown = unknownTasks.length === 0 ? "" :
+    ` ${unknownTasks.join(", ")} cannot count: ${plan.unreadable ?? "no plan/tasks.d shard declares it"}.`;
   return {
     ...entry,
     status: "regressed",
@@ -95,8 +163,9 @@ export function evaluateRow(entry, oldJson, newJson) {
     newValue,
     detail:
       `${path}: ${field} moved ${oldValue} -> ${newValue} against origin/main -- the WRONG direction for this ${kind}. ` +
-      `Restore it, or if the move is deliberate and reviewed, add a fresh "bumpRationale" string to ${path} naming the PR ` +
-      `(a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json already follows.`,
+      `Restore it, or if the move is deliberate and reviewed, write a "bumpRationale" in ${path} that names a PR or task ` +
+      `the previous rationale did not (a "#<n>" or "W1-T<n>" reference), the convention scripts/claude-md-budget-baseline.json ` +
+      `already follows. Rewording, padding or zero-padding the old rationale's references does not count.${unknown}`,
   };
 }
 
@@ -157,11 +226,12 @@ export function main(argv) {
     }
   }
   const results = [];
+  const plan = planTasks(root);
   try {
     for (const entry of table) {
       const oldJson = readJsonAtRef(root, values.base, entry.path);
       const newJson = readJsonFromWorkingTree(root, entry.path);
-      results.push(evaluateRow(entry, oldJson, newJson));
+      results.push(evaluateRow(entry, oldJson, newJson, plan));
     }
   } catch (e) {
     console.error(String(e.message ?? e));
