@@ -2550,7 +2550,11 @@ const CODEX_READ_NON_MESSAGE_ITEM_TYPES: ReadonlySet<string> = new Set(CODEX_EVE
  *  reads, not agent_message, and whose bytes hold no agent_message token is known not to be one. */
 function couldBeCodexAgentMessage(event: CodexJsonEvent, line: string): boolean {
   if (/"agent_message"/.test(line) || typeof event.type !== "string") return true;
-  if (CODEX_ITEM_EVENT_TYPES.has(event.type)) return !CODEX_READ_NON_MESSAGE_ITEM_TYPES.has(event.item?.type ?? "");
+  if (CODEX_ITEM_EVENT_TYPES.has(event.type)) {
+    // An item with no string type is as unknown as one of a type this file does not read.
+    const itemType = event.item?.type;
+    return typeof itemType !== "string" || !CODEX_READ_NON_MESSAGE_ITEM_TYPES.has(itemType);
+  }
   return !CODEX_READ_EVENT_TYPES.has(event.type);
 }
 
