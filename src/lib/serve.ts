@@ -3766,9 +3766,14 @@ export function startIncidentInvariantsMonitor(
     stallProfiler.stop();
     try {
       flushPending();
-    } catch (e) {
-      // Reported, not thrown: a stop must finish even when the ledger refuses the last profile rows.
-      deps.log?.("serve.incident_invariants.profile_flush_failed", { reason: String((e as Error)?.message ?? e) });
+    } catch (error) {
+      // The service logger writes to the same ledger. Use stderr so shutdown can continue.
+      try {
+        console.error("serve: failed to flush pending loop-stall profiles", String((error as Error)?.message ?? error));
+      } catch (diagnosticError) {
+        // Even when stderr is unavailable, the close handler must finish the remaining cleanup.
+        void diagnosticError;
+      }
     }
   }, { stallProfiler });
 }

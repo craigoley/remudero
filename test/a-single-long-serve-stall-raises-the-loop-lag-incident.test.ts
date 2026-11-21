@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { createHistogram } from "node:perf_hooks";
 import { test } from "node:test";
@@ -157,35 +158,45 @@ test("W1-T13203 criterion 2: a long stall profile still waiting for its lag samp
   });
 });
 
-test("W1-T13203: a stop whose last profile row the ledger refuses still finishes, and says why", async () => {
-  await withTempDir("serve-long-stall-stop-refused", (dir) => {
-    const path = join(dir, "ledger.ndjson");
-    const watchdog = Object.assign(new EventEmitter(), { unref() {}, async terminate() { return 0; } });
-    const fold: StallFold = {
-      chunks: 1, profiledUs: 34_000_000, inclusive: new Map(),
-      self: new Map(), callers: new Map(), syncSpawn: new Map(), syncSpawnUs: 0,
-    };
-    let nowMs = NOW - INCIDENT_INVARIANTS_INTERVAL_MS;
-    let tick: (() => void) | undefined;
-    const logged: Array<[string, Record<string, unknown> | undefined]> = [];
-    const stop = startIncidentInvariantsMonitor(path, {
-      clock: { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() },
-      eventLoopLag: () => ({ p50Ms: 20, p99Ms: 108.6, maxMs: 200, windowMs: INCIDENT_INVARIANTS_INTERVAL_MS }),
-      setInterval: ((cb: () => void) => { tick = cb; return { unref() {} }; }) as unknown as typeof setInterval,
-      clearInterval: () => {},
-      writeLedger: (ledger, line, options) => {
-        if ((line as { step?: unknown }).step === RUNTIME_LOOP_STALL_PROFILE_STEP) throw new Error("ledger refused");
-        return appendLedger(ledger, line, { ...options, clock: options?.clock ?? fixedClock(nowMs) });
-      },
-      stallProfiler: { spawn: () => watchdog as unknown as Worker },
-      log: (step, extra) => { logged.push([step, extra]); },
+for (const stderrFails of [false, true]) {
+  test(`W1-T13203: a refused profile append cannot interrupt shutdown (stderr fails: ${stderrFails})`, async (t) => {
+    await withTempDir("serve-long-stall-stop-refused", (dir) => {
+      const path = join(dir, "ledger.ndjson");
+      const watchdog = Object.assign(new EventEmitter(), { unref() {}, async terminate() { return 0; } });
+      const fold: StallFold = {
+        chunks: 1, profiledUs: 34_000_000, inclusive: new Map(),
+        self: new Map(), callers: new Map(), syncSpawn: new Map(), syncSpawnUs: 0,
+      };
+      let nowMs = NOW - INCIDENT_INVARIANTS_INTERVAL_MS;
+      let tick: (() => void) | undefined;
+      let ledgerLogCalls = 0;
+      const stderr = t.mock.method(console, "error", () => {
+        if (stderrFails) throw new Error("stderr unavailable");
+      });
+      const stop = startIncidentInvariantsMonitor(path, {
+        clock: { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() },
+        eventLoopLag: () => ({ p50Ms: 20, p99Ms: 108.6, maxMs: 200, windowMs: INCIDENT_INVARIANTS_INTERVAL_MS }),
+        setInterval: ((cb: () => void) => { tick = cb; return { unref() {} }; }) as unknown as typeof setInterval,
+        clearInterval: () => {},
+        stallProfiler: { spawn: () => watchdog as unknown as Worker },
+        log: (step, extra) => {
+          ledgerLogCalls++;
+          appendLedger(path, { run_id: "SERVE-test", task_id: "SERVE", step, lane: "serve", ...extra });
+        },
+      });
+      assert.ok(tick);
+      tick();
+      nowMs = NOW;
+      watchdog.emit("message", { kind: "profile", beat: 1, recoveredAtMs: NOW - 10, silent_ms: 35_000, unprofiled_ms: 1_000, fold });
+      renameSync(path, join(dir, "previous.ndjson"));
+      mkdirSync(path);
+
+      assert.doesNotThrow(stop);
+      assert.equal(ledgerLogCalls, 0, "shutdown diagnostics bypass the ledger logger");
+      assert.equal(stderr.mock.callCount(), 1);
+      const [message, detail] = stderr.mock.calls[0]!.arguments;
+      assert.equal(message, "serve: failed to flush pending loop-stall profiles");
+      assert.match(String(detail), /EISDIR/);
     });
-    assert.ok(tick);
-    tick();
-    nowMs = NOW;
-    watchdog.emit("message", { kind: "profile", beat: 1, recoveredAtMs: NOW - 10, silent_ms: 35_000, unprofiled_ms: 1_000, fold });
-    assert.doesNotThrow(() => stop());
-    assert.deepEqual(logged.filter(([step]) => step === "serve.incident_invariants.profile_flush_failed"),
-      [["serve.incident_invariants.profile_flush_failed", { reason: "ledger refused" }]]);
   });
-});
+}
