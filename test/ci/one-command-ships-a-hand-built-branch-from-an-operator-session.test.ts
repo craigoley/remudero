@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
 import { authorPushEligibility, failingTestsFromTap, pinnedNodeReexec, testSummary } from "#scripts/preflight-author.mjs";
-import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
+import { handShipEffects, runHandShip, withTapPaths, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { configureGithubInstallationBudget } from "#src/lib/github-transport.js";
 import { GhReadBroker, serveGhReadBroker, type GhUpstreamExec, type GhUpstreamResult } from "#src/lib/gh-read-broker.js";
 import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
@@ -15,11 +15,12 @@ import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short
 import type { InstallationBudget } from "#src/lib/github-installation-budget.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { worktreePushExecAsync } from "#src/lib/git-push.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { HANDLERS, handShipStopRunId, installUnhandledRejectionGuard, main as cliMain } from "#test/helpers/run-task-test.js";
+import { HAND_SHIP_STOP_ASSESS_TIMEOUT_MS, HANDLERS, handShipStopRunId, installUnhandledRejectionGuard, main as cliMain } from "#test/helpers/run-task-test.js";
 import { checkCliFreshness } from "#src/lib/self-sync.js";
 
 const head = "1".repeat(40);
@@ -45,16 +46,22 @@ function redReceipt(titles: string[]): ShipReceipt {
     diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: titles.length, cancelled: 0 },
   };
   result.failureAttribution = { counts: { failingAtHead: titles.length, unattributed: 0 },
-    tests: titles.map((title, index) => ({ file, title, location: `${index + 1}:1` })) };
+    tests: titles.map((title, index) => ({ file, title, path: tapPath(title), location: `${index + 1}:1` })) };
   return result;
 }
 
-function rerunResults(titles: string[]) {
-  return titles.map((title, index) => ({ file, title, location: `${index + 1}:1`, declaration: title, failed: true }));
+/** A fake row's TAP ancestry. No fixture name here holds a literal ` > `, so its title spells its nesting;
+ *  production never reads nesting from a title (see the criterion 3 test of a top-level `a > b`). */
+function tapPath(title: string): string[] {
+  return title.split(" > ");
 }
 
-function passingResults(titles: string[]): { file: string; title: string; location: null; failed: boolean }[] {
-  return titles.map((title) => ({ file, title, location: null, failed: false }));
+function rerunResults(titles: string[]) {
+  return titles.map((title, index) => ({ file, title, path: tapPath(title), location: `${index + 1}:1`, declaration: title, failed: true }));
+}
+
+function passingResults(titles: string[]): { file: string; title: string; path: string[]; location: null; failed: boolean }[] {
+  return titles.map((title) => ({ file, title, path: tapPath(title), location: null, failed: false }));
 }
 
 function fixture(t: TestContext) {
@@ -113,11 +120,12 @@ test("W1-T12169 criterion 2 asks the Mac launcher for low priority", async (t) =
 test("W1-T12169 criterion 3 compares isolated head failures with unchanged main on the same host", async (t) => {
   const f = fixture(t);
   f.workspace.preflight = async () => redReceipt(["flake", "existing red", "regression"]);
-  f.workspace.rerun = async (tree, target, sha, title) => {
+  f.workspace.rerun = async (tree, target, sha, path) => {
+    const title = path?.join(" > ");
     f.calls.push(`${tree} ${target} ${sha} ${title ?? ""}`);
     if (title === "flake" && tree === "head") return passingResults(["flake"]);
-    if (title === "existing red") return [{ file, title, location: "2:1", declaration: title, failed: true }];
-    if (title === "regression" && tree === "head") return [{ file, title, location: "3:1", declaration: title, failed: true }];
+    if (title === "existing red") return rerunResults([title]).map((row) => ({ ...row, location: "2:1" }));
+    if (title === "regression" && tree === "head") return rerunResults([title]).map((row) => ({ ...row, location: "3:1" }));
     return [];
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
@@ -144,8 +152,8 @@ test("workflow contract failures are isolated on head and unchanged main before 
     steps: [{ name: "census-precheck", ok: true }, { name: "workflow-contract-precheck", ok: false,
       suites: [file], diagnostics: { mayBeIncomplete: false }, testSummary: { pass: 1, fail: 1, cancelled: 0 } }],
   });
-  f.workspace.rerun = async (tree, target, _sha, title) => {
-    f.calls.push(`${tree} ${target} ${title ?? ""}`);
+  f.workspace.rerun = async (tree, target, _sha, path) => {
+    f.calls.push(`${tree} ${target} ${path?.join(" > ") ?? ""}`);
     return tree === "head" ? rerunResults(["head contract failure"]) : rerunResults(["main contract failure"]);
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
@@ -260,7 +268,7 @@ test("one occurrence on main accounts for only one same-location duplicate failu
   original.failureAttribution!.tests!.forEach((test) => { test.location = "7:3"; });
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => (tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"])
-    .map((title) => ({ file, title, location: "7:3", declaration: title, failed: true }));
+    .map((title) => ({ file, title, path: [title], location: "7:3", declaration: title, failed: true }));
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
@@ -273,9 +281,9 @@ test("a nested target comparison ignores sibling results from its selected paren
   original.failureAttribution!.tests![0]!.location = "10:1";
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => [
-    { file, title: "parent", location: "9:1", failed: true, suite: true },
-    { file, title: "parent > leaf", location: "10:1", declaration: "first registration", failed: true },
-    { file, title: "parent > sibling", location: "11:1", failed: tree === "head" },
+    { file, title: "parent", path: ["parent"], location: "9:1", failed: true, suite: true },
+    { file, title: "parent > leaf", path: ["parent", "leaf"], location: "10:1", declaration: "first registration", failed: true },
+    { file, title: "parent > sibling", path: ["parent", "sibling"], location: "11:1", failed: tree === "head" },
   ];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main.*parent > leaf/);
@@ -289,8 +297,8 @@ test("different same-title failures at distinct source locations never become ba
   original.failureAttribution!.tests![1]!.location = "20:1";
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => tree === "head"
-    ? [{ file, title: "duplicate", location: "10:1", declaration: "first registration", failed: true }, { file, title: "duplicate", location: "20:1", declaration: "second registration", failed: true }]
-    : [{ file, title: "duplicate", location: "25:1", declaration: "different registration", failed: true }];
+    ? [{ file, title: "duplicate", path: ["duplicate"], location: "10:1", declaration: "first registration", failed: true }, { file, title: "duplicate", path: ["duplicate"], location: "20:1", declaration: "second registration", failed: true }]
+    : [{ file, title: "duplicate", path: ["duplicate"], location: "25:1", declaration: "different registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
   assert.doesNotMatch(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
@@ -302,7 +310,7 @@ test("a failing test that only moved lines between main and head is also failing
   const original = redReceipt(["unchanged red"]);
   original.failureAttribution!.tests![0]!.location = "11:1";
   f.workspace.preflight = async () => original;
-  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", location: tree === "head" ? "11:1" : "10:1", declaration: "same registration", failed: true }];
+  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", path: ["unchanged red"], location: tree === "head" ? "11:1" : "10:1", declaration: "same registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: unchanged red/);
   assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
@@ -332,12 +340,12 @@ test("the production rerun selects one nested leaf and retains passing TAP rows 
   const source = await defaults.readSource(repo.dir, run);
   const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
   try {
-    const rows = await workspace.rerun("head", file, source.head, "parent > leaf");
+    const rows = await workspace.rerun("head", file, source.head, ["parent", "leaf"]);
     assert.ok(rows.some((row) => row.title === "parent > leaf" && row.failed === true));
     assert.ok(rows.some((row) => row.title === "parent" && row.failed === true && row.suite === true));
     assert.ok(!rows.some((row) => row.title === "parent > sibling"), "the sibling must be skipped by the runner");
     assert.doesNotMatch(readFileSync(join(f.root, "commands.log"), "utf8"), /DYNAMIC SIBLING RAN/);
-    const passingSibling = await workspace.rerun("head", file, source.head, "parent > sibling");
+    const passingSibling = await workspace.rerun("head", file, source.head, ["parent", "sibling"]);
     assert.ok(passingSibling.some((row) => row.file === file && row.title === "parent > sibling" &&
       row.failed === false && row.location === null), `a locationless passing TAP row keeps its known input file: ${JSON.stringify(passingSibling)}`);
   } finally {
@@ -517,18 +525,18 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.deepEqual(spawned[0], ["-n", "10", pinned, "--import", "tsx", "scripts/preflight-author.mjs",
       "--head-ref", branch, "--head-sha", source.head]);
     assert.deepEqual(await workspace.rerun("head", file, source.head), [
-      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+      { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true },
     ]);
-    assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
-      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true, declaration: undefined },
+    assert.deepEqual(await workspace.rerun("head", file, source.head, ["existing red"]), [
+      { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true, declaration: undefined },
     ]);
     assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^existing red$"), "the isolated rerun selects the named failure");
     assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
     assert.ok(!spawned.at(-1)!.some((arg) => /expose-internals|node:internal/.test(decodeURIComponent(arg))), "with public runner flags only");
     // A row that is neither the target nor one of its ancestors means the rerun did not run the target alone.
-    await assert.rejects(workspace.rerun("main", file, base, "other"), /also ran "existing red", so it did not run the named test alone/);
+    await assert.rejects(workspace.rerun("main", file, base, ["other"]), /also ran "existing red", so it did not run the named test alone/);
     assert.deepEqual(await workspace.rerun("main", file, base), [
-      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+      { file, title: "existing red", path: ["existing red"], location: "1:1", fileLevel: false, failed: true },
     ]);
     assert.ok(spawned.slice(1).every((args) => args.includes("--test-concurrency=1") && args.at(-1) === file));
     receiptBound = false;
@@ -668,7 +676,7 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]], "no force option and no `+` refspec");
   assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
-  await assert.rejects(defaults.push(source, run), /changed during verification/);
+  await assert.rejects(defaults.push(source, run), new RegExp(`HEAD moved during verification: the checks ran on ${source.head} but HEAD now reads ${repo.git("rev-parse", "HEAD")}`));
   assert.equal(requests.length, 1);
 });
 
@@ -790,10 +798,10 @@ test("a named failure on a separate SSH host is isolated there and compared with
     const scratch = readdirSync(join(remote, "tmp")).find((name) => name.startsWith("rmd-hand-ship."))!;
     assert.ok(scratch, "the scratch checkout is on the host");
     assert.equal(existsSync(join("/tmp", scratch)), false, "the operator's filesystem has no copy of the host's scratch path");
-    const headRows = await workspace.rerun("head", file, source.head, "parent > leaf");
+    const headRows = await workspace.rerun("head", file, source.head, ["parent", "leaf"]);
     assert.ok(headRows.some((row) => row.title === "parent > leaf" && row.failed === true), JSON.stringify(headRows));
     assert.ok(!headRows.some((row) => row.title === "parent > sibling"));
-    const mainRows = await workspace.rerun("main", file, source.head, "parent > leaf");
+    const mainRows = await workspace.rerun("main", file, source.head, ["parent", "leaf"]);
     assert.ok(mainRows.some((row) => row.title === "parent > leaf" && row.failed === true), JSON.stringify(mainRows));
   } finally {
     await workspace.close();
@@ -848,11 +856,11 @@ test("W1-T12169 criterion 3: a failing it inside a describe is isolated on head 
   const source = await defaults.readSource(repo.dir, run);
   const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
   try {
-    const rows = await workspace.rerun("head", file, source.head, "group > leaf");
+    const rows = await workspace.rerun("head", file, source.head, ["group", "leaf"]);
     assert.ok(rows.some((row) => row.title === "group > leaf" && row.failed === true && !row.suite), JSON.stringify(rows));
     assert.ok(rows.some((row) => row.title === "group" && row.failed === true && row.suite === true), JSON.stringify(rows));
     assert.ok(!rows.some((row) => row.title === "group > sibling"), "the sibling must be skipped by the runner");
-    const mainRows = await workspace.rerun("main", file, source.head, "group > leaf");
+    const mainRows = await workspace.rerun("main", file, source.head, ["group", "leaf"]);
     assert.ok(mainRows.some((row) => row.title === "group > leaf" && row.failed === true), JSON.stringify(mainRows));
   } finally {
     await workspace.close();
@@ -1030,15 +1038,15 @@ test("W1-T12169 criterion 3: a nested test red on head and main is classified by
   const reruns: string[] = [];
   f.effects.readSource = async () => source;
   f.effects.prepare = async () => ({
-    preflight: async () => ({
+    preflight: async () => withTapPaths({
       headSha: source.head, baseSha: mainSha, verdict: "failed",
       steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
         name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
         testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
       }],
       failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
-    }),
-    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    }, tap.stdout, realpathSync(repo.dir)),
+    rerun: async (tree, target, sha, path, count) => { reruns.push(`${tree} ${path?.join(" > ")}`); return real.rerun(tree, target, sha, path, count); },
     close: () => real.close(),
   });
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
@@ -1130,15 +1138,15 @@ test("W1-T12169 criterion 3: a failing test registered with a computed title is 
   const reruns: string[] = [];
   f.effects.readSource = async () => source;
   f.effects.prepare = async () => ({
-    preflight: async () => ({
+    preflight: async () => withTapPaths({
       headSha: source.head, baseSha: mainSha, verdict: "failed",
       steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
         name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
         testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
       }],
       failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
-    }),
-    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    }, tap.stdout, realpathSync(repo.dir)),
+    rerun: async (tree, target, sha, path, count) => { reruns.push(`${tree} ${path?.join(" > ")}`); return real.rerun(tree, target, sha, path, count); },
     close: () => real.close(),
   });
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
@@ -1325,14 +1333,14 @@ function realReceipt(repo: GitRepo, headSha: string, baseSha: string): ShipRecei
     { cwd: repo.dir, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT" && key !== "NODE_OPTIONS")) });
   const named = failingTestsFromTap(tap.stdout, realpathSync(repo.dir)) as { file: string; title: string }[];
   const summary = testSummary(tap.stdout);
-  return {
+  return withTapPaths({
     headSha, baseSha, verdict: "failed",
     steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
       name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
       testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
     }],
     failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
-  };
+  }, tap.stdout, realpathSync(repo.dir));
 }
 
 test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic parent with public runner filters, and no sibling runs", async (t) => {
@@ -1379,24 +1387,24 @@ test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic 
   const ranSince = (from: number) => [...readFileSync(commands, "utf8").slice(from).matchAll(/RAN ([^\n]*)/g)].map((match) => match[1]);
   try {
     let from = 0;
-    const nested = await workspace.rerun("head", file, source.head, "outer > dynamic parent > case one");
+    const nested = await workspace.rerun("head", file, source.head, ["outer", "dynamic parent", "case one"]);
     assert.deepEqual(nested.map((row) => [row.title, row.failed]),
       [["outer > dynamic parent > case one", true], ["outer > dynamic parent", true], ["outer", true]], JSON.stringify(nested));
     assert.deepEqual(ranSince(from), ["case one"], "only the target's own body runs: no sibling at any depth, and not the top-level namesake");
     from = readFileSync(commands, "utf8").length;
-    const spaced = await workspace.rerun("head", file, source.head, "a > b c");
+    const spaced = await workspace.rerun("head", file, source.head, ["a", "b c"]);
     assert.deepEqual(spaced.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(spaced));
     assert.deepEqual(ranSince(from), ["a > b c"], "the other path to the same spaced name does not run");
     from = readFileSync(commands, "utf8").length;
-    const collided = await workspace.rerun("head", collision, source.head, "a > b c");
+    const collided = await workspace.rerun("head", collision, source.head, ["a", "b c"]);
     assert.deepEqual(collided.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(collided));
     assert.deepEqual(ranSince(from), [], "the top-level namesake's callback never runs");
     from = readFileSync(commands, "utf8").length;
     // Node's TAP writes `#` as `\#` and `\` as `\\`; the rerun selects the name Node registered.
-    const escaped = await workspace.rerun("head", file, source.head, "hash \\# and back\\\\slash");
+    const escaped = await workspace.rerun("head", file, source.head, ["hash \\# and back\\\\slash"]);
     assert.deepEqual(escaped.map((row) => [row.title, row.failed]), [["hash \\# and back\\\\slash", false]], JSON.stringify(escaped));
     assert.deepEqual(ranSince(from), ["escaped name"]);
-    await assert.rejects(workspace.rerun("head", file, source.head, "line\\nbreak"), /TAP escape .* names more than one test/);
+    await assert.rejects(workspace.rerun("head", file, source.head, ["line\\nbreak"]), /TAP escape .* names more than one test/);
   } finally {
     await workspace.close();
   }
@@ -1436,7 +1444,7 @@ test("W1-T12169 criterion 3: a named failure on a branch whose package-lock.json
   f.effects.readSource = async () => source;
   f.effects.prepare = async () => ({
     preflight: async () => realReceipt(repo, source.head, mainSha),
-    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    rerun: async (tree, target, sha, path, count) => { reruns.push(`${tree} ${path?.join(" > ")}`); return real.rerun(tree, target, sha, path, count); },
     close: () => real.close(),
   });
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
@@ -1656,7 +1664,7 @@ test("W1-T12169 criterion 2: a child that resolves node through PATH finds the p
   const workspace = await defaults.prepare({ ...linux, kind: "mac" }, source, run);
   try {
     await workspace.preflight("low");
-    await workspace.rerun("head", file, source.head, "existing red");
+    await workspace.rerun("head", file, source.head, ["existing red"]);
   } finally {
     await workspace.close();
   }
@@ -1804,4 +1812,173 @@ test("W1-T12169 criterion 5: ship, worktree creation and every other stop shape 
   assert.equal(handShipStopRunId("doctor", ["ship", "stop", liveRunId]), undefined);
   // Nine CLI runs later, the process's own exit is the real one again — the runner calls it last.
   assert.equal(process.exit, realExit, "every CLI run put the real process.exit back");
+});
+
+test("W1-T12169 criterion 3: a top-level test whose own name holds ` > ` is selected by its TAP nesting, never by splitting its title", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  // The reviewer's case (test/rate-limit-bucket-surface.test.ts): a TOP-LEVEL name with a literal ` > `, beside a
+  // passing nested `bucket` > `refills` whose title text is the same. Split as text, the red one reads as nested.
+  writeFileSync(join(repo.dir, file), ['import { test } from "node:test";',
+    'test("bucket", async (context) => { await context.test("refills", () => { console.log("RAN NESTED"); }); });',
+    'test("bucket > refills", () => { console.log("RAN TOP-LEVEL"); throw new Error("red on both revisions"); });', ""].join("\n"));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "main: the top-level test is already red");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  repo.git("commit", "--allow-empty", "-m", "the hand change");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const receipt = realReceipt(repo, source.head, mainSha);
+  assert.deepEqual(receipt.failureAttribution!.tests!.map((test) => [test.title, test.path]), [["bucket > refills", ["bucket > refills"]]],
+    "the receipt's failure gets its ancestry from the TAP nesting: one top-level name");
+  const reruns: string[] = [];
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({
+    preflight: async () => receipt,
+    rerun: async (tree, target, sha, path, count) => { reruns.push(`${tree} ${JSON.stringify(path)}`); return real.rerun(tree, target, sha, path, count); },
+    close: () => real.close(),
+  });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
+  const log = f.lines.join("\n");
+  assert.doesNotMatch(log, /comparison unavailable|ran 0 tests/, log);
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: bucket > refills$/m);
+  assert.deepEqual(reruns, ['head ["bucket > refills"]', 'main ["bucket > refills"]']);
+  const commands = readFileSync(join(f.root, "commands.log"), "utf8");
+  assert.equal(commands.match(/RAN TOP-LEVEL/g)?.length, 2, "the red top-level test runs alone on head and on main");
+  assert.doesNotMatch(commands, /RAN NESTED/, "its nested namesake never runs");
+  assert.ok(f.calls.includes(`push ${source.head}`));
+});
+
+test("W1-T12169 criterion 3: a rerun filter that runs 0 tests is an error that names itself, never a pass", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  writeFileSync(join(repo.dir, file), 'import { test } from "node:test";\ntest("present", () => {});\n');
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "one test");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  try {
+    await assert.rejects(workspace.rerun("head", file, source.head, ["absent"]),
+      /head test\/ci\/example\.test\.ts: the rerun filter for "absent" ran 0 tests \(--test-name-pattern=\^absent\$ .*\), so it selected nothing/);
+    // On main a test the change adds is simply not there yet: the unfiltered file shows no test starts its path.
+    assert.deepEqual(await workspace.rerun("main", file, source.head, ["absent"]), []);
+  } finally {
+    await workspace.close();
+  }
+  // The receipt's failure has no TAP ancestry to select by: the comparison refuses and names it, and never reruns.
+  const unplaced = redReceipt(["no nesting"]);
+  delete unplaced.failureAttribution!.tests![0]!.path;
+  f.workspace.preflight = async () => unplaced;
+  f.workspace.rerun = async () => assert.fail("a failure without TAP ancestry is never rerun by a guess");
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
+  assert.match(f.lines.join("\n"), /the preflight's TAP report did not give the nesting of test\/ci\/example\.test\.ts :: no nesting/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+  // Two differently nested failing rows with one joined title are ambiguous, so neither gets an ancestry.
+  const tap = (name: string, indent: string) => `${indent}not ok 1 - ${name}\n${indent}  ---\n${indent}  location: '${join(f.root, file)}:1:1'\n${indent}  ...\n`;
+  const both = withTapPaths(redReceipt(["a > b"]), `# Subtest: a\n${tap("b", "    ")}${tap("a", "")}${tap("a > b", "")}`, f.root);
+  assert.equal(both.failureAttribution!.tests![0]!.path, undefined);
+  assert.deepEqual(withTapPaths(redReceipt(["a > b"]), `# Subtest: a\n${tap("b", "    ")}${tap("a", "")}`, f.root)
+    .failureAttribution!.tests![0]!.path, ["a", "b"]);
+});
+
+test("the production preflight reads the failed step's own TAP log to give each named failure its nesting", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  const base = seedHandBranch(repo, true);
+  const defaults = handShipEffects(() => 0);
+  let logPath = "coverage/rmd-author-x/affected-tests.stdout.log";
+  const run: Parameters<HandShipEffects["readSource"]>[1] = {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(command, args, options) {
+      if (!args.includes("scripts/preflight-author.mjs")) return spawn(command, args, options);
+      const cwd = String(options.cwd);
+      const red = redReceipt(["x > y"]);
+      delete red.failureAttribution!.tests![0]!.path;
+      red.steps[2]!.diagnostics = { mayBeIncomplete: false, stdout: logPath };
+      mkdirSync(join(cwd, "coverage/rmd-author-x"), { recursive: true });
+      writeFileSync(join(cwd, "coverage/preflight-author.json"), JSON.stringify({ ...red, headSha: repo.git("rev-parse", "HEAD"), baseSha: base,
+        version: 1, dryRun: false, publicationIdentity: { state: "passed", headRef: branch } }));
+      writeFileSync(join(cwd, "coverage/rmd-author-x/affected-tests.stdout.log"),
+        `not ok 1 - x > y\n  ---\n  location: '${join(cwd, file)}:1:1'\n  ...\n`);
+      return spawn(process.execPath, ["-e", "process.exitCode = 1"], options);
+    },
+  };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...linux }, source, run);
+  try {
+    assert.deepEqual((await workspace.preflight("normal")).failureAttribution!.tests!.map((test) => test.path), [["x > y"]]);
+    logPath = "../outside.stdout.log";
+    assert.deepEqual((await workspace.preflight("normal")).failureAttribution!.tests!.map((test) => test.path), [undefined],
+      "a log path outside the preflight's own diagnostics is never read");
+  } finally {
+    await workspace.close();
+  }
+});
+
+test("W1-T12169 criterion 4: a commit made while the push is verified is never sent unchecked, before or during the pre-push gate", async (t) => {
+  for (const when of ["before", "during"] as const) {
+    const f = fixture(t);
+    const repo = gitRepo({ scope: t });
+    seedHandBranch(repo);
+    // The operator's commit lands inside the pre-push gate, where Rule 15 reads HEAD.
+    const gate = harnessGate(t, when === "during"
+      ? 'cat > /dev/null; git -c user.name=operator -c user.email=operator@example.com commit -q --allow-empty -m moved; echo ran >> "$MARK"'
+      : 'cat > /dev/null; echo ran >> "$MARK"');
+    const requests: string[][] = [];
+    const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+    const offline = offlinePushRun(f);
+    let moved = false;
+    const run = { ...offline, git: (async (cwd, args, options) => {
+      // ...or just after the last HEAD read, before the gate starts: the remote read is the gate's first step.
+      if (when === "before" && args[0] === "ls-remote" && !moved) { moved = true; repo.git("commit", "--allow-empty", "-m", "moved"); }
+      return offline.git(cwd, args, options);
+    }) satisfies typeof hostWorktreeGitAsync };
+    const source = await defaults.readSource(repo.dir, run);
+    await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), (error: Error) => {
+      assert.match(error.message, new RegExp(`HEAD moved ${when === "before" ? "before" : "after"} the pre-push gate: the push sends ${source.head} ` +
+        `but HEAD reads ${repo.git("rev-parse", "HEAD")}`), error.message);
+      return true;
+    });
+    assert.notEqual(repo.git("rev-parse", "HEAD"), source.head);
+    assert.deepEqual(requests, [], `${when}: nothing is pushed`);
+    assert.equal(existsSync(gate), when === "during", `${when}: the gate runs only while HEAD is the sha it checks`);
+  }
+});
+
+test("W1-T12169 criterion 4: a required pre-push gate pushes only an explicit sha refspec, never HEAD", async (t) => {
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  harnessGate(t, "cat > /dev/null");
+  const pushed: string[][] = [];
+  const execute = worktreePushExecAsync(repo.dir, { requireGate: true, push: async (_cwd, args) => { pushed.push([...args]); return ""; } });
+  for (const refspec of ["HEAD", `HEAD:refs/heads/${branch}`, `${branch}:refs/heads/${branch}`]) {
+    await assert.rejects(async () => execute("git", ["-C", repo.dir, "push", "origin", refspec], { stdio: "ignore" }),
+      /a required pre-push gate pushes an explicit <sha>:<ref> refspec, never/, refspec);
+  }
+  assert.deepEqual(pushed, []);
+});
+
+test("W1-T12169 criterion 5: ship stop writes the stop marker before the freshness assessment touches Git transport", async (t) => {
+  const { checkFreshness } = behindWithOverlappingEdit(t);
+  let runDir = "";
+  const markerAtAssessment: boolean[] = [];
+  const run = await cliUnderGate(t, ["hand-worktree", "ship", "stop", liveRunId], {
+    // The assessment's first Git call is the origin fetch, which a stalled transport or credential helper holds.
+    checkFreshness: (dir, env, deps) => { markerAtAssessment.push(existsSync(join(runDir, "stop"))); return checkFreshness(dir, env, deps); },
+  }, (root) => { runDir = seedLiveRun(root); });
+  assert.equal(run.code, 0, JSON.stringify(run));
+  assert.deepEqual(markerAtAssessment, [true], "the run is already stopped when the assessment starts its fetch");
+  assert.deepEqual(run.rows.map((row) => [row.step, row.reason]), [["self_sync.exempt", `dirty (hand-worktree ship stop ${liveRunId})`]],
+    "the exemption is still ledgered, after the stop");
+  assert.ok(HAND_SHIP_STOP_ASSESS_TIMEOUT_MS > 0 && HAND_SHIP_STOP_ASSESS_TIMEOUT_MS <= 60_000, "and its Git calls are bounded");
 });

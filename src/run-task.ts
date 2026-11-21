@@ -45249,6 +45249,10 @@ export const READ_ONLY_FRESHNESS_EXEMPT_VERBS: ReadonlySet<string> = new Set(["d
  * `ship` itself, worktree creation and any malformed or extended stop keep the gate's refusal.
  * Returns the run id when the argv is that shape, otherwise `undefined`.
  */
+/** W1-T12169: each Git call of `ship stop`'s after-the-marker freshness assessment is killed past this bound.
+ *  BACKSTOP: the stop marker is already written, so this fires only on a stalled transport, never on a healthy fetch. */
+export const HAND_SHIP_STOP_ASSESS_TIMEOUT_MS = 20_000;
+
 export function handShipStopRunId(cmd: string | undefined, rest: readonly string[]): string | undefined {
   if (cmd !== "hand-worktree" || rest.length !== 3 || rest[0] !== "ship" || rest[1] !== "stop") return undefined;
   return isHandShipRunId(rest[2]!) ? rest[2] : undefined;
@@ -45270,13 +45274,17 @@ export function ledgerFreshnessExemption(
   ledgerPath: () => string = cliLedgerPathWithoutConfig,
   /** W1-T12169: the exempt sub-command and its target, appended to the row's `reason`. */
   detail?: string,
+  /** W1-T12169: the bound on each of the assessment's Git calls; unbounded when omitted. */
+  gitTimeoutMs?: number,
 ): ReturnType<typeof checkCliFreshness>["status"] | "exempt" | "would-sync" | "unassessed" {
   // The assess-only git runner below switches off the check's own test-runner guard, so keep it here.
   if (!checkFreshness && testRunnerOnItsOwnCheckout(repoDir, env)) return "guarded";
   const mergeBlocked = new Error("assess only: the ff-merge is never run");
   const assessOnly = (args: string[]): string => {
     if (args[0] === "merge") throw mergeBlocked;
-    return hostWorktreeGit(repoDir, args, { env: { GIT_OPTIONAL_LOCKS: "0" } });
+    // W1-T12169: a bounded call, killed outright and never prompting, so a stalled transport cannot hold the verb.
+    return hostWorktreeGit(repoDir, args, { env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+      ...(gitTimeoutMs === undefined ? {} : { timeout: gitTimeoutMs, killSignal: "SIGKILL" }) });
   };
   let result: ReturnType<typeof checkCliFreshness>;
   try {
@@ -45832,6 +45840,8 @@ async function main(
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
+  /** W1-T12169: work a verb's exemption defers until its dispatch has acted (`ship stop`'s ledgered assessment). */
+  let afterDispatch: (() => void) | undefined;
   if (cmd === "serve") markLedgerProcessActor("service");
   else if (cmd === "deploy-run") markLedgerProcessActor("host_automation");
   else if (cmd === "daemon") markDaemonProcessActor();
@@ -45971,8 +45981,10 @@ async function main(
   } else if (handShipStopRunId(cmd, rest) !== undefined) {
     // W1-T12169 (operator ruling, option 2 "Exempt ship stop only, logged"): a stop must reach a
     // run on the very checkout the gate refuses. Assessed read-only and ledgered like gh-broker's
-    // skip — one `self_sync.exempt` row whose reason names the sub-command and the run id.
-    assessExemptFreshness(cmd!, `hand-worktree ship stop ${rest[2]}`);
+    // skip — one `self_sync.exempt` row whose reason names the sub-command and the run id. The
+    // assessment fetches origin, so it runs only AFTER the dispatch has written the stop marker:
+    // a stalled Git transport or credential helper can delay this command's exit, never the stop.
+    afterDispatch = () => assessExemptFreshness(cmd!, `hand-worktree ship stop ${rest[2]}`);
   } else {
     const freshness = (deps.checkFreshness ?? checkCliFreshness)(repoRoot, process.env, selfSyncRefusalSink(cmd, rest));
     if (freshness.status === "refused") {
@@ -46001,17 +46013,22 @@ async function main(
   }
   // W1-T4063: exit only after stdout/stderr have drained — a bare process.exit() dropped every line a
   // pipe had not yet taken (522 of 280,672 for a piped `rmd ledger-grep`).
-  await flushThenExit(
-    await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
-      ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE)),
-  );
+  let code: number;
+  try {
+    code = await withSelectedRegistryContext(registryObserver, async () => deps.dispatch
+      ? await deps.dispatch(cmd, rest, REGISTRY, USAGE) : await dispatchCommand(cmd, rest, REGISTRY, USAGE));
+  } finally {
+    afterDispatch?.();
+  }
+  await flushThenExit(code);
 }
 
 // Wire the synchronous checkout assessment at the CLI entry. The daemon-loop census can reach
 // the name `main` through unrelated fields named `main`, but the CLI alone supplies this effect.
 function runTaskCli(deps?: Parameters<typeof main>[1]): Promise<void> {
   return main((cmd, detail) => {
-    ledgerFreshnessExemption(cmd, repoRoot, process.env, deps?.checkFreshness, undefined, detail);
+    ledgerFreshnessExemption(cmd, repoRoot, process.env, deps?.checkFreshness, undefined, detail,
+      detail === undefined ? undefined : HAND_SHIP_STOP_ASSESS_TIMEOUT_MS);
   }, deps);
 }
 

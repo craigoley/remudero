@@ -499,6 +499,10 @@ function* prePushGateSteps(
   const objectId = /^[0-9a-f]{40}$/;
   const localRef = src === "HEAD" ? (headRef ?? "HEAD") : src.startsWith("refs/") || /^[0-9a-f]{40,64}$/.test(src) ? src : `refs/heads/${src}`;
   const remoteRef = dst ?? localRef;
+  // A required gate's checks read the worktree's HEAD, so the push names the exact commit they must have read.
+  if (required && !objectId.test(src)) {
+    throw new Error(`git-push: a required pre-push gate pushes an explicit <sha>:<ref> refspec, never ${JSON.stringify(src)}`);
+  }
   const localArgs = ["rev-parse", src];
   const remoteArgs = ["ls-remote", remote, remoteRef];
   const localSha = required ? String(yield* step(() => read(localArgs))).trim() : (yield* tryRead(localArgs)) ?? ZERO_SHA;
@@ -945,9 +949,21 @@ export function worktreePushExecAsync(
     // to send. An ordinary push may not run in its place: if the ref were deleted after that read, the push would
     // recreate it with none of the required checks run.
     if (requireGate && gate === undefined) return;
+    // The hook's checks (Rule 15 among them) read the worktree's HEAD, not the sha the refspec names. A required
+    // gate therefore holds only while HEAD is that sha: read before the hook and again right before the push.
+    const bindHead = async (when: string) => {
+      if (!requireGate || gate === undefined) return;
+      const sent = gate.input.trim().split(" ")[1]!;
+      const head = String(await read(["rev-parse", "HEAD"])).trim();
+      if (head !== sent) {
+        throw gateRefusal(worktreePath, pushArgs, { reason: `HEAD moved ${when}: the push sends ${sent} but HEAD reads ${head}, ` +
+          "and the pre-push checks read HEAD, so they did not check the commit this push sends; nothing was pushed" });
+      }
+    };
     if (gate) {
       const runGate = async () => {
         signal?.throwIfAborted();
+        await bindHead("before the pre-push gate");
         return runHookAsync(worktreePath, gate, signal);
       };
       const outcome = requireGate ? requiredGateOutcome(await runGate(), gate)
@@ -968,6 +984,7 @@ export function worktreePushExecAsync(
           sampled.line.split(/\s+/)[0] || "absent"} -> ${now.split(/\s+/)[0] || "absent"}), so the gate's result does not cover this push` });
       }
     }
+    await bindHead("after the pre-push gate");
     signal?.throwIfAborted();
     await pushWithAuthRetry(async (env) => {
       try {
