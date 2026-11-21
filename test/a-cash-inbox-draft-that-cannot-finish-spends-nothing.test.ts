@@ -13,7 +13,7 @@ import { draftStatsFromRows } from "#src/lib/draft-routing.js";
 import { loadMounts, mountsPath } from "#src/lib/mounts.js";
 import { cashDraftFit, openWeightAllowancePath, openWeightReservationUsd, readOpenWeightAllowance,
   reserveOpenWeightBudget, settleOpenWeightBudget, spawnOpenWeightWorker, type CashDraftFitInput } from "#src/lib/worker-provider.js";
-import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { withWorkspaceCleanup } from "#src/lib/workspace-cleanup-contract.js";
 import { buildInboxDraftHook, draftProposalBatch } from "#test/helpers/run-task-test.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -151,8 +151,8 @@ async function productionBatch(t: TestContext, opts: FixtureOptions) {
   const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); };
   const rawSpawn: typeof spawnWorker = input => {
     const args: SpawnWorkerArgs = opts.allowClaude ? { ...input,
-      claudeExecutable: { cache: {}, deps: { env: { RMD_CLAUDE_BIN: "/fake/claude" }, home: root,
-        exists: () => true, canExecute: () => true, locations: [] } },
+      claudeExecutable: { cache: {}, deps: { env: { [CLAUDE_BIN_ENV_OVERRIDE]: "/fake/claude" }, home: root,
+        which: () => undefined, exists: () => true, canExecute: () => true, locations: [] } },
       keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({ claudeAiOauth: { accessToken: "fixture", expiresAt: 4_102_444_800_000 } }) },
       queryFn: (({ prompt }: { prompt: string }) => {
         transports.push("claude");
@@ -443,12 +443,12 @@ test("W1-T13863 criterion 4: unreadable cash allowance still reaches the existin
   const fixture = { cap: 1000, deployments: ["gpt-oss-120b"], only: ["gpt-oss-120b"], allowClaude: true, unreadableAllowance: true };
   const control = await productionBatch(t, { ...fixture, omitFit: true });
   assert.equal(control.cashAdapterCalls, 1);
-  assert.deepEqual(control.transports, ["claude"]);
+  assert.deepEqual(control.transports, ["claude"], JSON.stringify(control.rows));
   assert.equal(control.outcomes[0].ok, true);
 
   const run = await productionBatch(t, fixture);
   assert.equal(run.cashAdapterCalls, 0);
-  assert.deepEqual(run.transports, ["claude"]);
+  assert.deepEqual(run.transports, ["claude"], JSON.stringify(run.rows));
   assert.equal(run.outcomes[0].ok, true, JSON.stringify(run.rows));
   assert.equal(run.fitInputs.length, 1);
   assert.deepEqual(run.subscriptionPrompts, control.subscriptionPrompts);
@@ -525,7 +525,7 @@ test("W1-T13863 criterion 5: cash, relint and rescue rows count the full prompt 
     allowClaude: true, cashResult: worker({ text: "missing the fragment markers" }) });
   for (const batch of [run, rescue]) {
     const prompts = [...batch.cashPrompts, ...batch.subscriptionPrompts];
-    assert.ok(prompts.length > 1);
+    assert.ok(prompts.length > 1, JSON.stringify(batch.rows));
     const synthesized = batch.rows.filter(row => row.step === "inbox.draft_synthesized");
     assert.deepEqual(synthesized.map(row => row.prompt_chars), prompts.map(prompt => prompt.length));
     assert.deepEqual(batch.fitInputs.map(input => input.promptChars), batch.cashPrompts.map(prompt => prompt.length));

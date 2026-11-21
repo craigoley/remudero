@@ -3160,8 +3160,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     // A draft refused on the previous poll can use subscription headroom before retrying its cash mount.
     if (subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders)) {
-      try { return await spawnWorker({ ...args, mountProvider: undefined }); }
-      catch (error) {
+      try {
+        return await spawnWorker({
+          ...args,
+          mountProvider: undefined,
+        });
+      } catch (error) {
         if (!(error instanceof ProviderCapacityBlockedError)) throw error;
       }
     }
