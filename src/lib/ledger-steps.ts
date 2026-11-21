@@ -88,6 +88,12 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["clean input skipped with no matching cached draft"],
   },
   {
+    step: "inbox.draft_history_partial",
+    meaning: "The daemon could only check part of the ledger for prior drafts. It still honored indexed receipts and those from readable files.",
+    writer: ["buildInboxDraftHook"],
+    outcomes: ["one or more draft history paths unreadable"],
+  },
+  {
     step: "judge_shadow.compared",
     meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. W1-T12417: every fixed-option judge (risk, ci, fix-progress, verify-human, refresh-value, quiet-worker watchdog, head-rehome, typed judgment) writes it under its own role when its shadow is named; a decision-model shadow adds the distribution, the latency and model_surface decisions. Nothing acts on the row except the summary the config gardener reads.",
     writer: ["shadowJudgeCall"],

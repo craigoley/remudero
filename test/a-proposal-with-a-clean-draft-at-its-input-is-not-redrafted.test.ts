@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { gzipSync } from "node:zlib";
-import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftAttemptKey, draftInputKey,
+import { anchorFingerprint, captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftAttemptKey, draftInputKey,
   draftsDueOnDaemon, inboxDraftExampleFragmentYaml, MAX_DRAFT_LINT_ATTEMPTS, parseDraftAttemptCache, parseDraftCache,
-  runDraftRung, type DraftLaneIdentity, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
+  reframeProposal, runDraftRung, type DraftLaneIdentity, type DraftWorkerResult, type Proposal } from "#src/lib/inbox.js";
 import type { Config } from "#src/lib/config.js";
 import { rotateLedger } from "#src/lib/ledger.js";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
@@ -42,13 +44,15 @@ function hookFixture(t: TestContext, proposals: Proposal[], rows: Row[]) {
   const logs: Row[] = [];
   const append = (row: Row) => appendFileSync(ledgerPath, JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n");
   rows.forEach(append);
-  const newHook = () => buildInboxDraftHook("o", "r", { root } as Config, "RUN-13864", (step, extra = {}) => {
+  const newHook = (complete = false) => buildInboxDraftHook("o", "r", { root } as Config, "RUN-13864", (step, extra = {}) => {
     const row = { step, ...extra };
     logs.push(row);
     append(row);
-  }, async (due) => {
+  }, async (due, _config, _owner, _repo, runId, log) => {
     drafted.push(...due.map(p => p.id));
-    return [];
+    return complete ? runDraftRung(due, "- id: W1-T1\n", {
+      causalScope: { repository: "o/r" }, spawn: async () => worker(clean), log,
+    }, runId) : [];
   }, () => true, () => "fixture");
   return { stateDir, ledgerPath, setProposals, append, drafted, logs, newHook };
 }
@@ -129,6 +133,28 @@ test("W1-T13864 criterion 3: a clean completion clears its failure key and stays
   }, laneB), [reframed]);
 });
 
+test("W1-T13864 criterion 2: a transient live-ledger EIO does not hide a clean receipt after cache loss", async t => {
+  const fresh = { ...bare, id: "P-FRESH" };
+  const fixture = hookFixture(t, [bare, fresh], [cleanRow(bare)]);
+  const readFileSyncBeforeMock = fs.readFileSync;
+  let injected = false;
+  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof readFileSync>) => {
+    if (args[0] === fixture.ledgerPath && !injected) {
+      injected = true;
+      throw Object.assign(new Error("injected live ledger read failure"), { code: "EIO" });
+    }
+    return readFileSyncBeforeMock(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  await fixture.newHook()();
+  assert.equal(injected, true);
+  assert.deepEqual(fixture.drafted, [fresh.id]);
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_cache_missing").map(row => row.proposal_id), [bare.id]);
+  assert.equal(fixture.logs.some(row => row.step === "inbox.draft_history_partial"), false);
+});
+
 test("W1-T13864 criterion 4: unseen anchors and reframes draft, and returning to clean anchors stays retired", async t => {
   const moved: Proposal = { ...bare, evidenceAnchors: [{ pattern: "export function draftsDueOnDaemon", path: "src/lib/inbox.ts", description: "a live anchor" }] };
   const other = { ...bare, id: "P13864-R" };
@@ -168,14 +194,21 @@ test("W1-T13864 criterion 2: clean inputs are covered regardless of receipt orde
   }
 });
 
-test("W1-T13864 criterion 4: a new reframe round is drafted over a legacy cached draft that has no input snapshot", () => {
-  const legacy = { [bare.id]: { proposalId: bare.id, fragmentYaml: "- id: NEW-1\n", stampLine: "STAMP", anchorFingerprint: "" } };
+test("W1-T13864 criterion 3: a legacy clean draft for an already reframed proposal survives both lane changes", () => {
+  const reframed: Proposal = { ...proposal, reframeHistory: [{ feedback: "narrow it" }] };
+  const legacy = { [reframed.id]: { proposalId: reframed.id, fragmentYaml: inboxDraftExampleFragmentYaml(),
+    stampLine: "STAMP: draft input", anchorFingerprint: anchorFingerprint(reframed.evidenceAnchors) } };
+  for (const lane of [{ ...laneA, leadDeployment: laneB.leadDeployment }, { ...laneA, effort: laneB.effort }]) {
+    assert.deepEqual(draftsDueOnDaemon([reframed], legacy, {}, 3, undefined, lane), []);
+  }
+});
+
+test("W1-T13864 criterion 4: a subsequent operator reframe invalidates a legacy draft", t => {
   const reframed: Proposal = { ...bare, reframeHistory: [{ feedback: "narrow it" }] };
-  const priorAttempt = { [bare.id]: draftAttemptKey(bare, laneA) };
-  assert.deepEqual(draftsDueOnDaemon([reframed], legacy, priorAttempt, 3, undefined, laneA), [reframed]);
-  assert.deepEqual(draftsDueOnDaemon([reframed], legacy, {}, 3, undefined, laneA), [reframed]);
-  assert.deepEqual(draftsDueOnDaemon([bare], legacy, priorAttempt, 3, undefined, laneB), [], "the legacy draft still covers its own input");
-  assert.deepEqual(draftsDueOnDaemon([bare], legacy, {}, 3, undefined, laneB), []);
+  const legacy = { [bare.id]: { proposalId: bare.id, fragmentYaml: inboxDraftExampleFragmentYaml(), stampLine: "STAMP", anchorFingerprint: "" } };
+  const { ledgerPath } = hookFixture(t, [reframed], []);
+  const next = reframeProposal(reframed, "share the proof", legacy, { ledgerPath, runId: "REFRAME-13864" });
+  assert.deepEqual(draftsDueOnDaemon([next.proposal], next.drafts, {}, 3, undefined, laneB), [next.proposal]);
 });
 
 test("W1-T13864 criterion 5: a dirty attempt inside one run still redrafts up to MAX_DRAFT_LINT_ATTEMPTS", async t => {
@@ -192,20 +225,48 @@ test("W1-T13864 criterion 5: a dirty attempt inside one run still redrafts up to
   commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(proposal, scope)], outcomes, lane: laneA, log: () => {} });
   const attempts = parseDraftAttemptCache(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8"));
   assert.equal(attempts[proposal.id], draftAttemptKey(proposal, laneA));
-  assert.deepEqual(draftsDueOnDaemon([proposal], {}, attempts, 3, undefined, laneA), []);
-  assert.deepEqual(draftsDueOnDaemon([proposal], {}, attempts, 3, undefined, laneB), [proposal]);
+  const drafts = { [proposal.id]: outcome.candidate };
+  assert.deepEqual(draftsDueOnDaemon([proposal], drafts, attempts, 3, undefined, laneA), []);
+  assert.deepEqual(draftsDueOnDaemon([proposal], drafts, attempts, 3, undefined, laneB), [proposal]);
 });
 
-test("the daemon holds drafting until it can read the receipt archive", async t => {
+test("W1-T13864 criterion 4: a corrupt archive and invalid attempt values leave unseen inputs due after restart", async t => {
+  const archived = { ...bare, id: "P-ARCHIVED" };
+  const fresh = { ...bare, id: "P-FRESH" };
+  const changed = { ...archived, reframeHistory: [{ feedback: "draft the new input" }] };
   const fixture = hookFixture(t, [bare], []);
-  const archive = join(fixture.stateDir, "ledger.2026-11-19T00-00-00-000Z.ndjson.gz");
-  writeFileSync(archive, "unreadable gzip");
-  const poll = fixture.newHook();
-  await poll();
-  assert.deepEqual(fixture.drafted, []);
-  const error = fixture.logs.find(row => row.step === "inbox.draft_rung.error");
-  assert.match(String(error?.error), /incomplete inbox draft history/);
-  writeFileSync(archive, gzipSync(""));
-  await poll();
-  assert.deepEqual(fixture.drafted, [bare.id]);
+  await fixture.newHook(true)();
+  assert.deepEqual(fixture.drafted.splice(0), [bare.id]);
+  assert.equal(fixture.logs.find(row => row.step === "inbox.drafted")?.lint_clean, true);
+
+  const brokenArchive = join(fixture.stateDir, "ledger.2026-11-19T00-00-00-000Z.ndjson.gz");
+  const compressed = gzipSync(readFileSync(fixture.ledgerPath));
+  writeFileSync(brokenArchive, compressed.subarray(0, -8));
+  writeFileSync(fixture.ledgerPath, "");
+  const readableArchive = join(fixture.stateDir, "ledger.2026-11-20T00-00-00-000Z.ndjson.gz");
+  writeFileSync(readableArchive, gzipSync(JSON.stringify(cleanRow(archived)) + "\n"));
+  writeFileSync(join(fixture.stateDir, "inbox-drafts.json"), "{}");
+  writeFileSync(join(fixture.stateDir, "inbox-draft-attempts.json"), JSON.stringify({ [bare.id]: null, [fresh.id]: 42 }));
+  writeFileSync(join(fixture.stateDir, "inbox-reopened-keys.json"), JSON.stringify({ [bare.id]: "seen", [fresh.id]: "seen" }));
+  fixture.setProposals([bare, archived, fresh]);
+
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted.splice(0), [fresh.id], "keep the indexed and readable archived receipts");
+  fixture.setProposals([bare, changed]);
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, [changed.id], "the prior receipt leaves the new reframe due");
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_rung.error"), []);
+  assert.deepEqual(fixture.logs.filter(row => row.step === "inbox.draft_history_partial").map(row => row.unread),
+    [[brokenArchive], [brokenArchive]]);
+  const misses = fixture.logs.filter(row => row.step === "inbox.draft_cache_missing");
+  assert.deepEqual(misses.map(row => row.proposal_id).sort(), [archived.id, bare.id].sort());
+});
+
+test("W1-T13864 criterion 4: malformed attempt entries do not prevent unrelated drafting", async t => {
+  const fresh = { ...bare, id: "P-FRESH" };
+  const fixture = hookFixture(t, [bare, fresh], [cleanRow(bare)]);
+  writeFileSync(join(fixture.stateDir, "inbox-draft-attempts.json"), JSON.stringify({ [bare.id]: null, [fresh.id]: 42 }));
+  writeFileSync(join(fixture.stateDir, "inbox-reopened-keys.json"), JSON.stringify({ [bare.id]: "seen", [fresh.id]: "seen" }));
+  await fixture.newHook()();
+  assert.deepEqual(fixture.drafted, [fresh.id]);
 });

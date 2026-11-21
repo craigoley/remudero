@@ -1061,6 +1061,7 @@ import {
   approveProposal,
   classifyProposal,
   draftsDueOnDaemon,
+  indexInboxDraftReceipts,
   resolvedInboxDraftLane,
   decideDraftDeferral,
   type ProposalVerdictKind,
@@ -1408,7 +1409,7 @@ import {
 import { prStateCommand } from "./lib/pr-state.js";
 import { previewPlanTaskMigration } from "./lib/plan-task-migration.js";
 import { movePlanTask } from "./lib/plan-task-move.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRowsFor, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -37931,6 +37932,7 @@ export function buildInboxDraftHook(
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
   const inboxRoot = planningStore?.root ?? config.root;
+  const inboxState = join(inboxRoot, "state");
   const shardReader = createProposalShardReader(proposalShardDir(join(inboxRoot, "state", "inbox-proposals.json")), { log });
   const receiptSteps = ["inbox.drafted", "inbox.draft_cache_missing"];
   const draftHistory = createLedgerRotationMemo(rows => rows.filter(row => typeof row.step === "string" && receiptSteps.includes(row.step)), {
@@ -38066,40 +38068,59 @@ export function buildInboxDraftHook(
       const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
       let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
         grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
-      let ledgerLines: Record<string, unknown>[] = [];
+      let ledgerLines: Record<string, unknown>[] | undefined;
       try {
         // ledger-read-intent: union — seed receipts before listing archives so rotation cannot hide a receipt.
         ledgerLines = readLedgerLines(ledgerPath);
+      } catch (error) {
+        log("inbox.draft_readiness_unavailable", { error: String((error as Error)?.message ?? error) });
+        try {
+          ledgerLines = await readLiveLedgerRowsOffLoop(ledgerPath);
+        } catch (retryError) {
+          // A directory cannot contain live rows at this path. A second I/O failure can still hide them.
+          if ((retryError as NodeJS.ErrnoException).code !== "EISDIR") throw retryError;
+        }
+      }
+      const liveRows = ledgerLines;
+      if (liveRows) try {
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftSelection = {
           ...draftSelection,
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
-          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+          isRatified: (id) => isRatifiedInLedger(liveRows, id),
+          isDeclined: declinedWithReceipts(liveRows, inboxState),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
 
-      const draftReceipts = await readLedgerUnionRecordsMemoized(dirname(ledgerPath), draftHistory, {
+      const historyDir = dirname(ledgerPath);
+      const unread: string[] = liveRows ? [] : [ledgerPath];
+      const corpusSnapshot = listedLedgerFiles(historyDir, realLedgerFs, path => unread.push(path));
+      const liveDraftRows = liveRows?.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step));
+      const draftReceipts = await readLedgerUnionRecordsMemoized(historyDir, draftHistory, {
         step: receiptSteps,
-        refuseIncomplete: true,
-        readLiveRecords: () => ledgerLines.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step)),
+        corpusSnapshot,
+        readLiveRecords: () => liveDraftRows ?? [],
       });
-      if (!draftReceipts.ok) throw new Error(`incomplete inbox draft history: ${draftReceipts.unread.join(", ")}`);
-      const draftLedgerRows = draftReceipts.rows.filter(row => row.repository === undefined || row.repository === causalScope.repository);
+      unread.push(...draftReceipts.unread);
+      if (unread.length > 0) log("inbox.draft_history_partial", { unread, repository: causalScope.repository });
+      const draftLedgerRows = indexInboxDraftReceipts(inboxState, causalScope.repository, draftReceipts.rows);
       const reportedMissing = new Set<string>();
       for (const row of draftLedgerRows) {
         if (row.step === "inbox.draft_cache_missing" && typeof row.proposal_id === "string" && typeof row.draft_input_key === "string") {
           reportedMissing.add(JSON.stringify([row.proposal_id, row.draft_input_key]));
         }
       }
+      const newMisses: Record<string, unknown>[] = [];
       const onMissingCleanDraft = (proposalId: string, inputKey: string) => {
         const key = JSON.stringify([proposalId, inputKey]);
         if (reportedMissing.has(key)) return;
-        log("inbox.draft_cache_missing", { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository });
+        const fields = { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository };
+        log("inbox.draft_cache_missing", fields);
+        newMisses.push({ step: "inbox.draft_cache_missing", ...fields });
         reportedMissing.add(key);
       };
 
@@ -38109,6 +38130,7 @@ export function buildInboxDraftHook(
       const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
         : proposals.filter(proposal => proposal.id === onlyProposalId);
       const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, { ...draftSelection, draftLedgerRows, onMissingCleanDraft }, draftLane);
+      if (newMisses.length > 0) indexInboxDraftReceipts(inboxState, causalScope.repository, newMisses);
       const due = eligible.slice(0, DAEMON_DRAFT_BATCH_CAP);
       if (due.length === 0) return;
 

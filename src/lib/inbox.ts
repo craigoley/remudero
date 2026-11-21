@@ -28,7 +28,7 @@ import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCau
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
 import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
-import { defaultGetProcessStartTime, isHolderStale, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import { defaultGetProcessStartTime, isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { buildPlanPrBody, buildPlanPrCommitMessage, CHANGED_FILES_HEADING, filingAcceptanceCriteria, type PlanPrBodyOpts } from "./plan-pr-emitter.js";
 import { fitConventionalTitle } from "./commit-message.js";
@@ -516,6 +516,53 @@ export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): M
   return clean;
 }
 
+function draftReceiptRow(row: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (typeof row?.proposal_id !== "string" || typeof row.draft_input_key !== "string") return undefined;
+  const identity = { proposal_id: row.proposal_id, draft_input_key: row.draft_input_key };
+  if (row.step === "inbox.drafted" && row.lint_clean === true) return { step: row.step, ...identity, lint_clean: true };
+  if (row.step === "inbox.draft_cache_missing") return { step: row.step, ...identity };
+  return undefined;
+}
+
+function draftReceiptIndexPath(stateDir: string, repository: string): string {
+  return join(stateDir, "inbox-draft-receipts", `${encodeURIComponent(repository)}.json`);
+}
+
+function mergeDraftReceiptIndex(path: string, observed: readonly Record<string, unknown>[]) {
+  const stored: unknown = JSON.parse(readFileIfExists(path) ?? "[]");
+  if (!Array.isArray(stored)) throw new Error(`invalid inbox draft receipt index at ${path}`);
+  const index = new Map<string, Record<string, unknown>>();
+  for (const row of stored) {
+    const receipt = draftReceiptRow(row);
+    if (!receipt) throw new Error(`invalid inbox draft receipt at ${path}`);
+    index.set(JSON.stringify(receipt), receipt);
+  }
+  const priorCount = index.size;
+  for (const row of observed) {
+    const receipt = draftReceiptRow(row);
+    if (receipt) index.set(JSON.stringify(receipt), receipt);
+  }
+  return { rows: [...index.values()], changed: index.size !== priorCount };
+}
+
+function saveDraftReceiptIndex(path: string, observed: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const { rows, changed } = mergeDraftReceiptIndex(path, observed);
+  if (changed) writeAtomic(path, JSON.stringify(rows), { mode: 0o600 });
+  return rows;
+}
+
+/** Backfill readable receipts. Writes share the registry lock with completion publication. */
+export function indexInboxDraftReceipts(stateDir: string, repository: string, observed: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const path = draftReceiptIndexPath(stateDir, repository);
+  const scoped = observed.filter(row => row.repository === undefined || row.repository === repository);
+  const merged = mergeDraftReceiptIndex(path, scoped);
+  if (merged.changed) updateProposalRegistry(join(stateDir, "inbox-proposals.json"), () => {
+    merged.rows = saveDraftReceiptIndex(path, scoped);
+    return null;
+  });
+  return merged.rows;
+}
+
 /** Failed-attempt identity includes the lead and rescue lanes, so changing lanes allows a retry. */
 export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
   return `${draftInputKey(proposal)}::${JSON.stringify([
@@ -534,7 +581,7 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
   try {
     const raw = JSON.parse(text) as unknown;
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-    return raw as DraftAttemptCache;
+    return Object.fromEntries(Object.entries(raw).filter(([, key]) => typeof key === "string"));
   } catch {
     return {};
   }
@@ -568,16 +615,12 @@ export function draftsDueOnDaemon(
   const candidates = draftableProposals(proposals, ctx).filter((p) => {
     const inputKey = draftInputKey(p);
     const cached = drafts[p.id];
-    const cachedInput = cached?.completion?.snapshot?.proposal;
-    // A legacy entry has no snapshot of its input, only its anchors: it is current only when the attempt key
-    // names this input, or, with no attempt key, when the proposal has never been reframed.
-    const attempted = attempts[p.id];
-    const legacyInputMatches = attempted === undefined
-      ? (p.reframeHistory ?? []).length === 0
-      : attempted.startsWith(`${inputKey}::[`);
-    const hasCurrentDraft = cachedInput
-      ? draftInputKey(cachedInput) === inputKey
-      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors) && legacyInputMatches);
+    const completion = cached?.completion;
+    const cachedInput = completion?.snapshot?.proposal;
+    // Legacy drafts carry only anchors. The reframe write invalidates them before publishing new feedback.
+    const hasCurrentDraft = completion
+      ? completion.lintClean === true && cachedInput !== undefined && draftInputKey(cachedInput) === inputKey
+      : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors));
     if (clean.get(p.id)?.has(inputKey)) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
@@ -2095,7 +2138,7 @@ function validDraftSnapshot(snapshot: InboxDraftSnapshot, scope: InboxCausalScop
     JSON.stringify(snapshot.inputs) === JSON.stringify(draftSnapshotInputs(snapshot.proposal, scope));
 }
 
-/** Only pending publication lives here. Successful publication remains in the existing ledger. */
+/** Only pending publication lives here. Clean receipts also enter the durable selection index. */
 interface DraftCompletionOutboxEntry { completion: InboxDraftCompletion; adopted: boolean }
 
 export function commitInboxDraftOutcomes(opts: {
@@ -2119,7 +2162,7 @@ export function commitInboxDraftOutcomes(opts: {
   // Idle recovery must not synchronously scan every shard. Pending receipts are re-read under lock.
   if (opts.outcomes.length === 0 && Object.keys(readObject(outboxPath)).length === 0) return;
   updateProposalRegistry(registryPath, current => {
-    const drafts = readObject(draftsPath) as DraftCache, attempts = (opts.lane ? readObject(attemptsPath) : {}) as DraftAttemptCache,
+    const drafts = readObject(draftsPath) as DraftCache, attempts = opts.lane ? parseDraftAttemptCache(readFileIfExists(attemptsPath)) : {},
       outbox = readObject(outboxPath) as Record<string, DraftCompletionOutboxEntry>;
     const saveOutbox = () => writeAtomic(outboxPath, JSON.stringify(outbox));
     const flush = () => {
@@ -2133,10 +2176,13 @@ export function commitInboxDraftOutcomes(opts: {
           if (drafts[snapshot.proposal.id]?.completion?.snapshot.completionId !== id) continue;
           record.adopted = true; saveOutbox();
         }
-        opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, draft_input_key: draftInputKey(snapshot.proposal),
+        const receipt = { proposal_id: snapshot.proposal.id, draft_input_key: draftInputKey(snapshot.proposal),
           repository: snapshot.repository, completion_id: id,
           ...(completion.modelFields ?? draftModelFields()),
-          consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations });
+          consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations };
+        if (completion.lintClean) saveDraftReceiptIndex(draftReceiptIndexPath(opts.stateDir, snapshot.repository),
+          [{ step: "inbox.drafted", ...receipt }]);
+        opts.log("inbox.drafted", receipt);
         delete outbox[id]; saveOutbox();
       }
     };
