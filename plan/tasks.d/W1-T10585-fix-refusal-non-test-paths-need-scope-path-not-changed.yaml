@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
+  # hand-off only: the machine-filing judge re-judges this amended record (#19089 precedent)
   verify: auto
-  risk: low
+  risk: high # Rule 19 sizing: run-task and fix are two concerns
   priority: 1.13
   # refusal-amendment (W1-T10585, run W1-T10585-1793135839441, 2026-10-27T21:59:17.146Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The remedy has to go in `src/cli/commands/fix.ts` or `src/lib/proof-amendment.ts`. The task declares only `src/run-task.ts` and the new test, and `run-task.ts` has no seam that can prevent the refusal.
@@ -15,6 +16,7 @@
   origin: "ci-friction:fix_refusal:non-test-paths-need-scope-path-not-changed"
   files:
     - src/run-task.ts
+    - src/cli/commands/fix.ts
     - test/worker/run-task/fix-refusal-non-test-paths-need-scope-path-not-changed.test.ts
   acceptance:
     - claim: "the harness no longer spends a fix round on fix_refusal:non-test-paths-need-scope-path-not-changed"
@@ -32,11 +34,14 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+    AMENDED (2026-11-21): files adds src/cli/commands/fix.ts. The refusal comes from the W1-T10900 arm of the ask closure in runFixRung (src/cli/commands/fix.ts); src/run-task.ts only forwards to it (PR #19941 review; the 2026-10-27 refusal-amendment note already named this file).
   risk_ruling:
-    verdict: "rule-3-low-privilege"
+    verdict: "low"
     action: proceed
-    confidence: 1
+    confidence: 0.89
     reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 5 occurrence(s) across 7 day(s), last seen 2026-10-26T06:18:32.864Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T05:40:05.137Z"
-    pin: "301f544c3902c42a31cc90a8cce23e2b824d83203d5a354cc622ea21f61c6854"
+      - "The filing reports four fix rounds on PR #13868 and gives a concrete path-not-changed example. The amendment cites PR #19941 and adds the command file it identifies as the source of the refusal."
+      - "The declared remedy is limited to preventing or recovering from this specific fix-round refusal. The filing lists two implementation files and a new regression test, and specifies a post-merge comparison over equal windows."
+      - "The filing-time grep proof checks for the named test. Verification of the remedy’s behavior remains with CI and review."
+    judged_at: "2026-11-21T19:51:45.834Z"
+    pin: "60b9766c1da778dd4fac2764c475c19218f592f55cb18ebf3d6b1027ca49a496"
