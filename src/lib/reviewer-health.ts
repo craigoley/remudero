@@ -31,6 +31,8 @@
 import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
+import { mergeTargetFromPrUrl } from "./arm-auto-merge.js";
 import type { Clock } from "./clock.js";
 import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -40,6 +42,7 @@ import type { MainRepairLane, MainRepairRevertRequest } from "./main-health-rung
 import { upperNormalQuantile, wilsonInterval } from "./model-drift.js";
 import { readReviewEvidenceRecord } from "./review-evidence-record.js";
 import { DOWNGRADE_UNCLASSIFIED } from "./review-outcome-class.js";
+import { REVIEW_CONTEXT, REVIEWER_IDENTITY_ENV, reviewCodeShaFromDescription } from "./review.js";
 import { REVIEW_MATERIAL_ADVANCE_PATHS, reviewAdvanceIsMaterial, reviewPathSpans, runTaskAdvanceTouchesReviewPath } from "./self-sync.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
@@ -720,32 +723,64 @@ export function evaluatorModelDivergenceEscalation(incident: EvaluatorModelIncid
 
 type EvidenceJsonReader = NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]>;
 type EvidenceIdentity = Required<Pick<Parameters<typeof readReviewEvidenceRecord>[0], "prUrl" | "headSha" | "reviewInputDigest">>;
+const evidencePages = z.array(z.array(z.unknown()));
+const evidenceActor = z.object({ login: z.string(), type: z.enum(["Bot", "User"]) });
+const evidenceComment = z.object({ id: z.number().int().positive(), body: z.string(),
+  created_at: z.string(), updated_at: z.string(), user: evidenceActor });
+const historicalFailStatus = z.object({ context: z.literal(REVIEW_CONTEXT), state: z.literal("failure"),
+  created_at: z.string(), description: z.string().nullable(), creator: evidenceActor });
 
-/** Select the comment's input before the shared reader checks the publisher, checksum and status. */
-function isEvidenceForInput(comment: unknown, expected: EvidenceIdentity): boolean {
-  const body = (comment as { body?: unknown } | null)?.body;
+function evidenceInput(body: string) {
   const header = "<!-- remudero-review-evidence:v1\n";
   const end = "\n-->";
-  if (typeof body !== "string" || !body.startsWith(header) || !body.endsWith(end)) return false;
+  if (!body.startsWith(header) || !body.endsWith(end)) return undefined;
   try {
     const envelope = JSON.parse(body.slice(header.length, -end.length)) as {
-      evidence?: { pr_url?: unknown; head_sha?: unknown; review_input_digest?: unknown } | null;
+      evidence?: { pr_url?: unknown; head_sha?: unknown; review_input_digest?: unknown; reviewer_code_sha?: unknown } | null;
     } | null;
-    const evidence = envelope?.evidence;
-    return evidence?.pr_url === expected.prUrl && evidence.head_sha === expected.headSha &&
-      evidence.review_input_digest === expected.reviewInputDigest;
+    return envelope?.evidence;
   } catch (error) {
-    if (error instanceof SyntaxError) return false; // a malformed envelope cannot identify a publication
+    if (error instanceof SyntaxError) return undefined; // a malformed envelope cannot identify a publication
     throw error;
   }
 }
 
-/** Look up a counted FAIL's publication even after the PR has a newer head or review input. */
-function readPublishedModelFail(expected: EvidenceIdentity, readJson: EvidenceJsonReader) {
+/** Use the digest-bearing evidence comment to identify the decision and commit status history to
+ *  corroborate its FAIL. Keep the shared verifier's publisher, checksum and publication-time checks. */
+async function readPublishedModelFail(expected: EvidenceIdentity, readJson: EvidenceJsonReader) {
+  const target = mergeTargetFromPrUrl(expected.prUrl);
+  if (!target) return undefined;
+  const { owner, repo } = target;
+  const login = process.env[REVIEWER_IDENTITY_ENV]?.trim().toLowerCase() || "remudero-fleet[bot]";
+  let publication: { comment: z.infer<typeof evidenceComment>; codeSha: unknown } | undefined;
   return readReviewEvidenceRecord({ ...expected, reviewState: "failure" }, async (args, options) => {
-    const pages = await readJson(args, options);
-    if (args[1] === "graphql" || !Array.isArray(pages)) return pages;
-    return pages.map((page: unknown) => Array.isArray(page) ? page.filter((comment: unknown) => isEvidenceForInput(comment, expected)) : page);
+    if (args[1] !== "graphql") {
+      const pages = evidencePages.parse(await readJson(args, options));
+      for (const raw of pages.flat()) {
+        const comment = evidenceComment.safeParse(raw).data;
+        if (!comment || comment.user.login.toLowerCase() !== login || comment.id <= (publication?.comment.id ?? 0)) continue;
+        const input = evidenceInput(comment.body);
+        if (input?.pr_url === expected.prUrl && input.head_sha === expected.headSha && input.review_input_digest === expected.reviewInputDigest) {
+          publication = { comment, codeSha: input.reviewer_code_sha };
+        }
+      }
+      return [publication ? [publication.comment] : []];
+    }
+    if (!publication) return undefined;
+    const { comment, codeSha } = publication;
+    const pages = evidencePages.parse(await readJson(["api",
+      `repos/${owner}/${repo}/commits/${expected.headSha}/statuses?per_page=100`, "--paginate", "--slurp"], options));
+    for (const raw of pages.flat()) {
+      const status = historicalFailStatus.safeParse(raw).data;
+      if (!status || status.creator.login.toLowerCase() !== login || status.creator.type !== comment.user.type ||
+          reviewCodeShaFromDescription(status.description) !== codeSha ||
+          !(Date.parse(status.created_at) <= Date.parse(comment.created_at))) continue;
+      // The shared verifier consumes a GraphQL-shaped status. The REST path above scopes it to this commit.
+      return { data: { repository: { nameWithOwner: `${owner}/${repo}`, object: { oid: expected.headSha,
+        status: { context: { context: status.context, state: "FAILURE", description: status.description, createdAt: status.created_at,
+          creator: { login: status.creator.login, __typename: status.creator.type } } } } } } };
+    }
+    return undefined;
   });
 }
 

@@ -20,6 +20,7 @@ import { realWriteAtomicIo } from "#src/lib/fs-race-safe.js";
 import type { MainRepairLane } from "#src/lib/main-health-rung.js";
 import { readReviewEvidenceRecord, renderReviewEvidenceRecord } from "#src/lib/review-evidence-record.js";
 import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
+import { REVIEW_CONTEXT, reviewInputDigest } from "#src/lib/review.js";
 import { runEscalationReconcile } from "#src/lib/sweep.js";
 import { buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -706,19 +707,20 @@ test("W1-T13850 criterion 4: a FAIL whose review was not published in full has i
   assert.ok(health.loadReviewerHealthState(h.statePath).modelFails[SOL.model]!.some((f) => f.clauses.includes("PRIVATE-CATALOG clause of an ops task")));
 });
 
-test("W1-T13850 criterion 4: a filed task quotes only clauses in its verified published evidence", async (t) => {
+test("W1-T13850 criterion 4: a filed FAIL keeps its verified clause after a body edit posts PASS on the same commit", async (t) => {
   const { rows, claudeShas } = elevenNineteen();
   const sha = fake("publication-reviewer-code");
   const reason = (clause: string) => `proof executed and PASSED — (semantic downgrade): ${clause}`;
   const publication = (catalog: "public" | "ops", reasons: string[]) => {
     const prUrl = `${PULL}/${prSeq}`;
     const headSha = fake(prUrl);
-    const digest = `v2:${headSha.padEnd(64, "0")}`;
+    const digest = reviewInputDigest(headSha, "Original PR body");
     const record = renderReviewEvidenceRecord({ pr_url: prUrl, head_sha: headSha, review_input_digest: digest, state: "failure",
       reviewer_code_sha: sha, capped: false, plan_only: false, partially_executed: false, decision_verdict: { criteria: [] },
       unmet_criteria: [], reasons }, catalog);
-    const row = verdict(sha, SOL, "failure", { task_id: `W1-T${prSeq}`, head_sha: headSha, review_input_digest: digest, reasons });
-    return { row, prUrl, headSha, record };
+    const row = verdict(sha, SOL, "failure", { task_id: `W1-T${prSeq}`, head_sha: headSha,
+      review_input_digest: digest, review_decision_digest: fake(`${digest} FAIL`), reasons });
+    return { row, prUrl, headSha, digest, record };
   };
   const publicTask = publication("public", [reason("the filed public clause")]);
   (publicTask.row.reasons as string[]).push(reason("PRIVATE addition absent from the published record"));
@@ -726,43 +728,77 @@ test("W1-T13850 criterion 4: a filed task quotes only clauses in its verified pu
   const unavailable = publication("public", [reason("PRIVATE unless the evidence can be verified")]);
   const mismatched = publication("public", [reason("PRIVATE evidence on a different input")]);
   mismatched.row.review_input_digest = `v2:${"3".repeat(64)}`;
-  const passHead = fake("replacement head");
-  const passRecord = renderReviewEvidenceRecord({ pr_url: publicTask.prUrl, head_sha: passHead,
-    review_input_digest: `v2:${"4".repeat(64)}`, state: "success", reviewer_code_sha: sha, capped: false, plan_only: false,
+  const wrongPublisher = publication("public", [reason("PRIVATE without a trusted FAIL status")]);
+  const postdated = publication("public", [reason("PRIVATE without a prior FAIL status")]);
+  const invalidChecksum = publication("public", [reason("PRIVATE in a tampered evidence record")]);
+  const passDigest = reviewInputDigest(publicTask.headSha, "Edited PR body");
+  const passRecord = renderReviewEvidenceRecord({ pr_url: publicTask.prUrl, head_sha: publicTask.headSha,
+    review_input_digest: passDigest, state: "success", reviewer_code_sha: sha, capped: false, plan_only: false,
     partially_executed: false, decision_verdict: { criteria: [] }, unmet_criteria: [], reasons: [] }, "public");
-  let replacementPublished = false;
+  const pass = verdict(sha, SOL, "success", { pr_url: publicTask.prUrl, task_id: publicTask.row.task_id,
+    head_sha: publicTask.headSha, review_input_digest: passDigest, review_decision_digest: fake(`${passDigest} PASS`) });
+  assert.notEqual(passDigest, publicTask.digest);
+  const publisher = { login: "remudero-fleet[bot]", type: "Bot" };
+  const description = `Verdict [review code ${sha}]`;
+  const failAt = "2026-11-19T12:00:00Z";
+  const failCommentAt = "2026-11-19T12:00:01Z";
+  const passAt = "2026-11-19T12:00:02Z";
+  const passCommentAt = "2026-11-19T12:00:03Z";
+  const status = (state: "success" | "failure", created_at: string, creator = publisher) =>
+    ({ context: REVIEW_CONTEXT, state, created_at, description, creator });
+  const failStatus = status("failure", failAt);
+  const passStatus = status("success", passAt);
+  const publications = [publicTask, opsTask, mismatched, wrongPublisher, postdated, invalidChecksum];
+  let passPublished = false;
   const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args, options) => {
     assert.equal(options.fresh, true);
-    const fixture = [publicTask, opsTask, mismatched].find(({ prUrl, headSha }) => args[1] === "graphql"
-      ? args.includes(`sha=${headSha}`) : args[1]?.includes(`/issues/${prUrl.split("/").at(-1)}/comments?`));
+    const fixture = publications.find(({ prUrl, headSha }) => args[1] === "graphql" ? args.includes(`sha=${headSha}`) :
+      args[1]?.startsWith(`repos/acme/remudero/issues/${prUrl.split("/").at(-1)}/comments?`) ||
+      args[1]?.startsWith(`repos/acme/remudero/commits/${headSha}/statuses?`));
     if (!fixture) throw new Error("review evidence unavailable");
-    const at = "2026-11-19T12:00:00.000Z";
+    const hasPass = passPublished && fixture === publicTask;
+    if (args[1]?.includes("/statuses?")) {
+      assert.deepEqual(args.slice(2), ["--paginate", "--slurp"]);
+      if (fixture === wrongPublisher) return [[status("failure", failAt, { login: "another-account", type: "User" })]];
+      if (fixture === postdated) return [[status("failure", passAt)]];
+      return hasPass ? [[passStatus], [failStatus]] : [[failStatus]];
+    }
     if (args[1] !== "graphql") {
-      const comment = (id: number, body: string) => ({ id, body, created_at: at, updated_at: at,
-        user: { login: "remudero-fleet[bot]", type: "Bot" } });
-      const original = [comment(122, "<!-- remudero-review-evidence:v1\n{\n-->"), comment(123, fixture.record)];
-      return replacementPublished && fixture === publicTask ? [original, [comment(124, passRecord)]] : [original];
+      const comment = (id: number, body: string, at = failCommentAt) =>
+        ({ id, body, created_at: at, updated_at: at, user: publisher });
+      const record = fixture === invalidChecksum ? fixture.record.replace(/"sha256":"[a-f0-9]+"/, '"sha256":"invalid"') : fixture.record;
+      const original = [comment(122, "<!-- remudero-review-evidence:v1\n{\n-->"), comment(123, record)];
+      return hasPass ? [original, [comment(124, passRecord, passCommentAt)]] : [original];
     }
     return { data: { repository: { nameWithOwner: "acme/remudero", object: { oid: fixture.headSha,
-      status: { context: { context: "remudero-review", state: "FAILURE", description: `Verdict [review code ${sha}]`,
-        createdAt: at, creator: { login: "remudero-fleet", __typename: "Bot" } } } } } } };
+      status: { context: { context: REVIEW_CONTEXT, state: hasPass ? "SUCCESS" : "FAILURE", description,
+        createdAt: hasPass ? passAt : failAt, creator: { login: "remudero-fleet", __typename: "Bot" } } } } } } };
   };
   const h = harness(t, undefined, readJson);
   await h.evaluate(null);
   h.issues.listOpen = async () => {
-    assert.equal(divergenceRows(h).at(-1)!.models.find(({ model }) => model === SOL.model)?.state, "diverged");
-    replacementPublished = true;
+    const sol = divergenceRows(h).at(-1)!.models.find(({ model }) => model === SOL.model);
+    assert.equal(sol?.state, "diverged");
+    assert.equal(sol?.fail, 29);
+    assert.equal(sol?.n, 32);
+    passPublished = true;
     return [];
   };
-  h.queue.push(...rows, publicTask.row, opsTask.row, unavailable.row, mismatched.row);
+  const solSha = fake("4e13dcf00");
+  const filedFails = [...publications, unavailable].map(({ row }) => row);
+  const replaced = new Set(rows.filter((row) => row.reviewer_code_sha === solSha && row.state === "failure").slice(0, filedFails.length));
+  h.queue.push(...rows.filter((row) => !replaced.has(row)), ...filedFails, pass);
   await h.evaluate(claudeShas.at(-1)!);
   assert.equal(h.created.length, 1);
-  assert.equal(replacementPublished, true);
+  assert.equal(passPublished, true);
+  assert.equal((await readReviewEvidenceRecord({ prUrl: publicTask.prUrl, headSha: publicTask.headSha,
+    reviewInputDigest: passDigest, reviewState: "success" }, readJson))?.row.state, "success");
   assert.equal(await readReviewEvidenceRecord({ prUrl: publicTask.prUrl, headSha: publicTask.headSha,
-    reviewInputDigest: String(publicTask.row.review_input_digest), reviewState: "failure" }, readJson), undefined,
+    reviewInputDigest: publicTask.digest, reviewState: "failure" }, readJson), undefined,
     "the current-verdict reader still rejects the superseded FAIL");
-  assert.match(h.created[0]!.body, /the filed public clause/, "delivery still cites the counted FAIL after another head publishes a PASS");
+  assert.match(h.created[0]!.body, /the filed public clause/, "delivery cites the counted FAIL after the same head publishes a PASS");
   assert.doesNotMatch(h.created[0]!.body, /PRIVATE/);
+  assert.equal(h.created[0]!.body.match(/detailed evidence retained on host/g)?.length, filedFails.length - 1);
   assert.match(String(h.steps("reviewer.model_divergence_evidence_unavailable")[0]?.extra.error), /review evidence unavailable/);
 });
 
