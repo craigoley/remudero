@@ -2621,7 +2621,7 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13951: a spilled line's top-level `type` and `item.type`, by one streaming pass in any key order. */
+/** W1-T13951: stream spill types in any key order. */
 function spilledLineTypes(file: string): { type?: string; itemType?: string; textBytes?: number } {
   const out: { type?: string; itemType?: string; textBytes?: number } = {};
   const keys: Array<string | undefined> = [];
@@ -2633,7 +2633,7 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string; tex
   let start = 0;
   let fd: number;
   try { fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
-  catch (error) { void error; return out; }
+  catch (_error) { /* readBoundedFileTail reports open errors. */ return out; }
   try {
     if (!fstatSync(fd).isFile()) return out;
     const buf = Buffer.alloc(64 * 1024);
