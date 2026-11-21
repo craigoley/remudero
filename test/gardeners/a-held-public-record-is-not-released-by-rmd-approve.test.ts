@@ -307,6 +307,48 @@ test("W1-T13785 criterion 4: the probe and retry reject a changed record in the 
   assert.deepEqual(steps(rows, "stuck_state.record_changed").map(row => row.current_digest), [publicRecordDigest(fallback)]);
 });
 
+test("W1-T13785 criterion 4: beside an unrelated public-to-ops edge, the probe reports the digest of the record the strict fallback's composition resolved, and the retry checks that same record", async t => {
+  // The reviewer's world (2026-11-21 14:03Z): the ops duplicate clears and origin/main retitles the refused PUB-2 beside
+  // an unrelated public-to-ops edge, so origin/main does not load strictly and its working-tree fallback, where PUB-2 is
+  // unchanged, is the composition (operator ruling 2026-11-21). The probe's digest and the retry's check are one record.
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t, "main", PUBLIC_TEXT);
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  await pass();
+  main.publish(PUBLIC_TEXT.replace("held public fixture PUB-2", "retitled PUB-2") + record("PUB-REV", ["OPS-GOOD"]));
+  fx.set(record("OPS-GOOD"));
+  const deferred = await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true }), strict = await readReleasePublicPlan(main.dir);
+  assert.deepEqual([deferred.read, strict.read], ["origin/main", "working_tree"], "origin/main does not load strictly");
+  assert.notEqual(publicRecordDigest(deferred.plan.byId.get("PUB-2")!), item.digest, "origin/main retitled the refused record");
+  const resolved = strict.plan.byId.get("PUB-2")!;
+  assert.equal(publicRecordDigest(resolved), item.digest, "the fallback's record is the refused one");
+  const probed = await ports.probe(item);
+  assert.deepEqual(probed, { present: false, digest: publicRecordDigest(resolved) }, "the cleared edge reads gone with the resolved record's digest");
+  const retry = await readApproveRelease("PUB-2", undefined, main.dir, fx.lookup, () => undefined, probed.digest);
+  assert.equal(retry?.outcome, "found", `the retry accepts the digest the probe reported (${JSON.stringify(retry)})`);
+  assert.deepEqual(retry.plan.byId.get("PUB-2"), resolved, "and releases the record the probe digested");
+  await pass();
+  assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(resolved) }], "one replay pins the resolved record");
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => row.exit_code), [0]);
+  assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
+
+  // The mirror: the fallback's own record changes, so the probe reports that change and the retry refuses it.
+  const other = await refusalFixture(t, "main", PUBLIC_TEXT);
+  const [held] = scanStuckState(other.rows).open;
+  assert.ok(held?.digest);
+  await other.pass();
+  other.main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  writeFileSync(other.main.planPath, PUBLIC_TEXT.replace("held public fixture PUB-2", "edited fallback PUB-2"));
+  other.fx.set(record("OPS-GOOD"));
+  const edited = publicRecordDigest(loadPlan(other.main.planPath).byId.get("PUB-2")!);
+  assert.deepEqual(await other.ports.probe(held), { present: false, digest: edited }, "the fallback's changed record is reported");
+  assert.deepEqual(await readApproveRelease("PUB-2", undefined, other.main.dir, other.fx.lookup, () => undefined, held.digest),
+    { outcome: "unreadable", reason: "public-replay-record-unverified" });
+  await other.pass();
+  assert.deepEqual(other.approved, []);
+  assert.deepEqual(steps(other.rows, "stuck_state.record_changed").map(row => [row.recorded_digest, row.current_digest]), [[held.digest, edited]]);
+});
+
 test("W1-T13785 criterion 4: working-tree refusals replay once after an ops-only edit or switching the destination off", async t => {
   for (const clearing of ["ops edit", "destination off"] as const) {
     const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
@@ -606,7 +648,7 @@ test("W1-T13785 criterion 5: invariant no-held-record-is-released-from-either-ca
   assert.equal(soundSeen, 5 + 4 + 5 + 5, `the sound records the worlds name (${soundSeen})`);
 });
 
-test("W1-T13785 criterion 5: beside an unrelated public-to-ops edge, approve keeps origin/main's holds and releases a sound ops record from the strict fallback", async t => {
+test("W1-T13785 criterion 5: beside an unrelated public-to-ops edge, approve answers an ops record from the strict fallback's composition, as on origin/main, and keeps a public edge's hold", async t => {
   const main = publicMain(t, PUBLIC_TEXT + record("PUB-BOOT") + record("PUB-DUP"));
   main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
   const fx = opsCatalog(t, SOUND_OPS + BAD_OPS + record("PUB-DUP") +
@@ -624,20 +666,24 @@ test("W1-T13785 criterion 5: beside an unrelated public-to-ops edge, approve kee
   assert.deepEqual(deferredComposition.held.get("OPS-ON-BOOT"), { reason: BAD_EDGE, task: "OPS-ON-BOOT", dependsOn: "PUB-BOOT" });
   const approve = (id: string) => readApproveRelease(id, strict.plan, main.dir, { ...fx.lookup, opsSnapshot }, () => undefined);
 
-  // origin/main lacks PUB-BOOT, so its composition holds OPS-ON-BOOT; the older working tree cannot lift that hold.
-  assert.deepEqual(await approve("OPS-ON-BOOT"), { outcome: "held", hold: { reason: BAD_EDGE, task: "OPS-ON-BOOT", dependsOn: "PUB-BOOT" } });
-  const sound = await approve("OPS-ON-GOOD");
-  assert.equal(sound?.outcome, "found", JSON.stringify(sound));
-  assert.equal(sound.catalog, "ops");
-  assert.deepEqual(sound.plan, strictComposition.plan);
+  // Operator ruling 2026-11-21: origin/main does not load strictly, so the strict loader's working-tree fallback, where
+  // PUB-BOOT exists, is the composition, as on origin/main. The deferred ref's hold on OPS-ON-BOOT exists only because
+  // the ref failed to load, so it is not a hold the composition makes.
+  for (const id of ["OPS-ON-BOOT", "OPS-ON-GOOD"]) {
+    const sound = await approve(id);
+    assert.equal(sound?.outcome, "found", `${id}: ${JSON.stringify(sound)}`);
+    assert.equal(sound.catalog, "ops");
+    assert.deepEqual(sound.plan, strictComposition.plan, `${id} is released from the strict fallback's composition`);
+  }
   assert.deepEqual(await approve("OPS-CHILD"), { outcome: "held", hold: { reason: BAD_EDGE, task: "OPS-BAD", dependsOn: MISSING } });
   assert.deepEqual(await approve("OPS-ON-DUP"), { outcome: "held", hold: { reason: "duplicate_task_id", task: "PUB-DUP" } });
   assert.deepEqual(await approve("OPS-ON-REV"), { outcome: "held", hold: REV_HOLD });
 });
 
-test("W1-T13785 criterion 5: a record either public view's composition holds is never answered found, by approve or by the probe", async t => {
+test("W1-T13785 criterion 5: beside an unrelated public-to-ops edge, a record the strict fallback's composition or a public edge holds is never answered found, by approve or by the probe, and every other record is answered from the fallback as on origin/main", async t => {
   // origin/main (read with deferred edges) and the strict fallback (the older working tree) differ both ways:
-  // PUB-BOOT is only in the working tree, PUB-NEW only on origin/main, and origin/main's PUB-REV names an ops id.
+  // PUB-BOOT is only in the working tree, PUB-NEW only on origin/main, and origin/main's PUB-REV names an ops id, so
+  // origin/main does not load strictly and the fallback's composition is the composition (operator ruling 2026-11-21).
   const main = publicMain(t, PUBLIC_TEXT + record("PUB-BOOT") + record("PUB-DUP"));
   main.publish(PUBLIC_TEXT + record("PUB-NEW") + record("PUB-REV", ["OPS-GOOD"]));
   const fx = opsCatalog(t, SOUND_OPS + BAD_OPS + record("PUB-DUP") + record("OPS-ON-BOOT", ["PUB-BOOT"]) +
@@ -647,40 +693,39 @@ test("W1-T13785 criterion 5: a record either public view's composition holds is 
   assert.equal(opsSnapshot.outcome, "ok");
   const strict = await readReleasePublicPlan(main.dir), deferred = await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true });
   assert.deepEqual([strict.read, deferred.read], ["working_tree", "origin/main"]);
-  const views = [composeSecondaryPlan(deferred.plan, opsSnapshot.plan!), composeSecondaryPlan(strict.plan, opsSnapshot.plan!)];
-  const strictComposition = views[1]!;
-  assert.ok(views.every(view => view.outcome === "ok"));
-  if (strictComposition.outcome !== "ok") return;
-  const heldBy = (id: string) => views.map(view => view.outcome === "ok" ? view.held.get(id) : undefined).find(hold => hold !== undefined);
+  const [refView, fallbackView] = [composeSecondaryPlan(deferred.plan, opsSnapshot.plan!), composeSecondaryPlan(strict.plan, opsSnapshot.plan!)];
+  assert.ok(refView.outcome === "ok" && fallbackView.outcome === "ok");
+  if (refView.outcome !== "ok" || fallbackView.outcome !== "ok") return;
+  // A hold the composition makes: the fallback's, or one on a public edge of origin/main (the edge that fails it).
+  const publicEdgeHold = (id: string) => { const hold = refView.held.get(id); return hold && deferred.plan.byId.has(hold.task) ? hold : undefined; };
   const rows: Row[] = [];
   const ports = productionStuckStatePorts({
     stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
     log: () => undefined, escalate: () => null, destinationRead: async () => undefined, approve: async () => 1,
   });
-  let held = 0, sound = 0;
+  const held: string[] = [], fromFallback: string[] = [];
   for (const id of new Set([...deferred.plan.tasks, ...strict.plan.tasks, ...opsSnapshot.plan!.tasks].map(task => task.id))) {
-    const hold = heldBy(id);
     const before = rows.length;
     const answer = await readApproveRelease(id, strict.plan, main.dir, { ...fx.lookup, opsSnapshot }, row => rows.push({ ts: iso(NOW), ...row }));
-    if (hold !== undefined) {
-      held += 1;
-      assert.equal(answer?.outcome, "held", `${id} is held in one view, never ${JSON.stringify(answer)}`);
+    if (fallbackView.held.has(id) || publicEdgeHold(id) !== undefined) {
+      held.push(id);
+      assert.equal(answer?.outcome, "held", `${id} is held by the composition, never ${JSON.stringify(answer)}`);
       const [item] = scanStuckState(rows.slice(before)).open;
-      // A hold read from origin/main always writes its row; a working-tree-only hold may not (#19593's design).
-      if (views[0]!.outcome === "ok" && views[0]!.held.has(id)) assert.ok(item, `${id}: its refusal opens a held item`);
+      // A hold both views make keeps origin/main's commit for its row; a working-tree-only hold may write none (#19593).
+      if (refView.held.has(id)) assert.ok(item, `${id}: its refusal opens a held item`);
       if (item) assert.equal((await ports.probe(item)).present, true, `${id}: the probe reads the hold present`);
     } else if (opsSnapshot.plan!.byId.has(id)) {
-      sound += 1;
-      assert.deepEqual(answer, { outcome: "found", catalog: "ops", plan: strictComposition.plan }, `${id}: released as origin/main composes it`);
+      if (refView.held.has(id)) fromFallback.push(id);
+      assert.deepEqual(answer, { outcome: "found", catalog: "ops", plan: fallbackView.plan }, `${id}: released as origin/main composes it`);
     } else {
-      sound += 1;
       assert.ok(answer === undefined || answer.outcome === "absent", `${id}: a sound public record is not held (${JSON.stringify(answer)})`);
     }
   }
-  // Held: the dangling ops edge and its two dependants, the duplicate's copies and its ops dependant, OPS-ON-REV and
-  // PUB-REV, OPS-ON-BOOT and its child (origin/main lacks PUB-BOOT), OPS-ON-NEW (the working tree lacks PUB-NEW).
-  assert.equal(held, 3 + 2 + 2 + 2 + 1, `held records (${held})`);
-  assert.ok(sound >= 5, `sound records (${sound})`);
+  // Held: the dangling ops edge and its two dependants, the duplicate (both copies) and its ops dependant, PUB-REV and
+  // OPS-ON-REV, OPS-ON-NEW (the working tree lacks PUB-NEW).
+  assert.deepEqual(held.sort(), ["OPS-BAD", "OPS-CHILD", "OPS-GRANDCHILD", "OPS-ON-DUP", "OPS-ON-NEW", "OPS-ON-REV", "PUB-DUP", "PUB-REV"]);
+  // The deferred ref alone holds these (origin/main lacks PUB-BOOT); the fallback's composition releases them.
+  assert.deepEqual(fromFallback.sort(), ["OPS-ON-BOOT", "OPS-ON-BOOT-CHILD"]);
 });
 
 test("W1-T13785 criterion 4: an ops refusal origin/main no longer holds is probed through the strict fallback, which can still hold it", async t => {
@@ -706,7 +751,7 @@ test("W1-T13785 criterion 4: an ops refusal origin/main no longer holds is probe
   assert.deepEqual(await ports.probe(item), { present: false, digest: item.digest }, "a strict origin/main with PUB-NEW clears it");
 });
 
-test("W1-T13785 criterion 4: an existing ops refusal stays held in the probe and approve until origin/main clears it, whatever the working tree holds", async t => {
+test("W1-T13785 criterion 4: an existing ops refusal beside an unrelated public-to-ops edge is answered from the strict fallback in the probe and approve, as on origin/main", async t => {
   const id = "OPS-ON-BOOT";
   const main = publicMain(t, PUBLIC_TEXT);
   const fx = opsCatalog(t, SOUND_OPS + record(id, ["PUB-BOOT"]));
@@ -733,16 +778,11 @@ test("W1-T13785 criterion 4: an existing ops refusal stays held in the probe and
   await runStuckStateGardener(ports);
   assert.deepEqual(retries, []);
 
-  // The working tree gains PUB-BOOT, but origin/main (the composition's public view) still lacks it.
+  // origin/main does not load strictly, so its working-tree fallback is the composition (operator ruling 2026-11-21):
+  // the working tree gaining PUB-BOOT clears the hold, and that edit is the clearing event.
   writeFileSync(main.planPath, PUBLIC_TEXT + record("PUB-BOOT"));
   assert.equal(main.head(), publicCommit);
   assert.equal(fx.commit(), opsCommit);
-  assert.deepEqual(await approve(), { outcome: "held", hold: { reason: BAD_EDGE, task: id, dependsOn: "PUB-BOOT" } });
-  assert.deepEqual(await ports.probe(item), { present: true, reason: "held" });
-  await runStuckStateGardener(ports);
-  assert.deepEqual(retries, [], "a working-tree edit alone never lifts origin/main's hold");
-
-  main.publish(PUBLIC_TEXT + record("PUB-BOOT"));
   const release = await approve();
   assert.equal(release?.outcome, "found");
   assert.equal(release.catalog, "ops");
@@ -752,7 +792,5 @@ test("W1-T13785 criterion 4: an existing ops refusal stays held in the probe and
   await runStuckStateGardener(ports);
   await runStuckStateGardener(ports);
   assert.deepEqual(retries, [[id]]);
-  const retried = steps(rows, "stuck_state.retried");
-  assert.deepEqual(retried.map(row => row.exit_code), [0]);
-  assert.ok((retried[0]!.events as string[]).includes("public-main"), "origin/main's movement is the clearing event");
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => [row.exit_code, row.events]), [[0, ["public-working-tree"]]]);
 });
