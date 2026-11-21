@@ -471,11 +471,10 @@ function* prePushGateSteps(
   readConfig: (pin: PinnedWorktreeGit, key: string) => string | undefined | Promise<string | undefined>,
   required = false,
 ): Steps<PrePushGate | undefined> {
-  const pin = pinWorktreeGit(worktreePath);
-  const configured = yield* step(() => readConfig(pin, "core.hooksPath"));
-  // A required gate runs whatever the checkout configures: an operator checkout with Git's default hooks
-  // directory still has every check run, because the leaf points Git at hooks/host, which has no pre-push.
-  if (!required && (configured === undefined || configured === "" || configured === "/dev/null")) return undefined;
+  if (!required) {
+    const configured = yield* step(() => readConfig(pinWorktreeGit(worktreePath), "core.hooksPath"));
+    if (configured === undefined || configured === "" || configured === "/dev/null") return undefined;
+  }
   const hook = join(harnessHooksDir(), "pre-push");
   if (!existsSync(hook)) {
     if (required) throw new Error(`git-push: the required pre-push gate ${hook} is missing`);
@@ -494,15 +493,22 @@ function* prePushGateSteps(
   const remote = positional[0] ?? "origin";
   const refspec = positional[1] ?? "HEAD";
   const [src, dst] = refspec.includes(":") ? (refspec.split(":", 2) as [string, string]) : [refspec, undefined];
-  const headRef = yield* tryRead(["symbolic-ref", "-q", "HEAD"]);
+  const headRef = src === "HEAD" ? yield* tryRead(["symbolic-ref", "-q", "HEAD"]) : undefined;
+  const objectId = /^[0-9a-f]{40}$/;
   const localRef = src === "HEAD" ? (headRef ?? "HEAD") : src.startsWith("refs/") || /^[0-9a-f]{40,64}$/.test(src) ? src : `refs/heads/${src}`;
-  const localSha = (yield* tryRead(["rev-parse", src])) ?? ZERO_SHA;
   const remoteRef = dst ?? localRef;
-  // Unreadable reads as a new ref: the hook's only reader (identity-transition) abstains on it, and the
-  // push that follows reports the transport failure itself.
-  const remoteSha = (yield* tryRead(["ls-remote", remote, remoteRef]))?.split(/\s+/)[0] ?? ZERO_SHA;
+  const localArgs = ["rev-parse", src];
+  const remoteArgs = ["ls-remote", remote, remoteRef];
+  const localSha = required ? String(yield* step(() => read(localArgs))).trim() : (yield* tryRead(localArgs)) ?? ZERO_SHA;
+  const remoteLine = required ? String(yield* step(() => read(remoteArgs))).trim() : yield* tryRead(remoteArgs);
+  const remoteSha = remoteLine?.split(/\s+/)[0] || ZERO_SHA;
+  if (required && (!objectId.test(localSha) || localSha === ZERO_SHA ||
+    (remoteLine !== "" && remoteLine !== `${remoteSha}\t${remoteRef}`) || !objectId.test(remoteSha))) {
+    throw new Error("git-push: the required pre-push gate could not identify the local or remote ref");
+  }
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
-  const url = (yield* tryRead(["remote", "get-url", remote])) ?? remote;
+  const urlArgs = ["remote", "get-url", ...(required ? ["--push"] : []), remote];
+  const url = required ? String(yield* step(() => read(urlArgs))).trim() : (yield* tryRead(urlArgs)) ?? remote;
   const env = prePushGateEnv();
   // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
   if (required) delete env.RMD_PREPUSH_GATES;
@@ -511,45 +517,36 @@ function* prePushGateSteps(
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
 
-/** The open-PR body check's lines for a body it could not judge: UNCHECKED, unreadable, or not run at all. */
-const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|open-pr-body-proof-precheck could not read this push|open-pr-body-proof-precheck\.mjs absent|open-pr-body-proof-precheck: SKIP -- the pushed tree could not be read here/;
-
-/** The check's line for a proof the push newly falsifies. On a cached body the check only reports it. */
+const UNCHECKED_BODY_CHECK = /open-PR body proofs UNCHECKED|^open-pr-body-proof-precheck: .*could not be (?:compared|read)/m;
 const FALSIFIED_BODY_PROOF = /open-pr-body-proof-precheck: this push NEWLY FALSIFIES/;
 
-/** Each required rule the harness hook runs: the hook's lines for a check it could not run or whose diff it could
- *  not read (it exits 0 on both), and the check's own line for a diff it read and judged. hooks/pre-push runs
- *  rule15-precheck and rule25-precheck; the measured line is the only evidence the rule was checked. Rule 25 is
- *  advisory: rule25-precheck's NOTICE is a measured result the review reports and does not refuse. */
-const REQUIRED_RULES = [
-  { rule: "Rule 15", unread: /rule15-precheck could not read the diff|rule15-precheck: could not read the diff|scripts\/rule15-precheck\.mjs absent|pre-push: no tsx loader under/,
-    measured: /^rule15-precheck: OK -- /m },
-  { rule: "Rule 25", unread: /rule25-precheck could not read the diff|rule25-precheck: could not read the diff|scripts\/rule25-precheck\.mjs absent|pre-push: no tsx loader under/,
-    measured: /^rule25-precheck: (?:OK|NOTICE) -- /m },
+// The hook deliberately exits zero on several unreadable inputs. Match the checks' own results,
+// including named inapplicability and advisory results, after rejecting the hook's named failures.
+const REQUIRED_CHECKS = [
+  ["Rule 15", /^rule15-precheck: OK -- /m],
+  ["Rule 25", /^rule25-precheck: (?:OK|NOTICE) -- /m],
+  ["CI control-plane", /^ci-control-plane-precheck: (?:OK -- |SKIP -- this diff does not change a control-plane or capability-snapshot input$)/m],
+  ["test tier", /^test-tier-manifest: OK — /m],
+  ["head identity", /^head-identity-gate: (?:OK — |REFUSED — this head matches neither conforming form)/m],
+  ["worker branch shape", /^worker-branch-shape: OK — /m],
+  ["proof resolution", /^proof-resolve-precheck: (?:OK -- |SKIP -- (?:a plan-only filing|no task resolved|\S+ resolves no acceptance criteria)|remudero-review WILL REFUSE |[0-9]+ of .* grep proofs ALSO PASS )/m],
 ] as const;
+const MEASURED_BODY = /^open-pr-body-proof-precheck: (?:OK -- |SKIP -- (?:the body's Remudero-Task: |the open PR's body carries no ## Acceptance proofs$|this branch has no open pull request$)|[0-9]+ body proof\(s\) already failing at the old tip)/m;
 
-function unmeasuredRule(text: string): string | undefined {
-  for (const { rule, unread, measured } of REQUIRED_RULES) {
-    if (unread.test(text)) return `the pre-push gate could not read the diff for its ${rule} check, so ${rule} was not checked`;
-    if (!measured.test(text)) return `the pre-push gate reported no measured ${rule} result, so ${rule} was not checked`;
-  }
-  return undefined;
-}
-
-/** A required gate never reads an unjudged open-PR body check as a pass, and never pushes a newly falsified body
- *  proof: its caller wrote the cached body from a read made just before the push, so that body is the stored one.
- *  Nor does it read a required rule's check (Rule 15, Rule 25) as a pass unless the check says it read the diff and
- *  judged it: the hook exits 0 on an unreadable diff, so an unmeasured rule would otherwise let the push go with that
- *  check skipped. */
-function requiredGateOutcome(outcome: HookOutcome): HookOutcome {
+function requiredGateOutcome(outcome: HookOutcome, gate: PrePushGate): HookOutcome {
   if (outcome.refused) return outcome;
-  const text = `${String(outcome.out.stdout ?? "")}\n${String(outcome.out.stderr ?? "")}`;
+  const stderr = String(outcome.out.stderr ?? "");
+  const text = `${String(outcome.out.stdout ?? "")}\n${stderr}`;
+  const unchecked = /^pre-push: .*(?:could not (?:read|be judged)|skipped, NOT passed|every check skipped).*$/m.exec(text);
+  const [, , , remoteSha] = gate.input.trim().split(" ");
+  const missing = REQUIRED_CHECKS.find(([, measured]) => !measured.test(text));
   const reason = UNCHECKED_BODY_CHECK.test(text)
-    ? "the open PR's stored body could not be read, so its open-PR body proofs were not checked"
+    ? "the open PR's stored body proofs could not be checked"
     : FALSIFIED_BODY_PROOF.test(text) ? "this push newly falsifies a proof in the open PR's stored body"
-    : unmeasuredRule(text);
+    : missing ? `the pre-push gate reported no measured ${missing[0]} result`
+    : unchecked?.[0] ?? (remoteSha !== ZERO_SHA && !MEASURED_BODY.test(text) ? "the pre-push gate reported no measured open-PR body result" : undefined);
   if (reason === undefined) return outcome;
-  return { refused: true, err: { ...outcome.out, stderr: `${String(outcome.out.stderr ?? "")}${reason}\n`, reason } };
+  return { refused: true, err: { ...outcome.out, stderr: `${stderr}${reason}\n`, reason } };
 }
 
 /** W1-T6120 — the gate's env is an ALLOWLIST: GH_TOKEN, GH_APP_* and provider keys stay with the push. Its git calls
@@ -917,25 +914,28 @@ function runStoppableHook(worktreePath: string, gate: PrePushGate, signal: Abort
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
 export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient, signal, requireGate = false }: {
+  worktreePath: string, { prGates = true, requireGate = false, verdicts = requireGate ? undefined : defaultPushGateVerdicts(),
+    git = hostWorktreeGitAsync, push, refreshAmbient, signal }: {
     prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>; signal?: AbortSignal;
-    /** Run the harness pre-push gate even when the checkout's config disables hooks, with no opt-out. */
+    git?: typeof hostWorktreeGitAsync;
+    /** Run a fresh harness pre-push gate independently of the checkout's hooks configuration. */
     requireGate?: boolean;
   } = {},
 ): PushExecAsync {
   return async (_file, args, opts) => {
     signal?.throwIfAborted();
     const pushArgs = leafArgs(worktreePath, args);
-    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a, { signal });
-    const gate = prGates
+    const read = (a: string[]) => git(worktreePath, a, { signal });
+    const gate = prGates || requireGate
       ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requireGate))
       : undefined;
     if (gate) {
-      const outcome = await runStepsAsync(pushGateSteps(worktreePath, gate, read, async () => {
+      const runGate = async () => {
         signal?.throwIfAborted();
-        const ran = await runHookAsync(worktreePath, gate, signal);
-        return requireGate ? requiredGateOutcome(ran) : ran;
-      }, verdicts, "worktreePushExecAsync"));
+        return runHookAsync(worktreePath, gate, signal);
+      };
+      const outcome = requireGate ? requiredGateOutcome(await runGate(), gate)
+        : await runStepsAsync(pushGateSteps(worktreePath, gate, read, runGate, verdicts, "worktreePushExecAsync"));
       signal?.throwIfAborted();
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);

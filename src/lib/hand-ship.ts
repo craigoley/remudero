@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
+import { parse, type CallExpression, type Node } from "acorn";
 import { systemClock } from "./clock.js";
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError } from "./drain-lock.js";
 import { gitPushRunBranchAsync, worktreePushExecAsync } from "./git-push.js";
@@ -22,7 +24,7 @@ interface ShipHost {
 }
 
 interface ShipSource { root: string; branch: string; head: string; origin: string }
-interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean;
+interface FailingTest { file: string | null; title: string; location?: string | null; failed?: boolean; suite?: boolean; declaration?: string;
   /** A `describe` row: Node's `# tests` and `# fail` count only the tests inside it, never the row itself. */
   describeRow?: boolean; fileLevel?: boolean; state?: string }
 type Priority = "low" | "normal";
@@ -157,88 +159,60 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
   return rows;
 }
 
-function escapeTestName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-
-/** The Node test filter for the receipt's literal title: each name in it, escaped, and nothing else. */
-function literalTestPattern(title: string): string[] {
-  return ["--test-name-pattern", `^(?:${title.split(" > ").map(escapeTestName).join("|")})$`];
+/** Enable Node's name filter and supply its predicate in the pinned runner's test child. Node's
+ * CLI matches ancestors as well as the test itself, so admitting a dynamic parent with the CLI
+ * pattern also admits every child. The predicate sees each registered name and its actual parents. */
+function isolatedTestArgs(title: string): string[] {
+  const preload = `
+    import { createRequire } from "node:module";
+    if (process.env.NODE_TEST_CONTEXT === "child-v8") {
+      const require = createRequire(process.cwd() + "/hand-ship.cjs");
+      const { Test } = require("internal/test_runner/test");
+      if (typeof Test?.prototype.willBeFilteredByName !== "function") {
+        throw new Error("hand-ship: this Node runner cannot isolate a named test");
+      }
+      const target = ${JSON.stringify(title)};
+      Test.prototype.willBeFilteredByName = function () {
+        const names = [];
+        for (let test = this; test.parent; test = test.parent) names.unshift(test.name);
+        const name = names.join(" > ");
+        return name !== target && !target.startsWith(name + " > ");
+      };
+    }
+  `;
+  return ["--expose-internals", "--test-name-pattern=(?!)", `--import=data:text/javascript,${encodeURIComponent(preload)}`];
 }
 
-/** Build a Node test filter that admits the target's names and skips its siblings. The target is always selected
- *  by the literal title the receipt names. The source only adds skips for sibling names it can read literally: a
- *  computed title, such as test(`case ${name}`), cannot be read there, so the filter then skips nothing, and the
- *  rerun's own rows are matched to the target by its full title and counted. `null` means the source registers no
- *  test by the target's name, so on main the test does not exist. */
-function isolatedTestPatterns(source: string, title: string, expectedCount = 1): string[] | null {
-  const literal = literalTestPattern(title);
-  type Token = { kind: "identifier" | "punctuation" | "string"; value: string; literal?: boolean };
-  const tokens: Token[] = [];
-  let ambiguous = false;
-  for (let i = 0; i < source.length;) {
-    const char = source[i]!;
-    if (/\s/.test(char)) { i += 1; continue; }
-    if (source.startsWith("//", i)) { const end = source.indexOf("\n", i + 2); i = end < 0 ? source.length : end + 1; continue; }
-    if (source.startsWith("/*", i)) {
-      const end = source.indexOf("*/", i + 2);
-      if (end < 0) return literal;
-      i = end + 2;
-      continue;
-    }
-    if (char === "'" || char === '"' || char === "`") {
-      const quote = char, start = ++i;
-      let dynamic = false, closed = false;
-      while (i < source.length) {
-        if (source[i] === "\\") { dynamic = true; i += 2; continue; }
-        if (quote === "`" && source.startsWith("${", i)) dynamic = true;
-        if (source[i] === quote) { closed = true; break; }
-        i += 1;
-      }
-      if (!closed) return literal;
-      tokens.push({ kind: "string", value: source.slice(start, i), literal: !dynamic });
-      i += 1;
-      continue;
-    }
-    if (/[A-Za-z_$]/.test(char)) {
-      const start = i++;
-      while (i < source.length && /[\w$]/.test(source[i]!)) i += 1;
-      tokens.push({ kind: "identifier", value: source.slice(start, i) });
-      continue;
-    }
-    tokens.push({ kind: "punctuation", value: char });
-    i += 1;
-  }
-  const testNames = new Set(["test", "it", "spec", "specify", "describe", "suite"]);
-  const registrations: string[] = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i]!;
-    if (token.kind !== "identifier" || !testNames.has(token.value)) continue;
-    let open = i + 1;
-    if (tokens[open]?.value === ".") {
-      const modifier = tokens[open + 1]?.value;
-      if (["only", "skip", "todo", "fails"].includes(modifier ?? "") && tokens[open + 2]?.value === "(") open += 2;
-      else if (modifier === "each" || modifier === "for") { ambiguous = true; continue; }
-    }
-    if (tokens[open]?.value !== "(") continue;
-    const first = tokens[open + 1];
-    if (first?.kind !== "string" || first.literal !== true) { ambiguous = true; continue; }
-    registrations.push(first.value);
-  }
-  if (ambiguous) return literal;
-  if (registrations.length === 0) return null;
-  const target = title.split(" > ");
-  if (!registrations.includes(target.at(-1)!)) return null;
+/** A unique registration expression can be matched across line shifts. Identical expressions
+ * at different call sites are ambiguous even when only one of them registered on a given run. */
+function locateDeclarations(text: string) {
+  // Strip mode preserves the original offsets, including the locations in Node's TAP.
+  const source = parse(stripTypeScriptTypes(text), { ecmaVersion: "latest", sourceType: "module", locations: true });
+  const calls = new Map<string, string | null>();
   const counts = new Map<string, number>();
-  for (const name of registrations) counts.set(name, (counts.get(name) ?? 0) + 1);
-  const targetNames = new Set(target);
-  for (const name of targetNames) {
-    const expected = target.filter((part) => part === name).length + (name === target.at(-1) ? expectedCount - 1 : 0);
-    if (counts.get(name) !== expected) return literal;
-  }
-  const skipped = [...new Set(registrations.filter((name) => !targetNames.has(name)))];
-  if (skipped.length === 0) return literal;
-  const skipAlternatives = skipped.map(escapeTestName).join("|");
-  if (skipAlternatives.length > 24_000) return literal;
-  return [...literal, "--test-skip-pattern", `^(?:${skipAlternatives})$`];
+  const remember = (node: Node, declaration: string) => {
+    const start = node.loc?.start;
+    if (!start) return;
+    const location = `${start.line}:${start.column + 1}`;
+    calls.set(location, calls.has(location) ? null : declaration);
+  };
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!value || typeof value !== "object" || !("type" in value)) return;
+    if (value.type === "CallExpression") {
+      const call = value as CallExpression;
+      const declaration = text.slice(call.start, call.end);
+      counts.set(declaration, (counts.get(declaration) ?? 0) + 1);
+      remember(call, declaration);
+      if (call.callee.type === "MemberExpression") remember(call.callee.property, declaration);
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(source);
+  return (location: string | null | undefined) => {
+    const declaration = location ? calls.get(location) : undefined;
+    return typeof declaration === "string" && counts.get(declaration) === 1 ? declaration : undefined;
+  };
 }
 
 async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnType<HandShipEffects["prepare"]>>, run: ShipRun) {
@@ -377,10 +351,8 @@ async function compareFailures(receipt: ShipReceipt, workspace: Awaited<ReturnTy
   const remainingMain = [...mainFailures];
   const rows = [];
   for (const test of exactHeadFailures) {
-    // A test is the same test on main by its file and full title, never by its line: an unrelated edit above
-    // it moves the line. Same-title duplicates still match one to one, by count.
     const index = remainingMain.findIndex((other) => other.file === test.file && other.title === test.title &&
-      other.suite === test.suite);
+      test.declaration !== undefined && test.declaration === other.declaration);
     const classification: FailureClass = index >= 0 ? "also failing on main" : "caused by the change";
     if (index >= 0) remainingMain.splice(index, 1);
     run.log(`${classification}: ${test.file} :: ${test.title}`);
@@ -735,6 +707,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
     }
     const node = (args: string[]) => priority === "low" ? ["/usr/bin/nice", "-n", "10", nodeExecutable, ...args] : [nodeExecutable, ...args];
     let baseCut = false;
+    const declarations = new Map<string, ReturnType<typeof locateDeclarations>>();
     return {
       async preflight(requested) {
         priority = requested;
@@ -771,14 +744,8 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         if (available.code === 1 && tree === "main") return [];
         checked(available, `${tree} test ${file}`);
         await command(["test", "!", "-L", file], { cwd });
-        // The checkout lives on the host that runs the test, so its source is read there too.
-        const text = title === undefined ? "" : host.target === "local" ? readFileSync(join(cwd, file), "utf8")
-          : await command(["cat", "--", file], { cwd });
-        const found = title === undefined ? [] : isolatedTestPatterns(text, title, expectedCount);
-        if (found === null && tree === "main") return [];
-        // On head the receipt says the test ran, so a name the source does not show literally is still selected by it.
-        const namePattern = found ?? literalTestPattern(title!);
-        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", ...(namePattern ?? []),
+        const selection = title === undefined ? [] : isolatedTestArgs(title);
+        const args = proofTestRunnerArgs(["--test", "--test-reporter=tap", "--test-concurrency=1", "--enable-source-maps", ...selection,
           "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", file], source.root, [file]);
         const result = await hostCommand(host, run, node(args), { cwd, record: true });
         const { testSummary } = await authorTools();
@@ -786,14 +753,30 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         const results = tapResults(result.stdout, cwd, file);
         // A failing `it` in a `describe` reports two rows, but the summary counts one test: suites are not tests.
         const testRows = results.filter((test) => !test.describeRow);
-        const targetSelected = title === undefined || results.some((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
+        const targets = results.filter((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
+        const unrelated = title !== undefined && results.some((test) => !test.fileLevel &&
+          test.title !== title && !title.startsWith(`${test.title} > `));
         if (result.truncated || !summary || summary.cancelled !== 0 || testRows.length !== summary.tests ||
           testRows.filter((test) => test.failed).length !== summary.fail ||
-          (result.code !== 0 && result.code !== 1) ||
-          (title === undefined && result.code === 0 ? summary.pass === 0 || summary.fail !== 0 : false) ||
-          (title !== undefined && !targetSelected && tree === "head") ||
-          results.some((test) => test.file !== null && test.file !== file)) throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
-            `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)}, selected=${targetSelected})`);
+          result.code !== (summary.fail === 0 ? 0 : 1) ||
+          (title === undefined && result.code === 0 && summary.pass === 0) ||
+          (title !== undefined && tree === "head" && targets.length !== (expectedCount ?? 1)) ||
+          unrelated || results.some((test) => (test.fileLevel && test.failed) || (test.file !== null && test.file !== file))) {
+          throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
+            `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)})`);
+        }
+        const redTargets = targets.filter((row) => row.failed);
+        const ambiguous = targets.length > 1 && (redTargets.length !== targets.length ||
+          new Set(redTargets.map((row) => row.location)).size !== redTargets.length);
+        if (redTargets.length > 0 && !ambiguous) {
+          const path = join(cwd, file);
+          let identify = declarations.get(path);
+          if (!identify) {
+            identify = locateDeclarations(await git(["show", `${sha}:${file}`], { cwd }));
+            declarations.set(path, identify);
+          }
+          for (const row of redTargets) row.declaration = identify(row.location);
+        }
         return results;
       },
       close,
@@ -854,11 +837,12 @@ export function handShipEffects(checkAcceptance: (bodyFile: string) => number,
         throw new Error("source branch, head or origin changed during verification");
       }
       await cacheStoredBody(source, run, github);
-      const execute = worktreePushExecAsync(source.root, { prGates: true, requireGate: true, signal: run.signal, push: (worktree, args, opts) => {
+      const execute = worktreePushExecAsync(source.root, { prGates: true, requireGate: true, signal: run.signal, git: run.git, push: (worktree, args, opts) => {
         run.signal.throwIfAborted();
         return pushGit(worktree, args, opts);
       } });
       await gitPushRunBranchAsync(source.root, { expectedHeadSha: source.head, destination: source.branch,
+        capture: (_file, args) => gitAt(run, source.root, args.slice(2)),
         exec: (file, args, opts) => execute(file, [...args.slice(0, -1), `${source.head}:refs/heads/${source.branch}`], opts) });
     },
     async findPull(source, run) {

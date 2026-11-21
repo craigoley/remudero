@@ -45,8 +45,8 @@ function redReceipt(titles: string[]): ShipReceipt {
   return result;
 }
 
-function rerunResults(titles: string[]): { file: string; title: string; location: string; failed: boolean }[] {
-  return titles.map((title, index) => ({ file, title, location: `${index + 1}:1`, failed: true }));
+function rerunResults(titles: string[]) {
+  return titles.map((title, index) => ({ file, title, location: `${index + 1}:1`, declaration: title, failed: true }));
 }
 
 function passingResults(titles: string[]): { file: string; title: string; location: null; failed: boolean }[] {
@@ -112,8 +112,8 @@ test("W1-T12169 criterion 3 compares isolated head failures with unchanged main 
   f.workspace.rerun = async (tree, target, sha, title) => {
     f.calls.push(`${tree} ${target} ${sha} ${title ?? ""}`);
     if (title === "flake" && tree === "head") return passingResults(["flake"]);
-    if (title === "existing red") return [{ file, title, location: "2:1", failed: true }];
-    if (title === "regression" && tree === "head") return [{ file, title, location: "3:1", failed: true }];
+    if (title === "existing red") return [{ file, title, location: "2:1", declaration: title, failed: true }];
+    if (title === "regression" && tree === "head") return [{ file, title, location: "3:1", declaration: title, failed: true }];
     return [];
   };
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
@@ -256,7 +256,7 @@ test("one occurrence on main accounts for only one same-location duplicate failu
   original.failureAttribution!.tests!.forEach((test) => { test.location = "7:3"; });
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => (tree === "head" ? ["duplicate", "duplicate"] : ["duplicate"])
-    .map((title) => ({ file, title, location: "7:3", failed: true }));
+    .map((title) => ({ file, title, location: "7:3", declaration: title, failed: true }));
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
@@ -270,7 +270,7 @@ test("a nested target comparison ignores sibling results from its selected paren
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => [
     { file, title: "parent", location: "9:1", failed: true, suite: true },
-    { file, title: "parent > leaf", location: "10:1", failed: true },
+    { file, title: "parent > leaf", location: "10:1", declaration: "first registration", failed: true },
     { file, title: "parent > sibling", location: "11:1", failed: tree === "head" },
   ];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
@@ -285,10 +285,10 @@ test("different same-title failures at distinct source locations never become ba
   original.failureAttribution!.tests![1]!.location = "20:1";
   f.workspace.preflight = async () => original;
   f.workspace.rerun = async (tree) => tree === "head"
-    ? [{ file, title: "duplicate", location: "10:1", failed: true }, { file, title: "duplicate", location: "20:1", failed: true }]
-    : [{ file, title: "duplicate", location: "25:1", failed: true }];
+    ? [{ file, title: "duplicate", location: "10:1", declaration: "first registration", failed: true }, { file, title: "duplicate", location: "20:1", declaration: "second registration", failed: true }]
+    : [{ file, title: "duplicate", location: "25:1", declaration: "different registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1);
-  assert.match(f.lines.join("\n"), /also failing on main.*duplicate/);
+  assert.doesNotMatch(f.lines.join("\n"), /also failing on main.*duplicate/);
   assert.match(f.lines.join("\n"), /caused by the change.*duplicate/);
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
@@ -298,7 +298,7 @@ test("a failing test that only moved lines between main and head is also failing
   const original = redReceipt(["unchanged red"]);
   original.failureAttribution!.tests![0]!.location = "11:1";
   f.workspace.preflight = async () => original;
-  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", location: tree === "head" ? "11:1" : "10:1", failed: true }];
+  f.workspace.rerun = async (tree) => [{ file, title: "unchanged red", location: tree === "head" ? "11:1" : "10:1", declaration: "same registration", failed: true }];
   assert.equal(await runHandShip(f.args, f.options, f.effects), 0, f.lines.join("\n"));
   assert.match(f.lines.join("\n"), /also failing on main: test\/ci\/example\.test\.ts :: unchanged red/);
   assert.doesNotMatch(f.lines.join("\n"), /caused by the change/);
@@ -316,7 +316,8 @@ test("the production rerun selects one nested leaf and retains passing TAP rows 
     'import { test } from "node:test";',
     'test("parent", async (context) => {',
     '  await context.test("leaf", () => { throw new Error("selected leaf"); });',
-    '  await context.test("sibling", () => {});',
+    '  const sibling = "sibling";',
+    '  await context.test(sibling, () => { console.log("DYNAMIC SIBLING RAN"); });',
     '});',
     "",
   ].join("\n"));
@@ -331,6 +332,7 @@ test("the production rerun selects one nested leaf and retains passing TAP rows 
     assert.ok(rows.some((row) => row.title === "parent > leaf" && row.failed === true));
     assert.ok(rows.some((row) => row.title === "parent" && row.failed === true && row.suite === true));
     assert.ok(!rows.some((row) => row.title === "parent > sibling"), "the sibling must be skipped by the runner");
+    assert.doesNotMatch(readFileSync(join(f.root, "commands.log"), "utf8"), /DYNAMIC SIBLING RAN/);
     const passingSibling = await workspace.rerun("head", file, source.head, "parent > sibling");
     assert.ok(passingSibling.some((row) => row.file === file && row.title === "parent > sibling" &&
       row.failed === false && row.location === null), `a locationless passing TAP row keeps its known input file: ${JSON.stringify(passingSibling)}`);
@@ -370,10 +372,13 @@ test("stopping during Git bundle creation aborts the Git operation", async (t) =
 test("workflow-contract failures use real isolated head and main reruns", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
-  const base = seedHandBranch(repo, true);
+  seedHandBranch(repo, true);
   writeFileSync(join(repo.dir, "package-lock.json"), readFileSync(join(REPO_ROOT, "package-lock.json")));
   mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
   writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  repo.git("add", "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "both revisions have the test runner setup");
+  const base = repo.git("rev-parse", "HEAD");
   writeFileSync(join(repo.dir, file), [
     'import { test } from "node:test";',
     'test("workflow suite", async (context) => {',
@@ -511,9 +516,9 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
     assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
-      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
+      { file, title: "existing red", location: "1:1", fileLevel: false, failed: true, declaration: undefined },
     ]);
-    assert.ok(spawned.at(-1)!.includes("--test-name-pattern"), "the isolated rerun selects the named failure");
+    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=(?!)"), "the isolated rerun selects the named failure");
     assert.deepEqual(await workspace.rerun("main", file, base), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
@@ -605,13 +610,21 @@ test("cancellation reaches both a local child and the SSH supervisor", async (t)
   }), /SSH control pipe failed/);
 });
 
-/** A stand-in harness hook. By default it reports a measured Rule 15 pass, as the harness hook's rule15-precheck prints. */
-function harnessGate(t: TestContext, script: string, rule15 = true, rule25 = rule15): string {
+/** The harness hook's result lines, with individual checks omitted in the negative fixtures. */
+function harnessGate(t: TestContext, script: string, rule15 = true, rule25 = rule15, omit: string[] = []): string {
   const hooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-hooks-`));
   const mark = join(hooks, "ran");
   const measured = (rule15 ? 'echo "rule15-precheck: OK -- no criterion field added or edited in the plan"\n' : "") +
     (rule25 ? 'echo "rule25-precheck: OK -- no instrument path rides with a src/ product path"\n' : "");
-  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${measured}${script.replaceAll("$MARK", mark)}\n`);
+  const defaults = [
+    "ci-control-plane-precheck: SKIP -- this diff does not change a control-plane or capability-snapshot input",
+    "test-tier-manifest: OK — every row names an existing test file",
+    "head-identity-gate: OK — identified via its run-shaped head ref",
+    "worker-branch-shape: OK — no self-crediting plan filing",
+    "proof-resolve-precheck: SKIP -- no task resolved from the branch or a Remudero-Task: trailer",
+  ];
+  const checks = defaults.filter((line) => !omit.some((name) => line.startsWith(name))).map((line) => `echo ${shellQuote(line)}\n`).join("");
+  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\n${measured}${checks}${script.replaceAll("$MARK", mark)}\n`);
   chmodSync(join(hooks, "pre-push"), 0o755);
   const saved = { hooks: process.env.RMD_HARNESS_HOOKS_DIR, gates: process.env.RMD_PREPUSH_GATES };
   process.env.RMD_HARNESS_HOOKS_DIR = hooks;
@@ -623,6 +636,15 @@ function harnessGate(t: TestContext, script: string, rule15 = true, rule25 = rul
   return mark;
 }
 
+function offlinePushRun(f: ReturnType<typeof fixture>, signal = new AbortController().signal, oldTip?: string) {
+  return {
+    dir: f.root, signal, log: f.options.write,
+    git: ((cwd, args, options) => args[0] === "ls-remote"
+      ? Promise.resolve(oldTip ? `${oldTip}\t${args[2]}\n` : "")
+      : hostWorktreeGitAsync(cwd, args, options)) satisfies typeof hostWorktreeGitAsync,
+  };
+}
+
 test("the source publisher sends one non-forced refspec pinned to the receipt head and refuses drift", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
@@ -631,7 +653,7 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   const gate = harnessGate(t, 'cat > /dev/null; echo pass >> "$MARK"');
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
   assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
@@ -649,7 +671,7 @@ test("an operator checkout with Git's default hooks still runs every pre-push ch
   process.env.RMD_PREPUSH_GATES = "0";
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)));
   assert.equal(readFileSync(gate, "utf8"), "refused\n");
@@ -861,7 +883,7 @@ test("W1-T12169 criterion 4: an update push is judged against the stored body it
       if (stored instanceof Error) throw stored;
       return Array.isArray(stored) ? stored : [{ number: 7, body: stored }];
     }, async (_cwd, args) => { requests.push([...args]); return ""; });
-    const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+    const run = offlinePushRun(f, undefined, oldTip);
     const source = await defaults.readSource(repo.dir, run);
     const checks = () => readFileSync(gate, "utf8");
 
@@ -904,7 +926,7 @@ test("W1-T12169 criterion 4: a required pre-push gate's hook gets no GitHub toke
   });
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
   const env = readFileSync(gate, "utf8");
@@ -923,7 +945,7 @@ test("W1-T12169 criterion 5: a stop during the pre-push gate settles only after 
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
   const controller = new AbortController();
-  const run = { dir: f.root, signal: controller.signal, log: f.options.write };
+  const run = offlinePushRun(f, controller.signal);
   const source = await defaults.readSource(repo.dir, run);
   const pushing = withLiveWritesAllowed(() => defaults.push(source, run));
   pushing.catch(() => {});
@@ -947,7 +969,7 @@ test("W1-T12169 criterion 5: a stoppable pre-push gate that cannot start or over
   const mark = harnessGate(t, 'cat > /dev/null; head -c 67108865 /dev/zero; echo overflowed >> "$MARK"');
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   // The refusal writes the gate's output through; keep 64 MiB of it out of the TAP stream.
   const writes = { out: process.stdout.write, err: process.stderr.write };
@@ -1025,7 +1047,7 @@ test("W1-T12169 criterion 4: a required pre-push gate refuses a push whose Rule 
   seedHandBranch(repo);
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   const quiet = async (push: () => Promise<void>) => {
     const writes = { out: process.stdout.write, err: process.stderr.write };
@@ -1070,22 +1092,27 @@ test("W1-T12169 criterion 3: a failing test registered with a computed title is 
   mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
   writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
   const cases = (red: string[]) => [
-    'import { test } from "node:test";',
+    'import { test as trial, describe as group } from "node:test";',
     `const red = new Set(${JSON.stringify(red)});`,
-    'for (const name of ["alpha", "beta", "gamma"]) test(`case ${name}`, () => { if (red.has(name)) throw new Error(`red ${name}`); });',
-    'test("other", () => {});',
+    'group("parent", () => {',
+    '  for (const name of ["alpha", "beta", "gamma"]) trial(`case ${name}`, () => {',
+    '    console.log(`RAN CASE ${name}`);',
+    '    if (red.has(name)) throw new Error(`red ${name}`);',
+    '  });',
+    '});',
+    'trial("other", () => {});',
     "",
   ].join("\n");
   writeFileSync(join(repo.dir, file), cases(["alpha"]));
   repo.git("add", file, "test/setup/tmp-hygiene.ts");
   repo.git("commit", "-m", "a computed-title test is already red on main");
   const mainSha = repo.git("rev-parse", "HEAD");
-  writeFileSync(join(repo.dir, file), cases(["alpha", "beta"]));
+  writeFileSync(join(repo.dir, file), "\n" + cases(["alpha", "beta"]));
   repo.git("commit", "-am", "the hand change turns another computed case red");
   const tap = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"), file],
     { cwd: repo.dir, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT" && key !== "NODE_OPTIONS")) });
   const named = failingTestsFromTap(tap.stdout, realpathSync(repo.dir)) as { file: string; title: string }[];
-  assert.deepEqual(named.map((test) => test.title).sort(), ["case alpha", "case beta"], `${tap.stdout}\n${tap.stderr}`);
+  assert.deepEqual(named.map((test) => test.title).sort(), ["parent > case alpha", "parent > case beta"], `${tap.stdout}\n${tap.stderr}`);
   const summary = testSummary(tap.stdout);
   const defaults = handShipEffects(() => 0);
   const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
@@ -1108,10 +1135,124 @@ test("W1-T12169 criterion 3: a failing test registered with a computed title is 
   assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
   const log = f.lines.join("\n");
   assert.doesNotMatch(log, /could not isolate|comparison unavailable/, log);
-  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: case alpha$/m);
-  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: case beta$/m);
-  assert.deepEqual(reruns.sort(), ["head case alpha", "head case beta", "main case alpha", "main case beta"]);
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: parent > case alpha$/m);
+  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: parent > case beta$/m);
+  assert.deepEqual(reruns.sort(), ["head parent > case alpha", "head parent > case beta", "main parent > case alpha", "main parent > case beta"]);
+  const commands = readFileSync(join(f.root, "commands.log"), "utf8");
+  assert.doesNotMatch(commands, /RAN CASE gamma/, "a computed sibling's callback never executes");
+  assert.equal(commands.match(/RAN CASE alpha/g)?.length, 2);
+  assert.equal(commands.match(/RAN CASE beta/g)?.length, 2);
   assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
+});
+
+test("W1-T12169 criterion 4: different declarations with the same runtime title cannot authorize publication", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  const cases = (onHead: boolean) => [
+    'import { test } from "node:test";',
+    'const title = "same title";',
+    `const onHead = ${onHead};`,
+    'if (onHead) test(title, () => { throw new Error("head declaration"); });',
+    'else test(title, () => { throw new Error("main declaration"); });',
+    "",
+  ].join("\n");
+  writeFileSync(join(repo.dir, file), cases(false));
+  repo.git("add", file, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "main's declaration fails");
+  const baseSha = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, file), cases(true));
+  repo.git("commit", "-am", "a different declaration fails with the same title");
+  const defaults = handShipEffects(() => 0);
+  f.options.cwd = repo.dir;
+  f.effects.readSource = defaults.readSource;
+  f.effects.prepare = async (_host, source, run) => {
+    const isolated = await defaults.prepare({ ...linux, checkout: REPO_ROOT }, source, run);
+    return { ...isolated, preflight: async () => ({ ...redReceipt(["same title"]), headSha: source.head, baseSha }) };
+  };
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
+  assert.match(f.lines.join("\n"), /caused by the change: .* :: same title/m);
+  assert.doesNotMatch(f.lines.join("\n"), /also failing on main/);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+test("W1-T12169 criterion 4: no push when the control-plane or proof-resolution check did not complete", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const run = offlinePushRun(f);
+  const source = await defaults.readSource(repo.dir, run);
+  const push = () => withLiveWritesAllowed(() => defaults.push(source, run));
+  const cases = [
+    ["ci-control-plane-precheck", "could not read the diff — not blocking on an unreadable check", /CI control-plane/],
+    ["proof-resolve-precheck", "could not read this head — not blocking on an unreadable check", /proof resolution/],
+  ] as const;
+  for (const [check, failure, reason] of cases) {
+    harnessGate(t, `cat > /dev/null; echo ${shellQuote(`pre-push: ${check} ${failure}`)} >&2`, true, true, [check]);
+    await assert.rejects(push(), reason);
+    harnessGate(t, "cat > /dev/null", true, true, [check]);
+    await assert.rejects(push(), reason);
+  }
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, { ...run, git: (cwd, args, options) =>
+    args[0] === "ls-remote" ? Promise.reject(new Error("remote ref unreadable")) : run.git(cwd, args, options) })), /remote ref unreadable/);
+  assert.deepEqual(requests, []);
+  harnessGate(t, "cat > /dev/null");
+  await push();
+  assert.equal(requests.length, 1);
+});
+
+test("W1-T12169 criterion 5: stopping a publishing run does not wait on an irrelevant hooks-path read", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const path = process.env.PATH;
+  const started = join(f.root, "started");
+  const release = join(f.root, "release");
+  const shim = join(f.root, "git");
+  writeFileSync(shim, [
+    "#!/bin/sh",
+    'if [ "$3 $4 $5" = "config --get core.hooksPath" ]; then',
+    `  echo hooks-path > ${shellQuote(started)}`,
+    `  while [ ! -e ${shellQuote(release)} ]; do sleep .1; done`,
+    "fi",
+    `exec ${shellQuote(realGit)} "$@"`,
+  ].join("\n"));
+  chmodSync(shim, 0o755);
+  t.after(() => { process.env.PATH = path; });
+  process.env.PATH = `${f.root}:${path}`;
+  harnessGate(t, "cat > /dev/null");
+  const defaults = handShipEffects(() => 0, noOpenPull, async () => { f.calls.push("push"); return ""; });
+  f.options.cwd = repo.dir;
+  f.effects.readSource = defaults.readSource;
+  f.workspace.preflight = async () => ({ ...receipt(), headSha: repo.git("rev-parse", "HEAD") });
+  f.effects.push = (source, run) => withLiveWritesAllowed(() => defaults.push(source, { ...run, async git(cwd, args, options) {
+    if (args[0] !== "ls-remote") return hostWorktreeGitAsync(cwd, args, options);
+    writeFileSync(started, "remote-ref");
+    await delay(60_000, undefined, { signal: options?.signal });
+    return "";
+  } }));
+  const shipping = runHandShip(f.args, f.options, f.effects);
+  let beforeRelease: number | undefined;
+  try {
+    for (let attempt = 0; !existsSync(started) && attempt < 250; attempt += 1) await delay(20);
+    assert.ok(existsSync(started), f.lines.join("\n"));
+    const state = join(f.root, "hand-ship");
+    const id = readdirSync(state).find((entry) => entry.startsWith("rmd-ship-"))!;
+    assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
+    beforeRelease = await Promise.race([shipping, delay(3_000, undefined, { ref: false })]);
+    assert.equal(readFileSync(started, "utf8"), "remote-ref");
+    assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
+  } finally {
+    writeFileSync(release, "");
+    await shipping;
+  }
+  assert.equal(beforeRelease, 1);
+  assert.ok(!f.calls.includes("push"));
 });
 
 test("W1-T12169 criterion 4: a required pre-push gate refuses a push whose Rule 25 check was unreadable or not measured", async (t) => {
@@ -1120,7 +1261,7 @@ test("W1-T12169 criterion 4: a required pre-push gate refuses a push whose Rule 
   seedHandBranch(repo);
   const requests: string[][] = [];
   const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
-  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   const quiet = async (push: () => Promise<void>) => {
     const writes = { out: process.stdout.write, err: process.stderr.write };

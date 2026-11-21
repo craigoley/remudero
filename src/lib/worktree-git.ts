@@ -417,8 +417,12 @@ export function vetPinnedConfig(pin: PinnedWorktreeGit, log: WorktreeGitLog = st
   return vetted(pin, listing, log, harnessRoot);
 }
 
-async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS): Promise<Array<[string, string]>> {
-  const { stdout } = await execFileRouted("git", CONFIG_LIST_ARGS, { cwd: pin.worktree, encoding: "utf8", env: configReadEnv(pin), timeout });
+async function vetPinnedConfigAsync(pin: PinnedWorktreeGit, log: WorktreeGitLog, timeout = CONFIG_READ_TIMEOUT_MS,
+  signal?: AbortSignal): Promise<Array<[string, string]>> {
+  const options = { encoding: "utf8" as const, env: configReadEnv(pin), timeout };
+  const { stdout } = signal
+    ? await stoppableGit(pin, CONFIG_LIST_ARGS, options, "", signal)
+    : await execFileRouted("git", CONFIG_LIST_ARGS, { ...options, cwd: pin.worktree });
   return vetted(pin, stdout, log);
 }
 
@@ -608,7 +612,7 @@ function stoppableGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Om
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
-  const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs);
+  const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs, opts.signal);
   const { stdio: _stdio, input, signal, ...spawn } = spawnOptions(pin, opts, overrides);
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
