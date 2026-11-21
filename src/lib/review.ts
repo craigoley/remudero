@@ -17,13 +17,13 @@ import { createRequire } from "node:module";
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
@@ -31,7 +31,7 @@ import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRe
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
-import { readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRecords, readLedgerUnionRecordsSync, openLedgerUnion, ledgerLivePath, rotationBeforeTime, rotationStampIso, malformedRowCouldBelong, type LedgerUnionStreamIO } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
 import { isFullReviewerCodeSha, probeReviewerCodeFreshnessAsync } from "./self-sync.js";
@@ -6983,6 +6983,28 @@ export function priorHeadFindingsFromLedger(
     byHead.set(line.head_sha, findings);
   }
   return [...byHead.values()].slice(-3).flat();
+}
+
+/** BACKSTOP: how far back {@link priorHeadReviewRows} reads, when the PR is older than it. */
+export const PRIOR_HEAD_REVIEW_WINDOW_MS = 7 * 24 * 3_600_000;
+
+/** W1-T14166: this PR's review.posted rows from the ledger union, off the loop. Rotation keeps only a task's newest
+ *  input (dropSupersededReviews), so earlier heads live in archives; one cut before the PR or the window stays shut. */
+export async function priorHeadReviewRows(
+  ledgerPath: string,
+  taskId: string | undefined,
+  prUrl: string,
+  opts: { nowMs: number; prCreatedAt?: string; signal?: AbortSignal },
+): Promise<Array<Record<string, unknown>>> {
+  const lane = reviewLanePr.getStore();
+  const created = Date.parse(opts.prCreatedAt ?? (lane !== undefined && lane.prUrl === prUrl ? lane.createdAt ?? "" : ""));
+  const since = fixedClock(Math.max(opts.nowMs - PRIOR_HEAD_REVIEW_WINDOW_MS, Number.isFinite(created) ? created : 0)).iso();
+  const signal = opts.signal ?? reviewLaneCancellation.getStore();
+  return readLedgerUnionRecords(dirname(ledgerPath), {
+    step: "review.posted", since, ...(signal ? { signal } : {}),
+    selectRotation: (entry) => !((rotationStampIso(basename(entry.path)) ?? since) < since),
+    where: (row) => reviewRowNamesPr(row, taskId, prUrl),
+  });
 }
 
 function alignedReviewFailures(failures: readonly PriorReproducedReviewFailure[], criteria: readonly { claim: string }[]): PriorReproducedReviewFailure[] {
