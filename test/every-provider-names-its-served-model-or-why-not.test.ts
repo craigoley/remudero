@@ -559,3 +559,20 @@ test("W1-T13868 criterion 1: past the kept bound, a codex call still records the
   const bounded = await runCodex(reroutes);
   assert.equal(bounded.servedModel, "gpt-5.2", "positive control: without a final model the latest reroute is recorded");
 });
+
+test("W1-T13868 criterion 1: a receipt owner records what the wrapper standing aside beneath it observed", async () => {
+  // The fix lane: fixWorkerReceipt's recordBenchmarkWorkerAttempt owns the row, and the dispatch wrapper beneath it runs
+  // its own recordBenchmarkWorkerAttempt with its ledger writer disabled. The stream names its model inside that inner scope.
+  const outerRows = async (observed: { servedModel: string | null; servedModelReason?: string }) => {
+    const rows: Record<string, unknown>[] = [];
+    const inner = () => recordBenchmarkWorkerAttempt(async () => {
+      throw withObservedServedModel(new Error("codex worker exceeded its clock bound"), observed);
+    }, () => {}, () => undefined, () => {});
+    await assert.rejects(recordBenchmarkWorkerAttempt(inner, (step, fields) => rows.push({ step, ...fields }), () => undefined, () => {}));
+    return rows.filter((row) => row.worker_failure === "spawn-threw-before-result")
+      .map((row) => [row.step, row.served_model, row.served_model_reason]);
+  };
+  assert.deepEqual(await outerRows({ servedModel: "gpt-5.2" }), [["worker.attempt", "gpt-5.2", undefined]], "a named response");
+  assert.deepEqual(await outerRows({ servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON }),
+    [["worker.attempt", null, CODEX_SERVED_MODEL_REASON]], "an unnamed response");
+});

@@ -2304,12 +2304,14 @@ type ObservedServedModel = { servedModel: string | null; servedModelReason?: str
 const observedServedModels = new WeakMap<object, ObservedServedModel>();
 /** W1-T13868: one call's own observations. A caller's abort reason can be ONE error shared by many calls (one signal,
  * many calls), so an error-keyed table shared by every call lets one call overwrite another's evidence. */
-const callServedModels = new AsyncLocalStorage<WeakMap<object, ObservedServedModel>>();
+const callServedModels = new AsyncLocalStorage<readonly WeakMap<object, ObservedServedModel>[]>();
 
 /** W1-T13868: run one worker call with its own observation table, which {@link withObservedServedModel} writes to and
- * the caller reads back with {@link observedServedModelOf}. Calls that share an error never share its evidence. */
+ * the caller reads back with {@link observedServedModelOf}. Calls that share an error never share its evidence.
+ * A call opened inside another call's scope (a wrapper that stands aside for its caller's receipt) keeps the enclosing
+ * tables too: the record goes to each, so the receipt-owning caller reads what its inner call saw. */
 export function observeServedModelsPerCall<T>(observations: WeakMap<object, ObservedServedModel>, run: () => T): T {
-  return callServedModels.run(observations, run);
+  return callServedModels.run([...(callServedModels.getStore() ?? []), observations], run);
 }
 
 /** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
@@ -2321,7 +2323,7 @@ export function withObservedServedModel<E extends Error>(error: E,
   // Inside a call's scope the record goes to that call's own table only: the error (perhaps a caller's frozen or
   // shared abort reason) keeps its identity, is thrown unchanged, and carries nothing another call could read.
   const scoped = callServedModels.getStore();
-  if (scoped !== undefined) { scoped.set(error, record); return error as E & ObservedServedModel; }
+  if (scoped !== undefined) { for (const table of scoped) table.set(error, record); return error as E & ObservedServedModel; }
   // Outside any call scope: the side table holds even for a frozen error; the property copy is a convenience.
   observedServedModels.set(error, record);
   if (Object.isExtensible(error) && !Object.prototype.hasOwnProperty.call(error, "servedModel")) Object.assign(error, record);
@@ -2331,7 +2333,7 @@ export function withObservedServedModel<E extends Error>(error: E,
 /** W1-T13868: the served model (or its named reason) {@link withObservedServedModel} recorded for this thrown value:
  * in `observations` when given, else in the current call's table, else in the table for code outside any call. */
 export function observedServedModelOf(error: unknown,
-  observations: WeakMap<object, ObservedServedModel> | undefined = callServedModels.getStore()): ObservedServedModel | undefined {
+  observations: WeakMap<object, ObservedServedModel> | undefined = callServedModels.getStore()?.at(-1)): ObservedServedModel | undefined {
   if (error === null || typeof error !== "object") return undefined;
   return (observations ?? observedServedModels).get(error);
 }
