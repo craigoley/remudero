@@ -610,10 +610,38 @@ export function reviewVerdictPostedAtFromRollup(rollup: RollupCheck[] | undefine
 }
 
 /** W1-T14035: the run that owns the live `remudero-review` status, read off its own description ("owned by run <id>",
- *  written by every pending post in review.ts). Absent or another wording is an unknown run, never a match. */
+ *  which every claim postReviewPending posts carries). Absent or another wording is an unknown run, never a match. */
 export function reviewStatusRunIdFromRollup(rollup: RollupCheck[] | undefined): string | undefined {
   const r = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
   return /\(owned by run ([^)\s]+)\)/.exec(r?.description ?? "")?.[1];
+}
+
+/** W1-T14035: the run that published a live pending `remudero-review` status. A claim names its run in the description.
+ *  A hold (a pending verdict: promise harvest, cannot-evaluate, host load) names none, so it is bound to the run whose
+ *  `review.posted` pending row is the newest pending publication on this PR and head, and only while that row's own
+ *  summary is the live description. Anything else is an unknown run: no row, another run's row, a newer claim row, or a
+ *  description the row did not post. WRITE ORDER: a review run writes its claim row after GitHub accepts the claim, and
+ *  posts any hold later still; the rollup is read before the ledger, so a hold another run published before the rollup
+ *  read has that run's claim row (when it claimed) visible here, and the newest-row rule then names that run. */
+export function reviewPendingStatusRunId(
+  rollup: RollupCheck[] | undefined,
+  ledger: ReadonlyArray<Record<string, unknown>>,
+  taskKey: string,
+  prUrl: string,
+  headSha: string,
+): string | undefined {
+  const named = reviewStatusRunIdFromRollup(rollup);
+  if (named !== undefined) return named;
+  const description = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.description;
+  if (!description) return undefined;
+  let newest: Record<string, unknown> | undefined;
+  for (const line of ledger) {
+    if (line.head_sha !== headSha || !reviewRowNamesPr(line, taskKey, prUrl)) continue;
+    if (line.step === "review.pending_posted" || (line.step === "review.posted" && line.state === "pending")) newest = line;
+  }
+  if (newest?.step !== "review.posted" || typeof newest.run_id !== "string" || newest.run_id === "") return undefined;
+  const summary = (newest.decision_verdict as { summary?: unknown } | undefined)?.summary;
+  return typeof summary === "string" && summary !== "" && summary.slice(0, 140) === description ? newest.run_id : undefined;
 }
 
 /** Dedup refusals by task/synthetic key + PR URL + head + body digest; edits reset identity.
@@ -2632,7 +2660,8 @@ export function* openPrViewSteps(
       reviewPendingOwnerGoneReason: undefined,
       // W1-T14035: the dead row's run and the live status's run, so the sweep releases a claim only when they are one run.
       reviewPendingOwnerRunId: currentPendingRecord?.runId ? currentPendingRecord.runId : undefined,
-      reviewPendingStatusRunId: reviewState === "pending" ? reviewStatusRunIdFromRollup(pr.statusCheckRollup) : undefined,
+      reviewPendingStatusRunId: reviewState === "pending"
+        ? reviewPendingStatusRunId(pr.statusCheckRollup, ledger, unmetKey, pr.url, pr.headRefOid) : undefined,
       reviewVerdictPostedAt,
       checksState,
       // W1-T13195: a failed rollup read is carried so the sweep waits instead of reading "none".
