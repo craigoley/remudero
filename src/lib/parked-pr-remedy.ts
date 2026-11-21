@@ -127,7 +127,7 @@ export interface ParkedPrHost {
    */
   landTaskFiles(files: readonly TaskFileInput[], target: ParkedPrTarget):
     Promise<{ prUrl?: string; error?: string; refusalChecks?: readonly string[]; staged?: readonly string[];
-      refused?: ReadonlyArray<{ relPath: string; reason: string }> }>;
+      refused?: ReadonlyArray<{ relPath: string; reason: string; setAside?: true; reservationReleased?: true }> }>;
   closePr(prUrl: string, comment: string): Promise<void>;
   /** W1-T13047: the paths the pull request adds or changes, for a plan filing rebuilt from the pull request itself. */
   readPrFiles?(prUrl: string): Promise<readonly string[]>;
@@ -141,17 +141,25 @@ export interface ParkedPrHost {
 }
 
 /** W1-T13944: a held follow-up task, as the remedy matches it to a task and criterion. */
-export interface HeldFollowUp { id: string; title: string; depends_on: readonly string[]; claims: readonly string[] }
+export interface HeldFollowUp { id: string; title: string; depends_on: readonly string[]; claims: readonly string[]; parentId?: string }
 
 const HELD_FOLLOW_UP_TITLE = "(held follow-up)";
 
 /** W1-T13944: `task` as a held follow-up, or undefined when its title does not mark it as one. PURE. */
 export function heldFollowUpOf(task: unknown): HeldFollowUp | undefined {
-  const t = task as { id?: unknown; title?: unknown; depends_on?: unknown; acceptance?: unknown } | null;
+  const t = task as { id?: unknown; title?: unknown; depends_on?: unknown; acceptance?: unknown; rationale?: unknown } | null;
   if (typeof t?.id !== "string" || typeof t.title !== "string" || !t.title.endsWith(HELD_FOLLOW_UP_TITLE)) return undefined;
   const strings = (value: unknown) => Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
   const claims = Array.isArray(t.acceptance) ? t.acceptance.map(c => (c as { claim?: unknown } | null)?.claim) : [];
-  return { id: t.id, title: t.title, depends_on: strings(t.depends_on), claims: strings(claims) };
+  const depends_on = strings(t.depends_on);
+  // Generated records name the parent in their rationale and also carry its dependencies.
+  const parentId = typeof t.rationale === "string" ? /^FOLLOW-UP of (W1-T\d+)(?:, filed by the sweep\b|\.)/.exec(t.rationale)?.[1] : undefined;
+  return { id: t.id, title: t.title, depends_on, claims: strings(claims),
+    ...(parentId !== undefined && depends_on.includes(parentId) ? { parentId } : {}) };
+}
+
+export function heldFollowUpParents(held: HeldFollowUp): readonly string[] {
+  return held.parentId === undefined ? held.depends_on : [held.parentId];
 }
 
 /** W1-T13944: the held follow-ups a task file's text declares. PURE. */
@@ -165,7 +173,7 @@ export function heldFollowUpsOfTaskText(text: string): HeldFollowUp[] {
 function heldFollowUpsByClaim(held: readonly HeldFollowUp[], parentId: string, claims: readonly string[]): Map<string, string> {
   const byClaim = new Map<string, string>();
   for (const claim of claims) {
-    const id = held.filter(h => h.title.endsWith(HELD_FOLLOW_UP_TITLE) && h.depends_on.includes(parentId) && h.claims.includes(claim))
+    const id = held.filter(h => h.title.endsWith(HELD_FOLLOW_UP_TITLE) && heldFollowUpParents(h).includes(parentId) && h.claims.includes(claim))
       .map(h => h.id).sort(byTaskNumber)[0];
     if (id !== undefined) byClaim.set(claim, id);
   }
@@ -189,7 +197,7 @@ const CLAIM_TOKEN = randomUUID();
 const CLAIMS_DIR = "parked-pr-held-follow-up-claims";
 type ReservationPush = { taskId: string; anchor: string; claims: string[] };
 type ClaimHolder = { pid?: unknown; token?: unknown } | null;
-type ClaimRecord = { parent?: unknown; claim?: unknown; id?: unknown; files?: unknown; pending?: unknown; holder?: ClaimHolder };
+type ClaimRecord = { parent?: unknown; claim?: unknown; id?: unknown; files?: unknown; pending?: unknown; holder?: ClaimHolder; completed?: string };
 type ClaimSlot = { claim: string; dir: string; gen: number; record: ClaimRecord | undefined };
 type HeldClaims = { slots: ClaimSlot[]; claims: string[]; pending: ReservationPush[]; held?: { id: string; files: TaskFileInput[] } };
 
@@ -216,11 +224,15 @@ function claimGenerations(dir: string): number[] {
   return names.flatMap(name => { const m = /^(\d+)\.json$/.exec(name); return m === null ? [] : [Number(m[1])]; });
 }
 
+function claimGeneration(dir: string): number {
+  return Math.max(0, ...claimGenerations(dir));
+}
+
 /** The newest generation of a claim; generation 0 with no record when there is none. */
 function readClaimSlot(root: string, parentId: string, claim: string): ClaimSlot {
   const dir = heldClaimDir(root, parentId, claim);
   for (let tries = 0; ; tries++) {
-    const gen = Math.max(0, ...claimGenerations(dir));
+    const gen = claimGeneration(dir);
     if (gen === 0) return { claim, dir, gen, record: undefined };
     let text: string;
     try { text = readFileSync(join(dir, `${gen}.json`), "utf8"); } catch (error) {
@@ -270,33 +282,38 @@ function pushesOf(record: ClaimRecord | undefined): ReservationPush[] {
 }
 
 /**
- * W1-T13944: reads or takes the claims on the held follow-up of `parentId`, one for each of `claims`. A claim that names
- * an id makes this pass land that id again (the lowest, when two do) and take no other claim. A claim a live pass holds
- * with no id makes this pass stand back (`busy`). Otherwise this pass takes every claim, keeping the pending pushes of a
- * pass that died; when another pass takes one first, this pass gives back the ones it took and throws.
+ * An unfinished id replays its saved draft under the same claims, including any sibling criteria in that draft.
+ * A handoff after the lookup began can make its queue view stale, so that pass must read again before reserving.
  */
-function takeHeldFollowUpClaims(root: string, parentId: string, claims: readonly string[]): HeldClaims | { busy: string } {
+function takeHeldFollowUpClaims(root: string, parentId: string, claims: readonly string[], checked: ReadonlyMap<string, number>):
+  HeldClaims | { busy: string } {
   const found = [...new Set(claims)].sort().map(claim => readClaimSlot(root, parentId, claim));
   const withId = found.filter(s => typeof s.record?.id === "string" && Array.isArray(s.record.files))
     .sort((a, b) => byTaskNumber(a.record!.id as string, b.record!.id as string));
-  if (withId.length > 0) {
-    const id = withId[0]!.record!.id as string;
-    const first = withId.filter(s => s.record!.id === id);
-    return { slots: first, claims: first.map(s => s.claim), pending: [], held: { id, files: withId[0]!.record!.files as TaskFileInput[] } };
+  const replay = withId[0];
+  let slots = found;
+  let held: HeldClaims["held"];
+  if (replay !== undefined) {
+    const id = replay.record!.id as string;
+    held = { id, files: replay.record!.files as TaskFileInput[] };
+    const file = held.files.find(f => f.newFile === true);
+    const siblings = file === undefined ? [] : heldFollowUpsOfTaskText(file.content).flatMap(h => h.claims);
+    const keys = [...new Set([...withId.filter(s => s.record!.id === id).map(s => s.claim), ...siblings])].sort();
+    slots = keys.map(c => found.find(s => s.claim === c) ?? readClaimSlot(root, parentId, c)).filter(s => s.record?.id === id);
   }
-  const busy = found.find(s => holderAlive(s.record?.holder));
+  const busy = slots.find(s => holderAlive(s.record?.holder) || (s.record?.completed !== undefined && checked.get(s.claim) !== s.gen));
   if (busy !== undefined) return { busy: busy.dir };
   const taken: ClaimSlot[] = [];
   try {
-    for (const s of found) {
-      taken.push(advanceClaim(s, parentId, { holder: { pid: process.pid, token: CLAIM_TOKEN }, pending: pushesOf(s.record) }));
+    for (const s of slots) {
+      taken.push(advanceClaim(s, parentId, { ...s.record, holder: { pid: process.pid, token: CLAIM_TOKEN } }));
     }
   } catch (error) {
-    for (const s of taken) advanceClaim(s, parentId, { holder: null, pending: pushesOf(s.record) });
+    for (const s of taken) advanceClaim(s, parentId, { ...s.record, holder: null });
     throw error;
   }
   const pending = [...new Map(taken.flatMap(s => pushesOf(s.record)).map(p => [`${p.taskId} ${p.anchor}`, p])).values()];
-  return { slots: taken, claims: taken.map(s => s.claim), pending };
+  return { slots: taken, claims: taken.map(s => s.claim), pending, ...(held === undefined ? {} : { held }) };
 }
 
 /** W1-T13944: writes the next generation of every claim `held` holds, as `record`. */
@@ -310,19 +327,19 @@ function recordPendingPush(held: HeldClaims, parentId: string, push: Reservation
     pending: [...pushesOf(slot.record), push] }));
 }
 
-/** W1-T13944: gives the claims up; `keepPending` keeps their pending pushes, so the next pass can still find a pushed id. */
-function releaseHeldFollowUpClaims(held: HeldClaims, parentId: string, keepPending: boolean): void {
-  rewriteHeldFollowUpClaims(held, parentId, slot => ({ holder: null, pending: keepPending ? pushesOf(slot.record) : [] }));
-}
-
 function writeHeldFollowUpClaims(held: HeldClaims, parentId: string, id: string, files: readonly TaskFileInput[]): void {
   rewriteHeldFollowUpClaims(held, parentId, () => ({ id, files, holder: { pid: process.pid, token: CLAIM_TOKEN } }));
 }
 
-/** W1-T13944: gives the claims up on a failure path; a pass that changed a claim since holds it, and this pass leaves it. */
-function giveBackHeldFollowUpClaims(held: HeldClaims, parentId: string, keepPending: boolean): void {
-  try { releaseHeldFollowUpClaims(held, parentId, keepPending); } catch (error) {
-    if ((error as { claimTaken?: unknown }).claimTaken !== true) throw error;
+/** On handoff or explicit release, retire the replay. Otherwise keep the draft or pending reservation push. */
+function finishHeldFollowUpClaims(slots: readonly ClaimSlot[], parentId: string, completed?: string): void {
+  for (const slot of slots) {
+    try {
+      advanceClaim(slot, parentId, completed === undefined
+        ? { ...slot.record, holder: null, pending: pushesOf(slot.record) } : { holder: null, completed });
+    } catch (error) {
+      if ((error as { claimTaken?: unknown }).claimTaken !== true) throw error;
+    }
   }
 }
 
@@ -474,8 +491,19 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     // W1-T13944, invariant:one-held-follow-up-per-criterion: the plan and the landing queue, not the ledger, say what was
     // filed, one task and criterion at a time. A criterion a held follow-up already carries is not moved again.
     const split = decision.remedy === "split-follow-up" && read?.outcome === "read";
-    const held = split && host.readHeldFollowUps !== undefined
-      ? heldFollowUpsByClaim(await host.readHeldFollowUps(target), pr.taskId!, asked) : new Map<string, string>();
+    const claimRoot = split ? host.heldFollowUpClaimRoot : undefined;
+    const checked = new Map(claimRoot === undefined ? [] : asked.map(criterion =>
+      [criterion, claimGeneration(heldClaimDir(claimRoot, pr.taskId!, criterion))]));
+    const followUps = split && host.readHeldFollowUps !== undefined ? await host.readHeldFollowUps(target) : [];
+    const held = heldFollowUpsByClaim(followUps, pr.taskId!, asked);
+    if (claimRoot !== undefined && held.size > 0) {
+      // A pass can stop after the file stages but before landing returns its result. Its next observer can finish the handoff.
+      const matchedIds = new Set(held.values());
+      for (const file of followUps.filter(h => matchedIds.has(h.id))) {
+        const slots = file.claims.map(c => readClaimSlot(claimRoot, pr.taskId!, c));
+        finishHeldFollowUpClaims(slots.filter(s => s.record?.id === file.id && !holderAlive(s.record.holder)), pr.taskId!, file.id);
+      }
+    }
     if (held.size > 0 && asked.every(claim => held.has(claim))) {
       const reusable = [...held.values()].sort(byTaskNumber)[0]!;
       ctx.append({ ...row, outcome: "taken", reason: decision.reason, held_task_id: reusable, reused: true, criteria: asked });
@@ -492,63 +520,55 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
       return { remedy: decision.remedy, unchanged: true, reason: `the ${decision.remedy} remedy was refused by the plan preflight ` +
         `(${last.refusal_checks.map(String).join(", ")}) at this head, task file and criteria, so it is not tried again (W1-T13830)` };
     }
-    const claim = split && host.heldFollowUpClaimRoot !== undefined
-      ? takeHeldFollowUpClaims(host.heldFollowUpClaimRoot, pr.taskId!, moving.inputCriteria.map(c => c.claim)) : undefined;
+    const claim = claimRoot === undefined ? undefined
+      : takeHeldFollowUpClaims(claimRoot, pr.taskId!, moving.inputCriteria.map(c => c.claim), checked);
     if (claim !== undefined && "busy" in claim) {
-      throw new Error(`another pass holds the claim on the held follow-up of ${pr.taskId} for a criterion of this split ` +
-        `(${claim.busy}); it reserves the one id (W1-T13944)`);
+      throw new Error(`another pass holds the claim or just handed off the held follow-up of ${pr.taskId} ` +
+        `for a criterion of this split (${claim.busy}); this pass reserves no id (W1-T13944)`);
     }
     let heldTaskId: string;
     let files: TaskFileInput[];
-    if (claim?.held !== undefined) {
-      // A claim names a held follow-up whose file never staged: land that one again, with its criteria, and nothing else.
-      ({ id: heldTaskId, files } = claim.held);
-      moving = { ...moving, inputCriteria: moving.inputCriteria.filter(c => claim.claims.includes(c.claim)) };
-    } else {
-      let pushed = false;
-      try {
+    let landed: Awaited<ReturnType<ParkedPrHost["landTaskFiles"]>>;
+    try {
+      if (claim?.held !== undefined) {
+        ({ id: heldTaskId, files } = claim.held);
+        moving = { ...moving, inputCriteria: moving.inputCriteria.filter(c => claim.claims.includes(c.claim)) };
+      } else {
         // A push that went through before its id reached the claim: the pass that pushed it died, and this one holds every
         // criterion it was for. A push for other criteria too stays for the pass that holds them all (W1-T13944).
         let adopted: string | undefined;
         for (const push of claim?.pending ?? []) {
           if (adoptablePush(push, claim!) && host.reservationHeld !== undefined && await host.reservationHeld(push.taskId, push.anchor, target)) {
             adopted = push.taskId;
-            pushed = true;
             break;
           }
         }
         const moved = moving.inputCriteria.map(c => c.claim);
         heldTaskId = adopted ?? await host.reserveTaskId(target, claim === undefined ? undefined : (taskId, anchor) => {
           recordPendingPush(claim, pr.taskId!, { taskId, anchor, claims: moved });
-          pushed = true;
         });
         files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, moving, pr, ctx)
           : heldPlanRebuildFiles(heldTaskId, moving, pr, ctx);
-      } catch (error) {
-        // With no push, no id is held by this pass; after one, the next pass looks for the pushed id first.
-        if (claim !== undefined) giveBackHeldFollowUpClaims(claim, pr.taskId!, true);
-        throw error;
+        if (claim !== undefined) writeHeldFollowUpClaims(claim, pr.taskId!, heldTaskId, files);
       }
-      if (claim !== undefined) writeHeldFollowUpClaims(claim, pr.taskId!, heldTaskId, files);
+      landed = await host.landTaskFiles(files, target);
+    } catch (error) {
+      if (claim !== undefined) finishHeldFollowUpClaims(claim.slots, pr.taskId!);
+      throw error;
     }
-    const landed = await host.landTaskFiles(files, target);
     if ((landed.refusalChecks?.length ?? 0) > 0) refusalChecks = [...landed.refusalChecks!].sort();
-    // W1-T13944: a split whose held file staged filed it, though the plan preflight refused the edit of the parent task
-    // file. Only a refusal of another file makes a landing error partial; any other landing error stays a refusal.
     const heldFile = files.find(f => f.newFile === true) ?? files[0]!;
-    const heldStaged = split && landed.staged?.includes(heldFile.relPath) === true &&
-      !(landed.refused ?? []).some(r => r.relPath === heldFile.relPath);
-    const otherRefusals = (landed.refused ?? []).filter(r => r.relPath !== heldFile.relPath).map(r => r.reason);
-    const partial = heldStaged && landed.error !== undefined && otherRefusals.length > 0;
-    if (landed.error !== undefined && !partial) {
-      // A held file that staged keeps its claim, so the next pass lands that id again; one that did not may have had its
-      // id released, so a later pass reserves a new one.
-      if (claim !== undefined && !heldStaged) giveBackHeldFollowUpClaims(claim, pr.taskId!, false);
-      throw new Error(`the task files did not land: ${landed.error}`);
+    const heldRefusal = landed.refused?.find(r => r.relPath === heldFile.relPath);
+    const heldStaged = split && heldRefusal === undefined && landed.staged?.includes(heldFile.relPath) === true;
+    if (claim !== undefined) {
+      const completed = heldStaged || heldRefusal?.setAside === true || heldRefusal?.reservationReleased === true;
+      finishHeldFollowUpClaims(claim.slots, pr.taskId!, completed ? heldTaskId : undefined);
     }
-    // The refusal of the parent task file first, then a landing error beside it, such as a failed pull request listing.
-    const partialRefusal = partial
-      ? [...otherRefusals, ...(otherRefusals.includes(landed.error!) ? [] : [landed.error!])].join("; ") : undefined;
+    const otherRefusals = (landed.refused ?? []).filter(r => r.relPath !== heldFile.relPath).map(r => r.reason);
+    const landingError = landed.error ?? (split ? heldRefusal?.reason : undefined);
+    const partial = heldStaged && otherRefusals.length > 0;
+    if (landingError !== undefined && !partial) throw new Error(`the task files did not land: ${landingError}`);
+    const partialRefusal = partial ? [...new Set([...otherRefusals, ...(landingError === undefined ? [] : [landingError])])].join("; ") : undefined;
     if (closed) {
       await host.closePr(pr.prUrl, `Closed by the sweep (${pr.isPlanFiling === true ? "W1-T13047" : "W1-T12709"}): ` +
         `${pr.isPlanFiling === true ? "the plan-scoped round on this plan filing is exhausted, so it" : "no part of this pull request"} ` +

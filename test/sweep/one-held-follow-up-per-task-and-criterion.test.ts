@@ -53,6 +53,20 @@ const context = (rows: Row[]): ParkedPrContext => ({ runId: "t13944", ledgerTask
   cause: "needs-design", text: "which store?", append: row => { rows.push(row); } });
 const remedyRows = (rows: readonly Row[]) => rows.filter(r => r.step === PARKED_PR_REMEDY_STEP);
 
+function pauseHeldRead(host: ParkedPrHost) {
+  let reading!: () => void;
+  const started = new Promise<void>(resolve => { reading = resolve; });
+  let resume!: () => void;
+  const blocked = new Promise<void>(resolve => { resume = resolve; });
+  const paused: ParkedPrHost = { ...host, readHeldFollowUps: async target => {
+    const held = await host.readHeldFollowUps!(target);
+    reading();
+    await blocked;
+    return held;
+  } };
+  return { host: paused, started, resume };
+}
+
 function tempRoot(t: TestContext, kind: string): string {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${kind}-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -101,7 +115,9 @@ let minted = 0;
  * through the production reservation on the origin.
  */
 async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { id: string; text: string }; refuseParentEdit?: boolean;
-  listFails?: boolean; realReservation?: boolean; planDir?: string } = {}) {
+  listFails?: boolean; listFailsAt?: number; realReservation?: boolean; planDir?: string; trackingRefLags?: boolean;
+  landingFetchFails?: () => boolean; heldPreflight?: () => PlanPrPreflightResult | undefined; reloadPlanExtra?: string;
+  reloadFails?: boolean; planMonolith?: string } = {}) {
   const landingBranch = await taskFilesLandingBranchAsync({ owner: OWNER, repo: REPO });
   const root = tempRoot(t, "one-held-follow-up");
   const origin = gitRepo({ scope: t, bare: true, kind: "one-held-origin" });
@@ -109,7 +125,8 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
   // `planDir` places the target's plan by its own .remudero/layout.json, as a managed repository may.
   const planDir = opts.planDir ?? "plan";
   const seedFiles: Array<[string, string]> = [["plan/tasks.yaml", "[]\n"], [`${planDir}/tasks.d/${TASK}-fixture.yaml`, shardOf(TASK)],
-    ...(opts.planDir === undefined ? [] : [[".remudero/layout.json", `${JSON.stringify({ planDir: opts.planDir })}\n`] as [string, string]])];
+    ...(opts.planDir === undefined && opts.planMonolith === undefined ? [] : [[".remudero/layout.json",
+      `${JSON.stringify({ planDir: opts.planDir, planMonolith: opts.planMonolith })}\n`] as [string, string]])];
   for (const [path, text] of seedFiles) {
     mkdirSync(join(seed.dir, path, ".."), { recursive: true });
     writeFileSync(join(seed.dir, path), text);
@@ -135,41 +152,48 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     });
   }
   if (opts.mainExtra !== undefined) {
-    const rel = `${planDir}/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
+    const rel = opts.planMonolith ?? `${planDir}/tasks.d/${opts.mainExtra.id}-fixture-task-held-follow-up.yaml`;
     writeFileSync(join(seed.dir, rel), opts.mainExtra.text);
     seed.git("add", "-A");
     seed.git("commit", "--quiet", "-m", `chore(plan): file ${opts.mainExtra.id}`);
     seed.git("push", "--quiet", "origin", "HEAD:refs/heads/main");
-    repo.git("fetch", "--quiet", "origin");
+    if (!opts.trackingRefLags) repo.git("fetch", "--quiet", "origin");
   }
   const env = { ...process.env, GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
     GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email };
   const reserved: string[] = [], landed: TaskFileInput[][] = [];
   const results: Awaited<ReturnType<ParkedPrHost["landTaskFiles"]>>[] = [];
-  const planOf = () => mergePlanBlobs([{ label: "fixture.yaml", text: shardOf(TASK) },
-    ...(opts.planExtra === undefined ? [] : [{ label: "held.yaml", text: opts.planExtra }])]);
+  const planOf = (extra?: string) => mergePlanBlobs([{ label: "fixture.yaml", text: shardOf(TASK) },
+    ...(extra === undefined ? [] : [{ label: "held.yaml", text: extra }])]);
+  let listings = 0;
   const effects = buildSweepEffects({
     owner: OWNER, repo: REPO, repoRoot: repo.dir, config: { root, claudeBin: "/bin/true" } as Config,
     ledgerPath: join(root, "state", "ledger.ndjson"), runId: "fixture-sweep", log: () => {},
-    plan: planOf(), reloadPlanForFixImpl: planOf,
+    plan: planOf(opts.planExtra), reloadPlanForFixImpl: () => opts.reloadFails ? undefined : planOf(opts.reloadPlanExtra ?? opts.planExtra),
     readJsonImpl: async args => { throw new Error(`the remedy reads no API: ${args.join(" ")}`); },
-    planRepairGitImpl: (_file, args) => execFileSync("git", [...args], { encoding: "utf8", stdio: "pipe", env }),
+    planRepairGitImpl: (_file, args) => {
+      if (args.slice(2).join(" ") === "fetch origin --quiet" && opts.landingFetchFails?.()) throw new Error("landing fetch timed out");
+      return execFileSync("git", [...args], { encoding: "utf8", stdio: "pipe", env });
+    },
     ghJsonImpl: args => {
       assert.equal(args[0], "pr", `the landing makes no other GitHub call: ${args.join(" ")}`);
-      if (opts.listFails === true && args[1] === "list") throw new Error("gh: the open pull requests cannot be listed (HTTP 502)");
+      if (args[1] === "list" && (++listings === opts.listFailsAt || opts.listFails === true)) {
+        throw new Error("gh: the open pull requests cannot be listed (HTTP 502)");
+      }
       return args[1] === "create" ? `https://github.com/${OWNER}/${REPO}/pull/19839` : [];
     },
-    ...(opts.realReservation === true ? {} : { planRepairReserveIdImpl: () => {
+    ...(opts.realReservation === true ? {} : { planRepairReserveIdImpl: (_root, _branch, beforePush) => {
       const id = `W1-T91${3000 + minted++}`;
       const tree = origin.git("rev-parse", "main^{tree}");
       const sha = origin.git("commit-tree", tree, "-m", formatReservationAnchorMessage({ branch: landingBranch, startedAt: "2026-11-20T00:00:00Z" }));
+      beforePush?.(id, sha);
       origin.git("update-ref", taskIdReservationRef(id), sha);
       reserved.push(id);
       return id;
     } }),
     buildPlanPrBodyImpl: buildFixturePlanPrBody,
-    planPrPreflightImpl: (_dir, _sha, pr) => opts.refuseParentEdit === true && pr.body.includes("no longer carries the criteria moved to")
-      ? PARENT_RED : GREEN,
+    planPrPreflightImpl: (_dir, _sha, pr) => (pr.body.includes("the held follow-up task") ? opts.heldPreflight?.() : undefined) ??
+      (opts.refuseParentEdit === true && pr.body.includes("no longer carries the criteria moved to") ? PARENT_RED : GREEN),
   });
   assert.ok(effects.parkedPr, "the production sweep effects wire the remedy");
   const production = effects.parkedPr;
@@ -194,7 +218,7 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     writeFileSync(`${abs}.meta.json`, `${JSON.stringify({ baseBlob: null, claim: "filed", proof: `grep: id: ${id} in ${rel}`,
       repository: `${OWNER}/${REPO}`, ...(prUrl === undefined ? {} : { prUrl }) })}\n`);
   };
-  return { act, reserved, landed, results, stage, host, production, origin, root, checkoutDir: repo.dir };
+  return { act, reserved, landed, results, stage, host, production, origin, checkout: repo, root, checkoutDir: repo.dir };
 }
 
 /** The remedy module loaded again, as a restarted daemon loads it: a new claim token, so the old holder is gone. */
@@ -208,8 +232,8 @@ async function restartedRemedy(): Promise<typeof import("#src/lib/parked-pr-reme
 const carries = (files: readonly TaskFileInput[], claim: string) =>
   files.filter(f => f.newFile === true && heldFollowUpsOfTaskText(f.content).some(h => h.claims.includes(claim)));
 
-test("W1-T13944 criterion 1: a held follow-up on origin/main for the task and criterion is reused: no id, no file, one taken row", async t => {
-  const w = await world(t, { planExtra: heldText("W1-T13921", TASK, [CLAIMS[1]!]) + heldText("W1-T13919", TASK, [CLAIMS[1]!]) });
+test("W1-T13944 criterion 7: when reload fails, the daemon plan can supply the lowest matching held task", async t => {
+  const w = await world(t, { planExtra: heldText("W1-T13921", TASK, [CLAIMS[1]!]) + heldText("W1-T13919", TASK, [CLAIMS[1]!]), reloadFails: true });
   const rows: Row[] = [];
   const out = await w.act(rows, []);
   assert.equal(out.error, undefined, out.reason);
@@ -219,15 +243,11 @@ test("W1-T13944 criterion 1: a held follow-up on origin/main for the task and cr
   const written = remedyRows(rows);
   assert.equal(written.length, 1);
   assert.deepEqual([written[0]!.outcome, written[0]!.held_task_id, written[0]!.reused], ["taken", "W1-T13919", true]);
-  // With origin/main unreadable (no git checkout), the daemon's plan and the working tree still answer.
-  const elsewhere = await w.host.readHeldFollowUps!({ owner: OWNER, repo: REPO, checkoutDir: tempRoot(t, "one-held-no-checkout") });
-  assert.deepEqual([...new Set(elsewhere.map(h => h.id))].sort(), ["W1-T13919", "W1-T13921"]);
 });
 
-test("W1-T13944 criterion 1: a held follow-up only origin/main holds, behind a stale working tree and daemon plan, is reused", async t => {
-  const w = await world(t, { mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) } });
-  const read = await w.host.readHeldFollowUps!({ owner: OWNER, repo: REPO, checkoutDir: w.checkoutDir });
-  assert.deepEqual(read.map(h => h.id), ["W1-T13919"], "readHeldFollowUps: reads origin/main, not only the working tree");
+test("W1-T13944 criterion 1: reuse a held follow-up ahead of the checkout tracking ref and both plan snapshots", async t => {
+  const w = await world(t, { mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) }, trackingRefLags: true });
+  assert.notEqual(w.checkout.git("rev-parse", "origin/main"), w.origin.git("rev-parse", "main"), "the fixture tracking ref lags");
   const rows: Row[] = [];
   const out = await w.act(rows, []);
   assert.equal(out.error, undefined, out.reason);
@@ -235,6 +255,29 @@ test("W1-T13944 criterion 1: a held follow-up only origin/main holds, behind a s
   assert.equal(w.reserved.length, 0, "no id is reserved");
   assert.equal(w.landed.length, 0, "no task file lands");
   assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", "W1-T13919", true]]);
+});
+
+test("W1-T13944 criterion 1: reuse a held follow-up from the configured extensionless plan monolith", async t => {
+  const id = "W1-T13919";
+  const w = await world(t, { planMonolith: "plan/catalog", mainExtra: { id, text: heldText(id, TASK, [CLAIMS[1]!]) } });
+  const rows: Row[] = [];
+  const out = await w.act(rows);
+  assert.equal(out.error, undefined, out.reason);
+  assert.deepEqual([out.heldTaskId, w.reserved, w.landed], [id, [], []]);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", id, true]]);
+});
+
+test("W1-T13944 criterion 1: unreadable current main does not authorize a second reservation", async t => {
+  const w = await world(t, { mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) }, trackingRefLags: true });
+  const url = w.checkout.git("remote", "get-url", "origin").trim();
+  w.checkout.git("remote", "set-url", "origin", join(w.root, "origin-offline"));
+  const refused = await w.act([]);
+  assert.match(String(refused.error), /held follow-ups on origin\/main could not be read/);
+  assert.deepEqual([w.reserved, w.landed], [[], []]);
+  w.checkout.git("remote", "set-url", "origin", url);
+  const next = await w.act([]);
+  assert.equal(next.heldTaskId, "W1-T13919");
+  assert.deepEqual([w.reserved, w.landed], [[], []]);
 });
 
 test("W1-T13944 criterion 2: a held follow-up that waits in the task-files landing queue, staged or in an open landing PR, is reused", async t => {
@@ -500,7 +543,7 @@ test("W1-T13944 criterion 3: claims of a dead holder are taken over, a live hold
   const taken = await takeParkedPrRemedy(subject(), split([CLAIMS[1]!, CLAIMS[2]!]), [], f.h, context([]));
   assert.equal(taken.error, undefined, taken.reason);
   assert.equal(f.reserved.length, 1);
-  assert.equal(claimRecord(root, TASK, CLAIMS[1]!)!.id, f.reserved[0]);
+  assert.equal(claimRecord(root, TASK, CLAIMS[1]!)!.completed, f.reserved[0]);
 });
 
 /**
@@ -701,7 +744,7 @@ test("W1-T13944 criterion 3: a pass whose claim snapshot is older than generatio
     if (!interfered && String(linked).endsWith("/1.json")) {
       interfered = true;
       writeFileSync(join(dirname(String(linked)), "3.json"), `${JSON.stringify({ parent: TASK, claim: CLAIMS[1], id: "W1-T13990", files,
-        holder: { pid: process.ppid, token: "another-daemon" } })}\n`);
+        holder: null })}\n`);
     }
     realLink(existing, linked);
   }) as typeof fs.linkSync;
@@ -726,9 +769,10 @@ test("W1-T13944 criterion 4: a restart whose reservation-ref read fails keeps th
   const anchor = w.origin.git("commit-tree", w.origin.git("rev-parse", "main^{tree}").trim(), "-m", "reservation anchor").trim();
   w.origin.git("update-ref", taskIdReservationRef("W1-T13951"), anchor);
   writeClaim(w.root, TASK, CLAIMS[1]!, { holder: null, pending: [{ taskId: "W1-T13951", anchor, claims: [CLAIMS[1]] }] });
+  const held = await w.host.readHeldFollowUps!({ owner: OWNER, repo: REPO, checkoutDir: w.checkoutDir });
   const url = execFileSync("git", ["-C", w.checkoutDir, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
   execFileSync("git", ["-C", w.checkoutDir, "remote", "set-url", "origin", join(w.root, "an-origin-that-cannot-be-reached")]);
-  const out = await w.act([], []);
+  const out = await takeParkedPrRemedy(subject(), split(), [], { ...w.host, readHeldFollowUps: () => held }, context([]));
   assert.deepEqual(w.reserved, [], "a failed read reserves no other id");
   assert.match(String(out.error), /cannot be read from origin/, out.reason);
   assert.deepEqual(claimRecord(w.root, TASK, CLAIMS[1]!)!.pending, [{ taskId: "W1-T13951", anchor, claims: [CLAIMS[1]] }]);
@@ -782,4 +826,201 @@ test("W1-T13944 criterion 7: readHeldFollowUps: reads origin/main where the targ
   const out = await w.act(rows, []);
   assert.equal(out.heldTaskId, "W1-T13919", out.reason);
   assert.equal(w.reserved.length, 0, "no id is reserved");
+});
+
+test("W1-T13944 criterion 2: a completed filing whose landing closes unmerged stops blocking a new split", async t => {
+  const w = await world(t);
+  const first = await w.act([]);
+  assert.equal(first.error, undefined, first.reason);
+  assert.deepEqual(w.reserved, [first.heldTaskId]);
+  for (const file of w.landed[0]!) {
+    const staged = join(w.root, "state", "task-files-landing-pending", file.relPath);
+    rmSync(staged);
+    rmSync(`${staged}.meta.json`);
+  }
+  writeFileSync(join(w.checkoutDir, shardRel(TASK)), shardOf(TASK).replace("WHY: a fixture.", "WHY: current parent text."));
+  const rows: Row[] = [];
+  const next = await w.act(rows);
+  assert.equal(next.error, undefined, next.reason);
+  assert.notEqual(next.heldTaskId, first.heldTaskId);
+  assert.deepEqual(w.reserved, [first.heldTaskId, next.heldTaskId]);
+  assert.ok(w.landed[1]!.every(file => file.content.includes(next.heldTaskId!)));
+  assert.match(w.landed[1]!.find(f => f.relPath === shardRel(TASK))!.content, /WHY: current parent text\./);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", next.heldTaskId, undefined]]);
+});
+
+test("W1-T13944 criterion 2: observing a staged file completes a handoff interrupted before the landing reply", async t => {
+  const queue: HeldFollowUp[] = [];
+  const f = fakeHost(tempRoot(t, "one-held-interrupted-handoff"), queue);
+  const interrupted: ParkedPrHost = { ...f.h, landTaskFiles: async (files, target) => {
+    await f.h.landTaskFiles(files, target);
+    throw new Error("landing reply was interrupted after staging");
+  } };
+  const first = await takeParkedPrRemedy(subject(), split(), [], interrupted, context([]));
+  assert.match(String(first.error), /after staging/);
+  const [id] = f.reserved;
+  const reused = await takeParkedPrRemedy(subject(), split(), [], f.h, context([]));
+  assert.equal(reused.heldTaskId, id);
+  assert.deepEqual(f.reserved, [id]);
+  queue.length = 0;
+  const next = await takeParkedPrRemedy(subject(), split(), [], f.h, context([]));
+  assert.equal(next.error, undefined, next.reason);
+  assert.notEqual(next.heldTaskId, id);
+  assert.deepEqual(f.reserved, [id, next.heldTaskId]);
+});
+
+test("W1-T13944 criterion 3: a concurrent split held in the read replays the first pass's id after a fetch timeout", async t => {
+  let failFetch = true;
+  const w = await world(t, { landingFetchFails: () => failFetch });
+  const paused = pauseHeldRead(w.host);
+  const rows: Row[] = [];
+  const second = withLiveWritesAllowed(() => takeParkedPrRemedy(subject(), split(), [], paused.host, context(rows)));
+  await paused.started;
+  const first = await w.act(rows);
+  failFetch = false;
+  paused.resume();
+  const next = await second;
+  assert.match(String(first.error), /landing fetch timed out/);
+  assert.deepEqual(w.results[0]!.staged, []);
+  assert.equal(next.error, undefined, next.reason);
+  assert.deepEqual(w.reserved, [next.heldTaskId]);
+  assert.deepEqual(w.landed, [w.landed[0], w.landed[0]], "the retry uses exactly the same files");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["refused", undefined], ["taken", next.heldTaskId]]);
+});
+
+test("W1-T13944 criterion 3: a stale queue read cannot reserve after a concurrent pass handed off its claim", async t => {
+  const f = fakeHost(tempRoot(t, "one-held-handoff-race"), []);
+  const paused = pauseHeldRead(f.h);
+  const rows: Row[] = [];
+  const second = takeParkedPrRemedy(subject(), split(), [], paused.host, context(rows));
+  await paused.started;
+  const first = await takeParkedPrRemedy(subject(), split(), [], f.h, context(rows));
+  paused.resume();
+  const stale = await second;
+  assert.match(String(stale.error), /just handed off/);
+  const next = await takeParkedPrRemedy(subject(), split(), [], f.h, context(rows));
+  assert.equal(next.heldTaskId, first.heldTaskId);
+  assert.deepEqual(f.reserved, [first.heldTaskId]);
+  assert.equal(f.landed.length, 1);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.reused]), [["taken", undefined], ["refused", undefined], ["taken", true]]);
+});
+
+test("W1-T13944 criterion 4: a returned pre-staging landing error keeps the reserved id across a restart", async t => {
+  let failFetch = true;
+  const w = await world(t, { landingFetchFails: () => failFetch });
+  const first = await w.act([]);
+  assert.match(String(first.error), /landing fetch timed out/);
+  const [id] = w.reserved;
+  assert.ok(id);
+  assert.ok(w.origin.git("rev-parse", taskIdReservationRef(id)).trim());
+  assert.deepEqual(w.results[0]!.staged, []);
+  failFetch = false;
+  const restarted = await restartedRemedy();
+  const rows: Row[] = [];
+  const next = await withLiveWritesAllowed(() => restarted.takeParkedPrRemedy(subject(), split(), [], { ...w.host }, context(rows)));
+  assert.equal(next.error, undefined, next.reason);
+  assert.deepEqual([next.heldTaskId, w.reserved], [id, [id]]);
+  assert.deepEqual(w.landed, [w.landed[0], w.landed[0]], "the restarted host submits the reserved id and unchanged bytes");
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["taken", id]]);
+});
+
+test("W1-T13944 criterion 4: preflight timing out on the held file keeps the real reservation for the next pass", async t => {
+  let verdict: PlanPrPreflightResult | undefined = { ...GREEN, timedOut: [{ check: "lint-plan", firstLine: "preflight timed out" }] };
+  const w = await world(t, { heldPreflight: () => verdict });
+  const originalRows: Row[] = [];
+  const first = await w.act(originalRows);
+  const [id] = w.reserved;
+  assert.ok(id);
+  assert.match(String(first.error), /preflight ran out of its budget/);
+  assert.equal(remedyRows(originalRows)[0]!.refusal_checks, undefined, "a timeout is not a preflight verdict");
+  assert.ok(w.origin.git("rev-parse", taskIdReservationRef(id)).trim(), "the reservation is still on origin");
+  assert.ok(!w.results[0]!.staged?.includes(w.landed[0]!.find(f => f.newFile)!.relPath));
+  verdict = undefined;
+  const rows: Row[] = [];
+  const next = await w.act(rows, []);
+  assert.equal(next.error, undefined, next.reason);
+  assert.deepEqual([next.heldTaskId, w.reserved], [id, [id]]);
+  assert.deepEqual(w.landed[1], w.landed[0]);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id]), [["taken", id]]);
+});
+
+test("W1-T13944 criterion 4: a held-file refusal that releases the reservation permits a new id", async t => {
+  let verdict: PlanPrPreflightResult | undefined = PARENT_RED;
+  const w = await world(t, { heldPreflight: () => verdict });
+  const first = await w.act([]);
+  assert.match(String(first.error), /design-invariant-proof/);
+  const [id] = w.reserved;
+  assert.ok(id);
+  assert.equal(w.origin.git("for-each-ref", taskIdReservationRef(id)).trim(), "", "the landing released the reservation");
+  verdict = undefined;
+  const next = await w.act([], []);
+  assert.equal(next.error, undefined, next.reason);
+  assert.notEqual(next.heldTaskId, id);
+  assert.deepEqual(w.reserved, [id, next.heldTaskId]);
+});
+
+test("W1-T13944 criterion 5: batch preflight sets aside the parent before the second listing fails and the held file still counts", async t => {
+  const w = await world(t, { refuseParentEdit: true, listFailsAt: 2 });
+  let parent: TaskFileInput | undefined;
+  const interrupted = await withLiveWritesAllowed(() => takeParkedPrRemedy(subject(), split(), [], { ...w.host,
+    landTaskFiles: async files => {
+      parent = files.find(f => f.relPath === shardRel(TASK));
+      throw new Error("interrupted before the held file staged");
+    },
+  }, context([])));
+  assert.match(String(interrupted.error), /interrupted before the held file staged/);
+  assert.ok(parent);
+  const staged = join(w.root, "state", "task-files-landing-pending", parent.relPath);
+  mkdirSync(dirname(staged), { recursive: true });
+  writeFileSync(staged, parent.content);
+  writeFileSync(`${staged}.meta.json`, JSON.stringify({ baseBlob: w.origin.git("rev-parse", `main:${parent.relPath}`).trim(),
+    claim: parent.claim, proof: parent.proof, repository: `${OWNER}/${REPO}` }));
+
+  const rows: Row[] = [];
+  const out = await w.act(rows);
+  const result = w.results[0]!;
+  assert.match(String(result.error), /cannot be listed/);
+  assert.equal(existsSync(staged), false, "the parent was removed from the queue by batch preflight");
+  assert.deepEqual(result.staged, [w.landed[0]!.find(f => f.newFile)!.relPath]);
+  assert.equal(out.error, undefined, out.reason);
+  const [row] = remedyRows(rows);
+  assert.deepEqual([row!.outcome, row!.held_task_id, row!.refusal_checks], ["taken", w.reserved[0], ["lint-plan"]]);
+  assert.match(String(row!.partial_refusal), /design-invariant-proof.*cannot be listed/);
+  const nextRows: Row[] = [];
+  const again = await w.act(nextRows, []);
+  assert.deepEqual(w.reserved, [again.heldTaskId]);
+  assert.deepEqual(remedyRows(nextRows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", out.heldTaskId, true]]);
+});
+
+test("W1-T13944 criterion 6: a follow-up's inherited dependency does not identify its parent", async t => {
+  const queue: HeldFollowUp[] = [];
+  const f = fakeHost(tempRoot(t, "one-held-inherited-dependency"), queue);
+  const host: ParkedPrHost = { ...f.h, readTaskShard: async id => {
+    const read = await f.h.readTaskShard(id);
+    if (read.outcome === "read" && id === OTHER) read.shard.text = read.shard.text.replace("depends_on: []", `depends_on: [${TASK}]`);
+    return read;
+  } };
+  const rows: Row[] = [];
+  const child = await takeParkedPrRemedy(subject(OTHER), split(), [], host, context(rows));
+  assert.equal(child.error, undefined, child.reason);
+  assert.deepEqual(queue[0]!.depends_on, [OTHER, TASK]);
+  const parent = await takeParkedPrRemedy(subject(TASK), split(), [], host, context(rows));
+  assert.equal(parent.error, undefined, parent.reason);
+  assert.notEqual(parent.heldTaskId, child.heldTaskId);
+  assert.deepEqual(f.reserved, [child.heldTaskId, parent.heldTaskId]);
+  assert.deepEqual(queue.map(h => h.depends_on), [[OTHER, TASK], [TASK]]);
+  const again = await takeParkedPrRemedy(subject(OTHER), split(), [], host, context(rows));
+  assert.equal(again.heldTaskId, child.heldTaskId);
+  assert.equal(f.landed.length, 2);
+});
+
+test("W1-T13944 criterion 7: a successful reload supersedes the old snapshot when main and the queue are empty", async t => {
+  const w = await world(t, { planExtra: heldText("W1-T13919", TASK, [CLAIMS[1]!]), reloadPlanExtra: "[]\n" });
+  const rows: Row[] = [];
+  const out = await w.act(rows);
+  assert.equal(out.error, undefined, out.reason);
+  assert.deepEqual(w.reserved, [out.heldTaskId]);
+  assert.notEqual(out.heldTaskId, "W1-T13919");
+  assert.equal(w.landed.length, 1);
+  assert.deepEqual(remedyRows(rows).map(r => [r.outcome, r.held_task_id, r.reused]), [["taken", out.heldTaskId, undefined]]);
 });

@@ -543,7 +543,7 @@ const SEED_ROWS: readonly SeedRow[] = [
       "follow-up for this task and each criterion was already on the plan of origin/main or in the task-files landing " +
       "queue, so none was filed (W1-T13944); a split files a held task only for the criteria none carries, and `criteria` " +
       "names them. `partial_refusal` on a taken split means the held task file staged and the landing refused another " +
-      "file, such as the edit of the parent task file; it holds that refusal first, then any landing error. A landing " +
+      "file, such as the edit of the parent task file during staging or batch preflight; it holds that refusal first, then any landing error. A landing " +
       "error with no such refusal stays \"refused\". \"refused\" means the " +
       "remedy could not act; `reason` says why, and the next pass tries again.",
     writer: ["takeParkedPrRemedy"],

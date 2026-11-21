@@ -412,7 +412,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -5558,9 +5558,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
-        const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        const setAside = landed.setAside.filter(r => files.some(f => f.relPath === r.path));
+        const refusalChecks = planPreflightRefusalChecks({ refused: landed.refused, setAside });
         // W1-T13944: `staged` names an input that waits with its own bytes; another edit waiting at its path is a refusal.
-        const refused = landed.refused.map((r) => ({ relPath: r.path, reason: r.reason }));
+        const refused = [
+          ...landed.refused.map(r => ({ relPath: r.path, reason: r.reason,
+            ...(r.id_release === "released" || r.id_release === "already_absent" ? { reservationReleased: true as const } : {}) })),
+          ...setAside.map(r => ({ relPath: r.path, reason: r.reason, setAside: true as const })),
+        ];
         const staged = [...landed.landed, ...landed.waiting].filter((p) => !refused.some((r) => r.relPath === p));
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
           ...(refusalChecks === undefined ? {} : { refusalChecks }), staged, refused };
@@ -5571,18 +5576,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // for a task and criterion neither origin/main nor the queue holds.
       heldFollowUpClaimRoot: config.root,
       readHeldFollowUps: async (target) => {
-        let main: HeldFollowUp[] = [];
-        try {
-          main = await heldFollowUpsAtRefAsync(target.checkoutDir, "refs/remotes/origin/main");
-        } catch (error) {
-          log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
-        }
+        // Read the queue before fetching main so a file that merges out of the queue is visible in one of the reads.
         const queue = stagedTaskFiles(config.root).flatMap(({ relPath }) => {
           const abs = join(config.root, "state", "task-files-landing-pending", relPath);
           return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
         });
-        const daemon = [plan, reloadPlanForFix()].filter((p): p is Plan => p !== undefined)
-          .flatMap((p) => p.tasks.flatMap((task) => heldFollowUpOf(task) ?? []));
+        let main: HeldFollowUp[];
+        try {
+          main = await readMainHeldFollowUps(target.checkoutDir);
+        } catch (error) {
+          log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
+          throw new Error(`held follow-ups on origin/main could not be read: ${String(error)}`, { cause: error });
+        }
+        const daemon = (reloadPlanForFix() ?? plan).tasks.flatMap(task => heldFollowUpOf(task) ?? []);
         return withLaggingHeldFollowUps([...main, ...queue], daemon);
       },
       closePr: async (prUrl, comment) => {
@@ -12223,19 +12229,23 @@ export async function reservePlanRepairTaskIdAsync(
 }
 
 /**
- * W1-T13944: the held follow-ups the task files at `ref` declare, each file parsed alone, so a file the plan loader
+ * W1-T13944: the held follow-ups current origin/main declares, each file parsed alone, so a file the plan loader
  * would refuse (a dependency in another catalog, a duplicate id) hides no held follow-up in another file.
  */
-async function heldFollowUpsAtRefAsync(checkoutDir: string, ref: string): Promise<HeldFollowUp[]> {
+async function readMainHeldFollowUps(checkoutDir: string): Promise<HeldFollowUp[]> {
   const runGit = defaultGitRunnerAsync(checkoutDir);
+  const tracking = "refs/remotes/origin/main";
+  await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
+  const ref = (await runGit(["rev-parse", tracking])).trim();
   // The target's own layout override places its plan: the one at `ref`, else the one in the working tree.
   const rel = (path: string) => relative(checkoutDir, path).split(sep).join("/");
   const overrideRel = rel(join(resolveRepoLayout(checkoutDir, () => undefined).stateDir, "layout.json"));
   const overrideEntry = await runGit(["ls-tree", "--name-only", ref, "--", overrideRel]);
   const layoutAtRef = overrideEntry.length === 0 ? undefined : await runGit(["show", `${ref}:${overrideRel}`]);
   const layout = resolveRepoLayout(checkoutDir, (path) => layoutAtRef ?? (existsSync(path) ? readFileSync(path, "utf8") : undefined));
-  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", rel(layout.planMonolith), `${rel(join(layout.planDir, "tasks.d"))}/`]);
-  const paths = listing.split("\n").map((l) => l.trim()).filter((l) => /\.ya?ml$/.test(l));
+  const monolith = rel(layout.planMonolith);
+  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", monolith, `${rel(join(layout.planDir, "tasks.d"))}/`]);
+  const paths = listing.split("\n").map(l => l.trim()).filter(l => l === monolith || /\.ya?ml$/.test(l));
   const texts = await readBlobsAtRefAsync(runGit, ref, paths);
   // Every file is parsed: a folded or escaped title shows "(held follow-up)" only once parsed. A parse is kept by the
   // file's bytes, so a later pass parses only the files that changed.
@@ -12250,7 +12260,7 @@ async function heldFollowUpsAtRefAsync(checkoutDir: string, ref: string): Promis
   return held;
 }
 
-/** W1-T13944: the held follow-ups of each task file read at the last {@link heldFollowUpsAtRefAsync}, by the file's hash. */
+/** W1-T13944: the held follow-ups of each task file read at the last {@link readMainHeldFollowUps}, by the file's hash. */
 let heldFollowUpParses = new Map<string, HeldFollowUp[]>();
 
 /**
@@ -12260,9 +12270,9 @@ let heldFollowUpParses = new Map<string, HeldFollowUp[]>();
  */
 function withLaggingHeldFollowUps(current: readonly HeldFollowUp[], lagging: readonly HeldFollowUp[]): HeldFollowUp[] {
   const carried = (parents: readonly string[], claim: string) =>
-    current.some((h) => h.claims.includes(claim) && h.depends_on.some((d) => parents.includes(d)));
+    current.some(h => h.claims.includes(claim) && heldFollowUpParents(h).some(d => parents.includes(d)));
   return [...current, ...lagging.flatMap((h) => {
-    const claims = h.claims.filter((claim) => !carried(h.depends_on, claim));
+    const claims = h.claims.filter(claim => !carried(heldFollowUpParents(h), claim));
     return claims.length === 0 ? [] : [{ ...h, claims }];
   })];
 }
