@@ -14,7 +14,7 @@
     - W1-T13888
   files:
     - test/a-latched-restart-exits-when-its-last-lane-settles.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "the running-after-completed fixture keeps its drain limit past its third pass"

@@ -5,6 +5,8 @@
 // its turn.completed intact. A rebuilt line is never classified: whatever it parses as, a spill before the final
 // verdict cannot hide it, and a spill after it could be it. Every other input keeps main's result, retention and
 // dropped bytes, which the criterion 2 and 3 tests pin as main's literal values. A partial line never certifies.
+// The text, blocks and stdout labels are W1-T13951's (#19919): a command item cut in its output body leaves stdout
+// complete, so a stream that must show the spill on outputRetention.stdout spills a tool call instead.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -27,6 +29,11 @@ const eventLine = (item: Record<string, unknown>) => JSON.stringify({ type: "ite
 const oversizedCommand = (outputBytes = CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16) =>
   eventLine({ type: "command_execution", command: "/bin/bash -lc 'git diff origin/main'",
     aggregated_output: "x".repeat(outputBytes), exit_code: 0, status: "completed" });
+
+/** An intermediate tool call over the bound: unlike a command item, its spill reads stdout truncated. */
+const oversizedToolCall = () => eventLine({ id: "item_3", type: "mcp_tool_call", server: "github", tool: "get_file_contents",
+  arguments: { path: "src" }, result: { content: [{ type: "text", text: "m".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16) }] },
+  status: "completed" });
 
 function codexRun() {
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t13960-"));
@@ -71,10 +78,9 @@ function codexRun() {
   };
 }
 
-/** A completed stream whose one spilled line is an intermediate command item. */
-async function completedButSpilled() {
+/** A completed stream whose one spilled line is an intermediate item. */
+async function completedButSpilled(line: string) {
   const child = codexRun();
-  const line = oversizedCommand();
   child.start();
   await child.write(`${line}\n`);
   await child.write(`${eventLine({ type: "agent_message", text: FINAL })}\n`);
@@ -83,22 +89,25 @@ async function completedButSpilled() {
 }
 
 test("W1-T13960 criterion 1: a completed Codex run whose one spilled line is an intermediate event returns success with its final message", async () => {
-  const { child, result } = await completedButSpilled();
-  try {
-    // The spill really happened and really lost bytes inside the line (the measured shape).
-    assert.ok((result.outputTruncation?.droppedBytes ?? 0) > 0, "the oversized line lost its middle");
-    assert.equal(result.outputRetention?.stdout?.state, "truncated");
-    assert.equal(result.outputRetention?.completion?.state, "complete");
-    assert.equal(result.outputRetention?.originalSubtype, "success");
-    assert.deepEqual(result.exit, { kind: "exit", code: 0 });
-    assert.equal(result.text, FINAL, "the final message is intact");
-    assert.equal(result.outputRetention?.text.state, "complete", "the final message's own line lost nothing");
-    assert.equal(result.outputRetention?.blocks.state, "complete", "no retained block came from the cut line");
-    assert.equal(result.subtype, "success");
-    assert.equal(result.isError, false);
-    // review.ts's reviewerOutcome is this subtype for an attempted, exited run, so the verdict lines are judged, not withheld.
-    assert.equal(result.text.split("\n").filter((l) => /^REVIEW_VERDICT \d+: PASS/.test(l)).length, 2);
-  } finally { rmSync(child.home, { recursive: true, force: true }); }
+  // W1-T13951: a command item cut in its output body leaves stdout complete; a tool call's spill reads it truncated.
+  for (const [spilled, stdoutState] of [[oversizedCommand(), "complete"], [oversizedToolCall(), "truncated"]] as const) {
+    const { child, result } = await completedButSpilled(spilled);
+    try {
+      // The spill really happened and really lost bytes inside the line (the measured shape).
+      assert.ok((result.outputTruncation?.droppedBytes ?? 0) > 0, "the oversized line lost its middle");
+      assert.equal(result.outputRetention?.stdout?.state, stdoutState);
+      assert.equal(result.outputRetention?.completion?.state, "complete");
+      assert.equal(result.outputRetention?.originalSubtype, "success");
+      assert.deepEqual(result.exit, { kind: "exit", code: 0 });
+      assert.equal(result.text, FINAL, "the final message is intact");
+      assert.equal(result.outputRetention?.text.state, "complete", "the final message's own line lost nothing");
+      assert.equal(result.outputRetention?.blocks.state, "complete", "no retained block came from the cut line");
+      assert.equal(result.subtype, "success");
+      assert.equal(result.isError, false);
+      // review.ts's reviewerOutcome is this subtype for an attempted, exited run, so the verdict lines are judged, not withheld.
+      assert.equal(result.text.split("\n").filter((l) => /^REVIEW_VERDICT \d+: PASS/.test(l)).length, 2);
+    } finally { rmSync(child.home, { recursive: true, force: true }); }
+  }
 });
 
 test("W1-T13960 criterion 2: a stream that ends without turn.completed for its final turn is still incomplete", async () => {
@@ -190,7 +199,7 @@ test("W1-T13960 criterion 2: a spill removed just before its newline returns ori
     } finally { rmSync(child.home, { recursive: true, force: true }); }
   }
   // The literal results of origin/main (merge-base ed3d78aaa9) for these streams: the spill accounting may only veto
-  // an upgrade, so it never turns main's success into error_codex.
+  // an upgrade, so it never turns main's success into error_codex. #19919's spill-type scan threw on the absent file.
   assert.deepEqual(seen, {
     newline: { completion: "complete", stdout: "complete", subtype: "success", isError: false, droppedBytes: 0 },
     eof: { completion: "incomplete", stdout: "absent", subtype: "error_codex", isError: true, droppedBytes: 0 },
@@ -220,9 +229,9 @@ async function spillRecreatedShorterMidLine() {
   return { child, line, result: await child.run };
 }
 
-test("W1-T13960 criterion 2: a spill whose file no longer holds every byte spilled for its line keeps origin/main's result", async () => {
+test("W1-T13960 criterion 2: a spill whose file no longer holds every byte spilled for its line never certifies", async () => {
   const seen: Record<string, unknown> = {};
-  const expected: Record<string, unknown> = {};
+  const expected: Record<string, number> = {};
   for (const damage of ["recreated-empty-after-an-earlier-rebuild", "unlinked-mid-line"] as const) {
     let child: ReturnType<typeof codexRun> | undefined;
     try {
@@ -252,10 +261,15 @@ test("W1-T13960 criterion 2: a spill whose file no longer holds every byte spill
       seen[damage] = { ...outcome(result), droppedBytes: result.outputTruncation?.droppedBytes };
     } finally { if (child) rmSync(child.home, { recursive: true, force: true }); }
   }
-  // origin/main's literal results: the run stays incomplete, stdout truncated, and the dropped bytes are main's.
-  const main = (droppedBytes: unknown) => ({ completion: "complete", stdout: "truncated", subtype: "error_incomplete_output",
-    isError: true, droppedBytes });
-  assert.deepEqual(seen, Object.fromEntries(Object.entries(expected).map(([damage, bytes]) => [damage, main(bytes)])));
+  // The dropped bytes are origin/main's. An emptied spill reads as nothing and the command spill leaves stdout
+  // complete (W1-T13951), so main returns success; the veto keeps the run incomplete. Main rebuilds a spill from its
+  // file's own head, so a file recreated mid-line reads malformed: error_codex, as on main.
+  assert.deepEqual(seen, {
+    "recreated-empty-after-an-earlier-rebuild": { completion: "complete", stdout: "complete", subtype: "error_incomplete_output",
+      isError: true, droppedBytes: expected["recreated-empty-after-an-earlier-rebuild"] },
+    "unlinked-mid-line": { completion: "complete", stdout: "truncated", subtype: "error_codex", isError: true,
+      droppedBytes: expected["unlinked-mid-line"] },
+  });
 });
 
 test("W1-T13960 criterion 3: a spill recreated shorter mid-line keeps origin/main's truncated stdout and dropped bytes", async () => {
@@ -266,15 +280,15 @@ test("W1-T13960 criterion 3: a spill recreated shorter mid-line keeps origin/mai
     assert.equal(rebuiltDrop(fileBytes), 589_992);
     assert.equal(result.outputRetention?.stdout?.state, "truncated");
     assert.equal(result.outputRetention?.stdout?.fileBytes, fileBytes);
-    // Design step 2: the lost bytes fell in the command line, so the final text and the blocks read complete, while
-    // the unaccounted spill keeps the run incomplete.
+    // origin/main rebuilds the line from the recreated file's head, which no longer opens the line: it reads
+    // malformed, so W1-T13951 marks the blocks truncated and the run fails. The final message after it is whole.
     assert.equal(result.outputRetention?.text.state, "complete");
-    assert.equal(result.outputRetention?.blocks.state, "complete");
+    assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.deepEqual(result.outputTruncation, { limitBytes: CODEX_WORKER_STDOUT_MAX_BYTES,
       retainedBytes: result.outputTruncation?.retainedBytes, droppedBytes: rebuiltDrop(fileBytes), spilledBytes: Buffer.byteLength(line) });
     const receipt = child.rows().find((row) => row.step === "worker.output_truncated");
     assert.deepEqual(receipt?.output_truncation, result.outputTruncation);
-    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.subtype, "error_codex");
   } finally { rmSync(child.home, { recursive: true, force: true }); }
 });
 
@@ -429,11 +443,15 @@ test("W1-T13960 criterion 2: a spilled line that could be the final agent messag
         text: result.outputRetention?.text.state, blocks: result.outputRetention?.blocks.state };
     } finally { rmSync(child.home, { recursive: true, force: true }); }
   }
-  // origin/main's literal result: the rebuilt line drops bytes, so the run is incomplete and its text truncated. The
-  // earlier PASS is not the final message once a later line could have been one.
-  const main = { completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true,
-    text: "truncated", blocks: "truncated" };
-  assert.deepEqual(seen, Object.fromEntries(Object.keys(lines).map((shape) => [shape, main])));
+  // The labels are W1-T13951's: no retained block lost bytes, and the last line parses as a command item. The
+  // earlier PASS is not the final message once a later line could have been one, so the run is incomplete.
+  const refused = (stdout: string) => ({ completion: "complete", stdout, subtype: "error_incomplete_output", isError: true,
+    rebuilt: true, text: "complete", blocks: "complete" });
+  assert.deepEqual(seen, {
+    "a final message whose head ends inside its item type": refused("truncated"),
+    "an item of a type this file does not read": refused("truncated"),
+    "a command item that also names agent_message": refused("complete"),
+  });
 });
 
 test("W1-T13960 criterion 2: a final turn with no agent message of its own does not certify an earlier turn's verdict", async () => {
@@ -453,25 +471,34 @@ test("W1-T13960 criterion 2: a final turn with no agent message of its own does 
 });
 
 test("W1-T13960 criterion 3: the completed-but-spilled run still records its truncation", async () => {
-  const { child, line, result } = await completedButSpilled();
-  try {
-    const stdout = result.outputRetention?.stdout;
-    assert.equal(stdout?.state, "truncated");
-    assert.equal(stdout?.fileBytes, Buffer.byteLength(line), "the spill evidence names the whole spilled line");
-    assert.ok((stdout?.bytesRead ?? 0) > 0 && stdout!.bytesRead < stdout!.fileBytes!, "only a bounded tail was read");
-    assert.ok(result.outputTruncation, "outputTruncation is reported");
-    assert.equal(result.outputTruncation.limitBytes, CODEX_WORKER_STDOUT_MAX_BYTES);
-    assert.equal(result.outputTruncation.spilledBytes, Buffer.byteLength(line));
-    assert.ok(result.outputTruncation.droppedBytes > 0);
-    const receipt = child.rows().find((row) => row.step === "worker.output_truncated");
-    assert.ok(receipt, "the worker.output_truncated row is written");
-    assert.equal(receipt.run_id, "W1-T13960-test");
-    assert.deepEqual(receipt.output_truncation, result.outputTruncation);
-    // The review.reviewer row spreads workerLedgerFields(reviewer): its output_retention still shows the spill.
-    const fields = workerLedgerFields(result as Parameters<typeof workerLedgerFields>[0]);
-    assert.deepEqual(fields.output_retention, result.outputRetention);
-    assert.equal(fields.output_retention?.stdout?.state, "truncated");
-  } finally { rmSync(child.home, { recursive: true, force: true }); }
+  for (const spilled of [oversizedToolCall(), oversizedCommand()]) {
+    const { child, line, result } = await completedButSpilled(spilled);
+    try {
+      const stdout = result.outputRetention?.stdout;
+      const command = spilled.includes('"command_execution"');
+      if (command) {
+        // W1-T13951: a command item cut in its output body is counted below, not read as a stdout loss.
+        assert.equal(stdout?.state, "complete");
+      } else {
+        assert.equal(stdout?.state, "truncated");
+        assert.equal(stdout?.fileBytes, Buffer.byteLength(line), "the spill evidence names the whole spilled line");
+        assert.ok((stdout?.bytesRead ?? 0) > 0 && stdout!.bytesRead < stdout!.fileBytes!, "only a bounded tail was read");
+      }
+      assert.ok(result.outputTruncation, "outputTruncation is reported");
+      assert.equal(result.outputTruncation.limitBytes, CODEX_WORKER_STDOUT_MAX_BYTES);
+      assert.equal(result.outputTruncation.spilledBytes, Buffer.byteLength(line));
+      assert.ok(result.outputTruncation.droppedBytes > 0);
+      const receipt = child.rows().find((row) => row.step === "worker.output_truncated");
+      assert.ok(receipt, "the worker.output_truncated row is written");
+      assert.equal(receipt.run_id, "W1-T13960-test");
+      assert.deepEqual(receipt.output_truncation, result.outputTruncation);
+      // The review.reviewer row spreads workerLedgerFields(reviewer): its output_retention still shows the spill. It
+      // carries output_retention only when a value is not complete, so the command run's row omits it.
+      const fields = workerLedgerFields(result as Parameters<typeof workerLedgerFields>[0]);
+      assert.deepEqual(fields.output_retention, command ? undefined : result.outputRetention);
+      if (!command) assert.equal(fields.output_retention?.stdout?.state, "truncated");
+    } finally { rmSync(child.home, { recursive: true, force: true }); }
+  }
 });
 
 /** Run `before`, the intact verdict, then `after`, and close with `end`'s tail; the outcome, labels and drop. */
@@ -494,10 +521,7 @@ const CERTIFIED = { completion: "complete", stdout: "truncated", subtype: "succe
 
 test("W1-T13960 criterion 1: an oversized mcp_tool_call spilled mid-turn, then an intact verdict and turn.completed, returns success", async () => {
   // Round 5 finding 1: Round 4's allowlist of item types left out mcp_tool_call, so this run was refused.
-  const mcp = eventLine({ id: "item_3", type: "mcp_tool_call", server: "github", tool: "get_file_contents", arguments: { path: "src" },
-    result: { content: [{ type: "text", text: "m".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16) }] },
-    status: "completed" });
-  assert.deepEqual(await aroundTheVerdict([mcp]), CERTIFIED);
+  assert.deepEqual(await aroundTheVerdict([oversizedToolCall()]), CERTIFIED);
 });
 
 test("W1-T13960 criterion 1: a command item whose command is agent_message, spilled before the verdict, returns success", async () => {
@@ -505,7 +529,8 @@ test("W1-T13960 criterion 1: a command item whose command is agent_message, spil
   const command = eventLine({ type: "command_execution", command: "agent_message",
     aggregated_output: "x".repeat(CODEX_WORKER_STDOUT_MAX_BYTES + CODEX_WORKER_STDOUT_MAX_BYTES / 16), exit_code: 0, status: "completed" });
   assert.match(command.slice(0, SPILL_HEAD_BYTES), /"command":"agent_message"/, "the token is in the kept head");
-  assert.deepEqual(await aroundTheVerdict([command]), CERTIFIED);
+  // W1-T13951: the command spill leaves stdout complete.
+  assert.deepEqual(await aroundTheVerdict([command]), { ...CERTIFIED, stdout: "complete" });
 });
 
 /** A final agent message whose spill rebuilds into a valid command_execution item: the kept head ends inside its
@@ -525,23 +550,24 @@ function finalMessageRebuiltAsCommand(): string {
 
 test("W1-T13960 criterion 2: a final message spilled and rebuilt into a valid command_execution never certifies an earlier PASS", async () => {
   // Round 5 finding 2: the rebuilt line parses as a command item, and the earlier PASS was returned as success.
+  // W1-T13951 reads it as that command, so every label is complete and main returns success; the order refuses it.
   assert.deepEqual(await aroundTheVerdict([], [finalMessageRebuiltAsCommand()]), {
-    completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
-    textState: "truncated", blocksState: "truncated" });
+    completion: "complete", stdout: "complete", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
+    textState: "complete", blocksState: "complete" });
 });
 
 test("W1-T13960 criterion 2: a spill after the last intact agent message, in the final turn, never certifies", async () => {
   // A plain command item: nothing in its rebuilt bytes looks like a message, yet a spill after the last intact
-  // message could have been a later one, so origin/main's result stands.
+  // message could have been a later one, so the run is incomplete, though W1-T13951's labels are all complete.
   assert.deepEqual(await aroundTheVerdict([], [oversizedCommand()]), {
-    completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
-    textState: "truncated", blocksState: "truncated" });
+    completion: "complete", stdout: "complete", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
+    textState: "complete", blocksState: "complete" });
 });
 
 test("W1-T13960 criterion 2: a final message after its turn's turn.completed does not certify a spill", async () => {
   // The final turn's turn.completed must arrive intact AFTER its last message. Here it precedes the message.
   assert.deepEqual(await aroundTheVerdict([oversizedCommand(), TURN_COMPLETED.trimEnd()], [], ""), {
-    completion: "complete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
+    completion: "complete", stdout: "complete", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
     textState: "complete", blocksState: "complete" });
 });
 
@@ -549,6 +575,6 @@ test("W1-T13960 criterion 2: a sealed final message does not certify a stream wh
   // The final turn's message and turn.completed arrive intact after the spill, but an earlier turn has no
   // turn.completed, so completion reads incomplete and origin/main's result stands.
   assert.deepEqual(await aroundTheVerdict(['{"type":"turn.started"}', oversizedCommand()]), {
-    completion: "incomplete", stdout: "truncated", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
+    completion: "incomplete", stdout: "complete", subtype: "error_incomplete_output", isError: true, rebuilt: true, text: true,
     textState: "complete", blocksState: "complete" });
 });

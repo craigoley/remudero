@@ -2419,19 +2419,16 @@ export interface ParsedCodexEvents {
   errors: string[];
   usageRefusal?: UsageLimitRefusal;
   outputTruncation?: CodexOutputTruncation;
+  retention: { textTruncated: boolean; blocksTruncated: boolean };
   completion: CodexCompletionEvidence;
   /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
   reroutes?: string[];
   retentionLoss: CodexRetentionLoss;
 }
 
-/** W1-T13960: where dropped bytes fell, per line. A spilled command output leaves text and blocks whole. */
+/** W1-T13960: what certifies a run with a line rebuilt from its spill. */
 export interface CodexRetentionLoss {
-  /** From a rebuilt or cut line, or a later rebuilt line could be a message. */
-  text: boolean;
-  /** As text, for any block, or a block was dropped. */
-  blocks: boolean;
-  /** The last message arrived intact after every spill, then its turn.completed intact. */
+  /** The last message arrived intact after every rebuilt line, then its turn.completed intact. */
   finalMessageSealed: boolean;
   rebuiltLines: number;
   /** A budget cut is not a spill. */
@@ -2440,18 +2437,19 @@ export interface CodexRetentionLoss {
   unaccountedSpills: number;
 }
 
-/** W1-T13960: main's all-complete rule, or a narrow upgrade: a success with a complete final turn and stderr
- *  whose only loss is in accounted rebuilt lines before its final message. Anything else keeps main's result. */
+/** W1-T13960: main's all-complete rule, unless a line was rebuilt: then only a success with a complete final turn
+ *  and stderr, whose only loss is in accounted rebuilt lines before its final message. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
 ): boolean {
   const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
-  if (!notComplete(retention)) return true;
-  const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
-  if (retention.originalSubtype !== "success" || notComplete(rest) || stdout?.state !== "truncated") return false;
   const loss = parsed.retentionLoss;
-  return loss.finalMessageSealed && loss.rebuiltLines > 0 && loss.unaccountedSpills === 0
+  if (loss.rebuiltLines === 0) return !notComplete(retention);
+  const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
+  if (retention.originalSubtype !== "success" || notComplete(rest)) return false;
+  if (stdout?.state !== "complete" && stdout?.state !== "truncated") return false;
+  return loss.finalMessageSealed && loss.unaccountedSpills === 0
     && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
 }
 
@@ -2617,11 +2615,182 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
+/** W1-T13951: a spilled line's top-level `type` and `item.type`, by one streaming pass in any key order. */
+function spilledLineTypes(file: string): { type?: string; itemType?: string; textBytes?: number } {
+  const out: { type?: string; itemType?: string; textBytes?: number } = {};
+  const keys: Array<string | undefined> = [];
+  const objects: boolean[] = [];
+  let expectKey = false;
+  let inString = false;
+  let escaped = false;
+  let captured: number[] = [];
+  let start = 0;
+  const fd = openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    for (let pos = 0, read = 0; (read = readSync(fd, buf, 0, buf.length, pos)) > 0; pos += read) {
+      for (let k = 0; k < read; k++) {
+        const b = buf[k]!;
+        if (inString && (escaped || b !== 0x22)) {
+          escaped = !escaped && b === 0x5c;
+          if (captured.length <= 64) captured.push(b);
+        } else if (inString) {
+          inString = false;
+          const text = captured.length <= 64 ? jsonStringOrUndefined(Buffer.from(captured).toString()) : undefined;
+          if (objects.at(-1) && expectKey) {
+            keys[keys.length - 1] = text;
+            expectKey = false;
+          } else if (keys.length === 1 && keys[0] === "type") out.type = text;
+          else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "type") out.itemType = text;
+          else if (keys.length === 2 && objects[1] && keys[0] === "item" && keys[1] === "text") out.textBytes = pos + k - start;
+        } else if (b === 0x22) {
+          inString = true;
+          captured = [];
+          start = pos + k + 1;
+        } else if (b === 0x7b || b === 0x5b) {
+          objects.push(b === 0x7b);
+          keys.push(undefined);
+          expectKey = b === 0x7b;
+        } else if (b === 0x7d || b === 0x5d) {
+          objects.pop();
+          keys.pop();
+          expectKey = false;
+        } else if (b === 0x2c) expectKey = objects.at(-1) === true;
+      }
+    }
+  } finally { closeSync(fd); }
+  return out;
+}
+
+function jsonStringOrUndefined(raw: string): string | undefined {
+  return /^(?:[^"\\\u0000-\u001f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*$/.test(raw) ? JSON.parse(`"${raw}"`) as string : undefined;
+}
+
+function readSpillHead(file: string, bytes: number): string {
+  const fd = openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(bytes);
+    let end = readSync(fd, buf, 0, bytes, 0);
+    let lead = end - 1;
+    while (lead > 0 && (buf[lead]! & 0xc0) === 0x80) lead--;
+    const width = buf[lead]! >= 0xf0 ? 4 : buf[lead]! >= 0xe0 ? 3 : buf[lead]! >= 0xc0 ? 2 : 1;
+    if (end > 0 && lead + width > end) end = lead;
+    return buf.subarray(0, end).toString();
+  } finally { closeSync(fd); }
+}
+
+/** W1-T13951: the raw JSON payload of the string at `path`, as delivered; the last duplicate key wins. */
+function rawStringValue(line: string, path: readonly string[]): { raw: string; at: number } | undefined {
+  const keys: Array<string | undefined> = [];
+  const objects: boolean[] = [];
+  let expectKey = false;
+  let found: { raw: string; at: number } | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\"") {
+      let j = i + 1;
+      while (j < line.length && line[j] !== "\"") j += line[j] === "\\" ? 2 : 1;
+      const raw = line.slice(i + 1, j);
+      if (objects.at(-1) && expectKey) {
+        keys[keys.length - 1] = JSON.parse(`"${raw}"`) as string;
+        expectKey = false;
+      } else if (keys.length === path.length && keys.every((key, at) => key === path[at])) found = { raw, at: i + 1 };
+      i = j;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{");
+      keys.push(undefined);
+      expectKey = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keys.pop();
+      expectKey = false;
+    } else if (c === ",") expectKey = objects.at(-1) === true;
+  }
+  return found;
+}
+
+/** W1-T13951: the payload as delivered, with the spill marker `cut` placed in it tracked. */
+function rawPayload(line: string, path: readonly string[], text: string, cut?: { at: number; marker: string }) {
+  const found = rawStringValue(line, path);
+  const raw = found?.raw ?? JSON.stringify(text).slice(1, -1);
+  const at = cut && found ? cut.at - found.at : -1;
+  return { raw, marks: at >= 0 && raw.startsWith(cut!.marker, at) ? [{ at, len: cut!.marker.length }] : [] };
+}
+
+function unitBytes(raw: string, stream: boolean): number {
+  return Buffer.byteLength(stream ? raw : JSON.parse(`"${raw}"`) as string);
+}
+
+function rawUnitEnd(raw: string, i: number): number {
+  if (raw[i] === "\\") {
+    if (raw[i + 1] !== "u") return i + 2;
+    const hi = parseInt(raw.slice(i + 2, i + 6), 16);
+    const lo = raw.startsWith("\\u", i + 6) ? parseInt(raw.slice(i + 8, i + 12), 16) : NaN;
+    return i + (hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff ? 12 : 6);
+  }
+  const c = raw.charCodeAt(i);
+  return i + (c >= 0xd800 && c <= 0xdbff && (raw.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1);
+}
+
+function rawUtf8(raw: string, i: number, end: number): number {
+  if (raw[i] === "\\") return end - i;
+  const c = raw.charCodeAt(i);
+  return end - i === 2 ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+}
+
+/** Bytes past `offset` to the next escape boundary, by the parity of the backslash run before it. */
+function escapeSkipAt(file: string, offset: number, tail: string): number {
+  const fd = openSync(file, "r");
+  try {
+    const chunk = Buffer.alloc(64 * 1024);
+    const runBefore = (end: number) => {
+      let run = 0;
+      for (let pos = end; pos > 0;) {
+        const start = Math.max(0, pos - chunk.length);
+        const read = readSync(fd, chunk, 0, pos - start, start);
+        let k = read - 1;
+        while (k >= 0 && chunk[k] === 0x5c) k--;
+        run += read - 1 - k;
+        if (k >= 0 || read === 0) return run;
+        pos = start;
+      }
+      return run;
+    };
+    if (runBefore(offset) % 2 === 1) return tail.startsWith("u") ? 5 : 1;
+    const before = Buffer.alloc(Math.min(5, offset));
+    readSync(fd, before, 0, before.length, offset - before.length);
+    const hex = (byte: number | undefined) => byte !== undefined && /^[0-9a-fA-F]$/.test(String.fromCharCode(byte));
+    for (let j = 1; j <= 4; j++) {
+      const at = before.length - j - 1;
+      if (at < 0) break;
+      if (before[at] !== 0x5c || before[at + 1] !== 0x75) continue;
+      if (![...before.subarray(at + 2)].every(byte => hex(byte))) continue;
+      if (runBefore(offset - before.length + at + 1) % 2 === 1) return 5 - j;
+    }
+    return 0;
+  } finally { closeSync(fd); }
+}
+
+function withoutDanglingJsonEscape(text: string): string {
+  const backslashesAtEnd = (value: string) => value.length - value.replace(/\\+$/, "").length;
+  const unicode = /\\u[0-9a-fA-F]{0,3}$/.exec(text);
+  if (unicode && backslashesAtEnd(text.slice(0, unicode.index)) % 2 === 0) return text.slice(0, unicode.index);
+  return backslashesAtEnd(text) % 2 === 1 ? text.slice(0, -1) : text;
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
-class CodexJsonlAccumulator {
+export class CodexJsonlAccumulator {
   private sessionId = "";
+  /** W1-T13951: blocks and errors hold raw JSON payloads until finish(), the one representation kept. */
   private readonly blocks: string[] = [];
+  private readonly blockMarkers: Array<Array<{ at: number; len: number }>> = [];
   private readonly errors: string[] = [];
+  private readonly errorSource: boolean[] = [];
+  private readonly errorMarkers: Array<Array<{ at: number; len: number }>> = [];
+  /** W1-T13951: an entry cut by a spill counts stream bytes, as its spill did; any other counts decoded bytes. */
+  private readonly blockStreamUnit: boolean[] = [];
+  private readonly errorStreamUnit: boolean[] = [];
+  private spillStart = 0;
   private readonly reroutes: string[] = [];
   /** W1-T13868: the served model the lines read so far named, for an attempt that ends before `finish()`. */
   observedServedModel(): { servedModel: string | null; servedModelReason?: string } { return codexServedModel(this.reroutes); }
@@ -2645,20 +2814,16 @@ class CodexJsonlAccumulator {
   private droppedBytes = 0;
   private spilledBytes = 0;
   private spilling = false;
-  private spillHead = "";
-  private spillHeadFull = false;
   private spillEvidence?: Omit<FileTail, "text">;
+  private lastBlockTruncated = false;
+  private retainedTruncated = false;
   private failed = false;
-  private readonly blockLoss: boolean[] = [];
-  private blocksCut = false;
   private rebuiltLines = 0;
   private rebuiltDroppedBytes = 0;
   private unaccountedSpills = 0;
-  private rebuiltSinceBlock = false;
-  /** W1-T13960: any spill resets it, as a spill after the last intact message could be the final one. */
-  private finalMessage: "none" | "open" | "sealed" = "none";
-  /** W1-T13960: bytes written for the spilling line. */
-  private spillLineBytes = 0;
+  /** W1-T13960: a rebuilt line resets both, as one after the last intact message could be the final one. */
+  private messageOpen = false;
+  private messageSealed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -2666,21 +2831,6 @@ class CodexJsonlAccumulator {
   constructor(private nowMs: number, private readonly pendingFile?: string, private readonly observeToolLineage?: (raw: unknown) => void,
     private readonly observeMessage?: (text: string, tsMs: number) => void,
     private readonly observeToolCall?: (toolName: "Bash" | "Edit" | "Write", toolInput: Record<string, string>, tsMs: number) => void) {}
-
-  private appendSpillHead(part: string): void {
-    if (this.spillHeadFull) return;
-    const room = 64 * 1024 - Buffer.byteLength(this.spillHead);
-    if (room <= 0) { this.spillHeadFull = true; return; }
-    const bytes = Buffer.from(part);
-    const prefix = bytes.subarray(0, room);
-    if (bytes.length >= room) this.spillHeadFull = true;
-    for (let end = prefix.length; end > 0; end--) {
-      try {
-        this.spillHead += new TextDecoder("utf-8", { fatal: true }).decode(prefix.subarray(0, end));
-        return;
-      } catch { /* A byte cut may end inside one multibyte character. */ }
-    }
-  }
 
   push(chunk: string, nowMs = this.nowMs): void {
     this.nowMs = nowMs;
@@ -2690,16 +2840,13 @@ class CodexJsonlAccumulator {
       const part = chunk.slice(offset, newline < 0 ? chunk.length : newline);
       if (this.pendingFile && !this.spilling && this.retainedBytes() + Buffer.byteLength(part) > CODEX_WORKER_STDOUT_MAX_BYTES) {
         writeFileSync(this.pendingFile, this.pending, { mode: 0o600 });
-        this.spillLineBytes = this.pendingLineBytes();
+        this.spillStart = this.spilledBytes;
         this.spilledBytes += this.pendingLineBytes();
-        this.appendSpillHead(this.pending);
         this.pending = "";
         this.spilling = true;
       }
       if (this.spilling) {
-        this.appendSpillHead(part);
         appendFileSync(this.pendingFile!, part);
-        this.spillLineBytes += Buffer.byteLength(part);
         this.spilledBytes += Buffer.byteLength(part);
       } else {
         this.pending += part;
@@ -2713,62 +2860,80 @@ class CodexJsonlAccumulator {
   private consumePending(): void {
     let line = this.pending;
     let sourceBytes: number | undefined;
-    let spill: "read" | "rebuilt" | undefined;
+    let lineEvidence: Omit<FileTail, "text"> | undefined;
+    let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
-      spill = "read";
-      this.finalMessage = "none";
-      const tail = readBoundedFileTail(this.pendingFile!, 256 * 1024);
+      const lineBytes = this.spilledBytes - this.spillStart;
+      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 && existsSync(this.pendingFile!)
+        ? spilledLineTypes(this.pendingFile!) : {};
+      // W1-T13951: the cap binds the payload retained, not its envelope.
+      const payload = types.textBytes ?? Infinity;
+      const agent = types.type === "item.completed" && types.itemType === "agent_message"
+        && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
+      if (agent) this.reclaimFor(payload);
+      // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
+      const whole = agent || lineBytes <= 320 * 1024;
+      const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
       // W1-T13960: a short or rewritten spill file only vetoes the upgrade.
-      if (tail.fileBytes !== this.spillLineBytes) this.unaccountedSpills += 1;
+      if (tail.fileBytes !== lineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
       if (tail.state === "truncated") {
         // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
         // validates the envelope; a partial line can never certify a complete report.
-        const omitted = tail.fileBytes! - Buffer.byteLength(this.spillHead) - Buffer.byteLength(text);
-        line = this.spillHead + JSON.stringify(this.truncationMarker(Math.max(0, omitted))).slice(1, -1) + text;
-        this.droppedBytes += Math.max(0, omitted);
-        this.rebuiltDroppedBytes += Math.max(0, omitted);
-        spill = "rebuilt";
-        this.rebuiltSinceBlock = true;
+        // W1-T13951: never cut inside an escape.
+        const head = withoutDanglingJsonEscape(readSpillHead(this.pendingFile!, 64 * 1024));
+        const skip = escapeSkipAt(this.pendingFile!, tail.fileBytes! - Buffer.byteLength(text), text);
+        const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
+        const marker = JSON.stringify(this.truncationMarker(omitted)).slice(1, -1);
+        line = head + marker + text.slice(skip);
+        cut = { at: head.length, marker };
+        this.droppedBytes += omitted;
+        this.rebuiltDroppedBytes += omitted;
         this.rebuiltLines += 1;
+        this.messageOpen = this.messageSealed = false;
       } else {
         line = text;
       }
-      if (tail.state !== "complete") this.spillEvidence = evidence;
+      if (tail.state !== "complete" && tail.state !== "truncated") this.spillEvidence = evidence;
+      if (tail.state === "truncated") lineEvidence = evidence;
       if (tail.state === "malformed" || tail.state === "unreadable" || tail.state === "absent") {
         this.failed = true;
-        this.errors.push(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
+        this.pushError(`Codex stdout spill ${tail.state}: ${tail.reason ?? "report unavailable"}`);
         this.pending = "";
         this.spilling = false;
-        this.spillHead = "";
-        this.spillHeadFull = false;
         this.boundRetained();
         return;
       }
     }
     this.pending = "";
     this.spilling = false;
-    this.spillHead = "";
-    this.spillHeadFull = false;
-    this.consumeLine(line, sourceBytes, spill);
+    const kind = this.consumeLine(line, sourceBytes, cut);
+    // W1-T13951: a command item cut in its output body is counted, not a stdout loss.
+    if (lineEvidence && kind !== "item.completed:command_execution") this.spillEvidence = lineEvidence;
+    if (lineEvidence && kind === "malformed") {
+      this.lastBlockTruncated = true;
+      this.retainedTruncated = true;
+    }
     if (this.pendingFile) this.boundRetained();
   }
 
   finish(): ParsedCodexEvents {
-    if (this.spilling || this.pending.trim()) this.consumePending();
+    if (this.spilling || this.pending) this.consumePending();
+    for (const held of [this.blocks, this.errors]) held.splice(0, held.length, ...held.map(raw => JSON.parse(`"${raw}"`) as string));
     const text = this.blocks.at(-1) ?? "";
-    // Before the marker shifts blocks.
     const retentionLoss: CodexRetentionLoss = {
-      text: this.blockLoss.at(-1) === true || this.rebuiltSinceBlock,
-      blocks: this.blocksCut || this.blockLoss.some(Boolean) || this.rebuiltSinceBlock,
-      finalMessageSealed: this.finalMessage === "sealed",
+      finalMessageSealed: this.messageSealed,
       rebuiltLines: this.rebuiltLines,
       rebuiltDroppedBytes: this.rebuiltDroppedBytes,
       unaccountedSpills: this.unaccountedSpills,
     };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
-    else if (this.spilledBytes > 0 && this.droppedBytes === 0) this.blocks.splice(1, 0, `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`);
+    else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
+      const note = `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`;
+      const kept = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+      if (kept + Buffer.byteLength(note) <= CODEX_WORKER_STDOUT_MAX_BYTES) this.blocks.splice(1, 0, note);
+    }
     this.keptBytes = [...this.blocks, ...this.errors].reduce((sum, value) => sum + Buffer.byteLength(value), 0);
     return {
       sessionId: this.sessionId,
@@ -2786,6 +2951,7 @@ class CodexJsonlAccumulator {
         : this.completedTurns === 0 || this.turnInProgress || this.numTurns > this.completedTurns
           ? { state: "incomplete", reason: "Codex report lacks turn.completed for the final turn" }
           : { state: "complete" },
+      retention: { textTruncated: this.lastBlockTruncated, blocksTruncated: this.lastBlockTruncated || this.retainedTruncated },
       ...(this.usageRefusal ? { usageRefusal: this.usageRefusal } : {}),
       ...(this.reroutes.length > 0 ? { reroutes: [...this.reroutes] } : {}),
       ...(this.droppedBytes > 0 || this.spilledBytes > 0 ? { outputTruncation: {
@@ -2819,47 +2985,135 @@ class CodexJsonlAccumulator {
     return `\n[Codex output truncated: ${bytes} bytes omitted]\n`;
   }
 
-  private boundText(text: string, limit: number): string {
-    const raw = Buffer.from(text);
-    if (raw.length <= limit) return text;
+  private pushError(text: string, raw?: string, marks: Array<{ at: number; len: number }> = []): void {
+    this.errors.push(raw ?? JSON.stringify(text).slice(1, -1));
+    this.errorSource.push(raw !== undefined);
+    this.errorMarkers.push(marks);
+    this.errorStreamUnit.push(marks.length > 0);
+    this.keptBytes += Buffer.byteLength(this.errors.at(-1)!);
+  }
+
+  private store(kind: "block" | "error") {
+    return kind === "block"
+      ? { texts: this.blocks, sources: [] as boolean[], markers: this.blockMarkers, units: this.blockStreamUnit }
+      : { texts: this.errors, sources: this.errorSource, markers: this.errorMarkers, units: this.errorStreamUnit };
+  }
+
+  private yieldErrorsTo(room: number): void {
+    const bytes = () => this.errors.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    while (this.errors.length && bytes() > room) {
+      if (this.errors.length > 1) this.evictEntry("error", this.errors.length - 1);
+      else if (room >= 128) { this.boundEntry("error", 0, room); break; }
+      else this.evictEntry("error", 0);
+    }
+  }
+
+  /** W1-T13951: free room so an agent_message that fits the limit alone is never cut. */
+  private reclaimFor(reserveBytes: number): void {
+    const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
+    if (reserveBytes > CODEX_WORKER_STDOUT_MAX_BYTES) return;
+    if (reserveBytes + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - reserveBytes);
+    const room = CODEX_WORKER_STDOUT_MAX_BYTES - 128 - bytes(this.errors) - reserveBytes;
+    const droppedBefore = this.droppedBytes;
+    while (this.blocks.length > 1 && bytes(this.blocks) > room) this.evictBlock(1);
+    if (this.blocks.length && bytes(this.blocks) > room) {
+      if (room >= 128) this.boundBlock(0, room);
+      else this.evictBlock(0);
+    }
+    if (this.droppedBytes > droppedBefore) this.retainedTruncated = true;
+    this.keptBytes = bytes(this.blocks) + bytes(this.errors);
+  }
+
+  private evictBlock(index: number): void { this.evictEntry("block", index); }
+
+  private boundBlock(index: number, limit: number): void { this.boundEntry("block", index, limit); }
+
+  private evictEntry(kind: "block" | "error", index: number): void {
+    const { texts, sources, markers, units } = this.store(kind);
+    const raw = texts.splice(index, 1)[0]!;
+    const own = markers.splice(index, 1)[0] ?? [];
+    const source = sources.splice(index, 1)[0] ?? kind === "block";
+    const stream = units.splice(index, 1)[0]!;
+    this.retainedTruncated = true;
+    if (source) this.droppedBytes += unitBytes(raw, stream) - own.reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), stream), 0);
+  }
+
+  /** Keep an entry's head and tail within `limit` bytes, never splitting an escape or a marker. */
+  private boundEntry(kind: "block" | "error", index: number, limit: number): void {
+    const { texts, sources, markers: allMarkers, units } = this.store(kind);
+    const raw = texts[index]!;
+    const total = Buffer.byteLength(raw);
+    if (total <= limit) return;
+    const markers = allMarkers[index] ?? [];
     const allowance = Math.max(0, limit - 80);
-    let head = Math.floor(allowance / 2);
-    let tail = raw.length - (allowance - head);
-    while (head > 0 && (raw[head]! & 0xc0) === 0x80) head--;
-    while (tail < raw.length && (raw[tail]! & 0xc0) === 0x80) tail++;
-    const dropped = tail - head;
-    this.droppedBytes += dropped;
-    return raw.subarray(0, head).toString() + this.truncationMarker(dropped) + raw.subarray(tail).toString();
+    const headBytes = Math.floor(allowance / 2);
+    let head = 0;
+    let tail = raw.length;
+    for (let i = 0, bytes = 0; i < raw.length;) {
+      const end = rawUnitEnd(raw, i);
+      bytes += rawUtf8(raw, i, end);
+      if (bytes <= headBytes) head = end;
+      if (total - bytes <= allowance - headBytes) { tail = end; break; }
+      i = end;
+    }
+    for (let widened = true; widened;) {
+      widened = false;
+      for (const marker of markers) {
+        const end = marker.at + marker.len;
+        if (marker.at < tail && end > head && (marker.at < head || end > tail)) {
+          head = Math.min(head, marker.at);
+          tail = Math.max(tail, end);
+          widened = true;
+        }
+      }
+    }
+    const covered = markers.filter(marker => marker.at >= head && marker.at + marker.len <= tail)
+      .reduce((sum, m) => sum + unitBytes(raw.slice(m.at, m.at + m.len), units[index]!), 0);
+    const dropped = unitBytes(raw.slice(head, tail), units[index]!) - covered;
+    if (kind === "block" || sources[index]) this.droppedBytes += dropped;
+    const marker = JSON.stringify(this.truncationMarker(dropped)).slice(1, -1);
+    texts[index] = raw.slice(0, head) + marker + raw.slice(tail);
+    allMarkers[index] = [
+      ...markers.filter(kept => kept.at + kept.len <= head),
+      { at: head, len: marker.length },
+      ...markers.filter(kept => kept.at >= tail).map(kept => ({ at: kept.at - tail + head + marker.length, len: kept.len })),
+    ];
+    this.retainedTruncated = true;
   }
 
   private boundRetained(): void {
     const budget = CODEX_WORKER_STDOUT_MAX_BYTES - 128;
     const bytes = (values: string[]) => values.reduce((sum, value) => sum + Buffer.byteLength(value), 0);
-    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.droppedBytes += Buffer.byteLength(this.errors.pop()!);
-    if (this.errors.length) this.errors[0] = this.boundText(this.errors[0]!, budget / 4);
-    const blockBudget = budget - bytes(this.errors);
-    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) {
-      this.droppedBytes += Buffer.byteLength(this.blocks.splice(1, 1)[0]!);
-      this.blockLoss.splice(1, 1);
-      this.blocksCut = true;
+    const droppedBefore = this.droppedBytes;
+    while (this.errors.length > 1 && bytes(this.errors) > budget / 4) this.evictEntry("error", this.errors.length - 1);
+    if (this.errors.length) this.boundEntry("error", 0, budget / 4);
+    const newest = this.blocks.length ? Buffer.byteLength(this.blocks.at(-1)!) : 0;
+    if (newest <= CODEX_WORKER_STDOUT_MAX_BYTES && newest + bytes(this.errors) > CODEX_WORKER_STDOUT_MAX_BYTES) {
+      this.yieldErrorsTo(CODEX_WORKER_STDOUT_MAX_BYTES - newest);
     }
-    const cutBlock = (index: number, limit: number) => {
-      const before = this.droppedBytes;
-      this.blocks[index] = this.boundText(this.blocks[index]!, limit);
-      if (this.droppedBytes > before) this.blockLoss[index] = true;
-    };
+    const blockBudget = (this.blocks.length === 1 ? CODEX_WORKER_STDOUT_MAX_BYTES : budget) - bytes(this.errors);
+    while (this.blocks.length > 2 && bytes(this.blocks) > blockBudget) this.evictBlock(1);
     if (bytes(this.blocks) > blockBudget) {
-      if (this.blocks.length === 1) cutBlock(0, blockBudget);
+      const last = this.blocks.at(-1);
+      if (this.blocks.length === 1) this.boundBlock(0, blockBudget);
       else {
-        const headBudget = Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
-        cutBlock(0, headBudget);
-        cutBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        const lastBytes = Buffer.byteLength(this.blocks[1]!);
+        if (lastBytes > blockBudget - 128 && lastBytes <= CODEX_WORKER_STDOUT_MAX_BYTES - bytes(this.errors)) {
+          this.evictBlock(0);
+        } else {
+          const headBudget = lastBytes <= blockBudget - 128 ? blockBudget - lastBytes
+            : Math.min(Buffer.byteLength(this.blocks[0]!), Math.floor(blockBudget / 2));
+          this.boundBlock(0, headBudget);
+          this.boundBlock(1, blockBudget - Buffer.byteLength(this.blocks[0]!));
+        }
       }
+      if (this.blocks.at(-1) !== last) this.lastBlockTruncated = true;
     }
+    if (this.droppedBytes > droppedBefore) this.retainedTruncated = true;
     this.keptBytes = bytes(this.blocks) + bytes(this.errors);
   }
 
-  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, spill?: "read" | "rebuilt"): void {
+  private consumeLine(line: string, sourceBytes = Buffer.byteLength(line, "utf8") + 1, cut?: { at: number; marker: string }): CodexEventByteKind | undefined {
     if (!line.trim()) return;
     let event: CodexJsonEvent;
     try {
@@ -2868,9 +3122,9 @@ class CodexJsonlAccumulator {
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
-      this.errors.push(`unparseable Codex event: ${line.slice(0, 160)}`);
+      this.pushError(`unparseable Codex event: ${line.slice(0, 160)}`);
       this.failed = true;
-      return;
+      return "malformed";
     }
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
@@ -2884,14 +3138,17 @@ class CodexJsonlAccumulator {
     if (event.type === "turn.started") {
       this.numTurns += 1;
       this.turnInProgress = true;
-      this.finalMessage = "none";
+      this.messageOpen = this.messageSealed = false;
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
-      this.blocks.push(event.item.text);
-      this.blockLoss.push(spill === "rebuilt");
-      this.rebuiltSinceBlock = false;
-      if (!spill) this.finalMessage = "open";
-      this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
+      const { raw, marks } = rawPayload(line, ["item", "text"], event.item.text, cut);
+      this.blocks.push(raw);
+      this.blockMarkers.push(marks);
+      this.blockStreamUnit.push(marks.length > 0);
+      this.lastBlockTruncated = cut !== undefined;
+      if (cut !== undefined) this.retainedTruncated = true;
+      if (cut === undefined) [this.messageOpen, this.messageSealed] = [true, false];
+      this.keptBytes += Buffer.byteLength(raw);
       this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "item.completed") this.observeToolCalls(event.item);
@@ -2904,7 +3161,7 @@ class CodexJsonlAccumulator {
     const eventModel = cashResponseModel(event.model);
     if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
-      if (this.finalMessage === "open") this.finalMessage = "sealed";
+      if (this.messageOpen) [this.messageOpen, this.messageSealed] = [false, true];
       this.turnInProgress = false;
       this.completedTurns += 1;
       const input = event.usage?.input_tokens;
@@ -2926,14 +3183,18 @@ class CodexJsonlAccumulator {
       this.failed = true;
       this.turnInProgress = false;
       const message = event.error?.message ?? event.type;
-      this.errors.push(message);
-      this.keptBytes += Buffer.byteLength(message, "utf8");
+      if (typeof event.error?.message !== "string") this.pushError(message);
+      else {
+        const { raw, marks } = rawPayload(line, ["error", "message"], message, cut);
+        this.pushError(message, raw, marks);
+      }
       // Codex 0.152.0 preserves its structured UsageLimitExceeded classification inside app-server,
       // but `codex exec --json` intentionally projects only the terminal message. Normalize at this
       // adapter boundary while the text is known to be provider error evidence; never scan agent
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
+    return kind;
   }
 
   /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
@@ -6710,12 +6971,12 @@ async function spawnCodexWorkerInPrivateTemp(
     });
     const stderr = stderrRetainer.text();
     const stderrTruncation = stderrRetainer.truncation();
-    const droppedOutput = (parsed.outputTruncation?.droppedBytes ?? 0) > 0;
     const textBytes = Buffer.byteLength(parsed.text);
     const blockBytes = parsed.blocks.reduce((sum, block) => sum + Buffer.byteLength(block), 0);
+    // W1-T13951: judged by what lost bytes, not by any drop.
     const outputRetention: NonNullable<CodexWorkerResult["outputRetention"]> = {
-      text: { state: droppedOutput ? "truncated" : "complete", bytesRead: textBytes },
-      blocks: { state: droppedOutput ? "truncated" : "complete", bytesRead: blockBytes },
+      text: { state: parsed.retention.textTruncated ? "truncated" : "complete", bytesRead: textBytes },
+      blocks: { state: parsed.retention.blocksTruncated ? "truncated" : "complete", bytesRead: blockBytes },
       stdout: stdoutFailure ?? stdout.stdoutEvidence() ?? { state: "complete", bytesRead: stdoutBytes, fileBytes: stdoutBytes },
       stderr: { ...stderrRetainer.evidence(), ...stderrFailure },
       completion: parsed.completion,
@@ -6725,11 +6986,6 @@ async function spawnCodexWorkerInPrivateTemp(
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;
-    const subtype = parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
-      : incomplete ? "error_incomplete_output" : "success";
-    // W1-T13960: main's labels decide subtype; text and blocks read only their own lines' loss.
-    outputRetention.text = { state: parsed.retentionLoss.text ? "truncated" : "complete", bytesRead: textBytes };
-    outputRetention.blocks = { state: parsed.retentionLoss.blocks ? "truncated" : "complete", bytesRead: blockBytes };
     lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
@@ -6756,7 +7012,8 @@ async function spawnCodexWorkerInPrivateTemp(
       ...(stderrTruncation ? { stderrTruncation } : {}),
       stderr,
       outputRetention,
-      subtype,
+      subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
+        : incomplete ? "error_incomplete_output" : "success",
       isError,
       exit,
       apiError: parsed.errors.some((error) => /rate limit|server|network/i.test(error)),
