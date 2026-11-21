@@ -20,6 +20,7 @@
     - test/a-proposal-with-a-clean-draft-at-its-input-is-not-redrafted.test.ts
     - "src/lib/ledger.ts"
     - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
+    - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -65,6 +66,7 @@
     Drop the cleanDraftInputKeys filter: criterion 2's fixture, with an empty cache and a clean ledger row, drafts
     the proposal again and the test fails.
   note: |
+    AMENDED 2026-11-21 (operator session, #19786): files gain test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts. Design item 3 clears a clean completion's lane-bearing attempt key, and W1-T13863 criterion 4 in that suite asserted Object.keys(attempts) == [fitting.id]; the PR asserts attempts == {} and that the fitting proposal has a lint-clean inbox.drafted row, and keeps the oversized proposals asserted keyless, so W1-T13863's claim stands. This is the blocker of the fleet's last four rounds (two NEEDS_DESIGN, two NEEDS_SCOPE).
     files: amendment 2026-11-20 (operator, approving the recommendation on the #19786 clarification): acceptance-author-gate refused #19786 as canonical-task-scope-exceeded for test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts; each is a change the build needs.
     Id reserved for run-unfiled-1795113525000 with ~/rmd-work/bin/reserve-id.sh.
     AMENDED (2026-11-19): cleanDraftInputKeys needs the daemon's ledger rows, and only the daemon draft hook,
