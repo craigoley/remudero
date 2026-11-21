@@ -116,13 +116,32 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
   };
 }
 
+/** The run-id shape of a reviewer's own claim (`rmd review`'s `review-PR<n>-<ms>`, and the dependency reviewer's). */
+const REVIEWER_RUN_ID = /^(?:dep-)?review-PR\d+-/;
+
+/** W1-T14177 (INVARIANT one-live-review-owner) — postReviewPending's refusal because ANOTHER live REVIEWER holds this
+ *  head's claim. These are not this refusal:
+ *  - this run's own idempotent no-op;
+ *  - a closed lifecycle;
+ *  - a drained outbox;
+ *  - a claim a dispatching lane posted for the review it hands off (the sweep's reviewer-code advance posts under its
+ *    own SWEEP-* run, then admits this review).
+ *  Returns the refusal's reason, which the caller returns instead of reviewing or posting. */
+export function pendingClaimHeldByAnotherRun(
+  result: { posted: boolean; reason?: string; lifecycle?: unknown; outbox?: unknown }, runId: string,
+): string | undefined {
+  if (result.posted || result.lifecycle !== undefined || result.outbox !== undefined) return undefined;
+  const holder = /\(owned by run ([^)\s]+)\)/.exec(result.reason ?? "")?.[1];
+  return holder !== undefined && holder !== runId && REVIEWER_RUN_ID.test(holder) ? result.reason : undefined;
+}
+
 export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
 const REVIEW_EXIT_STEPS = ["view", "setup", "materialize", "review", "publish"] as const;
 export const REVIEW_EXIT_CAUSES = [
   "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
   "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
   "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
-  "verdict-failure", "verdict-pending", "verdict-not-success",
+  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held",
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
@@ -2611,8 +2630,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     });
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
+  let claimHeld: string | undefined;
   if (!shadow) try {
-    await postReviewPendingDep({
+    claimHeld = pendingClaimHeldByAnotherRun(await postReviewPendingDep({
       owner,
       repo,
       sha: view.headRefOid,
@@ -2623,9 +2643,16 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reviewInputDigest: inputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
-    });
+    }), runId);
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
+  // W1-T14177: a claim refusal is returned, never discarded — another run's live claim holds this head.
+  if (claimHeld !== undefined) {
+    log("review.stood_down", { pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest, reason: claimHeld });
+    console.log(`rmd review: PR #${view.number} not reviewed — ${claimHeld}`);
+    exit.as("review-claim-held");
+    return 2;
   }
 
   // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.

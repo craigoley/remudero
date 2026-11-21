@@ -6932,9 +6932,11 @@ export function deadOwnerProofSuperseded(
   const live = new Map<string, boolean>();
   for (const line of lines) {
     const run = typeof line.run_id === "string" ? line.run_id : undefined;
-    if (run === undefined || run === pr.reviewPendingOwnerRunId) continue;
     const claim = line.step === "review.pending_posted" && line.head_sha === pr.headSha &&
       (line.pr_url !== undefined ? line.pr_url === pr.prUrl : line.task_id === pr.taskId);
+    // A takeover retires the run it names: only the newest unsettled link of a takeover chain can hold the head.
+    if (claim && typeof line.took_over_run_id === "string" && live.has(line.took_over_run_id)) live.set(line.took_over_run_id, false);
+    if (run === undefined || run === pr.reviewPendingOwnerRunId) continue;
     const at = Date.parse(typeof line.ts === "string" ? line.ts : "");
     if (claim && (pr.reviewPendingOwnerRunId !== undefined || !(Number.isFinite(at) && Number.isFinite(since) && at <= since))) {
       live.set(run, true);
