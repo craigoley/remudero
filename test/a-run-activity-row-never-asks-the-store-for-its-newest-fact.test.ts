@@ -126,6 +126,21 @@ test("W1-T13905 criterion 1: after the cold load, ingesting run activity asks th
   assert.ok(standIns(board).includes(`DAEMON|DAEMON-1@${at(T0 + 2_000_000)}`), "the run activity still stands in");
 });
 
+test("W1-T13905 criterion 1: an older byTaskSteps index keeps tied activity when the first task_id is boolean", (t) => {
+  const duplicate = JSON.stringify(fact(T0, "W1-T1", "target")).replace('"task_id":', '"task_id":false,"task_id":');
+  const w = world(t, [duplicate, fact(T0, "W1-T1", "ordinary")]);
+  const board = w.caughtUp(w.board());
+  const earlier = board.index(board.rows());
+  assert.ok(earlier.byStep.get(FACT)?.some((row) => row.run_id === "target" && row.task_id === "W1-T1"),
+    "the duplicate-key fact is within the older index's sequence bound");
+  assert.deepEqual(standIns(board), [], "cold ingest uses the parsed fact keys and suppresses both ties");
+
+  w.append([fact(T0, "W1-T1", "target")]);
+  w.caughtUp(board);
+  assert.deepEqual(indexedActivity(earlier), ["target"], "the older lookup excludes the boolean key and the later fact");
+  assert.deepEqual(indexedActivity(board.index(board.rows())), [], "the later text-key fact suppresses its tied activity");
+});
+
 test("W1-T13905 criterion 1: warm activity ingest sees an uncached fact deletion below the tail", (t) => {
   const uncachedMs = T0 + 2_000;
   const uncached = { ts: at(uncachedMs), step: "panel.test", task_id: "W1-T1", run_id: "target", host: "h1" };
@@ -327,7 +342,7 @@ test("W1-T13905 criterion 3: grouped recovery uses the final task and run keys i
   assert.equal(counted.count.grouped, 1);
   assert.deepEqual(standIns(w.caughtUp(w.board())), []);
   assert.deepEqual(standIns(board), []);
-  assert.deepEqual(indexedActivity(board.index(board.rows())), [], "the sequence-bound query uses the same keys");
+  assert.deepEqual(indexedActivity(board.index(board.rows())), ["target"], "the sequence-bound lookup preserves its first task_id check");
 });
 
 test("W1-T13905 criterion 3: removing a cached task-only fact restores an older stand-in", (t) => {

@@ -900,7 +900,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     planOnlyDigest: db.prepare(`SELECT count(*) AS n, sum(seq) AS s, sum(ts_ms % ${DIGEST_MOD}) AS t FROM fact
       WHERE step IN ('pr.opened', 'review.posted', ?) AND seq <= ?`),
     runNewestFact: db.prepare(`SELECT MAX(ts_ms) AS ms FROM fact WHERE task_id = ? AND run_id = ? AND seq <= ? AND step NOT IN (${unreadSql})
-      AND ${textIdentity}`),
+      AND json_type(body, '$.task_id') = 'text'`),
     newestFactByRun: db.prepare(`SELECT task_id, run_id, MAX(ts_ms) AS ms FROM fact WHERE task_id IS NOT NULL AND run_id IS NOT NULL
       AND seq <= ? AND step NOT IN (${unreadSql}) AND ${textIdentity}
       GROUP BY task_id, run_id`),
