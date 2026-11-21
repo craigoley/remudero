@@ -1014,7 +1014,11 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
  */
-export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
+export async function readLedgerUnionRawLinesAsync(
+  stateDir: string,
+  // An inclusive upper bound for archive selection. The caller still filters rows in overlapping sources.
+  opts: LedgerUnionRawReadOptions & { untilMs?: number } = {},
+): Promise<LedgerUnionRawRead> {
   const unread: string[] = [];
   const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs, (path) => {
     if (opts.refuseIncomplete) unread.push(path);
@@ -1035,6 +1039,15 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
 
   const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
     if (rotationBeforeWindow(entry, minimumTs)) return;
+    if (opts.untilMs !== undefined) {
+      // Cut times and row times can straddle each other. Use the validated manifest's row bounds.
+      const indexed = await readLedgerKeyManifest(stateDir, entry);
+      if (indexed.kind !== "unbuildable") {
+        const first = Date.parse(indexed.manifest.minTs ?? "");
+        const last = Date.parse(indexed.manifest.maxTs ?? "");
+        if (first <= last && (first > opts.untilMs || (minimumTs !== undefined && last < minimumTs))) return;
+      }
+    }
     let buf: Buffer;
     try {
       const raw = await nodeReadFile(entry.path);

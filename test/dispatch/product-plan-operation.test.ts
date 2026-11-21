@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import fsPromises, { watch } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
+import { readLedgerKeyManifest } from "#src/lib/ledger-key-manifest.js";
 import { createHash } from "node:crypto";
 import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
@@ -748,6 +749,70 @@ test("W1-T13875: a legacy refusal never takes rows from outside its hand-off win
   assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["refused", undefined]);
 });
 
+test("W1-T13875: a resume of a refused hand-off reads no ledger evidence from an archive proven newer than the refusal", async (t) => {
+  const f = fixture(t);
+  const { observation: { operationId } } = await ok(f.service().execute(actor, f.command()));
+  seedLegacyRefusal(f, operationId);
+  const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const dir = dirname(f.ledgerPath);
+  const ts = (offset: number) => new Date(at(offset)).toISOString();
+  const futureStamped = ts(REFUSED_OFFSET - 500);
+  const crossing = ts(REFUSED_OFFSET + 1_000);
+  const later = ts(REFUSED_OFFSET + 4_000);
+  writeLedger([], { dir, rotations: [
+    { at: futureStamped, rows: [{ ts: ts(REFUSED_OFFSET + 2_000), step: "daemon.heartbeat" }] },
+    { at: crossing, rows: [started!, planned!, { ...opened!, ts: REFUSED }] },
+    { at: later, gz: true, rows: [{ ...opened!, ts: ts(REFUSED_OFFSET + 2_000) }] },
+  ] });
+  const archive = (stamp: string, gzip = false) => join(dir, `ledger.${stamp.replace(/[:.]/g, "-")}.ndjson${gzip ? ".gz" : ""}`);
+  assert.equal((await readLedgerKeyManifest(dir, { path: archive(futureStamped), form: "plain" })).kind, "built");
+  assert.equal((await readLedgerKeyManifest(dir, { path: archive(crossing), form: "plain" })).kind, "built");
+  assert.equal((await readLedgerKeyManifest(dir, { path: archive(later, true), form: "gzip" })).kind, "built");
+  const openedArchives = join(f.root, "opened-archives");
+  preloadChildModule(t, f, `
+    import fs from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const opened = ${JSON.stringify(openedArchives)};
+    const track = (read) => (path, ...args) => {
+      if (${JSON.stringify([archive(later, true), archive(crossing), archive(futureStamped)])}.includes(path)) {
+        fs.appendFileSync(opened, path + "\\n");
+      }
+      return read(path, ...args);
+    };
+    fs.readFileSync = track(fs.readFileSync);
+    fs.createReadStream = track(fs.createReadStream);
+    fs.promises.readFile = track(fs.promises.readFile);
+    syncBuiltinESMExports();
+  `);
+  for (let resume = 0; resume < 2; resume++) {
+    const again = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+    assert.deepEqual([again.observation.state, again.observation.proposal], ["proposed", PR_URL]);
+  }
+  const paths = readFileSync(openedArchives, "utf8").trim().split("\n");
+  assert.deepEqual(paths, [archive(crossing)], "only the rotation with an in-window proposal was opened, once");
+});
+
+test("W1-T13875: a proposal's evidence is read once and kept for an exit with a missing gateway row", async (t) => {
+  const f = fixture(t);
+  const { observation: { operationId } } = await ok(f.service({ inFlight: () => true }).execute(actor, f.command()));
+  f.row(at(1_000), { task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_started", pid: 4242 });
+  // The gateway knows the child exited nonzero, but its exit-row append failed.
+  f.release("refused");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(JSON.parse(readFileSync(journalPath(f), "utf8")).operations[operationId].handoff?.outcome, "exited");
+  const incomplete = f.service({ gateway: false, readLedgerLines: async () => ({ ok: false, rawLines: [] }) });
+  assert.equal((await ok(incomplete.execute(actor, f.command()))).observation.state, "unknown", "the exit cannot settle an incomplete scan");
+  const resumed = await ok(f.service({ gateway: false, alive: false }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["refused", undefined]);
+
+  const evidence = reader(() => proposalLines(f, operationId));
+  for (let resume = 0; resume < 2; resume++) {
+    const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+    assert.deepEqual([again.observation.state, again.observation.proposal], ["refused", undefined]);
+  }
+  assert.equal(evidence.reads.length, 0, "the terminal exit was kept across restarts");
+});
+
 test("W1-T13875: a nonzero child exit preserves an opened proposal across resumes", { timeout: 20_000 }, async (t) => {
   const f = fixture(t);
   mkdirSync(join(f.root, "bin"));
@@ -1165,6 +1230,63 @@ test("W1-T13875: invariant:bounded-read releases the journal while a new evidenc
     unlinkStage.mock.restore();
     syncBuiltinESMExports();
     release.resolve();
+  }
+});
+
+test("W1-T13875: invariant:bounded-read releases the journal during a stalled evidence rename", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t);
+  const { observation: { operationId } } = await ok(f.service().execute(actor, f.command()));
+  const evidence = reader(() => proposalLines(f, operationId));
+  const ownerKey = createHash("sha256").update(actor).digest("hex");
+  const kept = join(f.journalDirectory, `${ownerKey}.evidence.json`);
+  const started = deferredSignal();
+  const release = deferredSignal();
+  const settled = deferredSignal();
+  const realRename = fsPromises.rename;
+  const realRenameSync = fs.renameSync;
+  const bound = 1_000;
+  let publishing = false;
+  const asyncRename = t.mock.method(fsPromises, "rename", async (...args: Parameters<typeof realRename>) => {
+    if (args[1] !== kept || publishing) return realRename(...args);
+    publishing = true;
+    started.resolve();
+    await release.promise;
+    try { await realRename(...args); } finally { settled.resolve(); }
+  });
+  const syncRename = t.mock.method(fs, "renameSync", (...args: Parameters<typeof realRenameSync>) => {
+    if (args[1] === kept) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, bound + 50);
+    realRenameSync(...args);
+  });
+  syncBuiltinESMExports();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let finished = false;
+    const resume = ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()))
+      .finally(() => { finished = true; });
+    await Promise.race([started.promise, resume.then(() => assert.fail("resume returned without handing off the evidence rename"))]);
+    t.mock.timers.tick(bound);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(finished, true, "the journal deadline fires while the publication is still stalled");
+    const { observation } = await resume;
+    assert.deepEqual([observation.state, observation.proposal], ["unknown", undefined]);
+    acquireInflightLock(join(f.journalDirectory, "locks"), ownerKey, { run_id: "while-evidence-rename-stalled" }).release();
+    t.mock.timers.reset();
+
+    const nextUrl = PR_URL.replace(/42$/, "43");
+    const next = reader(() => proposalLines(f, operationId).map((line) => line.replace(PR_URL, nextUrl)));
+    const restarted = () => f.service({ gateway: false, readLedgerLines: next.read }).execute(actor, f.command());
+    assert.equal((await ok(restarted())).observation.proposal, nextUrl);
+    release.resolve();
+    await settled.promise;
+    assert.equal((await ok(restarted())).observation.proposal, nextUrl, "the expired rename cannot overwrite the retry");
+    assert.equal(next.reads.length, 1);
+  } finally {
+    t.mock.timers.reset();
+    release.resolve();
+    if (publishing) await settled.promise;
+    asyncRename.mock.restore();
+    syncRename.mock.restore();
+    syncBuiltinESMExports();
   }
 });
 

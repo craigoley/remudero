@@ -4,7 +4,7 @@ import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { open, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -272,6 +272,7 @@ const keptSchema = z.object({
 }).strict();
 type Kept = z.infer<typeof keptSchema>;
 interface Paths { directory: string; state: string; kept: string; ownerKey: string }
+const evidenceStagePrefix = (paths: Paths) => `.${paths.ownerKey}.evidence.`;
 
 type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilMs?: number };
 const keepEvidenceLine = (taskId: string) => (line: string) =>
@@ -303,9 +304,8 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       continue;
     }
     const before = liveIdentity();
-    // A rotation is named after its snapshot, and its rows can be future-stamped. Apply a legacy refusal's upper
-    // bound to evidence rows in correlateLedger, scanning later sources that can still contain in-window rows.
-    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, untilMs: subject.untilMs,
+      refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
     if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
@@ -650,14 +650,18 @@ export class ProductPlanOperationService {
     });
     const pastDeadline = () => deadlineReached || performance.now() >= deadline;
     try {
-      const kept = await Promise.race([this.readKept(paths), expired]);
+      const kept = await Promise.race([this.readKept(paths, pastDeadline), expired]);
       if (kept === "expired" || pastDeadline()) return "expired";
       const known = kept?.evidence[record.operationId];
       if (known) return known;
       const seen = await this.ledger(record, expired, pastDeadline);
       if (pastDeadline()) return "expired";
       if (typeof seen === "string") return seen;
-      const { opened, exited, failed } = seen;
+      const { opened, failed } = seen;
+      // The gateway can save a nonzero exit even when its ledger append fails. The complete read still gets
+      // first claim on any proposal the child opened before exiting.
+      const durableExit = record.handoff?.outcome === "exited" && !this.inFlight(record.operationId);
+      const exited = seen.exited || (durableExit && this.options.ledgerPath !== undefined);
       const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
         : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
       if (final === undefined) return seen;
@@ -677,7 +681,17 @@ export class ProductPlanOperationService {
   }
 
   /** The kept final evidence, read without blocking serve's loop; undefined only when no file exists yet. */
-  private async readKept(paths: Paths): Promise<Kept | undefined> {
+  private async readKept(paths: Paths, pastDeadline: () => boolean): Promise<Kept | undefined | "expired"> {
+    const names = await readdir(paths.directory);
+    if (pastDeadline()) return "expired";
+    // With the owner lock held, cancel any prior publication still waiting to rename. Either its rename
+    // wins before the unlink, or the source disappears and it cannot replace anything this lookup saves.
+    const prefix = evidenceStagePrefix(paths);
+    await Promise.all(names.filter((name) => name.startsWith(prefix) && name.endsWith(".pending")).map(async (name) => {
+      try { await unlink(join(paths.directory, name)); }
+      catch (error) { if (!errno(error, "ENOENT")) throw error; }
+    }));
+    if (pastDeadline()) return "expired";
     let handle: Awaited<ReturnType<typeof open>>;
     try {
       handle = await open(paths.kept, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -709,14 +723,14 @@ export class ProductPlanOperationService {
     }
   }
 
-  /** Flush a private stage asynchronously, then publish it only while this attempt still owns the journal lock. */
+  /** Flush and publish a private stage asynchronously; a successor discards any stage still waiting to rename. */
   private async keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence,
     pastDeadline: () => boolean): Promise<LedgerEvidence | "expired"> {
     // Only operations the journal still holds, so the file stays within operations x one entry.
     const evidence = Object.fromEntries(Object.entries({ ...kept?.evidence, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
     const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence });
     if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
-    const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
+    const temporary = join(paths.directory, `${evidenceStagePrefix(paths)}${randomUUID()}.pending`);
     let staged = false;
     let renamed = false;
     try {
@@ -725,8 +739,7 @@ export class ProductPlanOperationService {
       try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
       finally { await handle.close(); }
       if (pastDeadline()) return "expired";
-      // Keep the deadline check and publish in one turn. A queued rename could overwrite a later attempt after timeout.
-      renameSync(temporary, paths.kept);
+      await rename(temporary, paths.kept);
       renamed = true;
       const directory = await open(paths.directory, constants.O_RDONLY);
       try { await directory.sync(); } finally { await directory.close(); }
