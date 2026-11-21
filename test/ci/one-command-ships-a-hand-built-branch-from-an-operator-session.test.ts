@@ -1161,11 +1161,9 @@ test("W1-T12169 criterion 5: a stop while a GitHub read waits for admission sett
   while (waits === 0) await delay(20);
   const state = join(f.root, "hand-ship");
   const id = readdirSync(state).find((name) => /^rmd-ship-/.test(name))!;
-  const requested = Date.now();
   assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
   const settled = await Promise.race([first, delay(3_000, "still waiting")]);
   assert.equal(settled, 1, "the run settles at the stop, not when the budget's reset passes");
-  assert.ok(Date.now() - requested < 3_000);
   assert.equal(waits, 1, "the stopped read never asks for admission again");
   assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
