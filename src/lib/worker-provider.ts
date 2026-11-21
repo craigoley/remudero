@@ -2315,14 +2315,20 @@ export interface ParsedCodexEvents {
 /** W1-T13960: where the dropped bytes fell. A spilled intermediate event (a command output) loses bytes that no
  *  retained block holds; the final text and the blocks read truncated only when their own lines lost bytes. */
 export interface CodexRetentionLoss {
-  /** The final text block came from a rebuilt line, or was itself cut to the retention budget. */
+  /** The final text block came from a rebuilt line, or was itself cut to the retention budget, or a rebuilt line
+   *  after it could have been a later agent message. */
   text: boolean;
-  /** A retained block came from a rebuilt line, or a block was cut or dropped to the retention budget. */
+  /** A retained block came from a rebuilt line, or a block was cut or dropped to the retention budget, or a rebuilt
+   *  line could have been an agent message. */
   blocks: boolean;
+  /** The final turn's last agent message arrived on an intact line, and no rebuilt line after it could have been
+   *  a later one. Without it the final message is missing or uncertain, and no spill certifies. */
+  finalMessageIntact: boolean;
   /** Spilled lines rebuilt from their bounded head and tail. */
   rebuiltLines: number;
-  /** Rebuilt lines that did not parse, or parsed to something other than a valid Codex event of their kind: a
-   *  partial line never certifies. */
+  /** Rebuilt lines that did not parse, parsed to something other than a valid Codex event of their kind, or could
+   *  have been an agent message (an event or item type this file does not read, or an agent_message token in its
+   *  bytes): a partial line never certifies. */
   rejectedRebuiltLines: number;
   /** The bytes dropped from rebuilt lines; every other drop (a block or an error cut to the budget) is not a spill. */
   rebuiltDroppedBytes: number;
@@ -2335,9 +2341,10 @@ export interface CodexRetentionLoss {
  *  is complete, as on origin/main. Otherwise it is complete only as a narrow upgrade, when every condition holds:
  *  the original subtype is success; the final turn's turn.completed and stderr read complete; stdout reads truncated
  *  by a spill; every spilled line was rebuilt into a valid event of its kind and its file held every byte written
- *  for it; every dropped byte fell in those rebuilt lines; and neither the final text nor any retained block came
- *  from a line that lost bytes (text and blocks read truncated on main whenever any byte dropped). Any condition
- *  failing, or one it cannot decide, leaves origin/main's result. A partial line never certifies. */
+ *  for it, and none could have been an agent message; every dropped byte fell in those rebuilt lines; the final
+ *  turn's last agent message arrived intact; and neither the final text nor any retained block came from a line
+ *  that lost bytes. Any condition failing, or one it cannot decide, leaves origin/main's result. A partial line
+ *  never certifies, and losing the final message never passes. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
@@ -2347,7 +2354,8 @@ export function codexResultRetentionComplete(
   const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
   if (retention.originalSubtype !== "success" || notComplete(rest) || stdout?.state !== "truncated") return false;
   const loss = parsed.retentionLoss;
-  return !loss.text && !loss.blocks && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0 && loss.unaccountedSpills === 0
+  return !loss.text && !loss.blocks && loss.finalMessageIntact
+    && loss.rebuiltLines > 0 && loss.rejectedRebuiltLines === 0 && loss.unaccountedSpills === 0
     && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
 }
 
@@ -2531,6 +2539,21 @@ function isCodexEventEnvelope(value: unknown): boolean {
     .every((field) => usage[field] === undefined || (typeof usage[field] === "number" && Number.isFinite(usage[field])));
 }
 
+/** W1-T13960: the event types, and the item types other than agent_message, that this file reads. */
+const CODEX_READ_EVENT_TYPES: ReadonlySet<string> = new Set(CODEX_EVENT_BYTE_KIND_KEYS.filter((key) => !key.includes(":") && key !== "malformed" && key !== "other"));
+const CODEX_ITEM_EVENT_TYPES: ReadonlySet<string> = new Set(["item.started", "item.updated", "item.completed"]);
+const CODEX_READ_NON_MESSAGE_ITEM_TYPES: ReadonlySet<string> = new Set(CODEX_EVENT_BYTE_KIND_KEYS
+  .flatMap((key) => key.startsWith("item.completed:") && key !== "item.completed:agent_message" ? [key.slice("item.completed:".length)] : []));
+
+/** W1-T13960: whether a rebuilt line could have been an agent message. A rebuild can join a type to a string's
+ *  tail (a head that ends inside the item type), so only a line whose event type and item type are ones this file
+ *  reads, not agent_message, and whose bytes hold no agent_message token is known not to be one. */
+function couldBeCodexAgentMessage(event: CodexJsonEvent, line: string): boolean {
+  if (/"agent_message"/.test(line) || typeof event.type !== "string") return true;
+  if (CODEX_ITEM_EVENT_TYPES.has(event.type)) return !CODEX_READ_NON_MESSAGE_ITEM_TYPES.has(event.item?.type ?? "");
+  return !CODEX_READ_EVENT_TYPES.has(event.type);
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 class CodexJsonlAccumulator {
   private sessionId = "";
@@ -2561,6 +2584,11 @@ class CodexJsonlAccumulator {
   private rejectedRebuiltLines = 0;
   private rebuiltDroppedBytes = 0;
   private unaccountedSpills = 0;
+  /** W1-T13960: a rebuilt line since the last retained block could have been an agent message. */
+  private messageUncertainSinceBlock = false;
+  private messageLikeRebuiltLines = 0;
+  /** W1-T13960: an agent message was retained since the last turn.started. */
+  private messageInFinalTurn = false;
   /** W1-T13960: the bytes written to the spill file for the line now spilling, so its read must account for each. */
   private spillLineBytes = 0;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
@@ -2663,8 +2691,9 @@ class CodexJsonlAccumulator {
     const text = this.blocks.at(-1) ?? "";
     // Read before the marker block below shifts the blocks off their loss entries.
     const retentionLoss: CodexRetentionLoss = {
-      text: this.blockLoss.at(-1) === true,
-      blocks: this.blocksCut || this.blockLoss.some(Boolean),
+      text: this.blockLoss.at(-1) === true || this.messageUncertainSinceBlock,
+      blocks: this.blocksCut || this.blockLoss.some(Boolean) || this.messageLikeRebuiltLines > 0,
+      finalMessageIntact: this.messageInFinalTurn && this.blockLoss.at(-1) === false && !this.messageUncertainSinceBlock,
       rebuiltLines: this.rebuiltLines,
       rejectedRebuiltLines: this.rejectedRebuiltLines,
       rebuiltDroppedBytes: this.rebuiltDroppedBytes,
@@ -2767,7 +2796,7 @@ class CodexJsonlAccumulator {
     try {
       event = JSON.parse(line) as CodexJsonEvent;
     } catch {
-      if (rebuilt) this.rejectedRebuiltLines += 1;
+      if (rebuilt) this.rejectRebuiltLine(true);
       this.observeToolLineage?.(null);
       this.eventBytes.malformed += sourceBytes;
       // Preserve malformed output in the returned error verdict instead of treating it as absence.
@@ -2775,7 +2804,10 @@ class CodexJsonlAccumulator {
       this.failed = true;
       return;
     }
-    if (rebuilt && !isCodexEventEnvelope(event)) this.rejectedRebuiltLines += 1;
+    if (rebuilt) {
+      const messageLike = couldBeCodexAgentMessage(event, line);
+      if (messageLike || !isCodexEventEnvelope(event)) this.rejectRebuiltLine(messageLike);
+    }
     this.observeToolLineage?.(event);
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
@@ -2788,10 +2820,13 @@ class CodexJsonlAccumulator {
     if (event.type === "turn.started") {
       this.numTurns += 1;
       this.turnInProgress = true;
+      this.messageInFinalTurn = false;
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       this.blocks.push(event.item.text);
       this.blockLoss.push(rebuilt);
+      this.messageUncertainSinceBlock = false;
+      this.messageInFinalTurn = true;
       this.keptBytes += Buffer.byteLength(event.item.text, "utf8");
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -2826,6 +2861,15 @@ class CodexJsonlAccumulator {
       // output, which may discuss usage limits as part of the task.
       this.usageRefusal ??= detectUsageLimitRefusal(message, this.nowMs);
     }
+  }
+
+  /** W1-T13960: a rebuilt line that never certifies its spill; one that could have been an agent message also leaves
+   *  the blocks, and the final text when no block follows it, reading truncated. */
+  private rejectRebuiltLine(messageLike: boolean): void {
+    this.rejectedRebuiltLines += 1;
+    if (!messageLike) return;
+    this.messageLikeRebuiltLines += 1;
+    this.messageUncertainSinceBlock = true;
   }
 
   /** W1-T10763: a completed command or file change is a tool call, named as a claude tool call is so its
@@ -6551,12 +6595,10 @@ async function spawnCodexWorkerInPrivateTemp(
     const isError = parsed.isError || exitCode !== 0 || incomplete;
     const subtype = parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
       : incomplete ? "error_incomplete_output" : "success";
-    // W1-T13960: the one upgrade over origin/main. A success with dropped bytes is a certified spill, whose
-    // predicate proved the final text's and the blocks' own lines lost nothing; every other result is main's.
-    if (subtype === "success" && droppedOutput) {
-      outputRetention.text = { state: "complete", bytesRead: textBytes };
-      outputRetention.blocks = { state: "complete", bytesRead: blockBytes };
-    }
+    // W1-T13960: the subtype is decided on origin/main's labels above. For every result, text and blocks then read
+    // truncated only from their own lines' loss (design step 2): a spilled command output leaves them complete.
+    outputRetention.text = { state: parsed.retentionLoss.text ? "truncated" : "complete", bytesRead: textBytes };
+    outputRetention.blocks = { state: parsed.retentionLoss.blocks ? "truncated" : "complete", bytesRead: blockBytes };
     lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
