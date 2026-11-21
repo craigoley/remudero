@@ -1286,7 +1286,7 @@ function queueModelJudgment(statePath: string, job: () => Promise<void>, log: Re
   const prior = modelJudgments.get(statePath) ?? Promise.resolve();
   // The judgment's own failure (a ledger append, a lookup) is ledgered, and when even that append fails it goes to
   // stderr; it never reaches the route already returned.
-  const run = prior.then(job).catch((error: unknown) => reportModelHealthFailure(error, log));
+  const run = prior.then(job).catch((error: unknown) => reportModelHealthFailure(error, log) /* records reviewer.model_divergence_failed through log, or stderr when log throws */);
   modelJudgments.set(statePath, run);
   void run.finally(() => { if (modelJudgments.get(statePath) === run) modelJudgments.delete(statePath); });
 }
