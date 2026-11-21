@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs, { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 // @ts-expect-error The census CLI module has no declarations.
@@ -11,6 +11,7 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { fixtureRetentionReason, retainFixture } from "#test/setup/retained-fixtures.js";
 
 const PREFIX = "rmd-census-capture-";
+const EVIDENCE = ["stdout", "stderr", "native.json"];
 const SUITE = "reader.test.mjs";
 const TIMEOUT = 10_000;
 
@@ -49,6 +50,7 @@ const fixturePriority = {
 const settings = (root: string) => ({ root, files: [SUITE], history: { mode: "shadow" }, priority: fixturePriority });
 const run = (root: string, now?: () => number) => runCensusSuitesViaChild({ ...settings(root), timeoutMs: TIMEOUT, now });
 const receipt = (dir: string) => JSON.parse(readFileSync(join(dir, "native.json"), "utf8"));
+const evidence = (dir: string) => EVIDENCE.map(name => readFileSync(join(dir, name)));
 
 test("W1-T13191 criterion 1: accepted census child removes its capture", (t) => {
   withCaptureRoot(t, (root, captures) => {
@@ -63,6 +65,7 @@ test("W1-T13191 criterion 1: accepted census child removes its capture", (t) => 
       return ticks;
     }), []);
     assert.deepEqual(captures(), []);
+    assert.deepEqual(readdirSync(join(root, "scratch")), []);
   });
 });
 
@@ -175,13 +178,15 @@ for (const change of ["replace stderr", "add an entry"] as const) {
     withCaptureRoot(t, (root, captures) => {
       const scratch = join(root, "scratch");
       let payload: string | undefined;
+      let original: Buffer[] | undefined;
       const inventory = t.mock.method(fs, "readdirSync", new Proxy(fs.readdirSync, {
         apply(readEntries, receiver, args) {
           const entries = Reflect.apply(readEntries, receiver, args);
           const dir: unknown = args[0];
           if (!payload && typeof dir === "string" && dir.startsWith(join(scratch, PREFIX))) {
+            original = evidence(dir);
             const nested = join(dir, change === "replace stderr" ? "stderr" : "foreign");
-            if (change === "replace stderr") unlinkSync(nested);
+            if (change === "replace stderr") fs.renameSync(nested, join(root, "original-stderr"));
             mkdirSync(nested);
             payload = join(nested, "payload");
             writeFileSync(payload, "independently owned");
@@ -207,6 +212,87 @@ for (const change of ["replace stderr", "add an entry"] as const) {
       const remaining = captures();
       assert.equal(remaining.length, 1);
       assert.equal(fixtureRetentionReason(remaining[0]), error.message);
+      assert.deepEqual(readdirSync(scratch), [basename(remaining[0])]);
+      if (change === "add an entry") {
+        assert.match(error.message, /ENOTEMPTY.*rmdir/);
+        assert.deepEqual(evidence(remaining[0]), original);
+      } else {
+        assert.deepEqual([
+          readFileSync(join(remaining[0], "stdout")),
+          readFileSync(join(root, "original-stderr")),
+          readFileSync(join(remaining[0], "native.json")),
+        ], original);
+      }
     });
   });
 }
+
+test("W1-T13191 criterion 3: cleanup binds evidence deletion to the owned capture directory", (t) => {
+  withCaptureRoot(t, (root, captures) => {
+    const foreign = join(root, "foreign-capture");
+    const moved = join(root, "moved-capture");
+    mkdirSync(foreign);
+    for (const name of EVIDENCE) writeFileSync(join(foreign, name), name);
+    const foreignEvidence = evidence(foreign);
+    let original: Buffer[] | undefined;
+    const unlink = t.mock.method(fs, "unlinkSync", new Proxy(unlinkSync, {
+      apply(remove, receiver, args) {
+        const path = String(args[0]);
+        if (!original && (path === "stdout" || path === join(captures()[0] ?? root, "stdout"))) {
+          const [capture] = captures();
+          original = evidence(capture);
+          fs.renameSync(capture, moved);
+          fs.symlinkSync(foreign, capture);
+        }
+        return Reflect.apply(remove, receiver, args);
+      },
+    }));
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => run(root), /capture custody UNKNOWN/);
+    } finally {
+      unlink.mock.restore();
+      syncBuiltinESMExports();
+    }
+    assert.ok(original, "the capture path was rebound immediately before unlink");
+    assert.deepEqual(evidence(foreign), foreignEvidence);
+    assert.deepEqual(evidence(moved), original);
+    assert.match(fixtureRetentionReason(fs.realpathSync(moved)) ?? "", /capture custody UNKNOWN/);
+    assert.equal(captures().length, 1);
+    assert.ok(fs.lstatSync(captures()[0]).isSymbolicLink());
+  });
+});
+
+test("W1-T13191 criterion 3: cleanup retains a full backup when an original name is occupied", (t) => {
+  withCaptureRoot(t, (root, captures) => {
+    const scratch = join(root, "scratch");
+    const remove = t.mock.method(fs, "rmdirSync", new Proxy(fs.rmdirSync, {
+      apply(rmdir, receiver, args) {
+        const path = String(args[0]);
+        if (path === captures()[0]) writeFileSync(join(path, "stdout"), "late evidence", { flag: "wx" });
+        return Reflect.apply(rmdir, receiver, args);
+      },
+    }));
+    syncBuiltinESMExports();
+    let original: Buffer[] | undefined;
+    let ticks = 0;
+    try {
+      assert.throws(() => run(root, () => {
+        if (++ticks === 2) original = evidence(captures()[0]);
+        return ticks;
+      }), /capture custody UNKNOWN.*original capture files retained at/);
+    } finally {
+      remove.mock.restore();
+      syncBuiltinESMExports();
+    }
+    const [capture] = captures();
+    assert.equal(captures().length, 1);
+    assert.equal(readFileSync(join(capture, "stdout"), "utf8"), "late evidence");
+    assert.deepEqual(evidence(capture).slice(1), original?.slice(1));
+    const backups = readdirSync(scratch).map(name => join(scratch, name)).filter(path => path !== capture);
+    assert.equal(backups.length, 1);
+    assert.match(fixtureRetentionReason(capture) ?? "", /capture custody UNKNOWN/);
+    assert.ok(fixtureRetentionReason(backups[0]));
+    assert.deepEqual(evidence(backups[0]), original);
+  });
+});

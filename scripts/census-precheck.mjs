@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -763,20 +763,110 @@ function suiteChildRecord(files, suiteHistory) {
 
 const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
 
+function assertCensusDirectory(path, owner) {
+  const current = lstatSync(path);
+  if (!current.isDirectory() || current.dev !== owner.dev || current.ino !== owner.ino ||
+      current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+}
+
+function inCensusDirectory(dir, owner, visit) {
+  const previous = process.cwd();
+  process.chdir(dir);
+  try {
+    // On both POSIX hosts, relative operations now use the verified directory even if its name is rebound.
+    assertCensusDirectory(".", owner);
+    visit();
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+function removeCompleteCensusCapture(dir, owner, names, pins) {
+  const backup = mkdtempSync(join(dirname(dir), "rmd-census-cleanup-"));
+  const backupOwner = lstatSync(backup);
+  const staged = [];
+  const removed = [];
+  let recovered = true;
+  const assertFile = (path, pin, beforeLink = false) => {
+    const current = lstatSync(path);
+    if (!current.isFile() || ["dev", "ino", "uid", "size", "mtimeMs"].some(key => current[key] !== pin[key]) ||
+        (beforeLink && current.ctimeMs !== pin.ctimeMs)) throw new Error(`capture ${path} was replaced or changed`);
+  };
+  try {
+    inCensusDirectory(dir, owner, () => {
+      try {
+        // Keep a link to every original file until rmdir commits the removal.
+        for (const [index, name] of names.entries()) {
+          assertFile(name, pins[index], true);
+          assertCensusDirectory(backup, backupOwner);
+          const saved = join(backup, name);
+          linkSync(name, saved);
+          staged.push(name);
+          assertFile(saved, pins[index]);
+        }
+        for (const [index, name] of names.entries()) {
+          assertCensusDirectory(dir, owner);
+          assertFile(name, pins[index]);
+          unlinkSync(name);
+          removed.push(name);
+        }
+        assertCensusDirectory(dir, owner);
+        rmdirSync(dir);
+      } catch (error) {
+        const failures = [];
+        for (const name of removed) {
+          try {
+            assertCensusDirectory(backup, backupOwner);
+            linkSync(join(backup, name), name);
+          } catch (restoreError) {
+            failures.push(`${name}: ${restoreError.message}`);
+          }
+        }
+        if (removed.length > 0) {
+          try {
+            const retainedPath = realpathSync.native(".");
+            assertCensusDirectory(retainedPath, owner);
+            if (retainedPath !== dir) retainFixture(retainedPath, `capture custody UNKNOWN (${error.message})`);
+          } catch (locationError) {
+            failures.push(`capture location: ${locationError.message}`);
+          }
+        }
+        if (failures.length === 0) throw error;
+        recovered = false;
+        const reason = `${error.message}; original capture files retained at ${backup} (${failures.join(", ")})`;
+        retainFixture(backup, reason);
+        throw new Error(reason, { cause: error });
+      }
+    });
+  } finally {
+    if (recovered) {
+      try {
+        inCensusDirectory(backup, backupOwner, () => {
+          for (const name of staged) {
+            assertFile(name, pins[names.indexOf(name)]);
+            unlinkSync(name);
+          }
+          assertCensusDirectory(backup, backupOwner);
+          rmdirSync(backup);
+        });
+      } catch (error) {
+        const reason = `census cleanup staging could not be removed: ${error.message}`;
+        retainFixture(backup, reason);
+        console.error(`census-precheck: ${reason}`);
+      }
+    }
+  }
+}
+
 function completeCensusCapture(dir, owner, result) {
   const names = ["stdout", "stderr", "native.json"];
-  const assertOwner = () => {
-    const current = lstatSync(dir);
-    if (!current.isDirectory() || current.dev !== owner.dev || current.ino !== owner.ino ||
-        current.uid !== owner.uid) throw new Error("capture directory ownership changed");
-  };
   let pins, pinError;
   try { pins = names.map((name) => lstatSync(join(dir, name))); }
   catch (error) { pinError = error; }
   return (accepted, reason) => {
     try {
       if (pinError) throw pinError;
-      assertOwner();
+      assertCensusDirectory(dir, owner);
       const bytes = names.map((name, index) => {
         const path = join(dir, name), pin = pins[index];
         const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -802,13 +892,7 @@ function completeCensusCapture(dir, owner, result) {
         return;
       }
       if (readdirSync(dir).length !== names.length) throw new Error("capture directory has unexpected entries");
-      // Unlink refuses a replacement directory, and rmdir refuses any entries that arrived after inventory.
-      for (const name of names) {
-        assertOwner();
-        unlinkSync(join(dir, name));
-      }
-      assertOwner();
-      rmdirSync(dir);
+      removeCompleteCensusCapture(dir, owner, names, pins);
     } catch (error) {
       const reason = `capture custody UNKNOWN (${error.message})`;
       retainFixture(dir, reason);

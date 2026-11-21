@@ -159,6 +159,7 @@ test("complete census custody failures remain unknown without admission changes"
     assert.equal(o.result, null);
     assert.match(o.error ?? "", /capture custody UNKNOWN/);
     if (mode.startsWith("fault-") && !["fault-cleanup", "fault-binding"].includes(mode)) assert.match(o.error ?? "", /inputs changed during qualification/);
+    if (mode === "fault-cleanup") retained(o.rows.at(-1)!);
     assert.ok(o.rows.at(-1)!.reason); run.done();
   }
 });
