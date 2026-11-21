@@ -6,14 +6,18 @@
  * every step src/ emits and every step src/ reads outside the step's writer file. A step with no such
  * reader is write-only; scripts/write-only-ledger-step-baseline.json records today's write-only set as
  * shrink-only debt beside a `recordOnly` map of step -> reason. Every fixture here is an in-memory
- * source tree or a throwaway git repository, never the live tree.
+ * source tree or a throwaway git repository; only the last two tests scan the live tree, as a
+ * positive control and as a self-check of the scanner against a crude reading of the raw source.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { gitOrThrow } from "#scripts/lib/git.mjs";
 // @ts-ignore the executable .mjs module has no declaration file.
 import * as ratchet from "#scripts/write-only-ledger-step-ratchet.mjs";
 
@@ -31,6 +35,7 @@ type Verdict = {
 const mod = ratchet as unknown as {
   GATE: string;
   BASELINE_PATH: string;
+  REGISTRY_FILES: ReadonlySet<string>;
   scanLedgerSteps: (sources: Array<{ path: string; text: string }>) => Scan;
   ratchetVerdict: (input: { writeOnly: string[]; baseline: Baseline; baseBaseline: Baseline | null }) => Verdict;
   parseBaseline: (text: string, label: string) => Baseline;
@@ -200,6 +205,211 @@ test("W1-T14149 criterion 5: a step emitted through a named constant is resolved
   assert.deepEqual([...result.emitted.keys()], steps);
   for (const step of steps) assert.deepEqual(result.emitted.get(step), ["src/lib/writer.ts"]);
   assert.deepEqual(result.writeOnly, steps, "a constant's own declaration is not a reader");
+});
+
+// ── production forms a fleet review found the scanner did not model (5fb4d4746) ──────────────
+
+/** src/run-task.ts's queueGovernorGateFor: an undotted step on a row handed to appendLedger. */
+const GOVERNOR_WRITER = [
+  "declare function appendLedger(path: string, line: object): void;",
+  "declare function appendLine(path: string, line: object): void;",
+  "export function queueGovernorGateFor(ledgerPath: string, runId: string, owned: number, result: { tier: string; deferred: boolean }): void {",
+  '  appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_wip_observed",',
+  "    observed_open_count: owned,",
+  "    ...reclaimLedgerFields(undefined),",
+  "    tier: result.tier, deferred: result.deferred });",
+  "}",
+  "export function spreadRow(ledgerPath: string, ids: object): void {",
+  '  appendLine(ledgerPath, { ...ids, step: "dispatch_spread_only" });',
+  "}",
+  "export function smoke(opts: { ledger?: (row: object) => void }, token: string): void {",
+  '  opts.ledger?.({ run_id: `worker-smoke-${token}`, task_id: "DEPLOY", step: "worker_smoke", ok: false });',
+  "}",
+  "declare function reclaimLedgerFields(r: unknown): object;",
+].join("\n");
+
+test("W1-T14149 criterion 1: an undotted step on a ledger row is emitted, so an unread one fails the check", () => {
+  const result = scan({
+    "src/run-task.ts": GOVERNOR_WRITER,
+    "src/lib/plan-task-move.ts": [
+      'export const planned = (id: string) => ({ step: "copy", id, repository: "ops" });',
+      'export const table = [{ step: "fix_rung", owner: { kind: "sweep", by: "runFixRung" } }];',
+    ].join("\n"),
+  });
+  const steps = ["dispatch_spread_only", "dispatch_wip_observed", "worker_smoke"];
+  assert.deepEqual([...result.emitted.keys()], steps, "a printed action and a phase table off any ledger row are not emits");
+  assert.deepEqual(result.emitted.get("dispatch_wip_observed"), ["src/run-task.ts"]);
+  assert.deepEqual(result.writeOnly, steps);
+  const verdict = mod.ratchetVerdict({ writeOnly: result.writeOnly, baseline: EMPTY, baseBaseline: EMPTY });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.unrecorded, steps, "no baseline entry and no record-only reason: refused");
+});
+
+/** src/lib/installation-budget-start.ts: the daemon startup writer of the boot budget row. */
+const BUDGET_WRITER = [
+  'const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";',
+  "export function startProcessInstallationBudget(opts: { role: string; log: (step: string, extra?: Record<string, unknown>) => void }): void {",
+  "  const { role, log } = opts;",
+  '  log(GITHUB_BUDGET_CONFIGURED_STEP, { role, outcome: "configured" });',
+  "}",
+].join("\n");
+
+/** src/lib/ledger.ts: the compactor keeps each boot's lifetime evidence through a nullish-coalesced set read. */
+const BUDGET_READER = [
+  'const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set(["daemon.memory", "daemon.memory_policy", "github.budget.configured"]);',
+  "export function keep(originalOrder: Array<{ step?: string; tsMs: number }>): Map<string, unknown> {",
+  "  const evidence = new Map<string, unknown>();",
+  "  for (const p of originalOrder) {",
+  '    for (const key of ["last", ...(BOOT_LIFETIME_EVIDENCE_STEPS.has(p.step ?? "") ? [p.step!] : [])]) evidence.set(key, p);',
+  "  }",
+  "  return evidence;",
+  "}",
+].join("\n");
+
+test("W1-T14149 criterion 2: a set read through a nullish fallback, as the ledger compactor reads github.budget.configured, passes", () => {
+  const result = scan({ "src/lib/installation-budget-start.ts": BUDGET_WRITER, "src/lib/ledger.ts": BUDGET_READER });
+  assert.deepEqual(result.emitted.get("github.budget.configured"), ["src/lib/installation-budget-start.ts"]);
+  assert.deepEqual(result.readers.get("github.budget.configured"), ["src/lib/ledger.ts"]);
+  assert.deepEqual(result.writeOnly, []);
+
+  const forms = scan({
+    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { for (const s of ["or.a", "cast.b", "paren.c", "chain.d", "unread.e"]) log(s); log("or.a"); log("cast.b"); log("paren.c"); log("chain.d"); log("unread.e"); };',
+    "src/lib/reader.ts": [
+      'const OR = new Set(["or.a"]);',
+      'const CAST = new Set(["cast.b"]);',
+      'const PAREN = new Set(["paren.c"]);',
+      'const CHAIN = new Set(["chain.d"]);',
+      "export const r = (p: { step?: string } | undefined) =>",
+      '  OR.has(p?.step || "") || CAST.has(p?.step as string) || PAREN.has((p?.step ?? "")) || CHAIN.has(p?.step!);',
+    ].join("\n"),
+  });
+  for (const step of ["or.a", "cast.b", "paren.c", "chain.d"]) assert.deepEqual(forms.readers.get(step), ["src/lib/reader.ts"], step);
+  assert.deepEqual(forms.writeOnly, ["unread.e"], "the control step nobody reads is still write-only");
+});
+
+test("W1-T14149 criterion 4: a retained github.budget.configured debt entry is stale once the compactor's set read is scanned", () => {
+  const { writeOnly } = scan({ "src/lib/installation-budget-start.ts": BUDGET_WRITER, "src/lib/ledger.ts": BUDGET_READER });
+  const retained = { writeOnly: ["github.budget.configured"], recordOnly: {} };
+  const verdict = mod.ratchetVerdict({ writeOnly, baseline: retained, baseBaseline: retained });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.stale, ["github.budget.configured"], "the entry that gained a reader must leave the baseline");
+  assert.equal(mod.ratchetVerdict({ writeOnly, baseline: EMPTY, baseBaseline: retained }).ok, true);
+});
+
+test("W1-T14149 criterion 5: a step constant destructured from a host resolves to its exported value, as worker.state does", () => {
+  const result = scan({
+    "src/run-task.ts": [
+      'export const WORKER_STATE_LEDGER_STEP = "worker.state";',
+      "export function lastState(ledgerLines: Array<{ step: string; state?: string }>): string | undefined {",
+      "  for (const line of ledgerLines) if (line.step === WORKER_STATE_LEDGER_STEP) return line.state;",
+      "  return undefined;",
+      "}",
+      "export const host = { WORKER_STATE_LEDGER_STEP };",
+    ].join("\n"),
+    "src/cli/commands/run-task-verb.ts": [
+      "declare function appendLedger(path: string, line: object): void;",
+      "interface RunTaskHelperHost { readonly WORKER_STATE_LEDGER_STEP: string; capWorkerTailLines: (l: string[]) => string[] }",
+      'function buildWorkerStateSensor(helperHost: Pick<RunTaskHelperHost, "WORKER_STATE_LEDGER_STEP" | "capWorkerTailLines">, args: {',
+      "  ledgerPath: string;",
+      "  runId: string;",
+      "  taskId: string;",
+      "}): (next: string) => void {",
+      "  const { WORKER_STATE_LEDGER_STEP, capWorkerTailLines } = helperHost;",
+      "  void capWorkerTailLines;",
+      "  const recordTransition = (next: string): void => {",
+      "    try {",
+      "      appendLedger(args.ledgerPath, {",
+      "        run_id: args.runId,",
+      "        task_id: args.taskId,",
+      "        step: WORKER_STATE_LEDGER_STEP,",
+      "        state: next,",
+      "      });",
+      "    } catch {",
+      "      // best-effort",
+      "    }",
+      "  };",
+      "  return recordTransition;",
+      "}",
+      "export { buildWorkerStateSensor };",
+    ].join("\n"),
+    "src/lib/steps.ts": 'export const PARAM_STEP = "param.destructured";\nexport const RENAMED_STEP = "renamed.destructured";',
+    "src/lib/params.ts": [
+      "export const p = ({ PARAM_STEP }: { PARAM_STEP: string }, log: (s: string) => void) => log(PARAM_STEP);",
+      "export function q(deps: { RENAMED_STEP: string }, log: (s: string) => void) { const { RENAMED_STEP: step = \"x\" } = deps; log(step); }",
+      "export function lower(deps: { stepName: string }, log: (s: string) => void) { const { stepName } = deps; log(stepName); }",
+    ].join("\n"),
+  });
+  assert.deepEqual(result.emitted.get("worker.state"), ["src/cli/commands/run-task-verb.ts"]);
+  assert.deepEqual(result.readers.get("worker.state"), ["src/run-task.ts"]);
+  assert.deepEqual(result.emitted.get("param.destructured"), ["src/lib/params.ts"]);
+  assert.deepEqual(result.emitted.get("renamed.destructured"), ["src/lib/params.ts"]);
+  assert.deepEqual([...result.emitted.keys()].sort(), ["param.destructured", "renamed.destructured", "worker.state"],
+    "a lower-case destructured name is not a step constant");
+});
+
+/** src/lib/panel-actions.ts: the panel's ledger helpers, which take the step as a parameter. */
+const PANEL_ACTIONS = [
+  "declare function appendLedger(path: string, line: object): void;",
+  "type Clock = { now: () => number };",
+  "declare const systemClock: Clock;",
+  "export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {},",
+  "  clock: Clock = systemClock): { step: string; run_id: string } {",
+  "  const ms = clock.now();",
+  "  const row = { step, ts: String(ms), run_id: `PANEL-${ms}` };",
+  "  appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });",
+  "  return row;",
+  "}",
+  "function ledgerPanelAction(deps: { ledgerPath: string }, step: string, taskId: string, origin: string, extra: Record<string, unknown>, clock?: Clock): void {",
+  "  appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra, clock);",
+  "}",
+  "export function markHandled(deps: { ledgerPath: string }, taskId: string, origin: string): void {",
+  '  ledgerPanelAction(deps, "panel.escalation_marked_handled", taskId, origin, { class: "x" });',
+  "}",
+  'export const decidedHere = (rows: Array<{ step: string }>) => rows.some((r) => r.step === "fleet_lane.decided");',
+].join("\n");
+
+test("W1-T14149 criterion 1: a step handed to a ledger helper is emitted at the call, so an unread one fails the check", () => {
+  const result = scan({
+    "src/lib/panel-actions.ts": PANEL_ACTIONS,
+    "src/lib/fleet-lane.ts": [
+      clause("import { appendPanelLedger }", "./panel-actions.js"),
+      'export const decide = (path: string) => appendPanelLedger(path, "fleet_lane.decided", "T", "operator");',
+    ].join("\n"),
+    "src/lib/lanes.ts": [
+      "declare function appendLedger(path: string, line: object): void;",
+      "export function summarize(log: (step: string, extra: object) => void, ledgerPath: string, runId: string): void {",
+      "  const report = (step: string, extra: object) => log(step, extra);",
+      '  report("lane.idle_summary", {});',
+      '  const step = "shorthand.row";',
+      '  appendLedger(ledgerPath, { run_id: runId, task_id: "LANE", step });',
+      "  const timed = (step: string, f: () => void): number => { const t0 = Date.now(); f(); return Date.now() - t0; };",
+      '  timed("child-hold", () => {});',
+      "}",
+    ].join("\n"),
+  });
+  const steps = ["fleet_lane.decided", "lane.idle_summary", "panel.escalation_marked_handled", "shorthand.row"];
+  assert.deepEqual([...result.emitted.keys()], steps, "a parameter that never reaches an emit is not a step helper");
+  assert.deepEqual(result.emitted.get("panel.escalation_marked_handled"), ["src/lib/panel-actions.ts"]);
+  assert.deepEqual(result.emitted.get("fleet_lane.decided"), ["src/lib/fleet-lane.ts", "src/lib/panel-actions.ts"],
+    "the caller and the helper's own file both write the row");
+  assert.deepEqual(result.readers.get("fleet_lane.decided"), [], "the helper's file reading its own row back is a self-read");
+  assert.deepEqual(result.writeOnly, steps);
+  assert.deepEqual(mod.ratchetVerdict({ writeOnly: result.writeOnly, baseline: EMPTY, baseBaseline: EMPTY }).unrecorded, steps);
+});
+
+test("W1-T14149: both branches of a conditional step, a fallback's default and a fallback callee are emitted", () => {
+  const result = scan({
+    "src/lib/writer.ts": [
+      "export function w(log: (s: string, f?: object) => void, append: (row: object) => void, route: { step?: string } | undefined, ok: boolean,",
+      "  deps: { log?: (s: string, f?: object) => void }): void {",
+      '  log(ok ? "branch.ok" : "branch.failed");',
+      '  append({ step: route?.step ?? "fallback.default" });',
+      '  (deps.log ?? (() => {}))("callee.fallback", { count: 1 });',
+      '  log(`message ${ok ? "y" : "ies"}`);',
+      "}",
+    ].join("\n"),
+  });
+  assert.deepEqual([...result.emitted.keys()].sort(), ["branch.failed", "branch.ok", "callee.fallback", "fallback.default"]);
 });
 
 // ── precision of the emit and read positions ───────────────────────────────────────────────────
@@ -462,4 +672,88 @@ test("W1-T14149: a baseline absent at the merge base is a first landing, with no
   const first = run(["--root", repo.dir, "--base", "main"]);
   assert.equal(first.code, 0, first.out);
   assert.match(first.out, /no baseline at the merge base/);
+});
+
+// ── the live tree: a positive control and a corpus self-check ──────────────────────────────────
+
+let liveTree: { sources: Array<{ path: string; text: string }>; scan: Scan; baseline: Baseline } | undefined;
+
+/** The live src/ corpus exactly as main() lists it, scanned once for the two tests below. */
+function live(): NonNullable<typeof liveTree> {
+  if (liveTree) return liveTree;
+  const listed = String(gitOrThrow(["ls-files", "-z", "--", "src"], { cwd: REPO_ROOT })).split("\0");
+  const sources = listed.filter((path) => /^src\/.+\.(?:ts|mts|mjs)$/.test(path))
+    .map((path) => ({ path, text: readFileSync(join(REPO_ROOT, path), "utf8") }));
+  const baseline = mod.parseBaseline(readFileSync(join(REPO_ROOT, mod.BASELINE_PATH), "utf8"), mod.BASELINE_PATH);
+  liveTree = { sources, scan: mod.scanLedgerSteps(sources), baseline };
+  return liveTree;
+}
+
+test("W1-T14149: the live tree's scan sees dispatch_wip_observed, worker.state and github.budget.configured's reader", () => {
+  const { scan: result, baseline } = live();
+  const debt = new Set([...baseline.writeOnly, ...Object.keys(baseline.recordOnly)]);
+  const cases: Array<[string, string, string[]]> = [
+    ["dispatch_wip_observed", "src/run-task.ts", []],
+    ["github.budget.configured", "src/lib/installation-budget-start.ts", ["src/lib/ledger.ts"]],
+    ["worker.state", "src/cli/commands/run-task-verb.ts",
+      ["src/lib/ledger-projector.ts", "src/lib/quiet-worker-watchdog.ts", "src/lib/status.ts", "src/lib/task-case-file.ts", "src/run-task.ts"]],
+  ];
+  for (const [step, writer, knownReaders] of cases) {
+    assert.ok(result.emitted.get(step)?.includes(writer), `${step} is emitted by ${writer}: ${JSON.stringify(result.emitted.get(step))}`);
+    const readers = result.readers.get(step) ?? [];
+    for (const reader of knownReaders) assert.ok(readers.includes(reader), `${step} is read by ${reader}: ${JSON.stringify(readers)}`);
+    assert.equal(debt.has(step), readers.length === 0, `${step} is in the baseline exactly when nothing reads it (${readers.length} reader(s))`);
+  }
+});
+
+const STEP_TEXT = "[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*";
+const QUOTE = "[\"'`]";
+/** `step: "a.b"`, `log("a.b"` and a conditional's two literal branches after either, read off the raw text. */
+const CRUDE_LITERAL_FORMS = [
+  new RegExp(`\\bstep\\s*:\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g"),
+  new RegExp(`(?<!console\\.)\\blog\\(\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g"),
+  new RegExp(`(?:\\bstep\\s*:|(?<!console\\.)\\blog\\()[^,;\`{}()]*?\\?\\s*${QUOTE}(${STEP_TEXT})${QUOTE}\\s*:\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g"),
+];
+/** `step: X_STEP` and `log(X_STEP` — not a member access, and not an `*_STEPS` collection a query passes. */
+const CRUDE_CONSTANT_FORMS = [/\bstep\s*:\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g, /(?<!console\.)\blog\(\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g];
+const CRUDE_DECLARATION = new RegExp(`\\bconst\\s+([A-Z][A-Z0-9_]*)\\s*(?::[^=\\n]+)?=\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g");
+/**
+ * The unexplained difference measured on 4c4187268 (this branch's merge base; the branch changes no
+ * emit in src/), 24 entries, none a ledger emit: run-task.ts's run phase table off any row (12,
+ * `{ step: "fix_rung", owner }`), plan-task-move.ts's printed actions (5, `copy` ... `unknown`),
+ * review.ts's `view` exit, two type annotations (`commitlint`, `outside`), a reader query for a step
+ * src/ never writes (`inbox.thread_replied`), a stderr object taken as a query by its `where` key
+ * (`typecheck.cold`), a doc comment's `x.y`, and one template-built constant (REDESIGN_SCORECARD_STEP).
+ * The scanner of 5fb4d4746, before it modelled ledger rows, destructured constants, conditionals
+ * and step helpers, left 76, dispatch_wip_observed and worker.state among them. A new entry is an
+ * emit form the scanner does not model: fix the scanner. Raise this only for a non-emit, listed here.
+ */
+const UNEXPLAINED_CEILING = 24;
+
+test("W1-T14149: every step a crude reading of the raw source emits is in the scan, but for a measured remainder", (t) => {
+  const { sources, scan: result } = live();
+  const corpus = sources.filter(({ path }) => !mod.REGISTRY_FILES.has(path));
+  const constants = new Map<string, string[]>();
+  for (const { text } of corpus) {
+    for (const [, name, value] of text.matchAll(CRUDE_DECLARATION)) constants.set(name, [...(constants.get(name) ?? []), value]);
+  }
+  const crude = new Map<string, string>();
+  const add = (step: string, where: string) => { if (!crude.has(step)) crude.set(step, where); };
+  for (const { path, text } of corpus) {
+    for (const form of CRUDE_LITERAL_FORMS) for (const [, ...steps] of text.matchAll(form)) for (const step of steps) add(step, path);
+    for (const form of CRUDE_CONSTANT_FORMS) {
+      for (const [, name] of text.matchAll(form)) {
+        if (name.endsWith("STEPS")) continue;
+        for (const step of constants.get(name) ?? [`${name}?`]) add(step, `${path} via ${name}`);
+      }
+    }
+  }
+  assert.ok(crude.size > 1500, `the crude reading saw its corpus: ${crude.size} step(s) in ${corpus.length} file(s)`);
+  for (const step of ["dispatch_wip_observed", "worker.state", "github.budget.configured"]) assert.ok(crude.has(step), `positive control: ${step}`);
+
+  const unexplained = [...crude].filter(([step]) => !result.emitted.has(step)).sort(([a], [b]) => a.localeCompare(b));
+  t.diagnostic(`crude ${crude.size}, scanned ${result.emitted.size}, unexplained ${unexplained.length} (ceiling ${UNEXPLAINED_CEILING}):`);
+  for (const [step, where] of unexplained) t.diagnostic(`  ${step}  ${where}`);
+  const listing = unexplained.map(([step, where]) => `${step} (${where})`).join(", ");
+  assert.ok(unexplained.length <= UNEXPLAINED_CEILING, `${unexplained.length} unexplained, over the ceiling ${UNEXPLAINED_CEILING}: ${listing}`);
 });
