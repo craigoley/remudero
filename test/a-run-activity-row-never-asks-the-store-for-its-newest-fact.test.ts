@@ -13,7 +13,7 @@ import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { changedActivityByTask } from "#src/lib/now-view.js";
 import type { Plan, Task } from "#src/lib/plan.js";
-import { acquireLease, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
+import { acquireLease, attachReadModel, type ReadModelDb, type ReadModelStatement } from "#src/lib/read-model-db.js";
 import { WORKER_ACTIVITY_STAND_IN_STEP, type GitHub } from "#src/lib/status.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
@@ -96,31 +96,58 @@ const seed = (): Row[] => [
 
 test("W1-T13905 criterion 1: after the cold load, ingesting run activity asks the store for no run's newest fact", (t) => {
   const w = world(t, seed());
-  const counted = counting(w.raw, { perRun: /SELECT MAX\(ts_ms\) AS ms FROM fact WHERE task_id = \? AND run_id = \?/ });
+  const counted = counting(w.raw, {
+    grouped: /GROUP BY task_id, run_id/,
+    perRun: /SELECT MAX\(ts_ms\) AS ms FROM fact WHERE task_id = \? AND run_id = \?/,
+  });
   const board = w.caughtUp(w.board(counted.db));
   const earlier = board.index(board.rows());
   w.append([activity(T0 + 2_000_000, "DAEMON", "DAEMON-1"), activity(T0 + 2_000_500, "DAEMON", "DAEMON-9"),
     fact(T0 + 2_001_000, "W1-T1", "r3"), activity(T0 + 2_002_000, "W1-T1", "r3"), fact(T0 + 2_003_000, "W1-T1", "r1")]);
   w.caughtUp(board);
   assert.equal(counted.count.perRun, 0, "ingest runs no per-run MAX(ts_ms) read");
+  assert.equal(counted.count.grouped, 0, "append-only ingest extends the map without a grouped read");
   assert.ok(indexedActivity(earlier).includes("r1"), "the older index still compares activity against facts at its own sequence");
   assert.ok(counted.count.perRun! > 0, "the SQL counter sees the older fact lookup");
   assert.deepEqual(indexedActivity(board.index(board.rows())), ["r3"]);
   assert.ok(standIns(board).includes(`DAEMON|DAEMON-1@${at(T0 + 2_000_000)}`), "the run activity still stands in");
 });
 
-test("W1-T13905 criterion 1: the current activity index sees a deletion below the tail in an uncached step", (t) => {
-  const uncached = { ...fact(T0 + 2_000, "W1-T1", "target"), step: "panel.test" };
-  const w = world(t, [activity(T0 + 1_000, "W1-T1", "target"), uncached, fact(T0 + 3_000, "W1-T2", "tail")]);
-  const counted = counting(w.raw, { grouped: /GROUP BY task_id, run_id/ });
+test("W1-T13905 criterion 1: warm activity ingest sees an uncached fact deletion below the tail", (t) => {
+  const uncachedMs = T0 + 2_000;
+  const uncached = { ts: at(uncachedMs), step: "panel.test", task_id: "W1-T1", run_id: "target", host: "h1" };
+  const w = world(t, [fact(T0, "W1-T1", "target")]);
+  // A stray fact can be newer than the projector's run activity, and the consistency heal deletes it.
+  w.raw.prepare("INSERT INTO fact(ts, ts_ms, step, task_id, run_id, body) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(uncached.ts, uncachedMs, uncached.step, uncached.task_id, uncached.run_id, JSON.stringify(uncached));
+  w.append([fact(T0 + 3_000, "W1-T2", "tail")]);
+  const counted = counting(w.raw, {
+    grouped: /GROUP BY task_id, run_id/,
+    perRun: /SELECT MAX\(ts_ms\) AS ms FROM fact WHERE task_id = \? AND run_id = \?/,
+  });
   const board = w.caughtUp(w.board(counted.db));
-  assert.deepEqual(indexedActivity(board.index(board.rows())), [], "the fact initially suppresses the activity");
+  assert.deepEqual(standIns(board), [], "the surviving fact still ties the original activity");
+  assert.deepEqual(counted.count, { grouped: 0, perRun: 0 });
+  const activitySeq = w.raw.prepare("SELECT seq FROM run_activity WHERE task_id = 'W1-T1' AND run_id = 'target'");
+  const factSeq = w.raw.prepare("SELECT MAX(seq) AS seq FROM fact");
+  const before = Number(activitySeq.get()!.seq);
+  const tail = factSeq.get()!.seq;
 
-  assert.equal(w.raw.prepare("DELETE FROM fact WHERE step = ?").run(uncached.step).changes, 1);
+  const healer = attachReadModel(w.raw.path, w.raw.schemaVersion);
+  onReadModelClose(t, () => healer.close());
+  assert.equal(healer.prepare("DELETE FROM fact WHERE step = ?").run(uncached.step).changes, 1);
+  w.append([activity(T0 + 1_000, "W1-T1", "target")]);
+  assert.equal(factSeq.get()!.seq, tail, "the deletion left the fact tail in place");
+  assert.ok(Number(activitySeq.get()!.seq) > before, "the new activity advanced the cursor");
+  w.caughtUp(board);
+
   const fresh = w.caughtUp(w.board());
-  assert.deepEqual(indexedActivity(fresh.index(fresh.rows())), ["target"]);
+  assert.deepEqual(standIns(fresh), [`W1-T1|target@${at(T0 + 1_000)}`]);
+  assert.deepEqual(standIns(board), standIns(fresh), "warm activity ingest uses the surviving fact's time");
+  assert.deepEqual(counted.count, { grouped: 1, perRun: 0 }, "one rebuild serves the warm ingest");
+  w.caughtUp(board);
+  assert.deepEqual(counted.count, { grouped: 1, perRun: 0 }, "the same deletion is handled once");
   assert.deepEqual(indexedActivity(board.index(board.rows())), ["target"]);
-  assert.equal(counted.count.grouped, 0, "a deletion in this step did not reset the cache");
 });
 
 test("W1-T13905 criterion 2: invariant:same-stand-ins — an extended board holds the run activity stand-ins a fresh cold load holds", (t) => {

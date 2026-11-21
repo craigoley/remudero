@@ -28,7 +28,7 @@
  *
  * WHAT IT DOES NOT RE-READ (W1-T9604): the whole-ledger step buckets and plan-only sets an index answers. Each is read
  * in full once and then extended from the rows the ingest reads anyway, so a build reads no step body it read before.
- * A row of a cached step deleted under it (an index-only count) or a store behind it drops the cache, and the oracle
+ * A fact deletion or a store behind it drops the cache, and the oracle
  * audits it against a full read every pass; its `read_model.board_oracle` row carries what it read and reused.
  * W1-T9718: a pass audits one slice of {@link BOARD_ORACLE_SLICES} in turn ({@link boardOracleSliceOf}), every task healed
  * within {@link BOARD_ORACLE_RECURRENCE_MS}, and every non-plan projection; the rest are held. Both persist with the lease.
@@ -94,6 +94,7 @@ export const BOARD_ROW_UNREAD_FIELDS: ReadonlySet<string> = new Set([
   "review_input_digest", "proof_exec", "changed_paths", "evaluator_provenance", "reviewer_code_provenance",
 ]);
 const LATEST_TS_META = "board.latest_ts_ms";
+const FACT_DELETIONS_META = "board.fact_deletions";
 /** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
 export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
 export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(task_id TEXT PRIMARY KEY,
@@ -102,7 +103,11 @@ export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(
   healed INTEGER NOT NULL, issue_url TEXT);
   CREATE TABLE IF NOT EXISTS task_github_read(task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, keys TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS task_cross_read(task_id TEXT PRIMARY KEY, keys TEXT NOT NULL) WITHOUT ROWID;
-  CREATE TABLE IF NOT EXISTS board_oracle_heal(task_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL) WITHOUT ROWID;`;
+  CREATE TABLE IF NOT EXISTS board_oracle_heal(task_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL) WITHOUT ROWID;
+  CREATE TRIGGER IF NOT EXISTS board_fact_deleted AFTER DELETE ON fact BEGIN
+    INSERT INTO meta(k, v) VALUES('${FACT_DELETIONS_META}', '1')
+      ON CONFLICT(k) DO UPDATE SET v = CAST(v AS INTEGER) + 1;
+  END;`;
 
 /** W1-T9604: what the step cache read and reused since the last `read_model.board_oracle` row, which carries it. */
 export interface BoardStepReads {
@@ -118,7 +123,7 @@ export interface BoardStepReads {
   /** Rows an index was handed from the cache without a store read, and their body bytes. */
   reusedRows: number;
   reusedBytes: number;
-  /** Times the cache was dropped: a cached step's row deleted under it, a store behind it, the oracle's audit. */
+  /** Times the cache was dropped: a fact deletion or changed step digest, a store behind it, the oracle's audit. */
   resets: { deleted: number; behind: number; audit: number };
   /** What the cache holds: steps; bucket rows and body bytes plus plan-only set entries and their string lengths. */
   held: { steps: number; rows: number; bytes: number };
@@ -931,6 +936,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
    *  load and extended by the ingest, so a run activity row never asks the store (one DAEMON run's MAX(ts_ms) scanned its
    *  706,926 fact rows, 1.7 s). Rebuilt in one grouped read when the store is found to have dropped rows or gone behind. */
   let newestFactMs = new Map<string, number>();
+  let factDeletions: string | undefined;
   let crossCount = 0;
   let crossSeq = 0;
   /** W1-T9719: per cross-task step its rows' count and newest seq; the plan-only filings' likewise, and their PRs. */
@@ -1301,6 +1307,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   }
 
   function ingest(limit: number, deadline = Number.POSITIVE_INFINITY, replayThrough?: number): { fresh: number; caughtUp: boolean } {
+    if (replayThrough === undefined) checkStepCache(false);
     let fresh = 0;
     let cut = false;
     // The first load is sorted once; afterwards a live row a few ms early walks back a step or two.
@@ -1518,17 +1525,21 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     return { n: Number(r?.n ?? 0), s: Number(r?.s ?? 0), t: Number(r?.t ?? 0) };
   };
 
-  /** W1-T9604: drops the cache when an index-only digest says a cached step's row was deleted under it (the consistency
-   *  oracle's heal deletes corrupt or duplicate rows; facts otherwise only grow by seq), or the store reads behind it. */
-  function checkStepCache(): void {
-    if (stepCache.size === 0 && !planOnlyCache && taskCache.size === 0) return;
-    const moved = [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
-      || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
-    const maxSeq = Number(sql.maxSeq.get()?.seq ?? 0);
-    const reason = moved ? "deleted" : maxSeq < lastSeq ? "behind" : undefined;
-    if (!reason) return;
-    resetStepCache(Math.min(lastSeq, maxSeq));
-    stepReads.resets[reason]++;
+  /** The deletion counter covers uncached steps and changes on other connections. Only index reads check step digests. */
+  function checkStepCache(checkDigests = true): void {
+    const deletions = db.meta(FACT_DELETIONS_META);
+    const deleted = deletions !== factDeletions && lastSeq > 0;
+    if (deleted || (checkDigests && (stepCache.size > 0 || planOnlyCache || taskCache.size > 0))) {
+      const moved = deleted || [...stepCache].some(([step, bucket]) => !sameDigest(bucketDigest(bucket, stepPending.get(step)), storeDigest(step)))
+        || (planOnlyDigest !== undefined && !sameDigest(planOnlyDigest, storeDigest(undefined)));
+      const maxSeq = Number(sql.maxSeq.get()?.seq ?? 0);
+      const reason = maxSeq < lastSeq ? "behind" : moved ? "deleted" : undefined;
+      if (reason) {
+        resetStepCache(Math.min(lastSeq, maxSeq));
+        stepReads.resets[reason]++;
+      }
+    }
+    factDeletions = deletions;
   }
 
   /** `step`'s cached rows as of `upTo`: read in full at `lastSeq` on the first ask, so the ingest extends it from there. */
@@ -1814,7 +1825,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (wantedSteps.includes(BOARD_RUN_ACTIVITY_STEP) && runSql.activity) {
         for (const r of db.prepare("SELECT task_id, run_id, ts, ts_ms, seq FROM run_activity").iterate()) {
           const [taskId, runId] = [String(r.task_id), String(r.run_id)];
-          // A fact in an uncached step can disappear below upTo without resetting the ingest's map.
+          // This index's fact sequence can precede the ingest's current map.
           if (Number(r.ts_ms) > newestStoredFactMs(taskId, runId, upTo)) add(activityEntry(r, taskId));
         }
       }
