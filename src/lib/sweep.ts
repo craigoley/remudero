@@ -1711,7 +1711,7 @@ export interface BuildSweepEffectsDeps {
   planRepairGitImpl?: (
     file: string,
     args: readonly string[],
-    opts?: { encoding?: BufferEncoding },
+    opts?: { encoding?: BufferEncoding; input?: string },
   ) => string;
   /** Same coverage seam for the worktree this rung cuts — the real implementation lives in
    *  worker.ts (registered with the worktree-sites census); injectable here only so a test
@@ -1849,9 +1849,9 @@ function dirtyFleetRebaseGit(repoDir: string, worktreePath: string): DirtyFleetR
 function defaultPlanRepairGit(
   file: string,
   args: readonly string[],
-  opts: { encoding?: BufferEncoding } = {},
+  opts: { encoding?: BufferEncoding; input?: string } = {},
 ): string {
-  return execFileSync(file, [...args], { encoding: opts.encoding ?? "utf8", stdio: "pipe" }) as string;
+  return execFileSync(file, [...args], { encoding: opts.encoding ?? "utf8", input: opts.input, stdio: "pipe" }) as string;
 }
 
 export function rebaseDirtyFleetBranchViaGit(
@@ -5583,7 +5583,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         let main: HeldFollowUp[];
         try {
-          main = await readMainHeldFollowUps(target.checkoutDir);
+          main = await readMainHeldFollowUps(target.checkoutDir, deps.planRepairGitImpl);
         } catch (error) {
           log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
           throw new Error(`held follow-ups on origin/main could not be read: ${String(error)}`, { cause: error });
@@ -12232,8 +12232,9 @@ export async function reservePlanRepairTaskIdAsync(
  * W1-T13944: the held follow-ups current origin/main declares, each file parsed alone, so a file the plan loader
  * would refuse (a dependency in another catalog, a duplicate id) hides no held follow-up in another file.
  */
-async function readMainHeldFollowUps(checkoutDir: string): Promise<HeldFollowUp[]> {
-  const runGit = defaultGitRunnerAsync(checkoutDir);
+async function readMainHeldFollowUps(checkoutDir: string, git?: BuildSweepEffectsDeps["planRepairGitImpl"]): Promise<HeldFollowUp[]> {
+  const runGit = git === undefined ? defaultGitRunnerAsync(checkoutDir)
+    : async (args: string[], input?: string) => git("git", ["-C", checkoutDir, ...args], { input });
   const tracking = "refs/remotes/origin/main";
   await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
   const ref = (await runGit(["rev-parse", tracking])).trim();

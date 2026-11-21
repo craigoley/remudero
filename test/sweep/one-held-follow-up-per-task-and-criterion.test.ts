@@ -117,7 +117,7 @@ let minted = 0;
 async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { id: string; text: string }; refuseParentEdit?: boolean;
   listFails?: boolean; listFailsAt?: number; realReservation?: boolean; planDir?: string; trackingRefLags?: boolean;
   landingFetchFails?: () => boolean; heldPreflight?: () => PlanPrPreflightResult | undefined; reloadPlanExtra?: string;
-  reloadFails?: boolean; planMonolith?: string } = {}) {
+  reloadFails?: boolean; planMonolith?: string; defaultGit?: boolean } = {}) {
   const landingBranch = await taskFilesLandingBranchAsync({ owner: OWNER, repo: REPO });
   const root = tempRoot(t, "one-held-follow-up");
   const origin = gitRepo({ scope: t, bare: true, kind: "one-held-origin" });
@@ -171,9 +171,9 @@ async function world(t: TestContext, opts: { planExtra?: string; mainExtra?: { i
     ledgerPath: join(root, "state", "ledger.ndjson"), runId: "fixture-sweep", log: () => {},
     plan: planOf(opts.planExtra), reloadPlanForFixImpl: () => opts.reloadFails ? undefined : planOf(opts.reloadPlanExtra ?? opts.planExtra),
     readJsonImpl: async args => { throw new Error(`the remedy reads no API: ${args.join(" ")}`); },
-    planRepairGitImpl: (_file, args) => {
+    planRepairGitImpl: opts.defaultGit ? undefined : (_file, args, { input } = {}) => {
       if (args.slice(2).join(" ") === "fetch origin --quiet" && opts.landingFetchFails?.()) throw new Error("landing fetch timed out");
-      return execFileSync("git", [...args], { encoding: "utf8", stdio: "pipe", env });
+      return execFileSync("git", [...args], { encoding: "utf8", input, stdio: "pipe", env });
     },
     ghJsonImpl: args => {
       assert.equal(args[0], "pr", `the landing makes no other GitHub call: ${args.join(" ")}`);
@@ -268,7 +268,8 @@ test("W1-T13944 criterion 1: reuse a held follow-up from the configured extensio
 });
 
 test("W1-T13944 criterion 1: unreadable current main does not authorize a second reservation", async t => {
-  const w = await world(t, { mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) }, trackingRefLags: true });
+  const w = await world(t, { mainExtra: { id: "W1-T13919", text: heldText("W1-T13919", TASK, [CLAIMS[1]!]) },
+    trackingRefLags: true, defaultGit: true });
   const url = w.checkout.git("remote", "get-url", "origin").trim();
   w.checkout.git("remote", "set-url", "origin", join(w.root, "origin-offline"));
   const refused = await w.act([]);
