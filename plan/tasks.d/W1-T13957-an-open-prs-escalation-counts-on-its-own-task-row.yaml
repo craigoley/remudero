@@ -15,7 +15,7 @@
     - src/lib/inbox-board-referents.ts
     - test/inbox/an-open-prs-escalation-counts-on-its-own-task-row.test.ts
     - src/lib/status.ts # amended 2026-11-20 for PR 19888: ghGateway.listOpenHeadBranches carries the PR body
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Live 2026-11-20 (status.json 12:07:39Z): W1-T13785 (#19691 OPEN) and W1-T13855 (#19728 OPEN) are blocked
