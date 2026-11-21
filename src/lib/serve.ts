@@ -3730,6 +3730,40 @@ export function startIncidentInvariantsMonitor(
     }
   };
 
+  // W1-T13203: the service logger appends to the same ledger whose append just failed, so it can fail the same way
+  // (EIO). A report from the minute tick must never throw into its timer: stderr is the fallback.
+  const reportError = (step: string, error: unknown): void => {
+    const reason = String((error as Error)?.message ?? error);
+    try {
+      deps.log?.(step, { reason });
+    } catch (logError) {
+      try {
+        console.error(`serve: ${step}`, reason, String((logError as Error)?.message ?? logError));
+      } catch (stderrError) {
+        // Reason: ledger and stderr both refused; nothing is left to record it, and the tick must still finish.
+        void stderrError;
+      }
+    }
+  };
+
+  // W1-T10074's guarantee, kept for the deferred write: a profile row that cannot be written ends profiling for the
+  // boot and says why, and never interrupts the tick, as the watchdog callback's disable() did before.
+  const flushOrDisable = (settled: StallSample | undefined, nowMs: number): void => {
+    try {
+      flushProfiles(settled, nowMs);
+    } catch (error) {
+      stallProfiler.stop();
+      pending.length = 0;
+      const reason = `profile row: ${String((error as Error)?.message ?? error)}`.slice(0, 200);
+      try {
+        writeLedger(ledgerPath, loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.failed, { reason }, nowMs));
+      } catch (failedRowError) {
+        const failedRowReason = String((failedRowError as Error)?.message ?? failedRowError);
+        reportError("serve.incident_invariants.loop_stall_profile_failed", `${reason}; ${failedRowReason}`);
+      }
+    }
+  };
+
   const tick = (): void => {
     const nowMs = clock.now();
     try {
@@ -3743,9 +3777,9 @@ export function startIncidentInvariantsMonitor(
         stallProfiler.observe({ lagMs: lag.p99Ms, intervalMs: SERVE_LOOP_LAG_RESOLUTION_MS }, stallLog);
       }
       collecting = stalled ? { atMs: nowMs, lag } : undefined;
-      flushProfiles(settled, nowMs);
+      flushOrDisable(settled, nowMs);
     } catch (e) {
-      deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
+      reportError("serve.incident_invariants.loop_lag_failed", e);
     }
     try {
       const rows = liveRows(nowMs);
@@ -3753,7 +3787,7 @@ export function startIncidentInvariantsMonitor(
         writeLedger(ledgerPath, invariantFindingLedgerLine(finding, nowMs));
       }
     } catch (e) {
-      deps.log?.("serve.incident_invariants.evaluate_failed", { reason: String((e as Error)?.message ?? e) });
+      reportError("serve.incident_invariants.evaluate_failed", e);
     }
   };
 

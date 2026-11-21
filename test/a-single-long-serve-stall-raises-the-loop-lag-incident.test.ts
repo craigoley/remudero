@@ -278,3 +278,118 @@ for (const stderrFails of [false, true]) {
     });
   });
 }
+
+// W1-T10074 guaranteed that a profile row the ledger refuses cannot interrupt serve: the watchdog callback disabled
+// profiling and recorded why. The row is now written from the minute tick, so the tick must hold the same guarantee,
+// including when the logger that reports the failure appends to the same refusing ledger.
+const eio = () => Object.assign(new Error("EIO: i/o error, write"), { code: "EIO" });
+const refusals = [
+  { refused: ["profile"], logger: false, stderr: false },
+  { refused: ["profile", "failed", "log"], logger: true, stderr: false },
+  { refused: ["profile", "failed", "log"], logger: true, stderr: true },
+] as const;
+for (const { refused, logger, stderr: stderrFails } of refusals) {
+  test(`W1-T13203: EIO on the deferred profile row cannot escape the minute tick (refused: ${refused.join(", ")}; stderr fails: ${stderrFails})`, async (t) => {
+    await withTempDir("serve-long-stall-eio", (dir) => {
+      const path = join(dir, "ledger.ndjson");
+      const watchdog = Object.assign(new EventEmitter(), { unref() {}, async terminate() { return 0; } });
+      const silentMs = 35_000;
+      const fold: StallFold = {
+        chunks: 1, profiledUs: 34_000_000,
+        inclusive: new Map([["classifyAllProposals", { frame: { function: "classifyAllProposals", url: "file:///src/panel-graph.ts", line: 1 }, us: 34_000_000 }]]),
+        self: new Map(), callers: new Map(), syncSpawn: new Map(), syncSpawnUs: 0,
+      };
+      const intervalMs = INCIDENT_INVARIANTS_INTERVAL_MS;
+      let nowMs = NOW - intervalMs;
+      let tick: (() => void) | undefined;
+      const attempts: string[] = [];
+      let logCalls = 0;
+      const stderr = t.mock.method(console, "error", () => {
+        if (stderrFails) throw new Error("stderr unavailable");
+      });
+      const kindOf = (step: string) => step === RUNTIME_LOOP_STALL_PROFILE_STEP ? "profile"
+        : step === "runtime.loop_stall_profile_failed" ? "failed" : step.startsWith("serve.") ? "log" : "other";
+      const writeLedger = (ledger: string, line: Parameters<typeof appendLedger>[1], options?: Parameters<typeof appendLedger>[2]) => {
+        const step = String(line.step);
+        attempts.push(step);
+        if ((refused as readonly string[]).includes(kindOf(step))) throw eio();
+        return appendLedger(ledger, line, { ...options, clock: options?.clock ?? fixedClock(nowMs) });
+      };
+      const stop = startIncidentInvariantsMonitor(path, {
+        clock: { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() },
+        eventLoopLag: () => ({ p50Ms: 20, p99Ms: 108.6, maxMs: nowMs === NOW ? silentMs : 200, windowMs: intervalMs }),
+        setInterval: ((cb: () => void) => { tick = cb; return { unref() {} }; }) as unknown as typeof setInterval,
+        clearInterval: () => {},
+        writeLedger,
+        stallProfiler: { spawn: () => watchdog as unknown as Worker },
+        // The service logger appends to the same ledger, so it meets the same EIO.
+        log: (step, extra) => {
+          logCalls++;
+          writeLedger(path, { run_id: "SERVE-test", task_id: "SERVE", step, lane: "serve", ...extra });
+        },
+      });
+      try {
+        assert.ok(tick);
+        tick();
+        nowMs = NOW - 5;
+        watchdog.emit("message", { kind: "profile", beat: 1, recoveredAtMs: NOW - 10, silent_ms: silentMs, unprofiled_ms: 1_000, fold });
+        nowMs = NOW;
+        assert.doesNotThrow(tick);
+        nowMs = NOW + intervalMs;
+        assert.doesNotThrow(tick, "the tick that flushes the refused profile row completes");
+        assert.ok(attempts.includes(RUNTIME_LOOP_STALL_PROFILE_STEP), "positive control: the profile row was attempted");
+        const rows = readLedgerLines(path);
+        const failed = rows.filter((row) => row.step === "runtime.loop_stall_profile_failed");
+        if (logger) {
+          assert.deepEqual(failed, []);
+          assert.equal(logCalls, 1, "the failure is reported through the service logger");
+          assert.equal(stderr.mock.callCount(), 1, "the refused logger falls back to stderr");
+          assert.match(stderr.mock.calls[0]!.arguments.map(String).join(" "), /profile row: EIO.*EIO/);
+        } else {
+          assert.equal(failed.length, 1, "profiling ends for the boot and says why, as the watchdog callback did");
+          assert.match(String(failed[0]!.reason), /^profile row: EIO/);
+          assert.equal(logCalls, 0);
+          assert.equal(stderr.mock.callCount(), 0);
+        }
+        // Serve keeps running: the next minute still ledgers its lag and evaluates its invariants.
+        const lagRowsBefore = rows.filter((row) => row.step === RUNTIME_LOOP_LAG_STEP).length;
+        nowMs = NOW + 2 * intervalMs;
+        assert.doesNotThrow(tick);
+        const after = readLedgerLines(path);
+        assert.equal(after.filter((row) => row.step === RUNTIME_LOOP_LAG_STEP).length, lagRowsBefore + 1);
+        assert.equal(attempts.filter((step) => step === RUNTIME_LOOP_STALL_PROFILE_STEP).length, 1,
+          "the refused profile is not retried every minute");
+      } finally {
+        stop();
+      }
+    });
+  });
+}
+
+test("W1-T13203: a refusing logger cannot turn the tick's own failure report into an escape", async (t) => {
+  const stderr = t.mock.method(console, "error", () => {});
+  let tick: (() => void) | undefined;
+  let lagCalls = 0;
+  const stop = startIncidentInvariantsMonitor("/tmp/does-not-matter/ledger.ndjson", {
+    writeLedger: () => {},
+    readLedger: () => { throw eio(); },
+    eventLoopLag: () => { lagCalls++; throw eio(); },
+    clock: { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() },
+    setInterval: ((cb: () => void) => { tick = cb; return { unref() {} }; }) as unknown as typeof setInterval,
+    clearInterval: () => {},
+    log: () => { throw eio(); },
+  });
+  try {
+    assert.ok(tick);
+    assert.doesNotThrow(tick);
+    assert.doesNotThrow(tick);
+    assert.equal(lagCalls, 2, "the next tick still runs");
+    const steps = stderr.mock.calls.map((call) => String(call.arguments[0]));
+    assert.deepEqual(steps, [
+      "serve: serve.incident_invariants.loop_lag_failed", "serve: serve.incident_invariants.evaluate_failed",
+      "serve: serve.incident_invariants.loop_lag_failed", "serve: serve.incident_invariants.evaluate_failed",
+    ]);
+  } finally {
+    stop();
+  }
+});
