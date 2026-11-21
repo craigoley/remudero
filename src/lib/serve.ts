@@ -166,6 +166,7 @@ import {
   evaluateIncidentInvariants, INCIDENT_INPUT_LINE,
   eventLoopLagLedgerLine,
   invariantFindingLedgerLine,
+  LOOP_LAG_MAX_STALL_BOUND_MS,
   loopStallLedgerLine,
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
@@ -3687,8 +3688,29 @@ export function startIncidentInvariantsMonitor(
   const clearTimer = deps.clearInterval ?? clearInterval;
   const intervalMs = deps.intervalMs ?? INCIDENT_INVARIANTS_INTERVAL_MS;
   const stallProfiler = startLoopStallProfiler({ ...deps.stallProfiler, steps: SERVE_LOOP_STALL_STEPS });
-  const stallLog = (step: string, fields?: Record<string, unknown>): void => {
-    writeLedger(ledgerPath, loopStallLedgerLine(step, fields, clock.now()));
+  const readings: { atMs: number; lag: EventLoopLag }[] = [];
+  const pending: { recoveredAtMs: number; deliveredAtMs: number; fields: Record<string, unknown> }[] = [];
+  // The histogram and watchdog use separate timers. Allow one turn of each at the sample boundary.
+  const samplingSlackMs = 2 * SERVE_LOOP_LAG_RESOLUTION_MS;
+  // The histogram rounds up to the top of a bucket at three significant digits.
+  const durationSlackMs = (maxMs: number) => samplingSlackMs + maxMs / 1_000;
+  const sampleFor = (recoveredAtMs: number, lagMs: unknown) => readings.find(({ atMs, lag }) =>
+    recoveredAtMs > atMs - lag.windowMs - samplingSlackMs && recoveredAtMs <= atMs + samplingSlackMs &&
+    typeof lagMs === "number" && Math.abs(lag.maxMs - lagMs) <= durationSlackMs(lag.maxMs));
+  const stallLog = (step: string, fields?: Record<string, unknown>, recoveredAtMs?: number): void => {
+    const deliveredAtMs = clock.now();
+    if (step === SERVE_LOOP_STALL_STEPS.profile && fields && recoveredAtMs !== undefined &&
+        typeof fields.lag_ms === "number" &&
+        fields.lag_ms > LOOP_LAG_MAX_STALL_BOUND_MS - durationSlackMs(LOOP_LAG_MAX_STALL_BOUND_MS)) {
+      const sample = sampleFor(recoveredAtMs, fields.lag_ms);
+      if (sample === undefined) {
+        pending.push({ recoveredAtMs, deliveredAtMs, fields });
+        return;
+      }
+      writeLedger(ledgerPath, loopStallLedgerLine(step, fields, sample.atMs));
+      return;
+    }
+    writeLedger(ledgerPath, loopStallLedgerLine(step, fields, deliveredAtMs));
   };
 
   const tick = (): void => {
@@ -3696,9 +3718,24 @@ export function startIncidentInvariantsMonitor(
     try {
       const lag = eventLoopLag();
       if (lag) {
-        writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs));
+        const stalled = lag.maxMs > LOOP_LAG_MAX_STALL_BOUND_MS;
+        // Include the long stall in this evaluation even if appending advances the clock.
+        writeLedger(ledgerPath, eventLoopLagLedgerLine(lag, nowMs), stalled ? { clock: fixedClock(nowMs) } : undefined);
+        if (stalled) readings.push({ atMs: nowMs, lag });
         // Never throws: the profiler turns its own start, heartbeat and watchdog failures into its failure row.
         stallProfiler.observe({ lagMs: lag.p99Ms, intervalMs: SERVE_LOOP_LAG_RESOLUTION_MS }, stallLog);
+      }
+      while (readings[0] && readings[0].atMs < nowMs - intervalMs) readings.shift();
+      for (let index = 0; index < pending.length;) {
+        const profile = pending[index]!;
+        const sample = sampleFor(profile.recoveredAtMs, profile.fields.lag_ms);
+        if (sample || nowMs - profile.deliveredAtMs >= intervalMs) {
+          writeLedger(ledgerPath, loopStallLedgerLine(SERVE_LOOP_STALL_STEPS.profile, profile.fields,
+            sample?.atMs ?? profile.deliveredAtMs), { clock: fixedClock(nowMs) });
+          pending.splice(index, 1);
+        } else {
+          index++;
+        }
       }
     } catch (e) {
       deps.log?.("serve.incident_invariants.loop_lag_failed", { reason: String((e as Error)?.message ?? e) });
