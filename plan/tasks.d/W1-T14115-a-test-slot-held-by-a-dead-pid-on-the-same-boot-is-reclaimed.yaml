@@ -1,0 +1,44 @@
+- id: W1-T14115
+  title: A test slot held by a killed preflight is reclaimed when its pid is dead on the same boot
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  origin: operator-session#pr-backlog-sweep-2026-11-21
+  plan_refs: [W1-T10251, W1-T10870, W1-T11810]
+  files:
+    - src/lib/test-slot.ts
+    - test/ci/suites/a-test-slot-held-by-a-dead-pid-on-the-same-boot-is-reclaimed.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21 05:27Z on the Azure host: /mnt/scratch/rmd/test-slots/slot-1.json names pid 2438443 (label
+    preflight-author:static-and-affected, heartbeatAt 03:50:35Z, bootId a30a056d-...). The pid is gone; the
+    preflight's own timeout killed it. The record's cgroupScope is a login session scope (dedicated: false), which
+    W1-T10870 correctly refuses as proof that the work ended, so no probe ever answers ended and the slot is never
+    freed. Every author preflight since waits 2700 s and is refused with "test slot WAIT BOUND EXCEEDED after 2700s
+    (slot 1: pid 2438443 ...)", including those for #19871 and #19812.
+    NOT W1-T10251 / W1-T10870: those prove an ended owner through its dedicated cgroup scope and exclude login
+    sessions from that proof. This task adds a second, narrower basis for a record with no usable scope.
+  design: |
+    In src/lib/test-slot.ts, treat a reservation as ended when all of these hold: the record's bootId equals this
+    host's current boot id; the recorded owner pid is gone (ENOENT/ESRCH on /proc/<pid>/stat), or that pid now has a
+    different start than the record's processStart; and no live process carries this reservation's marker
+    (workIdentity reservation-marker-v1) where the marker scan can read it. When reclaiming on this basis, write a
+    test_slot.reclaimed_quiescent ledger row whose coverage is dead-owner-same-boot and which names the reclaimed
+    pid, label and slot. A live pid with the recorded start, a different boot id, or a marker scan that finds a live
+    holder keeps today's behaviour exactly.
+
+    INVARIANT dead-owner-same-boot-frees: a slot whose owner pid is dead on the boot that wrote it is reclaimed once, with a ledger row naming that pid; a live owner or another boot's record is never reclaimed on this basis.
+  acceptance:
+    - claim: "A slot record whose pid is dead on the same boot id, with a login-session scope, is reclaimed, and the ledger row names the reclaimed pid"
+      proof: "grep: W1-T14115 criterion 1: in test/ci/suites/a-test-slot-held-by-a-dead-pid-on-the-same-boot-is-reclaimed.test.ts"
+    - claim: "invariant:dead-owner-same-boot-frees — a live pid with its recorded start, or a record from a different boot id, is not reclaimed on this basis"
+      kind: guard
+      proof: "grep: W1-T14115 criterion 2: in test/ci/suites/a-test-slot-held-by-a-dead-pid-on-the-same-boot-is-reclaimed.test.ts"
+  falsifier: |
+    Drop the dead-owner basis: criterion 1's dead-pid same-boot record stays held. Ignore the boot id or the start
+    time: criterion 2's live or other-boot record is reclaimed.

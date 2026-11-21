@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 100.00
+  budget_usd: 4.50
   rationale: "Operator-observed host facts: core remudero-daemon mounts /home/craigoleyagent/rmd-state2 (named by its systemd and cron configuration); legacy /home/craigoleyagent/rmd-state is inactive and holds only an empty state/ directory; remudero-site has its own protected /mnt/rmd/remudero-site-state; remudero-site-daemon is intentionally exited after a STOP pending the cross-repo proof-runner repair and has no site systemd supervisor yet. Nothing today retires an old state root with evidence, so cleanup would be a guess against live mounts."
   design: |
     GATED. The default-path/config inconsistencies must be resolved by the separate multi-repository supervisor task before any old state root is retired; this task must not start retiring until that is proven, and must refuse to run while it is not.
