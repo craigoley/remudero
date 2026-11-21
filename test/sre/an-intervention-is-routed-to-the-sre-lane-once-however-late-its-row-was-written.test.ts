@@ -198,7 +198,8 @@ test("W1-T14005 criterion 3: the routing memory keeps a key while its row can be
   // An absent memory is an empty one; an unreadable or malformed one throws, as on origin/main.
   const absent = tmp(t);
   assert.equal((await route(absent, book, lastTs + WINDOW + MIN)).length, 0);
-  for (const bad of ["{not json", JSON.stringify({ routed: "k" }), JSON.stringify({ routed: [42] })]) {
+  for (const bad of ["{not json", JSON.stringify({ routed: "k" }), JSON.stringify({ routed: [42] }), JSON.stringify({ routed: [], complete: "yes" }),
+    JSON.stringify({ routed: [], pending: { since: "not a time", through: iso(NOW) } }), JSON.stringify({ routed: [], pending: true })]) {
     const dir = tmp(t);
     writeFileSync(memoryPath(dir), bad);
     await assert.rejects(route(dir, book, NOW), Error, `memory ${bad} must throw`);
@@ -632,4 +633,89 @@ test("W1-T14005 criterion 4: an unreadable routing history defers only the rows 
   await filePass(root, NOW + 2 * MIN, over());
   assert.deepEqual(liveRows(state).filter((r) => r.step === "incident.event").map((r) => r.intervention_key), [interventionKey(pause!), interventionKey(late)]);
   assert.equal(logs.filter((l) => l.step === "sre_lane.routing_deferred").length, 1, "a readable history defers nothing");
+});
+
+// ── Round 5 (review 2026-11-21T20:25Z on 03d8a2180) ──────────────────────────────────────────
+
+test("W1-T14005 criterion 1: a row appended after its pass took its clock is not routed again when that pass's memory write fails", async (t) => {
+  // Finding 1: the fix-lane gardener appended the row after the pass sampled its clock, so the keyed event (stamped at
+  // the pass's clock) is older than the row. The memory write then failed (a full disk), and the retry read the history
+  // from the row's ts, missed the event, and routed the row again.
+  const root = tmp(t);
+  const state = join(root, "state");
+  const book = rowsAt();
+  const history = async (sinceMs: number) => book.events().filter((e) => e.ts >= sinceMs);
+  const pass = (nowMs: number, writeEvent: (line: LedgerLine) => void = book.write) => {
+    book.at(nowMs);
+    return routeOperatorInterventions({ stateDir: state, nowMs, readRows: book.read, writeEvent, detectors: [], readRoutingHistory: history });
+  };
+  book.add(pushRow("pr#16442@4dc3ce296", NOW - HOUR, "src/lib/review.ts"), NOW - HOUR);
+  await pass(NOW - MIN);
+  const late = pushRow("pr#15368@c9c0b40f8", NOW - 13 * DAY);
+  book.add(late, NOW + 30_000);
+  // The event is written, then the memory write fails, as on a full disk: a directory stands at its path (EISDIR for
+  // every uid). What the failed pass left on disk is restored after.
+  let left = "";
+  await assert.rejects(pass(NOW, (line) => {
+    book.write(line);
+    left = memoryText(root);
+    rmSync(memoryPath(root), { force: true });
+    mkdirSync(join(memoryPath(root), "blocked"), { recursive: true });
+  }));
+  rmSync(memoryPath(root), { recursive: true, force: true });
+  if (left) writeFileSync(memoryPath(root), left);
+  const lateEvents = () => book.incidents().filter((r) => r.intervention_key === interventionKey(late));
+  assert.equal(lateEvents().length, 1, "fixture: the failed pass did route it");
+  assert.ok(Date.parse(String(lateEvents()[0]!.ts)) < NOW + 30_000, "fixture: its event is older than its row");
+  for (const at of [NOW + MIN, NOW + HOUR, NOW + DAY]) await pass(at);
+  assert.equal(lateEvents().length, 1, "routed once, and never again after the failed memory write");
+  assert.ok(memoryText(root).includes(JSON.stringify(interventionKey(late))), "its key is remembered from then on");
+});
+
+test("W1-T14005 criterion 2: a keyed event rotated out of the live file still counts, so a rotation never moves the count or burn", async (t) => {
+  // Finding 2: ledger rotation moved the oldest keyed event out of the live file, and the lane counted the live file
+  // only: its count fell from 3 to 2 and its burn rose, with no new intervention.
+  const root = tmp(t);
+  const book = rowsAt();
+  const rows = [pushRow("pr#16240@4dcacfa5e", NOW - HOUR), pushRow("pr#16240@17cfcb412", NOW + 4 * HOUR), pushRow("pr#16240@aaaaaaaaa", NOW + 9 * HOUR)];
+  const seen: Array<[number, number]> = [];
+  const runbookPass: SreLaneInput["runbookPass"] = async (incident) => { seen.push([incident.count, incident.burnPerHour]); return { outcome: "held", fileFeedback: false }; };
+  for (const [i, row] of rows.entries()) {
+    book.add(row, NOW + i * 5 * HOUR - MIN);
+    await lanePass(root, book, NOW + i * 5 * HOUR, { runbookPass });
+  }
+  assert.equal(book.incidents().filter((r) => r.intervention_key !== undefined).length, 3, "fixture: three distinct keyed routings");
+  await lanePass(root, book, NOW + 11 * HOUR, { runbookPass });
+  const before = seen.at(-1)!;
+  assert.deepEqual(before, [3, 3 / 10]);
+  // The rotation: the oldest keyed event leaves the live file; the union still holds it.
+  const rotated = interventionKey(rows[0]!);
+  const live = () => book.events().filter((e) => e.interventionKey !== rotated);
+  await lanePass(root, book, NOW + 12 * HOUR, { runbookPass, readEvents: live });
+  assert.deepEqual(seen.at(-1), before, "count and burn per hour do not move without a new intervention");
+  assert.equal(book.incidents().length, 3, "nothing routed again");
+});
+
+test("W1-T14005 criterion 4: a row written between passes routes in the pass that first reads it, though the routing history is unreadable", async (t) => {
+  // Finding 3: the fix-lane gardener appended a new row between passes; a kernel EIO on the routing history read then
+  // deferred that never-routed row, which origin/main routes on that pass.
+  const root = tmp(t);
+  const state = join(root, "state");
+  const book = rowsAt();
+  book.add(pushRow("pr#16213@5c177ab9a", NOW - 2 * HOUR, "src/lib/review.ts"), NOW - 2 * HOUR);
+  await route(root, book, NOW);
+  const fresh = pushRow("pr#16213@merge", NOW + MIN);
+  book.add(fresh, NOW + 2 * MIN);
+  const logs: string[] = [];
+  const eio = async (): Promise<readonly IncidentLedgerEvent[]> => { throw Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }); };
+  const pass = (nowMs: number) => {
+    book.at(nowMs);
+    return routeOperatorInterventions({ stateDir: state, nowMs, readRows: book.read, writeEvent: book.write, detectors: [], readRoutingHistory: eio, log: (step) => logs.push(step) });
+  };
+  const routed = await pass(NOW + 3 * MIN);
+  assert.deepEqual(routed.map((e) => e.intervention_key), [interventionKey(fresh)], "routed in the pass that first reads it");
+  assert.deepEqual(routed.map((e) => e.message), [interventionIncidentEvent(fresh, NOW).message], "with origin/main's message");
+  assert.deepEqual(logs, [], "nothing deferred");
+  assert.deepEqual(await pass(NOW + 4 * MIN), [], "and never again");
+  assert.equal(book.incidents().length, 2);
 });
