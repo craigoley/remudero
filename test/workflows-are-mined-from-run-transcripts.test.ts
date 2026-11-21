@@ -43,6 +43,28 @@ test("a row with no tool_signature falls back to its bare tool name, and the ren
   assert.equal(renderSkillDraft(candidate, { runs, records }), undefined);
 });
 
+test("repeated Edit calls collapse to their first normalized step in each run", () => {
+  const edit = signed("Edit:src/lib/review.ts");
+  const otherEdit = signed("Edit:src/lib/retro.ts");
+  const typecheck = signed("Bash:npm run typecheck");
+  const { runs, records } = transcripts([
+    ...run("P1", "W1-T4700", 1, [edit, otherEdit, typecheck, edit]),
+    ...run("P2", "W1-T4701", 2, [otherEdit, edit, typecheck, otherEdit]),
+  ]);
+  assert.deepEqual(mineRecurringProcedures(runs, records).map((p) => [p.steps, p.medianSpannedCalls]), [
+    [["Edit:src/lib/*.ts", "Bash:npm run typecheck"], 3],
+  ]);
+});
+
+test("an unknown run has no steps even when another run has qualifying tool rows", () => {
+  const steps = [signed("Edit:src/lib/review.ts"), signed("Bash:npm run typecheck")];
+  const { runs, records } = transcripts(run("P1", "W1-T4700", 1, steps));
+  const opts = { minRuns: 1, minTaskIds: 1 };
+  assert.deepEqual(mineRecurringProcedures(runs, records, opts).map((p) => p.runIds), [["P1"]]);
+  const unknown = { ...runs[0]!, runId: "NOPE" };
+  assert.deepEqual(mineRecurringProcedures([unknown], records, opts), []);
+});
+
 test("a repaired run that repeats the sequence counts toward its recurrence", () => {
   const steps = [signed("Bash:npm run comment-load-signal"), signed("Read:src/lib/retro.ts"), signed("Bash:npm run typecheck")];
   const { runs, records } = transcripts([

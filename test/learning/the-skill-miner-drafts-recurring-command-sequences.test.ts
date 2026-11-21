@@ -168,6 +168,20 @@ test("W1-T13857 criterion 5: the top procedure is drafted as Run and Change line
   assert.deepEqual(procedureLines(fallback.markdown), expectedLines);
   assert.deepEqual(scanSkillDraft(fallback, ALLOWLIST), { ok: true });
 
+  const toolNamePaths = corpus([
+    ["B1", "W1-T1", ["Bash:npm run typecheck", "Edit:Bash.md"], 1000],
+    ["B2", "W1-T2", ["Bash:npm run typecheck", "Edit:Bash.md"], 1000],
+    ["C1", "W1-T1", ["Bash:npm run typecheck", "Edit:RunCheck.md"], 500],
+    ["C2", "W1-T2", ["Bash:npm run typecheck", "Edit:RunCheck.md"], 500],
+    ["D1", "W1-T1", HIGH_SCORE_STEPS],
+    ["D2", "W1-T2", HIGH_SCORE_STEPS],
+  ]);
+  assert.deepEqual(mineRecurringProcedures(toolNamePaths.runs, toolNamePaths.records).map((p) => p.steps[1]),
+    ["Edit:Bash.md", "Edit:RunCheck.md", "Edit:src/lib/*.ts"]);
+  const safeFallback = renderSkillDraft(candidate(toolNamePaths.runs.map((run) => run.runId)), toolNamePaths)!;
+  assert.deepEqual(procedureLines(safeFallback.markdown), expectedLines);
+  assert.deepEqual(scanSkillDraft(safeFallback, ALLOWLIST), { ok: true });
+
   const crowded = competingProcedures();
   const top = renderSkillDraft(candidate(crowded.runs.map((run) => run.runId)), crowded)!;
   assert.deepEqual(procedureLines(top.markdown), expectedLines);
@@ -202,6 +216,17 @@ test("W1-T13857 criterion 6: scanSkillDraft refuses a Procedure step with no act
   const alternativeHeading = draftWith(["* Verify the result."]);
   alternativeHeading.markdown = alternativeHeading.markdown.replace("## Procedure", " ## Procedure ##").replaceAll("\n", "\r\n");
   assert.match(scanSkillDraft(alternativeHeading, ALLOWLIST).reason ?? "", /^not-an-action/);
+
+  const shellExample = ["```sh", "## Evidence", "- an example line", "```"];
+  const tildeExample = ["  ~~~~sh", "~~~", "````", "~~~~ trailing info", "## Evidence", " ~~~~~"];
+  for (const fence of [shellExample, tildeExample]) {
+    assert.deepEqual(scanSkillDraft(draftWith([...fence, "- Run `npm run typecheck`."]), ALLOWLIST), { ok: true });
+    for (const line of ["- Verify the result.", `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`]) {
+      const result = scanSkillDraft(draftWith([...fence, line]), ALLOWLIST);
+      assert.equal(result.offendingLine, line);
+      assert.match(result.reason ?? "", /^not-an-action/, line);
+    }
+  }
 });
 
 test("W1-T13857 criterion 7: the three recurring-procedure fixtures pass scanSkillDraft", () => {

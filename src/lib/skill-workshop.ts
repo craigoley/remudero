@@ -126,6 +126,12 @@ export interface TranscriptContext {
 const PROCEDURE_STEP_VERBS = new Map([
   ["Bash", "Run"], ["Edit", "Change"], ["MultiEdit", "Change"], ["NotebookEdit", "Change"], ["Write", "Create"],
 ]);
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"]);
+const CAPABILITY_TOOL_NAMES: ReadonlySet<string> = new Set([...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"]);
+
+function toolNamesIn(text: string, toolNames: ReadonlySet<string>): string[] {
+  return text.match(/\w+/g)?.filter((word) => toolNames.has(word)) ?? [];
+}
 
 /** Writes a census step as an action line, or `undefined` when no action verb fits it. No line names a tool. */
 function procedureStepLine(step: string): string | undefined {
@@ -133,7 +139,8 @@ function procedureStepLine(step: string): string | undefined {
   if (colon < 0) return undefined;
   const target = step.slice(colon + 1).trim();
   const verb = PROCEDURE_STEP_VERBS.get(step.slice(0, colon));
-  return verb && target && !/[`\r\n]/.test(target) ? `- ${verb} \`${target}\`.` : undefined;
+  if (!verb || !target || /[`\r\n]/.test(target) || toolNamesIn(target, CAPABILITY_TOOL_NAMES).length > 0) return undefined;
+  return `- ${verb} \`${target}\`.`;
 }
 
 /**
@@ -295,8 +302,6 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(out);
 }
 
-const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"] as const;
-
 /** Phrasings the untrusted envelope (W1-T2700) would fence as an instruction aimed at the reader
  *  rather than data describing a procedure — a small, curated set of classic injection shapes,
  *  deliberately narrower than "any imperative sentence" (a SKILL.md's whole body is imperative). */
@@ -325,6 +330,27 @@ const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
 const SECTION_HEADING = /^ {0,3}#{1,2}(?:[ \t]+|$)/;
 const PROCEDURE_HEADING = /^ {0,3}##[ \t]+Procedure(?:[ \t]+#+)?[ \t]*$/;
 const PROCEDURE_BULLET = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)(.*)$/;
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+function* skillDraftLines(markdown: string): Generator<{ line: string; bullet: string | undefined }> {
+  let inProcedure = false;
+  let fence: string | undefined;
+  for (const line of markdown.split(/\r?\n/)) {
+    let bullet: string | undefined;
+    if (fence) {
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = undefined;
+    } else {
+      fence = FENCE_OPEN.exec(line)?.[1];
+      if (!fence) {
+        if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
+        if (inProcedure) bullet = PROCEDURE_BULLET.exec(line)?.[1];
+      }
+    }
+    yield { line, bullet };
+  }
+}
 
 function hasNonblankCodeSpan(text: string): boolean {
   for (const span of text.matchAll(/(?<![`\\])(`+)(?!`)(.*?)(?<!`)\1(?!`)/g)) {
@@ -359,9 +385,8 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
-  let inProcedure = false;
-  for (const line of draft.markdown.split(/\r?\n/)) {
-    if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
+  const knownTools = allowlist.capabilityContext ? CAPABILITY_TOOL_NAMES : KNOWN_TOOL_NAMES;
+  for (const { line, bullet } of skillDraftLines(draft.markdown)) {
     const hostMatch = line.match(/https?:\/\/([a-zA-Z0-9.-]+)/);
     if (hostMatch && !allowlist.allowedHosts.includes(hostMatch[1])) {
       return { ok: false, offendingLine: line, reason: `names host '${hostMatch[1]}' outside the worker allowlist` };
@@ -371,11 +396,9 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolNames = allowlist.capabilityContext ? [...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"] : KNOWN_TOOL_NAMES;
-    const toolMatches = line.matchAll(new RegExp(`\\b(${toolNames.join("|")})\\b`, "g"));
-    for (const toolMatch of toolMatches) {
-      if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
-        return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+    for (const toolName of toolNamesIn(line, knownTools)) {
+      if (!allowlist.allowedTools.some(t => t === toolName || (!allowlist.capabilityContext && t.startsWith(`${toolName}(`)))) {
+        return { ok: false, offendingLine: line, reason: `names tool '${toolName}' outside the worker allowlist` };
       }
     }
     for (const pattern of INSTRUCTION_INJECTION_PATTERNS) {
@@ -387,7 +410,6 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         };
       }
     }
-    const bullet = inProcedure ? PROCEDURE_BULLET.exec(line)?.[1] : undefined;
     if (bullet !== undefined) {
       const tokens = stepContentTokens(bullet);
       if (tokens.length > 0 && outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
@@ -485,12 +507,9 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
 }
 
 function procedureStepLines(markdown: string): string[] {
-  let inProcedure = false;
   const steps: string[] = [];
-  for (const line of markdown.split(/\r?\n/)) {
-    if (SECTION_HEADING.test(line)) inProcedure = PROCEDURE_HEADING.test(line);
-    const step = inProcedure ? PROCEDURE_BULLET.exec(line)?.[1] : undefined;
-    if (step !== undefined) steps.push(step);
+  for (const { bullet } of skillDraftLines(markdown)) {
+    if (bullet !== undefined) steps.push(bullet);
   }
   return steps;
 }
