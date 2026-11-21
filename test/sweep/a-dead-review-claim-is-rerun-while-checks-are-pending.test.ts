@@ -22,6 +22,8 @@ import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 const NOW = Date.parse("2026-11-20T15:38:37.000Z");
 const minutesAgo = (m: number): string => new Date(NOW - m * 60_000).toISOString();
 const DEAD_RUN = "review-PR19791-1795187698034";
+/** The GitHub id of the live `remudero-review` status the fixture's combined-status read returns. */
+const LIVE_STATUS_ID = 9001;
 
 /** #19791's shape at 15:38:37Z: checks pending 42m, the dead run's pending claim posted at 15:15:10Z. */
 function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
@@ -36,6 +38,9 @@ function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
     // The live status and the dead ledger row name the same run, as the view producer reads them.
     reviewPendingOwnerRunId: DEAD_RUN, reviewPendingStatusRunId: DEAD_RUN,
     priorReviewAttemptsForInput: 0,
+    // The producer always reads the input's digest and loop facts; the backstop needs both to bound a re-run.
+    reviewInputDigest: "e".repeat(64),
+    reviewInputLoop: { admissions: 0, postsSinceLastAdmission: 0, posts: 0, lookedUpKey: "W1-T14035" },
     ...over,
   } as OpenPrView;
 }
@@ -172,8 +177,10 @@ test("W1-T14035 criterion 2: runSweep keeps the dead-owner reason beside an undi
 async function producedView(
   dir: string,
   liveStatus: { runId: string; createdAt?: string; description?: string;
+    /** The live status's GitHub id; {@link LIVE_STATUS_ID} when absent. */
+    id?: number;
     /** The head's `remudero-review` statuses newest first, given the live description; absent answers an unreadable read. */
-    history?: (live: string) => Array<{ state: string; description: string }> },
+    history?: (live: string) => Array<{ id?: number; state: string; description: string }> },
   /** Runs after the dead run's claim row is written; a returned string is the live status description. */
   afterClaim?: (ledgerPath: string) => Promise<string | undefined>,
 ): Promise<OpenPrView> {
@@ -204,7 +211,7 @@ async function producedView(
       }
       if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "in_progress", started_at: minutesAgo(42) }] };
       if (path.includes("/status")) return { statuses: [{
-        context: "remudero-review", state: "pending",
+        context: "remudero-review", state: "pending", id: liveStatus.id ?? LIVE_STATUS_ID,
         description: liveStatus.description ?? `remudero-review: review in progress (owned by run ${liveStatus.runId})`,
         ...(liveStatus.createdAt !== undefined ? { created_at: liveStatus.createdAt } : {}),
       }] };
@@ -385,8 +392,8 @@ test("W1-T14035 criterion 1: an ops hold the catalog poster redacted is released
 const postedAgo = (m: number): string => minutesAgo(m).replace(/\.\d{3}Z$/, "Z");
 const claimBy = (run: string) => ({ state: "pending", description: `remudero-review: review in progress (owned by run ${run})` });
 /** GitHub's history newest first: the live hold, any `between` posts, then the dead run's own claim (or `claim`). */
-const legacyHistory = (between: Array<{ state: string; description: string }> = [], claim = claimBy(DEAD)) =>
-  (live: string) => [{ state: "pending", description: live }, ...between, claim];
+const legacyHistory = (between: Array<{ id?: number; state: string; description: string }> = [], claim = claimBy(DEAD)) =>
+  (live: string) => [{ id: LIVE_STATUS_ID, state: "pending", description: live }, ...between, claim];
 
 test("W1-T14035 criterion 1: a hold posted before pending posts named their run is bound by its ledger row", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
@@ -527,5 +534,39 @@ test("W1-T14035 criterion 3: a live reviewer's newer pending status that quotes 
     const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
     assert.equal(r.disposition, "wait", label);
     assert.doesNotMatch(r.reason, /owner proven dead/, label);
+  }
+});
+
+test("W1-T14035 criterion 3: a newer hold with the dead run's text waits when the history read still lists the older post", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14035-view-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // The live status is a live reviewer's newer legacy hold (id 9002) with the same text as the dead run's hold (id 9001), and
+  // the history read still lists the dead run's post first. Equal text is not the same post: the owner proof is for 9001.
+  for (const catalog of ["ops", undefined] as const) {
+    const pr = await producedView(dir, { runId: DEAD, id: LIVE_STATUS_ID + 1, history: legacyHistory() }, async (ledgerPath) => {
+      const summary = await publishHold(ledgerPath, DEAD, { catalog, legacy: true });
+      return catalog === "ops" ? OPS_HOLD : summary;
+    });
+    const label = catalog ?? "public";
+    assert.equal(pr.reviewPendingStatusRunId, undefined, `${label}: the live post is not in the history the proof came from`);
+    assert.equal(pr.reviewPendingOwnerDead, undefined, label);
+    const r = deriveDisposition(pr, DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "wait", label);
+    assert.doesNotMatch(r.reason, /owner proven dead/, label);
+  }
+});
+
+test("W1-T14035 criterion 1: a dead claim with no attempt count, at an input admitted twice with a post since, is not re-run", () => {
+  // The alongside-CI lane takes a dead claim only where the reviewInputLoop backstop can bound it, which needs an explicit
+  // zero: an absent count is unknown, not zero, so the head waits instead of being admitted a third time.
+  const loop = { admissions: 2, postsSinceLastAdmission: 1, posts: 1, lookedUpKey: "W1-T14035" };
+  const unknown = deriveDisposition(deadClaimView({ priorReviewAttemptsForInput: undefined, reviewInputDigest: "e".repeat(64),
+    reviewInputLoop: loop }), DEFAULT_SWEEP_POLICY, NOW);
+  assert.notEqual(unknown.disposition, "post-review", "an absent attempt count never reads as zero");
+  assert.equal(unknown.disposition, "wait");
+  for (const missing of [{ reviewInputDigest: undefined }, { reviewInputLoop: undefined }]) {
+    const r = deriveDisposition(deadClaimView({ reviewInputDigest: "e".repeat(64), reviewInputLoop: { ...loop, admissions: 0,
+      postsSinceLastAdmission: 0, posts: 0 }, ...missing }), DEFAULT_SWEEP_POLICY, NOW);
+    assert.equal(r.disposition, "wait", `${Object.keys(missing)[0]} absent: the loop bound cannot be read`);
   }
 });

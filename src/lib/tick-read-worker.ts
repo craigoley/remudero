@@ -76,9 +76,11 @@ export function attachPostedGateIds<T extends object>(
 
 export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: GhApiFetcher): Steps<OpenPrRest[]> {
   const checkRuns = new Map<string, unknown>();
+  const combined = new Map<string, unknown>();
   const prs = yield* fetchOpenPrsRestSteps(owner, repo, (args, onRateLimit) => {
     const remember = (response: unknown) => {
       if (args[1]?.includes("/check-runs?")) checkRuns.set(args[1], response);
+      if (args[1]?.endsWith("/status")) combined.set(args[1], response);
       return response;
     };
     const response = fetch(args, onRateLimit);
@@ -87,9 +89,19 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
   for (const pr of prs) {
     if (pr.statusCheckRollup) {
       attachPostedGateIds(pr.statusCheckRollup, checkRuns.get(checkRunsRestArgs(owner, repo, pr.headRefOid)[1]));
+      attachReviewStatusId(pr.statusCheckRollup, combined.get(`repos/${owner}/${repo}/commits/${pr.headRefOid}/status`));
     }
   }
   return prs;
+}
+
+/** W1-T14035: the live `remudero-review` status's own GitHub id, kept beside its rollup entry so an owner proof read off the
+ *  head's status history binds to that one post, never to another with the same text. Absent when GitHub gave none. */
+export function attachReviewStatusId<T extends object>(rollup: T[], response: unknown): void {
+  const id = (response as { statuses?: Array<{ context?: unknown; id?: unknown }> } | undefined)?.statuses
+    ?.find((status) => status?.context === REVIEW_CTX)?.id;
+  const entry = rollup.find((c) => (c as { context?: string }).context === REVIEW_CTX);
+  if (entry !== undefined && typeof id === "number") (entry as T & { statusId?: number }).statusId = id;
 }
 
 /** Only the failing log's explicit `Run 'npm run <name>' and commit the result.` qualifies;
@@ -569,6 +581,8 @@ export interface RollupCheck {
   completedAt?: string;
   /** A status context's own description, verbatim from REST (`securityMergePolicyRefusal` reads it). */
   description?: string;
+  /** W1-T14035: a status context's own GitHub id (`remudero-review` only), from {@link attachReviewStatusId}. */
+  statusId?: number;
 }
 
 export interface RawOpenPr {
@@ -627,13 +641,14 @@ const LEGACY_OPS_HOLD = /^remudero-review: pending — detailed evidence retaine
 const REVIEW_STATUS_HISTORY_READ_CAP = 20;
 
 /** W1-T14035: one `remudero-review` entry of the head's status history, newest first, as GitHub lists it. */
-export interface ReviewStatusHistoryEntry { state?: string; description?: string }
+export interface ReviewStatusHistoryEntry { id?: number; state?: string; description?: string }
 
 /** W1-T14035: the head's `remudero-review` statuses, newest first (GitHub's own order, one id per post, so two posts in one
  *  second still have an order); undefined when the read failed or did not parse. */
 export function reviewStatusHistoryFromRest(rows: unknown): ReviewStatusHistoryEntry[] | undefined {
   if (!Array.isArray(rows) || rows.some((row) => typeof row !== "object" || row === null)) return undefined;
   return (rows as Array<Record<string, unknown>>).filter((row) => row.context === REVIEW_CTX).map((row) => ({
+    id: typeof row.id === "number" ? row.id : undefined,
     state: typeof row.state === "string" ? row.state : undefined,
     description: typeof row.description === "string" ? row.description : undefined,
   }));
@@ -644,7 +659,7 @@ export function reviewStatusHistoryFromRest(rows: unknown): ReviewStatusHistoryE
  *  and the same text can come from any run, a newer one included whose rows are not visible (a run posts its hold even when
  *  its own claim was refused, and writes its row only after GitHub accepts the post). Clocks cannot settle it: GitHub's and
  *  the host's differ, and posts share a second. So a hold's writer is read from GitHub's own order. It is run R only when the
- *  newest claim in the head's history is R's, every post after it is a pending hold, there are exactly as many of them as R
+ *  history's newest post is the live status itself (the same GitHub id), the newest claim in that history is R's, every post after it is a pending hold, there are exactly as many of them as R
  *  has `review.posted` pending rows since its claim row, no other run has a claim or hold row on this head after R's, a
  *  trailing "owned by run" marker on the live hold names R, and the rest of its text is R's summary or the ops redaction.
  *  Anything else, an unread history included, is an unknown run, and an unknown run waits. */
@@ -658,8 +673,11 @@ export function reviewPendingStatusRunId(
 ): string | undefined {
   const claimant = reviewStatusRunIdFromRollup(rollup);
   if (claimant !== undefined) return claimant;
-  const description = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.description;
-  if (!description || history === undefined || history[0]?.description !== description) return undefined;
+  const live = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
+  const description = live?.description;
+  // The history's newest post must BE the live status, by GitHub's id: equal text from another post proves nothing.
+  if (!description || history === undefined || live?.statusId === undefined || history[0]?.id !== live.statusId ||
+    history[0]?.description !== description) return undefined;
   const claimAt = history.findIndex((entry) => REVIEW_CLAIM_SHAPE.test(entry.description ?? ""));
   const run = claimAt > 0 ? REVIEW_CLAIM_SHAPE.exec(history[claimAt]!.description!)?.[1] : undefined;
   if (run === undefined || history.slice(0, claimAt).some((entry) => entry.state !== "pending")) return undefined;

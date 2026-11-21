@@ -6855,7 +6855,7 @@ function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: numb
     // W1-T14035: a dead pending claim is a review demand only where the alongside-CI row would admit it, so the loop
     // backstop never pre-empts that row's CI-age guard (a 30 s pending waits) or the stale-CI row at the ceiling.
     (pr.reviewState === "success" || pr.reviewState === "failure" || pr.reviewState === "none" ||
-      (pendingClaimOwnerProvenDead(pr) && alongsideCiReviewDue(pr, policy, now))) &&
+      (deadClaimReviewable(pr) && alongsideCiReviewDue(pr, policy, now))) &&
     loop.admissions >= REVIEW_INPUT_ADMISSION_BACKSTOP &&
     loop.postsSinceLastAdmission >= 1;
 }
@@ -6883,6 +6883,13 @@ function pendingClaimOwnerProvenDead(
   pr: Pick<SweepPrView, "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerGone" | "reviewPendingOwnerPidProven">,
 ): boolean {
   return pr.reviewState === "pending" && producerProvedOwnerDead(pr);
+}
+
+/** W1-T14035 — a dead claim is re-run alongside CI only where {@link reviewDemandLooping} can bound it: an explicit zero
+ *  attempts and the input's digest and loop facts all read. Absent, the count is unknown, never zero, and the head waits. */
+function deadClaimReviewable(pr: SweepPrView): boolean {
+  return pendingClaimOwnerProvenDead(pr) && pr.priorReviewAttemptsForInput === 0 &&
+    pr.reviewInputDigest !== undefined && pr.reviewInputLoop !== undefined;
 }
 
 /** W1-T14035 — the alongside-CI post-review row's own guards over a head whose checks are pending: CI registered at least a
@@ -13984,7 +13991,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "post-review",
     blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) =>
-      (pr.reviewState === "none" || pendingClaimOwnerProvenDead(pr)) && alongsideCiReviewDue(pr, policy, now),
+      (pr.reviewState === "none" || deadClaimReviewable(pr)) && alongsideCiReviewDue(pr, policy, now),
     reason: (pr, _policy, _ageDays, now) =>
       pr.reviewState === "pending"
         ? `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, remudero-review owner proven dead` +
