@@ -200,8 +200,8 @@ export type TaskReleasePlan =
  * W1-T13785: a public hit while a destination is named reads the ops catalog too, because the tick holds public
  * records as well (a duplicate's public copy, a public task naming an ops id, and their dependants). A public task
  * the composition holds is `held`. A sound public hit, an off destination, an unreadable ops catalog or a
- * malformed composition keeps the public plan. Approve checks for public holds before applying the strict loader's
- * working-tree fallback for unresolved dependencies. It composes again against the fallback before releasing.
+ * malformed composition keeps the public plan. Approve selects the checkout with the strict loader, then checks
+ * the public catalog view for holds before falling back to a strictly valid view of that checkout for a release.
  */
 export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<TaskReleasePlan> {
   const lookup = await findTaskInCatalogs(taskId, { ...sources, byId: publicPlan.byId });

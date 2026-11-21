@@ -11,7 +11,7 @@
  *
  * Here REFUSAL_CLASSES names each class once. A pass reads the ledger union for the items those classes open, records
  * `stuck_state.held` once per item, and probes an item only on an event its class names (a new public origin/main
- * commit, a public working-tree edit for a refusal read there, a new ops main commit, a daemon boot, memory pressure
+ * commit, a public working-tree edit for a release refusal, a new ops main commit, a daemon boot, memory pressure
  * back to normal). A passing probe re-runs the refused
  * action through its own path (`rmd approve` with the refused id, nothing else) or, for an action that retries itself,
  * records the clearance. It escalates once, only when its probe reads the cause still present after the event its
@@ -108,7 +108,7 @@ export const REFUSAL_CLASSES: readonly RefusalClass[] = [
         ...(digest === undefined ? {} : { digest }), ...publicRelease };
     },
     recovered: (row, item) => row.step === RELEASE_LEDGER_STEP && row.task_id === item.taskId,
-    probeOn: ["public-main", "ops-main", "daemon-boot"],
+    probeOn: ["public-main", "ops-main", "daemon-boot", "public-working-tree"],
     clearsOn: "daemon-boot",
     retry: "approve",
     escalatedBy: "gardener",
@@ -315,7 +315,7 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   const next: GardenState = { version: 1, items: {} };
   let external: Partial<Record<ClearingEvent, string>> | undefined;
   let workingTreeStamp: Promise<string | undefined> | undefined;
-  const stampsNow = async (item: HeldItem): Promise<Partial<Record<ClearingEvent, string>>> => {
+  const stampsNow = async (item: HeldItem, probeOn: readonly ClearingEvent[]): Promise<Partial<Record<ClearingEvent, string>>> => {
     if (external === undefined) {
       external = {};
       for (const event of ["public-main", "ops-main"] as const) {
@@ -326,7 +326,7 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
     }
     const stamps = { ...rowEventStamps(rows), ...external };
     if (!item.publicRelease && stamps["ops-main"] === OPS_DESTINATION_OFF) delete stamps["ops-main"];
-    if (item.publicRelease && item.publicRelease.publicCommit === undefined) {
+    if (probeOn.includes("public-working-tree")) {
       workingTreeStamp ??= Promise.resolve(ports.eventStamps["public-working-tree"]?.());
       stamps["public-working-tree"] = await workingTreeStamp;
     }
@@ -341,13 +341,12 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
   const released = new Map<string, number>();
   for (const item of open) {
     const cls = classNamed(item.className)!;
-    const probeOn = item.publicRelease && item.publicRelease.publicCommit === undefined
-      ? [...cls.probeOn, "public-working-tree" as const] : cls.probeOn;
+    const { probeOn } = cls;
     let prior = state.items[item.key];
     if (prior === undefined) {
       ports.log(STUCK_STATE_HELD_STEP, itemFields(item));
       // A public refusal's recorded commits also catch catalog changes before the first pass.
-      const baseline = await stampsNow(item), before = rowEventStamps(rows, item.openedAt);
+      const baseline = await stampsNow(item, probeOn), before = rowEventStamps(rows, item.openedAt);
       for (const event of ["daemon-boot", "memory-normal"] as const) baseline[event] = before[event];
       const evidence = item.publicRelease;
       if (evidence) baseline["public-main"] = evidence.publicCommit;
@@ -359,7 +358,7 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
     const entry: ItemState = { ...prior, stamps: { ...prior.stamps } };
     next.items[item.key] = entry;
     if (entry.recordChanged) continue;
-    const now = await stampsNow(item);
+    const now = await stampsNow(item, probeOn);
     const changed = probeOn.filter((event) => now[event] !== undefined && now[event] !== prior.stamps[event]);
     const bound = clearanceBound(item.className, rows);
     const overBound = bound !== undefined && nowMs - item.openedAt > bound.ms;
@@ -449,6 +448,10 @@ function publicWorkingTreeDigest(plan: Plan): string {
 
 type RefusalRow = Row & { run_id: string; task_id: string; step: string };
 
+function heldByPublicEdge(release: TaskReleasePlan | undefined, plan?: Plan): boolean {
+  return release?.outcome === "held" && plan?.byId.has(release.hold.task) === true;
+}
+
 /**
  * Resolve the approve decision and record composition refusals from the exact snapshots that made it.
  * The local/public fast paths keep their lookup order and open the ops snapshot only when needed.
@@ -482,7 +485,7 @@ export async function readApproveRelease(
     return view;
   };
   let release = await findApproveReleasePlan(taskId, localPlan, readPublic, lookup);
-  if (release?.outcome !== "held" || (publicPlan && !publicPlan.byId.has(release.hold.task))) {
+  if (!heldByPublicEdge(release, publicPlan)) {
     const localError = publicReleaseDependencyError(localPlan);
     if (localError && release?.outcome !== "held") throw localError;
     if (!localError && publicPlan && publicReleaseDependencyError(publicPlan)) {
@@ -627,11 +630,18 @@ export function productionStuckStateProbe(opts: {
       const composed = composeSecondaryPlan(publicPlan, read.plan);
       return composed.outcome === "ok" ? { present: false } : { present: true, reason: `compose-${composed.outcome}` };
     }
-    const release: TaskReleasePlan = await findReleasePlanInCatalogs(item.taskId!, publicPlan, { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read });
+    const taskId = item.taskId!;
+    const lookup = { stateDir: opts.stateDir, api: opts.api, opsSnapshot: read };
+    let release = await findReleasePlanInCatalogs(taskId, publicPlan, lookup);
+    if (!heldByPublicEdge(release, publicPlan) && publicReleaseDependencyError(publicPlan)) {
+      const strict = await opts.strictPublicPlan?.();
+      if (strict === undefined) return { present: true, reason: "public-replay-plan-invalid" };
+      release = await findReleasePlanInCatalogs(taskId, strict, lookup);
+    }
     // A catalog refusal or a per-task hold keeps the cause present.
     if (release.outcome !== "found") return { present: true, reason: "reason" in release ? release.reason : `${release.outcome}` };
     // W1-T13785: a public release names the public record's digest; a record that moved catalog digests apart.
-    const record = (release.catalog === "ops" ? read.plan : publicPlan).byId.get(item.taskId!);
+    const record = release.plan.byId.get(taskId);
     return { present: false, ...(record === undefined ? {} : { digest: release.catalog === "ops" ? opsRecordDigest(record) : publicRecordDigest(record) }) };
   };
 }

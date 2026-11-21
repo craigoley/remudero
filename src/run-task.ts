@@ -39909,11 +39909,10 @@ export async function approveCommand(
     const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
     const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
     const allowWorkingTree = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
-    const readLocal = (path: string) => loadLocalReleasePlan(path, stateDir);
-    // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
-    const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir, readLocal) : undefined;
-    // A public replay uses the pinned record verified by the gardener. An operator's ordinary release starts locally.
-    const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : readLocal(planPath) : undefined;
+    // Keep the strict checkout search so an invalid cwd cannot mask a valid daemon target (W1-T10925).
+    const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir) : undefined;
+    // After a miss, the default plan can still surface a public hold through its deferred edges.
+    const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : loadLocalReleasePlan(planPath, stateDir) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
     const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
       row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, allowWorkingTree);
@@ -43437,13 +43436,13 @@ function instanceStateDirIfConfigured(): string | undefined {
 
 /** W1-T10925: the plan root (and its loaded plan) a per-task verb acts on — cwd's, or the instance's
  *  target checkout's when cwd's plan lacks the id. A miss names every plan searched. */
-function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured, readPlan = loadPlan):
+function verbTaskPlan(taskId: string, stateDir: () => string | undefined = instanceStateDirIfConfigured):
   (Extract<VerbPlanRoot, { ok: true }> & { plan: Plan; planPath: string }) | Extract<VerbPlanRoot, { ok: false }> {
   let loaded: Plan | undefined;
   const located = resolveVerbPlanRoot(taskId, {
     cwdRoot: repoRoot,
     stateDir,
-    holds: (root, id) => (loaded = readPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
+    holds: (root, id) => (loaded = loadPlan(join(root, "plan", "tasks.yaml"))).byId.has(id),
   });
   return located.ok ? { ...located, plan: loaded!, planPath: join(located.root, "plan", "tasks.yaml") } : located;
 }

@@ -19,7 +19,7 @@ import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-ca
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
 import {
-  APPROVE_RELEASE_REFUSED_STEP, productionStuckStatePorts, productionStuckStateProbe, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
+  APPROVE_RELEASE_REFUSED_STEP, opsRecordDigest, productionStuckStatePorts, productionStuckStateProbe, publicRecordDigest, readApproveRelease, runStuckStateGardener, scanStuckState,
 } from "#src/lib/stuck-state-gardener.js";
 import { composeSecondaryPlan, findApproveReleasePlan, loadLocalReleasePlan, readReleasePublicPlan, type ReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -231,26 +231,34 @@ test("W1-T13785 criterion 4: the ops clearing event follows the catalog's defaul
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
-test("W1-T13785 criterion 4: a public replay waits while both public views fail strict validation", async t => {
+test("W1-T13785 criterion 4: a pinned public replay waits for a strict working-tree repair after the ops duplicate clears", async t => {
   const { fx, main, ports, rows, pass, approved } = await refusalFixture(t);
   const invalid = PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]);
-  main.publish(invalid);
+  const publicCommit = main.publish(invalid);
   writeFileSync(main.planPath, invalid);
-  fx.set(record("OPS-GOOD"));
   const [item] = scanStuckState(rows).open;
-  assert.ok(item);
+  assert.ok(item?.publicRelease?.publicCommit);
   const current = (await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true })).plan.byId.get("PUB-2")!;
   const digest = publicRecordDigest(current);
+  assert.equal(item.digest, digest);
+  assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "held" });
+  await pass();
+
+  fx.set(record("OPS-GOOD"));
+  const opsCommit = fx.commit();
   assert.deepEqual(await ports.probe(item), { present: true, digest, reason: "public-replay-plan-invalid" });
   await pass();
   await pass();
   assert.deepEqual(approved, [], "no replay while origin/main's approve would refuse the plan");
 
-  main.publish(PUBLIC_TEXT);
+  writeFileSync(main.planPath, PUBLIC_TEXT);
+  assert.equal(main.head(), publicCommit);
+  assert.equal(fx.commit(), opsCommit);
   assert.deepEqual(await ports.probe(item), { present: false, digest });
   await pass();
   await pass();
   assert.deepEqual(approved, [{ id: "PUB-2", pin: operatorReleasePin(current) }]);
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => [row.exit_code, row.events]), [[0, ["public-working-tree"]]]);
   assert.deepEqual(steps(rows, "stuck_state.record_changed"), []);
 });
 
@@ -528,4 +536,46 @@ test("W1-T13785 criterion 5: approve uses the strict fallback for ops releases b
   assert.deepEqual(await approve("OPS-CHILD"), { outcome: "held", hold: { reason: BAD_EDGE, task: "OPS-BAD", dependsOn: MISSING } });
   assert.deepEqual(await approve("OPS-ON-DUP"), { outcome: "held", hold: { reason: "duplicate_task_id", task: "PUB-DUP" } });
   assert.deepEqual(await approve("OPS-ON-REV"), { outcome: "held", hold: REV_HOLD });
+});
+
+test("W1-T13785 criterion 4: an existing ops refusal uses the same strict fallback in the probe and approve", async t => {
+  const id = "OPS-ON-BOOT";
+  const main = publicMain(t, PUBLIC_TEXT);
+  const fx = opsCatalog(t, SOUND_OPS + record(id, ["PUB-BOOT"]));
+  const rows: Row[] = [];
+  const approve = () => readApproveRelease(id, loadPlan(main.planPath), main.dir, fx.lookup,
+    row => rows.push({ ts: iso(NOW), ...row }));
+  assert.deepEqual(await approve(), { outcome: "held", hold: { reason: BAD_EDGE, task: id, dependsOn: "PUB-BOOT" } });
+  const [item] = scanStuckState(rows).open;
+  assert.ok(item?.digest);
+  assert.equal(item.publicRelease, undefined);
+  const retries: string[][] = [];
+  const ports = {
+    ...productionStuckStatePorts({
+      stateDir: fx.stateDir, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [], api: fx.api,
+      log: (step, extra) => void rows.push({ ts: iso(NOW + MIN), step, ...extra }),
+      escalate: () => null, destinationRead: async () => undefined,
+      approve: async (...args) => { retries.push(args); return (await approve())?.outcome === "found" ? 0 : 1; },
+    }),
+    readRows: () => rows, nowMs: () => NOW + MIN,
+  };
+  const publicCommit = main.publish(PUBLIC_TEXT + record("PUB-REV", ["OPS-GOOD"]));
+  const opsCommit = fx.commit();
+  assert.deepEqual(await ports.probe(item), { present: true, reason: "held" });
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, []);
+
+  writeFileSync(main.planPath, PUBLIC_TEXT + record("PUB-BOOT"));
+  assert.equal(main.head(), publicCommit);
+  assert.equal(fx.commit(), opsCommit);
+  const release = await approve();
+  assert.equal(release?.outcome, "found");
+  assert.equal(release.catalog, "ops");
+  const digest = opsRecordDigest(release.plan.byId.get(id)!);
+  assert.equal(digest, item.digest);
+  assert.deepEqual(await ports.probe(item), { present: false, digest });
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, [[id]]);
+  assert.deepEqual(steps(rows, "stuck_state.retried").map(row => [row.exit_code, row.events]), [[0, ["public-working-tree"]]]);
 });

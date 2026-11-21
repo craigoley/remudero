@@ -1,5 +1,6 @@
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { test, type TestContext } from "node:test";
 
@@ -16,9 +17,11 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
+import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
 import { approveInChild, productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
 import { approveCommand, approveParkedTask, namesATask, stripRepoRootFlag } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.
@@ -874,6 +877,44 @@ test("W1-T13785 criterion 2: an unreadable ops catalog leaves a deferred origin/
   assert.equal(code, 0);
   assert.equal(host.calls.length, 1, "strict fallback reuses the unsuccessful catalog read");
   assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(local)]);
+});
+
+test("W1-T13785 criterion 2: approve skips an invalid cwd plan and releases the daemon target's copy during an ops outage or shutdown", t => {
+  const cwd = publicMainAt(t, shardText(PUBLIC_ID) + dependingOn(DEPENDANT_ID, OPS_ID));
+  writeFileSync(join(cwd.dir, "plan", "policy.yaml"), "risk: { verifyHumanReleaseEnabled: { value: true, origin: fixture } }\n");
+  assert.throws(() => loadPlan(cwd.planPath), /depends_on unknown task/, "cwd contains the id, but the strict loader rejects the plan");
+  const hosts = ["offline", "off"].map(destination => {
+    const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" });
+    writeFileSync(host.planPath, shardText(PUBLIC_ID).replace(`Fixture ${PUBLIC_ID}`, "Daemon target copy"));
+    assert.deepEqual(writeDaemonTargetRecord(host.stateDir, {
+      owner: "fixture", repo: "consumer", isSelf: false, checkoutRoot: host.root,
+    }), { written: true });
+    if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+    return host;
+  });
+  const child = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", `
+    const { approveCommand } = await import(process.argv[2]);
+    const results = [];
+    for (const root of process.argv.slice(3)) {
+      let reads = 0;
+      const code = await approveCommand([process.argv[1]], {
+        config: { root },
+        taskLookup: { api: async () => { reads++; throw new Error("fixture ops outage"); } },
+      });
+      results.push({ code, reads });
+    }
+    console.log(JSON.stringify(results));
+  `, PUBLIC_ID, join(REPO_ROOT, "src", "run-task.ts"), ...hosts.map(host => host.root)], {
+    cwd: cwd.dir, encoding: "utf8", timeout: 60_000,
+  });
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout.trim().split("\n").at(-1)!), [{ code: 0, reads: 1 }, { code: 0, reads: 0 }], child.stderr);
+  for (const host of hosts) {
+    const target = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
+    const pin = pinBeforeThisTask(target);
+    assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pin]);
+    assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pin);
+  }
 });
 
 test("W1-T13785 criterion 2: the public loader still normalizes scalar dependencies before an ops outage or destination shutdown", async t => {
