@@ -456,8 +456,6 @@ interface PrePushGate {
   args: string[];
   input: string;
   env: NodeJS.ProcessEnv;
-  /** A required gate's verdict holds only for the remote tip it read: the push's compare-and-set on that tip. */
-  lease?: string;
 }
 
 /**
@@ -510,8 +508,7 @@ function* prePushGateSteps(
   }
   if (remoteSha === localSha) return undefined; // up to date: git sends nothing and runs no pre-push
   if (required && remoteSha !== ZERO_SHA) {
-    // The push below is leased on this tip, and a lease alone would let a push replace a tip it does not
-    // descend from. Only a tip the head descends from may be updated, so the leased push is a fast-forward.
+    // A required gate only judges fast-forwards. The sending push checks that the tip is still this one.
     try {
       yield* step(() => read(["merge-base", "--is-ancestor", remoteSha, localSha]));
     } catch {
@@ -524,8 +521,7 @@ function* prePushGateSteps(
   const env = prePushGateEnv();
   // A required gate has no opt-out: the hook's RMD_PREPUSH_GATES=0 escape hatch is not forwarded to it.
   if (required) delete env.RMD_PREPUSH_GATES;
-  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env,
-    ...(required ? { lease: `--force-with-lease=${remoteRef}:${remoteSha === ZERO_SHA ? "" : remoteSha}` } : {}) };
+  return { hook, args: [remote, url], input: `${localRef} ${localSha} ${remoteRef} ${remoteSha}\n`, env };
 }
 
 const GATE_ENV_ALLOWLIST = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "RMD_PREPUSH_GATES"] as const;
@@ -957,15 +953,16 @@ export function worktreePushExecAsync(
       if (outcome !== undefined && opts.stdio !== "ignore") writeThrough(outcome.refused ? outcome.err : outcome.out);
       if (outcome?.refused) throw gateRefusal(worktreePath, pushArgs, outcome.err);
     }
-    // A required gate judged the push from the remote tip it read. The lease makes the push a compare-and-set on
-    // that exact tip: Git rejects it if the remote moved at all, even to an ancestor of the head, and, the tip
-    // being an ancestor of the head (checked above), it can only fast-forward and never replace a commit.
-    const sent = gate?.lease === undefined ? pushArgs : [pushArgs[0]!, gate.lease, ...pushArgs.slice(1)];
+    // Verify the advertised ref update in Git's hook. Git itself checks that the ref still has that old
+    // value when the remote applies the fast-forward.
+    const expectedPrePushInput = requireGate ? gate?.input : undefined;
     signal?.throwIfAborted();
     await pushWithAuthRetry(async (env) => {
       try {
         signal?.throwIfAborted();
-        await (push ?? hostWorktreeGitAsync)(worktreePath, sent, { stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal });
+        await (push ?? hostWorktreeGitAsync)(worktreePath, pushArgs, {
+          stdio: opts.stdio === "ignore" ? "ignore" : "inherit-stdout", env, signal, expectedPrePushInput,
+        });
         signal?.throwIfAborted();
       } catch (err) {
         if (opts.stdio !== "ignore") writeThrough(err);

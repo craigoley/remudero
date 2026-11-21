@@ -170,38 +170,30 @@ function registeredName(escaped: string): string {
   });
 }
 
-const regexLiteral = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-
-/** Select exactly one named test and its ancestors with the documented public filters of `node --test`.
- *  Node runs a test when `--test-name-pattern` matches its name, an ancestor's name, or its name joined to its
- *  ancestors' names by single spaces (trimmed); a filtered `test()` never runs its body, so its subtests never
- *  register. Admitting each ancestor's space-joined name lets a dynamic parent register its subtests, and Node
- *  then admits every one of them, so `--test-skip-pattern` removes each test whose name and space-joined name
- *  are both off the target's path; Node runs a test only when both filters admit it. The space join can still
- *  name a different path, so the rerun's TAP rows are read by their ancestry afterwards ({@link pathRows}). */
+/** Use the pinned Node runner's registration filter with individual ancestor names. The name filter
+ *  flag enables that hook, and the preload runs only in the file's test process. */
 function isolatedTestArgs(title: string): string[] {
   const names = title.split(" > ").map(registeredName);
-  const joined = names.map((_, index) => names.slice(0, index + 1).join(" ").trim());
-  // Node also tests the skip pattern against each ancestor, up to its unnamed root (`<root>`, joined name "").
-  const onPath = [...new Set([...names, ...joined, "<root>", ""])];
-  return [`--test-name-pattern=^(?:${joined.map(regexLiteral).join("|")})$`,
-    `--test-skip-pattern=^(?!(?:${onPath.map(regexLiteral).join("|")})$)`];
-}
-
-/** The rows that belong to the target: the target and its ancestors, read by their ancestry in the TAP nesting
- *  (`a > b c`), never by the space-joined name the filters match. A test whose space-joined name collides with the
- *  path's (`a b c`) can still run; it is named in the log and dropped, so its result never counts as the target's.
- *  The run's summary is still checked against every row, the dropped ones included. */
-function pathRows(rows: FailingTest[], title: string, tree: string, file: string, log: (line: string) => void): FailingTest[] {
-  const joined = (name: string) => name.split(" > ").join(" ");
-  const kept: FailingTest[] = [];
-  for (const row of rows) {
-    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) { kept.push(row); continue; }
-    log(joined(row.title) === joined(title) || joined(title).startsWith(`${joined(row.title)} `)
-      ? `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which ran only because its space-joined name matches ${JSON.stringify(title)}'s`
-      : `${tree} ${file}: ignored ${JSON.stringify(row.title)}, which is not ${JSON.stringify(title)} or one of its ancestors`);
+  const preload = `
+if (process.env.NODE_TEST_CONTEXT === "child-v8") {
+  const names = ${JSON.stringify(names)};
+  const { Test, Suite } = process.getBuiltinModule("internal/test_runner/test") ?? {};
+  if (typeof Test?.prototype.willBeFilteredByName !== "function" || typeof Suite?.prototype.createBuild !== "function") {
+    throw new Error("hand-ship: this Node runner cannot isolate tests by ancestry");
   }
-  return kept;
+  Test.prototype.willBeFilteredByName = function () {
+    const path = [];
+    for (let test = this; test.parent !== null; test = test.parent) path.unshift(test.name);
+    return path.length > names.length || path.some((name, index) => name !== names[index]);
+  };
+  // A describe callback builds the suite before Node applies the runtime filter.
+  const build = Suite.prototype.createBuild;
+  Suite.prototype.createBuild = function () {
+    return this.filteredByName ? Promise.resolve() : build.call(this);
+  };
+}
+`;
+  return ["--expose-internals", "--test-name-pattern=.", "--import", `data:text/javascript,${encodeURIComponent(preload)}`];
 }
 
 /** A unique registration expression can be matched across line shifts. Identical expressions
@@ -655,7 +647,7 @@ const launchInDir = 'if [ -n "$1" ]; then PATH="$1:$PATH"; export PATH; fi; ' +
 
 async function hostCommand(host: ShipHost, run: ShipRun, args: string[], opts: ChildOptions = {}): Promise<CommandResult> {
   if (host.target === "local") {
-    const env = (await authorTools()).authorEnvironment(process.env);
+    const env = opts.env ?? (await authorTools()).authorEnvironment(process.env);
     if (host.pathPrefix) env.PATH = `${host.pathPrefix}:${env.PATH ?? "/usr/bin:/bin"}`;
     return runChild(run, args[0], args.slice(1), { ...opts, env });
   }
@@ -743,7 +735,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         priority = requested;
         run.log(`running author preflight at ${priority} priority`);
         const env = (await authorTools()).authorEnvironment(process.env);
-        if (isAbsolute(nodeExecutable)) env.PATH = `${dirname(nodeExecutable)}${delimiter}${env.PATH ?? ""}`;
+        if (isAbsolute(nodeExecutable)) env.PATH = `${dirname(nodeExecutable)}${delimiter}${env.PATH ?? "/usr/bin:/bin"}`;
         const result = await hostCommand(host, run, node(["--import", "tsx", authorEntry,
           "--head-ref", source.branch, "--head-sha", source.head]), { cwd: headDir, capture: false, record: true, env });
         if (result.code === null || result.code > 3) throw new Error(`author preflight did not finish (exit ${result.code ?? "signal"})`);
@@ -793,7 +785,8 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           result.code !== (summary.fail === 0 ? 0 : 1) ||
           (title === undefined && result.code === 0 && summary.pass === 0) ||
           (title !== undefined && tree === "head" && targets.length !== (expectedCount ?? 1)) ||
-          results.some((test) => (test.fileLevel && test.failed) || (test.file !== null && test.file !== file))) {
+          results.some((test) => (test.fileLevel && test.failed) || (test.file !== null && test.file !== file) ||
+            (title !== undefined && !test.fileLevel && test.title !== title && !title.startsWith(`${test.title} > `)))) {
           throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
             `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)})`);
         }
@@ -809,7 +802,7 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
           }
           for (const row of redTargets) row.declaration = identify(row.location);
         }
-        return title === undefined ? results : pathRows(results, title, tree, file, run.log);
+        return results;
       },
       close,
     };

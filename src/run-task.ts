@@ -45786,6 +45786,11 @@ async function main(
     console.log(commandHelp(helpSpec));
     process.exit(0);
   }
+  // Stopping a hand ship writes to the existing run in instance state, independent of the checkout.
+  if (cmd === "hand-worktree" && rest[0] === "ship" && rest[1] === "stop") {
+    return await flushThenExit(await withSelectedRegistryContext(registryObserver,
+      () => dispatchCommand(cmd, rest, REGISTRY, USAGE)));
+  }
   // THE GITHUB APP IS THE FLEET HOST'S ONLY CREDENTIAL, and until now only `daemonCommand` and
   // `serveCommand` minted from it. `gh auth login` is never run there and the boot env deliberately
   // carries NO `GH_TOKEN` (deploy/recycle-container.sh, see github-app.ts's header), so every OTHER

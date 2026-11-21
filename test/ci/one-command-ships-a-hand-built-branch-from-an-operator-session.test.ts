@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 // @ts-expect-error The installed author entrypoint has no declaration file.
 import { authorPushEligibility, failingTestsFromTap, pinnedNodeReexec, testSummary } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
+import { FIXTURE_CONFIG_PATH_SEGMENTS } from "#src/lib/config.js";
 import { configureGithubInstallationBudget } from "#src/lib/github-transport.js";
 import { GhReadBroker, serveGhReadBroker, type GhUpstreamExec, type GhUpstreamResult } from "#src/lib/gh-read-broker.js";
 import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
@@ -180,8 +181,35 @@ test("W1-T12169 criterion 4 gives the installed receipt judge complete compariso
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
 });
 
-test("W1-T12169 criterion 5 stops the active run by its id and lets the next queued run proceed", async (t) => {
+test("W1-T12169 criterion 5 stops the active run by id through the CLI from a stale checkout with an overlapping edit", async (t) => {
   const f = fixture(t);
+  const upstream = gitRepo({ scope: t });
+  const origin = gitRepo({ scope: t, bare: true });
+  upstream.git("push", origin.dir, "main");
+  const local = gitRepo({ scope: t, cloneFrom: origin.dir });
+  const originalHead = local.git("rev-parse", "HEAD");
+  writeFileSync(join(upstream.dir, "README.md"), "incoming edit\n");
+  upstream.git("commit", "-am", "advance main");
+  upstream.git("push", origin.dir, "main");
+  writeFileSync(join(local.dir, "README.md"), "operator edit\n");
+
+  const home = join(f.root, "home");
+  const config = join(home, ...FIXTURE_CONFIG_PATH_SEGMENTS);
+  mkdirSync(dirname(config), { recursive: true });
+  writeFileSync(config, JSON.stringify({ root: f.root, claudeBin: process.execPath }));
+  const stateDir = join(f.root, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "hand-ship-hosts.json"), JSON.stringify([mac, linux]));
+  const options = { ...f.options, stateDir };
+  const cli = (args: string[]) => spawnSync(join(REPO_ROOT, "bin/rmd"), ["hand-worktree", "ship", ...args], {
+    cwd: local.dir, encoding: "utf8", timeout: 20_000,
+    env: { ...process.env, HOME: home, CI: "", GITHUB_ACTIONS: "", RMD_SELF_SYNC_DONE: "",
+      RMD_SELECTED_INSTANCE_REGISTRY: undefined, RMD_INSTANCE_REGISTRY: undefined, GH_TOKEN: "fixture" },
+  });
+  const refused = cli(f.args);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /refusing to auto-sync/);
+
   let started!: () => void;
   const entered = new Promise<void>((resolve) => { started = resolve; });
   let resolveStopped!: () => void;
@@ -199,18 +227,27 @@ test("W1-T12169 criterion 5 stops the active run by its id and lets the next que
       return receipt();
     },
   });
-  const first = runHandShip(f.args, f.options, f.effects);
+  const first = runHandShip(f.args, options, f.effects);
   await entered;
-  const state = join(f.root, "hand-ship");
+  const state = join(stateDir, "hand-ship");
   const id = readdirSync(state).find((name) => /^rmd-ship-/.test(name))!;
-  const second = runHandShip(f.args, f.options, f.effects);
-  await delay(50);
-  assert.equal(launches, 1);
-  assert.equal(await runHandShip(["stop", "../invalid"], f.options, f.effects), 2);
-  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 0);
+  const second = runHandShip(f.args, options, f.effects);
+  try {
+    await delay(50);
+    assert.equal(launches, 1);
+    assert.equal(cli(["stop", "../invalid"]).status, 2);
+    const stop = cli(["stop", id]);
+    assert.equal(stop.status, 0, stop.stderr || stop.stdout);
+    assert.match(stop.stdout, new RegExp(`^${id}: stop requested`, "m"));
+    assert.equal(local.git("rev-parse", "HEAD"), originalHead);
+    assert.equal(readFileSync(join(local.dir, "README.md"), "utf8"), "operator edit\n");
+  } finally {
+    if (!existsSync(join(state, id, "stop"))) await runHandShip(["stop", id], options, f.effects);
+    await Promise.all([first, second]);
+  }
   assert.equal(await first, 1);
   assert.equal(await second, 0);
-  assert.equal(await runHandShip(["stop", id], f.options, f.effects), 1);
+  assert.equal(await runHandShip(["stop", id], options, f.effects), 1);
   assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
   assert.equal(launches, 2);
   assert.equal(f.calls.filter((call) => call === `push ${head}`).length, 1);
@@ -475,7 +512,7 @@ test("the local launcher reads Git, opens the committed bundle and cuts unchange
   assert.equal(repo.git("branch", "--show-current"), branch);
 });
 
-test("the launcher passes the frozen head to preflight under nice and reads complete TAP from each checkout", async (t) => {
+test("W1-T12169 criterion 2: nice runs preflight with the pinned Node on PATH for its child commands", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   const base = seedHandBranch(repo, true);
@@ -485,6 +522,12 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
   const defaults = handShipEffects(() => 0);
   const spawned: string[][] = [];
   let receiptBound = true;
+  const otherBin = join(f.root, "other-bin");
+  mkdirSync(otherBin);
+  writeFileSync(join(otherBin, "node"), "#!/bin/sh\necho other node\n", { mode: 0o700 });
+  const originalPath = process.env.PATH;
+  process.env.PATH = [otherBin, "/usr/bin", "/bin"].join(delimiter);
+  t.after(() => { if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath; });
   const run: Parameters<HandShipEffects["readSource"]>[1] = {
     dir: f.root, signal: new AbortController().signal, log: f.options.write,
     spawn(command, args, options) {
@@ -496,7 +539,9 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
         writeFileSync(join(cwd, "coverage/preflight-author.json"), JSON.stringify({ ...redReceipt(["existing red"]),
           headSha: repo.git("rev-parse", "HEAD"), baseSha: base, version: 1, dryRun: false,
           publicationIdentity: { state: "passed", headRef: receiptBound ? branch : "different-branch" } }));
-        return spawn(process.execPath, ["-e", "process.stdout.write('preflight output'); process.exitCode = 1"], options);
+        const preflight = 'const { execFileSync } = require("node:child_process"); ' +
+          'process.stdout.write("preflight child node=" + execFileSync("node", ["-p", "process.execPath"], { encoding: "utf8" })); process.exitCode = 1;';
+        return spawn(command, [...args.slice(0, 3), "-e", preflight], options);
       }
       const tap = `not ok 1 - existing red\n  ---\n  location: '${join(cwd, file)}:1:1'\n  ...\n` +
         "# tests 1\n# suites 0\n# pass 0\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n";
@@ -521,12 +566,7 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true, declaration: undefined },
     ]);
-    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^(?:existing red)$"), "the isolated rerun selects the named failure");
-    assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
-    assert.ok(!spawned.at(-1)!.some((arg) => /expose-internals|node:internal/.test(decodeURIComponent(arg))), "with public runner flags only");
-    // A row that is neither the target nor one of its ancestors is named and dropped, never read as the target.
-    assert.deepEqual(await workspace.rerun("main", file, base, "other"), []);
-    assert.match(f.lines.join("\n"), /main test\/ci\/example\.test\.ts: ignored "existing red", which is not "other" or one of its ancestors/);
+    await assert.rejects(workspace.rerun("main", file, base, "other"), /isolated rerun had no complete test result/);
     assert.deepEqual(await workspace.rerun("main", file, base), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
@@ -534,7 +574,9 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     receiptBound = false;
     await assert.rejects(workspace.preflight("low"), /did not issue a receipt for this branch/);
     const log = join(f.root, "commands.log");
-    assert.match(readFileSync(log, "utf8"), /not ok 1 - existing red/);
+    const output = readFileSync(log, "utf8");
+    assert.ok(output.includes(`preflight child node=${realpathSync(pinned)}\n`), output);
+    assert.match(output, /not ok 1 - existing red/);
     rmSync(log);
     mkdirSync(log);
     await assert.rejects(workspace.preflight("low"), /EISDIR/);
@@ -664,8 +706,7 @@ test("the source publisher sends one non-forced refspec pinned to the receipt he
   const run = offlinePushRun(f);
   const source = await defaults.readSource(repo.dir, run);
   await withLiveWritesAllowed(() => defaults.push(source, run));
-  // No `+`: a plain fast-forward refspec, leased on the absent ref the gate read (an empty lease: the ref must not exist).
-  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
   assert.equal(readFileSync(gate, "utf8"), "pass\n", "the harness gate runs even where the checkout disables hooks");
   repo.git("commit", "--allow-empty", "-m", "head moved after receipt");
   await assert.rejects(defaults.push(source, run), /changed during verification/);
@@ -1335,7 +1376,7 @@ function realReceipt(repo: GitRepo, headSha: string, baseSha: string): ShipRecei
   };
 }
 
-test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic parent with public runner filters, and no sibling runs", async (t) => {
+test("W1-T12169 criterion 3: the rerun isolates one dynamic nested test before sibling and namesake callbacks can run", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   seedHandBranch(repo, true);
@@ -1364,9 +1405,10 @@ test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic 
     "",
   ].join("\n"));
   writeFileSync(join(repo.dir, collision), [
-    'import { test } from "node:test";',
-    'test("a", async (context) => { await context.test("b c", () => {}); });',
+    'import { describe, test } from "node:test";',
+    'test("a", async (context) => { await context.test("b c", () => console.log("RAN nested target")); });',
     'test("a b c", () => console.log("RAN COLLISION"));',
+    'describe("unrelated suite", () => { console.log("RAN COLLISION SUITE"); });',
     "",
   ].join("\n"));
   repo.git("add", file, collision, "test/setup/tmp-hygiene.ts");
@@ -1390,8 +1432,7 @@ test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic 
     from = readFileSync(commands, "utf8").length;
     const collided = await workspace.rerun("head", collision, source.head, "a > b c");
     assert.deepEqual(collided.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(collided));
-    assert.deepEqual(ranSince(from), ["COLLISION"], "the colliding test runs, and only its row is dropped");
-    assert.match(f.lines.join("\n"), /ignored "a b c", which ran only because its space-joined name matches "a > b c"'s/);
+    assert.deepEqual(ranSince(from), ["nested target"], "the namesake and the unrelated suite never run");
     from = readFileSync(commands, "utf8").length;
     // Node's TAP writes `#` as `\#` and `\` as `\\`; the rerun selects the name Node registered.
     const escaped = await workspace.rerun("head", file, source.head, "hash \\# and back\\\\slash");
@@ -1465,7 +1506,7 @@ test("W1-T12169 criterion 4: a remote already at the verified head gets no push,
   // Positive control: a remote without the head runs the gate and then pushes.
   await withLiveWritesAllowed(() => defaults.push(source, offlinePushRun(f)));
   assert.equal(readFileSync(mark, "utf8"), "ran\n");
-  assert.deepEqual(requests, [["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `${source.head}:refs/heads/${branch}`]]);
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
 });
 
 test("W1-T12169 criterion 5: a stoppable ship read still goes through a live broker, and a stop ends its wait there", async (t) => {
@@ -1514,8 +1555,8 @@ test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a 
   writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
   // "a" > "b c" and the top-level "a b c" share the space-joined name the runner's filters match.
   const tests = (nestedRed: boolean, topRed: boolean) => ['import { test } from "node:test";',
-    `test("a", async (context) => { await context.test("b c", () => { ${nestedRed ? 'throw new Error("nested red");' : ""} }); });`,
-    `test("a b c", () => { ${topRed ? 'throw new Error("top-level red");' : ""} });`, ""].join("\n");
+    `test("a", async (context) => { await context.test("b c", () => { console.log("RAN NESTED"); ${nestedRed ? 'throw new Error("nested red");' : ""} }); });`,
+    `test("a b c", () => { console.log("RAN NAMESAKE"); ${topRed ? 'throw new Error("top-level red");' : ""} });`, ""].join("\n");
   // Main: the nested test passes and its namesake fails. Read as the target, the namesake would make it "also failing on main".
   writeFileSync(join(repo.dir, file), tests(false, true));
   repo.git("add", file, "test/setup/tmp-hygiene.ts");
@@ -1536,7 +1577,9 @@ test("W1-T12169 criterion 3: a nested failure whose space-joined name matches a 
   assert.doesNotMatch(log, /comparison unavailable|also failing on main/, log);
   assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a > b c$/m);
   assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: a$/m);
-  assert.match(log, /main test\/ci\/example\.test\.ts: ignored "a b c", which ran only because its space-joined name matches/);
+  const reruns = readFileSync(join(f.root, "commands.log"), "utf8");
+  assert.equal([...reruns.matchAll(/# RAN NESTED/g)].length, 2, "the target ran once on each revision");
+  assert.doesNotMatch(reruns, /RAN NAMESAKE/, "the colliding callback ran on neither revision");
   assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
 });
 
@@ -1567,7 +1610,7 @@ test("W1-T12169 criterion 3: a test red on head and main stays also failing on m
   assert.ok(f.calls.includes(`push ${source.head}`));
 });
 
-test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a tip that moves after the gate is never fast-forwarded", async (t) => {
+test("W1-T12169 criterion 4: Git sends a plain fast-forward only for the tip that passed the gate", async (t) => {
   const f = fixture(t);
   const repo = gitRepo({ scope: t });
   const base = seedHandBranch(repo);
@@ -1591,11 +1634,11 @@ test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a t
     git: ((cwd, args, options) => hostWorktreeGitAsync(cwd, args[0] === "ls-remote" ? toRemote(args) : args, options)) satisfies typeof hostWorktreeGitAsync };
   const source = await defaults.readSource(repo.dir, run);
   writeFileSync(join(f.root, "advance"), ancestor);
-  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /stale info|rejected/);
+  await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /remote update differs from the ref checked by the required pre-push gate/);
   assert.equal(readFileSync(mark, "utf8"), "ran\n");
-  assert.deepEqual(pushes, [["push", `--force-with-lease=refs/heads/${branch}:${base}`, "origin", `${verifiedHead}:refs/heads/${branch}`]]);
+  assert.deepEqual(pushes, [["push", "origin", `${verifiedHead}:refs/heads/${branch}`]]);
   assert.equal(tip(), ancestor, "the gate judged the push from the base; a remote that moved since rejects it");
-  // A tip the head does not descend from is refused before the gate, so the lease can never replace a commit.
+  // A tip outside the verified head's history is refused before the gate.
   repo.git("switch", "-q", "--detach", base);
   repo.git("commit", "--allow-empty", "-m", "someone else's commit");
   const foreign = repo.git("rev-parse", "HEAD");
@@ -1604,9 +1647,10 @@ test("W1-T12169 criterion 4: the push is leased on the tip its gate read, so a t
   await assert.rejects(withLiveWritesAllowed(() => defaults.push(source, run)), /is not an ancestor of .* so this push could only replace it/);
   assert.equal(pushes.length, 1);
   assert.equal(tip(), foreign);
-  // Positive control: an unmoved tip the head descends from takes the leased fast-forward.
+  // Positive control: the same plain push fast-forwards an unmoved tip.
   execFileSync("git", ["--git-dir", remote, "update-ref", `refs/heads/${branch}`, base]);
   writeFileSync(join(f.root, "advance"), base);
   await withLiveWritesAllowed(() => defaults.push(source, run));
+  assert.deepEqual(pushes[1], pushes[0]);
   assert.equal(tip(), verifiedHead);
 });

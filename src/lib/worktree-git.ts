@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawn as spawnChild } from "node:child_process";
-import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,6 +10,7 @@ import { systemClock } from "./clock.js";
 import { performance } from "node:perf_hooks";
 import { execFileRouted, spawnRoute } from "./spawn-helper.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
 import { DANGLING_REF_MAX_BUFFER, retryAfterDanglingRefRepair, retryAfterDanglingRefRepairAsync, type RepairGit } from "./git-fetch-retry.js";
 
 /**
@@ -445,6 +447,8 @@ export interface HostWorktreeGitOptions {
   killSignal?: NodeJS.Signals;
   /** Cancels an in-flight Git child when an owning operation is stopped. */
   signal?: AbortSignal;
+  /** The async push must propose exactly the ref update approved by the harness gate. */
+  expectedPrePushInput?: string;
   /** `latin1` maps each stdout byte to one char, so `Buffer.from(out, "latin1")` is the bytes exactly: a blob read
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
@@ -613,6 +617,25 @@ function stoppableGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Om
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs, opts.signal);
+  if (opts.expectedPrePushInput !== undefined) {
+    const hooks = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}push-input-`));
+    try {
+      writeFileSync(join(hooks, "expected"), opts.expectedPrePushInput, { mode: 0o600 });
+      writeFileSync(join(hooks, "pre-push"), `#!/bin/sh
+/usr/bin/cmp -s "${"$"}{0%/*}/expected" - && exit 0
+echo "git-push: the remote update differs from the ref checked by the required pre-push gate" >&2
+exit 1
+`, { mode: 0o700 });
+      return await runPinnedGitAsync(pin, args, opts, [...overrides, ["core.hooksPath", hooks]]);
+    } finally {
+      rmSync(hooks, { recursive: true, force: true });
+    }
+  }
+  return await runPinnedGitAsync(pin, args, opts, overrides);
+}
+
+async function runPinnedGitAsync(pin: PinnedWorktreeGit, args: readonly string[], opts: HostWorktreeGitOptions,
+  overrides: ReadonlyArray<readonly [string, string]>): Promise<string> {
   const { stdio: _stdio, input, signal, ...spawn } = spawnOptions(pin, opts, overrides);
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
