@@ -964,7 +964,9 @@ export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
  *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
  *  `pr.terminal` row the direct merge writes, which is the only record of most merges. W1-T14137: `pr.opened` names
  *  the PR of a run whose verdict omits it, so a run counted apart keeps that PR's later merge out of the comparison. */
-export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done", "pr.opened"];
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = [
+  "skills.selection", "pr.opened", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done",
+];
 /** Bootstrap draws for the cost comparison, the count retireCertainties uses. */
 export const SKILL_COST_BOOTSTRAP_DRAWS = 400;
 /** One-sided confidence for the cost rule and the percentile of verdict-to-merge time that settles a run. */
