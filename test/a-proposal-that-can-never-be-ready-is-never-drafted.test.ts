@@ -199,6 +199,35 @@ test("daemon readiness setup fails open and logs the unreadable readiness contex
   assert.deepEqual(unavailable.map((l) => l.extra.error), ["main commit unavailable for readiness"]);
 });
 
+test("daemon readiness fails open on EISDIR and still honors archived clean draft receipts", async (t) => {
+  const root = ownedFixtureDir(t, "draft-readiness-eisdir").dir;
+  const stateDir = join(root, "state");
+  mkdirSync(join(stateDir, LEDGER_FILENAME), { recursive: true });
+  const fresh = proposal("P-UNREADABLE-CONTEXT");
+  const clean = proposal("P-ALREADY-DRAFTED");
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [fresh, clean] }));
+  writeFileSync(join(stateDir, "ledger.2026-11-19T00-00-00-000Z.ndjson"), JSON.stringify({
+    step: "inbox.drafted", proposal_id: clean.id, draft_input_key: draftInputKey(clean), lint_clean: true,
+  }) + "\n");
+
+  const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const drafted: string[] = [];
+  const hook = buildInboxDraftHook("owner", "repo", { root } as Config, "RUN-EISDIR", (step, extra = {}) => {
+    logs.push({ step, extra });
+  }, async (due) => {
+    drafted.push(...due.map((p) => p.id));
+    return [];
+  }, undefined, () => "fixture");
+
+  await hook();
+
+  assert.deepEqual(drafted, [fresh.id]);
+  const unavailable = logs.filter((row) => row.step === "inbox.draft_readiness_unavailable");
+  assert.equal(unavailable.length, 1);
+  assert.match(String(unavailable[0]?.extra.error), /EISDIR/);
+  assert.equal(logs.some((row) => row.step === "inbox.draft_rung.error"), false);
+});
+
 test("manual inbox force still drafts a named proposal that daemon selection excludes", () => {
   const declined = proposal("P-DECLINED");
   const readiness = ctx({ isDeclined: () => "operator declined it" });

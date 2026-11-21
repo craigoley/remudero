@@ -129,22 +129,32 @@ test("W1-T13864 criterion 3: a clean completion clears its failure key and stays
   }, laneB), [reframed]);
 });
 
-test("W1-T13864 criterion 4: a proposal whose anchors changed or that got a new reframe round is still drafted", async t => {
+test("W1-T13864 criterion 4: unseen anchors and reframes draft, and returning to clean anchors stays retired", async t => {
   const moved: Proposal = { ...bare, evidenceAnchors: [{ pattern: "export function draftsDueOnDaemon", path: "src/lib/inbox.ts", description: "a live anchor" }] };
   const other = { ...bare, id: "P13864-R" };
   const reframed: Proposal = { ...other, reframeHistory: [{ feedback: "narrow it" }] };
-  const fixture = hookFixture(t, [moved, reframed], [cleanRow(bare), cleanRow(other)]);
+  const fixture = hookFixture(t, [bare, other], [cleanRow(other)]);
   const poll = fixture.newHook();
   await poll();
-  assert.deepEqual(fixture.drafted, [moved.id, reframed.id]);
+  assert.deepEqual(fixture.drafted, [bare.id]);
+  fixture.append(cleanRow(bare));
+
+  fixture.setProposals([moved, reframed]);
+  await poll();
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id]);
   fixture.append(cleanRow(moved));
   fixture.append(cleanRow(reframed));
+
   fixture.setProposals([bare, reframed]);
-  await poll();
-  assert.deepEqual(fixture.drafted, [moved.id, reframed.id, bare.id], "only the newest clean input is retired");
+  const restartedPoll = fixture.newHook();
+  await restartedPoll();
+  assert.deepEqual(fixture.drafted, [bare.id, moved.id, reframed.id], "returning to A after B must not draft A again");
+  await restartedPoll();
+  const misses = fixture.logs.filter(row => row.step === "inbox.draft_cache_missing" && row.proposal_id === bare.id);
+  assert.deepEqual(misses.map(row => row.draft_input_key), [draftInputKey(bare)]);
 });
 
-test("W1-T13864 criterion 2: a proposal returning to an older clean input after a newer clean draft is drafted again", () => {
+test("W1-T13864 criterion 2: clean inputs are covered regardless of receipt order or drafting lane", () => {
   const moved: Proposal = { ...bare, evidenceAnchors: anchors };
   const rows: Row[] = [
     { ...cleanRow(bare), ts: "2026-11-20T00:00:00.000Z" },
@@ -153,8 +163,8 @@ test("W1-T13864 criterion 2: a proposal returning to an older clean input after 
   const ctx = { isRatified: () => false, grepAnchorTrue: () => true, openProposalIds: new Set<string>() };
   // The union reads the live file before the archives, so the newest row can come first.
   for (const draftLedgerRows of [rows, [...rows].reverse()]) {
-    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneA), [bare]);
-    assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneA), []);
+    assert.deepEqual(draftsDueOnDaemon([bare], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
+    assert.deepEqual(draftsDueOnDaemon([moved], {}, {}, 3, { ...ctx, draftLedgerRows }, laneB), []);
   }
 });
 

@@ -503,19 +503,17 @@ export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "refr
   return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
 }
 
-/** Each proposal's input key from its NEWEST lint-clean inbox.drafted row, by `ts`; a later row wins a tie.
- *  An input the proposal has since moved away from is not retained, so returning to it drafts again. */
-export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, string> {
-  const newest = new Map<string, { key: string; at: number }>();
+/** Every input with a lint-clean receipt stays covered when a proposal returns to it. */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const clean = new Map<string, Set<string>>();
   for (const row of rows) {
     if (row.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
       typeof row.draft_input_key !== "string") continue;
-    const parsed = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
-    const at = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
-    const prior = newest.get(row.proposal_id);
-    if (!prior || at >= prior.at) newest.set(row.proposal_id, { key: row.draft_input_key, at });
+    const keys = clean.get(row.proposal_id);
+    if (keys) keys.add(row.draft_input_key);
+    else clean.set(row.proposal_id, new Set([row.draft_input_key]));
   }
-  return new Map([...newest].map(([id, { key }]) => [id, key]));
+  return clean;
 }
 
 /** Failed-attempt identity includes the lead and rescue lanes, so changing lanes allows a retry. */
@@ -580,7 +578,7 @@ export function draftsDueOnDaemon(
     const hasCurrentDraft = cachedInput
       ? draftInputKey(cachedInput) === inputKey
       : Boolean(cached && !isDraftStale(cached, p.evidenceAnchors) && legacyInputMatches);
-    if (clean.get(p.id) === inputKey) {
+    if (clean.get(p.id)?.has(inputKey)) {
       if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
       return false;
     }
