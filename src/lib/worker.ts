@@ -3326,7 +3326,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // W1-T13868: a rung the abort cut short still names the model its responses reported, on the error that replaces it.
           if (cashController.signal.aborted) {
             const reason: unknown = cashController.signal.reason;
-            throw withObservedServedModel(reason instanceof Error ? reason : new Error(String(reason)),
+            // The caller's own reason is thrown unchanged, as throwIfAborted would. Only an object can carry the record.
+            if (reason === null || typeof reason !== "object") throw reason;
+            throw withObservedServedModel(reason as Error,
               { servedModel: rung.servedModel ?? null, ...(rung.servedModelReason ? { servedModelReason: rung.servedModelReason } : {}) });
           }
           rung.promptChars = executionPrompt.length;

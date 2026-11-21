@@ -654,3 +654,14 @@ test("W1-T13868 criterion 1: a call the quiet-worker watchdog ended still record
   const nothing = await runQuietEndedDispatch("codex", async (endRound) => { endRound(); throw new Error("spawn failed"); });
   assert.deepEqual(nothing.rows, [["worker.attempt", undefined, undefined]]);
 });
+
+test("W1-T13868 criterion 1: a cash call cancelled with a structured or primitive reason throws that reason unchanged", async () => {
+  // A caller may abort with a non-Error reason. The rung throws it as throwIfAborted would, and an object still carries the model.
+  const structured = { code: "USER_CANCELLED", message: "the operator cancelled the run" };
+  const cancelled = await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" }, structured as never);
+  assert.equal(cancelled, structured, "the caller's structured reason is thrown unchanged");
+  const detail = spawnFailureDetail(cancelled, true);
+  assert.deepEqual([detail.error_code, detail.served_model], ["USER_CANCELLED", "gpt-5-nano-2025-08-07"]);
+  assert.equal(await runAbandonedCash({ servedModel: "gpt-5-nano-2025-08-07" }, "operator stop" as never), "operator stop",
+    "a primitive reason is thrown unchanged");
+});
