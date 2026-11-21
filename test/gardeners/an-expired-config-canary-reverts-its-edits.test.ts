@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { Clock } from "#src/lib/clock.js";
@@ -17,13 +17,16 @@ import {
   readConfigCanaries,
   runConfigGarden,
   tendConfigCanaries,
+  writeConfigCanaries,
   CANARY_TTL_MS,
   CONFIG_GARDEN_CLASSES,
-  exactLineProofPattern,
-  lineProofMatches,
+  exactLineProof,
+  holdsExactLine,
+  type ConfigEdit,
   type ConfigGardenSources,
 } from "#src/lib/config-gardener.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type GardenLandOpts, type PrState } from "#src/lib/gardener.js";
+import { parseAcceptanceBlock, parseWhitelistedProof } from "#src/lib/review.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-25T00:00:00Z");
@@ -101,19 +104,30 @@ function harness() {
   };
 }
 
-/** Whether the proof executor's own invocation, `grep -arn -- <pattern> <path>`, finds `pattern` in a file holding `text`. */
-function grepFinds(pattern: string, text: string): boolean {
+/** Whether the proof executor's own run of `proof` succeeds on a tree holding `files`: the argv
+ *  `parseWhitelistedProof` compiles (`grep -arn -- <pattern> <path>`), run with the tree as its cwd. */
+function executorFinds(proof: string, files: ReadonlyMap<string, string>): boolean {
+  const parsed = parseWhitelistedProof(proof);
+  assert.ok(parsed?.kind === "grep", `the executor runs ${proof} as a grep`);
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-proof-`));
-  const file = join(dir, "shard.yaml");
-  writeFileSync(file, text);
-  const res = spawnSync("grep", ["-arn", "--", pattern, file], { encoding: "utf8" });
+  for (const [path, text] of files) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), text);
+  }
+  const res = spawnSync(parsed.command, parsed.args, { cwd: dir, encoding: "utf8" });
   assert.ok(res.status === 0 || res.status === 1, `grep ran: ${res.stderr}`);
   return res.status === 0;
 }
 
-/** The revert body's grep proofs, as `{ pattern, path }`. */
-function proofsOf(body: string): Array<{ pattern: string; path: string }> {
-  return [...body.matchAll(/^ {2}proof: grep: (.+) in (\S+)$/gm)].map((m) => ({ pattern: m[1]!, path: m[2]! }));
+/** The revert body's proofs, as the reviewer's own parser reads them. */
+function proofsOf(body: string): string[] {
+  return parseAcceptanceBlock(body).map((c) => c.proof);
+}
+
+/** Write `text` at `path` under the harness root. */
+function put(root: string, path: string, text: string): void {
+  mkdirSync(dirname(join(root, path)), { recursive: true });
+  writeFileSync(join(root, path), text);
 }
 
 /** A merged budget canary, exposed, whose cohort has one settled run — below its floor of five. */
@@ -138,11 +152,33 @@ async function thinExposedCanary() {
 test("an expired config canary lands a revert of its edits and releases its class unjudged", async () => {
   const { h, cohort, prUrl, classesBefore } = await thinExposedCanary();
   assert.equal(h.gardenState().pending?.prUrl, prUrl, "the canary holds the gardener while it is open");
+  const root = h.deps.repoRoot;
   // One shard was already put back by another change: its revert has nothing to do and proves nothing.
   const restored = `plan/tasks.d/${cohort[0]}-x.yaml`;
-  const restoredPath = join(h.deps.repoRoot, restored);
-  writeFileSync(restoredPath, readFileSync(restoredPath, "utf8").replace(/^ {2}budget_usd: 9\.00$/m, "  budget_usd: 30.00"));
-  const before = new Map(cohort.map((id) => [`plan/tasks.d/${id}-x.yaml`, readFileSync(join(h.deps.repoRoot, `plan/tasks.d/${id}-x.yaml`), "utf8")]));
+  writeFileSync(join(root, restored), readFileSync(join(root, restored), "utf8").replace(/^ {2}budget_usd: 9\.00$/m, "  budget_usd: 30.00"));
+  // Every way a revert's proof has failed review, as edits of this one canary:
+  // - a reverted value that is a prefix of the canary's (5 under 50.00);
+  // - a reverted line with trailing spaces;
+  // - a line full of BRE metacharacters, a backslash, a comment and the proof grammar's own ` in `;
+  // - a file holding one edit already put back and one still to revert.
+  const prefix = "plan/tasks.d/W1-T950-p.yaml", spaced = "plan/tasks.d/W1-T951-s.yaml", mounts = "plan/mounts.yaml";
+  const caps = "scripts/knowledge-budget-baseline.json";
+  put(root, prefix, shard("W1-T950").replace("  budget_usd: 30.00", "  budget_usd: 50.00"));
+  put(root, spaced, shard("W1-T951").replace("  budget_usd: 30.00", "  budget_usd: 9.00"));
+  put(root, mounts, "flows:\n  ci_judge: { model: haiku, effort: low }\n");
+  put(root, caps, '{\n  "capturedAt": "2026-09-01",\n  "maxChars": 9000\n}\n');
+  const extra: ConfigEdit[] = [
+    { path: prefix, from: "  budget_usd: 5", to: "  budget_usd: 50.00" },
+    { path: spaced, from: "  budget_usd: 30.00  ", to: "  budget_usd: 9.00" },
+    { path: mounts, from: "  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c", to: "  ci_judge: { model: haiku, effort: low }" },
+    { path: caps, from: '  "capturedAt": "2026-09-01",', to: '  "capturedAt": "2026-09-20",' },
+    { path: caps, from: '  "maxChars": 6000', to: '  "maxChars": 9000' },
+  ];
+  const [canary0] = readConfigCanaries(h.deps.stateDir);
+  writeConfigCanaries(h.deps.stateDir, [{ ...canary0!, edits: [...canary0!.edits, ...extra] }]);
+  const touched = [...new Set([...canary0!.edits, ...extra].map((e) => e.path))];
+  const tree = () => new Map(touched.map((path) => [path, readFileSync(join(root, path), "utf8")]));
+  const before = tree();
   h.advance(CANARY_TTL_MS + HOUR);
   const [result] = await h.tend();
 
@@ -152,17 +188,24 @@ test("an expired config canary lands a revert of its edits and releases its clas
   assert.equal(h.landed.length, 2, "the expiry lands a revert as its own PR");
   assert.match(h.landed[1]!.title, /^revert\(config\): /);
   assert.equal(h.landed[1]!.sealedLanding, false, "the revert keeps its own PR, never the shared task-files landing that counts a held path as carried");
-  const reverted = cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).filter((p) => p !== restored).sort();
-  assert.deepEqual(h.landed[1]!.paths, reverted, "exactly the canary's files it still changes");
+  const shards = cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).filter((p) => p !== restored);
+  assert.deepEqual(h.landed[1]!.paths, [...shards, prefix, spaced, mounts, caps].sort(), "exactly the files the revert still changes");
   assert.match(h.landed[1]!.body, /expired before its cohort cleared the floor/);
-  const proofs = proofsOf(h.landed[1]!.body);
-  assert.deepEqual(proofs.map((p) => p.path).sort(), reverted, "one proof per reverted shard, none for the shard already restored");
-  for (const { pattern, path } of proofs) {
-    assert.equal(pattern, exactLineProofPattern("budget_usd: 30.00"));
-    assert.equal(grepFinds(pattern, before.get(path)!), false, `${path}'s proof is false on the tree before the revert, so the revert PR is not stale`);
-  }
+  const after = tree();
+  for (const e of [...canary0!.edits, ...extra]) assert.ok(holdsExactLine(after.get(e.path)!, e.from), `${e.path} is back at ${JSON.stringify(e.from)}`);
   for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00", `${id}'s declared budget is restored`);
-  for (const { pattern, path } of proofs) assert.equal(grepFinds(pattern, readFileSync(join(h.deps.repoRoot, path), "utf8")), true, `${path}'s proof holds after the revert`);
+
+  // The proofs, as the reviewer parses them and the executor runs them: one per line put back, none for a line already
+  // at its baseline, each holding after the revert and not before it, so preflight never reads the revert as stale.
+  const proofs = proofsOf(h.landed[1]!.body);
+  const putBack = [...shards.map((path) => ({ path, line: "  budget_usd: 30.00" })), { path: prefix, line: "  budget_usd: 5" },
+    { path: spaced, line: "  budget_usd: 30.00  " }, { path: mounts, line: extra[2]!.from }, { path: caps, line: '  "maxChars": 6000' }];
+  assert.deepEqual([...proofs].sort(), putBack.map((p) => exactLineProof(p.path, p.line)).sort(), "one proof per line put back");
+  for (const proof of proofs) {
+    assert.equal(executorFinds(proof, after), true, `${proof} holds after the revert`);
+    assert.equal(executorFinds(proof, before), false, `${proof} is false on the tree before the revert`);
+  }
+  assert.equal(proofs.some((p) => p.includes("capturedAt")), false, "the line already put back gets no proof");
   assert.equal(canary.rollbackPrUrl, "https://github.com/acme/remudero/pull/102", "the revert's receipt is kept on the canary");
 
   const state = h.gardenState();
@@ -191,14 +234,50 @@ test("a canary that is still under its floor before expiry lands no revert", asy
 });
 
 test("a revert's proof matches its own line exactly, never a longer value or a look-alike", () => {
-  const pattern = exactLineProofPattern("  budget_usd: 5");
-  assert.equal(grepFinds(pattern, "  budget_usd: 5\n"), true, "the reverted value");
-  assert.equal(grepFinds(pattern, "  budget_usd: 50.00\n"), false, "a canary that raised 5 to 50.00 does not satisfy its own revert's proof");
-  assert.equal(grepFinds(exactLineProofPattern("budget_usd: 9.00"), "  budget_usd: 9x00\n"), false, "a dot is literal");
-  assert.equal(grepFinds(exactLineProofPattern("  budget_usd: 30.00  "), "  budget_usd: 30.00  \n"), true, "a restored line keeps its trailing spaces");
-  assert.equal(grepFinds(exactLineProofPattern("budget_usd: 30.00"), "    budget_usd: 30.00 \n"), true, "any indentation and trailing spaces");
-  for (const [text, line] of [["  budget_usd: 50.00\n", "budget_usd: 5"], ["  budget_usd: 30.00  \n", "budget_usd: 30.00"], ["x: 9x00\n", "x: 9.00"]] as const) {
-    assert.equal(lineProofMatches(text, line), grepFinds(exactLineProofPattern(line), text), `the gardener's own check agrees with grep on ${JSON.stringify(text)}`);
+  const path = "plan/x.yaml";
+  const cases: Array<[line: string, lookAlikes: string[]]> = [
+    ["  budget_usd: 5", ["  budget_usd: 50.00", "  budget_usd: 5 ", "budget_usd: 5", "    budget_usd: 5"]],
+    ["  budget_usd: 30.00  ", ["  budget_usd: 30.00", "  budget_usd: 30x00  "]],
+    ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c", ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in", "  ci_judge: { model: sonnet, effort: low }"]],
+    ['  "maxChars": 6000,', ['  "maxChars": 60000,', '  "maxChars": 6000']],
+    ["\tkey: a|b (c) {d} +e", ["\tkey: a|b (c) {d} +ee", "key: a|b (c) {d} +e"]],
+  ];
+  for (const [line, lookAlikes] of cases) {
+    const proof = exactLineProof(path, line);
+    assert.deepEqual(parseAcceptanceBlock(`Acceptance:\n- claim: c\n  proof: ${proof}`).map((c) => c.proof), [proof], `${proof} reads back verbatim`);
+    assert.equal(executorFinds(proof, new Map([[path, `a\n${line}\nz\n`]])), true, `${JSON.stringify(line)} is found`);
+    assert.equal(holdsExactLine(`a\n${line}\nz\n`, line), true);
+    for (const other of lookAlikes) {
+      const text = `a\n${other}\nz\n`;
+      assert.equal(executorFinds(proof, new Map([[path, text]])), false, `${JSON.stringify(line)}'s proof does not match ${JSON.stringify(other)}`);
+      assert.equal(holdsExactLine(text, line), false, `the gardener's own check agrees with grep on ${JSON.stringify(other)}`);
+    }
   }
-  assert.equal(grepFinds(exactLineProofPattern("ci_judge: { model: sonnet, effort: low }"), "ci_judge: { model: sonnet, effort: low }\n"), true, "a mounts flow line");
+});
+
+test("a revert that cannot land leaves its canary as it was, and the pass still records the others", async () => {
+  const { h, prUrl } = await thinExposedCanary();
+  const [real] = readConfigCanaries(h.deps.stateDir);
+  // A second canary whose line someone has since changed: its exact revert is refused.
+  put(h.deps.repoRoot, "plan/tasks.d/W1-T960-z.yaml", shard("W1-T960").replace("  budget_usd: 30.00", "  budget_usd: 12.00"));
+  const stuck = { ...structuredClone(real!), prUrl: "https://github.com/acme/remudero/pull/999",
+    edits: [{ path: "plan/tasks.d/W1-T960-z.yaml", from: "  budget_usd: 30.00", to: "  budget_usd: 9.00" }] };
+  writeConfigCanaries(h.deps.stateDir, [stuck, real!]);
+  h.advance(CANARY_TTL_MS + HOUR);
+  await assert.rejects(h.tend(), /rollback line changed or ambiguous/, "a refused revert still fails the pass");
+
+  const [kept, done] = readConfigCanaries(h.deps.stateDir);
+  assert.deepEqual(kept, stuck, "the canary whose revert could not land is left exactly as it was, to be stepped again");
+  assert.equal(done!.promotion.state, "expired");
+  assert.equal(done!.rollbackPrUrl, "https://github.com/acme/remudero/pull/102", "the other canary's revert is recorded, so the next pass never reopens it");
+  assert.equal(h.landed.length, 2, "one revert opened");
+  assert.ok(h.logs.some((l) => l.step === "config.canary_expired" && l.extra?.pr_url === prUrl), "the canary that did revert is logged");
+  assert.equal(h.gardenState().pending, undefined, "the canary that did revert released its class");
+
+  // The failed pass still recorded its tend time, so the refused canary is stepped again after the tend interval.
+  // Two refusals in one pass fail it once, naming both.
+  writeConfigCanaries(h.deps.stateDir, [stuck, { ...stuck, prUrl: "https://github.com/acme/remudero/pull/998" }]);
+  h.advance(2 * HOUR);
+  await assert.rejects(h.tend(), /rollback line changed or ambiguous: plan\/tasks\.d\/W1-T960-z\.yaml; config gardener: rollback line changed or ambiguous/);
+  assert.equal(h.landed.length, 2, "neither opens a revert");
 });

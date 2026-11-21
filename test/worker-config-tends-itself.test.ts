@@ -256,7 +256,7 @@ test("W1-T4113: a budget recalibration runs as a canary and rolls back on a guar
   assert.deepEqual(h.landed[1]!.paths, cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).sort());
   assert.equal(judged.rollbackPrUrl, "https://github.com/acme/remudero/pull/102");
   for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00", `${id}'s declared budget is restored`);
-  assert.match(h.landed[1]!.body, /proof: grep: \^ \*budget_usd: 30\\\.00 \*\$ in plan\/tasks\.d\//);
+  assert.match(h.landed[1]!.body, /\| grep: \^ {2}budget_usd: 30\\\.00\$ in plan\/tasks\.d\//);
 
   const state = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
   assert.deepEqual(state.classes["recalibrate-budget"], { alpha: 3, beta: 2 }, "the breach debits the class");
