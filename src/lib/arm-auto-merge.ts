@@ -906,11 +906,12 @@ type RestReader = (args: string[]) => unknown;
 
 // Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
 // reads per attempt would spend the core budget on a setting that changes almost never.
+// W1-T13970: the per-PR map keeps the PR read; the rules reading is kept per owner, repository and base.
 function* cachedMergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
   const now = systemClock.now();
   const hit = mergeQueueReads.get(prUrl);
   if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
-  const value = yield* mergeQueueSteps(prUrl, fetch);
+  const value = yield* mergeQueueSteps(prUrl, fetch, rulesReadsOf(fetch));
   mergeQueueReads.set(prUrl, { at: now, value });
   return value;
 }
@@ -938,23 +939,41 @@ export function baseBranchRequiresMergeQueue(prUrl: string, fetch: GhApiFetcher 
   return runStepsSync(mergeQueueSteps(prUrl, fetch));
 }
 
-/** W1-T5284 — {@link baseBranchRequiresMergeQueue} with both REST reads awaited ({@link ghJsonAsync}). */
+/** W1-T5284 — {@link baseBranchRequiresMergeQueue} with both REST reads awaited ({@link ghJsonAsync}).
+ *  W1-T13970: the rules reading is kept per reader, owner, repository and base branch for MERGE_QUEUE_READ_TTL_MS,
+ *  as on the arm path, so two PRs on one base make one rules read. */
 export function baseBranchRequiresMergeQueueAsync(
   prUrl: string,
   fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
 ): Promise<boolean> {
-  return runStepsAsync(mergeQueueSteps(prUrl, fetch));
+  return runStepsAsync(mergeQueueSteps(prUrl, fetch, rulesReadsOf(fetch)));
 }
 
-function* mergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
+/** W1-T13970: the rules reading of each base branch, per reader, keyed by owner, repository and base. Only a
+ *  readable rules list is kept: an unreadable or malformed one answers false and is read again by the next PR. */
+const mergeQueueRulesReads = new WeakMap<RestReader, Map<string, { at: number; value: boolean }>>();
+function rulesReadsOf(fetch: RestReader): Map<string, { at: number; value: boolean }> {
+  let reads = mergeQueueRulesReads.get(fetch);
+  if (!reads) mergeQueueRulesReads.set(fetch, reads = new Map());
+  return reads;
+}
+
+function* mergeQueueSteps(prUrl: string, fetch: RestReader, rulesReads?: Map<string, { at: number; value: boolean }>): Steps<boolean> {
   const target = parsePrUrl(prUrl);
   if (!target) return false;
   try {
     const pr = (yield* step(() => fetch(singlePrRestArgs(target.owner, target.repo, target.number)))) as { base?: { ref?: string } };
     const branch = pr?.base?.ref;
     if (!branch) return false;
+    const key = JSON.stringify([target.owner, target.repo, branch]);
+    const now = systemClock.now();
+    const hit = rulesReads?.get(key);
+    if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
     const rules = yield* step(() => fetch(["api", `repos/${target.owner}/${target.repo}/rules/branches/${encodeURIComponent(branch)}`]));
-    return Array.isArray(rules) && rules.some((rule) => (rule as { type?: unknown })?.type === "merge_queue");
+    if (!Array.isArray(rules)) return false;
+    const value = rules.some((rule) => (rule as { type?: unknown })?.type === "merge_queue");
+    rulesReads?.set(key, { at: now, value });
+    return value;
   } catch {
     // unreadable ⇒ the pre-queue path, which GitHub's own queue enforcement keeps safe (see above)
     return false;

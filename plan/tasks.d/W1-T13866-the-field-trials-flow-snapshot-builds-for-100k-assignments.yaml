@@ -13,7 +13,7 @@
   files:
     - src/lib/field-trials-flow.ts
     - test/field-trials-flow.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     buildFieldTrialsFlowSnapshot (src/lib/field-trials-flow.ts) now throws RangeError: Maximum call stack size

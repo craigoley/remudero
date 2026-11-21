@@ -1,0 +1,159 @@
+- id: W1-T13940
+  title: "An answer posted through the Console or rmd mcp releases the held task on the daemon's next pass: the daemon honours the panel.question_answered ledger row, not only its own checkout's question store, and the Inbox lists each held task"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the needs_input dispatch hold, the answer writers and the Inbox held list; a wrong answer read releases or holds a task
+  band_meaning: blast-radius
+  origin: "operator-session#console-answer-split-2026-11-20"
+  plan_refs:
+    - W1-T12715
+    - W1-T10348
+    - W1-T4471
+  files:
+    - src/lib/plan.ts
+    - src/lib/worker.ts
+    - src/cli/commands/daemon.ts
+    - src/cli/commands/run-task-verb.ts
+    - src/run-task.ts
+    - src/lib/panel-actions.ts
+    - src/lib/ledger.ts
+    - src/lib/now-decisions.ts
+    - src/lib/now-view.ts
+    - src/lib/operator-mcp.ts
+    - test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts
+    - test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
+    - test/ledger-rotation.test.ts
+    - test/now-view.test.ts
+    - test/the-needs-you-view-is-a-view-of-views.test.ts
+    - test/the-operator-reaches-the-fleet-over-mcp.test.ts
+    - "src/lib/instance-gateway.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:route-answer-releases — a needs_input task is refused by the daemon's dispatch check; an answer posted through the real buildAnswerQuestionRoute handler, with serve's question root a different folder from the daemon's checkout and one shared ledger, makes the daemon's next dispatch pass admit the task; the daemon's taskInputAnswer is the production taskInputAnswerWithLedger(daemonRepoRoot, ledgerPath), with nothing injected in its place"
+      proof: "grep: W1-T13940 criterion 1 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
+    - claim: "invariant:github-answer-still-releases — an answer that readEscalationAnswers lands from a GitHub issue reply still releases the task, and a second pass over the same reply adds no second store entry and no second ledger row"
+      proof: "grep: W1-T13940 criterion 2 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
+    - claim: "invariant:held-task-is-listed — every queued task with an unanswered needs_input question appears in composeNeedsYou's decisions list (the list the Console renders) as a task_question with an answer form for POST /v1/questions/answer {taskId}, up to NOW_DECISIONS_CAP; past the cap, needsYou.display.more counts the held tasks the list leaves out, exact when the question store source is complete and atLeast when it is partial; the gate count equals the listed decisions plus that count; after an answer through the route the task leaves the list"
+      proof: "grep: W1-T13940 criterion 3 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
+    - claim: "invariant:one-answer-source — for every fixture in a table (route answer only, GitHub answer only, both, a blank answer, an answer for another task, no answer, an answer row the ledger rotation has dropped after the daemon read it once), the Inbox lists the held task exactly when the daemon's dispatch check refuses it; and each answer writer (the answer route, the escalation reply route, readEscalationAnswers) writes one panel.question_answered row with task_id, a nonblank answer and origin"
+      proof: "grep: W1-T13940 criterion 4 in test/plan/an-answer-posted-through-the-console-releases-the-held-task.test.ts"
+    - claim: the daemon's dispatch lane reads the answer through the ledger-backed reader
+      proof: "grep: taskInputAnswerWithLedger( in src/cli/commands/daemon.ts"
+    - claim: the task run's own runnable check reads the answer through the ledger-backed reader
+      proof: "grep: taskInputAnswerWithLedger( in src/cli/commands/run-task-verb.ts"
+    - claim: "the Inbox projects each held task as a decision before NOW_DECISIONS_CAP, and counts the held tasks the cap leaves out instead of dropping them silently"
+      proof: "grep: heldTaskDecisions( in src/lib/now-view.ts"
+  rationale: |
+    CONFIRMED 2026-11-20 (operator session). An answer posted through the Console or serve route
+    POST /v1/questions/answer, or through the rmd mcp tool answer_question (which calls that route),
+    never releases the held task.
+    WHERE THE ANSWER GOES: serve builds the route with `questionsRoot = repoRoot` (src/lib/serve.ts,
+    `questionDeps` near line 3207; src/run-task.ts near line 31039). Serve runs from
+    /home/node/rmd-serve-gens/<gen> in the remudero-serve container, and that folder is not mounted
+    into the daemon. So appendQuestionAnswer writes serve's own copy of plan/questions.ndjson. The
+    route also writes a `panel.question_answered` row to the shared ledger.
+    WHERE THE DAEMON LOOKS: the needs_input hold (W1-T12715) clears only when taskInputAnswer
+    (src/lib/worker.ts near line 5014) finds an answer in the daemon's own checkout's store. The
+    dispatch check (needsInputRefusal, src/lib/plan.ts near line 295) reads that store only. The
+    same reader feeds the task run's own assertRunnable (src/cli/commands/run-task-verb.ts near
+    line 5062), the build prompt (near line 6416) and `rmd inbox` (src/run-task.ts near line 38335).
+    EVIDENCE: W1-T11503's answer, posted through the route on 2026-11-12, sits only in serve's old
+    generation copy (/home/node/rmd-serve-gens/a/plan/questions.ndjson). The daemon's store holds 122
+    answers, all from GitHub issue replies (src/lib/escalation-answers.ts), none from the route. The
+    live ledger holds 0 panel.question_answered rows on 2026-11-20: rotation dropped them all;
+    W1-T11503's row is only in the archive ledger.2026-11-12T15-42-26-918Z.ndjson.gz.
+    W1-T11503 has since merged, and none of the 10 tasks held now (W1-T13904, W1-T13911, W1-T13919,
+    W1-T13921, W1-T13924, W1-T13925, W1-T13926, W1-T13929, W1-T13931, W1-T13932) has an answer in any
+    store or ledger file, so no archived answer needs a backfill.
+    SILENT STALL: the Inbox (now-decisions.ts taskQuestionDecisions, now-view.ts answeredByFact)
+    counts the ledger row, so it shows the question as answered while the task stays held. The
+    reverse also holds: now-view's held list reads serve's store, which never holds a GitHub answer,
+    so a task the daemon released can still show as held.
+    INBOX GAP (W1-T13904 and W1-T13911 not listed; 605 messages loaded): both shards are in serve's
+    generations a and b, so a stale plan is not the cause. In now-view.ts the held tasks become
+    gates (projectHeldTaskQuestionGates, subject = the task id) but never NowDecisions, and a
+    task_question gate's subject for a decision is the decision id. composeNeedsYou
+    (src/lib/needs-you-view.ts) keeps only decisions whose gate key matches, so a held task counts
+    in needsYou but is never in `decisions[]`, which the Console lists. That is a separate
+    projection gap, not the store split. This task covers it because the held list must use the
+    same answer source as the dispatch check (criterion 3 and 4).
+    NOT IN SCOPE: a worker's non-blocking QUESTION lines (run-task-verb.ts appendQuestion) also land
+    only in the daemon's store, so serve's taskQuestionDecisions never sees them. They hold no task.
+    File that as its own task if the Inbox must list them.
+  design: |
+    INVARIANT route-answer-releases: an answer posted through POST /v1/questions/answer releases a needs_input task on the daemon's next dispatch pass, whatever folder serve runs from.
+    INVARIANT github-answer-still-releases: an answer from a GitHub issue reply releases the task as before, once.
+    INVARIANT held-task-is-listed: every queued needs_input task without an answer is one answerable decision in the Inbox's needs-you list, or, past NOW_DECISIONS_CAP, counted in needsYou.display.more.
+    NOW_DECISIONS_CAP is a body-size backstop for the needs-you view, and this task keeps it.
+    INVARIANT one-answer-source: a task's answer is the newest nonblank answer among its panel.question_answered ledger rows and the reader's question store; the dispatch check, the task run's check, the build prompt, rmd inbox and the Inbox held list all decide through that one rule.
+    CHOICE: the ledger path. The ledger is already the one file serve and the daemon share, and
+    every answer writer already writes a panel.question_answered row. Serve writing into the
+    daemon's checkout would need a new mount between two containers and would still miss serve
+    generation switches. The ledger alone is not enough: rotation drops the rows (0 live today).
+    So the daemon copies each answer row it honours into its own store once, and the row step is
+    kept through rotation.
+    1. src/lib/plan.ts: add `newestLedgerTaskAnswer(rows, taskId)` beside newestTaskAnswer. It
+       reads rows with step panel.question_answered, task_id = taskId and a nonblank string
+       `answer`, and returns the newest by ts. One rule for every reader; no new constant.
+    2. src/lib/worker.ts: add `taskInputAnswerWithLedger(repoRoot, ledgerPath)`, returning a
+       TaskInputAnswer. For a task id it returns the newer of the store answer (taskInputAnswer)
+       and newestLedgerTaskAnswer over the live ledger lines (readReleaseLedgerLines; parse once
+       per ledger stat identity, not once per task). When the ledger answer is not in the store,
+       it appends it with appendQuestionAnswer, copying task, answer, origin, ts, answer_id,
+       author_login and authority, plus `source: "ledger"`. It skips the append when the store
+       already has an entry for the task with the same answer_id, or the same origin and answer
+       text (the daemon's own GitHub replies), so a second read adds nothing. A failed append does
+       not hide the answer: the read still returns it, and the next read tries again.
+    3. Callers, each passing its own repo root and ledger path:
+       src/cli/commands/daemon.ts (`taskInputAnswer:` in the dispatch lane deps, near line 2377);
+       src/cli/commands/run-task-verb.ts (assertRunnable near line 5062 and the build prompt near
+       line 6416); src/run-task.ts (`rmd inbox` held list near line 38335).
+    4. src/lib/panel-actions.ts: buildAnswerQuestionRoute stamps an `answer_id` (randomUUID) on its
+       store entry and its ledger row and takes ts from the module's clock, not `new Date()`.
+       buildEscalationReplyRoute, which writes config.root's store (a third folder the daemon does
+       not read), also writes one panel.question_answered row with the same fields. The
+       escalation-answers.ts writer already writes the row; leave it unchanged.
+    5. src/lib/ledger.ts: add "panel.question_answered" to DECISION_RELEVANT_LEDGER_STEPS with a
+       one-line reader note; update test/ledger-rotation.test.ts's consumer list to include
+       src/lib/worker.ts if its derivation needs it.
+    6. src/lib/now-decisions.ts: add `heldTaskDecisions(instance, tasks, answered)`: one
+       task_question NowDecision per queued task with needs_input and no answer, id
+       `question:<taskId>:<asked_at>`, title from the task, prompt the question (and source pull
+       request), askedAt = asked_at, answer form POST /v1/questions/answer {taskId}, input text.
+       src/lib/now-view.ts: push these into `all` and drop the separate heldTaskGates array, so the
+       held gates come from decisionGate and their keys match. `answered` is true when
+       newestTaskAnswer over serve's store or the read model's panel.question_answered fact
+       (answeredByFact) has an answer; answeredByFact already reads the ledger index, which keeps
+       rotated rows. Do not list a task twice when it also has a store QUESTION line.
+    7. src/lib/operator-mcp.ts: the answer_question description says it "does not ... lift a
+       dispatch hold". Change it to say an answer releases a task held for that answer and never
+       approves a pull request. Keep the tool's input schema.
+    8. Tests: the new test file holds one test per criterion, titled "W1-T13940 criterion N: ...".
+       Criterion 1 uses two temporary folders (serve root, daemon root) and one ledger, drives
+       the route handler with a request and response fake as test/panel-actions.test.ts does, and
+       runs the daemon kick path that test/plan/a-task-filed-for-operator-input-is-held-until-it-is-answered.test.ts
+       drives (near line 107) with taskInputAnswerWithLedger as the daemon's taskInputAnswer.
+       Criterion 3 builds the now view with injected plan and board as test/now-view.test.ts does,
+       then composeNeedsYou. Criterion 4's rotation case copies the row once, deletes it from the
+       live ledger, and checks the task stays released. Use test/helpers (ledger-fixture.ts,
+       repo-root.js) and RMD_TMP_PREFIX for temporary folders; load test/setup/tmp-hygiene.ts.
+    No new cap, constant, env var or config key. src/lib/plan.ts, src/lib/worker.ts, src/lib/ledger.ts
+    and src/cli/commands/daemon.ts have comment-cap tests: run them and add as few comments as you can.
+  falsifier: |
+    At origin/main criterion 1 fails: the daemon kick refuses the task with "needs-input: ..." after
+    the route answered, because the answer is only in serve's folder. Make taskInputAnswerWithLedger
+    return only the store answer: criteria 1 and 4 fail. Drop the dedup check in step 2: criterion 2's
+    second pass adds a second store entry. Restore heldTaskGates beside the decisions: criterion 3's
+    count and list disagree.
+  note: |
+    Id reserved for run-unfiled-1795175284000 with ~/rmd-work/bin/reserve-id.sh.
+    Filed from the 2026-11-20 operator finding: answers posted through the Console route or the
+    rmd mcp answer_question tool land in serve's own checkout (/home/node/rmd-serve-gens/<gen>) and
+    never release the held task; the daemon reads only its own plan/questions.ndjson. W1-T11503's
+    2026-11-12 answer is the recorded case. Filing only; not built.
