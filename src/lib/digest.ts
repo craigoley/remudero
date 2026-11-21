@@ -595,10 +595,17 @@ export function renderLearningUsefulness(u: LearningUsefulness): string {
   return `learnings used: ${u.used} of ${u.offered} offered (${share}) over ${u.reports} reports, ${u.silent} silent; least useful: ${least || "none yet"}`;
 }
 
-/** W1-T4241 — the outcome fold plus learnings whose effect and `LEARNINGS_USED` posterior disagree in sign. */
+/** W1-T4241 — the outcome fold plus learnings whose effect and `LEARNINGS_USED` posterior disagree in sign.
+ *  W1-T11115: a disagreement names the revision whose verdict it is; the used-mean is still per id. */
 export interface LearningOutcomeSummary {
   report: LearningOutcomeReport;
-  disagreements: Array<{ id: string; verdict: "helps" | "hurts"; usedMean: number }>;
+  disagreements: Array<{ id: string; contentId: string; verdict: "helps" | "hurts"; usedMean: number }>;
+}
+
+/** W1-T11115: the cohort label a rendered outcome carries. A `knowledge.measured` row written before
+ *  W1-T11115 pooled revisions under one id, so its verdicts are labelled legacy, never today's content. */
+function revisionLabel(contentId: unknown): string {
+  return typeof contentId === "string" ? `[${contentId}]` : "[legacy: revision unknown]";
 }
 
 /** Folds every line read, but `buildDigest` reads about a day, so most learnings read `unmeasurable`;
@@ -612,7 +619,7 @@ export function summarizeLearningOutcomes(lines: LedgerLine[]): LearningOutcomeS
     if (l.verdict !== "helps" && l.verdict !== "hurts") continue;
     const usedMean = learningValue(l.id, usage).mean;
     if ((l.verdict === "hurts" && usedMean > 0.5) || (l.verdict === "helps" && usedMean < 0.5)) {
-      disagreements.push({ id: l.id, verdict: l.verdict, usedMean });
+      disagreements.push({ id: l.id, contentId: l.contentId, verdict: l.verdict, usedMean });
     }
   }
   return { report, disagreements };
@@ -656,7 +663,7 @@ export function renderKnowledgeMeasured(s: KnowledgeMeasuredSummary): string {
   const o = s.outcomes;
   const effects = (o?.learnings ?? [])
     .filter((l) => l.verdict === "helps" || l.verdict === "hurts")
-    .map((l) => `${l.id} ${l.verdict} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)}`);
+    .map((l) => `${l.id} ${l.verdict} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)} ${revisionLabel(l.contentId)}`);
   return (
     `${head}, ${g.runs} run(s)): blind: ${blind.join("; ") || "none"}; ` +
     `areas: blind ${count("blind")}, covered ${count("covered")}, no-association ${count("no-association")}, unmeasurable ${count("unmeasurable")}; ` +
@@ -670,12 +677,16 @@ export function renderLearningOutcomes(s: LearningOutcomeSummary): string {
   const window = r.window ? `${r.window.from} .. ${r.window.to}` : "no contributing run";
   const measured = r.learnings.filter((l) => l.verdict !== "unmeasurable");
   const fmt = (l: LearningOutcomeReport["learnings"][number]) =>
-    `${l.id} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)} ±${l.se!.toFixed(2)} (n ${l.injected}/${l.dropped})`;
+    `${l.id} ${l.effect! >= 0 ? "+" : ""}${l.effect!.toFixed(2)} ±${l.se!.toFixed(2)} (n ${l.injected}/${l.dropped}) ${revisionLabel(l.contentId)}`;
   const effects = measured.filter((l) => l.verdict !== "no-detectable-effect");
-  const disagree = s.disagreements.map((d) => `${d.id} ${d.verdict} but used-mean ${d.usedMean.toFixed(2)}`).join(", ");
+  const disagree = s.disagreements.map((d) => `${d.id} ${d.verdict} but used-mean ${d.usedMean.toFixed(2)} ${revisionLabel(d.contentId)}`).join(", ");
+  const reasons = Object.entries(r.excludedRevision).filter(([, n]) => n > 0);
+  const unpinned = reasons.length > 0
+    ? `, ${reasons.reduce((sum, [, n]) => sum + n, 0)} without a single revision (${reasons.map(([why, n]) => `${why} ${n}`).join(", ")})`
+    : "";
   return (
     `learning outcomes (${r.runs} contested run(s), ${window}; excluded ${r.excludedNoVerdict} without a verdict, ` +
-    `${r.excludedTrimmed} trimmed): ${effects.map(fmt).join("; ") || "no detectable effect"}; ` +
+    `${r.excludedTrimmed} trimmed${unpinned}): ${effects.map(fmt).join("; ") || "no detectable effect"}; ` +
     `${measured.length} measured, ${r.learnings.length - measured.length} unmeasurable` +
     (disagree ? `; disagrees with LEARNINGS_USED: ${disagree}` : "")
   );

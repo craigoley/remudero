@@ -1665,6 +1665,78 @@ export function propensitySeed(seed: number, k: number): number {
   return (seed + Math.imul(k + 1, 0x9e3779b1)) >>> 0;
 }
 
+/**
+ * W1-T11115: an edit keeps a learning's id, so an outcome credited by id alone pools different
+ * interventions. A content identity names the exact revision a draw contested. It digests what the
+ * worker reads (`id`, `fact`) and what admits and ranks the entry (`files`, `symbols`,
+ * `errorSignatures`, `layer`, `lifecycle`). It leaves out usage metadata (`cited`, `citedCount`,
+ * which the citation miner restamps) and text that is never injected (`src`, `evidence`,
+ * `subsystem`). Each list is canonicalized only as far as the selector ignores the difference.
+ * Order never changes a count, so every list is sorted. A task file matches a glob SET once
+ * (`matchCount`), so globs are also de-duplicated. A symbol or error signature counts once PER
+ * COPY (`symbolHitCount`, `errorHitCount`), so a repeat ranks the entry higher and can move its
+ * propensity. Those lists keep their multiplicity, and a repeated trigger is a new revision.
+ * The ledger gets the fixed-width digest, never the content. Bump the version when the field set
+ * changes, so an old identity can never equal a new one.
+ */
+export const LEARNING_CONTENT_IDENTITY_VERSION = "lc1";
+export const LEARNING_CONTENT_IDENTITY_RE = /^lc1:[0-9a-f]{16}$/;
+/** Stands in for an identity when one snapshot held an id more than once with different content. */
+export const AMBIGUOUS_LEARNING_CONTENT = "ambiguous";
+
+const canonicalSet = (values: readonly string[] | undefined): string[] => [...new Set(values ?? [])].sort();
+const canonicalMultiset = (values: readonly string[] | undefined): string[] => [...(values ?? [])].sort();
+
+export function learningContentIdentity(entry: LearningEntry): string {
+  const canonical = {
+    v: LEARNING_CONTENT_IDENTITY_VERSION,
+    id: entry.id,
+    fact: entry.fact,
+    files: canonicalSet(entry.files),
+    symbols: canonicalMultiset(entry.symbols),
+    errorSignatures: canonicalMultiset(entry.errorSignatures),
+    layer: entryLayer(entry),
+    lifecycle: entry.lifecycle,
+  };
+  return `${LEARNING_CONTENT_IDENTITY_VERSION}:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 16)}`;
+}
+
+/** Each of `ids` resolved against ONE snapshot: the identity of its single revision, or
+ *  {@link AMBIGUOUS_LEARNING_CONTENT} when copies disagree. An id the snapshot does not hold is
+ *  left out, so the outcome fold counts it as unresolved instead of being given an invented identity. */
+export function learningContentIdentities(snapshot: readonly LearningEntry[], ids: Iterable<string>): Record<string, string> {
+  const wanted = new Set(ids);
+  const revisions = new Map<string, Set<string>>();
+  for (const entry of snapshot) {
+    if (!wanted.has(entry.id)) continue;
+    const seen = revisions.get(entry.id) ?? new Set<string>();
+    seen.add(learningContentIdentity(entry));
+    revisions.set(entry.id, seen);
+  }
+  const out: Record<string, string> = {};
+  for (const id of wanted) {
+    const seen = revisions.get(id);
+    if (seen) out[id] = seen.size === 1 ? [...seen][0]! : AMBIGUOUS_LEARNING_CONTENT;
+  }
+  return out;
+}
+
+/** W1-T11115: {@link selectLearnings}, remembering the content identities of the last draw it
+ *  returned. The producer reaches selection through wipe-test.ts's `computeMatchedLearningsForArm`,
+ *  which relays ids only. This lets the producer ledger the identities of THAT draw. It never
+ *  re-reads the corpus, which could see a later tree. */
+export function recordingSelectLearnings(): { selectLearnings: typeof selectLearnings; contentIds: () => Record<string, string> | undefined } {
+  let last: Record<string, string> | undefined;
+  return {
+    selectLearnings: (entries, taskFiles, budgetChars, context) => {
+      const result = selectLearnings(entries, taskFiles, budgetChars, context);
+      last = result.contentIds;
+      return result;
+    },
+    contentIds: () => last,
+  };
+}
+
 /** A generated lookup index (W1-T33): per shard filename, the entry ids it carries and the union
  *  of `files:` globs, `symbols:` and `error_signatures:` those entries use, plus a
  *  `subsystem -> shard filename(s)` map. The index is an optional local artifact (W1-T7954). */
@@ -1841,7 +1913,7 @@ export function selectLearnings<T extends LearningEntry>(
   taskFiles: string[] | undefined,
   budgetChars: number = DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   context?: LearningsSelectionContext,
-): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number> } {
+): { selected: T[]; dropped: T[]; matchedBy: LearningMatchCounts; propensity?: Record<string, number>; contentIds?: Record<string, string> } {
   const active = entries.filter((e) => e.lifecycle === "active");
   const files = taskFiles ?? [];
   const haystack = selectionHaystack(context);
@@ -1903,7 +1975,13 @@ export function selectLearnings<T extends LearningEntry>(
     for (const entry of selectWith(propensitySeed(seed, k)).selected) hits[entry.id] += 1;
   }
   const propensity = Object.fromEntries(Object.entries(hits).map(([id, n]) => [id, n / draws]));
-  return { ...result, propensity };
+  // W1-T11115: the revision of every contested entry, selected AND dropped, resolved against EVERY
+  // entry of the snapshot this draw read: matched or not, active or not. A same-id copy the task
+  // never matched is still a second revision of that id in the source, so the id reads ambiguous
+  // instead of taking the matched copy's digest. Absent when nothing was contested.
+  const contested = Object.keys(propensity).filter((id) => propensity[id]! > 0 && propensity[id]! < 1);
+  if (contested.length === 0) return { ...result, propensity };
+  return { ...result, propensity, contentIds: learningContentIdentities(entries, contested) };
 }
 
 export const LEXICAL_SHADOW_VERSION = "lexical-shadow-v1" as const;
