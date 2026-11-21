@@ -2204,11 +2204,15 @@ function opsOwnTaskRows(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: P
   openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): Map<string, StatusProjection> {
   const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
   if (!combined || combined === plan) return projection;
+  // Only a PR that claims exactly one task lends that task an ops row: a branch and trailer naming different
+  // tasks are contradictory evidence, so neither row may verify its escalation count (W1-T130).
   const claimed = new Set<string>();
   for (const pr of openPrs!) {
+    const ids = new Set<string>();
     const head = taskIdFromRunBranch(pr.headRefName);
-    if (head) claimed.add(head);
-    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) claimed.add(match[1]);
+    if (head) ids.add(head);
+    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) ids.add(match[1]);
+    if (ids.size === 1) claimed.add([...ids][0]);
   }
   const tasks = [...claimed].flatMap(id => {
     const task = plan.byId.has(id) || projection.has(id) ? undefined : combined.byId.get(id);

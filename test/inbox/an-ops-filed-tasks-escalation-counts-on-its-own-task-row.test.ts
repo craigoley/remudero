@@ -165,3 +165,24 @@ test("W1-T14114 ops-filed own task row: the slow lane worker hands a catalog rep
   for (const run of handlers) run(catalogPacket(state, opsOnly, systemish));
   assert.equal(posted.filter((m) => (m as { type?: string }).type === "ops_catalog_read").length, 0, "no inbox unit, so nothing was asked");
 });
+
+test("W1-T14114 ops-filed own task row: a PR whose branch and trailer claim different ops tasks takes no ops row and stays unverified", () => {
+  const otherOps = task("W1-T8");
+  const wide = planOf(task("W1-T1"), opsTask, otherOps);
+  const open = [pr(7, "run-W1-T8-1795095230170", "Remudero-Task: W1-T9")];
+  const read = projectInboxPlan({ ledgerPath: ledgerWith(), statusGithub: gateway(open), inboxReferentPlan: () => wide }, publicPlan);
+  assert.deepEqual(read.boardReferents.states.get("#7"), { status: "open" }, "contradictory claims are not a verified zero");
+});
+
+test("W1-T14114 ops-filed own task row: a catalog packet older than one refresh interval supplies nothing", () => {
+  const state = catalogState();
+  let now = Date.parse("2026-11-21T12:00:00Z");
+  const manual: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  const catalog = createSlowLaneCatalog(true, () => {}, manual, 5_000);
+  void catalog.settle(state);
+  const observed: Clock = { now: () => now - 119_000, date: () => new Date(now - 119_000), iso: () => new Date(now - 119_000).toISOString() };
+  catalog.accept(catalogPacket(state, opsOnly, observed));
+  assert.ok(catalog.referentPlan(publicPlan, state)?.byId.has("W1-T9"), "a packet younger than the interval is current");
+  now += 2_000;
+  assert.equal(catalog.referentPlan(publicPlan, state), undefined, "at 121 s the packet is stale, so the referents use the public plan");
+});
