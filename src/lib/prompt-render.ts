@@ -323,6 +323,15 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
   return rule ? rule.mode : "reviewer-unmet";
 }
 
+/** W1-T14167: a reviewer-unmet round fixes the class a finding probes, not only the input shown.
+ *  Rendered by renderFixPrompt only when that round has unmet criteria; no other mode carries it. */
+export const FIX_CLASS_NOT_PROBE_LINES: readonly string[] = [
+  "CLASS, NOT PROBE (W1-T14167): each review finding above is one probe of a class of inputs, not the whole defect.",
+  "Fix the rule the probe broke so its neighbouring inputs are covered: e.g. a parser validates the record's whole shape, not only the malformed field shown.",
+  "In your REPORT, name each finding's class and the test that now covers that class.",
+  "Never reverse a requirement an earlier round of this PR satisfied without naming that requirement in your REPORT.",
+];
+
 /**
  * Render the fix worker's prompt. The prompt NAMES its derived MODE and
  * carries ONLY that mode's inputs — never a mix, never the other modes'
@@ -887,6 +896,7 @@ export function renderFixPrompt(opts: {
     `${summary}`,
     "",
     list,
+    ...(n > 0 ? ["", ...FIX_CLASS_NOT_PROBE_LINES] : []),
     ...footer,
   ].join("\n");
 }
