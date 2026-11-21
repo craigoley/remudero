@@ -2431,22 +2431,32 @@ export interface CodexRetentionLoss {
   rebuiltLines: number;
   rebuiltDroppedBytes: number;
   unaccountedSpills: number;
+  invalidRebuiltLines: number;
 }
 
-/** W1-T13960: main's rule; after a rebuilt line, only a success whose sole loss is accounted
- *  rebuilt lines before its sealed final message. */
+/** W1-T13960: main's rule, else a success losing only valid rebuilt lines before its sealed final message. */
 export function codexResultRetentionComplete(
   retention: NonNullable<CodexWorkerResult["outputRetention"]>,
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
 ): boolean {
   const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
+  if (!notComplete(retention)) return true;
   const loss = parsed.retentionLoss;
-  if (loss.rebuiltLines === 0) return !notComplete(retention);
-  const { text: _text, blocks: _blocks, stdout, ...rest } = retention;
-  if (retention.originalSubtype !== "success" || notComplete(rest)) return false;
-  if (stdout?.state !== "complete" && stdout?.state !== "truncated") return false;
-  return loss.finalMessageSealed && loss.unaccountedSpills === 0
-    && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
+  const { stdout, ...rest } = retention;
+  if (loss.rebuiltLines === 0 || retention.originalSubtype !== "success" || notComplete(rest)) return false;
+  return stdout?.state === "truncated" && loss.finalMessageSealed && loss.unaccountedSpills === 0
+    && loss.invalidRebuiltLines === 0 && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** W1-T13960: a rebuilt line's required shape. */
+export function isCodexEventEnvelope(event: unknown): boolean {
+  if (!isRecord(event) || typeof event.type !== "string") return false;
+  if (!event.type.startsWith("item.")) return event.item === undefined || isRecord(event.item);
+  if (!isRecord(event.item) || typeof event.item.type !== "string") return false;
+  return event.item.type !== "agent_message" || typeof event.item.text === "string";
 }
 
 export interface CodexOutputTruncation {
@@ -2621,8 +2631,11 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string; tex
   let escaped = false;
   let captured: number[] = [];
   let start = 0;
-  const fd = openSync(file, "r");
+  let fd: number;
+  try { fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW); }
+  catch (error) { void error; return out; }
   try {
+    if (!fstatSync(fd).isFile()) return out;
     const buf = Buffer.alloc(64 * 1024);
     for (let pos = 0, read = 0; (read = readSync(fd, buf, 0, buf.length, pos)) > 0; pos += read) {
       for (let k = 0; k < read; k++) {
@@ -2817,6 +2830,7 @@ export class CodexJsonlAccumulator {
   private rebuiltLines = 0;
   private rebuiltDroppedBytes = 0;
   private unaccountedSpills = 0;
+  private invalidRebuiltLines = 0;
   /** W1-T13960: a rebuilt line resets both: it could be the final message. */
   private messageOpen = false;
   private messageSealed = false;
@@ -2860,8 +2874,7 @@ export class CodexJsonlAccumulator {
     let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
       const lineBytes = this.spilledBytes - this.spillStart;
-      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 && existsSync(this.pendingFile!)
-        ? spilledLineTypes(this.pendingFile!) : {};
+      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(this.pendingFile!) : {};
       // W1-T13951: the cap binds the payload retained, not its envelope.
       const payload = types.textBytes ?? Infinity;
       const agent = types.type === "item.completed" && types.itemType === "agent_message"
@@ -2923,6 +2936,7 @@ export class CodexJsonlAccumulator {
       rebuiltLines: this.rebuiltLines,
       rebuiltDroppedBytes: this.rebuiltDroppedBytes,
       unaccountedSpills: this.unaccountedSpills,
+      invalidRebuiltLines: this.invalidRebuiltLines,
     };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
@@ -3123,6 +3137,7 @@ export class CodexJsonlAccumulator {
       return "malformed";
     }
     this.observeToolLineage?.(event);
+    if (cut !== undefined && !isCodexEventEnvelope(event)) this.invalidRebuiltLines += 1;
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
     const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
