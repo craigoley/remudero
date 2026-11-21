@@ -78,12 +78,20 @@ export function judgeCiLessonEfficacy(
   });
 }
 
+/** A filed lesson the rung can judge: its finding id, the gate it is about and its watermark. */
+export interface FiledCiLesson {
+  findingId: string;
+  gate: string;
+  watermarkPr: number;
+}
+
 /** Read a filed lesson's gate and watermark back out of a shard's own fields. Returns `undefined`
  *  for a record that carries no `ci_learning_prs` — every lesson filed before W1-T3055, which is
  *  UNJUDGEABLE rather than passing: an older record has no watermark and inventing one from the
- *  origin's first pull request would judge the lesson against its own evidence. */
-export function parseFiledCiLesson(contents: string): { findingId: string; gate: string; watermarkPr: number } | undefined {
-  const origin = /^\s*origin:\s*"(ci-learning:(\d+):(.+?))"\s*$/m.exec(contents);
+ *  origin's first pull request would judge the lesson against its own evidence.
+ *  W1-T14140: a reopen's origin ends `#r<N>`; the finding id keeps it and the gate does not. */
+export function parseFiledCiLesson(contents: string): FiledCiLesson | undefined {
+  const origin = /^\s*origin:\s*"(ci-learning:(\d+):(.+?)(?:#r\d+)?)"\s*$/m.exec(contents);
   if (!origin) return undefined;
   const prs = /^\s*ci_learning_prs:\s*\[([0-9,\s]*)\]\s*$/m.exec(contents);
   if (!prs) return undefined;

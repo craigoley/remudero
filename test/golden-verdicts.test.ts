@@ -520,3 +520,21 @@ test("GOLDEN — TASK-ID-EXISTENCE LESSON: the cited incident executes and the i
     assert.ok(selected.some((entry) => entry.id === "task-id-existence-cites-must-resolve"), taskFile);
   }
 });
+
+test("GOLDEN — CI LESSONS CARRY THEIR GATE: each backfilled check name executes as a signature and a round failing that check selects its lesson (W1-T14140)", () => {
+  const { verdict, golden } = judgeCase("ci-lessons-carry-their-gate");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+
+  // Through the index lookup prompt assembly uses: the check name alone, with no task file, finds the lesson.
+  const learningsDir = join(HERE, "..", "learnings");
+  for (const [gate, id] of [
+    ["security-merge-policy", "security-merge-policy-refusal-evidence-lane"],
+    ["leak-grep", "leak-grep-refuses-plan-shard-token-text"],
+    ["clock-sweep-report (merge the shards, classify, deliver)", "clock-sweep-report-refusal-needs-per-pr-cause"],
+  ]) {
+    const entries = loadLearningsForTaskFiles(learningsDir, undefined, { text: gate });
+    const selected = selectLearnings(entries, undefined, undefined, { text: gate }).selected;
+    assert.ok(selected.some((entry) => entry.id === id), gate);
+  }
+});
