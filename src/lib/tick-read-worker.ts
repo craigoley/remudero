@@ -2595,14 +2595,16 @@ export function* openPrViewSteps(
   const holdHeads = new Set(ledger.filter((l) => l.step === "review.posted" && l.state === "pending").map((l) => l.head_sha));
   const historyCandidates = raw.filter((pr) => {
     const status = (pr.statusCheckRollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
-    return reviewStateFromRollup(pr.statusCheckRollup) === "pending" && !!status?.description &&
-      reviewStatusOwnerRun(status.description) === undefined && holdHeads.has(pr.headRefOid);
+    const description = status === undefined ? undefined : status.description;
+    return reviewStateFromRollup(pr.statusCheckRollup) === "pending" && typeof description === "string" && description !== "" &&
+      reviewStatusOwnerRun(description) === undefined && holdHeads.has(pr.headRefOid);
   }).map((pr) => ({ number: pr.number, headSha: pr.headRefOid })).slice(0, REVIEW_STATUS_HISTORY_READ_CAP);
   const reviewStatusHistories = byCandidate(historyCandidates, yield* perPrStageSteps(stageCtx, "review_status_history",
     historyCandidates, function* (c, read) {
       try {
         return reviewStatusHistoryFromRest(yield* step(() => read(["api", `repos/${owner}/${repo}/commits/${c.headSha}/statuses?per_page=100`])));
       } catch {
+        // An unreadable history is not an empty one: it names no owner, so the head waits.
         return undefined;
       }
     }, false));
