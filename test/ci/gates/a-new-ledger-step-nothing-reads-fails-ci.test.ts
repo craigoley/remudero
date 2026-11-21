@@ -59,11 +59,19 @@ const SELF_READ_WRITER = [
 test("W1-T14149 criterion 1: a step newly written in src that no other file reads fails the check", () => {
   const result = scan({
     "src/lib/fresh.ts": SELF_READ_WRITER,
-    "src/lib/other.ts": 'export const seen = (row: { step: string }) => row.step === "some.other_step";',
+    "src/lib/other.ts": [
+      'const FRESH_STEP = "fresh.step";',
+      'const DEBUG = new Set(["fresh.step"]);',
+      'console.log("fresh.step", FRESH_STEP, DEBUG.has("fresh.step"));',
+      'console.log(\'"step":"fresh.step"\');',
+      'export const seen = (row: { step: string }) => row.step === "some.other_step";',
+      'export const label = (text: string) => text.startsWith("fresh.");',
+    ].join("\n"),
   });
   assert.deepEqual([...result.emitted.keys()], ["fresh.step"]);
   assert.deepEqual(result.emitted.get("fresh.step"), ["src/lib/fresh.ts"]);
-  assert.deepEqual(result.writeOnly, ["fresh.step"], "a read inside the writer's own file is not a reader");
+  assert.deepEqual(result.readers.get("fresh.step"), [], "the self-read and unrelated console output do not count");
+  assert.deepEqual(result.writeOnly, ["fresh.step"]);
 
   const verdict = mod.ratchetVerdict({ writeOnly: result.writeOnly, baseline: EMPTY, baseBaseline: EMPTY });
   assert.equal(verdict.ok, false);
@@ -85,6 +93,7 @@ const READ_FORMS_WRITER = [
   "  log(SET_CONST_STEP, {});",
   '  log("fixture.array", {});',
   '  log("fixture.prefix.done", {});',
+  '  log("q.done", {});',
   '  log("fixture.unread", {});',
   "}",
 ].join("\n");
@@ -95,7 +104,8 @@ const READ_FORMS_READER = [
   'export const FIXTURE_READ_STEPS = ["fixture.array"] as const;',
   "export function read(rows: Array<{ step: string }>): number {",
   "  return rows.filter((row) =>",
-  '    row.step === "fixture.eq" || row.step === EQ_CONST_STEP || SEEN.has(row.step) || row.step.startsWith("fixture.prefix.")).length;',
+  '    row.step === "fixture.eq" || EQ_CONST_STEP !== row.step || SEEN.has(row.step) ||',
+  '    row.step.startsWith("fixture.prefix.") || row.step.startsWith("q")).length;',
   "}",
 ].join("\n");
 
@@ -103,9 +113,9 @@ test("W1-T14149 criterion 2: a step read in another file through an equality, a 
   const result = scan({ "src/lib/writer.ts": READ_FORMS_WRITER, "src/lib/reader.ts": READ_FORMS_READER });
   assert.deepEqual(
     [...result.emitted.keys()].sort(),
-    ["fixture.array", "fixture.eq", "fixture.eq_const", "fixture.prefix.done", "fixture.set", "fixture.set_const", "fixture.unread"],
+    ["fixture.array", "fixture.eq", "fixture.eq_const", "fixture.prefix.done", "fixture.set", "fixture.set_const", "fixture.unread", "q.done"],
   );
-  for (const step of ["fixture.eq", "fixture.eq_const", "fixture.set", "fixture.set_const", "fixture.array", "fixture.prefix.done"]) {
+  for (const step of ["fixture.eq", "fixture.eq_const", "fixture.set", "fixture.set_const", "fixture.array", "fixture.prefix.done", "q.done"]) {
     assert.deepEqual(result.readers.get(step), ["src/lib/reader.ts"], `${step} has a reader outside its writer`);
   }
   assert.deepEqual(result.writeOnly, ["fixture.unread"], "the control step nobody reads is still write-only");
@@ -137,16 +147,16 @@ test("W1-T14149 criterion 3: a step declared record-only with a reason passes, a
 
 test("W1-T14149 criterion 4: a baseline entry that gained a reader must be removed, so the baseline only shrinks", () => {
   const files = {
-    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("old.debt"); log("still.debt"); };',
-    "src/lib/reader.ts": 'export const r = (row: { step: string }) => row.step === "old.debt";',
+    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("old.debt"); log("q.done"); log("still.debt"); };',
+    "src/lib/reader.ts": 'export const r = (row: { step: string }) => row.step === "old.debt" || row.step.startsWith("q");',
   };
   const { writeOnly } = scan(files);
   assert.deepEqual(writeOnly, ["still.debt"]);
 
-  const baseBaseline = { writeOnly: ["old.debt", "still.debt"], recordOnly: {} };
+  const baseBaseline = { writeOnly: ["old.debt", "q.done", "still.debt"], recordOnly: {} };
   const unremoved = mod.ratchetVerdict({ writeOnly, baseline: baseBaseline, baseBaseline });
   assert.equal(unremoved.ok, false);
-  assert.deepEqual(unremoved.stale, ["old.debt"], "the entry that gained a reader must leave the baseline");
+  assert.deepEqual(unremoved.stale, ["old.debt", "q.done"], "each entry that gained a reader must leave the baseline");
 
   const removed = mod.ratchetVerdict({ writeOnly, baseline: { writeOnly: ["still.debt"], recordOnly: {} }, baseBaseline });
   assert.equal(removed.ok, true);
@@ -170,15 +180,26 @@ test("W1-T14149 criterion 5: a step emitted through a named constant is resolved
     "src/lib/writer.ts": [
       clause("import { IMPORTED_STEP }", "./constants.js"),
       'const LOCAL_STEP = "const.local" as const;',
+      'const SHADOWED_STEP = "const.shadowed";',
       "export function write(log: (step: string) => void, append: (row: object) => void): void {",
       "  log(LOCAL_STEP);",
       '  append({ run_id: "r", task_id: "t", step: IMPORTED_STEP });',
       "}",
+      'export function one(log: (s: string) => void) { const WRITE_STEP = "named.one"; log(WRITE_STEP); }',
+      'export function two(log: (s: string) => void) { const WRITE_STEP = "named.two"; log(WRITE_STEP); }',
+      'export function appendRow(append: (row: object) => void) { const WRITE_STEP = "named.append"; append({ step: WRITE_STEP }); }',
+      'export function shadow(log: (s: string) => void, SHADOWED_STEP: string) { log(SHADOWED_STEP); }',
+      'export function block(log: (s: string) => void) {',
+      '  const WRITE_STEP = "named.outer";',
+      '  { const WRITE_STEP = "named.inner"; log(WRITE_STEP); }',
+      '  log(WRITE_STEP);',
+      '}',
     ].join("\n"),
   });
-  assert.deepEqual([...result.emitted.keys()].sort(), ["const.imported", "const.local"]);
-  assert.deepEqual(result.emitted.get("const.imported"), ["src/lib/writer.ts"]);
-  assert.deepEqual(result.writeOnly, ["const.imported", "const.local"], "a constant's own declaration is not a reader");
+  const steps = ["const.imported", "const.local", "named.append", "named.inner", "named.one", "named.outer", "named.two"];
+  assert.deepEqual([...result.emitted.keys()], steps);
+  for (const step of steps) assert.deepEqual(result.emitted.get(step), ["src/lib/writer.ts"]);
+  assert.deepEqual(result.writeOnly, steps, "a constant's own declaration is not a reader");
 });
 
 // ── precision of the emit and read positions ───────────────────────────────────────────────────
@@ -219,7 +240,7 @@ test("W1-T14149: comments are not readers; raw patterns, switch cases, regexes a
   const writer = [
     "export function w(log: (s: string) => void): void {",
     '  for (const s of ["x"]) void s;',
-    '  log("commented.step"); log("raw.step"); log("case.step"); log("rx.exact"); log("rxp.prefixed");',
+    '  log("commented.step"); log("raw.step"); log("raw.alt"); log("case.step"); log("rx.exact"); log("rxp.prefixed");',
     '  log("job.scorecard"); log("wild.card"); log("tail.of_wild");',
     "}",
   ].join("\n");
@@ -228,6 +249,7 @@ test("W1-T14149: comments are not readers; raw patterns, switch cases, regexes a
     '/* row.step === "commented.step" */',
     "const ratio = total / count / 2;",
     'export const raw = (line: string) => line.includes(\'"step":"raw.step"\');',
+    'export const alt = (line: string) => /"step":"(?:raw\\.alt|raw\\.step)"/.test(line);',
     "export function sw(row: { step: string }): number {",
     "  switch (row.step) {",
     '    case "case.step": return 1;',
@@ -235,12 +257,13 @@ test("W1-T14149: comments are not readers; raw patterns, switch cases, regexes a
     "  }",
     "}",
     'export const t = (row: { step: string }) => `${row.step}-${`nested ${"x"}`}` && row.step.endsWith(".scorecard");',
-    'const PATTERNS = ["wild.*", "*.of_wild"];',
-    'export const wild = (step: string) => PATTERNS.some((p) => p === step);',
+    'const PREFIXES = ["wild."];',
+    'const SUFFIXES = [".of_wild"];',
+    'export const wild = (step: string) => PREFIXES.some((p) => step.startsWith(p)) || SUFFIXES.some((s) => step.endsWith(s));',
   ].join("\n");
   const result = scan({ "src/lib/writer.ts": writer, "src/lib/reader.ts": reader });
   assert.deepEqual(result.writeOnly, ["commented.step"]);
-  for (const step of ["raw.step", "case.step", "rx.exact", "rxp.prefixed", "job.scorecard", "wild.card", "tail.of_wild"]) {
+  for (const step of ["raw.step", "raw.alt", "case.step", "rx.exact", "rxp.prefixed", "job.scorecard", "wild.card", "tail.of_wild"]) {
     assert.deepEqual(result.readers.get(step), ["src/lib/reader.ts"], step);
   }
 });
@@ -383,6 +406,11 @@ test("W1-T14149: the CLI refuses to report OK when it cannot measure", (t) => {
   const empty = run(["--root", repo.dir, "--base", "main"]);
   assert.equal(empty.code, 2, "no emitted step is a census that saw no corpus");
   assert.match(empty.out, /REFUSING/);
+
+  put(repo, { "src/lib/writer.ts": "const broken = #;" });
+  const malformed = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(malformed.code, 2);
+  assert.match(malformed.out, /cannot parse src\/lib\/writer\.ts/);
 
   put(repo, { "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => log("m.step");' });
   const missing = run(["--root", repo.dir, "--base", "main"]);

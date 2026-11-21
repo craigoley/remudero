@@ -6,13 +6,10 @@
 // nothing reads is how a loop silently stops: `routing.experiment.result` was written daily and
 // read only by its own writer.
 //
-// EMITTED: `log("a.b"`, or a `step:` property holding a literal or a string constant in an object
-// literal that is not a ledger-union read query. READ, in a file that does not emit the step: any
-// other occurrence of the literal (an equality, a switch case, an inline array, a raw
-// `"step":"a.b"` pattern), a use of a string constant or of a collection holding it (by name, or
-// any collection named *_READ_STEPS), a startsWith/endsWith argument, a `/^a\./` regex prefix and
-// an `a.*` wildcard. Comments never read. Erring toward READ is deliberate: a false write-only
-// refuses a pull request wrongly, while a false read only leaves one step's debt unmeasured.
+// EMITTED: `log("a.b"` or a `step:` property holding a literal or a lexically bound constant.
+// READ: equality and switch cases on a step, step membership checks, read-step collections,
+// step prefixes and suffixes, and raw JSON step patterns. Read evidence must be in a different
+// file from the emission. Comments, console output and incidental literals do not read a step.
 //
 // THE RATCHET: the baseline's `writeOnly` list is today's debt and only shrinks against the merge
 // base; an entry that gained a reader must leave it. A new write-only step needs a reader, or a
@@ -24,6 +21,7 @@
 import { readFileSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { parseSync } from "@swc/core";
 import { createScanner, SyntaxKind as K } from "typescript/unstable/ast";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
@@ -38,10 +36,14 @@ const SOURCE_RE = /^src\/.+\.(?:ts|mts|mjs)$/;
 const STEP_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
 /** A `step:` property literal must be dotted: `{ step: "copy" }` is far more often a plain object than a ledger row. */
 const DOTTED_STEP_RE = /^(?=[^.]*\.)[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
-const RAW_STEP_RE = /"step"\s*:\s*"([^"]+)"/g;
-const REGEX_PREFIX_RE = /^\/\^((?:[a-z0-9_:-]|\\\.)+)(\$\/)?/;
-const READ_STEPS_NAME_RE = /READ_STEPS?$/;
-/** Option keys only a ledger-union read query carries (src/lib/ledger-union.ts's option interfaces). */
+const RAW_STEP_RE = /"step"\s*:\s*"((?:[a-z0-9_.:-]|\\\.)+)"/g;
+const RAW_STEP_ALTERNATIVES_RE = /"step"\s*:\s*"\((?:\?:)?((?:[a-z0-9_:|-]|\\\.)+)\)"/g;
+const REGEX_PREFIX_RE = /^\^((?:[a-z0-9_:-]|\\\.)+)(\$)?$/;
+const READ_STEPS_NAME_RE = /(?:^|_)READ_STEPS?$/;
+const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
+const EQUALITY = new Set(["===", "!==", "==", "!="]);
+const MATCH_METHODS = new Set(["includes", "startsWith", "endsWith", "indexOf", "match", "matchAll", "search"]);
+const PREDICATE_METHODS = new Set(["some", "every", "find", "findIndex", "filter"]);
 const READER_QUERY_KEYS = new Set([
   "refuseIncomplete", "requireArchives", "rotationRecords", "rotationWindowMs", "minRotations", "maxRotations",
   "liveFirst", "readLiveRecords", "liveRecords", "dedupe", "dedupeSeed", "dedupeWindowPerStep", "exactDedupe",
@@ -49,87 +51,141 @@ const READER_QUERY_KEYS = new Set([
   "onTorn", "onLiveRead", "onSourceRead", "satisfied", "since", "sinceTs", "where", "stopAfterRotation",
   "throughRotation", "selectRotation", "includeLive", "afterRotation", "strictMalformed", "corpusSnapshot",
 ]);
-const STRINGS = new Set([K.StringLiteral, K.NoSubstitutionTemplateLiteral]);
-const VALUED = new Set([K.Identifier, K.StringLiteral, K.NoSubstitutionTemplateLiteral, K.RegularExpressionLiteral]);
-/** A literal ending in a separator ("daemon.", "review.stale_") is a step prefix wherever it is read. */
-const PREFIX_RE = /^[a-z][a-z0-9_.:-]*[._:]$/;
-const STARTS_WITH_RE = /^[a-z][a-z0-9_.:-]{2,}$/;
-const ENDS_WITH_RE = /^[._:-][a-z0-9_.:-]+$/;
-/** Only a constant-shaped name resolves by name alone across files; `step` or `name` would match everything. */
-const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
-const OPENERS = new Set([K.OpenBraceToken, K.OpenParenToken, K.OpenBracketToken, K.TemplateHead]);
-const CLOSERS = new Set([K.CloseBraceToken, K.CloseParenToken, K.CloseBracketToken, K.TemplateTail]);
-/** A `/` after one of these is division; after anything else it opens a regular expression. */
-const VALUE_END = new Set([
-  K.Identifier, K.StringLiteral, K.NumericLiteral, K.NoSubstitutionTemplateLiteral, K.TemplateTail,
-  K.RegularExpressionLiteral, K.CloseParenToken, K.CloseBracketToken, K.CloseBraceToken, K.ThisKeyword,
-]);
-/** A token after a declaration's initializer that makes it an expression rather than a plain value. */
-const CONTINUES = new Set([
-  K.PlusToken, K.DotToken, K.QuestionDotToken, K.OpenBracketToken, K.OpenParenToken, K.QuestionToken,
-  K.BarBarToken, K.QuestionQuestionToken, K.AmpersandAmpersandToken,
+const WRAPPERS = new Set([
+  "ParenthesisExpression", "TsAsExpression", "TsConstAssertion", "TsNonNullExpression",
+  "TsSatisfiesExpression", "TsTypeAssertion",
 ]);
 
-/** Every token of `text` as `{ kind, value }`, comments dropped, with regex and template tokens re-scanned. */
-export function tokenize(text) {
-  const scanner = createScanner(true, undefined, text);
-  const tokens = [];
-  const templateBraces = [];
-  for (let kind = scanner.scan(); kind !== K.EndOfFile; kind = scanner.scan()) {
-    if ((kind === K.SlashToken || kind === K.SlashEqualsToken) && !VALUE_END.has(tokens.at(-1)?.kind)) kind = scanner.reScanSlashToken();
-    else if (kind === K.CloseBraceToken && templateBraces.pop()) kind = scanner.reScanTemplateToken(false);
-    if (kind === K.OpenBraceToken) templateBraces.push(false);
-    else if (kind === K.TemplateHead || kind === K.TemplateMiddle) templateBraces.push(true);
-    tokens.push({ kind, value: VALUED.has(kind) ? scanner.getTokenValue() : undefined });
-  }
-  return tokens;
-}
-
-/** The index of the token closing the bracket opened at `open`. */
-function matching(tokens, open) {
-  let depth = 0;
-  for (let i = open; i < tokens.length; i++) {
-    if (OPENERS.has(tokens[i].kind)) depth++;
-    else if (CLOSERS.has(tokens[i].kind) && --depth === 0) return i;
-  }
-  return tokens.length - 1;
-}
-
-/** The depth-0 keys of the object literal enclosing token `at`, or null when the nearest open bracket is not `{`. */
-function enclosingObjectKeys(tokens, at) {
-  let open = at - 1;
-  for (let depth = 0; open >= 0; open--) {
-    if (CLOSERS.has(tokens[open].kind)) depth++;
-    else if (OPENERS.has(tokens[open].kind) && depth-- === 0) break;
-  }
-  if (tokens[open]?.kind !== K.OpenBraceToken) return null;
-  const keys = new Set();
-  const close = matching(tokens, open);
-  for (let i = open + 1, depth = 0; i < close; i++) {
-    const kind = tokens[i].kind;
-    if (depth === 0 && (kind === K.Identifier || kind === K.StringLiteral) && [K.OpenBraceToken, K.CommaToken].includes(tokens[i - 1].kind)) keys.add(tokens[i].value);
-    if (OPENERS.has(kind)) depth++;
-    else if (CLOSERS.has(kind)) depth--;
-  }
-  return keys;
-}
-
-/** The last index of an import clause, or of an export list or `export *`, starting at `i`; its names are not reads. */
-function moduleClause(tokens, i, imports) {
-  const open = tokens[i + 1].kind === K.TypeKeyword ? i + 2 : i + 1;
-  if (tokens[i].kind === K.ExportKeyword && tokens[open].kind === K.OpenBraceToken) {
-    const close = matching(tokens, open);
-    return tokens[close + 1]?.kind === K.FromKeyword ? close + 2 : close;
-  }
-  let j = i + 1;
-  for (let braces = false; j < tokens.length && !STRINGS.has(tokens[j].kind) && tokens[j].kind !== K.SemicolonToken; j++) {
-    const kind = tokens[j].kind;
-    if (kind === K.OpenBraceToken || kind === K.CloseBraceToken) braces = kind === K.OpenBraceToken;
-    else if (braces && kind === K.Identifier && tokens[j - 1].kind !== K.AsKeyword) {
-      imports.push({ local: tokens[j + 1].kind === K.AsKeyword ? tokens[j + 2].value : tokens[j].value, name: tokens[j].value });
+function parseSource(path, text) {
+  const options = { syntax: "typescript", target: "es2022" };
+  try {
+    return parseSync(text, options);
+  } catch (error) {
+    if (!error.message.includes("got '<eof>'")) throw new Error(`cannot parse ${path}: ${error.message}`, { cause: error });
+    // A truncated source can still have complete expressions before its missing closing delimiters.
+    const closing = new Map([[K.OpenParenToken, ")"], [K.OpenBracketToken, "]"], [K.OpenBraceToken, "}"]]);
+    const enders = new Set([K.CloseParenToken, K.CloseBracketToken, K.CloseBraceToken]);
+    const open = [];
+    const scanner = createScanner(true, undefined, text);
+    for (let kind = scanner.scan(); kind !== K.EndOfFile; kind = scanner.scan()) {
+      if (closing.has(kind)) open.push(closing.get(kind));
+      else if (enders.has(kind)) open.pop();
     }
+    return parseSync(`${text}\n${open.reverse().join("")}`, options);
   }
-  return j;
+}
+
+function visitNodes(node, visit) {
+  if (node.type) visit(node);
+  for (const key in node) {
+    const child = node[key];
+    if (key !== "span" && child && typeof child === "object") visitNodes(child, visit);
+  }
+}
+
+function unwrap(node) {
+  while (node && (WRAPPERS.has(node.type) || node.type === "OptionalChainingExpression")) {
+    node = node.expression ?? node.base;
+  }
+  return node;
+}
+
+function propertyName(node) {
+  if (node?.type === "Computed") return node.expression.type === "StringLiteral" ? node.expression.value : undefined;
+  return node?.value;
+}
+
+function memberName(node) {
+  return node?.type === "MemberExpression" ? propertyName(node.property) : undefined;
+}
+
+function isStep(node) {
+  node = unwrap(node);
+  if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
+    node = unwrap(node.arguments[0]?.expression);
+  }
+  return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
+}
+
+// SWC assigns a syntax context to each binding and its references. The context is local to a file;
+// context 1 is the resolver's unresolved context, so it cannot be a shadowing local binding.
+const bindingKey = (node) => `${node.ctxt}:${node.value}`;
+
+function collection(node) {
+  if (node.type === "ArrayExpression") return node.elements;
+  if (node.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.value === "Set") {
+    return node.arguments?.slice(0, 1) ?? [];
+  }
+  if (node.type === "CallExpression" && memberName(node.callee) === "freeze" && node.callee.object.value === "Object") {
+    return node.arguments.slice(0, 1);
+  }
+  return undefined;
+}
+
+function isStatic(expr) {
+  const node = unwrap(expr);
+  return node && (node.type === "Identifier" || node.type === "StringLiteral" || node.type === "RegExpLiteral" ||
+    (node.type === "TemplateLiteral" && node.expressions.length === 0) || collection(node) !== undefined);
+}
+
+function collectEvidence(node, rec) {
+  const { type } = node;
+  if (type === "BinaryExpression" && EQUALITY.has(node.operator)) {
+    if (isStep(node.left)) rec.reads.push(["exact", node.right]);
+    if (isStep(node.right)) rec.reads.push(["exact", node.left]);
+  } else if (type === "SwitchStatement" && isStep(node.discriminant)) {
+    for (const { test } of node.cases) if (test) rec.reads.push(["exact", test]);
+  } else if (type === "ObjectExpression") {
+    const keys = new Set(node.properties.map((prop) => propertyName(prop.key ?? prop)));
+    const query = !keys.has("run_id") && !keys.has("task_id") && [...keys].some((key) => READER_QUERY_KEYS.has(key));
+    for (const prop of node.properties) {
+      if (prop.type !== "KeyValueProperty") continue;
+      const key = propertyName(prop.key);
+      if (key === "step" && query) rec.reads.push(["exact", prop.value]);
+      else if (key === "step") rec.emits.push([DOTTED_STEP_RE, prop.value]);
+      else if (key === "pattern" || key === "markers") rec.reads.push(["raw", prop.value]);
+    }
+  } else if (type === "CallExpression") {
+    const callee = unwrap(node.callee);
+    const method = memberName(callee);
+    const arg = node.arguments[0];
+    if (!arg || arg.spread) return;
+    const value = arg.expression;
+    if (callee.type === "Identifier" && callee.value === "log") rec.emits.push([STEP_RE, value]);
+    if (!method) return;
+    const receiver = unwrap(callee.object);
+    if (method === "log" && receiver.value !== "console" && memberName(receiver) !== "console") rec.emits.push([STEP_RE, value]);
+    if ((method === "has" || method === "includes") && isStep(value)) rec.reads.push(["exact", receiver]);
+    if (node.arguments.length === 1 && isStep(receiver)) {
+      if (method === "startsWith") rec.reads.push(["prefix", value]);
+      if (method === "endsWith") rec.reads.push(["suffix", value]);
+    }
+    if (method === "test" || method === "exec") rec.reads.push([isStep(value) ? "regex" : "raw", receiver]);
+    if (MATCH_METHODS.has(method)) rec.reads.push(["raw", value]);
+    if (PREDICATE_METHODS.has(method)) readPredicate(receiver, unwrap(value), rec);
+  }
+}
+
+function readPredicate(receiver, predicate, rec) {
+  if (predicate.type !== "ArrowFunctionExpression" && predicate.type !== "FunctionExpression") return;
+  const param = predicate.params[0]?.pat ?? predicate.params[0];
+  if (param?.type !== "Identifier") return;
+  const isParam = (expr) => {
+    const node = unwrap(expr);
+    return node?.type === "Identifier" && bindingKey(node) === bindingKey(param);
+  };
+  visitNodes(predicate.body, (node) => {
+    if (node.type === "BinaryExpression" && EQUALITY.has(node.operator) &&
+      ((isParam(node.left) && isStep(node.right)) || (isParam(node.right) && isStep(node.left)))) {
+      rec.reads.push(["exact", receiver]);
+    } else if (node.type === "CallExpression" && node.arguments.length === 1 && isParam(node.arguments[0].expression)) {
+      const callee = unwrap(node.callee);
+      if (!isStep(callee.object)) return;
+      const method = memberName(callee);
+      if (method === "startsWith") rec.reads.push(["prefix", receiver]);
+      if (method === "endsWith") rec.reads.push(["suffix", receiver]);
+    }
+  });
 }
 
 /** A module specifier resolved to a source path, or undefined for a package or an unknown file. */
@@ -140,153 +196,110 @@ function resolveSpecifier(from, specifier, known) {
   return [base, base.replace(/\.js$/, ".ts"), base.replace(/\.mjs$/, ".mts"), `${base}.ts`, `${base}/index.ts`].find((p) => known.has(p));
 }
 
-/** The token range `[start, end]` of a collection initializer at `k`, or null when it is not one. */
-function collectionRange(tokens, k) {
-  const t = tokens[k];
-  if (t?.kind === K.OpenBracketToken) return [k, matching(tokens, k)];
-  const call = t?.kind === K.NewKeyword && tokens[k + 1]?.value === "Set" ? k + 2 :
-    t?.value === "Object" && tokens[k + 2]?.value === "freeze" ? k + 3 : -1;
-  if (call === -1) return null;
-  let open = call;
-  while (open < tokens.length && tokens[open].kind !== K.OpenParenToken) open++;
-  return [open, matching(tokens, open)];
-}
-
-/** One file's declarations, imports, emitted steps and read evidence, before any cross-file resolution. */
-function analyzeFile(path, text) {
-  const tokens = tokenize(text);
-  const notRead = new Set();
+function analyzeFile({ path, text }) {
+  const tree = parseSource(path, text);
   const rec = {
-    path, consts: new Map(), collections: new Map(), exported: new Set(), imports: [], emits: [],
-    lits: new Set(), ids: new Set(), prefixes: new Set(), suffixes: new Set(),
+    path, bindings: new Map(), exports: new Map(), imports: new Map(), emits: [], reads: [],
+    lits: new Set(), prefixes: new Set(), suffixes: new Set(),
   };
-  for (let i = 0; i < tokens.length; i++) {
-    const { kind, value } = tokens[i];
-    const next = tokens[i + 1]?.kind;
-    if ((kind === K.ImportKeyword && next !== K.OpenParenToken && next !== K.DotToken) ||
-      (kind === K.ExportKeyword && [K.OpenBraceToken, K.AsteriskToken].includes(next === K.TypeKeyword ? tokens[i + 2]?.kind : next))) {
-      const imports = [];
-      const end = moduleClause(tokens, i, imports);
-      for (let j = i; j <= end; j++) notRead.add(j);
-      const from = kind === K.ImportKeyword && STRINGS.has(tokens[end]?.kind) ? tokens[end].value : undefined;
-      if (from !== undefined) for (const { local, name } of imports) rec.imports.push({ local, name, from });
-      i = end;
-      continue;
-    }
-    if ([K.ConstKeyword, K.LetKeyword, K.VarKeyword].includes(kind) && next === K.Identifier && [K.EqualsToken, K.ColonToken].includes(tokens[i + 2]?.kind)) {
-      declaration(tokens, i + 1, rec, notRead);
-      continue;
-    }
-    if (kind === K.Identifier && value === "log" && next === K.OpenParenToken && !(tokens[i - 1]?.kind === K.DotToken && tokens[i - 2]?.value === "console")) {
-      emitArgument(tokens, i + 2, [K.CommaToken, K.CloseParenToken], STEP_RE, rec, notRead);
-    } else if ((kind === K.Identifier || kind === K.StringLiteral) && value === "step" && next === K.ColonToken &&
-      [K.OpenBraceToken, K.CommaToken].includes(tokens[i - 1]?.kind)) {
-      const keys = enclosingObjectKeys(tokens, i);
-      const query = keys !== null && !keys.has("run_id") && !keys.has("task_id") && [...keys].some((key) => READER_QUERY_KEYS.has(key));
-      if (keys !== null && !query) emitArgument(tokens, i + 2, [K.CommaToken, K.CloseBraceToken], DOTTED_STEP_RE, rec, notRead);
-    } else if (kind === K.Identifier && (value === "startsWith" || value === "endsWith") && next === K.OpenParenToken && STRINGS.has(tokens[i + 2]?.kind)) {
-      const arg = tokens[i + 2].value;
-      if (value === "startsWith" && STARTS_WITH_RE.test(arg)) rec.prefixes.add(arg);
-      if (value === "endsWith" && ENDS_WITH_RE.test(arg)) rec.suffixes.add(arg);
+  for (const stmt of tree.body) {
+    if (stmt.type === "ImportDeclaration" && !stmt.typeOnly) {
+      for (const spec of stmt.specifiers) {
+        if (spec.type === "ImportSpecifier" && !spec.isTypeOnly) {
+          rec.imports.set(bindingKey(spec.local), { name: spec.imported?.value ?? spec.local.value, from: stmt.source.value });
+        }
+      }
+    } else if (stmt.type === "ExportDeclaration" && stmt.declaration.type === "VariableDeclaration") {
+      for (const { id } of stmt.declaration.declarations) {
+        if (id.type === "Identifier") rec.exports.set(id.value, id);
+      }
     }
   }
-  tokens.forEach((t, i) => { if (!notRead.has(i)) readEvidence(t, rec); });
+  visitNodes(tree, (node) => {
+    if (node.type === "VariableDeclaration" && node.kind === "const") {
+      for (const { id, init } of node.declarations) {
+        if (id.type !== "Identifier" || !isStatic(init)) continue;
+        rec.bindings.set(bindingKey(id), init);
+        if (READ_STEPS_NAME_RE.test(id.value) && collection(unwrap(init))) rec.reads.push(["exact", init]);
+      }
+    }
+    collectEvidence(node, rec);
+  });
+  rec.reads = rec.reads.filter(([, expr]) => isStatic(expr));
+  rec.emits = rec.emits.filter(([, expr]) => isStatic(expr));
   return rec;
 }
 
-/** Records `const NAME = <string>` or a collection initializer starting at the binding `name`. */
-function declaration(tokens, name, rec, notRead) {
-  notRead.add(name);
-  if (tokens[name - 2]?.kind === K.ExportKeyword) rec.exported.add(tokens[name].value);
-  let k = name + 1;
-  for (let depth = 0; k < tokens.length && !(depth === 0 && [K.EqualsToken, K.SemicolonToken].includes(tokens[k].kind)); k++) {
-    if (OPENERS.has(tokens[k].kind)) depth++;
-    else if (CLOSERS.has(tokens[k].kind)) depth--;
-  }
-  if (tokens[k]?.kind !== K.EqualsToken) return;
-  const init = k + 1;
-  const range = collectionRange(tokens, init);
-  const end = range ? range[1] : init;
-  if (CONTINUES.has(tokens[end + 1]?.kind)) return;
-  if (STRINGS.has(tokens[init]?.kind)) {
-    rec.consts.set(tokens[name].value, tokens[init].value);
-    notRead.add(init);
-  } else if (range) {
-    const members = [];
-    for (let j = range[0]; j <= end; j++) {
-      notRead.add(j);
-      if (STRINGS.has(tokens[j].kind) || tokens[j].kind === K.RegularExpressionLiteral) members.push({ lit: tokens[j].value });
-      else if (tokens[j].kind === K.Identifier) members.push({ id: tokens[j].value });
+function readValue(mode, value, rec) {
+  if (mode === "raw") {
+    const text = typeof value === "string" ? value : value.pattern;
+    for (const match of text.matchAll(RAW_STEP_RE)) rec.lits.add(match[1].replaceAll("\\.", "."));
+    if (typeof value === "string") return;
+    for (const match of text.matchAll(RAW_STEP_ALTERNATIVES_RE)) {
+      for (const step of match[1].split("|")) rec.lits.add(step.replaceAll("\\.", "."));
     }
-    rec.collections.set(tokens[name].value, { members, readHere: READ_STEPS_NAME_RE.test(tokens[name].value) });
+  } else if (mode === "regex" && typeof value !== "string") {
+    const match = REGEX_PREFIX_RE.exec(value.pattern);
+    if (match) {
+      const step = match[1].replaceAll("\\.", ".");
+      if (match[2]) rec.lits.add(step);
+      else rec.prefixes.add(step);
+    }
+  } else if (typeof value === "string") {
+    if (mode === "prefix") rec.prefixes.add(value);
+    else if (mode === "suffix") rec.suffixes.add(value);
+    else if (mode === "exact") rec.lits.add(value);
   }
-}
-
-/** Records the value at `at` as an emitted step when it is a literal matching `shape` or a lone identifier. */
-function emitArgument(tokens, at, enders, shape, rec, notRead) {
-  const t = tokens[at];
-  if (!t || !enders.includes(tokens[at + 1]?.kind)) return;
-  if (STRINGS.has(t.kind) && shape.test(t.value)) rec.emits.push({ lit: t.value });
-  else if (t.kind === K.Identifier) rec.emits.push({ id: t.value });
-  else return;
-  notRead.add(at);
-}
-
-/** What one token that is not a declaration, emit or module binding says this file reads. */
-function readEvidence({ kind, value }, rec) {
-  if (kind === K.Identifier) rec.ids.add(value);
-  else if (STRINGS.has(kind) || kind === K.RegularExpressionLiteral) readValue(value, rec);
-}
-
-/** A read value: a step literal, a raw `"step":"a.b"` pattern, a separator-ended prefix, an `a.*` / `*.b`
- *  wildcard, or a regular expression's text (`/^a\.b$/` reads one step, `/^a\./` a prefix). */
-function readValue(value, rec) {
-  for (const m of value.matchAll(RAW_STEP_RE)) rec.lits.add(m[1]);
-  const regex = REGEX_PREFIX_RE.exec(value);
-  const literal = regex?.[1].replaceAll("\\.", ".");
-  if (regex?.[2]) rec.lits.add(literal);
-  else if (regex && STARTS_WITH_RE.test(literal)) rec.prefixes.add(literal);
-  else if (STEP_RE.test(value)) rec.lits.add(value);
-  else if (PREFIX_RE.test(value)) rec.prefixes.add(value);
-  else if (/^[a-z][a-z0-9_.:-]*\*$/.test(value)) rec.prefixes.add(value.slice(0, -1));
-  else if (/^\*[._:-][a-z0-9_.:-]+$/.test(value)) rec.suffixes.add(value.slice(1));
 }
 
 /**
- * Every step `sources` emit, each one's readers outside its writer files, and the write-only steps
- * (emitted, read nowhere else). `sources` is `[{ path, text }]`; {@link REGISTRY_FILES} are skipped.
+ * Every step `sources` emit, each one's readers outside its writer files, and the write-only steps.
+ * `sources` is `[{ path, text }]` and the ledger step registry is excluded.
  */
 export function scanLedgerSteps(sources) {
-  const recs = sources.filter(({ path }) => !REGISTRY_FILES.has(path)).map(({ path, text }) => analyzeFile(path, text));
+  const recs = sources.filter(({ path }) => !REGISTRY_FILES.has(path)).map(analyzeFile);
   const byPath = new Map(recs.map((rec) => [rec.path, rec]));
   const declarers = new Map();
   for (const rec of recs) {
-    rec.importMap = new Map(rec.imports.map(({ local, name, from }) => [local, { name, path: resolveSpecifier(rec.path, from, byPath) }]));
-    for (const name of rec.exported) declarers.set(name, [...(declarers.get(name) ?? []), rec]);
+    for (const [name, id] of rec.exports) declarers.set(name, [...(declarers.get(name) ?? []), [rec, id]]);
   }
-  const resolveName = (rec, name, constsOnly, seen = new Set()) => {
-    const key = `${rec.path}\0${name}`;
-    if (seen.has(key)) return [];
-    seen.add(key);
-    if (rec.consts.has(name)) return [rec.consts.get(name)];
-    const collection = rec.collections.get(name);
-    if (collection) return constsOnly ? [] : collection.members.flatMap((m) => m.lit ?? resolveName(rec, m.id, false, seen));
-    const imported = rec.importMap.get(name);
-    if (imported) return imported.path ? resolveName(byPath.get(imported.path), imported.name, constsOnly, seen) : [];
-    return CONSTANT_NAME_RE.test(name) ? (declarers.get(name) ?? []).flatMap((other) => resolveName(other, name, constsOnly, seen)) : [];
-  };
+
+  function values(rec, expr, emit = false, seen = new Set()) {
+    const node = unwrap(expr);
+    if (!node || seen.has(node)) return [];
+    const next = new Set(seen).add(node);
+    if (node.type === "StringLiteral") return [node.value];
+    if (node.type === "TemplateLiteral" && node.expressions.length === 0) return [node.quasis[0].cooked];
+    if (node.type === "RegExpLiteral" && !emit) return [node];
+    if (node.type !== "Identifier") {
+      return emit ? [] : (collection(node) ?? []).flatMap((member) => values(rec, member?.expression, false, next));
+    }
+    const key = bindingKey(node);
+    if (rec.bindings.has(key)) return values(rec, rec.bindings.get(key), emit, next);
+    const imported = rec.imports.get(key);
+    if (imported) {
+      const target = byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
+      return target ? values(target, target.exports.get(imported.name), emit, next) : [];
+    }
+    if (emit && node.ctxt === 1 && CONSTANT_NAME_RE.test(node.value)) {
+      return (declarers.get(node.value) ?? []).flatMap(([other, id]) => values(other, id, true, next));
+    }
+    return [];
+  }
 
   const writers = new Map();
   for (const rec of recs) {
-    for (const emit of rec.emits) {
-      const steps = emit.lit !== undefined ? [emit.lit] : resolveName(rec, emit.id, true);
-      if (steps.length === 0) rec.ids.add(emit.id);
-      for (const step of steps) writers.set(step, new Set([...(writers.get(step) ?? []), rec.path]));
+    for (const [shape, expr] of rec.emits) {
+      for (const step of values(rec, expr, true)) {
+        const literal = unwrap(expr).type !== "Identifier";
+        if (!(literal ? shape : STEP_RE).test(step)) continue;
+        if (!writers.has(step)) writers.set(step, new Set());
+        writers.get(step).add(rec.path);
+      }
     }
-  }
-  for (const rec of recs) {
-    const named = [...rec.ids, ...[...rec.collections].filter(([, { readHere }]) => readHere).map(([name]) => name)];
-    for (const name of named) for (const value of resolveName(rec, name, false)) readValue(value, rec);
+    for (const [mode, expr] of rec.reads) {
+      for (const value of values(rec, expr)) readValue(mode, value, rec);
+    }
   }
   const emitted = new Map();
   const readers = new Map();
