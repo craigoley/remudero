@@ -5,6 +5,7 @@ import {
   readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { open, unlink } from "node:fs/promises";
+import { promises as fsPromises } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -15,7 +16,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
 import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync, rotationStampIso } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -30,6 +31,12 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
 /** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
 export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
+/**
+ * W1-T13875 BACKSTOP: how late a row stamped inside a legacy refusal's window may still be appended. A window read opens
+ * the archives cut before the refusal plus this margin and the first archive cut after it, never the later ones, which
+ * hold only rows appended after the refusal.
+ */
+export const PRODUCT_PLAN_LEGACY_LATE_ROW_MS = 10 * 60_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
 
@@ -305,7 +312,10 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
     const before = liveIdentity();
     // A rotation is named after its snapshot, and its rows can be future-stamped. Apply a legacy refusal's upper
     // bound to evidence rows in correlateLedger, scanning later sources that can still contain in-window rows.
-    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
+    // W1-T13875: a window with an upper bound opens no archive cut after its first one past the bound and margin.
+    const maxRotations = rotationsThroughWindow(ledgerRotationEntries(readdirSync(stateDir), stateDir), subject.untilMs);
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, refuseIncomplete: true, keep: keepEvidenceLine(taskId),
+      ...(maxRotations !== undefined ? { maxRotations } : {}) });
     if (read.unread.includes(stateDir)) return "unread";
     const after = liveIdentity();
     const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
@@ -313,6 +323,21 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
       archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
     return read.ok ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread";
   }
+}
+
+/**
+ * W1-T13875: how many of the oldest-first rotations a window ending at `untilMs` must read: every one cut before the end
+ * plus {@link PRODUCT_PLAN_LEGACY_LATE_ROW_MS}, and the first one cut at or after it. Undefined reads them all (no end, or
+ * no rotation cut that late yet). A name without a readable stamp is read, never guessed old.
+ */
+export function rotationsThroughWindow(rotations: ReadonlyArray<{ path: string }>, untilMs: number | undefined): number | undefined {
+  if (untilMs === undefined) return undefined;
+  const cut = untilMs + PRODUCT_PLAN_LEGACY_LATE_ROW_MS;
+  const first = rotations.findIndex((entry) => {
+    const stamp = rotationStampIso(entry.path.slice(entry.path.lastIndexOf("/") + 1));
+    return stamp !== undefined && Date.parse(stamp) >= cut;
+  });
+  return first < 0 ? undefined : first + 1;
 }
 
 function parseEvidenceLines(rawLines: readonly string[]): Array<Record<string, unknown>> {
@@ -406,6 +431,8 @@ export class ProductPlanOperationService {
   private readonly clock: Clock;
   private readonly sync: (fd: number) => void;
   private readonly flying = new Set<string>();
+  /** W1-T13875: the kept-evidence publishes, one at a time. */
+  private publishing: Promise<unknown> = Promise.resolve();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: ProductPlanOperationOptions) {
@@ -657,11 +684,13 @@ export class ProductPlanOperationService {
       const seen = await this.ledger(record, expired, pastDeadline);
       if (pastDeadline()) return "expired";
       if (typeof seen === "string") return seen;
-      const { opened, exited, failed } = seen;
+      // W1-T13875: a journaled nonzero exit is final even when the gateway could not append its ratify.cli_exited row.
+      const { opened, failed } = seen;
+      const exited = seen.exited || (record.handoff?.outcome === "exited" && !this.inFlight(record.operationId));
       const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
         : this.legacyRefusal(record) ? { exited: false, failed: false, settled: true as const } : undefined;
       if (final === undefined) return seen;
-      const saved = await Promise.race([this.keep(paths, journal, kept, record.operationId, final, pastDeadline), expired]);
+      const saved = await Promise.race([this.keep(paths, journal, record.operationId, final, pastDeadline), expired]);
       return pastDeadline() ? "expired" : saved;
     } catch (error) {
       // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
@@ -709,11 +738,25 @@ export class ProductPlanOperationService {
     }
   }
 
-  /** Flush a private stage asynchronously, then publish it only while this attempt still owns the journal lock. */
-  private async keep(paths: Paths, journal: Journal, kept: Kept | undefined, operationId: string, final: LedgerEvidence,
-    pastDeadline: () => boolean): Promise<LedgerEvidence | "expired"> {
-    // Only operations the journal still holds, so the file stays within operations x one entry.
-    const evidence = Object.fromEntries(Object.entries({ ...kept?.evidence, [operationId]: final }).filter(([id]) => journal.operations[id] !== undefined));
+  /**
+   * W1-T13875: publishes run one at a time, each off the loop, and each merges the kept file as it is when it runs, with
+   * an entry already kept winning over this one. The rename is asynchronous, so a slow publish never delays the bounded
+   * answer or the journal release (the caller races it with the deadline); a stage still unpublished at the deadline is
+   * discarded, and one already renaming can only add an entry no kept file held when it was read.
+   */
+  private keep(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
+    Promise<LedgerEvidence | "expired"> {
+    const run = this.publishing.then(() => this.publishKept(paths, journal, operationId, final, pastDeadline));
+    this.publishing = run.catch((error: unknown) => { void error; /* this publish's caller receives its failure */ });
+    return run;
+  }
+
+  /** Flush a private stage asynchronously, then publish it with an asynchronous rename. */
+  private async publishKept(paths: Paths, journal: Journal, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
+    Promise<LedgerEvidence | "expired"> {
+    const kept = await this.readKept(paths);
+    // Only operations the journal still holds, so the file stays within operations x one entry. An entry already kept wins.
+    const evidence = Object.fromEntries(Object.entries({ [operationId]: final, ...kept?.evidence }).filter(([id]) => journal.operations[id] !== undefined));
     const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence });
     if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
@@ -725,8 +768,7 @@ export class ProductPlanOperationService {
       try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
       finally { await handle.close(); }
       if (pastDeadline()) return "expired";
-      // Keep the deadline check and publish in one turn. A queued rename could overwrite a later attempt after timeout.
-      renameSync(temporary, paths.kept);
+      await fsPromises.rename(temporary, paths.kept);
       renamed = true;
       const directory = await open(paths.directory, constants.O_RDONLY);
       try { await directory.sync(); } finally { await directory.close(); }
@@ -743,7 +785,8 @@ export class ProductPlanOperationService {
   private async ledger(record: Record_, expired: Promise<"expired">, pastDeadline: () => boolean): Promise<EvidenceRead> {
     const none = { exited: false, failed: false };
     const ledgerPath = this.options.ledgerPath;
-    const refused = record.handoff?.outcome === "refused" && !this.inFlight(record.operationId);
+    // W1-T13875: a saved nonzero exit ends its window too: the child had exited before the outcome was saved.
+    const refused = (record.handoff?.outcome === "refused" || record.handoff?.outcome === "exited") && !this.inFlight(record.operationId);
     if (ledgerPath === undefined) return none;
     // A legacy refusal can be a nonzero exit after a proposal opened. The gateway saves the refusal only after the child
     // exited and its exit row was written, so its window ends exactly at the saved refusal.

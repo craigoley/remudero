@@ -13,7 +13,7 @@ import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
-  PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  PRODUCT_PLAN_LEGACY_LATE_ROW_MS, PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, rotationsThroughWindow, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
   type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -1310,4 +1310,79 @@ test("W1-T13875 criterion 3: a view taken while rotation drains the replaced liv
   const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
   assert.deepEqual([again.observation.state, again.observation.proposal], ["proposed", PR_URL]);
   assert.equal(evidence.reads.length, 0, "the proposal was kept for later resumes");
+});
+
+// ── W1-T13875 review round 2026-11-21: the production window read, a stalled publish, a journaled nonzero exit ─────
+
+test("W1-T13875: a legacy refusal's window read never opens an archive cut after its first one past the refusal", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId);
+  const [started, planned, opened] = proposalLines(f, operationId).map((line) => JSON.parse(line) as Record<string, unknown>);
+  const dir = dirname(f.ledgerPath);
+  const cut = (offset: number) => new Date(at(offset)).toISOString();
+  const pastCut = REFUSED_OFFSET + PRODUCT_PLAN_LEGACY_LATE_ROW_MS + 1_000;
+  const unread = cut(pastCut + 30 * 60_000);
+  writeLedger([], { dir, rotations: [
+    { at: cut(2_500), rows: [started!, planned!] },
+    { at: cut(REFUSED_OFFSET + 1_000), gz: true, rows: [opened!] },
+    { at: cut(pastCut), gz: true, rows: [{ ts: cut(pastCut - 1_000), step: "daemon.heartbeat" }] },
+    { at: unread, gz: true, rows: [] },
+  ] });
+  // An archive cut long after the refusal holds only rows appended after it: the production reader must not open it.
+  writeFileSync(join(dir, `ledger.${unread.replace(/[:.]/g, "-")}.ndjson.gz`), "unreadable archive cut after the window");
+  const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL],
+    "the window read stopped at the first archive past the refusal and its margin");
+  assert.equal(rotationsThroughWindow([{ path: "/s/ledger.ndjson" }], Date.parse(REFUSED)), undefined, "no stamped rotation: all are read");
+  assert.equal(rotationsThroughWindow([{ path: `/s/ledger.${cut(pastCut).replace(/[:.]/g, "-")}.ndjson.gz` }], undefined), undefined);
+});
+
+test("W1-T13875: invariant:bounded-read holds while publishing newly found evidence is stalled", { timeout: 20_000 }, async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  const evidence = reader(() => proposalLines(f, operationId));
+  const ownerKey = createHash("sha256").update(actor).digest("hex");
+  const renaming = deferredSignal();
+  const release = deferredSignal();
+  const realRename = fsPromises.rename;
+  const stall = t.mock.method(fsPromises, "rename", async (from: Parameters<typeof realRename>[0], to: Parameters<typeof realRename>[1]) => {
+    if (String(to).endsWith(".evidence.json")) { renaming.resolve(); await release.promise; }
+    return realRename(from, to);
+  });
+  syncBuiltinESMExports();
+  const bound = 5_000;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let finished = false;
+    const resume = ok(f.service({ gateway: false, readLedgerLines: evidence.read, ledgerReadBoundMs: bound }).execute(actor, f.command()))
+      .finally(() => { finished = true; });
+    await Promise.race([renaming.promise, resume.then(() => assert.fail("resume answered before publishing its evidence"))]);
+    t.mock.timers.tick(bound);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(finished, true, "resume answered at the deadline while the publish was still stalled");
+    const result = await resume;
+    assert.equal(result.observation.state, "unknown");
+    acquireInflightLock(join(f.journalDirectory, "locks"), ownerKey, { run_id: "while-evidence-publish-stalled" }).release();
+  } finally {
+    t.mock.timers.reset();
+    release.resolve();
+    stall.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test("W1-T13875: a journaled nonzero exit stays refused and is kept when its exit row is missing", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  const operationId = first.observation.operationId;
+  seedLegacyRefusal(f, operationId, "exited"); // the gateway saved the nonzero exit but could not append ratify.cli_exited
+  const evidence = reader(() => []);
+  for (let resume = 0; resume < 3; resume++) {
+    const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
+    assert.deepEqual([again.observation.operationId, again.observation.state], [operationId, "refused"]);
+  }
+  assert.equal(evidence.reads.length, 1, "the final exit was read once and kept");
 });
