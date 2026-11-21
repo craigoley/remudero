@@ -1,5 +1,5 @@
 import { INBOX_VERBS, validatedInboxAction, type InboxVerbActions, type InboxVerbActor, type InboxVerbName, type InboxVerbRespond } from "./inbox-verdict-command.js";
-import { INBOX_TERMINAL_VERDICT_HEADER } from "./inbox-cli-serve.js";
+import { expiredSnoozeDetail, INBOX_TERMINAL_VERDICT_HEADER } from "./inbox-cli-serve.js";
 import { readInboxGardenerStore, inboxGardenerPath, inboxRetirementFor, inboxOperatorIntent } from "./inbox-retirement.js";
 /** Control-panel plan→task→PR routes (MASTER-PLAN §7B, api-client §7A).
  * Reuse feedback/trace/drain; only the daemon writes durably. `replyTo` files fresh feedback;
@@ -4303,7 +4303,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       }
       const clock = deps.inboxClock ?? systemClock;
       if (input.until !== null && Date.parse(input.until) <= clock.now()) {
-        respond(400, { error: "invalid_request", detail: "until must be in the future" });
+        respond(400, { error: "invalid_request", detail: expiredSnoozeDetail(clock.iso()) });
         return;
       }
       const held = setInboxSnoozed(join(deps.inboxRoot, "state"), input.proposalId, input.until);

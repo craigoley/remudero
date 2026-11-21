@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { Agent, createServer, type Server } from "node:http";
-import { Socket } from "node:net";
+import { createServer as createNetServer, Socket, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fixedClock } from "#src/lib/clock.js";
 import { INBOX_VERBS, inboxVerbCommand, proposalVerdictCommand, type InboxVerbActions, type InboxVerbName } from "#src/lib/inbox-verdict-command.js";
-import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, serveFirstInboxActions, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
+import { inboxCliServeTarget, inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictReceipt, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, retractLocalServePort, serveFirstInboxActions, type InboxCliServeConfig } from "#src/lib/inbox-cli-serve.js";
 import { declinedWithReceipts } from "#src/lib/inbox-verdict-receipts.js";
 import { DEFAULT_SERVE_PORT, resolveServePort, serviceTokensPath } from "#src/lib/serve.js";
 import { readLedgerLines, type PrRef } from "#src/lib/status.js";
@@ -494,20 +494,45 @@ function triageWorld(t: Ctx, now: number): PanelGraphDeps {
     ratify: { approve: () => undefined, reframe: () => undefined }, inboxMainSha: () => "a".repeat(40), inboxClock: fixedClock(now) };
 }
 
-test("W1-T13238 criterion 3: expired snoozes print the same refusal through the real route and locally at different times", async (t) => {
+test("W1-T13238 criterion 3: expired snoozes print the original refusal, with the CLI's own clock, through the real route and locally", async (t) => {
   const until = "2026-10-13T02:00:00Z";
   const expiry = Date.parse(until);
-  const local = triageWorld(t, expiry + 1000);
+  const cliNow = expiry + 1000;
+  const local = triageWorld(t, cliNow);
   const remote = triageWorld(t, expiry + 10_000);
   const server = createService({ tokens: { read: "cd".repeat(32), write: TOKEN }, routes: buildPanelGraphRoutes(remote) });
   useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
   const config = { root: remote.root, resolveServePort, serve: { port: SERVE_PORT } };
   const args = ["P1", "--until", until];
   const inProcess = await captured(t, () => inboxVerbCommand("snooze", args, buildInboxVerbActions(local)));
-  const throughServe = await captured(t, () => inboxVerbViaServe("snooze", args, config, () => assert.fail("ran in-process")));
+  const throughServe = await captured(t, () => inboxVerbViaServe("snooze", args, config, () => assert.fail("ran in-process"), fixedClock(cliNow)));
+  // The body inboxVerbCommand printed before W1-T13238, "(now is <ISO>)" included.
+  const original = { code: 2, out: [], err: [JSON.stringify({ error: "invalid_request", detail: `until must be in the future (now is ${new Date(cliNow).toISOString()})` })] };
+  assert.deepEqual(inProcess, original);
   assert.deepEqual(throughServe, inProcess);
-  assert.deepEqual(throughServe, { code: 2, out: [], err: [JSON.stringify({ error: "invalid_request", detail: "until must be in the future" })] });
   for (const deps of [local, remote]) assert.deepEqual(readLedgerLines(deps.ledgerPath), []);
+});
+
+test("W1-T13238 criterion 3: only serve's expired-until refusal takes the CLI's clock; other snooze answers print as serve sent them", async (t) => {
+  const answers = new Map<string, [number, unknown]>([
+    ["P400", [400, { error: "invalid_request", detail: "until must be an ISO timestamp" }]],
+    ["P409", [409, { error: "conflict", detail: "until must be in the future (now is 2026-10-13T02:00:10.000Z)" }]],
+  ]);
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const [status, body] = answers.get((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { proposalId: string }).proposalId)!;
+      res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    });
+  });
+  useHttpEndpoints(t, new Map([[SERVE_PORT, server]]));
+  const viaServe = serveFirstInboxActions(() => ({ url: `http://127.0.0.1:${SERVE_PORT}`, token: TOKEN }), () => assert.fail("ran in-process"),
+    { clock: fixedClock(Date.parse("2026-10-13T02:00:01Z")) });
+  for (const [id, [status, body]] of answers) {
+    const printed = await captured(t, () => inboxVerbCommand("snooze", [id, "--until", "2026-10-13T02:00:00Z"], viaServe));
+    assert.deepEqual(printed.err, [JSON.stringify(body)], `${status} prints serve's body unchanged`);
+  }
 });
 
 test("W1-T13238 criterion 3: successful terminal declines through serve preserve archive and keep marks and the next archive receipt", async (t) => {
@@ -659,4 +684,107 @@ test("W1-T13238 criterion 3: a terminal POST preserves the recorded decline afte
   assert.equal(remoteRestore.code, 0);
   assert.deepEqual(world.requests, ["POST /v1/inbox/decline", "POST /v1/inbox/restore", "POST /v1/inbox/restore"]);
   assert.deepEqual(readLedgerLines(world.ledgerPath).map(row => row.step), ["panel.proposal_declined", "panel.proposal_restored"]);
+});
+
+/** A loopback port that refuses connections: bound once, then closed, as a stopped serve leaves it. */
+async function refusedPort(): Promise<number> {
+  const gone = createNetServer();
+  await new Promise<void>((resolve) => gone.listen(0, "127.0.0.1", resolve));
+  const { port } = gone.address() as AddressInfo;
+  await new Promise<void>((resolve) => gone.close(() => resolve()));
+  return port;
+}
+
+test("W1-T13238 criterion 1: rmd archive reaches the configured serve after a second serve on --port 4318 stopped and left its port behind", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  delete process.env.RMD_SERVE_PORT;
+  const config = { resolveServePort, root: root(t), serve: { port: 4317 } };
+  const configured = serve(fakeActions());
+  useHttpEndpoints(t, new Map([[4317, configured.server]]));
+  // The second serve published 4318 when it bound; it was killed, so nothing retracted it.
+  publishLocalServePort(config.root, 4318);
+  assert.deepEqual(inboxCliServeTarget(config), { url: "http://127.0.0.1:4318", token: TOKEN, alternates: ["http://127.0.0.1:4317"] });
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => assert.fail("ran in-process")));
+  assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [] });
+  assert.deepEqual(configured.seen, [{ method: "POST", path: "/v1/inbox/archive", auth: `Bearer ${TOKEN}`, body: { proposalId: "P7", archived: true } }]);
+
+  // decline and restore take the same addresses.
+  const decline = await captured(t, () => proposalVerdictViaServe("decline", ["P7", "--reason", "duplicate"], config, () => assert.fail("ran in-process")));
+  assert.deepEqual(decline, { code: 0, out: [proposalVerdictReceipt("decline", "P7")], err: [] });
+  assert.equal(configured.seen.at(-1)?.path, "/v1/inbox/decline");
+});
+
+test("W1-T13238 criterion 1: a stopping serve retracts only the port it published itself", (t) => {
+  const dir = root(t);
+  const published = join(dir, "state", "serve-port");
+  publishLocalServePort(dir, 4317);
+  publishLocalServePort(dir, 4318);
+  retractLocalServePort(dir, 4318);
+  assert.equal(existsSync(published), false, "the second serve's clean stop leaves no stale port");
+  assert.deepEqual(inboxCliServeTarget({ resolveServePort, root: dir, serve: { port: 4317 } }), { url: "http://127.0.0.1:4317", token: TOKEN });
+
+  publishLocalServePort(dir, 4319);
+  retractLocalServePort(dir, 4318);
+  assert.equal(readFileSync(published, "utf8"), "4319\n", "a serve that published later keeps its port");
+  retractLocalServePort(dir, 4319);
+  retractLocalServePort(dir, 4319);
+  assert.equal(existsSync(published), false);
+});
+
+test("W1-T13238 criterion 2: with neither the published nor the configured serve reachable, the verb names both and runs in-process", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  delete process.env.RMD_SERVE_PORT;
+  useHttpEndpoints(t);
+  const config = { resolveServePort, root: root(t), serve: { port: 4317 } };
+  publishLocalServePort(config.root, 4318);
+  const local = fakeActions();
+  const result = await captured(t, () => inboxVerbViaServe("archive", ["P7"], config, () => local));
+  assert.deepEqual(result, { code: 0, out: [JSON.stringify({ ok: true, verb: "archive", proposalId: "P7" })], err: [
+    "rmd archive: no serve answered at http://127.0.0.1:4318 (ECONNREFUSED), http://127.0.0.1:4317 (ECONNREFUSED); running in-process"] });
+  assert.deepEqual(local.calls, ["archive"]);
+});
+
+test("W1-T13238 criterion 2: a stalled published port spends the one two-second deadline and the configured port is not dialed after it", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  delete process.env.RMD_SERVE_PORT;
+  const socket = Object.assign(new Socket(), { connecting: true });
+  t.after(() => { socket.destroy(); });
+  const connect = t.mock.method(Agent.prototype, "createConnection", () => socket);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const config = { resolveServePort, root: root(t), serve: { port: 4317 } };
+  publishLocalServePort(config.root, 4318);
+  const local = fakeActions();
+  const result = await captured(t, async () => {
+    const run = inboxVerbViaServe("snooze", ["P3", "--wake"], config, () => local);
+    await setImmediate();
+    t.mock.timers.tick(2_000);
+    return run;
+  });
+  assert.equal(connect.mock.callCount(), 1);
+  assert.deepEqual(result.err, ["rmd snooze: no serve answered at http://127.0.0.1:4318 (CONNECT_TIMEOUT); running in-process"]);
+  assert.deepEqual(local.calls, ["snooze"]);
+});
+
+test("W1-T13238 criterion 2: the archived skill-draft restore probe finds the configured serve behind a stale published port", async (t) => {
+  const prior = process.env.RMD_SERVE_PORT;
+  t.after(() => { if (prior === undefined) delete process.env.RMD_SERVE_PORT; else process.env.RMD_SERVE_PORT = prior; });
+  delete process.env.RMD_SERVE_PORT;
+  const live = createNetServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => live.listen(0, "127.0.0.1", resolve));
+  t.after(() => { live.close(); });
+  const config = { resolveServePort, root: root(t), serve: { port: (live.address() as AddressInfo).port } };
+  const stale = await refusedPort();
+  publishLocalServePort(config.root, stale);
+  const local = t.mock.fn(() => 0);
+  const reached = await captured(t, () => proposalVerdictViaServe("restore", ["skill-draft:parked", "--reason", "reconsidered"], config, local, true));
+  assert.deepEqual(reached, { code: 0, out: [], err: [] }, "a reachable configured serve draws no fallback warning");
+
+  live.close();
+  const gone = await captured(t, () => proposalVerdictViaServe("restore", ["skill-draft:parked", "--reason", "reconsidered"], config, local, true));
+  assert.equal(gone.err.length, 1);
+  assert.match(gone.err[0]!, new RegExp(`^rmd restore: no serve answered at http://127\\.0\\.0\\.1:${stale} \\(ECONNREFUSED\\), http://127\\.0\\.0\\.1:${config.serve.port} \\(ECONNREFUSED\\); running in-process$`));
+  assert.equal(local.mock.callCount(), 2);
 });

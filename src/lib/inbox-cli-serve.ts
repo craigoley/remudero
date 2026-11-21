@@ -4,10 +4,11 @@
  * in-process (400 s from the Azure host on 2026-11-16).
  * It lives outside run-task.ts so its test does not import the CLI hub (the affected-suite reach ratchet).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { INBOX_VERBS, inboxVerbCommand, PROPOSAL_VERDICT_SYNTAX, type InboxVerbActions, type InboxVerbName } from "./inbox-verdict-command.js";
@@ -32,18 +33,52 @@ export function publishLocalServePort(root: string, port: number): void {
   writeAtomic(servePortPath(root), `${port}\n`, { mode: 0o600 });
 }
 
+/**
+ * A stopping serve takes back the port it published, so a later CLI does not prefer a listener that is gone over the
+ * configured serve. It leaves the file alone when another serve has since published its own port.
+ */
+export function retractLocalServePort(root: string, port: number): void {
+  if (readFileIfExists(servePortPath(root))?.trim() === String(port)) rmSync(servePortPath(root), { force: true });
+}
+
+/**
+ * The refusal `rmd snooze --until <past>` prints, in-process and from serve's route alike. It carries the clock reading
+ * of the process that refused it, so the CLI re-reads its own clock over serve's answer: the body is then the one the
+ * in-process command prints at that moment, whichever path ran.
+ */
+export function expiredSnoozeDetail(nowIso: string): string {
+  return `until must be in the future (now is ${nowIso})`;
+}
+const EXPIRED_SNOOZE_DETAIL = /^until must be in the future \(now is [^)]*\)$/;
+
+function inCliClock(name: InboxVerbName, status: number, body: unknown, clock: Clock): unknown {
+  const refusal = body as { error?: unknown; detail?: unknown } | null;
+  if (name !== "snooze" || status !== 400 || refusal?.error !== "invalid_request" || typeof refusal.detail !== "string"
+    || !EXPIRED_SNOOZE_DETAIL.test(refusal.detail)) return body;
+  return { ...refusal, detail: expiredSnoozeDetail(clock.iso()) };
+}
+
 /** W1-T13238: how long an Inbox verb waits to connect to the running serve before it runs in-process instead. */
 export const INBOX_CLI_SERVE_CONNECT_MS = 2_000;
 
-/** W1-T13238: where the running serve's write routes listen, and the write token they take. */
-export interface InboxCliServeTarget { url: string; token: string }
+/**
+ * W1-T13238: where the running serve's write routes listen, and the write token they take. `alternates` are further
+ * loopback addresses to try, in order, only when the ones before them refused the connection (nothing was sent).
+ */
+export interface InboxCliServeTarget { url: string; token: string; alternates?: string[] }
 
-/** Resolve one loopback address before sending the write token. */
+/**
+ * Resolve loopback addresses before sending the write token: the port the newest serve published first, then the
+ * configured port (RMD_SERVE_PORT, serve.port, serve's default). A published port can outlive its serve (a second
+ * `rmd serve --port` that stopped, or one that was killed), so it never hides a configured serve that is still up.
+ */
 export function inboxCliServeTarget(config: InboxCliServeConfig): InboxCliServeTarget | { reason: string } {
-  let port: number;
+  let ports: number[];
   try {
+    const configured = resolveLocalServePort([], config.serve?.port, config.resolveServePort);
     const published = readFileIfExists(servePortPath(config.root))?.trim();
-    port = resolveLocalServePort(published === undefined ? [] : ["--port", published], config.serve?.port, config.resolveServePort);
+    const first = published === undefined ? configured : resolveLocalServePort(["--port", published], config.serve?.port, config.resolveServePort);
+    ports = first === configured ? [first] : [first, configured];
   } catch (error) {
     return { reason: (error as Error).message };
   }
@@ -54,14 +89,47 @@ export function inboxCliServeTarget(config: InboxCliServeConfig): InboxCliServeT
     return { reason: `no serve write token (${(error as NodeJS.ErrnoException).code ?? "unreadable"})` };
   }
   if (typeof write !== "string" || !/^[0-9a-f]{64}$/.test(write)) return { reason: "no serve write token (malformed)" };
-  return { url: `http://127.0.0.1:${port}`, token: write };
+  const [url, ...alternates] = ports.map((port) => `http://127.0.0.1:${port}`);
+  return { url: url!, token: write, ...(alternates.length === 0 ? {} : { alternates }) };
 }
 
 /** W1-T13238: errors that mean no serve answered the connect, so nothing was sent and in-process is safe. */
 const INBOX_UNREACHABLE = new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ENOTFOUND", "EADDRNOTAVAIL", "CONNECT_TIMEOUT"]);
 
-function unansweredServe(url: string, reason: string): string {
-  return `no serve answered at ${url} (${reason})`;
+function unansweredServe(tried: Array<{ url: string; reason: string }>): string {
+  return `no serve answered at ${tried.map(({ url, reason }) => `${url} (${reason})`).join(", ")}`;
+}
+
+/** One connect deadline shared by every address a verb tries, so the fallback still starts within the bound. */
+interface ConnectDeadline { expired: boolean; onExpire: Set<() => void>; clear(): void }
+
+function connectDeadline(connectMs: number): ConnectDeadline {
+  const deadline: ConnectDeadline = { expired: false, onExpire: new Set(), clear: () => clearTimeout(timer) };
+  const timer = setTimeout(() => { deadline.expired = true; for (const expire of deadline.onExpire) expire(); }, connectMs);
+  return deadline;
+}
+
+type ServeAnswer = { status: number; body: unknown } | { unreachable: string } | { failed: string };
+
+/**
+ * Post to the target's address, then to each alternate while the one before refused the connection. A refused
+ * connection sent nothing, so the next address is safe to try; any answer, or a failure after connecting, is final.
+ */
+async function postToServe(target: InboxCliServeTarget, path: string, body: unknown, connectMs: number,
+  headers?: Record<string, string>): Promise<ServeAnswer> {
+  const deadline = connectDeadline(connectMs);
+  const tried: Array<{ url: string; reason: string }> = [];
+  try {
+    for (const url of [target.url, ...(target.alternates ?? [])]) {
+      const answer = await postInboxVerb(`${url}${path}`, target.token, body, deadline, headers);
+      if (!("unreachable" in answer)) return answer;
+      tried.push({ url, reason: answer.unreachable });
+      if (deadline.expired) break;
+    }
+  } finally {
+    deadline.clear();
+  }
+  return { unreachable: unansweredServe(tried) };
 }
 
 /**
@@ -71,9 +139,10 @@ function unansweredServe(url: string, reason: string): string {
  * never retries in-process: the route may have acted.
  */
 export function serveFirstInboxActions(targetFor: () => ReturnType<typeof inboxCliServeTarget>, inProcess: () => InboxVerbActions,
-  opts: { warn?: (line: string) => void; connectMs?: number } = {}): InboxVerbActions {
+  opts: { warn?: (line: string) => void; connectMs?: number; clock?: Clock } = {}): InboxVerbActions {
   const warn = opts.warn ?? ((line: string) => console.error(line));
   const connectMs = opts.connectMs ?? INBOX_CLI_SERVE_CONNECT_MS;
+  const clock = opts.clock ?? systemClock;
   const entries = INBOX_VERBS.map((spec) => [spec.name, async (body: unknown, actor: Parameters<InboxVerbActions[InboxVerbName]>[1],
     respond: Parameters<InboxVerbActions[InboxVerbName]>[2]) => {
     const target = targetFor();
@@ -81,19 +150,19 @@ export function serveFirstInboxActions(targetFor: () => ReturnType<typeof inboxC
       warn(`rmd ${spec.name}: ${target.reason}; running in-process`);
       return inProcess()[spec.name](body, actor, respond);
     }
-    const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, body, connectMs);
+    const answer = await postToServe(target, spec.path, body, connectMs);
     if ("unreachable" in answer) {
-      warn(`rmd ${spec.name}: ${unansweredServe(target.url, answer.unreachable)}; running in-process`);
+      warn(`rmd ${spec.name}: ${answer.unreachable}; running in-process`);
       return inProcess()[spec.name](body, actor, respond);
     }
     if ("failed" in answer) { respond(502, { error: "serve_request_failed", detail: answer.failed }); return; }
-    respond(answer.status, answer.body);
+    respond(answer.status, inCliClock(spec.name, answer.status, answer.body, clock));
   }] as const);
   return Object.fromEntries(entries) as unknown as InboxVerbActions;
 }
 
-function postInboxVerb(url: string, token: string, body: unknown, connectMs: number, headers?: Record<string, string>):
-  Promise<{ status: number; body: unknown } | { unreachable: string } | { failed: string }> {
+function postInboxVerb(url: string, token: string, body: unknown, deadline: ConnectDeadline, headers?: Record<string, string>):
+  Promise<ServeAnswer> {
   const payload = Buffer.from(JSON.stringify(body));
   return new Promise((resolve) => {
     let connected = false;
@@ -112,13 +181,15 @@ function postInboxVerb(url: string, token: string, body: unknown, connectMs: num
         }
       });
     });
-    const timer = setTimeout(() => { if (!connected) req.destroy(Object.assign(new Error("connect timed out"), { code: "CONNECT_TIMEOUT" })); }, connectMs);
+    const expire = () => { if (!connected) req.destroy(Object.assign(new Error("connect timed out"), { code: "CONNECT_TIMEOUT" })); };
+    const settle = () => { deadline.onExpire.delete(expire); };
+    deadline.onExpire.add(expire);
     req.on("socket", (socket) => {
-      if (!socket.connecting) { connected = true; clearTimeout(timer); return; }
-      socket.once("connect", () => { connected = true; clearTimeout(timer); });
+      if (!socket.connecting) { connected = true; settle(); return; }
+      socket.once("connect", () => { connected = true; settle(); });
     });
     req.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
+      settle();
       const code = error.code ?? "";
       resolve(!connected && INBOX_UNREACHABLE.has(code) ? { unreachable: code } : { failed: error.message });
     });
@@ -128,8 +199,8 @@ function postInboxVerb(url: string, token: string, body: unknown, connectMs: num
 
 /** W1-T13238: one CLI verb, serve first; build in-process actions only if the verb falls back. */
 export function inboxVerbViaServe(name: InboxVerbName, args: string[], config: InboxCliServeConfig,
-  inProcess: () => InboxVerbActions): Promise<number> {
-  return inboxVerbCommand(name, args, serveFirstInboxActions(() => inboxCliServeTarget(config), inProcess));
+  inProcess: () => InboxVerbActions, clock: Clock = systemClock): Promise<number> {
+  return inboxVerbCommand(name, args, serveFirstInboxActions(() => inboxCliServeTarget(config), inProcess, { clock }));
 }
 
 /** W1-T13238: the receipt `rmd decline` and `rmd restore` print once the verdict is recorded (proposalVerdictCommand's). */
@@ -139,14 +210,34 @@ export function proposalVerdictReceipt(kind: "decline" | "restore", proposalId: 
     : `rmd restore: ${proposalId} RESTORED — it is back in the inbox and classifies as it would have before the decline`;
 }
 
-/** Archived skill-draft restores need the terminal archive reader and only probe serve for a fallback warning. */
-function inboxServeConnectionError(url: string): Promise<string | undefined> {
+/**
+ * Archived skill-draft restores need the terminal archive reader and only probe serve for a fallback warning. The probe
+ * tries the same addresses, under the same one deadline, as a posted verb.
+ */
+async function inboxServeConnectionError(target: InboxCliServeTarget): Promise<string | undefined> {
+  const deadline = connectDeadline(INBOX_CLI_SERVE_CONNECT_MS);
+  const tried: Array<{ url: string; reason: string }> = [];
+  try {
+    for (const url of [target.url, ...(target.alternates ?? [])]) {
+      const reason = await probeServe(url, deadline);
+      if (reason === undefined) return undefined;
+      tried.push({ url, reason });
+      if (deadline.expired) break;
+    }
+  } finally {
+    deadline.clear();
+  }
+  return unansweredServe(tried);
+}
+
+function probeServe(url: string, deadline: ConnectDeadline): Promise<string | undefined> {
   const address = new URL(url);
   return new Promise((resolve) => {
     const socket = createConnection({ host: address.hostname, port: Number(address.port || 80) });
-    const timer = setTimeout(() => finish("CONNECT_TIMEOUT"), INBOX_CLI_SERVE_CONNECT_MS);
+    const expire = () => finish("CONNECT_TIMEOUT");
+    deadline.onExpire.add(expire);
     function finish(reason?: string): void {
-      clearTimeout(timer);
+      deadline.onExpire.delete(expire);
       socket.destroy();
       resolve(reason);
     }
@@ -172,15 +263,15 @@ export async function proposalVerdictViaServe(kind: "decline" | "restore", rest:
     return inProcess();
   }
   if (localOnly) {
-    const error = await inboxServeConnectionError(target.url);
-    if (error !== undefined) console.error(`rmd ${kind}: ${unansweredServe(target.url, error)}; running in-process`);
+    const error = await inboxServeConnectionError(target);
+    if (error !== undefined) console.error(`rmd ${kind}: ${error}; running in-process`);
     return inProcess();
   }
   const spec = INBOX_VERBS.find((verb) => verb.name === kind)!;
-  const answer = await postInboxVerb(`${target.url}${spec.path}`, target.token, { proposalId, reason }, INBOX_CLI_SERVE_CONNECT_MS,
+  const answer = await postToServe(target, spec.path, { proposalId, reason }, INBOX_CLI_SERVE_CONNECT_MS,
     { [INBOX_TERMINAL_VERDICT_HEADER]: "1" });
   if ("unreachable" in answer) {
-    console.error(`rmd ${kind}: ${unansweredServe(target.url, answer.unreachable)}; running in-process`);
+    console.error(`rmd ${kind}: ${answer.unreachable}; running in-process`);
     return inProcess();
   }
   if ("failed" in answer) { console.error(`rmd ${kind}: serve request failed: ${answer.failed}`); return 1; }
