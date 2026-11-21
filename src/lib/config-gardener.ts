@@ -967,30 +967,52 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): { paths: s
   return { paths: [...staged.keys()].sort(), applied };
 }
 
-/** The `grep:` proof that `path` holds `line` as one whole line: the house literal escape ({@link escapeGrepLiteral})
- *  between `^` and `$`. Anchored, `budget_usd: 5` never matches `budget_usd: 50.00`, and the line's own leading
- *  and trailing spaces stay part of what it must equal. */
-export function exactLineProof(path: string, line: string): string {
-  return `grep: ^${escapeGrepLiteral(line)}$ in ${path}`;
+/** One code point of a proven line. A control character other than tab, such as a CRLF file's carriage return, is
+ *  `[[:cntrl:]]`, because a PR body cannot carry the byte. `|` is `.`, because the house Acceptance renderer quotes a proof
+ *  holding `|`, and a quoted proof cannot also hold `"`. Every other character is the house literal escape
+ *  ({@link escapeGrepLiteral}). */
+type LineAtom = { kind: "char"; ch: string } | { kind: "cntrl" } | { kind: "any" };
+const isBodyUnsafeControl = (ch: string): boolean => ch !== "\t" && /[\0-\x1f\x7f]/.test(ch);
+/** POSIX `[:cntrl:]`, which grep matches: every C0 control character and DEL, tab included. */
+const isPosixControl = (ch: string | undefined): boolean => ch !== undefined && /[\0-\x1f\x7f]/.test(ch);
+
+function lineAtoms(line: string): LineAtom[] {
+  return [...line].map((ch): LineAtom => (isBodyUnsafeControl(ch) ? { kind: "cntrl" } : ch === "|" ? { kind: "any" } : { kind: "char", ch }));
 }
 
-/** What the executor's `grep -arn -- <pattern> <path>` answers for {@link exactLineProof}: some line of `text` is `line`. */
+function linePattern(line: string): string {
+  return `^${lineAtoms(line).map((a) => (a.kind === "cntrl" ? "[[:cntrl:]]" : a.kind === "any" ? "." : escapeGrepLiteral(a.ch))).join("")}$`;
+}
+
+/** The `grep:` proof that `path` holds `line` as one whole line, anchored at both ends, so `budget_usd: 5` never matches
+ *  `budget_usd: 50.00` and the line's own leading and trailing spaces stay part of what it must equal. */
+export function exactLineProof(path: string, line: string): string {
+  return `grep: ${linePattern(line)} in ${path}`;
+}
+
+/** What the executor's `grep -arn -- <pattern> <path>` answers for {@link exactLineProof}: some line of `text` matches every
+ *  atom of `line` (the same character, any character for `|`, or a control character for a control character). */
 export function holdsExactLine(text: string, line: string): boolean {
-  return text.split("\n").includes(line);
+  const atoms = lineAtoms(line);
+  return text.split("\n").some((candidate) => {
+    const chars = [...candidate];
+    return chars.length === atoms.length &&
+      atoms.every((a, i) => a.kind === "any" || (a.kind === "cntrl" ? isPosixControl(chars[i]) : chars[i] === a.ch));
+  });
 }
 
 /** The revert's Acceptance block: one proof per line it put back, and none for a line already at its baseline.
  *  Preflight runs each body proof through check-proof and refuses one that already holds on the tree before the
  *  revert, so the canary would keep its edits and its class would stay pending. So each proof is checked here the
  *  way the executor will run it: it must parse to the argv this pattern names, hold after the revert and not before.
- *  `renderAcceptanceBlock` refuses a block the reviewer's parser would not read back verbatim. A line that cannot be
- *  proven this way refuses the revert before any PR opens. */
+ *  `renderAcceptanceBlock` refuses a block the reviewer's parser would not read back verbatim. A proof that would already
+ *  hold before the revert, such as a `|` widened to `.` beside a look-alike line, refuses the revert before any PR opens. */
 function rollbackAcceptance(applied: readonly ConfigEdit[], before: ReadonlyMap<string, string>, root: string): string {
   for (const e of applied) {
     const parsed = parseWhitelistedProof(exactLineProof(e.path, e.to));
     const after = readFileIfExists(join(root, e.path)) ?? "";
-    const runs = parsed?.kind === "grep" && parsed.args.join("\0") === ["-arn", "--", `^${escapeGrepLiteral(e.to)}$`, e.path].join("\0");
-    if (!runs || /[\0-\x08\x0a-\x1f\x7f]/.test(e.to) || !holdsExactLine(after, e.to) || holdsExactLine(before.get(e.path) ?? "", e.to)) {
+    const runs = parsed?.kind === "grep" && parsed.args.join("\0") === ["-arn", "--", linePattern(e.to), e.path].join("\0");
+    if (!runs || !holdsExactLine(after, e.to) || holdsExactLine(before.get(e.path) ?? "", e.to)) {
       throw new Error(`config gardener: the rollback proof for ${e.path} would not tell the revert from the tree before it`);
     }
   }

@@ -162,15 +162,18 @@ test("an expired config canary lands a revert of its edits and releases its clas
   // - a line full of BRE metacharacters, a backslash, a comment and the proof grammar's own ` in `;
   // - a file holding one edit already put back and one still to revert.
   const prefix = "plan/tasks.d/W1-T950-p.yaml", spaced = "plan/tasks.d/W1-T951-s.yaml", mounts = "plan/mounts.yaml";
-  const caps = "scripts/knowledge-budget-baseline.json";
+  const caps = "scripts/knowledge-budget-baseline.json", crlf = "scripts/crlf-mounts.yaml";
   put(root, prefix, shard("W1-T950").replace("  budget_usd: 30.00", "  budget_usd: 50.00"));
   put(root, spaced, shard("W1-T951").replace("  budget_usd: 30.00", "  budget_usd: 9.00"));
   put(root, mounts, "flows:\n  ci_judge: { model: haiku, effort: low }\n");
   put(root, caps, '{\n  "capturedAt": "2026-09-01",\n  "maxChars": 9000\n}\n');
+  // - a row a human commit gave CRLF endings, so the line put back ends in a carriage return no PR body can carry.
+  put(root, crlf, "flows:\r\n  feedback_summary: { model: haiku, effort: low }\r\n");
   const extra: ConfigEdit[] = [
     { path: prefix, from: "  budget_usd: 5", to: "  budget_usd: 50.00" },
     { path: spaced, from: "  budget_usd: 30.00  ", to: "  budget_usd: 9.00" },
-    { path: mounts, from: "  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c", to: "  ci_judge: { model: haiku, effort: low }" },
+    { path: mounts, from: "  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c a|b \"q\"", to: "  ci_judge: { model: haiku, effort: low }" },
+    { path: crlf, from: "  feedback_summary: { model: sonnet, effort: low }\r", to: "  feedback_summary: { model: haiku, effort: low }\r" },
     { path: caps, from: '  "capturedAt": "2026-09-01",', to: '  "capturedAt": "2026-09-20",' },
     { path: caps, from: '  "maxChars": 6000', to: '  "maxChars": 9000' },
   ];
@@ -189,7 +192,7 @@ test("an expired config canary lands a revert of its edits and releases its clas
   assert.match(h.landed[1]!.title, /^revert\(config\): /);
   assert.equal(h.landed[1]!.sealedLanding, false, "the revert keeps its own PR, never the shared task-files landing that counts a held path as carried");
   const shards = cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).filter((p) => p !== restored);
-  assert.deepEqual(h.landed[1]!.paths, [...shards, prefix, spaced, mounts, caps].sort(), "exactly the files the revert still changes");
+  assert.deepEqual(h.landed[1]!.paths, [...shards, prefix, spaced, mounts, caps, crlf].sort(), "exactly the files the revert still changes");
   assert.match(h.landed[1]!.body, /expired before its cohort cleared the floor/);
   const after = tree();
   for (const e of [...canary0!.edits, ...extra]) assert.ok(holdsExactLine(after.get(e.path)!, e.from), `${e.path} is back at ${JSON.stringify(e.from)}`);
@@ -199,13 +202,16 @@ test("an expired config canary lands a revert of its edits and releases its clas
   // at its baseline, each holding after the revert and not before it, so preflight never reads the revert as stale.
   const proofs = proofsOf(h.landed[1]!.body);
   const putBack = [...shards.map((path) => ({ path, line: "  budget_usd: 30.00" })), { path: prefix, line: "  budget_usd: 5" },
-    { path: spaced, line: "  budget_usd: 30.00  " }, { path: mounts, line: extra[2]!.from }, { path: caps, line: '  "maxChars": 6000' }];
+    { path: spaced, line: "  budget_usd: 30.00  " }, { path: mounts, line: extra[2]!.from }, { path: caps, line: '  "maxChars": 6000' },
+    { path: crlf, line: extra[3]!.from }];
   assert.deepEqual([...proofs].sort(), putBack.map((p) => exactLineProof(p.path, p.line)).sort(), "one proof per line put back");
   for (const proof of proofs) {
     assert.equal(executorFinds(proof, after), true, `${proof} holds after the revert`);
     assert.equal(executorFinds(proof, before), false, `${proof} is false on the tree before the revert`);
   }
   assert.equal(proofs.some((p) => p.includes("capturedAt")), false, "the line already put back gets no proof");
+  assert.equal(proofs.some((p) => /[\r|]/.test(p)), false, "no proof carries a carriage return or a `|` the body cannot hold verbatim");
+  assert.equal(readFileSync(join(root, crlf), "utf8"), "flows:\r\n  feedback_summary: { model: sonnet, effort: low }\r\n", "the CRLF file keeps its endings");
   assert.equal(canary.rollbackPrUrl, "https://github.com/acme/remudero/pull/102", "the revert's receipt is kept on the canary");
 
   const state = h.gardenState();
@@ -235,22 +241,25 @@ test("a canary that is still under its floor before expiry lands no revert", asy
 
 test("a revert's proof matches its own line exactly, never a longer value or a look-alike", () => {
   const path = "plan/x.yaml";
-  const cases: Array<[line: string, lookAlikes: string[]]> = [
-    ["  budget_usd: 5", ["  budget_usd: 50.00", "  budget_usd: 5 ", "budget_usd: 5", "    budget_usd: 5"]],
-    ["  budget_usd: 30.00  ", ["  budget_usd: 30.00", "  budget_usd: 30x00  "]],
-    ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c", ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in", "  ci_judge: { model: sonnet, effort: low }"]],
-    ['  "maxChars": 6000,', ['  "maxChars": 60000,', '  "maxChars": 6000']],
-    ["\tkey: a|b (c) {d} +e", ["\tkey: a|b (c) {d} +ee", "key: a|b (c) {d} +e"]],
+  // [line, lines its proof must match, lines it must not]. A `|` is proven as `.`, so a line differing only there matches;
+  // the revert refuses itself when such a line is already in the tree before it.
+  const cases: Array<[line: string, matches: string[], misses: string[]]> = [
+    ["  budget_usd: 5", [], ["  budget_usd: 50.00", "  budget_usd: 5 ", "budget_usd: 5", "    budget_usd: 5"]],
+    ["  budget_usd: 30.00  ", [], ["  budget_usd: 30.00", "  budget_usd: 30x00  "]],
+    ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in c", [], ["  ci_judge: { model: sonnet, effort: low } # [x]* ^$ a.b? \\d+ in", "  ci_judge: { model: sonnet, effort: low }"]],
+    ['  "maxChars": 6000,', [], ['  "maxChars": 60000,', '  "maxChars": 6000']],
+    ["\tkey: a (c) {d} +e", [], ["\tkey: a (c) {d} +ee", "key: a (c) {d} +e", " key: a (c) {d} +e"]],
+    ["  feedback_summary: { model: sonnet }\r", ["  feedback_summary: { model: sonnet }\u0001"], ["  feedback_summary: { model: sonnet }", "  feedback_summary: { model: sonnet }x", "  feedback_summary: { model: sonnet }\r\r"]],
+    ['  note: a|b "q"', ['  note: a.b "q"'], ['  note: a|bb "q"', '  note: ab "q"']],
   ];
-  for (const [line, lookAlikes] of cases) {
+  for (const [line, matches, misses] of cases) {
     const proof = exactLineProof(path, line);
     assert.deepEqual(parseAcceptanceBlock(`Acceptance:\n- claim: c\n  proof: ${proof}`).map((c) => c.proof), [proof], `${proof} reads back verbatim`);
-    assert.equal(executorFinds(proof, new Map([[path, `a\n${line}\nz\n`]])), true, `${JSON.stringify(line)} is found`);
-    assert.equal(holdsExactLine(`a\n${line}\nz\n`, line), true);
-    for (const other of lookAlikes) {
+    assert.equal(/[\r|]/.test(proof), false, `${JSON.stringify(proof)} holds no carriage return and no |`);
+    for (const [other, expected] of [[line, true], ...matches.map((m) => [m, true] as const), ...misses.map((m) => [m, false] as const)] as const) {
       const text = `a\n${other}\nz\n`;
-      assert.equal(executorFinds(proof, new Map([[path, text]])), false, `${JSON.stringify(line)}'s proof does not match ${JSON.stringify(other)}`);
-      assert.equal(holdsExactLine(text, line), false, `the gardener's own check agrees with grep on ${JSON.stringify(other)}`);
+      assert.equal(executorFinds(proof, new Map([[path, text]])), expected, `grep on ${JSON.stringify(other)} for ${JSON.stringify(line)}`);
+      assert.equal(holdsExactLine(text, line), expected, `the gardener's own check agrees with grep on ${JSON.stringify(other)}`);
     }
   }
 });
@@ -282,16 +291,16 @@ test("a revert that cannot land leaves its canary as it was, and the pass still 
   assert.equal(h.landed.length, 2, "neither opens a revert");
 });
 
-test("a revert whose line cannot ride a PR body verbatim opens no PR", async () => {
+test("a revert whose proof already holds on the tree before it opens no PR", async () => {
   const { h } = await thinExposedCanary();
   const [real] = readConfigCanaries(h.deps.stateDir);
-  // A CRLF file: the line put back ends in a carriage return, which a PR body cannot carry, so no proof can name it.
-  put(h.deps.repoRoot, "scripts/crlf-baseline.yaml", "caps:\r\n  budget_usd: 9.00\r\n");
-  const crlf = { ...real!, edits: [{ path: "scripts/crlf-baseline.yaml", from: "  budget_usd: 30.00\r", to: "  budget_usd: 9.00\r" }] };
-  writeConfigCanaries(h.deps.stateDir, [crlf]);
+  // The line put back holds a `|`, proven as `.`, and the tree before the revert already has a line differing only there.
+  put(h.deps.repoRoot, "scripts/pipe-baseline.yaml", "v: a.b\nw: canary\n");
+  const widened = { ...real!, edits: [{ path: "scripts/pipe-baseline.yaml", from: "v: a|b", to: "w: canary" }] };
+  writeConfigCanaries(h.deps.stateDir, [widened]);
   h.advance(CANARY_TTL_MS + HOUR);
-  await assert.rejects(h.tend(), /the rollback proof for scripts\/crlf-baseline\.yaml would not tell the revert from the tree before it/);
+  await assert.rejects(h.tend(), /the rollback proof for scripts\/pipe-baseline\.yaml would not tell the revert from the tree before it/);
   assert.equal(h.landed.length, 1, "no revert PR opens");
-  assert.deepEqual(readConfigCanaries(h.deps.stateDir), [crlf], "the canary is left as it was");
+  assert.deepEqual(readConfigCanaries(h.deps.stateDir), [widened], "the canary is left as it was");
   assert.ok(h.gardenState().pending, "its class stays pending");
 });
