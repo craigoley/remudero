@@ -1416,6 +1416,7 @@ export async function loadPlanAtRefAsync(
   ref = "HEAD",
   runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
   keepsUnseenDependency?: KeepsUnseenDependency,
+  parseCache: PlanBlobCache = planAtRefParseCache(planRelPath),
 ): Promise<Plan> {
   let monolithBlob: string;
   try {
@@ -1438,7 +1439,29 @@ export async function loadPlanAtRefAsync(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
-  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), {}, { keepsUnseenDependency });
+  return mergePlanBlobsReusingParses(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), parseCache, keepsUnseenDependency);
+}
+
+const planAtRefParseCaches = new Map<string, PlanBlobCache>();
+
+/** W1-T13969: {@link loadPlanAtRefAsync}'s parses for one plan path, kept for the process's lifetime. Each shard's entry
+ *  is keyed by its content hash, so an unchanged blob is parsed once and a changed one again; one plan's shards at most. */
+function planAtRefParseCache(planRelPath: string): PlanBlobCache {
+  let cache = planAtRefParseCaches.get(planRelPath);
+  if (cache === undefined) planAtRefParseCaches.set(planRelPath, cache = new PlanBlobCache());
+  return cache;
+}
+
+/** W1-T13969: {@link mergePlanBlobs} under its default parse, answering each blob whose content `cache` holds from that
+ *  parse. MEASURED 2026-11-20: re-parsing every shard on each load held the daemon loop 85.5 s in a day. */
+function mergePlanBlobsReusingParses(blobs: Array<{ label: string; text: string }>, cache: PlanBlobCache,
+  keepsUnseenDependency?: KeepsUnseenDependency): Plan {
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
+  const plan = validatedPlan(mergeBlobTasks(blobs, undefined, undefined, cachedBlobParser(cache, next, counts)), undefined, keepsUnseenDependency);
+  cache.entries = next;
+  Object.assign(cache, counts);
+  return plan;
 }
 
 /** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
