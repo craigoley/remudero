@@ -1,0 +1,44 @@
+- id: W1-T14179
+  title: A PASS cannot replace a standing FAIL from another writer on the same head and review input digest unless it answers the FAIL's unmet criteria; otherwise the disagreement escalates
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # tightens the remudero-review gate; a wrong refusal holds a good PR, a wrong accept merges unproven work
+  band_meaning: span
+  origin: operator-session#pr-backlog-sweep-2026-11-21
+  plan_refs: [W1-T14178, W1-T14035]
+  files:
+    - src/cli/commands/review.ts
+    - test/review/a-pass-cannot-replace-another-writers-standing-fail.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21 (W1-T14178 recon, comment on #20066): on #19922 head 66e66ab89, reviewer code ebea9d1a5, the
+    fleet's semantic review posted FAIL at 19:00:03Z (run review-PR19922-1795287178193), and the daemon restored that
+    FAIL at 19:02:55Z. A hand review on the Mac mini (host Craigs-Mini-2, account craigoleyagent, actor operator_ai,
+    run review-PR19922-1795286994954) then ran semantic mode with claude-sonnet-5-5, found 0 downgrades, posted
+    success at 19:03:28Z through the operator's GitHub login, and armed auto-merge. The PR merged 7 s later. Two
+    semantic reviews disagreed, and the last post won. That writer's rows are only in the Mac account's local
+    ledger, so no Azure-side check could see its run.
+  design: |
+    In src/cli/commands/review.ts, before posting success, read the head's remudero-review status history from GitHub
+    (the only record every writer shares, the Mac agent account and other local ledgers included). If a FAIL stands
+    on the same head from another run, for the same review input digest and reviewer code, a PASS may post only when
+    its verdict answers each of that FAIL's unmet criteria (named in the FAIL's evidence comment) with an executed
+    proof. Otherwise post pending with a disagreement reason naming both runs, raise an escalation for a person or a
+    third review, and never arm auto-merge. A FAIL replacing a PASS, a PASS on a new head or a new input digest, and
+    a writer's own re-post keep today's behaviour.
+
+    INVARIANT no-silent-override: a PASS never replaces another writer's standing FAIL on the same head and input digest without answering its unmet criteria; an unanswered disagreement escalates and arms nothing.
+  acceptance:
+    - claim: "A PASS from a second writer over a standing FAIL on the same head, input digest and reviewer code, without answers to the FAIL's unmet criteria, posts pending with a disagreement reason naming both runs and arms no auto-merge"
+      proof: "grep: W1-T14179 criterion 1: in test/review/a-pass-cannot-replace-another-writers-standing-fail.test.ts"
+    - claim: "invariant:no-silent-override — a PASS that answers every unmet criterion with an executed proof may post; a new head, a new input digest, or the same writer's re-post keeps today's behaviour"
+      kind: guard
+      proof: "grep: W1-T14179 criterion 2: in test/review/a-pass-cannot-replace-another-writers-standing-fail.test.ts"
+  falsifier: |
+    Post the PASS without reading the status history: criterion 1's second-writer case posts success and arms
+    auto-merge, and the test fails.

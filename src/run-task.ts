@@ -254,6 +254,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, retractLocalServePort } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -929,7 +930,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -30773,9 +30774,7 @@ export async function serveCommand(
   let hosts: string[];
   let identity: ReturnType<typeof resolveServeIdentity>;
   try {
-    // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
-    // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
-    port = resolveServePort(rest, config.serve?.port);
+    port = resolveLocalServePort(rest, config.serve?.port, resolveServePort);
     hosts = resolveServeHosts(rest, process.env, config.serve?.host);
     // W1-T398: resolved here, side by side with host/port, so an install that enables identity
     // without declaring which proxy it trusts fails the SAME way an invalid --host does — a
@@ -31160,6 +31159,11 @@ export async function serveCommand(
   }
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+  try {
+    publishLocalServePort(config.root, port);
+  } catch (error) {
+    log("serve.port_publication_failed", { port, reason: (error as Error).message });
+  }
 
   // Start the projection only after a successful bind. The worker uses this process's one
   // GitHub gateway for facts and publishes complete snapshots; client reads never start a pass.
@@ -31178,6 +31182,12 @@ export async function serveCommand(
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       log("serve.stop", {});
+      // W1-T13238: a stopped serve must not stay the port an Inbox CLI dials first.
+      try {
+        retractLocalServePort(config.root, port);
+      } catch (error) {
+        log("serve.port_retraction_failed", { port, reason: (error as Error).message });
+      }
       stopServeReadModel(server);
       server.close(() => resolve());
     };
@@ -39810,27 +39820,42 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
-  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
-  const actions = buildInboxVerbActions(deps ?? {
-    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
-    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
-  }, causalScope);
-  return inboxVerbCommand(name, rest, actions);
+  let built: InboxVerbActions | undefined;
+  const inProcess = (): InboxVerbActions => built ??= (() => {
+    const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+    const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
+    const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
+    return buildInboxVerbActions(deps ?? {
+      root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+      github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+      ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
+    }, causalScope);
+  })();
+  if (deps) return inboxVerbCommand(name, rest, inProcess());
+  // W1-T13238: the running serve's write route first, as the Console does; in-process only when no serve answers.
+  return inboxVerbViaServe(name, rest, { ...config, resolveServePort }, inProcess);
+}
+
+/**
+ * W1-T13238: `rmd decline` and `rmd restore`, serve first. The in-process verdict preserves terminal verify-human
+ * decisions (W1-T10077) and can restore skill drafts whose decline is only in an archive (W1-T13859).
+ */
+function proposalVerdictServeFirst(kind: ProposalVerdictKind, rest: string[]): Promise<number> {
+  const config = loadConfig();
+  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config),
+    kind === "restore" && rest[0]?.startsWith(SKILL_DRAFT_ID_PREFIX));
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  const decide = () => proposalVerdictCommand(
+  const decide = () => proposalVerdictInProcess(
     kind,
     rest,
     (id) => {
+      const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+      const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
+      const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
       let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
       if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
@@ -45702,8 +45727,9 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await approveCommandMirrored(rest);
     },
   ],
-  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
-  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
+  // W1-T13238: the running serve's verdict route first, as the Console does; in-process only when no serve answers.
+  ["decline", (rest) => proposalVerdictServeFirst("decline", rest)],
+  ["restore", (rest) => proposalVerdictServeFirst("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [

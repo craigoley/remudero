@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human # hand-off only: the machine-filing judge re-judges this amended record (#19089 precedent)
+  # hand-off only: the machine-filing judge re-judges this amended record (#19089 precedent)
+  verify: auto
   risk: high # Rule 19 sizing: run-task and fix are two concerns
   priority: 1.13
   # refusal-amendment (W1-T10585, run W1-T10585-1793135839441, 2026-10-27T21:59:17.146Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
@@ -34,3 +35,13 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
     AMENDED (2026-11-21): files adds src/cli/commands/fix.ts. The refusal comes from the W1-T10900 arm of the ask closure in runFixRung (src/cli/commands/fix.ts); src/run-task.ts only forwards to it (PR #19941 review; the 2026-10-27 refusal-amendment note already named this file).
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.89
+    reasons:
+      - "The filing reports four fix rounds on PR #13868 and gives a concrete path-not-changed example. The amendment cites PR #19941 and adds the command file it identifies as the source of the refusal."
+      - "The declared remedy is limited to preventing or recovering from this specific fix-round refusal. The filing lists two implementation files and a new regression test, and specifies a post-merge comparison over equal windows."
+      - "The filing-time grep proof checks for the named test. Verification of the remedy’s behavior remains with CI and review."
+    judged_at: "2026-11-21T19:51:45.834Z"
+    pin: "60b9766c1da778dd4fac2764c475c19218f592f55cb18ebf3d6b1027ca49a496"
