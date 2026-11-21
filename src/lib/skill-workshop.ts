@@ -28,12 +28,7 @@ import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js
 import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
-import {
-  mineTranscriptWorkflows,
-  renderTranscriptWorkflowSteps,
-  type TranscriptLedgerRow,
-  type TranscriptRun,
-} from "./workflow-mining.js";
+import { mineRecurringProcedures, type TranscriptLedgerRow, type TranscriptRun } from "./workflow-mining.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
  *  header for why this duplicates retro.ts's `ProceduralCandidate` rather than importing it. */
@@ -122,61 +117,43 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
     .slice(0, 16);
 }
 
-/** The transcript corpus {@link renderSkillDraft} mines a distinguishing workflow from (W1-T4668,
- *  design clause ii) — optional so the existing call site (retro.ts's `buildGather`, unchanged by
- *  this task) keeps drafting off signals alone until a future caller wires the ledger through. */
+/** The transcript corpus {@link renderSkillDraft} mines the candidate's recurring procedure from (W1-T13857). */
 export interface TranscriptContext {
   runs: readonly TranscriptRun[];
   records: readonly TranscriptLedgerRow[];
 }
 
+/** Writes a census step as an action line, or `undefined` when no action verb fits it. No line names a tool. */
+function procedureStepLine(step: string): string | undefined {
+  const colon = step.indexOf(":");
+  if (colon < 0) return undefined;
+  const target = step.slice(colon + 1);
+  const verb = ({ Bash: "Run", Edit: "Change", MultiEdit: "Change", NotebookEdit: "Change", Write: "Create" } as Record<string, string>)[step.slice(0, colon)];
+  return verb && target.length > 0 ? `- ${verb} \`${target}\`.` : undefined;
+}
+
 /**
- * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
- * a candidate with no eligible signal or under the two-run floor. Mining already enforces this
- * threshold, but a caller handing this function a single-run candidate
- * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
- * anecdote dressed as a proven procedure.
- *
- * `transcripts`, when supplied, mines the SAME candidate's task type for a {@link
- * TranscriptWorkflow} (workflow-mining.ts, W1-T4668) and appends its distinguishing steps —
- * actual tool-call steps every first-attempt-success run of this shape took that no repaired run
- * ever needed — after the signal-derived steps, so the Procedure section stops restating the
- * outcome ("resolve on the first attempt") and starts naming what a successful worker actually
- * DID. A shape with no transcript workflow (none mined, or none matching this candidate's task
- * type) leaves the Procedure section exactly as before.
+ * Render one procedural candidate as a Claude Code skill draft. `undefined` for a candidate with no eligible signal,
+ * under the two-run floor, or whose runs hold no recurring action procedure the renderer can write (W1-T13857): the
+ * signal's outcome text is never drafted as a step. The Procedure is the highest-scored {@link
+ * mineRecurringProcedures} sequence over the candidate's own runs whose every step is a Run, Change or Create line.
  */
-export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
+export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
-  const eligibleSignals = candidate.signals.filter(skillEligibleSignal);
-  if (eligibleSignals.length === 0) return undefined;
-  const hash = proceduralCandidateHash(candidate);
-  const procedureKey = procedureKeyFor(candidate);
-  // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
-  // evidence accrues rather than minting a new directory per cadence pass.
-  const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
-  const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
+  if (!candidate.signals.some(skillEligibleSignal)) return undefined;
+  const own = new Set(candidate.runIds);
+  const procedure = mineRecurringProcedures(transcripts.runs.filter((r) => own.has(r.runId)), transcripts.records)
+    .find((p) => p.steps.every((step) => procedureStepLine(step) !== undefined));
+  if (!procedure) return undefined;
+  const procedureKey = procedureKeyFor({ taskType: candidate.taskType, steps: procedure.steps });
+  const firstTwo = procedure.steps.slice(0, 2).map((step) => step.slice(step.indexOf(":") + 1)).join(" ");
+  const name = `${kebabSlug(firstTwo)}-${procedureKey.slice(0, 8)}`;
+  const description = `Take the ${procedure.steps.length} actions that ${procedure.recurrence} merged ${candidate.taskType} ` +
+    `runs of ${procedure.taskIds.length} tasks repeated, in the order they took them.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const outcomeFor = (key: string): string =>
-    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key;
   // Every mined outcome reaches the scanner's vocabulary, eligible or not (W1-T4283).
-  const outcomeDescriptions = candidate.signals.map(outcomeFor);
-  const workflow = transcripts
-    ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
-    : undefined;
-  const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
-  // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
-  // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
-  // draft; with no mined steps it stays, so stageSkillDraft refuses the outcome-only procedure.
-  // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
-  const steps = eligibleSignals
-    .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
-    .filter(({ line, outcome }) => workflowSteps.length === 0 || !restatesOutcome(line, outcome))
-    .map(({ line }) => line);
-  const evidence = [
-    ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
-    `- Filed under: ${candidate.taskIds.join(", ")}`,
-    ...(workflow ? workflow.runIds.map((runId) => `- [src: transcript#${runId}]`) : []),
-  ];
+  const outcomeDescriptions = candidate.signals.map((key) => candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key);
+  const round = (n: number): string => String(Math.round(n));
   const markdown = [
     "---",
     `name: ${name}`,
@@ -184,19 +161,22 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
     ...(appliesTo ? [`applies-to: ${appliesTo}`] : []),
     "---",
     "",
-    "<!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15",
+    "<!-- DRAFTED by skill-workshop.ts (W1-T13857) from a command sequence that recurs across runs — a Rule 15",
     "     plan write the Architect proposes and the operator ratifies, not yet ratified. -->",
     "",
     "## Procedure",
     "",
-    ...steps,
-    ...workflowSteps,
+    ...procedure.steps.map((step) => procedureStepLine(step)!),
     "",
     "## Evidence",
     "",
-    ...evidence,
+    `- Recurs in ${procedure.recurrence} runs of ${procedure.taskIds.length} tasks: ${procedure.taskIds.join(", ")}.`,
+    `- Median tool calls from the first step to the last: ${procedure.medianSpannedCalls}.`,
+    procedure.estimatedTokensPerRun === null ? "- tokens: not measured" : `- Estimated output tokens per run: ${round(procedure.estimatedTokensPerRun)}.`,
+    `- Score: ${round(procedure.score)}.`,
+    ...procedure.runIds.map((runId) => `- [src: run#${runId}]`),
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns, outcomeDescriptions };
+  return { name, description, markdown, candidateHash: proceduralCandidateHash(candidate), procedureKey, supportingRuns: procedure.recurrence, outcomeDescriptions };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -333,6 +313,11 @@ export interface SkillDraftScanResult {
   reason?: string;
 }
 
+/** The verbs a Procedure step may start with (W1-T13857). A new action verb is a new row here. */
+const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
+  "Run", "Rerun", "Change", "Create", "Add", "Delete", "Commit", "Push", "Fetch", "Merge", "Open", "Reserve", "Claim", "Copy",
+]);
+
 const STEP_FILLER_WORDS = new Set("a an the and or are as at be been being by for from has have had in is it of on that to was were with".split(" "));
 
 /** A lexical check, not a semantic judgement: case, punctuation, filler and common inflections
@@ -392,6 +377,10 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
       if (outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
         return { ok: false, offendingLine: line, reason: "outcome-only: step restates its mined outcome without adding behavioral content" };
       }
+      const verb = line.slice(2).split(" ", 1)[0]!;
+      if (!SKILL_ACTION_VERBS.has(verb) || !/`[^`]+`/.test(line)) {
+        return { ok: false, offendingLine: line, reason: "not-an-action: a Procedure step starts with an action verb and names a backticked command or path" };
+      }
     }
   }
   return { ok: true };
@@ -424,10 +413,10 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
 
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
-/** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
- *  run set. Hashed so the id stays the same shape as before. */
-export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeKey" | "taskType">): string {
-  return createHash("sha256").update(`${candidate.taskType}|${candidate.shapeKey}`).digest("hex").slice(0, 16);
+/** W1-T3385c, W1-T13857 — the PROCEDURE's identity: the task type and its ordered steps, and NOT its run set, so
+ *  one procedure keeps one proposal id as its runs grow. */
+export function procedureKeyFor(procedure: { taskType: string; steps: readonly string[] }): string {
+  return createHash("sha256").update([procedure.taskType, ...procedure.steps].join("|")).digest("hex").slice(0, 16);
 }
 
 /**

@@ -24,8 +24,15 @@ const allowlist = workerAllowlistFromSettings(undefined);
 const missingContext = workerAllowlistFromCapabilityContext(undefined, undefined);
 const clock = { iso: () => "2026-11-19T10:00:00.000Z" };
 
-/** The one-line draft the Azure host holds for four procedures: only the fully_executed_proof line. */
-function signalOnlyDraft(): SkillDraft {
+/** W1-T13857: run-a and run-b (two tasks) both ran the type check and then changed a lib file. */
+const MINED = {
+  runs: ["run-a", "run-b"].map((runId, i) => ({ runId, taskId: `W1-T${i + 1}`, type: "implement", verdict: "merged" })),
+  records: ["run-a", "run-b"].flatMap((runId) => ["Bash:npm run typecheck", "Edit:src/lib/plan.ts"].map((tool_signature) =>
+    ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: tool_signature.split(":")[0], tool_signature }))),
+};
+
+/** The draft the workshop renders now: the recurring commands of run-a and run-b. */
+function minedDraft(): SkillDraft {
   const draft = renderSkillDraft({
     shapeKey: "implement:fully_executed_proof",
     taskType: "implement",
@@ -33,16 +40,15 @@ function signalOnlyDraft(): SkillDraft {
     runIds: ["run-a", "run-b"],
     taskIds: ["W1-T1", "W1-T2"],
     supportingRuns: 2,
-  });
+  }, MINED);
   assert.ok(draft, "a two-run candidate renders a draft");
   return draft;
 }
 
-/** The same draft with one transcript-mined step after the signal line. */
-function minedDraft(): SkillDraft {
-  const draft = signalOnlyDraft();
-  const signalLine = `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`;
-  return { ...draft, markdown: draft.markdown.replace(signalLine, `${signalLine}\n- Add a failing test first, then change the source until it passes.`) };
+/** The one-line draft the Azure host holds for four procedures: only the fully_executed_proof line. */
+function signalOnlyDraft(): SkillDraft {
+  const draft = minedDraft();
+  return { ...draft, markdown: draft.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, `## Procedure\n\n- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n\n`) };
 }
 
 function fixture() {
@@ -108,14 +114,15 @@ test("W1-T13858 criterion 1: a draft whose every step is a signal-table line is 
   } finally { f.done(); }
 });
 
-test("W1-T13858 criterion 2: a draft with the fully_executed_proof line and a transcript-mined step still stages", () => {
+test("W1-T13858 criterion 2: a draft with transcript-mined steps still stages (W1-T13857 drafts no signal line)", () => {
   const f = fixture();
   try {
     const r = stageSkillDraft(f.registryPath, minedDraft(), allowlist, reachability(), {}, clock);
     assert.equal(r.refused, false, r.reason);
     assert.equal(r.staged, true);
     const entry = loadProposalRegistry(f.registryPath).find((p) => p.id === skillDraftProposalId(minedDraft().procedureKey));
-    assert.ok(entry?.skillFile?.markdown.includes(PROCEDURAL_STEP_TEXT.fully_executed_proof), "the per-line check still passes that line");
+    assert.ok(entry?.skillFile?.markdown.includes("- Run `npm run typecheck`."), "the mined command is the staged step");
+    assert.ok(!entry?.skillFile?.markdown.includes(PROCEDURAL_STEP_TEXT.fully_executed_proof));
   } finally { f.done(); }
 });
 

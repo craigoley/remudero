@@ -1,151 +1,83 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { gatherRuns, parseLedger } from "../src/lib/retro.js";
-import { renderSkillDraft, type ProceduralCandidateLike } from "../src/lib/skill-workshop.js";
-import { mineTranscriptWorkflows, renderTranscriptWorkflowSteps, toolStepsForRun } from "../src/lib/workflow-mining.js";
+import { gatherRuns, parseLedger } from "#src/lib/retro.js";
+import { renderSkillDraft, type ProceduralCandidateLike } from "#src/lib/skill-workshop.js";
+import { mineRecurringProcedures } from "#src/lib/workflow-mining.js";
 
-// W1-T4668 — THE RETRO MINES PROCEDURES FROM LEDGER SIGNALS ONLY. `mineProceduralCandidates`
-// (retro.ts, W1-T87) groups merged runs by a fixed signal table, so every staged skill's
-// Procedure restates the outcome ("resolve on the first attempt") rather than what a successful
-// worker actually DID. This module compares the tool-call sequence of first-attempt-success runs
-// against runs that needed a `fix.dispatch` repair, for the same task shape, and extracts the
-// steps every clean run took that no repaired run ever needed.
-//
-// IMPLEMENT shape: P1 and P2 are first-attempt successes (merged, zero fix.dispatch) that both
-// read the test THEN grep an existing pattern THEN edit; P3 needed a fix.dispatch and its
-// transcript jumped straight to editing, never reading or grepping first — Read and Grep are the
-// steps that distinguish a clean pass from a repaired one.
-//
-// DIAGNOSE shape: D1 and D2 are first-attempt successes with the SAME tool sequence as D3, the
-// one repaired run — nothing distinguishes success from repair, so this shape mines NOTHING.
-const TRANSCRIPT_LEDGER = [
-  `{"ts":"2026-05-01T00:00:00.000Z","run_id":"P1","task_id":"W1-T4700","step":"run.start","type":"implement"}`,
-  `{"ts":"2026-05-01T00:00:01.000Z","run_id":"P1","task_id":"W1-T4700","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-  `{"ts":"2026-05-01T00:00:02.000Z","run_id":"P1","task_id":"W1-T4700","step":"worker.activity","event_kind":"tool-executing","tool_name":"Grep"}`,
-  `{"ts":"2026-05-01T00:00:03.000Z","run_id":"P1","task_id":"W1-T4700","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-01T00:00:04.000Z","run_id":"P1","task_id":"W1-T4700","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/700"}`,
-  `{"ts":"2026-05-02T00:00:00.000Z","run_id":"P2","task_id":"W1-T4701","step":"run.start","type":"implement"}`,
-  `{"ts":"2026-05-02T00:00:01.000Z","run_id":"P2","task_id":"W1-T4701","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-  `{"ts":"2026-05-02T00:00:02.000Z","run_id":"P2","task_id":"W1-T4701","step":"worker.activity","event_kind":"tool-executing","tool_name":"Grep"}`,
-  `{"ts":"2026-05-02T00:00:03.000Z","run_id":"P2","task_id":"W1-T4701","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-02T00:00:04.000Z","run_id":"P2","task_id":"W1-T4701","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/701"}`,
-  `{"ts":"2026-05-03T00:00:00.000Z","run_id":"P3","task_id":"W1-T4702","step":"run.start","type":"implement"}`,
-  `{"ts":"2026-05-03T00:00:01.000Z","run_id":"P3","task_id":"W1-T4702","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-03T00:00:02.000Z","run_id":"P3","task_id":"W1-T4702","step":"fix.dispatch","strike":1,"strike_cap":3,"unmet_count":1,"round":"fresh"}`,
-  `{"ts":"2026-05-03T00:00:03.000Z","run_id":"P3","task_id":"W1-T4702","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-03T00:00:04.000Z","run_id":"P3","task_id":"W1-T4702","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/702"}`,
-  `{"ts":"2026-05-04T00:00:00.000Z","run_id":"D1","task_id":"W1-T4710","step":"run.start","type":"diagnose"}`,
-  `{"ts":"2026-05-04T00:00:01.000Z","run_id":"D1","task_id":"W1-T4710","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-  `{"ts":"2026-05-04T00:00:02.000Z","run_id":"D1","task_id":"W1-T4710","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-04T00:00:03.000Z","run_id":"D1","task_id":"W1-T4710","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/710"}`,
-  `{"ts":"2026-05-05T00:00:00.000Z","run_id":"D2","task_id":"W1-T4711","step":"run.start","type":"diagnose"}`,
-  `{"ts":"2026-05-05T00:00:01.000Z","run_id":"D2","task_id":"W1-T4711","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-  `{"ts":"2026-05-05T00:00:02.000Z","run_id":"D2","task_id":"W1-T4711","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-05T00:00:03.000Z","run_id":"D2","task_id":"W1-T4711","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/711"}`,
-  `{"ts":"2026-05-06T00:00:00.000Z","run_id":"D3","task_id":"W1-T4712","step":"run.start","type":"diagnose"}`,
-  `{"ts":"2026-05-06T00:00:01.000Z","run_id":"D3","task_id":"W1-T4712","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-  `{"ts":"2026-05-06T00:00:02.000Z","run_id":"D3","task_id":"W1-T4712","step":"fix.dispatch","strike":1,"strike_cap":3,"unmet_count":1,"round":"fresh"}`,
-  `{"ts":"2026-05-06T00:00:03.000Z","run_id":"D3","task_id":"W1-T4712","step":"worker.activity","event_kind":"tool-executing","tool_name":"Edit"}`,
-  `{"ts":"2026-05-06T00:00:04.000Z","run_id":"D3","task_id":"W1-T4712","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/712"}`,
-].join("\n");
+// W1-T4668 mined the steps every clean run took and no repaired run did; on the live ledger that returned nothing
+// (W1-T13857). The recurring miner reads the same `worker.activity` rows through the real retro parse, and keeps
+// what runs of two or more tasks repeat, repaired or not.
+function row(ts: string, runId: string, taskId: string, extra: Record<string, unknown>): string {
+  return JSON.stringify({ ts, run_id: runId, task_id: taskId, ...extra });
+}
 
-function transcripts() {
-  const records = parseLedger(TRANSCRIPT_LEDGER);
+function run(runId: string, taskId: string, day: number, tools: Array<{ name: string; signature?: string }>, fixed = false): string[] {
+  const ts = (s: number) => `2026-05-0${day}T00:00:0${s}.000Z`;
+  return [
+    row(ts(0), runId, taskId, { step: "run.start", type: "implement" }),
+    ...tools.map((t, i) => row(ts(i + 1), runId, taskId, {
+      step: "worker.activity", event_kind: "tool-executing", tool_name: t.name, ...(t.signature ? { tool_signature: t.signature } : {}),
+    })),
+    ...(fixed ? [row(ts(7), runId, taskId, { step: "fix.dispatch", strike: 1, strike_cap: 3, unmet_count: 1, round: "fresh" })] : []),
+    row(ts(8), runId, taskId, { step: "verdict", verdict: "merged", cost_usd: 1.0 }),
+  ];
+}
+
+function transcripts(lines: string[]) {
+  const records = parseLedger(lines.join("\n"));
   return { runs: gatherRuns(records), records };
 }
 
-// ── toolStepsForRun: the ordered, deduplicated per-run trace the mining above reduces ─────────
+const signed = (signature: string) => ({ name: signature.slice(0, signature.indexOf(":")), signature });
 
-test("toolStepsForRun: the ordered, de-duplicated tool_name trace off worker.activity rows for one run", () => {
-  const { records } = transcripts();
-  assert.deepEqual(toolStepsForRun(records, "P1"), ["Read", "Grep", "Edit"]);
-  assert.deepEqual(toolStepsForRun(records, "P3"), ["Edit"]); // repeated Edit collapses to one
-  assert.deepEqual(toolStepsForRun(records, "NOPE"), []); // an unknown run_id is empty, never a throw
-});
-
-// ── (1) W1-T4668: a staged procedure lists steps taken from successful transcripts ─────────────
-
-test("W1-T4668: a staged procedure lists steps taken from successful transcripts", () => {
-  const { runs, records } = transcripts();
-  const workflows = mineTranscriptWorkflows(runs, records);
-  const implementWorkflow = workflows.find((w) => w.taskType === "implement");
-  assert.ok(implementWorkflow, "the implement shape must mine a workflow");
-  assert.deepEqual(implementWorkflow!.steps, ["Read", "Grep", "Edit"]);
-  // P3's repaired transcript never read or grepped first — those are what distinguish success.
-  assert.deepEqual(implementWorkflow!.distinguishingSteps, ["Read", "Grep"]);
-  assert.deepEqual(implementWorkflow!.runIds, ["P1", "P2"]);
-  assert.deepEqual(implementWorkflow!.taskIds, ["W1-T4700", "W1-T4701"]);
-  assert.equal(implementWorkflow!.supportingRuns, 2);
-
-  const rendered = renderTranscriptWorkflowSteps(implementWorkflow!);
-  assert.ok(rendered.some((line) => line.includes("`Read`")));
-  assert.ok(rendered.some((line) => line.includes("`Grep`")));
-  assert.ok(!rendered.some((line) => line.includes("`Edit`"))); // Edit is common but NOT distinguishing
-
-  // Staged as the skill draft's own Procedure section (design clause ii), citing the runs it came
-  // from — a draft handed the SAME transcript corpus names the mined steps and their evidence.
+test("a row with no tool_signature falls back to its bare tool name, and the renderer drafts no bare tool name", () => {
+  const { runs, records } = transcripts([
+    ...run("P1", "W1-T4700", 1, [{ name: "Read" }, { name: "Bash" }, { name: "Edit" }]),
+    ...run("P2", "W1-T4701", 2, [{ name: "Grep" }, { name: "Bash" }, { name: "Edit" }]),
+  ]);
+  assert.deepEqual(mineRecurringProcedures(runs, records).map((p) => p.steps), [["Bash", "Edit"]]);
   const candidate: ProceduralCandidateLike = {
-    shapeKey: "implement:fully_executed_proof",
-    taskType: "implement",
-    signals: ["fully_executed_proof"], // W1-T4270: a clean_single_strike-only candidate drafts nothing
-    runIds: ["P1", "P2"],
-    taskIds: ["W1-T4700", "W1-T4701"],
-    supportingRuns: 2,
+    shapeKey: "implement:fully_executed_proof", taskType: "implement", signals: ["fully_executed_proof"],
+    runIds: ["P1", "P2"], taskIds: ["W1-T4700", "W1-T4701"], supportingRuns: 2,
   };
-  const draft = renderSkillDraft(candidate, { runs, records });
-  assert.ok(draft, "a two-run candidate must still render a draft");
-  assert.match(draft!.markdown, /Call `Read`/);
-  assert.match(draft!.markdown, /Call `Grep`/);
-  assert.match(draft!.markdown, /\[src: transcript#P1\]/);
-  assert.match(draft!.markdown, /\[src: transcript#P2\]/);
+  assert.equal(renderSkillDraft(candidate, { runs, records }), undefined);
 });
 
-// ── (2) W1-T4668: a shape with no distinguishing step stages nothing ───────────────────────────
-
-test("W1-T4668: a shape with no distinguishing step stages nothing", () => {
-  const { runs, records } = transcripts();
-  const workflows = mineTranscriptWorkflows(runs, records);
-  // D1/D2 (success) and D3 (repaired) all took the identical Read-then-Edit trace — nothing
-  // separates a clean pass from the repaired one, so the diagnose shape mines NOTHING.
-  assert.ok(!workflows.some((w) => w.taskType === "diagnose"));
-
-  // A draft for that same shape, handed the same corpus, gets no workflow steps appended either —
-  // its Procedure section is exactly what the signal-only path already rendered.
-  const candidate: ProceduralCandidateLike = {
-    shapeKey: "diagnose:fully_executed_proof",
-    taskType: "diagnose",
-    signals: ["fully_executed_proof"], // W1-T4270: a clean_single_strike-only candidate drafts nothing
-    runIds: ["D1", "D2"],
-    taskIds: ["W1-T4710", "W1-T4711"],
-    supportingRuns: 2,
-  };
-  const withoutTranscripts = renderSkillDraft(candidate);
-  const withTranscripts = renderSkillDraft(candidate, { runs, records });
-  assert.equal(withTranscripts!.markdown, withoutTranscripts!.markdown);
+test("a repaired run that repeats the sequence counts toward its recurrence", () => {
+  const steps = [signed("Bash:npm run comment-load-signal"), signed("Read:src/lib/retro.ts"), signed("Bash:npm run typecheck")];
+  const { runs, records } = transcripts([
+    ...run("P1", "W1-T4700", 1, steps),
+    ...run("P2", "W1-T4701", 2, steps, true),
+    ...run("P3", "W1-T4702", 3, steps, true),
+  ]);
+  const [procedure, ...rest] = mineRecurringProcedures(runs, records);
+  assert.equal(rest.length, 0);
+  assert.deepEqual(procedure!.steps, ["Bash:npm run comment-load-signal", "Bash:npm run typecheck"]);
+  assert.deepEqual(procedure!.runIds, ["P1", "P2", "P3"]);
+  assert.equal(procedure!.medianSpannedCalls, 3);
 });
 
-// ── mineTranscriptWorkflows floors: below-threshold and no-repair-to-compare-against ───────────
-
-test("mineTranscriptWorkflows: a shape below the success threshold mines NOTHING, even with a repaired run to compare against", () => {
-  const records = parseLedger(
-    [
-      `{"ts":"2026-05-10T00:00:00.000Z","run_id":"S1","task_id":"W1-T4720","step":"run.start","type":"recon"}`,
-      `{"ts":"2026-05-10T00:00:01.000Z","run_id":"S1","task_id":"W1-T4720","step":"worker.activity","event_kind":"tool-executing","tool_name":"Read"}`,
-      `{"ts":"2026-05-10T00:00:02.000Z","run_id":"S1","task_id":"W1-T4720","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/720"}`,
-      `{"ts":"2026-05-11T00:00:00.000Z","run_id":"R1","task_id":"W1-T4721","step":"run.start","type":"recon"}`,
-      `{"ts":"2026-05-11T00:00:01.000Z","run_id":"R1","task_id":"W1-T4721","step":"fix.dispatch","strike":1,"strike_cap":3,"unmet_count":1,"round":"fresh"}`,
-      `{"ts":"2026-05-11T00:00:02.000Z","run_id":"R1","task_id":"W1-T4721","step":"verdict","verdict":"merged","cost_usd":1.0,"pr_url":"https://github.com/o/r/pull/721"}`,
-    ].join("\n"),
-  );
-  assert.deepEqual(mineTranscriptWorkflows(gatherRuns(records), records), []);
+test("a sequence held by one run is below the run floor and mines nothing", () => {
+  const steps = [signed("Bash:npm run typecheck"), signed("Bash:git commit")];
+  const { runs, records } = transcripts([
+    ...run("S1", "W1-T4720", 1, steps),
+    ...run("S2", "W1-T4721", 2, [signed("Bash:git commit"), signed("Bash:npm run typecheck")]),
+  ]);
+  assert.deepEqual(mineRecurringProcedures(runs, records), []);
+  assert.equal(mineRecurringProcedures(runs, records, { minRuns: 1, minTaskIds: 1 }).length, 2);
 });
 
-test("mineTranscriptWorkflows: two clean successes with NO repaired run of the same shape mine NOTHING — nothing to distinguish success FROM", () => {
-  const { records } = transcripts();
-  // P1/P2 (implement) have no repaired counterpart if the fix.dispatch line for P3 is dropped —
-  // simulate that by mining a corpus that only ever saw first-attempt successes.
-  const cleanOnly = parseLedger(TRANSCRIPT_LEDGER).filter((r) => r.task_id !== "W1-T4702");
-  const runs = gatherRuns(cleanOnly);
-  const workflows = mineTranscriptWorkflows(runs, cleanOnly, { threshold: 2 });
-  assert.ok(!workflows.some((w) => w.taskType === "implement"));
+test("growth stops at its branch bound when many runs share most of one long order, and keeps the most-recurring", () => {
+  // 120 runs each keep a seeded 80% of 30 shared commands: millions of closed sequences recur in two runs.
+  let seed = 11;
+  const keep = (): boolean => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31 < 0.8;
+  const shared = Array.from({ length: 30 }, (_, i) => `Bash:npm run s${i}`);
+  const runs = Array.from({ length: 120 }, (_, r) => ({ runId: `R${r}`, taskId: `W1-T${r}`, type: "implement", verdict: "merged" }));
+  const records = runs.flatMap(({ runId }) => shared
+    .filter(() => keep())
+    .map((tool_signature) => ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: "Bash", tool_signature })));
+  const found = mineRecurringProcedures(runs, records);
+  assert.ok(found.length > 10_000 && found.length <= 20_000, `${found.length} procedures: the bound stopped growth`);
+  assert.ok(found.every((p) => p.recurrence >= 2 && p.taskIds.length >= 2));
+  assert.ok(found[0]!.recurrence >= Math.max(...found.map((p) => p.recurrence)) / 2, "the most-recurring sequences are grown first");
 });

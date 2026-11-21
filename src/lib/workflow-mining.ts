@@ -1,26 +1,14 @@
 /**
- * lib/workflow-mining.ts — W1-T4668. THE RETRO MINES PROCEDURES FROM LEDGER SIGNALS ONLY.
+ * lib/workflow-mining.ts — W1-T4668, W1-T13857. THE MINER FINDS THE COMMAND SEQUENCES RUNS REPEAT.
  *
- * `mineProceduralCandidates` (retro.ts, W1-T87/P13) groups merged runs by a FIXED signal table
- * (`clean_single_strike`, `fully_executed_proof`) and the drafted skill's Procedure section
- * restates the outcome those signals name — "resolve the task on the first attempt" — because
- * the miner never reads what a successful worker actually DID. Worker transcripts already exist:
- * `run-task.ts`'s `buildWorkerStateSensor` ledgers one `worker.activity` row per observed stream
- * event, carrying a real `tool_name` for every `tool-executing` event, per `run_id`, in
- * chronological (append) order — the exact step-by-step trace AWM
- * (https://arxiv.org/abs/2409.07429) and ACE (https://arxiv.org/abs/2510.04618) mine.
+ * Each `tool-executing` `worker.activity` row carries a `tool_signature` (since 2026-10-13): `Bash:<program>
+ * [<subcommand>]` or `<file tool>:<path>`. A skill saves the work a run repeats, whether or not the run later needed
+ * a fix. So {@link mineRecurringProcedures} returns the ordered action-step sequences that recur across runs of two
+ * or more tasks, scored by how much work each one spans. Reads and searches are LOOK steps, never actions: with
+ * them kept, the top sequences were read noise (`Bash:sed`, `Bash:grep`). `skill-workshop.ts` drafts the top one.
  *
- * This module compares the tool-call sequence of first-attempt-success runs against runs that
- * needed a `fix.dispatch` repair, for the SAME task shape, and extracts the steps every clean run
- * took that NO repaired run ever needed — design clause (i). Staging the result as a skill
- * draft's Procedure section is (ii), left to `skill-workshop.ts`. Clause (iii) is enforced HERE:
- * a shape with no step that distinguishes success from repair mines NOTHING for that shape.
- *
- * PURE — no LLM, no I/O (Rule 2: the signal set is DATA, mirroring `mineProceduralCandidates`'s
- * own discipline). Every input type is STRUCTURAL, duplicating the run-task.ts/retro.ts shapes
- * this reads rather than importing them, exactly as `retro-closure.ts` already does one file over
- * — so retro.ts (or any future caller) can hand this a real `RunSummary[]`/`LedgerRecord[]` with
- * zero conversion, and this file introduces no import back onto retro.ts.
+ * PURE: no LLM, no I/O. Every input type is STRUCTURAL, duplicating the retro.ts shapes this reads rather than
+ * importing them, so retro.ts can hand this a real `RunSummary[]`/`LedgerRecord[]` with no import cycle.
  */
 
 /** The run fields this module reads. `RunSummary` (retro.ts) satisfies it structurally. */
@@ -29,6 +17,8 @@ export interface TranscriptRun {
   taskId: string;
   type: string;
   verdict: string;
+  /** Summed worker output tokens; absent or 0 means not measured. */
+  outputTokens?: number;
 }
 
 /** The ledger-row fields this module reads. `LedgerRecord` (retro.ts) satisfies it structurally:
@@ -45,32 +35,6 @@ export interface TranscriptLedgerRow {
  *  not run-task.ts's internals, and run-task.ts sits well above this file in the dependency
  *  graph. */
 const WORKER_ACTIVITY_STEP = "worker.activity";
-
-/** One MINED transcript workflow — a reusable step sequence shared by every first-attempt-success
- *  run of a task shape, with the steps repair never needed called out. */
-export interface TranscriptWorkflow {
-  taskType: string;
-  /** The tool-call steps EVERY first-attempt-success run of this shape took, in the order the
-   *  first such run took them, deduplicated to each tool's first appearance per run before the
-   *  intersection is taken. Never a single run's idiosyncrasy: only what recurs across all of
-   *  them survives. */
-  steps: string[];
-  /** The subset of {@link steps} that no repaired run of the SAME shape ever took — the steps
-   *  that actually separate a clean pass from one that needed a `fix.dispatch` rung. Always
-   *  non-empty: {@link mineTranscriptWorkflows} mines NOTHING for a shape where this would be
-   *  empty (design clause iii). */
-  distinguishingSteps: string[];
-  /** The first-attempt-success run ids this workflow was distilled from, sorted. */
-  runIds: string[];
-  taskIds: string[];
-  supportingRuns: number;
-}
-
-/** Count of `fix.dispatch` ledger lines per `run_id` — mirrors `fixDispatchCountByRun` (retro.ts)
- *  exactly, duplicated rather than imported for the same no-cycle reason the header names. */
-function fixDispatchCounts(records: readonly TranscriptLedgerRow[]): Map<string, number> {
-  return fixDispatchCountsAttributed(records);
-}
 
 /** Fix rounds per implementing run. Since 2026-08-13 the sweep dispatches fix rounds under its OWN run id
  *  (`DAEMON-…`: 2,023 rows, against 35 task-run-keyed ones last seen 2026-09-13), so keying by `run_id` alone
@@ -99,26 +63,6 @@ export function fixDispatchCountsAttributed(records: readonly TranscriptLedgerRo
     out.set(key, (out.get(key) ?? 0) + 1);
   }
   return out;
-}
-
-/**
- * The ordered, de-duplicated tool-call sequence for ONE run: every `tool_name` off a
- * `worker.activity` row whose `event_kind` is `"tool-executing"` for this `run_id`, in ledger
- * (append, i.e. chronological) order, keeping only each tool's FIRST occurrence — a worker
- * calling `Read` five times in a row is one step, not five.
- */
-export function toolStepsForRun(records: readonly TranscriptLedgerRow[], runId: string): string[] {
-  const steps: string[] = [];
-  const seen = new Set<string>();
-  for (const r of records) {
-    if (r.step !== WORKER_ACTIVITY_STEP || r.run_id !== runId) continue;
-    if (r.event_kind !== "tool-executing") continue;
-    const name = typeof r.tool_name === "string" ? r.tool_name : undefined;
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    steps.push(name);
-  }
-  return steps;
 }
 
 /** A file-tool signature's path when it names no file to coarsen. */
@@ -164,77 +108,193 @@ export function procedureStepsForRun(records: readonly TranscriptLedgerRow[], ru
   }
   return steps;
 }
+/** Shell commands that read or wait, never act, as the text after `Bash:`. A new look command is a new row here. */
+const LOOK_STEPS: ReadonlySet<string> = new Set([
+  "sed", "grep", "cat", "rg", "tail", "head", "ls", "wc", "find", "awk", "jq", "echo", "printf", "ps", "pgrep",
+  "sleep", "for", "until", "while", "timeout", "python3", "node", "pwd", "cd", "date", "which", "stat", "sort",
+  "cut", "tr", "true", "test",
+  "git show", "git status", "git log", "git diff", "git grep", "git rev-parse", "git remote", "git ls-files",
+  "git ls-tree", "git rev-list", "git cat-file", "git merge-base", "git blame", "git config",
+]);
 
-/**
- * MINE merged runs for a per-task-shape workflow: the tool-call steps shared by every
- * first-attempt-success run (zero `fix.dispatch` lines) of that `type`, minus whatever a
- * REPAIRED run of the same `type` (one or more `fix.dispatch` lines) also touched. A shape needs
- * at least `opts.threshold` (default 2, matching `mineProceduralCandidates`'s own floor — one
- * clean run is an anecdote) success runs AND at least one repaired run to compare against: with
- * no repair transcript to compare, nothing distinguishes success FROM it, so nothing is mined
- * for that shape.
- *
- * Pure over the summaries plus raw records: no LLM, no I/O — identical discipline to
- * `mineProceduralCandidates` (retro.ts), one file over.
- */
-export function mineTranscriptWorkflows(
-  runs: readonly TranscriptRun[],
-  records: readonly TranscriptLedgerRow[],
-  opts: { threshold?: number } = {},
-): TranscriptWorkflow[] {
-  const threshold = opts.threshold ?? 2;
-  const fixCounts = fixDispatchCounts(records);
+/** File tools and bare tool names that only read. */
+const LOOK_TOOLS: ReadonlySet<string> = new Set(["Read", "Grep", "Glob"]);
 
-  const successByType = new Map<string, TranscriptRun[]>();
-  const repairedByType = new Map<string, TranscriptRun[]>();
-  for (const r of runs) {
-    if (r.verdict !== "merged") continue;
-    const count = fixCounts.get(r.runId) ?? 0;
-    const bucket = count === 0 ? successByType : repairedByType;
-    const arr = bucket.get(r.type) ?? [];
-    arr.push(r);
-    bucket.set(r.type, arr);
-  }
-
-  const out: TranscriptWorkflow[] = [];
-  const taskTypes = [...successByType.keys()].sort();
-  for (const taskType of taskTypes) {
-    const successRuns = successByType.get(taskType) ?? [];
-    if (successRuns.length < threshold) continue; // one clean run is an anecdote, not a workflow
-    const repairedRuns = repairedByType.get(taskType) ?? [];
-    if (repairedRuns.length === 0) continue; // nothing repaired to distinguish success FROM
-
-    const successSequences = successRuns.map((r) => toolStepsForRun(records, r.runId));
-    // Steps EVERY success run of this shape took — a tool one run happened to reach for is not
-    // "the workflow"; only what recurs across every clean run is.
-    const commonSteps = successSequences[0]!.filter((step) => successSequences.every((seq) => seq.includes(step)));
-
-    const repairedToolNames = new Set<string>();
-    for (const r of repairedRuns) {
-      for (const step of toolStepsForRun(records, r.runId)) repairedToolNames.add(step);
-    }
-
-    const distinguishingSteps = commonSteps.filter((step) => !repairedToolNames.has(step));
-    if (distinguishingSteps.length === 0) continue; // design clause iii — refuse to stage this shape
-
-    out.push({
-      taskType,
-      steps: commonSteps,
-      distinguishingSteps,
-      runIds: [...new Set(successRuns.map((r) => r.runId))].sort(),
-      taskIds: [...new Set(successRuns.map((r) => r.taskId))].sort(),
-      supportingRuns: successRuns.length,
-    });
-  }
-  return out;
+/** Whether a census step only looks: a read or search tool, a path outside the worktree, or a {@link LOOK_STEPS} command. */
+function isLookStep(step: string): boolean {
+  if (step.endsWith(":<outside>")) return true;
+  const colon = step.indexOf(":");
+  const tool = colon < 0 ? step : step.slice(0, colon);
+  if (LOOK_TOOLS.has(tool)) return true;
+  return tool === "Bash" && colon >= 0 && LOOK_STEPS.has(step.slice(colon + 1));
 }
 
-/** Render one mined workflow's distinguishing steps as Procedure-section bullet lines, each named
- *  as what it is: a step observed in every first-attempt-success transcript for this shape and
- *  absent from every repaired one — never a bare tool name with no evidentiary claim attached. */
-export function renderTranscriptWorkflowSteps(workflow: TranscriptWorkflow): string[] {
-  return workflow.distinguishingSteps.map(
-    (step) =>
-      `- Call \`${step}\` — observed in every first-attempt-success transcript for this shape, absent from every repaired one.`,
-  );
+/** One ordered action-step sequence that recurs across runs, with the work it spans. */
+export interface RecurringProcedure {
+  steps: string[];
+  /** Distinct runs that hold every step in this order, not necessarily next to each other. */
+  recurrence: number;
+  runIds: string[];
+  taskIds: string[];
+  /** Median tool calls from the first step to the last step in a run, both included. */
+  medianSpannedCalls: number;
+  /** Median of a run's output tokens over its tool calls, over the runs that measured tokens; `null` when none did. */
+  medianOutputTokensPerCall: number | null;
+  estimatedTokensPerRun: number | null;
+  /** `recurrence * medianSpannedCalls * (medianOutputTokensPerCall ?? 1)`. */
+  score: number;
+}
+
+/** BACKSTOP: the prune keeps real ledgers small, but closed sequences can still number in the millions when hundreds
+ *  of runs each keep most of one shared order. Growth stops after this many branches; the most-recurring
+ *  extensions are grown first, so the procedures found are the ones with the most runs. */
+const MAX_GROWN_BRANCHES = 20_000;
+
+interface MinedRun {
+  runId: string;
+  taskId: string;
+  /** Action steps in first-occurrence order; each step once. */
+  actions: string[];
+  position: Map<string, number>;
+  /** Each step's first tool-call index among all of the run's tool calls. */
+  firstCall: Map<string, number>;
+  tokensPerCall: number | null;
+}
+
+interface Member {
+  run: MinedRun;
+  last: number;
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function minedRun(run: TranscriptRun, rows: readonly TranscriptLedgerRow[]): MinedRun {
+  const firstCall = new Map<string, number>();
+  let calls = 0;
+  for (const r of rows) {
+    if (r.step !== WORKER_ACTIVITY_STEP || r.event_kind !== "tool-executing") continue;
+    const signature = typeof r.tool_signature === "string" && r.tool_signature.length > 0 ? r.tool_signature : undefined;
+    const step = signature !== undefined ? normalizeProcedureStep(signature) : typeof r.tool_name === "string" ? r.tool_name : "";
+    if (step !== "" && !firstCall.has(step)) firstCall.set(step, calls);
+    calls += 1;
+  }
+  const actions = procedureStepsForRun(rows, run.runId).filter((step) => !isLookStep(step));
+  const tokens = run.outputTokens ?? 0;
+  return {
+    runId: run.runId,
+    taskId: run.taskId,
+    actions,
+    position: new Map(actions.map((step, i) => [step, i])),
+    firstCall,
+    tokensPerCall: tokens > 0 && calls > 0 ? tokens / calls : null,
+  };
+}
+
+/** Whether one step lies in the same gap of `steps` in every member run. Inserting it then keeps the same runs for
+ *  this procedure and for every extension of it, so no extension can be kept and the branch is cut. */
+function insertableInEveryRun(steps: readonly string[], members: readonly Member[]): boolean {
+  const first = members[0]!.run;
+  for (let gap = 0; gap < steps.length; gap++) {
+    const low = gap === 0 ? -1 : first.position.get(steps[gap - 1]!)!;
+    const high = first.position.get(steps[gap]!)!;
+    for (const step of first.actions.slice(low + 1, high)) {
+      const fits = members.every(({ run }) => {
+        const at = run.position.get(step);
+        const before = gap === 0 ? -1 : run.position.get(steps[gap - 1]!)!;
+        return at !== undefined && at > before && at < run.position.get(steps[gap]!)!;
+      });
+      if (fits) return true;
+    }
+  }
+  return false;
+}
+
+function procedureOf(steps: readonly string[], members: readonly Member[]): RecurringProcedure {
+  const firstStep = steps[0]!;
+  const lastStep = steps[steps.length - 1]!;
+  const spans = members.map(({ run }) => run.firstCall.get(lastStep)! - run.firstCall.get(firstStep)! + 1);
+  const rates = members.map(({ run }) => run.tokensPerCall).filter((rate): rate is number => rate !== null);
+  const medianSpannedCalls = median(spans);
+  const medianOutputTokensPerCall = rates.length > 0 ? median(rates) : null;
+  return {
+    steps: [...steps],
+    recurrence: members.length,
+    runIds: members.map(({ run }) => run.runId).sort(),
+    taskIds: [...new Set(members.map(({ run }) => run.taskId))].sort(),
+    medianSpannedCalls,
+    medianOutputTokensPerCall,
+    estimatedTokensPerRun: medianOutputTokensPerCall === null ? null : medianSpannedCalls * medianOutputTokensPerCall,
+    score: members.length * medianSpannedCalls * (medianOutputTokensPerCall ?? 1),
+  };
+}
+
+/**
+ * The ordered action-step sequences of two or more steps that recur in at least `opts.minRuns` (default 2) runs of
+ * at least `opts.minTaskIds` (default 2) tasks. Each step comes after the one before it in a run, not necessarily
+ * next to it. A procedure is kept only when no longer procedure with the same recurrence contains it. Sorted by
+ * score, highest first, then by the steps joined. Growth stops at {@link MAX_GROWN_BRANCHES}.
+ */
+export function mineRecurringProcedures(
+  runs: readonly TranscriptRun[],
+  records: readonly TranscriptLedgerRow[],
+  opts: { minRuns?: number; minTaskIds?: number } = {},
+): RecurringProcedure[] {
+  const minRuns = opts.minRuns ?? 2;
+  const minTaskIds = opts.minTaskIds ?? 2;
+  const rowsByRun = new Map<string, TranscriptLedgerRow[]>();
+  for (const r of records) {
+    if (r.step !== WORKER_ACTIVITY_STEP || !r.run_id) continue;
+    const list = rowsByRun.get(r.run_id);
+    if (list) list.push(r);
+    else rowsByRun.set(r.run_id, [r]);
+  }
+  const seen = new Set<string>();
+  const mined: MinedRun[] = [];
+  for (const run of runs) {
+    if (seen.has(run.runId)) continue;
+    seen.add(run.runId);
+    mined.push(minedRun(run, rowsByRun.get(run.runId) ?? []));
+  }
+  const qualifies = (members: readonly Member[]): boolean =>
+    members.length >= minRuns && new Set(members.map(({ run }) => run.taskId)).size >= minTaskIds;
+  const out: RecurringProcedure[] = [];
+  let grown = 0;
+  // Most runs first, then by step, so growth is deterministic and a stopped search keeps the most-recurring.
+  const bySupport = (a: [string, Member[]], b: [string, Member[]]): number =>
+    b[1].length - a[1].length || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  const grow = (steps: string[], members: Member[]): void => {
+    if (grown >= MAX_GROWN_BRANCHES || insertableInEveryRun(steps, members)) return;
+    grown += 1;
+    const extensions = new Map<string, Member[]>();
+    for (const { run, last } of members) {
+      for (let i = last + 1; i < run.actions.length; i++) {
+        const step = run.actions[i]!;
+        const list = extensions.get(step);
+        if (list) list.push({ run, last: i });
+        else extensions.set(step, [{ run, last: i }]);
+      }
+    }
+    let longest = true;
+    for (const [step, next] of [...extensions].sort(bySupport)) {
+      if (!qualifies(next)) continue;
+      if (next.length === members.length) longest = false;
+      grow([...steps, step], next);
+    }
+    if (longest && steps.length >= 2) out.push(procedureOf(steps, members));
+  };
+  const roots = new Map<string, Member[]>();
+  for (const run of mined) {
+    run.actions.forEach((step, i) => {
+      const list = roots.get(step);
+      if (list) list.push({ run, last: i });
+      else roots.set(step, [{ run, last: i }]);
+    });
+  }
+  for (const [step, members] of [...roots].sort(bySupport)) if (qualifies(members)) grow([step], members);
+  const key = (p: RecurringProcedure): string => p.steps.join("\n");
+  return out.sort((a, b) => b.score - a.score || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }
