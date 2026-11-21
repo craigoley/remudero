@@ -963,8 +963,15 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
   return [...changed].sort();
 }
 
+/** A basic-regex pattern (the `grep:` dialect) matching exactly `line`, whatever its indentation. Anchored at both ends and
+ *  with BRE metacharacters escaped, so `budget_usd: 5` never matches `budget_usd: 50.00` and a proof cannot read true on the
+ *  tree it changes. */
+export function exactLineProofPattern(line: string): string {
+  return `^ *${line.trim().replace(/[\\.[\]*^$]/g, (c) => `\\${c}`)}$`;
+}
+
 function acceptance(edits: ConfigEdit[]): string[] {
-  return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: grep: ${e.to.trim()} in ${e.path}`])];
+  return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: grep: ${exactLineProofPattern(e.to)} in ${e.path}`])];
 }
 
 function prBody(action: ConfigGardenAction): string {

@@ -4,6 +4,7 @@
  * lands — and, since an unmeasured change is not evidence of harm, releases its class unjudged.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ import {
   tendConfigCanaries,
   CANARY_TTL_MS,
   CONFIG_GARDEN_CLASSES,
+  exactLineProofPattern,
   type ConfigGardenSources,
 } from "#src/lib/config-gardener.js";
 import { gardenStatePath, readGardenState, type GardenCheckout, type GardenLandOpts, type PrState } from "#src/lib/gardener.js";
@@ -98,6 +100,21 @@ function harness() {
   };
 }
 
+/** Whether the proof executor's own invocation, `grep -arn -- <pattern> <path>`, finds `pattern` in a file holding `text`. */
+function grepFinds(pattern: string, text: string): boolean {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}canary-proof-`));
+  const file = join(dir, "shard.yaml");
+  writeFileSync(file, text);
+  const res = spawnSync("grep", ["-arn", "--", pattern, file], { encoding: "utf8" });
+  assert.ok(res.status === 0 || res.status === 1, `grep ran: ${res.stderr}`);
+  return res.status === 0;
+}
+
+/** The revert body's grep proofs, as `{ pattern, path }`. */
+function proofsOf(body: string): Array<{ pattern: string; path: string }> {
+  return [...body.matchAll(/^ {2}proof: grep: (.+) in (\S+)$/gm)].map((m) => ({ pattern: m[1]!, path: m[2]! }));
+}
+
 /** A merged budget canary, exposed, whose cohort has one settled run — below its floor of five. */
 async function thinExposedCanary() {
   const h = harness();
@@ -131,8 +148,14 @@ test("an expired config canary lands a revert of its edits and releases its clas
   assert.equal(h.landed[1]!.sealedLanding, false, "the revert keeps its own PR, never the shared task-files landing that counts a held path as carried");
   assert.deepEqual(h.landed[1]!.paths, cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).sort(), "exactly the canary's files");
   assert.match(h.landed[1]!.body, /expired before its cohort cleared the floor/);
-  assert.match(h.landed[1]!.body, /proof: grep: budget_usd: 30\.00 in plan\/tasks\.d\//);
+  const proofs = proofsOf(h.landed[1]!.body);
+  assert.equal(proofs.length, cohort.length, "one proof per reverted shard");
+  for (const { pattern, path } of proofs) {
+    assert.equal(pattern, exactLineProofPattern("budget_usd: 30.00"));
+    assert.equal(grepFinds(pattern, "  budget_usd: 9.00\n"), false, `${path}'s proof is false on the canary's tree, so the revert PR is not stale`);
+  }
   for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00", `${id}'s declared budget is restored`);
+  for (const { pattern, path } of proofs) assert.equal(grepFinds(pattern, readFileSync(join(h.deps.repoRoot, path), "utf8")), true, `${path}'s proof holds after the revert`);
   assert.equal(canary.rollbackPrUrl, "https://github.com/acme/remudero/pull/102", "the revert's receipt is kept on the canary");
 
   const state = h.gardenState();
@@ -158,4 +181,12 @@ test("a canary that is still under its floor before expiry lands no revert", asy
   assert.equal(h.gardenState().pending?.prUrl, prUrl, "the canary still holds the gardener");
   assert.deepEqual(h.gardenState().classes, classesBefore);
   assert.equal(h.logs.some((l) => l.step === "config.canary_expired" || l.step === "config.canary_rolled_back"), false);
+});
+
+test("a revert's proof matches its own line exactly, never a longer value or a look-alike", () => {
+  const pattern = exactLineProofPattern("  budget_usd: 5");
+  assert.equal(grepFinds(pattern, "  budget_usd: 5\n"), true, "the reverted value");
+  assert.equal(grepFinds(pattern, "  budget_usd: 50.00\n"), false, "a canary that raised 5 to 50.00 does not satisfy its own revert's proof");
+  assert.equal(grepFinds(exactLineProofPattern("budget_usd: 9.00"), "  budget_usd: 9x00\n"), false, "a dot is literal");
+  assert.equal(grepFinds(exactLineProofPattern("ci_judge: { model: sonnet, effort: low }"), "ci_judge: { model: sonnet, effort: low }\n"), true, "a mounts flow line");
 });
