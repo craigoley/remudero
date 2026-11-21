@@ -1796,8 +1796,7 @@ interface GhReadCadencePlan {
   leaveQueue(): void;
   /** Names the phase the NEXT pause waits for, when it is not the one `turnRemainingMs` named. */
   notePauseReason(reason: "gap" | "floor-recheck"): void;
-  /** W1-T12058 criterion 3: called with the length of EVERY cadence sleep, just before it runs. In wait
-   *  mode it prints one line naming that length and why; every other mode stays silent. */
+  /** W1-T12058: called with each cadence sleep's length before it runs; prints a line in wait mode only. */
   announcePause(ms: number): void;
 }
 
@@ -1836,10 +1835,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     if (shared === undefined) return gated;
     return gated === undefined ? shared : Math.max(shared, gated);
   };
-  /** A paced floor's remaining wait, to ITS DEADLINE: the counted stamp plus one window. A stamp a little
-   *  ahead of the clock (mtime rounding, a sibling's clock) is paced as age 0 by the decision, but the
-   *  wait still runs until the stamp is a whole window old, so the deadline, not the clamped age, is the
-   *  wait's length (W1-T12058 criterion 3, #19924: a stamp 0.5 s ahead waited 180.5 s and printed 180). */
+  /** A paced floor's wait to ITS DEADLINE (stamp + window), not the clamped age: a stamp ahead of the
+   *  clock still waits a whole window (W1-T12058). */
   const floorDeadlineRemainingMs = (paced: boolean, lastReadMs: number | undefined, nowMs: number): number =>
     paced && lastReadMs !== undefined ? Math.max(0, lastReadMs + windowMs - nowMs) : 0;
   const floorRemainingAt = (nowMs: number): number => {
@@ -1883,14 +1880,9 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     return head === undefined || head.yielded || floorRemainingAt(nowMs) > 0 ? undefined : head;
   };
   const warnLine = (line: string) => (deps.warn ?? ((l: string) => void process.stderr.write(`${l}\n`)))(line);
-  /** W1-T12058 criterion 3: what the next pause waits for, and how long this read has paused so far.
-   *  A wait line is printed AT EACH PAUSE, with the length the read is about to sleep, never as a total
-   *  predicted up front: a queued ticket can expire mid-wait, a sibling's stamp can move the gap, and a
-   *  later read in the burst can pause again, so any forecast disagreed with the sleep (#19924 review).
-   *  The first pause of a read prints "waiting Ns for <why>"; a later phase that extends it prints one
-   *  more line, "waiting Ns more for <why> (Ts in all)". A pause of one phase is one sleep, so a single
-   *  phase prints once. Not announced: the cadence LOCK's 25 ms retries, bounded at 1 s in all
-   *  (GH_CADENCE_LOCK_MAX_WAIT_MS); a line per retry would bury the real wait. */
+  /** W1-T12058: each pause prints the sleep it is about to run, never an up-front forecast (tickets
+   *  expire and stamps move). Later phases add "waiting Ns more for <why> (Ts in all)". The lock's
+   *  25 ms retries (at most 1 s) are not announced. */
   let pauseReason: "floor" | "queue" | "slot" | "gap" | "floor-recheck" = "floor";
   let queueAhead = 0;
   let pausedMs = 0;
@@ -1943,9 +1935,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
-    // W1-T12058 criterion 3: a wait-mode read prints NOTHING here. Its wait lines are printed by
-    // `announcePause`, at each real sleep, with that sleep's length (#19924 review: every up-front total
-    // was wrong once a ticket expired, a stamp moved, or a later read in the burst paused).
+    // W1-T12058: a wait-mode read prints nothing here; `announcePause` prints at each real sleep.
     if (!waiter && decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
       warnLine(
