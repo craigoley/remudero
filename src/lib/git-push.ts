@@ -929,6 +929,10 @@ export function worktreePushExecAsync(
     const gate = prGates || requireGate
       ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync, requireGate))
       : undefined;
+    // A required gate yields no gate only when the remote already holds the verified head, so there is nothing
+    // to send. An ordinary push may not run in its place: if the ref were deleted after that read, the push would
+    // recreate it with none of the required checks run.
+    if (requireGate && gate === undefined) return;
     if (gate) {
       const runGate = async () => {
         signal?.throwIfAborted();

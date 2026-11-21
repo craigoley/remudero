@@ -9,6 +9,9 @@ import { test, type TestContext } from "node:test";
 import { authorPushEligibility, failingTestsFromTap, pinnedNodeReexec, testSummary } from "#scripts/preflight-author.mjs";
 import { handShipEffects, runHandShip, type HandShipEffects, type ShipReceipt } from "#src/lib/hand-ship.js";
 import { configureGithubInstallationBudget } from "#src/lib/github-transport.js";
+import { GhReadBroker, serveGhReadBroker, type GhUpstreamExec, type GhUpstreamResult } from "#src/lib/gh-read-broker.js";
+import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
+import { MAX_UNIX_SOCKET_PATH_BYTES, shortPathWhenTooLong } from "#src/lib/short-path-root.js";
 import type { InstallationBudget } from "#src/lib/github-installation-budget.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
@@ -518,7 +521,10 @@ test("the launcher passes the frozen head to preflight under nice and reads comp
     assert.deepEqual(await workspace.rerun("head", file, source.head, "existing red"), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true, declaration: undefined },
     ]);
-    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=(?!)"), "the isolated rerun selects the named failure");
+    assert.ok(spawned.at(-1)!.includes("--test-name-pattern=^(?:existing red)$"), "the isolated rerun selects the named failure");
+    assert.ok(spawned.at(-1)!.some((arg) => arg.startsWith("--test-skip-pattern=")), "and skips every test off its path");
+    assert.ok(!spawned.at(-1)!.some((arg) => /expose-internals|node:internal/.test(decodeURIComponent(arg))), "with public runner flags only");
+    await assert.rejects(workspace.rerun("head", file, source.head, "other"), /the isolated rerun of "other" also ran "existing red"/);
     assert.deepEqual(await workspace.rerun("main", file, base), [
       { file, title: "existing red", location: "1:1", fileLevel: false, failed: true },
     ]);
@@ -1308,4 +1314,190 @@ test("W1-T12169 criterion 5: a stop while a GitHub read waits for admission sett
   assert.equal(waits, 1, "the stopped read never asks for admission again");
   assert.equal(JSON.parse(readFileSync(join(state, id, "status.json"), "utf8")).status, "stopped");
   assert.ok(!f.calls.some((call) => call.startsWith("push")));
+});
+
+/** The author receipt for a real red test file: its failures named by the installed TAP parser, as preflight names them. */
+function realReceipt(repo: GitRepo, headSha: string, baseSha: string): ShipReceipt {
+  const tap = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", join(REPO_ROOT, "node_modules/tsx/dist/loader.mjs"), file],
+    { cwd: repo.dir, encoding: "utf8", env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_TEST_CONTEXT" && key !== "NODE_OPTIONS")) });
+  const named = failingTestsFromTap(tap.stdout, realpathSync(repo.dir)) as { file: string; title: string }[];
+  const summary = testSummary(tap.stdout);
+  return {
+    headSha, baseSha, verdict: "failed",
+    steps: [{ name: "census-precheck", ok: true }, { name: "static-preflight", ok: true }, {
+      name: "affected-tests", ok: false, judge: { given: 1, reported: 1 }, diagnostics: { mayBeIncomplete: false },
+      testSummary: { pass: summary.pass, fail: summary.fail, cancelled: summary.cancelled, tests: summary.tests },
+    }],
+    failureAttribution: { counts: { failingAtHead: named.length, unattributed: 0 }, tests: named },
+  };
+}
+
+test("W1-T12169 criterion 3: the rerun isolates one test under a nested dynamic parent with public runner filters, and no sibling runs", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  const collision = "test/ci/collision.test.ts";
+  writeFileSync(join(repo.dir, file), [
+    'import { describe, it, test } from "node:test";',
+    'const ran = (name: string) => console.log(`RAN ${name}`);',
+    'describe("outer", () => {',
+    '  it("before", () => ran("outer before"));',
+    '  test("dynamic parent", async (context) => {',
+    '    for (const name of ["one", "two"]) {',
+    '      await context.test(`case ${name}`, () => { ran(`case ${name}`); if (name === "one") throw new Error("red"); });',
+    '    }',
+    '    await context.test("tail", () => ran("tail"));',
+    '  });',
+    '  it("after", () => ran("outer after"));',
+    '});',
+    'test("case one", () => ran("top-level case one"));',
+    // The task's own example: "a b" > "c" and "a" > "b c" join to the same spaced name "a b c".
+    'test("a b", async (context) => { await context.test("c", () => ran("a b > c")); });',
+    'test("a", async (context) => { await context.test("b c", () => ran("a > b c")); await context.test("d", () => ran("a > d")); });',
+    'test("hash # and back\\\\slash", () => ran("escaped name"));',
+    'test("hash", () => ran("hash"));',
+    "",
+  ].join("\n"));
+  writeFileSync(join(repo.dir, collision), [
+    'import { test } from "node:test";',
+    'test("a", async (context) => { await context.test("b c", () => {}); });',
+    'test("a b c", () => console.log("RAN COLLISION"));',
+    "",
+  ].join("\n"));
+  repo.git("add", file, collision, "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "nested, dynamic and space-colliding tests");
+  const defaults = handShipEffects(() => 0);
+  const run = { dir: f.root, signal: new AbortController().signal, log: f.options.write };
+  const source = await defaults.readSource(repo.dir, run);
+  const workspace = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const commands = join(f.root, "commands.log");
+  const ranSince = (from: number) => [...readFileSync(commands, "utf8").slice(from).matchAll(/RAN ([^\n]*)/g)].map((match) => match[1]);
+  try {
+    let from = 0;
+    const nested = await workspace.rerun("head", file, source.head, "outer > dynamic parent > case one");
+    assert.deepEqual(nested.map((row) => [row.title, row.failed]),
+      [["outer > dynamic parent > case one", true], ["outer > dynamic parent", true], ["outer", true]], JSON.stringify(nested));
+    assert.deepEqual(ranSince(from), ["case one"], "only the target's own body runs: no sibling at any depth, and not the top-level namesake");
+    from = readFileSync(commands, "utf8").length;
+    const spaced = await workspace.rerun("head", file, source.head, "a > b c");
+    assert.deepEqual(spaced.map((row) => [row.title, row.failed]), [["a > b c", false], ["a", false]], JSON.stringify(spaced));
+    assert.deepEqual(ranSince(from), ["a > b c"], "the other path to the same spaced name does not run");
+    from = readFileSync(commands, "utf8").length;
+    await assert.rejects(workspace.rerun("head", collision, source.head, "a > b c"),
+      /space-joined test name of "a b c" is ambiguous with "a > b c"/);
+    assert.deepEqual(ranSince(from), ["COLLISION"], "the run that could not be isolated is refused, not read");
+    from = readFileSync(commands, "utf8").length;
+    // Node's TAP writes `#` as `\#` and `\` as `\\`; the rerun selects the name Node registered.
+    const escaped = await workspace.rerun("head", file, source.head, "hash \\# and back\\\\slash");
+    assert.deepEqual(escaped.map((row) => [row.title, row.failed]), [["hash \\# and back\\\\slash", false]], JSON.stringify(escaped));
+    assert.deepEqual(ranSince(from), ["escaped name"]);
+    await assert.rejects(workspace.rerun("head", file, source.head, "line\\nbreak"), /TAP escape .* names more than one test/);
+  } finally {
+    await workspace.close();
+  }
+});
+
+test("W1-T12169 criterion 3: a named failure on a branch whose package-lock.json differs from main is still rerun on main and classified", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo, true);
+  mkdirSync(join(repo.dir, "test/setup"), { recursive: true });
+  writeFileSync(join(repo.dir, "test/setup/tmp-hygiene.ts"), "");
+  const lock = readFileSync(join(REPO_ROOT, "package-lock.json"), "utf8");
+  const tests = (red: string[]) => ['import { test } from "node:test";',
+    ...["still red", "new red"].map((name) => `test(${JSON.stringify(name)}, () => { ${red.includes(name) ? 'throw new Error("red");' : ""} });`), ""].join("\n");
+  writeFileSync(join(repo.dir, "package-lock.json"), `${lock}\n`);
+  writeFileSync(join(repo.dir, file), tests(["still red"]));
+  repo.git("add", file, "package-lock.json", "test/setup/tmp-hygiene.ts");
+  repo.git("commit", "-m", "main locks other dependencies and is already red");
+  const mainSha = repo.git("rev-parse", "HEAD");
+  writeFileSync(join(repo.dir, "package-lock.json"), lock);
+  writeFileSync(join(repo.dir, file), tests(["still red", "new red"]));
+  repo.git("commit", "-am", "the hand change moves the lockfile and adds a red");
+  const installs: string[] = [];
+  const defaults = handShipEffects(() => 0);
+  const run: Parameters<HandShipEffects["readSource"]>[1] = {
+    dir: f.root, signal: new AbortController().signal, log: f.options.write,
+    spawn(command, args, options) {
+      if (command !== "npm") return spawn(command, args, options);
+      // Offline stand-in for main's own `npm ci`: the fixture's lockfiles differ only by a newline.
+      installs.push(`${String(options.cwd)} ${args.join(" ")}`);
+      return spawn("ln", ["-s", join(REPO_ROOT, "node_modules"), "node_modules"], options);
+    },
+  };
+  const source = await defaults.readSource(repo.dir, run);
+  const real = await defaults.prepare({ ...mac, target: "local", kind: "mac" as const, checkout: REPO_ROOT }, source, run);
+  const reruns: string[] = [];
+  f.effects.readSource = async () => source;
+  f.effects.prepare = async () => ({
+    preflight: async () => realReceipt(repo, source.head, mainSha),
+    rerun: async (tree, target, sha, title, count) => { reruns.push(`${tree} ${title}`); return real.rerun(tree, target, sha, title, count); },
+    close: () => real.close(),
+  });
+  assert.equal(await runHandShip(f.args, f.options, f.effects), 1, f.lines.join("\n"));
+  const log = f.lines.join("\n");
+  assert.deepEqual(reruns, ["head still red", "head new red", "main still red", "main new red"], log);
+  assert.equal(installs.length, 1, "main installs its own locked dependencies once");
+  assert.match(installs[0]!, /\/main ci --no-audit --no-fund$/);
+  assert.match(log, /also failing on main: test\/ci\/example\.test\.ts :: still red$/m);
+  assert.match(log, /caused by the change: test\/ci\/example\.test\.ts :: new red$/m);
+  assert.ok(!f.calls.some((call) => call.startsWith("push")), "a failure caused by the change never pushes");
+});
+
+test("W1-T12169 criterion 4: a remote already at the verified head gets no push, so a ref deleted after that read is never recreated unchecked", async (t) => {
+  const f = fixture(t);
+  const repo = gitRepo({ scope: t });
+  seedHandBranch(repo);
+  const mark = harnessGate(t, 'cat > /dev/null; echo ran >> "$MARK"');
+  const requests: string[][] = [];
+  const defaults = handShipEffects(() => 0, noOpenPull, async (_cwd, args) => { requests.push([...args]); return ""; });
+  const source = await defaults.readSource(repo.dir, offlinePushRun(f));
+  // ls-remote answers the verified head; the ref may be gone by the time a push would reach the remote.
+  await withLiveWritesAllowed(() => defaults.push(source, offlinePushRun(f, new AbortController().signal, source.head)));
+  assert.deepEqual(requests, [], "nothing is sent: an ordinary push here would recreate a deleted ref with no check run");
+  assert.equal(existsSync(mark), false);
+  // Positive control: a remote without the head runs the gate and then pushes.
+  await withLiveWritesAllowed(() => defaults.push(source, offlinePushRun(f)));
+  assert.equal(readFileSync(mark, "utf8"), "ran\n");
+  assert.deepEqual(requests, [["push", "origin", `${source.head}:refs/heads/${branch}`]]);
+});
+
+test("W1-T12169 criterion 5: a stoppable ship read still goes through a live broker, and a stop ends its wait there", async (t) => {
+  const prefix = "rmd-hs-";
+  const root = mkdtempSync(shortPathWhenTooLong(join(tmpdir(), prefix), (short) => join(short, prefix),
+    (candidate) => Buffer.byteLength(join(`${candidate}XXXXXX`, "remudero", "gh-broker", "broker.sock")) <= MAX_UNIX_SOCKET_PATH_BYTES, existsSync));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: root })!;
+  const upstream: { args: string[]; resolve: (result: GhUpstreamResult) => void }[] = [];
+  const exec: GhUpstreamExec = (args) => args[1] === "user" ? Promise.resolve({ stdout: "octo\n", stderr: "", exitCode: 0 })
+    : new Promise((resolve) => upstream.push({ args, resolve }));
+  const server = await serveGhReadBroker({ dir, broker: new GhReadBroker(dir, exec, undefined, undefined, () => 1e12, { sharedPaceRoot: null }) });
+  t.after(() => server.close());
+  const saved = process.env.RMD_GH_CACHE_HOME;
+  process.env.RMD_GH_CACHE_HOME = root;
+  t.after(() => { if (saved === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = saved; });
+  const answer = (index: number) => upstream[index]!.resolve({ stdout: "HTTP/2.0 200 OK\r\nCache-Control: private, max-age=60\r\n\r\n[]", stderr: "", exitCode: 0 });
+  const until = async (count: number) => {
+    for (let waited = 0; upstream.length < count && waited < 10_000; waited += 20) await delay(20);
+    assert.equal(upstream.length, count, "the read reached the live broker");
+  };
+  const { findPull } = handShipEffects(() => 0);
+  const source = { root, branch, head, origin: "https://github.com/example/repo.git" };
+  await withGhShim([{ when: "", stdout: "FALSIFIER: the real gh ran\n" }], async (shim) => {
+    const run = { dir: root, signal: new AbortController().signal, log: () => {} };
+    const found = findPull(source, run);
+    await until(1);
+    assert.match(upstream[0]!.args.join(" "), /repos\/example\/repo\/pulls\?state=open/);
+    answer(0);
+    assert.equal(await found, undefined);
+    const stop = new AbortController();
+    const stopped = findPull(source, { ...run, signal: stop.signal });
+    await until(2);
+    stop.abort(new Error("stop requested"));
+    await assert.rejects(Promise.race([stopped, delay(3_000).then(() => "still waiting")]), /stop requested/);
+    answer(1);
+    assert.deepEqual(shim.calls(), [], "no ship read bypassed the broker for direct gh");
+  });
 });

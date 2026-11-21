@@ -159,26 +159,48 @@ function tapResults(output: string, root: string, fallbackFile?: string): Failin
   return rows;
 }
 
-/** Enable Node's name filter and supply its predicate in the pinned runner's test child. Node's
- * CLI matches ancestors as well as the test itself, so admitting a dynamic parent with the CLI
- * pattern also admits every child. The predicate sees each registered name and its actual parents. */
+/** One TAP-escaped test name as Node registered it. Node's TAP reporter writes `\#` for `#` and `\\` for `\`,
+ *  but it also writes a control character such as a newline as `\\n`, the same text as a literal backslash
+ *  and `n`. Such a name cannot be told apart, so it cannot be selected exactly. */
+function registeredName(escaped: string): string {
+  return escaped.replace(/\\(\\[bfnrtv]?|#|[\s\S]?)/g, (sequence, rest: string) => {
+    if (rest === "#") return "#";
+    if (rest === "\\") return "\\";
+    throw new Error(`hand-ship: the test name ${JSON.stringify(escaped)} has a TAP escape (${sequence}) that names more than one test`);
+  });
+}
+
+const regexLiteral = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+
+/** Select exactly one named test and its ancestors with the documented public filters of `node --test`.
+ *  Node runs a test when `--test-name-pattern` matches its name, an ancestor's name, or its name joined to its
+ *  ancestors' names by single spaces (trimmed); a filtered `test()` never runs its body, so its subtests never
+ *  register. Admitting each ancestor's space-joined name lets a dynamic parent register its subtests, and Node
+ *  then admits every one of them, so `--test-skip-pattern` removes each test whose name and space-joined name
+ *  are both off the target's path; Node runs a test only when both filters admit it. The space join can still
+ *  name a different path, so the rerun's TAP is checked against the path afterwards ({@link pathRows}). */
 function isolatedTestArgs(title: string): string[] {
-  const preload = `
-    if (process.env.NODE_TEST_CONTEXT === "child-v8") {
-      const Test = process.getBuiltinModule("node:internal/test_runner/test")?.Test;
-      if (typeof Test?.prototype.willBeFilteredByName !== "function") {
-        throw new Error("hand-ship: this Node runner cannot isolate a named test");
-      }
-      const target = ${JSON.stringify(title)};
-      Test.prototype.willBeFilteredByName = function () {
-        const names = [];
-        for (let test = this; test.parent; test = test.parent) names.unshift(test.name);
-        const name = names.join(" > ");
-        return name !== target && !target.startsWith(name + " > ");
-      };
-    }
-  `;
-  return ["--expose-internals", "--test-name-pattern=(?!)", `--import=data:text/javascript,${encodeURIComponent(preload)}`];
+  const names = title.split(" > ").map(registeredName);
+  const joined = names.map((_, index) => names.slice(0, index + 1).join(" ").trim());
+  // Node also tests the skip pattern against each ancestor, up to its unnamed root (`<root>`, joined name "").
+  const onPath = [...new Set([...names, ...joined, "<root>", ""])];
+  return [`--test-name-pattern=^(?:${joined.map(regexLiteral).join("|")})$`,
+    `--test-skip-pattern=^(?!(?:${onPath.map(regexLiteral).join("|")})$)`];
+}
+
+/** The rerun's rows must be the target and its ancestors and nothing else. A row off that path ran because its
+ *  space-joined name collides with the path's, or because a filter admitted it in some other way; either way the
+ *  run did not isolate the target, so it is refused rather than read. */
+function pathRows(rows: FailingTest[], title: string, tree: string, file: string): void {
+  const joined = (name: string) => name.split(" > ").join(" ");
+  const path = new Set(title.split(" > ").map((_, index, names) => joined(names.slice(0, index + 1).join(" > "))));
+  for (const row of rows) {
+    if (row.fileLevel || row.title === title || title.startsWith(`${row.title} > `)) continue;
+    throw new Error(path.has(joined(row.title))
+      ? `${tree} ${file}: the space-joined test name of ${JSON.stringify(row.title)} is ambiguous with ` +
+        `${JSON.stringify(title)}, so Node's name filter cannot isolate it`
+      : `${tree} ${file}: the isolated rerun of ${JSON.stringify(title)} also ran ${JSON.stringify(row.title)}`);
+  }
 }
 
 /** A unique registration expression can be matched across line shifts. Identical expressions
@@ -727,11 +749,15 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
       async rerun(tree, file, sha, title, expectedCount) {
         run.log(`isolated rerun on ${tree} ${sha}: ${file}${title === undefined ? "" : ` :: ${title}`}`);
         if (tree === "main" && !baseCut) {
-          await git(["diff", "--quiet", source.head, sha, "--", "package-lock.json"]);
+          // `git diff --quiet` exits 1 when the lockfile differs: that is an answer, not a failure.
+          const lockfile = await hostCommand(host, run, ["git", "diff", "--quiet", source.head, sha, "--", "package-lock.json"], { cwd: headDir });
+          if (lockfile.code !== 0 && lockfile.code !== 1) checked(lockfile, "git diff package-lock.json");
           await command(["git", "clone", "--shared", "--no-checkout", "--", headDir, mainDir]);
           await git(["checkout", "--detach", sha], { cwd: mainDir });
-          // The lockfile is unchanged between head and main, so main reuses head's dependencies.
-          await command(["ln", "-s", join(donor ?? headDir, "node_modules"), join(mainDir, "node_modules")]);
+          // An unchanged lockfile lets main reuse head's dependencies. A changed one installs main's own locked
+          // dependencies in its private checkout, so main's tests run against what main declares.
+          if (lockfile.code === 0) await command(["ln", "-s", join(donor ?? headDir, "node_modules"), join(mainDir, "node_modules")]);
+          else await command(["npm", "ci", "--no-audit", "--no-fund"], { cwd: mainDir, record: true });
           baseCut = true;
         }
         const cwd = tree === "main" ? mainDir : headDir;
@@ -752,14 +778,13 @@ async function prepareWorkspace(host: ShipHost, source: ShipSource, run: ShipRun
         // A failing `it` in a `describe` reports two rows, but the summary counts one test: suites are not tests.
         const testRows = results.filter((test) => !test.describeRow);
         const targets = results.filter((test) => !test.suite && !test.fileLevel && test.file === file && test.title === title);
-        const unrelated = title !== undefined && results.some((test) => !test.fileLevel &&
-          test.title !== title && !title.startsWith(`${test.title} > `));
+        if (title !== undefined) pathRows(results, title, tree, file);
         if (result.truncated || !summary || summary.cancelled !== 0 || testRows.length !== summary.tests ||
           testRows.filter((test) => test.failed).length !== summary.fail ||
           result.code !== (summary.fail === 0 ? 0 : 1) ||
           (title === undefined && result.code === 0 && summary.pass === 0) ||
           (title !== undefined && tree === "head" && targets.length !== (expectedCount ?? 1)) ||
-          unrelated || results.some((test) => (test.fileLevel && test.failed) || (test.file !== null && test.file !== file))) {
+          results.some((test) => (test.fileLevel && test.failed) || (test.file !== null && test.file !== file))) {
           throw new Error(`${tree} ${file}: isolated rerun had no complete test result ` +
             `(exit=${result.code}, summary=${JSON.stringify(summary)}, rows=${JSON.stringify(results)})`);
         }

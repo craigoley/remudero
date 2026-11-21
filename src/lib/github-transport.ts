@@ -476,13 +476,15 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await admitInstallationReadAsync(args, readOpts.signal);
     // Async CI/review polls must share ghJson/ghExec's floor to prevent rapid read bursts.
     refuseSentinelGhToken("gh", args, undefined);
-    const brokered = readOpts.signal === undefined ? await ghBrokeredAsync(execArgs, readOpts) : undefined;
+    // A caller's signal never changes the route: a live broker still answers first, unfloored, then the floored
+    // direct read. The signal only ends the caller's wait for whichever route is taken.
+    const brokered = await untilAborted(ghBrokeredAsync(execArgs, readOpts), readOpts.signal);
     if (brokered !== undefined) return brokered;
     readOpts.signal?.throwIfAborted();
     await untilAborted(applyGhReadCadenceAsync(args), readOpts.signal);
     readOpts.signal?.throwIfAborted();
-    const inProcess = readOpts.signal === undefined ? ghHttpReadFor(execArgs) : undefined;
-    const output = inProcess === undefined ? await run() : await inProcess.send();
+    const inProcess = ghHttpReadFor(execArgs);
+    const output = inProcess === undefined ? await run() : await untilAborted(inProcess.send(), readOpts.signal);
     readOpts.signal?.throwIfAborted();
     return output;
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
@@ -738,13 +740,13 @@ async function admitInstallationReadAsync(args: readonly string[], signal?: Abor
   }
 }
 
-/** `work`, or the caller's stop when it comes first. The cadence wait keeps its queue turn and lock to itself and
- *  settles on its own; only the caller stops waiting for it. */
+/** `work`, or the caller's stop when it comes first. The broker read, the cadence wait (which keeps its queue turn
+ *  and lock to itself) and the in-process read each settle on their own; only the caller stops waiting for them. */
 function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (signal === undefined) return work;
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason);
-    if (signal.aborted) { work.catch(() => { /* the caller has stopped: the cadence wait settles on its own and nobody reads its outcome */ }); stop(); return; }
+    if (signal.aborted) { work.catch(() => { /* the caller has stopped: the wait settles on its own and nobody reads its outcome */ }); stop(); return; }
     signal.addEventListener("abort", stop, { once: true });
     work.then((value) => { signal.removeEventListener("abort", stop); resolve(value); },
       (error: unknown) => { signal.removeEventListener("abort", stop); reject(error); });
