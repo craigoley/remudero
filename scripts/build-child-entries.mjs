@@ -183,11 +183,15 @@ function sourceSignature(root, version) {
 
 /** One memo entry per root; a concurrent edit refuses the launch rather than caching a hash of a moving tree. */
 export function memoizedSourceHash(root, stats, hash = sourceHash) {
+  return hashWithSourceMemo(root, stats, hash, sourceSignature);
+}
+
+function hashWithSourceMemo(root, stats, hash, signatureOf, acceptUnstable = false) {
   root = resolve(root);
   const version = loadEsbuild(root).version;
-  const signature = sourceSignature(root, version);
+  const signature = signatureOf(root, version);
   const cached = sourceHashes.get(root);
-  if (cached?.signature === signature) {
+  if (cached && cached.signature === signature) {
     stats.reused++;
     return cached.hash;
   }
@@ -196,8 +200,11 @@ export function memoizedSourceHash(root, stats, hash = sourceHash) {
   stats.computed++;
   try {
     const value = hash(root, version, stats);
-    if (sourceSignature(root, version) !== signature) throw new Error("source changed while hashing child entry");
-    sourceHashes.set(root, { signature, hash: value });
+    if (signature !== undefined && signatureOf(root, version) === signature) {
+      sourceHashes.set(root, { signature, hash: value });
+    } else if (!acceptUnstable) {
+      throw new Error("source changed while hashing child entry");
+    }
     return value;
   } finally {
     stats.ms += performance.now() - started;
@@ -378,13 +385,22 @@ export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, ha
 }
 
 /**
- * W1-T13969: the default `hashSource` of a currency check is {@link memoizedSourceHash}: a tree whose every input has the
+ * W1-T13969: a currency check shares the source hash memo. A tree whose every input has the
  * stat (size, mtime, ctime, inode, device, mode) it had when last hashed answers with that hash and reads no source
  * file; any changed stat reruns {@link sourceHash}. MEASURED 2026-11-20: rehashing the whole tree on each check held
  * the daemon loop 115 s in a day (engine-tree's bundleIsCurrent and spawnRunChild's newestCurrentEngine).
  */
 const currencyHashStats = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
-const currencySourceHash = (root) => memoizedSourceHash(root, currencyHashStats);
+const currencySourceHash = (root) => hashWithSourceMemo(root, currencyHashStats, sourceHash, currencySourceSignature, true);
+
+function currencySourceSignature(root, version) {
+  try {
+    return sourceSignature(root, version);
+  } catch {
+    // The stat witness is optional for currency. The content hash still decides the verdict.
+    return undefined;
+  }
+}
 
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
 function judgeChildEntry(root, name, outDir, treeHash, hashSource) {

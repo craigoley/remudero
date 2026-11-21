@@ -17,11 +17,11 @@ import type { Config } from "#src/lib/config.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerUnionRecordsSync, rotationStampIso, type LedgerUnionRecordRead } from "#src/lib/ledger-union.js";
-import { loadPlanAtRefAsync, mergePlanBlobs, PlanBlobCache, type Plan } from "#src/lib/plan.js";
+import { loadPlanAtRefAsync, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates, PlanBlobCache, type Plan } from "#src/lib/plan.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import * as sweepModule from "#test/helpers/sweep-test.js";
-import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import { beginOpenEscalationHistoryPass, buildSweepEffects, readOpenEscalationHistory, runSweep, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const MIN = 60_000;
@@ -146,6 +146,33 @@ test("W1-T13969 criterion 1: a repeated sweep pass over unchanged rotations read
   assert.equal(summaries.length, 2, "each pass writes its summary row");
   assert.deepEqual([summaries[1]!.open_escalation_memo_rotations, summaries[1]!.open_escalation_memo_rows], [2, 2],
     "the pass's summary row says what the history memo holds: both rotations, and their two rows of the history's steps");
+});
+
+test("W1-T13969 criterion 1: a corrupt rotation refuses without falling back to a synchronous archive read", async (t) => {
+  const stateDir = scratch(t, "corrupt-rotation");
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  writeFileSync(ledgerPath, ndjson([seedRow, holdRow(-HOUR)]));
+  const archive = join(stateDir, rotationName(-2 * HOUR, true));
+  writeFileSync(archive, "not a gzip");
+  const expected = syncOpenEscalationRead(stateDir, TASK, seedRow.ts);
+  assert.equal(expected.ok, false);
+  assert.deepEqual(expected.unread, [archive]);
+  const reads = countArchiveReads(t, stateDir);
+
+  for (const pass of [1, 2]) {
+    reads.reset();
+    beginOpenEscalationHistoryPass(ledgerPath);
+    const actual = await readOpenEscalationHistory(ledgerPath, TASK, seedRow.ts);
+    assert.deepEqual(comparable(actual), comparable(expected), `pass ${pass} refuses the incomplete history`);
+    assert.equal(reads.counts.sync, 0, `pass ${pass} reads no corrupt-archive bytes on the loop`);
+    assert.equal(reads.counts.async, 1, `pass ${pass} attempts the archive off the loop`);
+  }
+
+  writeFileSync(archive, gzipSync(ndjson([holdRow(-5 * HOUR)])));
+  const repaired = await readOpenEscalationHistory(ledgerPath, TASK, seedRow.ts);
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.rows[0]!.open_escalation_hold_since, stamp(-5 * HOUR), "repair restores the archived hold");
+  assert.equal(reads.counts.sync, 0);
 });
 
 /** Five rotations an hour apart, each holding one hold row of the task, and the live file's checkpoint. */
@@ -277,15 +304,23 @@ test("W1-T13969 criterion 2: a plan loaded twice at one tree identity parses eac
   const third = await load("fixture-root", `${dir}/tasks.yaml`, "origin/main", runGit, undefined, cache);
   assert.deepEqual([cache.parsedBlobs, cache.reusedBlobs], [1, files.size - 1], "a changed blob, and only it, is parsed again");
   assert.deepEqual(third.byId.get("SHARD-4")!.files, ["src/b.ts"]);
+  files.set(`${dir}/tasks.d/SHARD-4.yaml`, taskYaml("SHARD-4", ["  files:", "    - src/a.ts"]));
+  const restored = await load("fixture-root", `${dir}/tasks.yaml`, "origin/main", runGit, undefined, cache);
+  assert.deepEqual([cache.parsedBlobs, cache.reusedBlobs], [0, files.size], "returning to a previous tree parses no shard");
+  assert.strictEqual(restored.byId.get("SHARD-4"), first.byId.get("SHARD-4"), "the restored blob reuses its original parse");
 
-  // The daemon's own call names no cache: the loader keeps one for the plan path, for the process's lifetime.
+  // The daemon's own call names no cache. Another repo may have the same paths at the same ref.
   const dflt = "plan-w1t13969-c2-default";
   const tree = planTree(dflt);
   const git = planGit(tree, []);
   const once = await loadPlanAtRefAsync("fixture-root", `${dflt}/tasks.yaml`, "origin/main", git);
+  const otherTree = planTree(dflt);
+  otherTree.set(`${dflt}/tasks.d/SHARD-4.yaml`, taskYaml("SHARD-4", ["  files:", "    - src/other.ts"]));
+  const other = await loadPlanAtRefAsync("other-root", `${dflt}/tasks.yaml`, "origin/main", planGit(otherTree, []));
+  assert.deepEqual(other.byId.get("SHARD-4")!.files, ["src/other.ts"]);
   const twice = await loadPlanAtRefAsync("fixture-root", `${dflt}/tasks.yaml`, "origin/main", git);
   assert.ok(twice.tasks.length >= 5 && twice.tasks.every((task, i) => task === once.tasks[i]),
-    "a second default load at one tree identity reuses every parsed task");
+    "a second default load reuses every parse after an interleaved load from another repository");
 });
 
 interface CurrencyVerdict { current: boolean; reason: string; [key: string]: unknown }
@@ -307,13 +342,17 @@ async function builtTree(t: TestContext): Promise<string> {
 }
 
 /** Reads of files under `<root>/src`: the bytes sourceHash reads to hash a tree. */
-function countSourceReads(t: TestContext, root: string): () => number {
+function countSourceReads(t: TestContext, root: string, afterRead?: (path: string) => void): () => number {
   const src = join(root, "src") + sep;
   const read = fs.readFileSync;
   let count = 0;
   const spy = t.mock.method(fs, "readFileSync", (path: unknown, ...args: unknown[]) => {
-    if (typeof path === "string" && path.startsWith(src)) count++;
-    return Reflect.apply(read, fs, [path, ...args]);
+    const result = Reflect.apply(read, fs, [path, ...args]);
+    if (typeof path === "string" && path.startsWith(src)) {
+      count++;
+      afterRead?.(path);
+    }
+    return result;
   });
   syncBuiltinESMExports();
   t.after(() => { spy.mock.restore(); syncBuiltinESMExports(); });
@@ -348,6 +387,46 @@ test("W1-T13969 criterion 3: childEntryIsCurrent judges an unchanged tree withou
   assert.equal(stale.now, childEntries.sourceHash(root));
 });
 
+test("W1-T13969 criterion 3: an unavailable stat witness still yields the content verdict", async (t) => {
+  const root = await builtTree(t);
+  const note = join(root, "src", "lib", "note.ts");
+  const stat = fs.lstatSync;
+  const spy = t.mock.method(fs, "lstatSync", (path: unknown, ...args: unknown[]) => {
+    if (path === note) throw Object.assign(new Error("cannot stat source"), { code: "EACCES" });
+    return Reflect.apply(stat, fs, [path, ...args]);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spy.mock.restore(); syncBuiltinESMExports(); });
+  const base = childEntries.childEntryIsCurrent(root, ENTRY, { hashSource: childEntries.sourceHash });
+  assert.equal(base.reason, "source-hash-match");
+  assert.deepEqual(childEntries.childEntryIsCurrent(root, ENTRY), base);
+});
+
+test("W1-T13969 criterion 3: a source change during hashing preserves the verdict and leaves the hash uncached", async (t) => {
+  const root = await builtTree(t);
+  const note = join(root, "src", "lib", "note.ts");
+  const before = "export const note = 'before';\n";
+  let changeOnRead = true;
+  const reads = countSourceReads(t, root, (path) => {
+    if (path !== note || !changeOnRead) return;
+    changeOnRead = false;
+    writeFileSync(note, "export const note = 'changed during hashing';\n");
+  });
+  const base = childEntries.childEntryIsCurrent(root, ENTRY, { hashSource: childEntries.sourceHash });
+  assert.equal(base.reason, "source-hash-match", "base judges the bytes it read");
+  assert.equal(changeOnRead, false);
+  writeFileSync(note, before);
+  changeOnRead = true;
+
+  assert.deepEqual(childEntries.childEntryIsCurrent(root, ENTRY), base);
+  assert.equal(changeOnRead, false, "the memoized check raced with the same edit");
+  const afterRace = reads();
+  const stale = childEntries.childEntryIsCurrent(root, ENTRY);
+  assert.ok(reads() - afterRace >= 2, "the unstable hash was not cached");
+  assert.equal(stale.reason, "source-changed");
+  assert.equal(stale.now, childEntries.sourceHash(root));
+});
+
 /** A replayed history: plain and gzipped rotations, a torn line, an exact replay across files, a row naming the task
  *  only in a nested field, a row with no string ts, and rows of other tasks and steps. */
 function replayedHistory(root: string): void {
@@ -356,12 +435,16 @@ function replayedHistory(root: string): void {
     loop_decision: { task_id: TASK, route: "close-and-rebuild" } };
   const replay = { ...holdRow(-6 * HOUR), replayed: true };
   writeFileSync(join(root, rotationName(-9 * HOUR, true)), gzipSync(ndjson([holdRow(-10 * HOUR)])));
-  writeFileSync(join(root, rotationName(-5 * HOUR, true)), gzipSync(ndjson([replay, other, holdRow(-5.5 * HOUR)]) + "{torn\n"));
+  const spaced = JSON.stringify(replay).replaceAll("\",\"", "\", \"");
+  const escapedId = JSON.stringify({ ...holdRow(-5.25 * HOUR), escapedId: true }).replace(TASK, "\\u0057" + TASK.slice(1));
+  const escapedStep = JSON.stringify({ ...holdRow(-5.125 * HOUR), escapedStep: true }).replace("sweep.disposed", "\\u0073weep.disposed");
+  writeFileSync(join(root, rotationName(-5 * HOUR, true)), gzipSync(ndjson([replay, other, holdRow(-5.5 * HOUR)]) +
+    `${spaced}\n${escapedId}\n${escapedStep}\n{"task_id":"${TASK}", broken\n{torn\n`));
   writeFileSync(join(root, rotationName(-3 * HOUR, false)), ndjson([replay, nested,
     { step: "fix.stood_down", task_id: TASK, site: "rung.strike", reason: HOLD_REASON, read_head_sha: HEAD, ts: stamp(-3.5 * HOUR) },
     { step: "fix.done", task_id: TASK, head_sha: HEAD, run_id: RUN, ts: 12 }]));
   writeFileSync(join(root, "ledger.ndjson"), ndjson([seedRow, replay,
-    { step: "fix.done", task_id: TASK, head_sha: HEAD, run_id: RUN, ts: stamp(-2 * HOUR) }, holdRow(-HOUR)]));
+    { step: "fix.done", task_id: TASK, head_sha: HEAD, run_id: RUN, ts: stamp(-2 * HOUR) }, holdRow(-HOUR)]) + spaced + "\n");
 }
 
 /** origin/main's read at sweep.ts's open-escalation site, verbatim. */
@@ -373,7 +456,7 @@ const syncOpenEscalationRead = (stateDir: string, taskId: string, since: string 
     refuseIncomplete: true,
   });
 const comparable = (read: LedgerUnionRecordRead) =>
-  ({ ok: read.ok, rows: read.rows, unread: read.unread, archiveFiles: read.archiveFiles, liveFileRead: read.liveFileRead });
+  ({ ok: read.ok, rows: read.rows, torn: read.torn, unread: read.unread, archiveFiles: read.archiveFiles, liveFileRead: read.liveFileRead });
 
 test("W1-T13969 criterion 4: invariant:same-rows-same-decisions on a replayed ledger", async (t) => {
   await t.test("each converted ledger read returns origin/main's rows, including a refuseIncomplete refusal", async (st) => {
@@ -384,6 +467,11 @@ test("W1-T13969 criterion 4: invariant:same-rows-same-decisions on a replayed le
     replayedHistory(root);
     const cases: Array<[string, string | undefined]> = [[TASK, stamp(-8 * HOUR)], [TASK, stamp(-11 * HOUR)], [TASK, stamp(-4 * HOUR)],
       [TASK, undefined], ["W1-T7", stamp(-8 * HOUR)], ["W1-T8", stamp(-8 * HOUR)], ["W1-T404", stamp(-8 * HOUR)]];
+    const rawReplay = syncOpenEscalationRead(root, TASK, stamp(-8 * HOUR));
+    assert.equal(rawReplay.rows.filter((row) => row.replayed === true).length, 2, "base keeps distinct spacing and dedupes exact replays");
+    assert.ok(rawReplay.rows.some((row) => row.escapedStep === true), "base accepts an escaped step with a raw task-id match");
+    assert.ok(rawReplay.rows.every((row) => row.escapedId !== true), "base excludes a task id written only as a JSON escape");
+    assert.equal(rawReplay.torn, 1, "base counts only torn lines with the raw task-id match");
     let compared = 0;
     for (const pass of [1, 2]) {
       for (const [taskId, since] of cases) {
@@ -399,11 +487,24 @@ test("W1-T13969 criterion 4: invariant:same-rows-same-decisions on a replayed le
     assert.equal(refusedExpected.ok, false, "an unreadable rotation refuses the strict read");
     const refused = await read!(join(root, "ledger.ndjson"), TASK, stamp(-8 * HOUR));
     assert.deepEqual(comparable(refused), comparable(refusedExpected), "the memoized read refuses the same incomplete history");
+    assert.deepEqual(comparable(await read!(join(root, "ledger.ndjson"), TASK, stamp(-8 * HOUR))), comparable(refusedExpected),
+      "the next read refuses the same incomplete history");
     const absent = join(root, "gone", "ledger.ndjson");
     const absentExpected = syncOpenEscalationRead(dirname(absent), TASK, stamp(-8 * HOUR));
     assert.deepEqual(absentExpected.unread, [dirname(absent)], "an absent state directory is unread to the strict read");
     assert.deepEqual(comparable(await read!(absent, TASK, stamp(-8 * HOUR))), comparable(absentExpected),
       "and the memoized read refuses it the same way");
+  });
+
+  await t.test("an unreadable live ledger refuses archived history", async (st) => {
+    const root = scratch(st, "unreadable-live");
+    const ledgerPath = join(root, "ledger.ndjson");
+    mkdirSync(ledgerPath); // EISDIR when the reader tries to consume it.
+    writeFileSync(join(root, rotationName(-2 * HOUR, false)), ndjson([holdRow(-3 * HOUR)]));
+    const expected = syncOpenEscalationRead(root, TASK, seedRow.ts);
+    assert.equal(expected.ok, false);
+    assert.deepEqual(expected.unread, [ledgerPath]);
+    assert.deepEqual(comparable(await readOpenEscalationHistory(ledgerPath, TASK, seedRow.ts)), comparable(expected));
   });
 
   await t.test("each plan load returns origin/main's plan, and refuses an invalid or duplicated shard the same way", async () => {
@@ -418,15 +519,21 @@ test("W1-T13969 criterion 4: invariant:same-rows-same-decisions on a replayed le
     for (const pass of [1, 2]) {
       assert.deepEqual(await loadPlanAtRefAsync("fixture-root", `${dir}/tasks.yaml`, "origin/main", git), mergePlanBlobs(await blobs()), `pass ${pass}`);
     }
+    const cache = new PlanBlobCache();
+    await loadPlanAtRefAsync("fixture-root", `${dir}/tasks.yaml`, "origin/main", git, undefined, cache);
     for (const [name, text] of [["SHARD-9.yaml", "- id: [unclosed\n"], ["SHARD-5.yaml", taskYaml("SHARD-1")]] as const) {
       files.set(`${dir}/tasks.d/${name}`, text);
       let expected: unknown;
       try { mergePlanBlobs(await blobs()); } catch (error) { expected = error; }
       assert.ok(expected instanceof Error, `${name} is refused at base`);
       for (const pass of [1, 2]) {
-        await assert.rejects(() => loadPlanAtRefAsync("fixture-root", `${dir}/tasks.yaml`, "origin/main", git),
+        await assert.rejects(() => loadPlanAtRefAsync("fixture-root", `${dir}/tasks.yaml`, "origin/main", git, undefined, cache),
           (error: Error) => error.constructor === (expected as Error).constructor && error.message === (expected as Error).message,
           `pass ${pass}: ${name} is refused with origin/main's error`);
+        const input = await blobs();
+        const quarantined = mergePlanBlobsQuarantiningDuplicates(input);
+        assert.ok(quarantined.quarantined.length > 0, `${name} yields quarantine evidence`);
+        assert.deepEqual(mergePlanBlobsQuarantiningDuplicates(input, cache), quarantined, `pass ${pass}: ${name} quarantine`);
       }
       files.delete(`${dir}/tasks.d/${name}`);
     }

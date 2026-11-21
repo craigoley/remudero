@@ -146,7 +146,7 @@ import {
 } from "./strike-ladder.js";
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
-  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, incrementalLedgerDigestVersion, ledgerLivePath, ledgerRawLineProjection,
+  createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, incrementalLedgerDigestVersion, LEDGER_ROTATION_LOAD_LINES_PER_TURN, ledgerLivePath, ledgerRawLineProjection,
   ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, realLedgerFs,
   resolveLedgerUnion, rotationStatKey,
   type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationMemo, type LedgerRotationRecords, type LedgerUnionRecordRead,
@@ -19034,7 +19034,15 @@ export function openEscalationStandDownSince(
 }
 
 const OPEN_ESCALATION_HISTORY_STEPS: readonly string[] = ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"];
-const OPEN_ESCALATION_STEP_LINE = new RegExp(OPEN_ESCALATION_HISTORY_STEPS.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+interface OpenEscalationLedgerLine extends Record<string, unknown> {
+  raw: string;
+  row: Record<string, unknown>;
+}
+
+function openEscalationLedgerLine(row: Record<string, unknown>, raw: string): OpenEscalationLedgerLine {
+  return { raw, row, step: row.step, ts: row.ts };
+}
+
 /** One state directory's open-escalation memo and the rotations each of the last two sweep passes reached. */
 interface OpenEscalationHistoryState { memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string> }
 const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>();
@@ -19043,12 +19051,25 @@ const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>(
  *  keeps every rotation this pass or the one before reached. The union of one pass's windows is what the next pass
  *  needs, so an older window's rotations are kept one pass and no longer. A rotation's own size and mtime still
  *  decide every hit. */
-function retainingTheLastTwoPasses(state: OpenEscalationHistoryState): LedgerRotationMemo {
+function openEscalationRotationMemo(state: OpenEscalationHistoryState, needle: string, seen: Set<string>): LedgerRotationMemo {
   return { ...state.memo, pass: (opts) => {
+    seen.clear();
     const pass = state.memo.pass(opts);
+    const unread = new Set<string>();
     return { ...pass,
-      rotationRecords: (entry, parse) => { state.reached.add(entry.path); return pass.rotationRecords(entry, parse); },
-      complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous]) };
+      rotationRecords: (entry) => {
+        state.reached.add(entry.path);
+        const read = pass.rotationRecords(entry, () => {
+          // A failed load or stat reaches the memo's inline fallback. Surface the unread path
+          // through the union and let the next request retry it asynchronously.
+          unread.add(entry.path);
+          throw new Error(`unreadable open-escalation rotation: ${entry.path}`);
+        });
+        const tornLines = read.tornLines.filter((line) => line.includes(needle));
+        return { ...read, torn: tornLines.length, tornLines };
+      },
+      complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous].filter((path) => !unread.has(path))),
+    };
   } };
 }
 
@@ -19085,27 +19106,65 @@ export function openEscalationHistoryHeld(ledgerPath: string): { rotations: numb
  * answered from a rotation memo the sweep keeps across passes, so a repeated pass over unchanged rotations reads
  * no archive bytes on the loop (a rotation is loaded off the loop once, and again only when its size or mtime changes,
  * or after a pass that no read reached it; see {@link beginOpenEscalationHistoryPass}). MEASURED 2026-11-20: this read, then synchronous per PR and per pass, held the daemon loop 97.5 s in a day.
- * The rows equal readLedgerUnionRecordsSync's with the task's JSON-quoted id as `pattern`: a ledger line is
- * JSON.stringify's output, so that pattern matches the line exactly when it matches the row's own serialisation.
+ * Match the JSON-quoted id on the original line and dedupe exact text across rotations and the live ledger.
+ * Re-serializing parsed rows loses differences in whitespace and JSON escapes.
  */
 export async function readOpenEscalationHistory(ledgerPath: string, taskId: string, since: string | undefined,
-  fsDeps: LedgerGrepFsDeps = realLedgerFs): Promise<LedgerUnionRecordRead> {
+  fsDeps: LedgerGrepFsDeps = realLedgerFs,
+  openLive: (path: string) => AsyncIterable<Buffer | string> = (path) => fs.createReadStream(path),
+): Promise<LedgerUnionRecordRead> {
   const stateDir = dirname(ledgerPath);
   let state = openEscalationHistoryStates.get(stateDir);
   if (state === undefined) {
     const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
-      { holder: "sweep.open-escalation-history", pattern: OPEN_ESCALATION_STEP_LINE });
+      { holder: "sweep.open-escalation-history", projectLine: openEscalationLedgerLine });
     openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set() });
   }
   const needle = JSON.stringify(taskId);
-  return readLedgerUnionRecordsMemoized(stateDir, retainingTheLastTwoPasses(state), {
+  const livePath = ledgerLivePath(stateDir);
+  const readLive = fsDeps.existsSync(livePath) ? await readOpenEscalationLive(livePath, needle, openLive) : undefined;
+  const seen = new Set<string>();
+  const read = await readLedgerUnionRecordsMemoized(stateDir, openEscalationRotationMemo(state, needle, seen), {
     step: [...OPEN_ESCALATION_HISTORY_STEPS],
     since,
-    // The memo is shared by every task, so its rows carry no task filter: the task is matched on each row instead.
-    pattern: OPEN_ESCALATION_STEP_LINE,
-    where: (row) => row.task_id === taskId || JSON.stringify(row).includes(needle),
+    dedupe: false,
+    where: (record) => {
+      const { raw } = record as OpenEscalationLedgerLine;
+      if (!raw.includes(needle) || seen.has(raw)) return false;
+      seen.add(raw);
+      return true;
+    },
+    liveRecords: readLive,
     refuseIncomplete: true,
-  }, fsDeps);
+  }, { ...fsDeps, existsSync: (path) => path === livePath ? readLive !== undefined : fsDeps.existsSync(path) });
+  return { ...read, rows: read.rows.map((record) => (record as OpenEscalationLedgerLine).row) };
+}
+
+async function readOpenEscalationLive(path: string, needle: string, open: (path: string) => AsyncIterable<Buffer | string>):
+  Promise<() => LedgerRotationRecords> {
+  const rows: OpenEscalationLedgerLine[] = [];
+  const tornLines: string[] = [];
+  let lines = 0;
+  try {
+    for await (const raw of ndjsonLines(open(path))) {
+      if (++lines % LEDGER_ROTATION_LOAD_LINES_PER_TURN === 0) await delay(0);
+      const line = raw.trim();
+      if (!line.includes(needle)) continue;
+      try {
+        const row: unknown = JSON.parse(line);
+        if (row !== null && typeof row === "object" && !Array.isArray(row)) {
+          rows.push(openEscalationLedgerLine(row as Record<string, unknown>, line));
+        }
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        tornLines.push(line);
+      }
+    }
+  } catch (error) {
+    // The union's strict live-file hook reports the underlying read failure as unread.
+    return () => { throw error; };
+  }
+  return () => ({ rows, torn: tornLines.length, tornLines });
 }
 
 /** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */

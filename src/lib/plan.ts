@@ -956,7 +956,7 @@ export function loadPlanKeepingUnseenDependencies(
 export function loadPlanReusingParses(path: string, cache: PlanBlobCache): Plan {
   const next = new Map<string, CachedPlanBlob>();
   const counts = { parsedBlobs: 0, reusedBlobs: 0 };
-  const parse = cachedBlobParser(cache, next, counts, (file) => file);
+  const parse = cachedBlobParser(cache.entries, next, counts, (file) => file);
   const plan = readMergedPlan(path, defaultIntegrityIO, join(dirname(path), "tasks.d"), undefined, undefined, parse);
   cache.entries = next;
   Object.assign(cache, counts);
@@ -998,27 +998,29 @@ type CachedPlanBlob = {
   error?: { prefix: "yaml" | "task" | "plain"; message: string };
 };
 
-/** One path's current pin only. A merge replaces the entries after validation succeeds. */
+/** Working-tree readers keep current path pins. The async ref loader retains parses by blob identity. */
 export class PlanBlobCache {
   entries = new Map<string, CachedPlanBlob>();
+  readonly byBlob = new Map<string, CachedPlanBlob>();
   parsedBlobs = 0;
   reusedBlobs = 0;
 }
 
 function cachedBlobParser(
-  cache: PlanBlobCache,
+  entries: Map<string, CachedPlanBlob>,
   next: Map<string, CachedPlanBlob>,
   counts: { parsedBlobs: number; reusedBlobs: number },
   // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
   pathForLabel = (label: string) => label.slice(label.indexOf(":") + 1),
+  blobForLabel?: ReadonlyMap<string, string>,
 ): typeof parseTasksFromYaml {
   return (text, label, onDuplicate) => {
-    const path = pathForLabel(label);
-    const hash = createHash("sha256").update(text, "utf8").digest("hex");
-    let entry = cache.entries.get(path);
+    const oid = blobForLabel?.get(label);
+    const hash = oid === undefined ? `text:${createHash("sha256").update(text, "utf8").digest("hex")}` : `git:${oid}`;
+    const key = blobForLabel === undefined ? pathForLabel(label) : hash;
+    let entry = entries.get(key);
     if (entry?.hash === hash) {
       counts.reusedBlobs++;
-      if (entry.label !== label) entry = { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
     } else {
       counts.parsedBlobs++;
       entry = { hash, label, tasks: [], duplicates: [] };
@@ -1036,13 +1038,14 @@ function cachedBlobParser(
             : { prefix: "plain", message: err.message };
       }
     }
-    next.set(path, entry);
+    const relabeled = entry.label === label ? entry : { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
+    next.set(key, blobForLabel === undefined ? relabeled : entry);
     for (const id of entry.duplicates) (onDuplicate ?? rejectDuplicateTaskId)(id);
     if (entry.error) {
       const prefix = entry.error.prefix === "yaml" ? `plan is not valid YAML (${label}): ` : entry.error.prefix === "task" ? `${label}: task ` : "";
       throw new PlanError(prefix + entry.error.message);
     }
-    return entry.tasks;
+    return relabeled.tasks;
   };
 }
 
@@ -1060,7 +1063,7 @@ export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: strin
     blobs,
     (id, earlierLabel, laterLabel) => recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
     (label, err, text) => invalid.push(...invalidShard(label, err, text)),
-    cache ? cachedBlobParser(cache, next, counts) : parseTasksFromYaml,
+    cache ? cachedBlobParser(cache.entries, next, counts) : parseTasksFromYaml,
   );
   const read = quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
   if (cache) {
@@ -1282,7 +1285,7 @@ export async function loadPlanAtRefAsync(
   ref = "HEAD",
   runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
   keepsUnseenDependency?: KeepsUnseenDependency,
-  parseCache: PlanBlobCache = planAtRefParseCache(planRelPath),
+  parseCache: PlanBlobCache = planAtRefParseCache,
 ): Promise<Plan> {
   let monolithBlob: string;
   try {
@@ -1299,33 +1302,31 @@ export async function loadPlanAtRefAsync(
     shardListing = ""; // no tasks.d/ at this ref: the same tolerance loadPlanAtRef applies
   }
   const shardRelPaths = shardPathsFromListing(shardListing);
-  let shardBlobs: string[];
+  let shardBlobs: GitPlanBlob[];
   try {
-    shardBlobs = await readBlobsAtRefAsync(runGit, ref, shardRelPaths);
+    shardBlobs = await readBlobBatchAtRefAsync(runGit, ref, shardRelPaths);
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
-  return mergePlanBlobsReusingParses(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), parseCache, keepsUnseenDependency);
+  const blobForLabel = new Map<string, string>();
+  for (const [i, blob] of shardBlobs.entries()) {
+    const label = `${ref}:${shardRelPaths[i]}`;
+    blobs.push({ label, text: blob.text });
+    if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(blob.oid)) blobForLabel.set(label, blob.oid);
+  }
+  return mergePlanBlobsReusingParses(blobs, blobForLabel, parseCache, keepsUnseenDependency);
 }
 
-const planAtRefParseCaches = new Map<string, PlanBlobCache>();
-
-/** W1-T13969: {@link loadPlanAtRefAsync}'s parses for one plan path, kept for the process's lifetime. Each shard's entry
- *  is keyed by its content hash, so an unchanged blob is parsed once and a changed one again; one plan's shards at most. */
-function planAtRefParseCache(planRelPath: string): PlanBlobCache {
-  let cache = planAtRefParseCaches.get(planRelPath);
-  if (cache === undefined) planAtRefParseCaches.set(planRelPath, cache = new PlanBlobCache());
-  return cache;
-}
+/** Shard blob identities are content-addressed across refs and repositories. */
+const planAtRefParseCache = new PlanBlobCache();
 
 /** W1-T13969: {@link mergePlanBlobs} under its default parse, answering each blob whose content `cache` holds from that
  *  parse. MEASURED 2026-11-20: re-parsing every shard on each load held the daemon loop 85.5 s in a day. */
-function mergePlanBlobsReusingParses(blobs: Array<{ label: string; text: string }>, cache: PlanBlobCache,
-  keepsUnseenDependency?: KeepsUnseenDependency): Plan {
-  const next = new Map<string, CachedPlanBlob>();
+function mergePlanBlobsReusingParses(blobs: Array<{ label: string; text: string }>, blobForLabel: ReadonlyMap<string, string>,
+  cache: PlanBlobCache, keepsUnseenDependency?: KeepsUnseenDependency): Plan {
   const counts = { parsedBlobs: 0, reusedBlobs: 0 };
-  const plan = validatedPlan(mergeBlobTasks(blobs, undefined, undefined, cachedBlobParser(cache, next, counts)), undefined, keepsUnseenDependency);
-  cache.entries = next;
+  const parse = cachedBlobParser(cache.byBlob, cache.byBlob, counts, undefined, blobForLabel);
+  const plan = validatedPlan(mergeBlobTasks(blobs, undefined, undefined, parse), undefined, keepsUnseenDependency);
   Object.assign(cache, counts);
   return plan;
 }
@@ -1352,9 +1353,17 @@ export async function readBlobsAtRefAsync(
   ref: string,
   relPaths: string[],
 ): Promise<string[]> {
+  return (await readBlobBatchAtRefAsync(runGit, ref, relPaths)).map(({ text }) => text);
+}
+
+async function readBlobBatchAtRefAsync(
+  runGit: (args: string[], stdin?: string) => Promise<string>,
+  ref: string,
+  relPaths: string[],
+): Promise<GitPlanBlob[]> {
   if (relPaths.length === 0) return [];
   const request = await blobBatchRequestAsync(runGit, ref, relPaths);
-  return parseBlobBatch(await runGit(["cat-file", "--batch"], request), ref, relPaths);
+  return frameBlobBatch(await runGit(["cat-file", "--batch"], request), ref, relPaths);
 }
 
 /**
@@ -1389,8 +1398,14 @@ function blobBatchRequest(ref: string, relPaths: string[], listing: string): str
 
 /** Frame the bytes one `cat-file --batch` printed for `relPaths`, in order; the contract {@link readBlobsAtRef} states. */
 export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): string[] {
+  return frameBlobBatch(raw, ref, relPaths).map(({ text }) => text);
+}
+
+type GitPlanBlob = { oid: string; text: string };
+
+function frameBlobBatch(raw: string, ref: string, relPaths: string[]): GitPlanBlob[] {
   const buf = Buffer.from(raw, "utf8");
-  const texts: string[] = [];
+  const blobs: GitPlanBlob[] = [];
   let off = 0;
   for (const relPath of relPaths) {
     const nl = buf.indexOf(0x0a, off);
@@ -1408,10 +1423,10 @@ export function parseBlobBatch(raw: string, ref: string, relPaths: string[]): st
     if (!Number.isInteger(size) || size < 0 || off + size > buf.length) {
       throw new Error(`git cat-file --batch gave an unusable size for ${ref}:${relPath} (${header})`);
     }
-    texts.push(buf.toString("utf8", off, off + size));
+    blobs.push({ oid: fields[0]!, text: buf.toString("utf8", off, off + size) });
     off = off + size + 1; // the LF git appends after the contents
   }
-  return texts;
+  return blobs;
 }
 
 /** Merge already-read plan blobs into one {@link Plan} under {@link loadPlan}'s contract; `label` names each blob. */
