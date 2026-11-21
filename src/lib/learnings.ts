@@ -1671,7 +1671,8 @@ export function propensitySeed(seed: number, k: number): number {
  * worker reads (`id`, `fact`) and what admits and ranks the entry (`files`, `symbols`,
  * `errorSignatures`, `layer`, `lifecycle`). It leaves out usage metadata (`cited`, `citedCount`,
  * which the citation miner restamps) and text that is never injected (`src`, `evidence`,
- * `subsystem`). Globs and symbols match as sets, so they are sorted and de-duplicated first.
+ * `subsystem`). Globs match as a set. Symbol and error hits count repetitions, so their sorted
+ * lists retain multiplicity.
  * The ledger gets the fixed-width digest, never the content. Bump the version when the field set
  * changes, so an old identity can never equal a new one.
  */
@@ -1688,8 +1689,8 @@ export function learningContentIdentity(entry: LearningEntry): string {
     id: entry.id,
     fact: entry.fact,
     files: canonicalSet(entry.files),
-    symbols: canonicalSet(entry.symbols),
-    errorSignatures: canonicalSet(entry.errorSignatures),
+    symbols: [...(entry.symbols ?? [])].sort(),
+    errorSignatures: [...(entry.errorSignatures ?? [])].sort(),
     layer: entryLayer(entry),
     lifecycle: entry.lifecycle,
   };
@@ -1970,11 +1971,10 @@ export function selectLearnings<T extends LearningEntry>(
     for (const entry of selectWith(propensitySeed(seed, k)).selected) hits[entry.id] += 1;
   }
   const propensity = Object.fromEntries(Object.entries(hits).map(([id, n]) => [id, n / draws]));
-  // W1-T11115: the revision of every contested entry, selected AND dropped, from the candidates
-  // this draw ranked. Absent when nothing was contested.
+  // W1-T11115: even a copy filtered out by matching or lifecycle can make a contested id ambiguous.
   const contested = Object.keys(propensity).filter((id) => propensity[id]! > 0 && propensity[id]! < 1);
   if (contested.length === 0) return { ...result, propensity };
-  return { ...result, propensity, contentIds: learningContentIdentities(matched.map((r) => r.entry), contested) };
+  return { ...result, propensity, contentIds: learningContentIdentities(entries, contested) };
 }
 
 export const LEXICAL_SHADOW_VERSION = "lexical-shadow-v1" as const;

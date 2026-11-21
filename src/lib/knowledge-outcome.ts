@@ -132,8 +132,9 @@ function revisionOf(contentIds: unknown, id: string): Revision {
 const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
- *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. An
- *  observation is checked in order: trimmed, then revision, then arm. Each exclusion counts once. */
+ *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. A
+ *  valid identity still participates in conflict detection when its observation is trimmed.
+ *  Exclusions count trimmed rows separately from otherwise eligible rows withheld for conflict. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -183,12 +184,18 @@ export function foldLearningOutcomes(
     const selected = new Set(stringList(r.matched_ids));
     const dropped = new Set(stringList(r.dropped));
     for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
-      if (typeof p !== "number" || p <= 0 || p >= 1) continue;
+      if (typeof p !== "number" || !(p > 0 && p < 1)) continue;
+      const exposure = `${r.run_id}\u0000${id}`;
+      const revision = revisionOf(r.content_ids, id);
+      if ("contentId" in revision) {
+        const seen = revisionsByExposure.get(exposure) ?? new Set<string>();
+        seen.add(revision.contentId);
+        revisionsByExposure.set(exposure, seen);
+      }
       if (p < trim || p > 1 - trim) {
         report.excludedTrimmed++;
         continue;
       }
-      const revision = revisionOf(r.content_ids, id);
       if ("excluded" in revision) {
         report.excludedRevision[revision.excluded]++;
         continue;
@@ -198,10 +205,6 @@ export function foldLearningOutcomes(
         report.excludedRevision.unresolved++;
         continue;
       }
-      const exposure = `${r.run_id}\u0000${id}`;
-      const seen = revisionsByExposure.get(exposure) ?? new Set<string>();
-      seen.add(contentId);
-      revisionsByExposure.set(exposure, seen);
       pending.push({ exposure, id, contentId, obs: { injected: selected.has(id), propensity: p, clean } });
     }
   }

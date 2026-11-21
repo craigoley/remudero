@@ -10,7 +10,7 @@
  * draw's own snapshot; the fold groups by {id, revision} and counts every observation it cannot pin.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -198,7 +198,7 @@ function deepFreeze<T>(value: T): T {
  *  disk: the layered load, the real selector wrapped by `recordingSelectLearnings`, the production
  *  budget, draw count and run seed, then the producer's own `learningsInjectedRow`. 30 equal-strength
  *  ~430-char lines overflow the 8,148-char budget, so about 19 fit and the seeded draw decides which. */
-function producerRun(): ProducerRun {
+function producerRun(duplicateIds: string[] = []): ProducerRun {
   const dir = mkdtempSync(join(tmpdir(), "rmd-lcr-corpus-"));
   try {
     writeFileSync(
@@ -208,9 +208,16 @@ function producerRun(): ProducerRun {
         return [`- id: ${id}`, `  fact: "${RAW_FACT_SENTINEL}-${id} ${"x".repeat(380)}"`, '  src: "lcr-fixture"', `  files: ["${PRODUCER_TASK_FILE}"]`].join("\n");
       }).join("\n") + "\n",
     );
+    const userOverallDir = join(dir, "user-layer");
+    if (duplicateIds.length > 0) {
+      mkdirSync(userOverallDir);
+      writeFileSync(join(userOverallDir, "duplicates.yaml"), duplicateIds.map((id) =>
+        `- id: ${id}\n  fact: "${RAW_FACT_SENTINEL} conflicting copy"\n  src: "lcr-fixture"\n  files: ["unrelated.ts"]\n`,
+      ).join(""));
+    }
     const usage = {};
     const input = {
-      homes: { projectDir: dir, userOverallDir: join(dir, "no-user-layer"), globalArtifactPath: join(dir, "no-global-layer", "artifact.yaml") },
+      homes: { projectDir: dir, userOverallDir, globalArtifactPath: join(dir, "no-global-layer", "artifact.yaml") },
       taskFiles: [PRODUCER_TASK_FILE],
       selectionContext: { text: ["prove the producer names the exact learning revision it drew"], usage, seed: seedOf(PRODUCER_RUN_ID), propensityDraws: LEARNING_PROPENSITY_DRAWS },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -250,8 +257,7 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
   }
   assert.equal(selectLearnings(snapshot, files, 700, { usage: {}, seed: 42 }).contentIds, undefined, "no draw, no contest, no revision");
 
-  // DETERMINISTIC AND CANONICAL: equal canonical bytes give one identity. Reordering or repeating a
-  // glob or symbol is not a revision, and neither is usage metadata or text that is never injected.
+  // Reordering triggers and repeating a glob preserve canonical bytes, as does changing metadata.
   const base = { ...entry("r", ["src/a.ts", "src/b.ts"], "the fact"), symbols: ["x", "y"], errorSignatures: ["boom"] } as LearningEntry;
   const id0 = learningContentIdentity(base);
   assert.equal(learningContentIdentity({ ...base }), id0);
@@ -285,6 +291,15 @@ test("W1-T11115: learning outcome revision identifies both selected and dropped 
     assert.equal(source.length, 1);
     assert.equal(ids[id], learningContentIdentity(source[0]!), `${id}: the ledgered revision is the source entry's`);
   }
+  const selectedId = producerContested.find((id) => matched.has(id))!;
+  const droppedId = producerContested.find((id) => dropped.has(id))!;
+  const { row: ambiguous } = producerRun([selectedId, droppedId]);
+  assert.deepEqual(ambiguous.matched_ids, row.matched_ids);
+  assert.deepEqual(ambiguous.dropped, row.dropped);
+  assert.deepEqual(ambiguous.propensity, p);
+  assert.deepEqual(ambiguous.content_ids, { ...ids, [selectedId]: AMBIGUOUS_LEARNING_CONTENT, [droppedId]: AMBIGUOUS_LEARNING_CONTENT },
+    "both contested IDs are ambiguous even when the conflicting copies did not match the task");
+  assert.ok(!JSON.stringify(ambiguous).includes(RAW_FACT_SENTINEL));
 });
 
 test("W1-T11115: learning outcome revision separates opposite effects under one learning id", () => {
@@ -325,6 +340,32 @@ test("W1-T11115: learning outcome revision separates opposite effects under one 
   const knowledge = renderKnowledgeMeasured(summarizeKnowledgeMeasured([measuredRow])!);
   assert.ok(knowledge.includes(`L helps +1.00 [${first}]`), knowledge);
   assert.ok(knowledge.includes(`L hurts -1.00 [${edit}]`), knowledge);
+
+  // Repeating a trigger can move L into the stronger tie. Differing peer costs keep both draws contested.
+  for (const field of ["symbols", "errorSignatures"] as const) {
+    const trigger = ["DrawTrigger"];
+    const repeated = [...trigger, ...trigger];
+    const peers = [entry("large", [], "x".repeat(480)), entry("small", [], "x".repeat(250))]
+      .map((peer) => ({ ...peer, [field]: repeated }));
+    const draw = (triggers: string[]) => selectLearnings(
+      [{ ...entry("L", [], "x".repeat(200)), [field]: triggers }, ...peers], [], 700,
+      { text: trigger, usage: {}, seed: 42, propensityDraws: LEARNING_PROPENSITY_DRAWS },
+    );
+    const before = draw(trigger);
+    const after = draw(repeated);
+    const pBefore = contestedPropensities(before.propensity)!.L!;
+    const pAfter = contestedPropensities(after.propensity)!.L!;
+    assert.ok(pBefore > 0 && pAfter < 1 && pAfter > pBefore, `${field}: the edit changes the contested propensity`);
+    const beforeId = before.contentIds!.L!;
+    const afterId = after.contentIds!.L!;
+    const helps = (contentId: string) => stratum("trigger-first", 80, pBefore, 40, (inj) => inj ? "merged" : "blocked_ci", contentId);
+    const hurts = stratum("trigger-edit", 20, pAfter, 10, (inj) => inj ? "blocked_ci" : "merged", afterId);
+    assert.equal(foldLearningOutcomes([...helps(afterId), ...hurts]).learnings[0]!.verdict, "helps", `${field}: pooling hides the harm`);
+    const effects = foldLearningOutcomes([...helps(beforeId), ...hurts]).learnings;
+    assert.equal(effects.length, 2, `${field}: the real draws identify separate cohorts`);
+    assert.equal(effects.find((l) => l.contentId === beforeId)?.effect, 1);
+    assert.equal(effects.find((l) => l.contentId === afterId)?.effect, -1);
+  }
 });
 
 test("W1-T11115: learning outcome revision reports unresolved exposure identities as unmeasurable", () => {
@@ -341,6 +382,8 @@ test("W1-T11115: learning outcome revision reports unresolved exposure identitie
     injectedRow("ambiguous", { content_ids: { L: AMBIGUOUS_LEARNING_CONTENT } }), verdict("ambiguous"),
     // CONFLICTING: one run ledgered two different revisions for the same exposure.
     injectedRow("conflict", {}), injectedRow("conflict", { content_ids: { L: other } }), verdict("conflict"),
+    injectedRow("trimmed-low-conflict", {}), injectedRow("trimmed-low-conflict", { propensity: { L: 1 / 64 }, content_ids: { L: other } }), verdict("trimmed-low-conflict"),
+    injectedRow("trimmed-high-conflict", { propensity: { L: 63 / 64 }, content_ids: { L: other } }), injectedRow("trimmed-high-conflict", {}), verdict("trimmed-high-conflict"),
     // UNRESOLVED: no identity for the contested entry, or no single arm for it.
     injectedRow("no-identity", { content_ids: {} }), verdict("no-identity"),
     injectedRow("no-arm", { matched_ids: [], dropped: [] }), verdict("no-arm"),
@@ -349,13 +392,14 @@ test("W1-T11115: learning outcome revision reports unresolved exposure identitie
     ...stratum("current", 3, 0.5, 2, (inj) => (inj ? "merged" : "blocked_ci")),
   ];
   const report = foldLearningOutcomes(rows);
-  assert.deepEqual(report.excludedRevision, { legacy: 20, malformed: 2, ambiguous: 1, conflicting: 2, unresolved: 3 });
-  assert.equal(report.runs, 20 + 8 + 3, "an excluded revision still counts its row's run; only the observation is withheld");
+  assert.deepEqual(report.excludedRevision, { legacy: 20, malformed: 2, ambiguous: 1, conflicting: 4, unresolved: 3 });
+  assert.equal(report.excludedTrimmed, 2, "both tail observations still count as trimmed");
+  assert.equal(report.runs, 20 + 12 + 3, "an excluded revision still counts its row's run; only the observation is withheld");
   assert.deepEqual(report.learnings, [{ id: "L", contentId: REV, injected: 2, dropped: 1, verdict: "unmeasurable" }], "legacy rows never inherit the current revision");
 
   // THE DIGEST counts them by reason, beside the trimmed and verdict-less exclusions.
   const line = renderLearningOutcomes(summarizeLearningOutcomes(rows)!);
-  assert.ok(line.includes("28 without a single revision (legacy 20, malformed 2, ambiguous 1, conflicting 2, unresolved 3)"), line);
+  assert.ok(line.includes("30 without a single revision (legacy 20, malformed 2, ambiguous 1, conflicting 4, unresolved 3)"), line);
   assert.ok(line.includes("0 measured, 1 unmeasurable"), line);
   const clean = renderLearningOutcomes(summarizeLearningOutcomes(stratum("only", 3, 0.5, 2, () => "merged"))!);
   assert.ok(!clean.includes("without a single revision"), clean);
