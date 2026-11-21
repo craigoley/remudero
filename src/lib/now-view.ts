@@ -83,7 +83,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { answerText, sharedAnswerEvidence, sharedAnswersPath, sharedTaskAnswer, unmetDependencies, type Plan, type AcceptanceCriterion, type SharedAnswerEvidence } from "./plan.js";
+import { answerRecords, publishAnswers, sharedAnswerEvidence, sharedAnswersPath, unmetDependencies, type AnswerRecord, type Plan, type AcceptanceCriterion, type SharedAnswerEvidence } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
@@ -564,17 +564,17 @@ function mtimeOf(path: string): number | undefined {
 
 const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
-/** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
-function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
+/** A task's nonblank `panel.question_answered` facts, by its task index, which keeps a row rotation dropped. */
+function answerFacts(db: ReadModelDb): (taskId: string) => AnswerRecord[] {
   // The daemon's answerText decides; SQLite would return an array answer as its JSON text, so only a text answer is read.
-  const query = db.prepare("SELECT ts, CASE json_type(body, '$.answer') WHEN 'text' THEN json_extract(body, '$.answer') END AS answer FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
-  return (taskId) => {
-    let newest: string | undefined;
-    for (const row of query.all(taskId) as Array<{ ts?: unknown; answer?: unknown }>) {
-      if (typeof row.ts === "string" && answerText(row.answer) !== undefined && (newest === undefined || row.ts > newest)) newest = row.ts;
-    }
-    return newest;
-  };
+  const text = (key: string) => `CASE json_type(body, '$.${key}') WHEN 'text' THEN json_extract(body, '$.${key}') END AS ${key}`;
+  const query = db.prepare(`SELECT ts, ${text("answer")}, ${text("origin")}, ${text("answer_id")} FROM fact WHERE task_id = ? AND step = 'panel.question_answered'`);
+  return (taskId) => answerRecords((query.all(taskId) as Array<Record<string, unknown>>).map((row) => ({ ...row, task: taskId })), taskId);
+}
+
+/** A task's newest answer fact time: the route ledgers one even when its store write failed. */
+function answeredByFact(facts: (taskId: string) => AnswerRecord[]): (taskId: string) => string | undefined {
+  return (taskId) => facts(taskId).reduce<string | undefined>((newest, fact) => newest === undefined || fact.ts > newest ? fact.ts : newest, undefined);
 }
 
 const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
@@ -1153,7 +1153,8 @@ export function createNowView(opts: NowViewOptions): {
     let feedbackEntries: FeedbackEntry[] = [];
     let storeLines: readonly unknown[] = [];
     let storeSkipped: string | undefined;
-    const factAnswer = answeredByFact(db);
+    const facts = answerFacts(db);
+    const factAnswer = answeredByFact(facts);
     // The held list decides from the evidence the daemon's dispatch check decides from, never a checkout path.
     // Only a held candidate needs that evidence, so an instance with none attests its empty held list.
     const heldCandidates = ((catalog?.plan ?? plan)?.tasks ?? []).some((task) => task.needs_input !== undefined && task.status === "queued");
@@ -1199,8 +1200,14 @@ export function createNowView(opts: NowViewOptions): {
     }
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
     // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
-    const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [],
-      (taskId) => sharedTaskAnswer(evidence, taskId) !== undefined, catalog?.opsIds, instance.name === core);
+    // Answered from the live rows, the published answers, the indexed facts and serve's store; an answer the daemon cannot see is published.
+    const answered = (taskId: string): boolean => {
+      const live = [...answerRecords(evidence.rows(taskId), taskId), ...answerRecords(evidence.lines, taskId)];
+      const own = [...facts(taskId), ...answerRecords(instance.name === core ? storeLines : [], taskId)];
+      if (evidence.answersUnreadable === undefined && evidence.ledgerUnreadable === undefined) publishAnswers(ledgerPath, own, [...live]);
+      return live.length + own.length > 0;
+    };
+    const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [], answered, catalog?.opsIds, instance.name === core);
     const heldIds = new Set(held.map((decision) => decision.taskId));
     if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
       all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));

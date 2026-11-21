@@ -1,5 +1,5 @@
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins } from "./operator-release.js";
-import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -321,8 +321,9 @@ export function sharedAnswersPath(ledgerPath: string): string {
 export interface SharedAnswerEvidence {
   lines: readonly unknown[];
   rows: (taskId: string) => readonly unknown[];
-  /** Set when the answers file could not be read; a reader must then publish nothing. */
+  /** Set when the answers file, or the ledger, could not be read; a reader must then publish nothing. */
   answersUnreadable?: string;
+  ledgerUnreadable?: string;
   partial?: string;
 }
 
@@ -333,6 +334,7 @@ export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvid
   return () => {
     const reasons: string[] = [];
     let fd: number | undefined;
+    let ledgerUnreadable: string | undefined;
     try {
       fd = openSync(ledgerPath, "r");
       const stat = fstatSync(fd);
@@ -358,7 +360,7 @@ export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvid
       if (tail.head.length < 256) tail.head = head;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined;
-      else reasons.push(`the ledger ${ledgerPath} is unreadable: ${(error as Error).message}`);
+      else reasons.push(ledgerUnreadable = `the ledger ${ledgerPath} is unreadable: ${(error as Error).message}`);
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
@@ -382,15 +384,45 @@ export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvid
       reasons.push(answersUnreadable);
     }
     const known = tail;
-    return { lines, rows: (taskId) => known?.rows.get(taskId) ?? [], ...(answersUnreadable ? { answersUnreadable } : {}),
+    return { lines, rows: (taskId) => known?.rows.get(taskId) ?? [], ...(answersUnreadable ? { answersUnreadable } : {}), ...(ledgerUnreadable ? { ledgerUnreadable } : {}),
       ...(reasons.length > 0 ? { partial: reasons.join("; ") } : {}) };
   };
 }
 
-/** W1-T13940: the one answer rule: the newest nonblank answer among the published answers and the live ledger rows. */
-export function sharedTaskAnswer(evidence: SharedAnswerEvidence, taskId: string): string | undefined {
-  const row = newestLedgerTaskAnswer(evidence.rows(taskId), taskId);
-  return newestTaskAnswer(row ? [...evidence.lines, { task: taskId, answer: row.answer, ts: row.ts }] : evidence.lines, taskId);
+/** W1-T13940: one answer for a task, from a question-store line (`task`), an answer row (`task_id`) or a published line. */
+export interface AnswerRecord { task: string; answer: string; ts: string; origin: string; answer_id?: string; author_login?: string; authority?: string; source?: "ledger" | "store" }
+
+/** W1-T13940: the nonblank answers for `taskId` among store lines, published lines and panel.question_answered rows. */
+export function answerRecords(values: Iterable<unknown>, taskId: string): AnswerRecord[] {
+  const out: AnswerRecord[] = [];
+  for (const value of values) {
+    const v = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const answer = answerText(v.answer);
+    if ((v.step === undefined ? v.task : v.step === "panel.question_answered" ? v.task_id : undefined) !== taskId || answer === undefined) continue;
+    const text = (key: string): Record<string, string> => typeof v[key] === "string" ? { [key]: v[key] as string } : {};
+    out.push({ task: taskId, answer, ts: typeof v.ts === "string" ? v.ts : "", origin: typeof v.origin === "string" ? v.origin : "",
+      ...text("answer_id"), ...text("author_login"), ...text("authority"), ...(v.source === "ledger" || v.source === "store" ? { source: v.source } : {}) });
+  }
+  return out;
+}
+
+/** W1-T13940: `known` holds `record` already: the same answer_id, or the same origin and text. */
+export function answerHeld(known: readonly AnswerRecord[], record: AnswerRecord): boolean {
+  return known.some((other) => (record.answer_id !== undefined && other.answer_id === record.answer_id) || (other.origin === record.origin && other.answer === record.answer));
+}
+
+/** W1-T13940: append each of `candidates` that `known` lacks to the answers file beside the ledger, so the reader that cannot
+ * see the store it came from counts it too. Best effort: it never decides an answer, and a failed append is retried next read. */
+export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): void {
+  for (const record of candidates) {
+    if (answerHeld(known, record)) continue;
+    try {
+      appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(record) + "\n");
+      known.push(record);
+    } catch {
+      return; // deliberate: the answer still counts where it is held; an unpublished one is published on a later read.
+    }
+  }
 }
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */

@@ -1,5 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
-import { answerText, newestTaskAnswer, sharedAnswerEvidence, sharedAnswersPath, sharedTaskAnswer, type Task, type TaskInputAnswer } from "./plan.js";
+import { answerHeld, answerRecords, newestLedgerTaskAnswer, newestTaskAnswer, publishAnswers, sharedAnswerEvidence, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
@@ -5062,20 +5062,22 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
 /** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
  * answers nothing, so a task with needs_input stays held. */
 export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
-  return newestTaskAnswer(questionStoreLines(repoRoot), taskId);
+  return newestTaskAnswer(questionStoreLines(repoRoot) ?? [], taskId);
 }
 
-function questionStoreLines(repoRoot: string): unknown[] {
+/** The store's parsed lines; [] when it is absent, undefined when it exists but cannot be read. */
+function questionStoreLines(repoRoot: string): unknown[] | undefined {
   let text: string;
   try {
     text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
-  } catch {
-    return []; // deliberate: an absent or unreadable store holds the task, the safe side.
+  } catch (error) {
+    // deliberate: an absent or unreadable store answers nothing, the safe side; an unreadable one also takes no copy.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
   }
   const lines: unknown[] = [];
   for (const raw of text.split("\n")) {
     try {
-      lines.push(JSON.parse(raw));
+      if (raw.trim() !== "") lines.push(JSON.parse(raw));
     } catch {
       continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
     }
@@ -5083,42 +5085,24 @@ function questionStoreLines(repoRoot: string): unknown[] {
   return lines;
 }
 
-/** W1-T13940: the answer reader every needs_input check uses. It decides only from the shared evidence serve also reads
- * (sharedTaskAnswer), and first publishes into that evidence each answer row and each of this checkout's store answers
- * it lacks, so rotation cannot take a row back and a store answer serve cannot see is published before it counts. */
+/** W1-T13940: the answer reader every needs_input check uses: the newest nonblank answer among this checkout's store, the
+ * live answer rows and the answers published beside the ledger. It copies each row the store lacks into the store, and
+ * publishes each store answer no row carries, so serve counts it too; neither write ever decides the answer. */
 export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string): TaskInputAnswer {
   const evidence = sharedAnswerEvidence(ledgerPath);
   return (taskId) => {
     const read = evidence();
-    const published = [...read.lines];
-    const candidates = read.answersUnreadable !== undefined ? [] : [
-      ...read.rows(taskId).map((value) => ({ value, source: "ledger" as const })),
-      ...questionStoreLines(repoRoot).map((value) => ({ value, source: "store" as const })),
-    ];
-    for (const { value, source } of candidates) {
-      const line = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
-      const answer = answerText(line.answer);
-      if ((source === "ledger" ? line.task_id : line.task) !== taskId || answer === undefined) continue;
-      const origin = typeof line.origin === "string" ? line.origin : source;
-      const answerId = typeof line.answer_id === "string" ? line.answer_id : undefined;
-      // Published already when an entry has its answer_id, or the same origin and text (the daemon's own GitHub reply).
-      const held = published.some((other) => {
-        const entry = typeof other === "object" && other !== null ? other as Partial<QuestionAnswerEntry> : {};
-        return entry.task === taskId && ((answerId !== undefined && entry.answer_id === answerId) || (entry.origin === origin && entry.answer === answer));
-      });
-      if (held) continue;
-      const entry: QuestionAnswerEntry = { ts: typeof line.ts === "string" ? line.ts : "", task: taskId, answer, origin,
-        ...(answerId === undefined ? {} : { answer_id: answerId }),
-        ...(typeof line.author_login === "string" ? { author_login: line.author_login } : {}),
-        ...(typeof line.authority === "string" ? { authority: line.authority } : {}), source };
-      try {
-        appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(entry) + "\n");
-        published.push(entry);
-      } catch {
-        continue; // deliberate: an unpublished store answer releases nothing; a row still counts from the ledger, and the next read retries.
-      }
+    const lines = questionStoreLines(repoRoot);
+    const store = answerRecords(lines ?? [], taskId);
+    const rows = answerRecords(read.rows(taskId), taskId);
+    for (const row of lines === undefined ? [] : rows) {
+      // Skipped when the store has its answer_id, or its origin and text (the daemon's own GitHub reply).
+      if (!answerHeld(store, row) && appendQuestionAnswer(repoRoot, { ...row, source: "ledger" })) store.push({ ...row, source: "ledger" });
     }
-    return sharedTaskAnswer({ ...read, lines: published }, taskId);
+    const published = answerRecords(read.lines, taskId);
+    if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
   };
 }
 
