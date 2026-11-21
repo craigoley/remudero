@@ -215,9 +215,12 @@ test("W1-T13968 criterion 2: by default each refusal kind is noted once for the 
   const rows: string[] = [];
   const log = (step: string, extra?: Record<string, unknown>) => { rows.push(`${step}:${String(extra?.how)}`); };
   const refuse = () => { throw new Error("EACCES: permission denied"); };
-  // No `noted` passed: the module's own set, shared by every spawn this process makes.
-  runChild.lowerRunChildPriority(FAKE_PID, log, { setPriority: refuse, ionice: null });
-  runChild.lowerRunChildPriority(FAKE_PID + 1, log, { setPriority: refuse, ionice: null });
+  // No `noted` passed: the module's own set, shared by every spawn this process makes. The row is written once the returned
+  // promise settles, so both are awaited.
+  await Promise.all([
+    runChild.lowerRunChildPriority(FAKE_PID, log, { setPriority: refuse, ionice: null }),
+    runChild.lowerRunChildPriority(FAKE_PID + 1, log, { setPriority: refuse, ionice: null }),
+  ]);
   assert.deepEqual(rows, [`${DEGRADED}:nice`]);
 });
 
@@ -301,6 +304,73 @@ test("W1-T13968 criterion 2: each refusal is classed by its own error code, and 
       noted: new Set(),
     });
     assert.deepEqual(rows, c.rows, `${c.name}, for a child already gone`);
+  }
+});
+
+/** `os.setPriority`'s EACCES, as a host that forbids lowering a process throws it. */
+const setPriorityEacces = (): Error => Object.assign(
+  new Error("A system error occurred: uv_os_setpriority returned EACCES (permission denied)"), { code: "ERR_SYSTEM_ERROR", info: { code: "EACCES" } });
+
+/** Blocks this thread for `ms`, as the daemon's synchronous ledger writer does on a slow disk (the review saw 150 ms). */
+const stall = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+test("W1-T13968 criterion 2: a refusal's row is written after spawnRunChild returns, so a stalled ledger write never delays the spawn", async () => {
+  const fx = spawnFixture("stalled-ledger");
+  let returned = false;
+  const writes: Array<{ how: unknown; afterReturn: boolean; boundAtWrite: number }> = [];
+  const record = fx.input.log;
+  fx.input.log = (step, extra) => {
+    if (step === DEGRADED) {
+      writes.push({ how: extra?.how, afterReturn: returned, boundAtWrite: fx.bound.length });
+      stall(150);
+    }
+    record(step, extra);
+  };
+  const seams = prioritySeams({ nice: setPriorityEacces(), ionice: ioniceFailed("ionice: ioprio_set failed: Operation not permitted\n") });
+  const launch = await launched(fx, { priority: seams.ports });
+  returned = true;
+  assert.equal(launch.pid, FAKE_PID, "the run child started");
+  assert.deepEqual(fx.bound, [FAKE_PID], "its reservation was bound");
+  assert.deepEqual(writes, [], "no refusal row was written before the launch handle returned");
+  await settleIonice();
+  assert.deepEqual(writes.map((w) => w.how).sort(), ["ionice", "nice"], "each refusal kind still writes its row afterwards");
+  assert.ok(writes.every((w) => w.afterReturn && w.boundAtWrite === 1), JSON.stringify(writes));
+  assert.equal(fx.rows.filter((r) => r.step === DEGRADED).length, 2, "exactly one row per kind");
+
+  // A second refusal of a kind whose row is still waiting to be written is noted already: it writes no second row.
+  const rows: string[] = [];
+  const noted = new Set<string>();
+  const log = (step: string, extra?: Record<string, unknown>) => { if (step === DEGRADED) rows.push(String(extra?.how)); };
+  const ports = { setPriority: () => { throw setPriorityEacces(); }, ionice: null, noted };
+  const first = runChild.lowerRunChildPriority(FAKE_PID, log, ports);
+  const second = runChild.lowerRunChildPriority(FAKE_PID + 1, log, ports);
+  assert.deepEqual([rows, [...noted]], [[], ["nice"]], "noted at once, written later");
+  await Promise.all([first, second]);
+  assert.deepEqual(rows, ["nice"], "written exactly once");
+});
+
+test("W1-T13968 criterion 2: a ledger write that throws is dropped, never thrown at the caller nor left an unhandled rejection", async () => {
+  const escaped: unknown[] = [];
+  const onEscape = (error: unknown): void => { escaped.push(error); };
+  process.on("uncaughtException", onEscape);
+  process.on("unhandledRejection", onEscape);
+  try {
+    const tried: string[] = [];
+    const log = (_step: string, extra?: Record<string, unknown>) => {
+      tried.push(String(extra?.how));
+      throw new Error("ledger write failed: ENOSPC");
+    };
+    const done = runChild.lowerRunChildPriority(FAKE_PID, log, {
+      setPriority: () => { throw setPriorityEacces(); }, ionice: "/usr/bin/ionice",
+      runIonice: () => Promise.reject(ioniceFailed("ionice: ioprio_set failed: Operation not permitted\n")), noted: new Set(),
+    });
+    await done;
+    await settleIonice();
+    assert.deepEqual(tried.sort(), ["ionice", "nice"], "each kind's write was tried once");
+    assert.deepEqual(escaped, [], "nothing escaped");
+  } finally {
+    process.off("uncaughtException", onEscape);
+    process.off("unhandledRejection", onEscape);
   }
 });
 

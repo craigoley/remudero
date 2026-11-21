@@ -748,7 +748,8 @@ const ioniceNoSuchProcess = (error: unknown): boolean => {
  * child's IO class, so the builds, fixes and reviews it starts never compete with the daemon's one-threaded loop on equal terms.
  * Its descendants (worker CLIs, git, tests) inherit both, and a test child's own `nice -n` still lowers it further, relative to
  * this. Nice, not a cap: an idle CPU is still the child's. NEVER throws and never delays the spawn: the IO class change runs
- * beside it, and a refusal is logged once per kind as {@link RUN_CHILD_PRIORITY_DEGRADED_STEP}. Each refusal is classed by its own
+ * beside it, and a refusal is logged once per kind as {@link RUN_CHILD_PRIORITY_DEGRADED_STEP}, written on a later turn of the loop
+ * (the returned promise settles once it is), and a log that throws is dropped. Each refusal is classed by its own
  * error: only "no such process" (ESRCH, a child already gone) is silent; EPERM, EACCES and any other refusal are noted, even when
  * the answer arrives after the child exited. It never lowers its own process: a pid that is this process, 0 (which setPriority
  * reads as the caller) or not a positive integer is skipped without a call or a row, so the daemon keeps its niceness for any caller.
@@ -756,11 +757,24 @@ const ioniceNoSuchProcess = (error: unknown): boolean => {
 export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPriorityPorts = {}): Promise<void> {
   if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return Promise.resolve();
   const noted = opts.noted ?? notedPriorityRefusals;
+  const written: Promise<void>[] = [];
   const refused = (how: "nice" | "ionice", error: unknown): void => {
+    // Noted at once, so a second refusal writes no second row; only the synchronous ledger write waits, off the spawn path.
     if (noted.has(how)) return;
     noted.add(how);
-    log(RUN_CHILD_PRIORITY_DEGRADED_STEP, { how, error: reasonOf(error), child_pid: pid });
+    const row = { how, error: reasonOf(error), child_pid: pid };
+    written.push(new Promise<void>((resolve) => {
+      setImmediate(() => {
+        try {
+          log(RUN_CHILD_PRIORITY_DEGRADED_STEP, row);
+        } catch (logError) {
+          void logError; // The ledger is the only place this note reports to; a failing one leaves nothing else to tell.
+        }
+        resolve();
+      });
+    }));
   };
+  const allWritten = (): Promise<void> => Promise.all(written).then(() => undefined);
   try {
     (opts.setPriority ?? osSetPriority)(pid, GARDEN_CHILD_NICENESS);
   } catch (error) {
@@ -769,7 +783,7 @@ export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPrior
   }
   const exists = opts.exists ?? existsSync;
   const ionice = opts.ionice === undefined ? RUN_CHILD_IONICE_PATHS.find((path) => exists(path)) : opts.ionice;
-  if (ionice === undefined || ionice === null) return Promise.resolve();
+  if (ionice === undefined || ionice === null) return allWritten();
   const run = opts.runIonice ?? ((file, args) => execFileRouted(file, args, { encoding: "utf8", timeout: 5_000 }));
   return new Promise<unknown>((resolve) => { resolve(run(ionice, [...RUN_CHILD_IONICE_CLASS, "-p", String(pid)])); }).then(
     () => undefined,
@@ -777,7 +791,7 @@ export function lowerRunChildPriority(pid: number, log: Log, opts: RunChildPrior
       // Classed by its own error, never by whether the pid still runs: a permission refusal read after the child exited is still one.
       if (!ioniceNoSuchProcess(error)) refused("ionice", error);
     },
-  );
+  ).then(allWritten);
 }
 
 export interface RunChildHandle {
