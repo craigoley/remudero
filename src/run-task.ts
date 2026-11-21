@@ -10850,10 +10850,8 @@ function ledgerNonDispatchAssignment(
   });
 }
 
-/** `known`: the work the lane knows when its worker is assigned, recorded on the assignment receipt (W1-T14146). */
-export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
-  known: Pick<BenchmarkWorkInput, "taskClass"> = {}): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw, known);
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
+  return benchmarkNonDispatchSpawn(lane, raw);
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller

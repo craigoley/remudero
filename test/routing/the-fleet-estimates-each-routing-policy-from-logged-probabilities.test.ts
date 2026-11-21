@@ -607,8 +607,8 @@ const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encodi
 function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
 
 /** The review lane run for real (`runReview`, src/cli/commands/review.ts) through to its reviewer. The reviewer's
- *  spawn is the production receipt writer, run-task.ts's `ledgeredNonDispatchSpawn("review", …)`, given whatever work
- *  `runReview` passes it; only the provider call under it is a fixture, routed by the production auction and
+ *  spawn is the production receipt writer, run-task.ts's `ledgeredNonDispatchSpawn("review")`, called with whatever
+ *  work `runReview` puts on the call; only the provider call under it is a fixture, routed by the production auction and
  *  returning a passing verdict. Returns the rows the writer ledgered, each `ts` pinned to `at(n)`. */
 async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">,
   n: number): Promise<Row[]> {
@@ -645,7 +645,7 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
       GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
       acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
       attributeWorkerStreamEvent: unexpected,
-      ledgeredNonDispatchSpawn: (lane, _raw, known) => ledgeredNonDispatchSpawn(lane, provider, known),
+      ledgeredNonDispatchSpawn: (lane) => ledgeredNonDispatchSpawn(lane, provider),
       lintPlanForReview: unexpected, liveWorkerRunIds: new Set<string>(), materializeReviewWorktree: unexpected,
       readHeadShaRest: () => HEAD, readMainPlanTreeSha: unexpected,
       realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,

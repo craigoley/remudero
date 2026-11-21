@@ -540,6 +540,19 @@ export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity>
   return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: ReceiptIdentity })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
 }
 
+/** W1-T14146: the work a non-dispatch caller knows when its worker is assigned — the review lane's, its PR's plan
+ *  task's class — for {@link benchmarkNonDispatchSpawn}'s assignment receipt. Symbol-keyed like the identity above,
+ *  so it rides the call's args to the receipt wrapper and never reaches the router. */
+export const BENCHMARK_RECEIPT_WORK: unique symbol = Symbol("rmd.benchmarkReceiptWork");
+
+export function withReceiptWork(args: SpawnWorkerArgs, work: Pick<BenchmarkWorkInput, "taskClass">): SpawnWorkerArgs {
+  return { ...args, [BENCHMARK_RECEIPT_WORK]: { ...work } } as SpawnWorkerArgs;
+}
+
+function receiptWork(args: SpawnWorkerArgs): Pick<BenchmarkWorkInput, "taskClass"> {
+  return (args as { [BENCHMARK_RECEIPT_WORK]?: Pick<BenchmarkWorkInput, "taskClass"> })[BENCHMARK_RECEIPT_WORK] ?? {};
+}
+
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
 const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
 
@@ -655,10 +668,10 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
 }
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
- * caller's existing assignment sink remains authoritative when one is supplied. `known` is the work the
- * caller knows at assignment ({@link nonDispatchBenchmarkWork}); absent, the receipt records none. */
+ * caller's existing assignment sink remains authoritative when one is supplied. The assignment receipt
+ * records the work a call carries ({@link withReceiptWork}); a call carrying none records none. */
 export function benchmarkNonDispatchSpawn(
-  lane: string, raw: typeof spawnWorker = spawnWorker, known: Pick<BenchmarkWorkInput, "taskClass"> = {},
+  lane: string, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
   return async (requested) => {
     // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.
@@ -706,7 +719,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, known), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, receiptWork(args)), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {

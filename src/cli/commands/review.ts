@@ -29,6 +29,7 @@ import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { deriveTaskClass } from "../../lib/task-class.js";
+import { withReceiptWork } from "../../lib/benchmark-run.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -67,7 +68,7 @@ export interface ReviewCommandHost {
   readonly JUDGE_AT_OWN_START_FLAG: string;
   acceptedReviewAttemptId(value: unknown, prNumber?: number): string | undefined;
   attributeWorkerStreamEvent(event: WorkerStreamEvent, assignment: Pick<WorkerSelectionAssignment, "id" | "selected"> | undefined): WorkerStreamEvent;
-  ledgeredNonDispatchSpawn(lane: string, raw?: typeof spawnWorker, known?: { taskClass?: string }): typeof spawnWorker;
+  ledgeredNonDispatchSpawn(lane: string, raw?: typeof spawnWorker): typeof spawnWorker;
   lintPlanForReview(
     headCheckoutDir: string | undefined,
     git?: (cwd: string, args: string[]) => string | Promise<string>,
@@ -1131,7 +1132,9 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerClockBoundMs =
           host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
-        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review", undefined, reviewedTaskWork(task, replayInput));
+        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T14146: each reviewer call carries the reviewed work, so its assignment receipt records the plan task's class.
+        const reviewedWork = reviewedTaskWork(task, replayInput);
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
@@ -1139,7 +1142,7 @@ export async function runReview(host: ReviewCommandHost, args: {
           for (;;) {
             reviewerAssignment = undefined as WorkerSelectionAssignment | undefined;
             reviewer = args.account(
-              await reviewerSpawnWorker({
+              await reviewerSpawnWorker(withReceiptWork({
                 cwd: snapshot.cwd,
                 permissionMode: "bypassPermissions",
                 settingsFile: args.settingsFile,
@@ -1174,7 +1177,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
                 streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
-              }),
+              }, reviewedWork)),
             );
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
             if (priorSignal !== undefined && reviewer.exit?.kind === "signal") {
@@ -1233,7 +1236,7 @@ export async function runReview(host: ReviewCommandHost, args: {
           mounts: () => [args.reviewerMount!, resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)))],
           log,
           judge: async (mount) => {
-            const shadow = args.account(await reviewerSpawnWorker({
+            const shadow = args.account(await reviewerSpawnWorker(withReceiptWork({
               cwd: snapshot.cwd, permissionMode: "bypassPermissions", settingsFile: args.settingsFile,
               model: mount.model, mountProvider: mount.provider, effort: mount.effort,
               maxTurns: Math.min(mount.maxTurns, 12), maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
@@ -1243,7 +1246,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               runId: args.runId, taskId: task.id,
               clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
               prompt,
-            }));
+            }, reviewedWork)));
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
             return {
               decision: reviewerSemanticVerdicts(shadow, criteria.length),
