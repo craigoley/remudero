@@ -2,7 +2,6 @@
   title: "The fix class learns its memory estimate from measured concurrent tree peaks, keeps lifetime-peak sums only as a labelled fallback, names why a tree went unmeasured, and reads its samples past the test-file rows, so fix admission stops charging 5.9 GiB for a tree whose measured p90 is 835 MiB"
   repo: remudero
   depends_on: []
-  priority: 1
   type: implement
   verify: auto
   principles:
@@ -21,7 +20,9 @@
     - test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts
     - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # superseded by held rebuild W1-T14002, same files and criteria
+  superseded_by: W1-T14002
   attempts: 0
   acceptance:
     - claim: "When the store holds concurrent-rss fix samples, the fix class estimate and typical are learned from their measured concurrent peaks, not from legacy-hwm lifetime sums"
@@ -70,6 +71,11 @@
     fallback label: criterion 2 fails. Drop the reason: criterion 3 fails. Read fix samples from the 256 KiB tail:
     criterion 4 fails. Drop the row field: criterion 5 fails.
   note: |
+    WITHDRAWN 2026-11-20 (operator session): W1-T14002 supersedes W1-T13878. The sweep closed
+    https://github.com/craigoley/remudero/pull/19776 (the W1-T13878 build) at 14:52Z and filed W1-T14002 as its
+    held rebuild (#19884). W1-T14002 has the same criteria and design, the same five files (#19897), and a design
+    step that opens the store with an explicit 0o600 mode, which clears CodeQL alert 1351. This task is no longer
+    queued, so the fleet cannot build the refused version beside W1-T14002.
     files: amendment 2026-11-20 (operator, approving the recommendation on the #19776 clarification): acceptance-author-gate refused #19776 as canonical-task-scope-exceeded for test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts, test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts; each is a change the build needs.
     The operator approved loosening the admission charge on 2026-11-19.
     Id reserved for run-unfiled-1795124491000 with ~/rmd-work/bin/reserve-id.sh.

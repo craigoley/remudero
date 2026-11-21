@@ -3,8 +3,9 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human
+  risk: high  # Rule 19 span: widened to fix, run-task by a scope amendment for #19939
+  band_meaning: span
   priority: 1.11
   # refusal-amendment (W1-T10581, run W1-T10581-1793126668014, 2026-10-27T19:52:08.143Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The code that emits the refusal is in `src/cli/commands/fix.ts` and `src/lib/proof-amendment.ts`, not in the declared `src/run-task.ts`, so no in-scope change can remedy this cause.
@@ -16,6 +17,7 @@
   files:
     - src/run-task.ts
     - test/worker/run-task/fix-refusal-non-test-paths-need-scope-shard-drifted.test.ts
+    - "src/cli/commands/fix.ts"
   acceptance:
     - claim: "the harness no longer spends a fix round on fix_refusal:non-test-paths-need-scope-shard-drifted"
       proof: "grep: test(\"W1-T10581: fix_refusal:non-test-paths-need-scope-shard-drifted is prevented, not retried\" in test/worker/run-task/fix-refusal-non-test-paths-need-scope-shard-drifted.test.ts"
@@ -50,10 +52,10 @@
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
   risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
+    verdict: "high"
+    action: escalate
+    confidence: 0.93
     reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 5 occurrence(s) across 7 day(s), last seen 2026-10-24T09:10:58.152Z, and the record declares no privileged path"
-    judged_at: "2026-10-27T05:40:05.137Z"
-    pin: "235d1d2412a22a6d3d9ba3e0714e4573bacaeff921383c242fa5433ccfc84f67"
+      - "high-risk verdict at confidence 0.93 — on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration. It can verify that the test is named in the file, while the claimed remedy requires evidence that the shard-drift refusal is prevented or resolved without spending a fix round."
+    judged_at: "2026-11-21T08:56:15.110Z"
+    pin: "c77c9700d3eb9bb2ea36e60085d7dfe27a97a289a5ef7bb5bd2cb205fd06628c"

@@ -1277,7 +1277,7 @@ export function resolveGhTransportFloorMode(env: NodeJS.ProcessEnv = process.env
   return mode === "enforce" || mode === "wait" ? mode : "advisory";
 }
 
-/** Fresh invocation burst and default mode: CLI enforces/waits, daemon stays advisory.
+/** Fresh invocation burst and default mode: a CLI command waits, the daemon stays advisory.
  * Explicit env wins; restoring env and scope isolates sequential and nested invocations. */
 export async function withGhTransportFloorMode<T>(
   mode: "advisory" | "enforce" | "wait",
@@ -1299,9 +1299,11 @@ export async function withGhTransportFloorMode<T>(
   }
 }
 
-/** Run a standalone unattended command with the read floor explicitly enforced by default. */
+/** Run a standalone hand-run command (`rmd review`) whose first read WAITS for its turn by default.
+ * W1-T12058: enforce refused it whenever the fleet had read in the last 180 s, and a re-run only
+ * restarted the window. An explicit RMD_GH_TRANSPORT_FLOOR (enforce or advisory) still wins. */
 export async function withGhTransportFloor<T>(fn: () => T | Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
-  return await withGhTransportFloorMode("enforce", fn, env);
+  return await withGhTransportFloorMode("wait", fn, env);
 }
 
 /**
@@ -1817,6 +1819,12 @@ interface GhReadCadencePlan {
   stampAfterGap(stampPath: string): void;
   /** Removes this read's ticket: an admitted, refused or interrupted waiter never holds the queue. */
   leaveQueue(): void;
+  /** Names the phase the NEXT pause waits for, when it is not the one `turnRemainingMs` named. */
+  notePauseReason(reason: "gap" | "floor-recheck"): void;
+  /** W1-T12058: adds a sleep about to run, a lock retry included, to the read's wait. */
+  addPause(ms: number, lock?: boolean): void;
+  /** Prints the read's one wait line, in wait mode, once its turn has come. */
+  reportWait(): void;
 }
 
 function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): GhReadCadencePlan {
@@ -1842,7 +1850,6 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
   let gatedFirst = false;
   /** A gated first read in wait mode that must wait: its floor, or a ticket queued ahead of it. */
   let waiter = false;
-  let floorWaitMs = 0;
   let ticket: GhReadTicket | undefined;
   let actor: string | undefined;
 
@@ -1855,10 +1862,26 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     if (shared === undefined) return gated;
     return gated === undefined ? shared : Math.max(shared, gated);
   };
+  /** A paced floor's wait to ITS DEADLINE (stamp + window), not the clamped age: a stamp ahead of the
+   *  clock still waits a whole window (W1-T12058). */
+  const floorDeadlineRemainingMs = (paced: boolean, lastReadMs: number | undefined, nowMs: number): number =>
+    paced && lastReadMs !== undefined ? Math.max(0, lastReadMs + windowMs - nowMs) : 0;
+  /** At most one window per sleep: the waiter refreshes its ticket (live a window plus the lock-stale
+   *  bound) between slices, or a 225 s sleep lets a sibling reap it (#19924). */
   const floorRemainingAt = (nowMs: number): number => {
     const lastReadMs = countedFloorMs();
     const decision = ghReadCadenceDecision({ isWrite, isExempt, nowMs, lastReadMs, mode: "wait", windowS });
-    return decision.paced ? Math.max(0, windowMs - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
+    return Math.min(windowMs, floorDeadlineRemainingMs(decision.paced, lastReadMs, nowMs));
+  };
+  /** The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
+   *  shared gap still protects the secondary limiter across sibling processes without making a
+   *  normal sweep self-refuse after its first read. */
+  const sharedGapRemainingAt = (path: string): number => {
+    const latest = readStampMs(path);
+    const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
+    // The clock is read AFTER the stamp, as on main: a slow stamp read counts toward the gap.
+    const elapsed = latest === undefined ? undefined : now() - latest;
+    return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
   };
   /** The queue, with every ticket whose process is gone, or that nobody refreshed for a window plus the
    *  lock-stale bound, reclaimed. A pid is judged only on its own host: another container's pid
@@ -1879,7 +1902,36 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     const rank = ghReadTicketRank(callerActor());
     return tickets.filter((t) => t.id !== ticket?.id && (ticket ? compareGhReadTickets(t, ticket) < 0 : t.rank <= rank));
   };
+  /** The live head ticket a non-waiter gives one shared gap (THE RESERVED SLOT, W1-T10271): due, since
+   *  the floor is clear, and not yet yielded to. `undefined` when no slot is owed. */
+  const headOwedSlot = (nowMs: number): GhReadTicket | undefined => {
+    if (sharedReadGapMs === 0) return undefined;
+    const head = liveTickets(nowMs)[0];
+    return head === undefined || head.yielded || floorRemainingAt(nowMs) > 0 ? undefined : head;
+  };
   const warnLine = (line: string) => (deps.warn ?? ((l: string) => void process.stderr.write(`${l}\n`)))(line);
+  /** W1-T12058: ONE line per read, when its turn comes: the sum of the sleeps it took, and why. An
+   *  up-front total is a forecast, and tickets expire and stamps move mid-wait (#19924). */
+  let pauseReason: "floor" | "queue" | "slot" | "gap" | "floor-recheck" = "floor";
+  const pauseWhy = new Set<string>();
+  let pausedMs = 0;
+  const pauseS = (ms: number): number => Math.ceil(ms) / 1000;
+  const addPause = (ms: number, lock = false): void => {
+    if (mode !== "wait" || ms <= 0) return;
+    pauseWhy.add(lock ? "the cadence lock" : {
+      floor: `the ${windowS}s floor`,
+      queue: "queued gated reads ahead taking their slot (W1-T10271)",
+      slot: "a due queued read's reserved slot (W1-T10271)",
+      gap: `the ${pauseS(sharedReadGapMs)}s shared read gap`,
+      "floor-recheck": `the ${windowS}s floor, which a newer gated read restarted`,
+    }[pauseReason]);
+    pausedMs += ms;
+  };
+  const reportWait = (): void => {
+    if (pausedMs > 0) warnLine(`gh read cadence (wait, W1-T7957): waited ${pauseS(pausedMs)}s for ${[...pauseWhy].join(", then ")} on ${stampPath}`);
+    pausedMs = 0;
+    pauseWhy.clear();
+  };
 
   const evaluate = (): GhReadCadenceDecision => {
     // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
@@ -1899,7 +1951,6 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     });
     const ahead = gatedFirst && windowS > 0 ? queuedAhead(liveTickets(nowMs)).length : 0;
     waiter = gatedFirst && mode === "wait" && (decision.paced || ahead > 0);
-    floorWaitMs = waiter && decision.paced ? Math.max(0, decision.windowS * 1000 - Math.max(0, nowMs - (lastReadMs ?? nowMs))) : 0;
     // SPEND THE BURST BEFORE REFUSING. A read inside an invocation the floor has already admitted is
     // part of that one burst, not a new one, so it is allowed and the stamp is still refreshed below
     // — the NEXT invocation is therefore gated from this read, not from the first of the burst.
@@ -1912,12 +1963,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     // (`rate_limit`) and a write never open a burst, so neither can be used to buy one for a loop
     // that would otherwise be refused.
     else if (!isWrite && !isExempt && ghReadBurstScope && !waiter) ghReadBurstScope.remaining = ghReadBurst(env);
-    if (waiter) {
-      warnLine(
-        `gh read cadence (wait, W1-T7957): waiting ${floorWaitMs / 1000}s for the ${decision.windowS}s floor on ${stampPath}` +
-          (ahead > 0 ? `, behind ${ahead} queued gated read(s) (W1-T10271)` : ""),
-      );
-    } else if (decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
+    // W1-T12058: a wait-mode read prints nothing here; `reportWait` prints when its turn comes.
+    if (!waiter && decision.paced && !burstAllowed && !ghCadenceAdvisoryEmitted) {
       ghCadenceAdvisoryEmitted = true;
       warnLine(
         `gh read cadence (advisory, W1-T3297): a read ${decision.ageS}s after the last on the ${bucket ?? "core"} ` +
@@ -1956,15 +2003,16 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
           : { ...mine, refreshedMs: nowMs, yielded: onDisk?.yielded ?? mine.yielded };
         writeGhReadTicket(stampPath, ticket);
         // Behind a due head, look again after one shared gap: the head takes its slot within it.
+        pauseReason = floor > 0 ? "floor" : "queue";
         return floor > 0 ? floor : Math.max(sharedReadGapMs, GH_CADENCE_LOCK_WAIT_MS);
       }
       // THE RESERVED SLOT. The first reader to find a due head ticket gives it one shared gap, outside the
       // lock, so the waiter takes the next slot. Marked on the ticket: nobody yields to it twice.
-      if (sharedReadGapMs === 0) return 0;
-      const head = liveTickets(nowMs)[0];
-      if (head === undefined || head.yielded || floorRemainingAt(nowMs) > 0) return 0;
+      const head = headOwedSlot(nowMs);
+      if (head === undefined) return 0;
       writeGhReadTicket(stampPath, { ...head, yielded: true });
       ghReadCadenceCounts.slotsYielded += 1;
+      pauseReason = "slot";
       return sharedReadGapMs;
     },
     floorWaitRemainingMs: () => (waiter ? floorRemainingAt(now()) : 0),
@@ -1972,15 +2020,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
     sharedReadGapMs,
     sharedReadGapLoopBoundMs,
-    sharedGapRemainingMs: (path) => {
-      // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
-      // shared gap still protects the secondary limiter across sibling processes without making a
-      // normal sweep self-refuse after its first read.
-      const latest = readStampMs(path);
-      const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(ownKey(path)) === latest;
-      const elapsed = latest === undefined ? undefined : now() - latest;
-      return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
-    },
+    sharedGapRemainingMs: (path) => sharedGapRemainingAt(path),
     stampAfterGap: (path) => {
       // Stamp only after the gap so a concurrent process observes the completed transport slot.
       const nowMs = now();
@@ -1999,6 +2039,11 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
       else ghCadenceOwnStampMs.set(ownKey(path), stampedAt);
     },
     leaveQueue,
+    notePauseReason: (reason) => {
+      pauseReason = reason;
+    },
+    addPause,
+    reportWait,
   };
 }
 
@@ -2017,7 +2062,10 @@ function ghReadCadenceTurn(
     // The shared lock can fail open or be reclaimed during the gap. A newer gated read still
     // owns the floor, so recheck before granting this invocation its read and burst.
     const floor = plan.floorWaitRemainingMs();
-    if (floor > 0) return floor;
+    if (floor > 0) {
+      plan.notePauseReason("floor-recheck");
+      return floor;
+    }
     plan.stampAfterGap(stampPath);
     return 0;
   };
@@ -2026,6 +2074,7 @@ function ghReadCadenceTurn(
     plan.stampAfterGap(stampPath);
     return 0;
   }
+  plan.notePauseReason("gap");
   const slept = gapSleep(gap);
   return slept instanceof Promise ? slept.then(finish) : finish();
 }
@@ -2057,9 +2106,16 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   }
   const blockingSleep = deps.sleepSync ?? defaultBlockingSleepSync;
   // W1-T12123: on the daemon loop a wait of at most the shared read gap is slept. A longer wait is refused.
-  const sleepSync = loopSafeGhSleep(blockingSleep, plan.sharedReadGapLoopBoundMs);
+  // W1-T12058 criterion 3: each sleep joins the read's one wait line, after the loop's refusal check.
+  const sleepSync = loopSafeGhSleep((ms) => {
+    plan.addPause(ms);
+    blockingSleep(ms);
+  }, plan.sharedReadGapLoopBoundMs);
   // W1-T12057: a lock wait may sleep on the daemon loop, because tryGhCadenceLock already bounds the total.
-  const lockSleepSync = loopSafeGhSleep(blockingSleep, GH_CADENCE_LOCK_MAX_WAIT_MS);
+  const lockSleepSync = loopSafeGhSleep((ms) => {
+    plan.addPause(ms, true);
+    blockingSleep(ms);
+  }, GH_CADENCE_LOCK_MAX_WAIT_MS);
   // W1-T12123: this process's own async read holds the lock and needs the loop to release it.
   // The loop read does not wait for that lock. It takes its turn without it, as a give-up does.
   const ownAsyncLock = ghLoopHost.getStore() === true && ghCadenceOwnAsyncLocks.has(stampPath);
@@ -2074,6 +2130,7 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
       waitMs = ownAsyncLock ? turn() : withGhCadenceLock(stampPath, lockSleepSync, turn);
       if (waitMs > 0) sleepSync(waitMs);
     } while (waitMs > 0);
+    plan.reportWait();
     if (ownAsyncLock) {
       ghPaceLoopWaits.push({ step: GH_PACE_LOOP_WAIT_STEP, wait_ms: 0, call_site: ghCallSiteOutsideTransport(), lock: "own-async-read" });
     }
@@ -2096,17 +2153,23 @@ export async function applyGhReadCadenceAsync(
   const stampPath = plan.coordinatedStampPath;
   if (stampPath === undefined) return plan.evaluate();
   const sleep = deps.sleep ?? defaultTimerSleep;
+  // W1-T12058 criterion 3: each sleep joins the read's one wait line.
+  const cadenceSleep = async (ms: number, lock = false): Promise<void> => {
+    plan.addPause(ms, lock);
+    await sleep(ms);
+  };
   return await withGhCadenceQueueAsync(stampPath, async () => {
     let decision: GhReadCadenceDecision | undefined;
     try {
       let waitMs: number;
       do {
-        waitMs = await withGhCadenceLockAsync(stampPath, sleep, async () => {
+        waitMs = await withGhCadenceLockAsync(stampPath, (ms) => cadenceSleep(ms, true), async () => {
           decision ??= plan.evaluate();
-          return await ghReadCadenceTurn(plan, stampPath, sleep);
+          return await ghReadCadenceTurn(plan, stampPath, cadenceSleep);
         });
-        if (waitMs > 0) await sleep(waitMs);
+        if (waitMs > 0) await cadenceSleep(waitMs);
       } while (waitMs > 0);
+      plan.reportWait();
       return decision!;
     } finally {
       plan.leaveQueue();

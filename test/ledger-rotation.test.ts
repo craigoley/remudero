@@ -94,6 +94,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     "../src/lib/review.ts",
     "../src/lib/stall-verifier.ts",
     "../src/lib/restart-cycle.ts",
+    "../src/lib/plan.ts", // W1-T13940: newestLedgerTaskAnswer releases a needs_input task from a panel.question_answered row.
   ];
 
   // VERIFIED non-deciding despite living in a deciding-reader file: status.ts's
