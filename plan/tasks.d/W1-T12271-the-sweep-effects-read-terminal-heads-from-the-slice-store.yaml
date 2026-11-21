@@ -33,8 +33,6 @@
       proof: "grep: W1-T12271 criterion 1 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
     - claim: "The terminal heads are the same as those that `resolveLedgerUnion` gives for the same files, in a fixture with rows in the live file and in two rotated files"
       proof: "grep: W1-T12271 criterion 2 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
-    - claim: "An unreadable rotated file gives the answer of today for an unread history. A head is never reported as free because its file could not be read"
-      proof: "grep: W1-T12271 criterion 3 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
     - claim: "The test goes through `buildSweepEffects`, the production caller, with nothing injected in place of the reader"
       proof: "grep: W1-T12271 criterion 4 in test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts"
   rationale: |
@@ -46,6 +44,8 @@
     - Line 28000: `createEscalationTriageHistoryReader` reads a slice of each rotated file once and keeps it in a store with a shared snapshot. W1-T12235 (queued) uses that store for the lifetime history and exports what a second user needs.
     The first sweep after a restart, the review command and the fix command each build the effects in a new process. Each pays the full read.
     CHECKED for overlap: W1-T12235 covers the lifetime history only. W1-T12236 (queued) covers the open pull request reads at a restart.
+
+    MOVED to W1-T14076 by the sweep (W1-T12709): 1 criteria that need operator input, so https://github.com/craigoley/remudero/pull/19672 merges on the rest.
   design: |
     NO-INVARIANTS: This amendment names the files needed to meet existing parity and unread-history criteria; it adds no independent guarantee.
     Give `terminalUncreditableHeads` its rows from a reader that `createEscalationTriageHistoryReader` builds for a new slice:

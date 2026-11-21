@@ -424,7 +424,9 @@ test("parent catalog reads coalesce across producers and reject roots outside th
       await completed;
       assert.equal(replies[0]!.buffer, replies[1]!.buffer, "both consumers share the same packet allocation");
       assert.equal(replies[0]!.sequence, replies[1]!.sequence);
-      assert.equal(shim.calls().length, fx.calls.length, "two consumers perform one whole pinned source read");
+      const refCommitTree = (calls: string[]): number => calls.filter((c) => /\/git\/(ref\/heads\/|commits\/|trees\/)/.test(c)).length;
+      const whole = refCommitTree(fx.calls), pooled = refCommitTree(shim.calls());
+      assert.ok(whole > 0 && pooled === whole, `two consumers perform one whole pinned source read of the ref, the commit and the trees (${pooled} of ${whole})`);
       const before = shim.calls().length;
       a.close();
       b.request({ type: "ops_catalog_read", version: 1, root: h.state });

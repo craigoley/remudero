@@ -440,6 +440,12 @@
       "grepHint": "Forensics: src/lib/feedback.ts"
     },
     {
+      "path": "docs/forensics/fix-peak-estimate-drivers.md",
+      "title": "What drives the fix class's learned peak estimate (W1-T13842)",
+      "summary": "Fix admission charges each fix at the fix class's learned p90 peak (`classEstimate(\"fix\")`). It also uses the",
+      "grepHint": "What drives the fix class's learned peak estimate (W1-T13842)"
+    },
+    {
       "path": "docs/forensics/fleet-github-identity.md",
       "title": "Fleet GitHub identity",
       "summary": "Recon for W1-T13224. The operator ruled on 2026-11-16 that `cao825` and `craigoley` are the owner and",
