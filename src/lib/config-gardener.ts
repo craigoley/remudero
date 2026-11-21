@@ -1113,7 +1113,9 @@ async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | u
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body }), "config gardener");
+    // A revert keeps its own PR. The shared task-files landing counts a path its open PR already holds as carried,
+    // whatever that PR's content, so a budget revert riding it could be recorded while the canary's values stay.
+    const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body, sealedLanding: false }), "config gardener");
     if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
     return prUrl;
   } finally {

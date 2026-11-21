@@ -20,7 +20,7 @@ import {
   CONFIG_GARDEN_CLASSES,
   type ConfigGardenSources,
 } from "#src/lib/config-gardener.js";
-import { gardenStatePath, readGardenState, type GardenCheckout, type PrState } from "#src/lib/gardener.js";
+import { gardenStatePath, readGardenState, type GardenCheckout, type GardenLandOpts, type PrState } from "#src/lib/gardener.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-25T00:00:00Z");
@@ -60,7 +60,7 @@ function harness() {
   const ids = Array.from({ length: 12 }, (_, i) => `W1-T${900 + i}`);
   for (const id of ids) writeFileSync(join(root, "plan", "tasks.d", `${id}-x.yaml`), shard(id));
   const rows = Array.from({ length: 30 }, (_, i) => run(`h${i}`, `W1-T${100 + i}`, T0 - (40 - i) * HOUR, "merged", 3 + (i % 4))).flat();
-  const landed: Array<{ paths: string[]; title: string; body: string }> = [];
+  const landed: GardenLandOpts[] = [];
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   let now = T0;
   let pr: PrState = "open";
@@ -128,6 +128,7 @@ test("an expired config canary lands a revert of its edits and releases its clas
   assert.equal(canary.promotion.state, "expired");
   assert.equal(h.landed.length, 2, "the expiry lands a revert as its own PR");
   assert.match(h.landed[1]!.title, /^revert\(config\): /);
+  assert.equal(h.landed[1]!.sealedLanding, false, "the revert keeps its own PR, never the shared task-files landing that counts a held path as carried");
   assert.deepEqual(h.landed[1]!.paths, cohort.map((id) => `plan/tasks.d/${id}-x.yaml`).sort(), "exactly the canary's files");
   assert.match(h.landed[1]!.body, /expired before its cohort cleared the floor/);
   assert.match(h.landed[1]!.body, /proof: grep: budget_usd: 30\.00 in plan\/tasks\.d\//);
