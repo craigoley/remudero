@@ -66,7 +66,7 @@ export interface LagIntervalReading {
   async_by_caller?: SyncSpawnCallerTotal[];
 }
 
-export type StallLog = (step: string, extra?: Record<string, unknown>) => void;
+export type StallLog = (step: string, extra?: Record<string, unknown>, recoveredAtMs?: number) => void;
 
 /** One tick's lateness as the daemon measured it: the input the bound is a quantile of. */
 export interface LoopLagReading {
@@ -372,11 +372,12 @@ const rotate = async () => {
   stall.chunkAt = performance.now();
   stall.fold = foldStallChunk(stall.fold, profile, forwarding);
 };
-const finish = async () => {
+const finish = async (recoveredAt) => {
   const { profile } = await post("Profiler.stop");
   const done = stall;
   stall = undefined;
-  parentPort.postMessage({ kind: "profile", beat: done.beat, silent_ms: Math.round(performance.now() - done.startedAt),
+  parentPort.postMessage({ kind: "profile", beat: done.beat, recoveredAtMs: Math.round(performance.timeOrigin + recoveredAt),
+    silent_ms: Math.round(recoveredAt - done.startedAt),
     unprofiled_ms: Math.round(done.unprofiledMs), fold: foldStallChunk(done.fold, profile, forwarding) });
 };
 const tick = () => {
@@ -387,7 +388,7 @@ const tick = () => {
   if (beat !== lastBeat) {
     lastBeat = beat;
     lastChangeAt = now;
-    if (stall) run(finish);
+    if (stall) run(() => finish(now));
     return;
   }
   const bound = Atomics.load(shared, ${BOUND});
@@ -440,14 +441,21 @@ export interface LoopStallProfiler {
   stop(): void;
 }
 
-interface ProfileMessage { kind: "profile"; beat: number; silent_ms: number; unprofiled_ms: number; fold: StallFold }
+interface ProfileMessage {
+  kind: "profile";
+  beat: number;
+  recoveredAtMs: number;
+  silent_ms: number;
+  unprofiled_ms: number;
+  fold: StallFold;
+}
 type WatchdogMessage = { kind: "ready" } | { kind: "failed"; reason: string } | ProfileMessage;
 
 export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): LoopStallProfiler {
   const steps = options.steps ?? DAEMON_LOOP_STALL_STEPS;
   const shared = new Int32Array(new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT));
   const lags: number[] = [];
-  const beats = new Map<number, { lagMs: number; syncSpawnMs: number; syncSpawn?: LagIntervalReading }>();
+  const beats = new Map<number, { lagMs: number; recoveredAtMs: number; syncSpawnMs: number; syncSpawn?: LagIntervalReading }>();
   let intervalMs: number | undefined;
   let sink: StallLog | undefined;
   let worker: Worker | undefined;
@@ -481,7 +489,12 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
       const count = Atomics.add(shared, BEAT, 1) + 1;
       const syncSpawn = options.takeSyncSpawn?.();
       const syncSpawnMs = syncSpawn?.sync_spawn_ms ?? options.takeSyncSpawnMs?.() ?? 0;
-      beats.set(count, { lagMs: Math.max(0, nowMs - lastBeatAtMs - period()), syncSpawnMs, syncSpawn });
+      beats.set(count, {
+        lagMs: Math.max(0, nowMs - lastBeatAtMs - period()),
+        recoveredAtMs: Math.round(performance.timeOrigin + nowMs),
+        syncSpawnMs,
+        syncSpawn,
+      });
       beats.delete(count - BEATS_KEPT);
       lastBeatAtMs = nowMs;
       heartbeat = setTimeout(beat, period());
@@ -507,7 +520,7 @@ export function startLoopStallProfiler(options: LoopStallProfilerOptions = {}): 
       bound_ms: Atomics.load(shared, BOUND),
       unprofiled_ms: message.unprofiled_ms,
       ...summary,
-    });
+    }, closing?.recoveredAtMs ?? message.recoveredAtMs);
   };
   const start = (): void => {
     lastBeatAtMs = performance.now();
