@@ -21,7 +21,7 @@
     - src/lib/sweep.ts
     - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
     - test/fix-lane/a-held-fix-dispatch-lifts-when-its-recorded-cause-clears.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Through the production sweep entry, a PR whose newest sweep.fix.dispatch_failed row at its head carries the run child's memory refusal (\"fix dispatch refused: worker admission refused (live host capacity exhausted ...\") is dispatched again at the same head, with no new push, on the first full pass whose fix admission reading admits one fix, before the hold's learned next_retry_at"

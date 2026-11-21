@@ -16,7 +16,7 @@
     - src/lib/human-gate.ts
     - test/the-needs-you-view-is-a-view-of-views.test.ts
     - test/inbox/the-human-gate-sort-parses-each-time-once.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Reading the needs-you view or walking its bodies composes again only when an input entry or the instances moved"
