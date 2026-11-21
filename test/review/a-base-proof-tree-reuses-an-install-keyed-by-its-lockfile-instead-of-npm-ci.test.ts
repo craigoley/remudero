@@ -444,7 +444,14 @@ const linux = process.platform === "linux";
 
 function procStart(pid: number): string | undefined {
   if (!linux) return undefined;
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (error) {
+    // A pid that has already exited (deadPid) has no /proc entry, so its owner record carries no start time.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
   return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
 }
 
