@@ -81,7 +81,8 @@ test("W1-T13330 criterion 1: a refresh whose branch still names the kept commit 
     try {
       const first = await p.read();
       const cold = shim.calls().length;
-      assert.ok(cold >= 5 && shim.calls().some((c) => c.includes("/git/blobs/")), `positive control: the first read is whole (${cold} GETs)`);
+      assert.ok(cold >= 5 && shim.calls().some((c) => c.includes("/git/ref/heads/main")) && shim.calls().some((c) => c.includes("/git/commits/")) &&
+        shim.calls().some((c) => c.includes("/git/trees/")), `positive control: the first read is whole: ref, commit and trees (${cold} GETs)`);
       now.ms += BOARD_CATALOG_REFRESH_MS + 1;
       const second = await p.read();
       assert.deepEqual(shim.calls().slice(cold), [`api repos/${repository}/git/ref/heads/main`], "one ref GET revalidates the kept catalog");
@@ -135,7 +136,9 @@ test("W1-T13330 criterion 3: a changed selection drops the kept catalog, even wh
       now.ms += BOARD_CATALOG_REFRESH_MS + 1;
       const before = shim.calls().length;
       assert.deepEqual(idsOf(await p.read()), ["OPS-T1"]);
-      assert.ok(shim.calls().slice(before).some((c) => c.includes("/git/blobs/")), "the returning selection reads in full, never revives the kept read");
+      const returning = shim.calls().slice(before);
+      assert.ok(returning.some((c) => c.includes("/git/ref/heads/main")) && returning.some((c) => c.includes("/git/commits/")) &&
+        returning.some((c) => c.includes("/git/trees/")), "the returning selection reads the ref, the commit and the trees, never revives the kept read");
     } finally { p.bridge.close(); }
   });
 });
