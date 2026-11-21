@@ -1005,13 +1005,16 @@ export function main(argv) {
       // note text on the same physical line -- see reservationHandoffNoteLine's comment for why
       // the old one-line fragment silently failed the very matcher it named once a note already
       // had content.
-      if (c.recordedBranch !== undefined && c.filerBranch) {
+      // W1-T13829: a named holder gets the same pasteable line; the matcher already accepts it. A lost
+      // takeover race does not, since that line does not clear it.
+      const handoffFrom = c.recordedBranch ?? (c.reason === "lost the takeover race" ? undefined : c.holderBranch);
+      if (handoffFrom !== undefined && c.filerBranch) {
         console.error(
           "    remedy: add this as a NEW line in the shard's note -- do not merge it into any " +
             "existing note text on the same line, or the check that requires it will not see it:",
         );
         console.error("        note: |");
-        console.error(`          ${reservationHandoffNoteLine(c.recordedBranch, c.filerBranch)}`);
+        console.error(`          ${reservationHandoffNoteLine(handoffFrom, c.filerBranch)}`);
       }
     }
     console.error(

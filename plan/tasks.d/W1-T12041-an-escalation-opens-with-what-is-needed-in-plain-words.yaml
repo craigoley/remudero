@@ -18,6 +18,9 @@
     - "test/decision-summary.test.ts"
     - "src/lib/escalation-conversation.ts"
     - "src/lib/tick-read-worker.ts"
+    - "test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts"
+    - "src/lib/escalation-answers.ts"
+    - "src/lib/issue-revalidation-garden.ts"
   status: queued
   attempts: 0
   acceptance:
@@ -39,4 +42,7 @@
   falsifier: |
     Put a machine field before the summary and criterion 1 must fail. Make a reader depend on the old position and criterion 2 must fail. Stop reading an old-order body and criterion 3 must fail. Restore and require all three to pass.
   note: |
+    files: amendment 2026-11-20 (operator, fix every red PR, 15:46Z): #19695's coverage shard fails
+    test/a-requeue-backstop-escalation-detail-describes-the-refusals.test.ts, which reads the detail from the paragraph
+    before Options; the new body order puts the summary there, so the build must update that reader test.
     Open issues keep their old bodies; only new issues use the new order.
