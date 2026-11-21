@@ -33,7 +33,6 @@ import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, find
 
 type Row = Record<string, unknown>;
 
-export const STUCK_STATE_GARDEN = "stuck-state";
 /** `rmd approve`'s catalog refusal, written beside its console line so a gardener can see it. */
 export const APPROVE_RELEASE_REFUSED_STEP = "approve.release_refused";
 export const STUCK_STATE_HELD_STEP = "stuck_state.held";

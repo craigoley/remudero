@@ -1,0 +1,42 @@
+- id: W1-T13955
+  title: The export gardener's appended proofs import through the #src alias when the root maps it
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  budget_usd: 6.00
+  risk: low # the specifier of a generated test import; the deletion logic is unchanged
+  origin: "operator-session#unstick-pr-backlog-2026-11-20"
+  plan_refs:
+    - W1-T5278
+    - W1-T9864
+  files:
+    - src/lib/export-gardener.ts
+    - test/gardeners/the-export-gardener-proofs-import-through-the-src-alias.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "When the root's package.json maps #src/* to ./src/*, the appended proof imports the source through #src and still passes at head and fails with the export restored"
+      proof: "grep: W1-T13955 criterion 1: in test/gardeners/the-export-gardener-proofs-import-through-the-src-alias.test.ts"
+    - claim: "invariant:unmapped-root-relative — a root whose package.json does not parse keeps the location-relative specifier"
+      kind: guard
+      proof: "grep: W1-T13955 criterion 2: in test/gardeners/the-export-gardener-proofs-import-through-the-src-alias.test.ts"
+    - claim: "applyExportDeletions reads the alias map once per apply"
+      proof: "grep: rootMapsSrcAlias( in src/lib/export-gardener.ts"
+  rationale: |
+    OBSERVED 2026-11-19/20: export-gardener PR #19731 went red in coverage-shard 12/12 on
+    test/a-test-imports-through-the-subpath-alias.test.ts ("W1-T9864: location-relative test files never rise
+    above the merge base") because goneTest (src/lib/export-gardener.ts) appends import("../src/lib/<file>.js").
+    The two older proofs in test/export-gardener-removes-unreferenced-exports.test.ts already use #src, edited by
+    hand. #19731 sat red 14 h; hand-fixed in 200ae5ee0.
+  design: |
+    INVARIANT unmapped-root-relative: a root that does not map #src/* keeps the location-relative specifier.
+    1. rootMapsSrcAlias(root) reads package.json imports["#src/*"] === "./src/*"; a parse failure returns false.
+    2. goneTest takes that flag and emits "#src/<path>.js" for a src/ file, else today's relative specifier.
+  falsifier: |
+    Force the flag false: criterion 1 fails with the relative specifier.
+  note: |
+    Id reserved for run-unfiled-1795177718799 with rmd next-task-id on the host.

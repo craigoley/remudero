@@ -45,10 +45,14 @@ import {
 import { loadFleetStateCommitStore, type FleetStateCommitStore } from "./fleet-state-commit-store.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
-import { gatedRemoteRefReserver, gatedRemoteRefReserverAsync, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, type RemoteReserveAsyncInput,
-  type RemoteReserveDeps } from "./task-id-reservation.js";
+import {
+  gatedRemoteRefReserver, gatedRemoteRefReserverAsync, parseReservationHolderLine, RESERVATION_PUSH_GRACE_MS,
+  reservationHandoffNoteLine, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, taskIdReservationRef,
+  type RemoteReserveAsyncInput, type RemoteReserveDeps,
+} from "./task-id-reservation.js";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import { checkSharedPause, isRecyclePauseDetail, realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
 import {
@@ -62,7 +66,7 @@ import {
 } from "./base-reproduction.js";
 export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { proofTargetPaths } from "./task-linter.js";
-import { parse as parseYaml } from "yaml";
+import { isAlias, isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import {
   armAutoMergeDetailedAsync,
   armEvidenceFingerprint,
@@ -101,10 +105,12 @@ import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetReadsAnyPath, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
-import { classEstimate, classTypical, type LearnedEstimate } from "./host-memory-learning.js";
+import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
 import {
-  ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
+  loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
+  type HostMemoryBudgetPolicy,
 } from "./host-memory-shadow.js";
+import { readHostPressure, type HostPressure } from "./daemon-health.js";
 import { installedDaemonSlackReclaimer, reclaimLedgerFields, type SlackReclaimPool, type SlackReclaimRecord } from "./daemon-memory-policy.js";
 import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
@@ -113,7 +119,7 @@ import {
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { ghExec, ghJson, ghJsonAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { readReviewEvidenceRecord } from "./review-evidence-record.js";
 import { withdrawStaleConflictedJudgePr } from "./machine-filing-judge.js";
 import type { AdmissionObserver, AdmissionSettings, AdmissionRead } from "./contributor-admission.js";
@@ -286,6 +292,7 @@ import {
   excludeNodeModulesFromGit,
   provisionWorktreeNodeModules,
   worktreeAdd,
+  worktreeAddAsync,
   worktreeRemove,
   worktreeRemoveAsync,
   releaseReviewWorktree,
@@ -352,6 +359,7 @@ import {
   needsWorkflowIdentity,
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
+  fetchBoardPrsRestAsync,
   GhPaceFloorStandDownError,
   isHumanHoldCandidate,
   isScannerBlockerCandidate,
@@ -1630,6 +1638,7 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[], readOpts?: GhJsonReadOptions) => Promise<unknown>;
+  readPlanRepairLogImpl?: typeof ghLinesAsync;
   /** W1-T13183: the awaited binary read (an artifact zip); defaults to a byte-keeping {@link ghTextAsync}. */
   readBufferImpl?: (args: string[]) => Promise<Buffer>;
   fleetDeployStateImpl?: DeployStateReader;
@@ -6118,12 +6127,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       },
       closePr: async (prUrl, comment) => { await ghTextAsync(["pr", "close", prUrl, "--comment", comment]); },
     }).then((r) => ({ withdrawn: r.withdrawn, ...(r.withdrawn ? { reason: r.stale.map((s) => s.id).join(", ") } : {}) })),
-    readPlanRepairFacts: (pr) => {
+    readPlanRepairFacts: async (pr, handoffJobId) => {
+      const facts: PlanRepairFacts = {};
+      if (handoffJobId !== undefined && pr.headRefName !== undefined) {
+        const parser = gateHandoffLogParser(pr.headRefName);
+        try {
+          await (deps.readPlanRepairLogImpl ?? ghLinesAsync)(["api", `repos/${owner}/${repo}/actions/jobs/${handoffJobId}/logs`], parser.push);
+          facts.handoffs = parser.finish() ?? null;
+        } catch (error) {
+          log(`${PLAN_REPAIR_STEP}.read_error`, { pr_number: pr.prNumber, job_id: handoffJobId, error: String(error) });
+          facts.handoffs = null;
+        }
+        if (!isMachineLanePlanHead(pr.headRefName) && !filedTaskPlanRepairCandidate(pr)) return facts;
+      }
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       const row = ghJsonForBuild(["api", pulls]) as {
         user?: { login?: string }; title?: string; head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null };
       };
-      const facts: PlanRepairFacts = { authorLogin: row?.user?.login, title: row?.title };
+      facts.authorLogin = row?.user?.login;
+      facts.title = row?.title;
       // W1-T11170: the session-branch ownership facts. A head repo GitHub no longer shows (a deleted fork) is a fork.
       const headRepo = row?.head?.repo;
       if (headRepo !== undefined) facts.headRepoFork = headRepo?.full_name?.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
@@ -6151,6 +6173,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ghJsonForBuild(["api", "-X", "PATCH", pulls, "-f", `title=${decision.title}`]);
         if (decision.jobId) ghJsonForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
         return { outcome: "retitled" };
+      }
+      if (decision.action === "handoff") {
+        return handOffHeldPlanPrIds(pr, decision.handoffs, repoDir, join(worktreesDir(config), `plan-handoff-${pr.prNumber}-${nowMsImpl()}`),
+          { owner, repo, log, readJson: (args) => readJsonImpl(args, { fresh: true }), nowMs: nowMsImpl });
       }
       // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
       const worktreePath = join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`);
@@ -6686,13 +6712,17 @@ export function restorableDeliveredVerdict(
 ): { row: Record<string, unknown>; regressionKey: string } | { refusal: string } {
   if (pr.reviewState !== "pending") return { refusal: "GitHub's status is not pending" };
   if (pr.reviewInputDigest === undefined) return { refusal: "the review input digest is unread" };
-  const taskId = reviewOutcomeTaskIdFor(pr);
-  const row = lines.findLast(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
-    r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
-  if (row === undefined) return { refusal: "no delivered verdict of this head and input is on the ledger" };
-  const verdict = row.decision_verdict as ReviewVerdict | undefined;
-  if ((row.state !== "success" && row.state !== "failure") || verdict?.state !== row.state || verdict.cannotEvaluate === true) {
-    return { refusal: "the delivered verdict is not a full success or failure" };
+  const posted = postedRowsForInput(pr, lines);
+  if (posted.length === 0) return { refusal: "no delivered verdict of this head and input is on the ledger" };
+  // W1-T13949: a cannot-evaluate hold posted AFTER a full verdict of the same input (a fix worker's in-round review) judged
+  // nothing, so it never hides that verdict; the newest full verdict is the one restored.
+  const row = newestFullVerdictRow(posted);
+  if (row === undefined) return { refusal: "the delivered verdict is not a full success or failure" };
+  // W1-T11847: a requeue after the verdict (its reviewer code advanced) admitted a fresh review that owns this pending status, so
+  // the stale verdict is never restored over it. A plain pending row is otherwise a claim, not an outcome (W1-T11929).
+  const at = lines.indexOf(row);
+  if (lines.slice(at + 1).some(r => reviewerCodeAdvanceNames(r, pr.prUrl, pr.headSha))) {
+    return { refusal: "the delivered verdict was requeued for a reviewer-code advance; the fresh review owns the status" };
   }
   const regressionKey = `${reviewKey}|${pr.reviewPendingSince ?? "unstamped"}`;
   if (lines.some(r => r.step === REVIEW_STATUS_RESTORED_STEP && r.regression_key === regressionKey)) {
@@ -6710,6 +6740,25 @@ function postedRowsForInput(pr: ReviewInputView, lines: ReadonlyArray<Record<str
   const taskId = reviewOutcomeTaskIdFor(pr);
   return lines.filter(r => r.step === "review.posted" && r.task_id === taskId && r.pr_url === pr.prUrl &&
     r.head_sha === pr.headSha && r.review_input_digest === pr.reviewInputDigest);
+}
+
+/** W1-T13949 — the newest `review.posted` row of an input that is a full success or failure verdict. Walking newest first:
+ *  - a row flagged cannotEvaluate, of any state, is a hold that judged nothing, so it is looked past;
+ *  - a row whose state and verdict disagree is not a verdict, so it is looked past too;
+ *  - a plain pending row is a claim, never an outcome (W1-T11929), so it is looked past as well. A review admitted by a
+ *    reviewer-code requeue is protected by restorableDeliveredVerdict's requeue refusal instead (W1-T11847).
+ *  OBSERVED 2026-11-20 on #19691 and #19721: a lane FAIL was delivered, a fix worker's in-round review then posted a
+ *  cannot-evaluate pending for the same head and input two minutes later, and every release path read that hold as the
+ *  newest row, so no review or fix ran again. */
+function newestFullVerdictRow(posted: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | undefined {
+  for (let i = posted.length - 1; i >= 0; i--) {
+    const row = posted[i]!;
+    const verdict = row.decision_verdict as ReviewVerdict | undefined;
+    if (verdict?.cannotEvaluate === true) continue;
+    if (row.state === "pending") continue;
+    if ((row.state === "success" || row.state === "failure") && verdict?.state === row.state) return row;
+  }
+  return undefined;
 }
 
 /** W1-T12994 — a `review.posted` row of state pending is a cannot-evaluate HOLD: it folds as delivered, yet nothing was judged.
@@ -6794,7 +6843,7 @@ function deliveredFailureView(
   pr: OpenPrView,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): { view: OpenPrView; row: Record<string, unknown> } | undefined {
-  const row = postedRowsForInput(pr, lines).at(-1);
+  const row = newestFullVerdictRow(postedRowsForInput(pr, lines));
   const verdict = row?.decision_verdict as ReviewVerdict | undefined;
   if (row === undefined || row.state !== "failure" || verdict?.state !== "failure" || verdict.cannotEvaluate === true) return undefined;
   if (row.instrument_entangled === true || row.failure_class === "instrument_entangled") return undefined;
@@ -11384,6 +11433,7 @@ export function isFleetAppAuthor(login: string | undefined): boolean {
 }
 
 export interface PlanRepairFacts {
+  handoffs?: HeldIdHandoff[] | null;
   filedTaskRepairReady?: boolean;
   authorLogin?: string;
   title?: string;
@@ -11610,8 +11660,11 @@ export function planLintViolationsFromCiFailures(failures: readonly CiFailure[],
   return [...named].slice(0, max);
 }
 
+type HeldIdHandoff = { id: string; holder: string; filer: string; files: string[] };
+
 export type PlanRepairDecision =
   | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
+  | { signature: "held-task-id-handoff"; action: "handoff"; check: "task-id-existence"; handoffs: HeldIdHandoff[] }
   | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
   | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" | "inherited" };
 
@@ -11645,6 +11698,83 @@ export function heldTaskIdsFromCiFailures(failures: readonly CiFailure[]): strin
     }
   }
   return [...ids];
+}
+
+/** The bundled job can log HELD fixtures in other steps. Use the runner's gate step boundaries. */
+function gateHandoffLogParser(filer: string) {
+  const entries: Array<Omit<HeldIdHandoff, "holder"> & { holder?: string }> = [];
+  let step: "outside" | "preamble" | "output" = "outside";
+  let gateSeen = false;
+  let gateFailed = false;
+  let held = false;
+  let refused = false;
+  let entry: (typeof entries)[number] | undefined;
+  return {
+    push(raw: string) {
+      const line = raw.replace(ACTIONS_LOG_TIMESTAMP, "").trimEnd();
+      if (line.startsWith("##[group]Run ")) {
+        step = line === '##[group]Run if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then # W1-T5522: a queued PR is open and would match itself'
+          ? "preamble" : "outside";
+        if (step === "preamble") {
+          refused ||= gateSeen;
+          gateSeen = true;
+        }
+        return;
+      }
+      if (step === "preamble" && line === "##[endgroup]") {
+        step = "output";
+        return;
+      }
+      if (step !== "output") return;
+      if (line.startsWith("##[error]")) {
+        gateFailed = line === "##[error]Process completed with exit code 1.";
+        step = "outside";
+        return;
+      }
+      if (line.startsWith("task-id-existence:") && HELD_ID_HEADER_RE.test(line)) {
+        refused ||= held && !entry;
+        held = line.endsWith("HELD by a different reservation holder:");
+        refused ||= !held;
+        entry = undefined;
+      } else if (held) {
+        const id = /^\s+(W\d+-T\d+) -- /.exec(line)?.[1];
+        const file = /^\s+(plan\/tasks\.d\/[^/]+\.ya?ml):\d+$/.exec(line)?.[1];
+        const handoff = /^\s+reservation hand-off: (\S+) -> (\S+)$/.exec(line);
+        if (id) entries.push(entry = { id, filer, files: [] });
+        else if (entry && file) entry.files.push(file);
+        else if (entry && handoff) {
+          refused ||= entry.holder !== undefined || handoff[2] !== filer;
+          entry.holder = handoff[1];
+        } else if ((entry || line !== "") && !/^\s+(?:remedy: add this as a NEW line|note: \|$)/.test(line)) {
+          refused ||= !entry || /^\s/.test(line);
+          held = false;
+        }
+      }
+    },
+    finish(): HeldIdHandoff[] | undefined {
+      if (!gateFailed || refused || (held && !entry) || entries.length === 0 ||
+          entries.some((e) => !e.holder || e.files.length === 0)) return undefined;
+      return entries.map((e) => ({ ...e, holder: e.holder!, files: [...new Set(e.files)] }));
+    },
+  };
+}
+
+function gateHandoffsFromCiFailures(failures: readonly CiFailure[], filer: string | undefined): HeldIdHandoff[] | undefined {
+  if (!filer) return undefined;
+  const handoffs = new Map<string, HeldIdHandoff>();
+  for (const failure of failures) {
+    if (failure.name !== "task-id-existence") continue;
+    const parser = gateHandoffLogParser(filer);
+    for (const line of failure.logTail.split("\n")) parser.push(line);
+    const entries = parser.finish();
+    if (entries === undefined) return undefined;
+    for (const entry of entries) {
+      const prior = handoffs.get(entry.id);
+      if (prior && prior.holder !== entry.holder) return undefined;
+      handoffs.set(entry.id, { ...entry, files: [...new Set([...(prior?.files ?? []), ...entry.files])] });
+    }
+  }
+  return [...handoffs.values()];
 }
 
 /** CHECK-NAME TRAP (W1-T4399): the `commitlint` check reports the title step AND rule-checks. Only
@@ -11685,6 +11815,10 @@ export function planRepairHistoryFromLedger(lines: readonly Record<string, unkno
     if (line.step !== PLAN_REPAIR_STEP || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
     if (line.outcome === "unwired") continue; // PR-13008: a light pass's no-op never spends the full pass's attempt.
     const head = `${line.pr_number}@${line.head_sha}`;
+    if (line.outcome === "stood-down") {
+      keys.add(`${head}@${String(line.signature)}@stood-down`).add(`${head}@${String(line.signature)}@stood-down@${String(line.reason)}`);
+      if (line.signature !== "held-task-id-handoff") continue;
+    }
     keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
     if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
   }
@@ -11702,6 +11836,12 @@ export function decidePlanRepair(
   const head = `${pr.prNumber}@${pr.headSha}`;
   // The renumber and retitle rungs push to the lane's OWN branch, so only a fleet machine-lane head gets them.
   const fleetLane = isMachineLanePlanHead(pr.headRefName) && isFleetAppAuthor(facts.authorLogin);
+  const handoffs = pr.isPlanFiling === true && !history.has(`${head}@held-task-id-handoff`)
+    ? facts.handoffs === undefined ? gateHandoffsFromCiFailures(failures, pr.headRefName) : facts.handoffs
+    : undefined;
+  if (handoffs?.length && handoffs.every((handoff) => handoff.filer === pr.headRefName)) {
+    return { signature: "held-task-id-handoff", action: "handoff", check: "task-id-existence", handoffs };
+  }
   if (fleetLane) {
     const heldIds = heldTaskIdsFromCiFailures(failures);
     if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
@@ -11816,6 +11956,214 @@ export async function renumberPlanPrIds(
       }
     }
   }
+}
+
+// Persist the claim before the effect so even a crashed sweep cannot spend the same head again.
+function claimPlanHandoff(ledgerPath: string, head: string, runId: string): boolean {
+  const dir = join(dirname(ledgerPath), "plan-handoff-attempts");
+  const key = createHash("sha256").update(JSON.stringify([basename(ledgerPath), head])).digest("hex");
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(join(dir, key), JSON.stringify({ head, run_id: runId }), { flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+/** W1-T13829: the gate's printed hand-off line, added to each named shard's note of a PR whose holders are abandoned
+ *  (W1-T6026's proof: no holder head on origin, no open PR on it, a reservation past RESERVATION_PUSH_GRACE_MS). */
+export async function handOffHeldPlanPrIds(
+  pr: OpenPrView,
+  handoffs: readonly HeldIdHandoff[],
+  repoDir: string,
+  wt: string,
+  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo" | "log"> & {
+    readJson: (args: string[]) => Promise<unknown>;
+    nowMs: () => number;
+    git?: (cwd: string, args: string[]) => Promise<string>;
+  },
+): Promise<PlanRepairOutcome> {
+  const branch = pr.headRefName;
+  if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
+  const git = deps.git ?? ((cwd, args) => hostWorktreeGitAsync(cwd, args, { maxBuffer: 1 << 24 }));
+  const edits = new Map<string, { ids: string[]; line: string }>();
+  for (const { id, holder, filer, files } of handoffs) {
+    const line = reservationHandoffNoteLine(holder, filer);
+    for (const rel of files) {
+      const edit = edits.get(rel);
+      if (!edit) edits.set(rel, { ids: [id], line });
+      else if (edit.line === line) edit.ids.push(id);
+      else return { outcome: "stood-down", reason: `${rel}: the gate printed different hand-offs for the same shard` };
+    }
+  }
+  let cut = false;
+  try {
+    const beforeCut = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforeCut !== undefined) return { outcome: "stood-down", reason: beforeCut };
+    await worktreeAddAsync(repoDir, wt, basename(wt), `origin/${branch}`, { log: deps.log });
+    cut = true;
+    const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
+    if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
+    const beforeEdit = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforeEdit !== undefined) return { outcome: "stood-down", reason: beforeEdit };
+    const files: string[] = [];
+    for (const [rel, edit] of edits) {
+      const path = join(wt, rel);
+      const text = readFileSync(path, "utf8");
+      const next = shardWithHandoffNote(text, edit.ids, edit.line);
+      if (typeof next !== "string") return { outcome: "stood-down", reason: `${rel}: ${next.reason}` };
+      if (next !== text) {
+        writeFileSync(path, next);
+        files.push(rel);
+      }
+    }
+    if (files.length === 0) return { outcome: "stood-down", reason: "the named shards already contain the printed hand-offs" };
+    const ids = [...new Set(handoffs.map((h) => h.id))].join(", ");
+    await git(wt, ["add", "--", ...files]);
+    await git(wt, ["commit", "-m", `chore(plan): record the reservation hand-off for ${ids}\n\nW1-T13829 sweep plan repair.`]);
+    const newHeadSha = (await git(wt, ["rev-parse", "HEAD"])).trim();
+    assertLiveWriteAllowed("git-push", `recording the reservation hand-off for ${ids} on ${branch} for PR #${pr.prNumber}`);
+    const beforePush = await handoffStandDown(handoffs, repoDir, git, deps);
+    if (beforePush !== undefined) return { outcome: "stood-down", reason: beforePush };
+    await git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
+    return { outcome: "handed-off", newHeadSha };
+  } catch (error) {
+    return { outcome: "error", reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+  } finally {
+    if (cut) await worktreeRemoveAsync(repoDir, wt).catch((error) => deps.log("sweep.plan_repair.cleanup_failed", { reason: String(error) }));
+  }
+}
+
+/** Fetch all reservations before checking live holders, and stand down on unreadable facts. */
+async function handoffStandDown(
+  handoffs: readonly HeldIdHandoff[], repoDir: string, git: (cwd: string, args: string[]) => Promise<string>,
+  deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
+): Promise<string | undefined> {
+  try {
+    const readShas = async (refs: readonly string[]) => new Map((await git(repoDir, ["ls-remote", "--refs", "origin", ...refs]))
+      .split("\n").map((row) => row.split("\t")).filter(([, name]) => name !== undefined && refs.includes(name)).map(([sha, name]) => [name!, sha!]));
+    const validated = new Map<string, string>();
+    for (const { id, holder } of handoffs) {
+      const ref = taskIdReservationRef(id);
+      const readSha = async () => (await readShas([ref])).get(ref) ?? "";
+      const sha = await readSha();
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) return `the reservation of ${id} is not on origin`;
+      await git(repoDir, ["fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", ref]);
+      if (await readSha() !== sha) return `the reservation of ${id} changed while it was being read from origin`;
+      const parsed = parseReservationHolderLine(await git(repoDir, ["log", "-1", "--format=%B", sha]));
+      if (parsed.status !== "known" || parsed.holder.branch !== holder) return `the reservation of ${id} does not name ${holder} as its holder`;
+      const started = Date.parse(parsed.holder.startedAt ?? "");
+      if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
+      if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
+        return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
+      }
+      validated.set(ref, sha);
+    }
+    for (const { id, holder } of handoffs) {
+      if ((await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${holder}`])).trim() !== "") {
+        return `holder branch ${holder} of ${id} is on origin`;
+      }
+    }
+    // Check the refs together before asking GitHub about open PRs, including forks.
+    const final = await readShas([...validated.keys(), ...handoffs.map(({ holder }) => `refs/heads/${holder}`)]);
+    const published = handoffs.find(({ holder }) => final.has(`refs/heads/${holder}`));
+    if (published) return `holder branch ${published.holder} of ${published.id} is on origin`;
+    const moved = handoffs.find(({ id }) => final.get(taskIdReservationRef(id)) !== validated.get(taskIdReservationRef(id)));
+    if (moved !== undefined) return `the reservation of ${moved.id} changed while the hand-off was being checked`;
+    const open = await fetchBoardPrsRestAsync(deps.owner, deps.repo, async (args) => {
+      const rows = await deps.readJson(args);
+      if (!Array.isArray(rows)) throw new Error("the open pull request page is unreadable");
+      for (const row of rows) {
+        if (typeof row?.head?.ref !== "string" || !/^\S+$/.test(row.head.ref)) {
+          throw new Error(`open PR #${row?.number ?? "unknown"} has an unreadable head ref`);
+        }
+      }
+      return rows;
+    }, undefined, "open");
+    if (open.truncated) return "the open pull request list is incomplete";
+    for (const { id, holder } of handoffs) {
+      const openPr = open.rows.find((row) => row.headRefName === holder);
+      if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
+    }
+    return undefined;
+  } catch (error) {
+    return `a holder fact is unreadable: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}`;
+  }
+}
+
+/** The check matches the remedy across the shard, so one note suffices for all ids that share it. */
+function shardWithHandoffNote(text: string, ids: readonly string[], line: string): string | { reason: string } {
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0 || !isSeq(doc.contents)) return { reason: "the shard is not a YAML task list" };
+  const before = doc.toJS() as Array<Record<string, unknown> | null>;
+  const invalid = ids.find((id) => before.filter((row) => row?.id === id).length !== 1);
+  if (invalid !== undefined) return { reason: `the shard does not declare ${invalid} once` };
+  if (text.split(/\r?\n/).some((row) => row.trim() === line)) return text;
+  const id = ids[0]!;
+  const task = doc.contents.items[before.findIndex((row) => row?.id === id)];
+  const first = isMap(task) ? task.items[0]?.key : undefined;
+  const keyStart = isScalar(first) ? first.range?.[0] : undefined;
+  if (!isMap(task) || task.range === undefined || keyStart === undefined) {
+    return { reason: `the shard does not declare ${id} once` };
+  }
+  const pad = " ".repeat(keyStart - (text.lastIndexOf("\n", keyStart - 1) + 1));
+  const noteNode = task.items.find((pair) => isScalar(pair.key) && pair.key.value === "note")?.value;
+  // The plan loader resolves an aliased note to its anchor's text; the alias is replaced by a block holding that text.
+  const resolved = isAlias(noteNode) ? noteNode.resolve(doc) : noteNode;
+  if (resolved !== undefined && !(isScalar(resolved) && (typeof resolved.value === "string" || resolved.value === null) &&
+      (isAlias(noteNode) ? noteNode.range : resolved.range))) {
+    return { reason: `the note of ${id} is not text` };
+  }
+  const prior = isScalar(resolved) && typeof resolved.value === "string" ? resolved.value : "";
+  const note: { range?: readonly number[] | null; type?: string | null } | undefined =
+    isAlias(noteNode) ? { range: noteNode.range } : isScalar(resolved) ? resolved : undefined;
+  const prefix = prior + (prior && !prior.endsWith("\n") ? "\n" : "");
+  const joined = prefix + line;
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const body = joined.split("\n").map((l) => (l ? `${pad}  ${l}` : "")).join(eol);
+  const folded = note?.type === "BLOCK_FOLDED";
+  const emptyBlock = prior === "" && (folded || note?.type === "BLOCK_LITERAL");
+  let expected = `${joined}\n`;
+  let next: string;
+  if (note?.range) {
+    const [start, end] = note.range as [number, number];
+    if (note.type === "BLOCK_LITERAL" || folded) {
+      const block = text.slice(start, end);
+      const indicators = /^[|>]([1-9+-]*)/.exec(block)?.[1] ?? "";
+      const width = Number(/[1-9]/.exec(indicators)?.[0]);
+      const contentIndent = /^ +(?=[^ \r\n])/m.exec(block)?.[0];
+      const indent = width ? pad + " ".repeat(width) : contentIndent ?? `${pad}  `;
+      // More-indented text in a folded block retains the preceding line break.
+      const extra = folded && contentIndent !== undefined ? " " : "";
+      if (indicators.includes("-")) expected = joined;
+      const headerEnd = block.indexOf("\n");
+      const at = emptyBlock && headerEnd >= 0 ? start + headerEnd + 1 : end;
+      next = `${text.slice(0, at)}${text[at - 1] === "\n" ? "" : eol}${indent}${extra}${line}${eol}${text.slice(at)}`;
+    } else {
+      const at = text.indexOf("\n", end);
+      const headerSuffix = text.slice(end, at < 0 ? text.length : at).replace(/\r$/, "").replace(/^#/, " #");
+      const rest = at < 0 ? text.length : at + 1;
+      const separator = text[start - 1] === ":" ? " " : "";
+      const indicator = /^\n*[ \t]/.test(joined) ? "|2" : "|";
+      next = `${text.slice(0, start)}${separator}${indicator}${headerSuffix}${eol}${body}${eol}${text.slice(rest)}`;
+    }
+  } else {
+    const end = task.range[1];
+    const at = text[end - 1] === "\n" ? end : text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end);
+    const block = `${pad}note: |${eol}${body}`;
+    next = text[end - 1] === "\n" ? `${text.slice(0, at)}${block}${eol}${text.slice(at)}` : `${text.slice(0, at)}${eol}${block}${text.slice(at)}`;
+  }
+  const after = parseDocument(next);
+  const rows = after.errors.length === 0 ? (after.toJS() as Array<Record<string, unknown>>) : undefined;
+  const noteMatches = (value: unknown) => folded || emptyBlock
+    ? typeof value === "string" && value.startsWith(prefix) && value.slice(prefix.length).trim() === line
+    : value === expected;
+  const same = Array.isArray(rows) && rows.length === before.length && rows.every((row, i) => row?.id === id
+    ? noteMatches(row.note) && isDeepStrictEqual({ ...row, note: undefined }, { ...before[i], note: undefined })
+    : isDeepStrictEqual(row, before[i]));
+  return same ? next : { reason: `adding the hand-off to the note of ${id} would change other text` };
 }
 
 /** A git runner in the PR-head tree `cwd`, through the leaf, the shape {@link gatedRemoteRefReserver} takes.
@@ -16316,13 +16664,13 @@ export interface SweepDeps {
     evidence: ProofDiscriminationEvidence,
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
-  readPlanRepairFacts?: (pr: OpenPrView) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  readPlanRepairFacts?: (pr: OpenPrView, handoffJobId?: string) => PlanRepairFacts | Promise<PlanRepairFacts>;
   /** W1-T11171: the queued plan tasks that wait, transitively, on this PR's task; a conflict's blocked cost reads it. */
   conflictDependents?: (pr: OpenPrView) => number;
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
   repairPlanPr?: (
     pr: OpenPrView,
-    decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
+    decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" | "handoff" }>,
   ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
   /** W1-T11388: a conflicted machine-judge PR whose ruled record moved on main is withdrawn for a re-judge
    *  (closed, the judge's pending state cleared), never sent to a plan-scoped round machine-author-verify must refuse. */
@@ -20109,8 +20457,13 @@ export type FixAdmissionClass = "fix" | "review";
 export interface FixAdmissionWaiter { prNumber: number; sinceMs: number } // W1-T9582: a PR and when it began waiting.
 
 /** W1-T9498: the rss+swap (MiB) of each live, started worker tree of a class in this container; undefined when the
- *  residency cannot be read, and then every reservation is charged its whole estimate. */
-export type FixAdmissionResidents = { readonly [K in FixAdmissionClass]: readonly number[] } | undefined;
+ *  residency cannot be read, and then every reservation is charged its whole estimate.
+ *  W1-T13879: `pendingFix` counts the live fix trees with no residency reading yet (absent reads 0), and
+ *  `readFixMemoryCalm` is the lazy host memory calm reader the typical-beside-live rung asks (absent: not calm). */
+export type FixAdmissionResidents = ({ readonly [K in FixAdmissionClass]: readonly number[] } & {
+  readonly pendingFix?: number;
+  readonly readFixMemoryCalm?: () => boolean;
+}) | undefined;
 
 /** W1-T9498: what one refresh charged against the headroom, as the capacity row and a refusal show it. */
 export interface FixAdmissionCharge {
@@ -20122,9 +20475,11 @@ export interface FixAdmissionCharge {
   reviewEstimateMib: number;
   fixTypicalMib: number;
   admissionRung: FixAdmissionRung;
+  /** W1-T13879: the live fix trees' summed resident, set only on the typical-beside-live rung. */
+  liveFixResidentMib?: number;
 }
 
-export type FixAdmissionRung = "fits" | "typical" | "nothing-live" | "none";
+export type FixAdmissionRung = "fits" | "typical" | "typical-beside-live" | "nothing-live" | "none";
 
 /**
  * W1-T9498 — THE CHARGE OF `count` RESERVATIONS OF ONE CLASS, ONCE. The pressure reading (MemAvailable, the container's
@@ -20142,15 +20497,40 @@ export function fixAdmissionChargeMib(count: number, estimateMib: number, reside
 }
 
 /**
+ * W1-T13879: the host memory calm test the typical-beside-live rung asks: the host's memory PSI is readable and within
+ * the host memory budget's own psi bounds (host-memory-shadow.ts: some avg10 over psiSomeAvg10Max, or full avg10 over
+ * the bound, names psi) at the prior full bound psiFullAvg10Max, the stricter side of psiBoundFor. No new number.
+ * Unreadable PSI is not calm.
+ */
+export function productionFixMemoryCalm(
+  readPressure: () => HostPressure = () => readHostPressure(),
+  loadPolicy: () => Pick<HostMemoryBudgetPolicy, "psiSomeAvg10Max" | "psiFullAvg10Max"> = () => loadHostMemoryBudgetPolicy(),
+): boolean {
+  const memory = readPressure().memory;
+  if (memory === "unknown") return false;
+  const policy = loadPolicy();
+  return memory.someAvg10 <= policy.psiSomeAvg10Max && (memory.fullAvg10 ?? 0) <= policy.psiFullAvg10Max;
+}
+
+/**
  * W1-T9498: this container's live fix and review worker trees, measured as the shadow budget measures them (each tree's
  * rss+swap, a process counted once). Only this container's own, unreleased reservations count, as
  * {@link ownContainerWorkLive} reads them; a tree whose record cannot be read is left out, so its reservation is charged
  * whole. An unreadable reservation store: undefined, every reservation whole.
+ *
+ * W1-T13879 — NO RESIDENCY READING YET. `pendingFix` counts the owned, unreleased fix entries whose tree cannot be read,
+ * and the readable fix trees below the class typical at an age before most of the class reach their peak (the class
+ * survival above 1 - typicalQuantile, or unmeasured): such a tree's resident says nothing yet about its peak. The
+ * reading also carries the host memory calm reader. Both ride as non-enumerable fields, so the trees' own view (a
+ * deep-equal or JSON of fix and review) is unchanged.
  */
 export function productionFixAdmissionResidents(
   root: string,
   readLedger: (root: string) => HostMemoryReading | undefined = (r) => readMemoryLedger({ root: r }),
   readFile: (path: string) => string = (path) => readFileSync(path, "utf8"),
+  readTypical: (workerClass: "fix") => LearnedEstimate = (workerClass) => classTypical(workerClass),
+  readSurvival: (workerClass: "fix", ageMs: number) => Survival = (workerClass, ageMs) => classSurvival(workerClass, ageMs),
+  readFixMemoryCalm: () => boolean = () => productionFixMemoryCalm(),
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
@@ -20158,10 +20538,22 @@ export function productionFixAdmissionResidents(
     (entry.workerClass === "fix" || entry.workerClass === "review"));
   const residents = residentsOf(readFile, live.map((entry) => entry.path));
   const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
+  let pendingFix = 0;
+  let typicalMib: number | undefined;
   live.forEach((entry, i) => {
     const resident = residents[i]!;
     if (!("unread" in resident)) out[entry.workerClass as FixAdmissionClass].push(resident.mib);
+    if (entry.workerClass !== "fix") return;
+    if ("unread" in resident) {
+      pendingFix++;
+      return;
+    }
+    typicalMib ??= readTypical("fix").estimateMib;
+    if (resident.mib >= typicalMib) return;
+    const survival = readSurvival("fix", entry.ageMs);
+    if ("unmeasured" in survival || survival.factor > 1 - ESTIMATE_LEARNING.typicalQuantile) pendingFix++;
   });
+  Object.defineProperties(out, { pendingFix: { value: pendingFix }, readFixMemoryCalm: { value: readFixMemoryCalm } });
   return out;
 }
 
@@ -20262,6 +20654,15 @@ export function createSweepFixAdmissionController(input: {
   };
   let residents: FixAdmissionResidents;
   let residentsRead = false;
+  // W1-T13879: absent, false or a throw is not calm, so a reading without the calm reader reads as before this rung.
+  const fixMemoryCalm = (live: NonNullable<FixAdmissionResidents>): boolean => {
+    try {
+      return live.readFixMemoryCalm?.() === true;
+    } catch (error) {
+      void error; // An unreadable calm reading is not calm: the rung stays closed.
+      return false;
+    }
+  };
   const liveTrees = (): FixAdmissionResidents => {
     if (!residentsRead) {
       residents = readResidents();
@@ -20309,6 +20710,18 @@ export function createSweepFixAdmissionController(input: {
     if (live && live.fix.length === 0 && left >= charge.fixTypicalMib) charge.admissionRung = "typical";
     else if (live && live.fix.length + live.review.length === 0 && activeWorkers === 0 &&
       charge.headroomMib > 0 && charge.fixTypicalMib > charge.headroomMib) charge.admissionRung = "nothing-live";
+    else if (live && live.fix.length > 0 && (live.pendingFix ?? 0) === 0) {
+      // W1-T13879 — TYPICAL BESIDE LIVE. One fix at its typical peak beside live fix trees, only while nothing is reserved
+      // here (a second claim sees reservations 1, so live is undefined: at most one per pass on this rung). The headroom
+      // already nets each live tree's resident (the NO DOUBLE COUNT rule above); charging the residents AGAIN is
+      // deliberate: it keeps for each live fix room to grow by as much again as it holds now, a growth allowance from its
+      // own measurement instead of its class p90. Host memory must also read calm; the calm reader is asked last.
+      const liveFixMib = live.fix.reduce((sum, mib) => sum + mib, 0);
+      if (charge.headroomMib - charge.reviewChargeMib - liveFixMib - charge.fixTypicalMib >= 0 && fixMemoryCalm(live)) {
+        charge.admissionRung = "typical-beside-live";
+        charge.liveFixResidentMib = liveFixMib;
+      }
+    }
     if (charge.admissionRung !== "none") available = 1;
   };
   const reviewsFit = (count: number): boolean => !pressure
@@ -20373,6 +20786,7 @@ export function createSweepFixAdmissionController(input: {
       review_estimate_mib: state.charge?.reviewEstimateMib,
       fix_typical_mib: state.charge?.fixTypicalMib,
       admission_rung: state.charge?.admissionRung,
+      ...(state.charge?.admissionRung === "typical-beside-live" ? { live_fix_resident_mib: state.charge.liveFixResidentMib } : {}),
       ...order,
     });
   };
@@ -22465,17 +22879,24 @@ export async function runSweep(
     if (!deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
     let facts: PlanRepairFacts = {};
-    if (isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
+    const head = `${pr.prNumber}@${pr.headSha}`;
+    // The usual CI excerpt can drop part of the gate's HELD block.
+    const handoffJobId = pr.isPlanFiling && pr.headRefName && !planRepairHistory.has(`${head}@held-task-id-handoff`)
+      ? pr.ciFailures?.find((f) => f.name === "task-id-existence" && /^\d+$/.test(f.jobId ?? ""))?.jobId
+      : undefined;
+    if (handoffJobId || isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
       try {
-        facts = planRoundFacts.get(pr.prNumber) ?? await deps.readPlanRepairFacts(pr);
+        const cached = planRoundFacts.get(pr.prNumber);
+        facts = (handoffJobId && cached?.handoffs === undefined ? undefined : cached) ?? await deps.readPlanRepairFacts(pr, handoffJobId);
         planRoundFacts.set(pr.prNumber, facts);
       } catch (e) {
-        appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
+        if (!deps.dryRun) appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
         return notRepaired;
       }
     }
     const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory, deps.behindMainByPr?.get(pr.prNumber));
     if (decision === undefined) return notRepaired;
+    if (deps.dryRun) return { repaired: true, reason: `plan repair (${decision.signature}): would ${decision.action} on ${decision.check}` };
     if (decision.signature === "base-red") baseRedStandDownPrs.add(pr.prNumber);
     const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
     if (decision.action === "wait") {
@@ -22486,6 +22907,12 @@ export async function runSweep(
     }
     let result: PlanRepairOutcome;
     try {
+      if (decision.action === "handoff" &&
+          (planRepairHistoryFromLedger(readLedger(deps.ledgerPath)).has(`${head}@${decision.signature}`) ||
+           !claimPlanHandoff(deps.ledgerPath, head, deps.runId))) {
+        planRepairHistory.add(`${head}@${decision.signature}`);
+        return notRepaired;
+      }
       result =
         decision.signature === "base-red"
           ? { outcome: !deps.updateBranch ? "unwired"
@@ -22495,15 +22922,22 @@ export async function runSweep(
       result = { outcome: "error", reason: String((e as Error)?.message ?? e) };
     }
     if (decision.signature === "base-red" && result.reason !== undefined) result = { outcome: `error: ${result.reason}` };
-    appendLine(deps.ledgerPath, {
-      ...ledgered,
-      ...(decision.signature === "base-red" ? { cause: decision.cause } : {}),
-      ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
-      ...(decision.action === "retitle" ? { title: decision.title } : {}),
-      ...result,
-    });
-    if (result.outcome !== "unwired") planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
-    if (["renumbered", "retitled", "updated"].includes(result.outcome)) {
+    const standDownKey = `${pr.prNumber}@${pr.headSha}@${decision.signature}@stood-down`;
+    if (result.outcome !== "stood-down" || !planRepairHistory.has(`${standDownKey}@${String(result.reason)}`)) {
+      appendLine(deps.ledgerPath, {
+        ...ledgered,
+        ...(decision.signature === "base-red" ? { cause: decision.cause } : {}),
+        ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
+        ...(decision.action === "retitle" ? { title: decision.title } : {}),
+        ...(decision.action === "handoff" ? { handoffs: decision.handoffs } : {}),
+        ...result,
+      });
+    }
+    if (result.outcome === "stood-down") planRepairHistory.add(standDownKey).add(`${standDownKey}@${String(result.reason)}`);
+    if (result.outcome !== "unwired" && (result.outcome !== "stood-down" || decision.action === "handoff")) {
+      planRepairHistory.add(`${head}@${decision.signature}`);
+    }
+    if (["renumbered", "retitled", "updated", "handed-off"].includes(result.outcome)) {
       return { repaired: true, reason: `plan repair (${decision.signature}): ${decision.action} on ${decision.check} — ${result.outcome}` };
     }
     return { repaired: false, reason: `; plan repair (${decision.signature}) did not take: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}` };
