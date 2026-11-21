@@ -18,7 +18,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, returnedServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -585,8 +585,12 @@ export const THROWN_SERVED_MODEL_UNREADABLE = "the thrown error's served-model e
 /** Reading evidence never replaces the rejection or drops the row: a throwing getter is named, not propagated. */
 function thrownServedModelEvidence(error: unknown,
   observations: WeakMap<object, { servedModel: string | null; servedModelReason?: string }> | undefined): Record<string, string | null> {
-  try { return thrownServedModel(error, observations); }
-  catch { const reason = THROWN_SERVED_MODEL_UNREADABLE; return { served_model: null, served_model_reason: reason }; }
+  try {
+    const thrown = thrownServedModel(error, observations);
+    if (Object.keys(thrown).length > 0 || observations === undefined) return thrown;
+    // A wrapper's error (the quiet-worker watchdog's round end) replaced a result the worker had returned.
+    return servedModelEvidence(returnedServedModelOf(observations));
+  } catch { const reason = THROWN_SERVED_MODEL_UNREADABLE; return { served_model: null, served_model_reason: reason }; }
 }
 
 /** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
@@ -604,6 +608,11 @@ function thrownServedModel(error: unknown,
     ? observedServedModelOf(error, observations) ?? unscopedObservedServedModelOf(error)
     : observedServedModelOf(error) ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
   if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, observations, depth + 1);
+  return servedModelEvidence(observed);
+}
+
+function servedModelEvidence(observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined): Record<string, string | null> {
+  if (observed === undefined) return {};
   const { servedModel, servedModelReason } = observed;
   if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
   return typeof servedModelReason === "string" && servedModelReason.length > 0

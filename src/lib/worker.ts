@@ -222,7 +222,7 @@ import {
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
-  withObservedServedModel,
+  withObservedServedModel, forgetReturnedServedModel, observeReturnedServedModel,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -2505,6 +2505,14 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
+  forgetReturnedServedModel();
+  const result = await spawnWorkerUnobserved(args);
+  observeReturnedServedModel(result);
+  return result;
+}
+
+async function spawnWorkerUnobserved(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const attemptId = randomUUID();
   let assignment: WorkerSelectionAssignment | undefined;
   const onSelectionAssignment = args.onSelectionAssignment;

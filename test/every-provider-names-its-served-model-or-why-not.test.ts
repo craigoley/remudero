@@ -12,6 +12,7 @@ import { benchmarkNonDispatchSpawn, benchmarkRunAttemptReceipt, benchmarkWorkerA
 import { spawnWorker, WorkerAbandonedError, workerLedgerFields, type WorkerResult } from "#src/lib/worker.js";
 import * as runtimeRegistry from "#src/lib/instance-registry-selection.js";
 import { recordReviewFindings } from "#src/lib/review-findings.js";
+import { QuietRoundEndedError, guardSpawnWithQuietWatchdog } from "#src/lib/quiet-worker-watchdog.js";
 
 import {
   CASH_SERVED_MODEL_REASONS,
@@ -575,4 +576,30 @@ test("W1-T13868 criterion 1: a receipt owner records what the wrapper standing a
   assert.deepEqual(await outerRows({ servedModel: "gpt-5.2" }), [["worker.attempt", "gpt-5.2", undefined]], "a named response");
   assert.deepEqual(await outerRows({ servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON }),
     [["worker.attempt", null, CODEX_SERVED_MODEL_REASON]], "an unnamed response");
+});
+
+test("W1-T13868 criterion 1: a call whose returned result the quiet-worker watchdog replaced still records its model", async () => {
+  // Production dispatch: recordBenchmarkWorkerAttempt -> the quiet-worker guard -> spawnWorker. The worker returns, then
+  // the guard throws the round end it recorded in place of that result.
+  const ended = new QuietRoundEndedError({ reason: "the worker went quiet" });
+  const guarded = guardSpawnWithQuietWatchdog(spawnWorker, { abort: new AbortController(), onRootPid: () => {}, ended: () => ended,
+    watchdog: { observer: () => {}, tick: async () => {}, start: () => () => {} } });
+  const attempt = async (reply: Partial<WorkerResult>) => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-served-model-quiet-round-"));
+    const rows: Record<string, unknown>[] = [];
+    try {
+      await assert.rejects(recordBenchmarkWorkerAttempt(() => guarded({ cwd: root,
+        settingsFile: join(globalThis.process.cwd(), "settings", "worker.json"), permissionMode: "bypassPermissions",
+        prompt: "bounded worker", model: "sonnet", effort: "low", maxTurns: 4, mountProvider: "cash", cashSqueezed: true,
+        config: { root, dailyCapUsd: 25, workerProviders: { enabled: ["cash"], cashEndpoint: "https://openai.example.test/" } } as Config,
+        providerRouting: { spawnOpenWeight: async () => ({ isError: false, subtype: "success", text: "done", stderr: "",
+          numTurns: 1, durationMs: 5, totalCostUsd: 0, ...reply }) },
+      } as never), (step, fields) => rows.push({ step, ...fields }), () => undefined, () => {}), (error) => error === ended);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+    return rows.filter((row) => row.worker_failure === "spawn-threw-before-result")
+      .map((row) => [row.error_class, row.served_model, row.served_model_reason]);
+  };
+  assert.deepEqual(await attempt({ servedModel: "gpt-5.2" }), [["QuietRoundEndedError", "gpt-5.2", undefined]], "a named response");
+  assert.deepEqual(await attempt({ servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } as never),
+    [["QuietRoundEndedError", null, CASH_SERVED_MODEL_REASONS.unnamed]], "an unnamed response");
 });

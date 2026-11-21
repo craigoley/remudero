@@ -2314,6 +2314,32 @@ export function observeServedModelsPerCall<T>(observations: WeakMap<object, Obse
   return callServedModels.run([...(callServedModels.getStore() ?? []), observations], run);
 }
 
+/** W1-T13868: the key under which a call's table holds the served model of the result its worker RETURNED. A wrapper can
+ * still replace that result with its own error (the quiet-worker watchdog's QuietRoundEndedError ends a round after the
+ * worker came back), and that error names no model; the call's reader falls back to this record. */
+const RETURNED_RESULT_KEY: object = Object.freeze({ key: "returned-result-served-model" });
+
+/** W1-T13868: record, in every enclosing call's table, the served model of the result a worker returned. Outside any
+ * call's scope it records nothing. */
+export function observeReturnedServedModel(result: { servedModel?: string | null; servedModelReason?: string }): void {
+  const scoped = callServedModels.getStore();
+  if (scoped === undefined) return;
+  const record = { servedModel: typeof result.servedModel === "string" ? result.servedModel : null,
+    ...(result.servedModelReason !== undefined ? { servedModelReason: result.servedModelReason } : {}) };
+  for (const table of scoped) table.set(RETURNED_RESULT_KEY, record);
+}
+
+/** W1-T13868: forget a returned result's record in every enclosing call's table, as a new worker call starts, so a
+ * later call's replaced result is never read as an earlier call's. */
+export function forgetReturnedServedModel(): void {
+  for (const table of callServedModels.getStore() ?? []) table.delete(RETURNED_RESULT_KEY);
+}
+
+/** W1-T13868: the served model of the result this call's worker returned before an error replaced it, if any. */
+export function returnedServedModelOf(observations: WeakMap<object, ObservedServedModel>): ObservedServedModel | undefined {
+  return observations.get(RETURNED_RESULT_KEY);
+}
+
 /** W1-T13868: a spawn that throws after its stream named a model still carries that model (or the named reason)
  * on the error, so the failed attempt's row records it like a returned result's row does. */
 export function withObservedServedModel<E extends Error>(error: E,
