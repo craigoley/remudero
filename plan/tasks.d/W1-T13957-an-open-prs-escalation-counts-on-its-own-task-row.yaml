@@ -14,6 +14,7 @@
   files:
     - src/lib/inbox-board-referents.ts
     - test/inbox/an-open-prs-escalation-counts-on-its-own-task-row.test.ts
+    - src/lib/status.ts # amended 2026-11-20 for PR 19888: ghGateway.listOpenHeadBranches carries the PR body
   status: queued
   attempts: 0
   rationale: |
@@ -31,6 +32,10 @@
     rule: cannot observe means wait). A PR seen only as an overlap entry on another task never takes that task's
     needsHuman. UNVERIFIED: whether the open-PR batch carries headRefName; the builder confirms it and adjusts
     the lookup key.
+
+    Scope amendment 2026-11-20 for PR 19888: files adds src/lib/status.ts. Review on 475b1fe1c found the
+    Inbox CLI's ghGateway.listOpenHeadBranches drops the PR body, so ownTaskIds reads every open PR's body as
+    unread on that path; one mapping line carries REST's body, as the batched gateway already does.
 
     INVARIANT escalation-from-own-task: an open PR's escalation count comes only from a single unambiguous projection row for its own task; a missing or contradictory row stays unreadable.
   acceptance:

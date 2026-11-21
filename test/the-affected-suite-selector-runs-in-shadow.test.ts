@@ -10,10 +10,10 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { gitRepo } from "./helpers/git-repo.js";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 import {
   affectedSelectionOrFull,
@@ -28,8 +28,6 @@ import {
 } from "../src/lib/affected-suites.js";
 import { affectedSuitesStep } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A small tree: b imports a, a suite imports b, a census suite READS a by path, one is unrelated,
  *  and a suite spawns a script it names by path rather than importing it. */
@@ -597,6 +595,45 @@ test("W1-T10506: the unreadable commit range suite is selected for each recorded
   const unrelated = selectAffectedSuites(["src/a.ts"], selectorInput);
   assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
   const absent = selectAffectedSuites(["src/lib/commit-message.ts"], { ...selectorInput, files: filesWithoutSuite });
+  assert.equal(absent.fullRun, false);
+  assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
+});
+
+test("W1-T10557: the console Claude login suite is selected for each recorded miss edge", async (t) => {
+  const suite = "test/routing/the-console-claude-login-reaches-the-fleet-store.test.ts";
+  const sourceEdges = [
+    "src/lib/account-usage.ts",
+    "src/lib/provider-auth-sessions.ts",
+    "src/lib/worker-home.ts",
+  ];
+  const siblingEdges = [
+    "test/routing/a-console-claude-swap-names-the-account-it-switched-to.test.ts",
+    "test/routing/the-console-signs-the-fleet-into-claude.test.ts",
+  ];
+  // Use the real imports so the source edges exercise the graph as they do in CI.
+  const files = new Map(Object.entries(TREE));
+  for (const file of [suite, ...sourceEdges, ...siblingEdges]) {
+    files.set(file, readFileSync(join(REPO_ROOT, file), "utf8"));
+  }
+  const selectorInput: AffectedSuitesInput = {
+    files,
+    pathReaders: [],
+    packageRoot: REPO_ROOT,
+  };
+  for (const changed of [...sourceEdges, ...siblingEdges]) {
+    await t.test(changed, () => {
+      const selection = selectAffectedSuites([changed], selectorInput);
+      assert.equal(selection.fullRun, false);
+      assert.ok(selection.suites.includes(suite), `${changed} must select ${suite} in the floor`);
+      const reason = sourceEdges.includes(changed) ? `reaches ${changed}` : "reads a changed file by path";
+      assert.ok(selection.reasons.includes(`${suite}: ${reason}`));
+    });
+  }
+  const unrelated = selectAffectedSuites(["src/a.ts"], selectorInput);
+  assert.equal(unrelated.fullRun, false);
+  assert.ok(!unrelated.suites.includes(suite), "an unrelated change must not select the suite");
+  files.delete(suite);
+  const absent = selectAffectedSuites([siblingEdges[0]!], selectorInput);
   assert.equal(absent.fullRun, false);
   assert.ok(!absent.suites.includes(suite), "a suite absent from the tree cannot be selected");
 });

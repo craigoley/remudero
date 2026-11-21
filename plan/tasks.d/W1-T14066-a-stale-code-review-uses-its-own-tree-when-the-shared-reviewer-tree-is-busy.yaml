@@ -1,0 +1,137 @@
+- id: W1-T14066
+  title: "A stale-code review uses its own tree at origin/main when the shared reviewer tree is busy, so concurrent reviews are posted and not skipped while the daemon waits to restart"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes which tree a stale-code review runs from; a wrong tree would judge a pull request with the wrong code
+  origin: "operator-session#reviewer-tree-lease-skips-2026-11-20"
+  plan_refs:
+    - W1-T3723
+    - W1-T3962
+    - W1-T9065
+    - W1-T11847
+    - W1-T7850
+    - W1-T13222
+    - W1-T3691
+  files:
+    - src/run-task.ts
+    - src/lib/reviewer-worktree-lease.ts
+    - test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:fresh-code-only — when the lease on <worktreeRoot>/reviewer-<sha12> refuses with ReviewerWorktreeLeasedError, buildFreshTreeReviewRunner cuts one tree at <worktreeRoot>/reviewer-<sha12>-<pid>-<8 hex> with addWorktree at the same origin/main sha, proves it an exact clean detached checkout of that sha, calls spawnReview with that path only, returns the child's exit code, and calls removeWorktree once for that path after the child settles; spawnReview is never called with the shared path"
+      kind: guard
+      proof: "grep: W1-T14066 criterion 1: in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts"
+    - claim: "The removal also runs when spawnReview rejects (the runner returns undefined, as on origin/main), and a removeWorktree that throws does not change the returned exit code"
+      proof: "grep: W1-T14066 criterion 2: in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts"
+    - claim: "With the production lease and a real git repository: a <shared>.lock file whose holder is a live process of this host (the W1-T13991 review that held reviewer-e200819f2e11 at 18:47Z) makes the runner review from its own tree; the .lock file is byte-for-byte unchanged, the shared tree is not removed, and afterwards the own tree is gone from disk and from git worktree list"
+      proof: "grep: W1-T14066 criterion 3: in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts"
+    - claim: "The W1-T3962 control changes on purpose: a shared tree that is mismatched or dirty is never added over and never reviewed in; the runner cuts its own tree and reviews there. A missing or unreadable shared tree still returns undefined with no add and no spawn, as on origin/main"
+      proof: "grep: W1-T14066 criterion 4: in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts"
+    - claim: "invariant:skip-only-when-no-fresh-tree — a corrupt or unknown shared lease, a failed fetch, an addWorktree that throws for the own tree, or an own tree that prepareWorktree cannot make runnable each return undefined with no spawn, and onFailure names that cause; removeWorktree is called only for a path whose addWorktree succeeded"
+      kind: guard
+      proof: "grep: W1-T14066 criterion 5: in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts"
+    - claim: the fresh-tree runner recognises a busy shared tree by the lease's own error type
+      proof: "grep: ReviewerWorktreeLeasedError in src/run-task.ts"
+  rationale: |
+    WHY: while the daemon's reviewer code is behind origin/main, most reviews are skipped, not run.
+    OBSERVED, read-only, in the Azure daemon ledger (~/rmd-state2/state/ledger.ndjson and the rotated
+    ledger.*.ndjson.gz, rows deduplicated with sort -u), from 2026-11-19T18:00Z to 2026-11-20T18:50Z:
+    - 33 review.skipped_stale_reviewer_code rows with fresh_tree "unavailable", across 23 pull requests
+      (31 of them at code_sha f3658256ecbe). 29 say "Error: reviewer worktree is leased by another
+      owner". 4 say "reviewer worktree at .../reviewer-<sha12> is not an exact clean detached checkout".
+      Only 19 review.ran_from_fresh_tree rows in the same time (10 review-lane children, 9 daemon).
+      Since 2026-11-18T12:00Z: 80 skips (70 for the lease) against 99 runs.
+    - The lease holder was a live review every time. For 28 of the 29 lease skips another review run
+      at the same origin/main sha started before the skip and finished after it. The 29th (#19515,
+      18:47:21Z, sha e200819f2e11) was held by pid 2118134, run work-review-W1-T13991-1795200190867-d6e3,
+      started 18:43Z and still running at 18:56Z; reviewer-e200819f2e11.lock names that pid. No stale
+      lease was found. A fresh-tree review child holds the lease for 6.6 to 18.3 minutes (median about 12).
+    - The 4 other skips are a cut race: each is the first use of a new origin/main sha, a few hundred
+      milliseconds after another child started cutting the same reviewer-<sha12> (for example
+      W1-T13850 at 1795196209939 ms, the skip from W1-T13785 at 1795196210078 ms).
+    - A skipped child spends 4 to 28 seconds and an admission slot, then the sweep requeues the pull
+      request ("one fresh review of this head (W1-T11847)"). The semantic post-review admission bound
+      was 0 to 1 in those passes, so the skips used the slots that real reviews needed. Of the 23
+      skipped pull requests only #19907 had a verdict posted afterwards (10 minutes later). #19766 has
+      waited with a pending review since 17:38:32Z; 12 pull requests were in that requeue between
+      18:40Z and 18:57Z.
+    - The daemon defers its freshness restart by design (daemon.freshness_decision action defer,
+      pressure 15 < 18). This task does not change that; it makes reviews flow while the code is stale.
+    CAUSE, in code on origin/main e200819f2:
+    - buildFreshTreeReviewRunner (src/run-task.ts) cuts one tree per origin/main sha,
+      <worktreeRoot>/reviewer-<sha12>, and runs the review under withReviewerWorktreeLease.
+    - withReviewerWorktreeLease (src/lib/reviewer-worktree-lease.ts, #10937) writes <tree>.lock, the
+      general reaper's run-lock token (src/lib/worker.ts runLockPath, src/lib/object-reaper.ts
+      isWorktreeActive). Its borrowers map shares the tree inside one process only. Every review
+      child is its own process, so a second child at the same sha throws "leased by another owner",
+      and the runner returns undefined, which run-child.ts logs as the skip.
+    - prepareFreshOriginMainTree throws "not an exact clean detached checkout" when a second child
+      inspects the tree while the first child's git worktree add is still checking it out.
+    Not the same as the related tasks: W1-T3962 (merged) made the per-sha tree reusable and runnable;
+    W1-T7850 (merged) re-reviews a verdict refused because its tree vanished; W1-T13222 (merged) keeps
+    reviewer trees out of the state snapshot. None of them lets two processes review at one sha.
+  design: |
+    INVARIANT fresh-code-only: a stale-code review runs only from a tree proven an exact clean detached checkout of the origin/main sha it read; a busy or unproven shared tree is never reviewed in, added over or removed.
+    INVARIANT skip-only-when-no-fresh-tree: the review is skipped only when no tree at that sha can be cut and made runnable; it never falls back to the daemon's loaded code.
+    CHOICE: when the shared tree is busy, cut the review its own tree at the same sha, as W1-T9065's
+    approve already does, and remove it when the review settles. The common case is unchanged: a free
+    shared tree is reused, so no extra disk and no extra cut. Rejected:
+    - Waiting for the lease: one review per sha at a time, 6.6 to 18.3 minutes each, while the waiting
+      child holds an admission slot. 12 queued pull requests would take hours.
+    - A shared-read lease: the reaper's run-lock is one holder per file (worker.ts readRunLock,
+      object-reaper.ts isWorktreeActive). Many holders would change both reapers and still need a cut
+      lock for the race.
+    - Always one tree per review: about 262 MB (13,869 tracked files) and a cut for every review, also
+      when the shared tree is free.
+    Disk stays bounded without a cap: an own tree lives only while its review runs, so the extra trees
+    are at most the reviews the existing admission bound lets run at once; a tree whose process died is
+    registered and detached, and the general worktree reaper collects it (as for W1-T9065's approve).
+    1. src/lib/reviewer-worktree-lease.ts: export class ReviewerWorktreeLeasedError extends Error. Throw
+       it, with the same message "reviewer worktree is leased by another owner", at the two places in
+       claim() that throw that message today. Every other refusal (corrupt lease, nonregular lock,
+       contested reclaim, changed lease) keeps its plain Error.
+    2. src/run-task.ts, buildFreshTreeReviewRunner: keep the shared path, its prepared cache and its
+       lease. Add one helper that cuts an own tree with perAttemptTreePath(deps, "reviewer", sha) and
+       deps.addWorktree, runs makeTreeRunnable, takes the lease on the own path, checks
+       freshTreeInspector(...) === "reusable" for that path and sha, calls deps.spawnReview there, and
+       in finally calls removePerAttemptTree only when the add succeeded. Use it when (a) the shared
+       lease call rejects with ReviewerWorktreeLeasedError (the action has not run, so nothing was
+       reviewed), or (b) prepareFreshOriginMainTree finds the shared path "unsafe". Keep the shared
+       tree's prepared entry in case (a); in case (b) do not cache anything. Any other error falls back
+       to the skip exactly as today, with freshTreeFailureText naming it.
+    3. Raw git worktree add sites stay at four: the own tree is cut through deps.addWorktree, as the
+       approve path does. Do not change run-child.ts: a run from an own tree is still logged as
+       review.ran_from_fresh_tree.
+    4. Tests, all in test/a-stale-reviewer-reviews-from-a-fresh-tree.test.ts (it already imports
+       src/run-task.ts; a new test file importing it trips the affected-suite reach ratchet), one test
+       per criterion titled "W1-T14066 criterion N: ...". Criteria 1, 2, 4 and 5 use the injected
+       seams; a busy shared tree is a withWorktreeLease seam that rejects with
+       ReviewerWorktreeLeasedError for the shared path and runs the action for any other path.
+       Criterion 3 uses gitRepo, the production lease and a .lock JSON naming process.ppid on this
+       host. Change the W1-T3962 "unproven tree control" test only for its mismatched and dirty cases
+       (criterion 4). Load test/setup/tmp-hygiene.ts through the existing helpers for any temp folder.
+    No new cap, constant, env var or config key. Both changed source files are in
+    REVIEW_MATERIAL_ADVANCE_PATHS, so the merge makes the daemon's reviewer code stale once more; this
+    task is what lets reviews keep flowing through that.
+  falsifier: |
+    At origin/main a lease seam that rejects with "leased by another owner" makes the runner return
+    undefined with no spawn, so criteria 1 and 3 fail. Catch every lease error instead of the typed
+    one: criterion 5's corrupt-lease case cuts an own tree. Review in the shared path after the lease
+    refusal: criterion 1 sees spawnReview called with reviewer-<sha12>. Skip the removal on a
+    rejected child: criterion 2 counts zero removals. Leave the W1-T3962 control unchanged: criterion
+    4's dirty case returns undefined.
+  note: |
+    Id reserved for run-unfiled-1795201194918 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-20. Filing only; not built.
+    Not in scope: the 9 of 19 fresh-tree runs that exited 1 or 2 in the same time (their failure rows
+    name the cause; a separate task if they persist), the 45 per-sha reviewer trees kept under
+    engines/worktrees, and the daemon's freshness restart decision.
+    After deploy, check: review.skipped_stale_reviewer_code rows whose fresh_tree_reason says "leased
+    by another owner" or "not an exact clean detached checkout" stop, while review.ran_from_fresh_tree
+    rows continue at the stale code sha.
