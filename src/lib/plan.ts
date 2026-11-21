@@ -1,11 +1,12 @@
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins } from "./operator-release.js";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
+import { readFileIfExists } from "./fs-race-safe.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
@@ -279,16 +280,149 @@ function readNeedsInput(value: unknown): TaskNeedsInput | undefined {
     ...(typeof e.source_pr === "string" || typeof e.source_pr === "number" ? { source_pr: String(e.source_pr) } : {}) };
 }
 
+/** W1-T13940: the one answer rule every reader shares: a string with a non-space character, else no answer. */
+export function answerText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 /** W1-T12715: the newest answer among question-store lines for `taskId`, or undefined. */
 export function newestTaskAnswer(lines: Iterable<unknown>, taskId: string): string | undefined {
   let newest: { ts: string; answer: string } | undefined;
   for (const value of lines) {
     const line = typeof value === "object" && value !== null ? value as { task?: unknown; answer?: unknown; ts?: unknown } : {};
-    if (line.task !== taskId || typeof line.answer !== "string" || line.answer.trim() === "") continue;
+    const answer = answerText(line.answer);
+    if (line.task !== taskId || answer === undefined) continue;
     const ts = typeof line.ts === "string" ? line.ts : "";
-    if (newest === undefined || ts >= newest.ts) newest = { ts, answer: line.answer };
+    if (newest === undefined || ts >= newest.ts) newest = { ts, answer };
   }
   return newest?.answer;
+}
+
+/** W1-T13940: the newest nonblank panel.question_answered ledger row for `taskId`, or undefined. */
+export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string): LedgerTaskAnswer | undefined {
+  let newest: LedgerTaskAnswer | undefined;
+  for (const value of rows) {
+    const row = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const answer = answerText(row.answer);
+    if (row.step !== "panel.question_answered" || row.task_id !== taskId || answer === undefined) continue;
+    const ts = typeof row.ts === "string" ? row.ts : "";
+    if (newest === undefined || ts >= newest.ts) newest = { ...row, ts, answer };
+  }
+  return newest;
+}
+
+type LedgerTaskAnswer = Readonly<Record<string, unknown>> & { readonly ts: string; readonly answer: string };
+
+/** W1-T13940: the answers a needs_input reader published, beside the ledger in the state folder serve and the daemon both mount. */
+export function sharedAnswersPath(ledgerPath: string): string {
+  return join(dirname(ledgerPath), "question-answers.ndjson");
+}
+
+export interface SharedAnswerEvidence {
+  lines: readonly unknown[];
+  rows: (taskId: string) => readonly unknown[];
+  /** Set when the answers file, or the ledger, could not be read; a reader must then publish nothing. */
+  answersUnreadable?: string;
+  ledgerUnreadable?: string;
+  partial?: string;
+}
+
+/** W1-T13940: the evidence every needs_input reader decides from, read from where the last read stopped. A checkout
+ * path names different folders in serve and the daemon, so no checkout's store is in it. */
+export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvidence {
+  let tail: { dev: number; ino: number; head: string; offset: number; rows: Map<string, unknown[]> } | undefined;
+  return () => {
+    const reasons: string[] = [];
+    let fd: number | undefined;
+    let ledgerUnreadable: string | undefined;
+    try {
+      fd = openSync(ledgerPath, "r");
+      const stat = fstatSync(fd);
+      const headBytes = Buffer.alloc(Math.min(256, stat.size));
+      readSync(fd, headBytes, 0, headBytes.length, 0);
+      const head = headBytes.toString("latin1");
+      if (!tail || tail.dev !== stat.dev || tail.ino !== stat.ino || stat.size < tail.offset || !head.startsWith(tail.head)) {
+        tail = { dev: stat.dev, ino: stat.ino, head, offset: 0, rows: new Map() };
+      }
+      const fresh = Buffer.alloc(stat.size - tail.offset);
+      readSync(fd, fresh, 0, fresh.length, tail.offset);
+      const end = fresh.lastIndexOf(10);
+      for (const raw of end < 0 ? [] : fresh.subarray(0, end).toString("utf8").split("\n")) {
+        if (!raw.includes('"panel.question_answered"')) continue;
+        try {
+          const row = JSON.parse(raw) as { task_id?: unknown };
+          if (typeof row.task_id === "string") tail.rows.set(row.task_id, [...(tail.rows.get(row.task_id) ?? []), row]);
+        } catch {
+          continue; // deliberate: a torn line is skipped, as every ledger reader does.
+        }
+      }
+      if (end >= 0) tail.offset += end + 1;
+      if (tail.head.length < 256) tail.head = head;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined;
+      else reasons.push(ledgerUnreadable = `the ledger ${ledgerPath} is unreadable: ${(error as Error).message}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const lines: unknown[] = [];
+    let answersUnreadable: string | undefined;
+    try {
+      let skipped = 0;
+      for (const raw of (readFileIfExists(sharedAnswersPath(ledgerPath)) ?? "").split("\n")) {
+        if (raw.trim() === "") continue;
+        try {
+          lines.push(JSON.parse(raw));
+        } catch {
+          // Collapses only JSON.parse's SyntaxError: a line torn by a concurrent append, or a malformed one. Not erased:
+          // the count makes the evidence `partial`, so the Inbox source reads partial, and the line releases no task.
+          skipped++;
+        }
+      }
+      if (skipped > 0) reasons.push(`the answers file has ${skipped} malformed line(s)`);
+    } catch (error) {
+      answersUnreadable = `the answers file ${sharedAnswersPath(ledgerPath)} is unreadable: ${(error as Error).message}`;
+      reasons.push(answersUnreadable);
+    }
+    const known = tail;
+    return { lines, rows: (taskId) => known?.rows.get(taskId) ?? [], ...(answersUnreadable ? { answersUnreadable } : {}), ...(ledgerUnreadable ? { ledgerUnreadable } : {}),
+      ...(reasons.length > 0 ? { partial: reasons.join("; ") } : {}) };
+  };
+}
+
+/** W1-T13940: one answer for a task, from a question-store line (`task`), an answer row (`task_id`) or a published line. */
+export interface AnswerRecord { task: string; answer: string; ts: string; origin: string; answer_id?: string; author_login?: string; authority?: string; source?: "ledger" | "store" }
+
+/** W1-T13940: the nonblank answers for `taskId` among store lines, published lines and panel.question_answered rows. */
+export function answerRecords(values: Iterable<unknown>, taskId: string): AnswerRecord[] {
+  const out: AnswerRecord[] = [];
+  for (const value of values) {
+    const v = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const answer = answerText(v.answer);
+    if ((v.step === undefined ? v.task : v.step === "panel.question_answered" ? v.task_id : undefined) !== taskId || answer === undefined) continue;
+    const text = (key: string): Record<string, string> => typeof v[key] === "string" ? { [key]: v[key] as string } : {};
+    out.push({ task: taskId, answer, ts: typeof v.ts === "string" ? v.ts : "", origin: typeof v.origin === "string" ? v.origin : "",
+      ...text("answer_id"), ...text("author_login"), ...text("authority"), ...(v.source === "ledger" || v.source === "store" ? { source: v.source } : {}) });
+  }
+  return out;
+}
+
+/** W1-T13940: `known` holds `record` already: the same answer_id, or the same origin and text. */
+export function answerHeld(known: readonly AnswerRecord[], record: AnswerRecord): boolean {
+  return known.some((other) => (record.answer_id !== undefined && other.answer_id === record.answer_id) || (other.origin === record.origin && other.answer === record.answer));
+}
+
+/** W1-T13940: append each of `candidates` that `known` lacks to the answers file beside the ledger, so the reader that cannot
+ * see the store it came from counts it too. Best effort: it never decides an answer, and a failed append is retried next read. */
+export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): void {
+  for (const record of candidates) {
+    if (answerHeld(known, record)) continue;
+    try {
+      appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(record) + "\n");
+      known.push(record);
+    } catch {
+      return; // deliberate: the answer still counts where it is held; an unpublished one is published on a later read.
+    }
+  }
 }
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */

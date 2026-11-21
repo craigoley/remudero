@@ -12,7 +12,7 @@
   files:
     - src/lib/benchmark-cohort.ts
     - test/benchmark-cohort.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The field trials work needs each worker call in the benchmark cohort index to carry the verified outcome of
