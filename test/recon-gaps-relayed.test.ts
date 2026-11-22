@@ -153,10 +153,14 @@ function fakeGh(branch: string): string {
   return dir;
 }
 
-async function runFixture(t: import("node:test").TestContext, spawn: typeof spawnWorker) {
+async function runFixture(
+  t: import("node:test").TestContext,
+  spawn: typeof spawnWorker,
+  fixture: { plan?: string; github?: GitHub } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), "gaps-root-"));
   const planPath = join(root, "tasks.yaml");
-  writeFileSync(planPath, FIXTURE_PLAN);
+  writeFileSync(planPath, fixture.plan ?? FIXTURE_PLAN);
   const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
   gitFixture(root);
   const FIXED_TS = 1785100000000;
@@ -171,7 +175,7 @@ async function runFixture(t: import("node:test").TestContext, spawn: typeof spaw
         skipGitSync: true,
         planPath,
         config,
-        github: OFFLINE_GITHUB,
+        github: fixture.github ?? OFFLINE_GITHUB,
         spawn,
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
@@ -360,4 +364,52 @@ test("MUTANT: the relay reads couldntVerify, and the label is applied only to th
   // "labelled" assertion above would pass while conveying nothing.
   const plain = "`- ${l} ${citation(`recon#${taskId}`)}`";
   assert.equal([SRC, ENTRYPOINT_SRC].reduce((count, source) => count + source.split(plain).length - 1, 0), 1, "the OBSERVED mapper must exist, exactly once, unlabelled");
+});
+
+// ── W1-T11396: the declared prerequisites reach BOTH real prompt producers ───────────────────
+
+test("prerequisite outcome context reaches real recon and implementation prompt preparation", async (t) => {
+  const plan = [
+    "- id: T-DEP",
+    "  title: the prerequisite",
+    "  repo: remudero",
+    "  type: implement",
+    "  verify: auto",
+    "  risk: medium",
+    "  files: [src/lib/daemon.ts]",
+    "  origin: architect",
+    "  status: queued",
+    "",
+    FIXTURE_PLAN.replace("  status: queued", "  depends_on: [T-DEP]\n  status: queued"),
+  ].join("\n");
+  const depPr = { number: 4242, url: "https://github.com/acme/remudero/pull/4242", state: "MERGED", mergedAt: "2026-11-01T00:00:00Z" };
+  const github: GitHub = {
+    ...OFFLINE_GITHUB,
+    findMergedByTrailer: (id) => (id === "T-DEP" ? depPr : null),
+    headRefName: (url) => (url === depPr.url ? "run-T-DEP-1785000000000" : undefined),
+    prBody: (url) => (url === depPr.url ? "Remudero-Task: T-DEP" : undefined),
+  };
+  const spawnCalls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    spawnCalls.push(args);
+    if (spawnCalls.length === 1) return result({ sessionId: "s-recon", text: reconText("a gap") });
+    // Both prompts are already rendered and captured: the push/PR path past the implement spawn is
+    // not what this proves, so the implement worker fails here rather than run it.
+    return result({ sessionId: "s-impl", text: "", subtype: "error_during_execution", isError: true });
+  };
+
+  await runFixture(t, spawn, { plan, github });
+  assert.ok(spawnCalls.length >= 2, "recon then implement (the failed implement may be retried)");
+  for (const [lane, call] of [["recon", spawnCalls[0]], ["implement", spawnCalls[1]]] as const) {
+    const prompt = String(call.prompt);
+    assert.match(prompt, /Declared prerequisites of T-GAPS: 1 total, 1 shown, 0 omitted/, `${lane} carries the header`);
+    assert.match(prompt, /Prerequisite 1\/1 T-DEP: merged via [^;]*PR#4242[^;]*; base-applicability-unknown/, `${lane} carries the canonical reference`);
+    assert.ok(prompt.includes("https://github.com/acme/remudero/pull/4242"), `${lane} names the PR`);
+  }
+  const implPrompt = String(spawnCalls[1].prompt);
+  assert.equal(assertProvenance(implPrompt), undefined, "the cited CONTEXT block still lints clean");
+  assert.ok(
+    contextBlocks(implPrompt).some((block) => block.join("\n").includes("Prerequisite 1/1 T-DEP")),
+    "the implement prompt carries it inside CONTEXT as a cited claim",
+  );
 });
