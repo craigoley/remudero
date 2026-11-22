@@ -6507,9 +6507,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // from the projection and plan snapshot this run already prepared (no per-dependency read) and
     // bound to the frozen child base. The projection carries no merge commit SHA, so base
     // applicability renders unknown rather than inferred. Shared by recon AND implement below.
-    const childBaseSha = (() => {
+    // Awaits the async leaf: the daemon loop must not block on a synchronous worktree git call.
+    const childBaseSha = await (async (): Promise<string | undefined> => {
       try {
-        return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim() || undefined;
+        return (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim() || undefined;
       } catch (error) {
         // An unreadable base renders "child base unavailable" in the block, never a guessed SHA.
         say(`prerequisite context: child base unreadable (${String((error as Error)?.message ?? error)})`);
