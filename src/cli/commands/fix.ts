@@ -37,6 +37,7 @@ import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requ
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
 import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
+import { FIX_SELF_CHECK_EXTRA_TURNS, FIX_SELF_CHECK_TIMEOUT_MS, buildFixSelfCheckPrompt, decideFixSelfCheck, fixSelfCheckUnclearedLines, metCriteriaForFix, runBoundedFixSelfCheck, type FixSelfCheckDecision, type FixSelfCheckRunArgs, type FixSelfCheckRunResult } from "../../lib/fix-self-check.js";
 import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
@@ -45,7 +46,8 @@ import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
@@ -137,6 +139,7 @@ export interface FixCommandHost {
   readonly workerChangedPaths: (raw: string) => string[];
   readonly workerCreatedCurrentHead: RunTaskCommandHost["workerCreatedCurrentHead"];
   readonly worktreeHasUncommittedChanges: RunTaskCommandHost["worktreeHasUncommittedChanges"];
+  readonly runFixSelfCheck?: (args: FixSelfCheckRunArgs) => Promise<FixSelfCheckRunResult>;
 }
 
 /**
@@ -2771,8 +2774,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       standInEscalates = false;
     }
   };
-  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
-  // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-task withholding, so a
+  // fix-lane effectiveness report has a randomized control. W1-T14137: one assignment per TASK, keyed on
+  // opts.taskId and never the run id (a sweep's run id is pass-wide), so every strike, every run of the task
+  // and its implement run agree, and two tasks of one sweep pass draw independently.
   const stagedRetirements = typeof opts.config.root === "string"
     ? stagedSkillRetirements(join(opts.config.root, "state", "inbox-proposals.json")) : new Set<string>();
   const fixSkillSelection = observeSkillSelection(
@@ -2780,7 +2785,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     SKILL_FIX_TASK_TYPE,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     opts.task.files,
-    (skillName) => skillWithheldUnderRetirement(opts.runId, skillName, stagedRetirements),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: opts.taskId, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, stagedRetirements),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
   let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
@@ -3980,10 +3988,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
-    const rawUnmet = review.criteria.map((c, index) => {
+    const judgedCriteria = review.criteria.map((c, index) => {
       const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
       return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
-    }).filter((c) => !c.met);
+    });
+    const rawUnmet = judgedCriteria.filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
     const proofDiscriminationFromReview =
       opts.proofDiscrimination !== undefined &&
@@ -4397,7 +4406,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           {
             review: { unmetCriteria: unmet, summary: review.summary, findings: verifiedReviewFindingsForFix(
               roundLedger, opts.taskId, opts.prUrl, priorHeadSha,
-            ) },
+            ), metCriteria: metCriteriaForFix(judgedCriteria) },
             actionableGateFailures: gateFailuresNow,
             proofDiscrimination: proofDiscriminationNow,
             constraint: progressConstraint(),
@@ -5041,6 +5050,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.branchClaim?.release();
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
+    let selfCheckCostUsd = 0;
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
@@ -5059,7 +5069,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ...(fixWorkerEndedBySignal(fixResult)
         ? { worker_exit: "signal", worker_exit_signal: fixResult.exit.signal } : {}),
       ...fixRoundLandingFields(landing, fixResult.subtype, fixOutcome?.kind ?? "unstated"),
-      cost_usd: fixResult.costUsd,
+      cost_usd: selfCheckCostUsd > 0 ? (fixResult.costUsd ?? 0) + selfCheckCostUsd : fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
       num_turns: fixResult.numTurns,
@@ -5085,6 +5095,63 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const unlandedStrikes = () => (strikes === attempt ? attempt - 1 : strikes);
     const notLandedOutcome = (landing: Extract<FixRoundLanding, { landed: false }>): FixRungOutcome => ({ outcome: "stood_down", review,
       strikes: unlandedStrikes(), retriggers, reason: `fix round push did not land (${landing.outcome})`, standDownReason: `fix round push did not land (${landing.outcome}): ${landing.reason}` });
+    const selfCheckBeforePush = async (): Promise<void> => {
+      const acceptance = opts.task.acceptance ?? [];
+      if (!host.runFixSelfCheck || fixMode !== "reviewer-unmet" || acceptance.length === 0 || expectedHeadShaForPush === undefined ||
+        expectedHeadShaForPush === (roundStartSha ?? priorHeadSha)) return;
+      const priorReasons = visibleCriteria(judgedCriteria).map((c) => ({ criterionIndex: c.criterionIndex, met: c.met, reason: c.reason }));
+      for (let check = 1; ; check++) {
+        const commitSha: string = expectedHeadShaForPush;
+        const startedMs = systemClock.now();
+        const row = { round_id: roundId, pr_url: opts.prUrl, strike: attempt, head_sha: commitSha, attempt: check };
+        let decision: FixSelfCheckDecision;
+        try {
+          const checkPrompt = buildFixSelfCheckPrompt({ task: opts.task, prUrl: opts.prUrl, owner: opts.reviewBase.owner,
+            repo: opts.reviewBase.repo, commitSha, priorReasons });
+          const bound = new AbortController();
+          const result = await runBoundedFixSelfCheck(host.runFixSelfCheck({ worktreePath: opts.worktreePath, commitSha,
+            prompt: checkPrompt, timeoutMs: FIX_SELF_CHECK_TIMEOUT_MS, signal: bound.signal, mount: opts.reviewBase.reviewerMount,
+            settingsFile: opts.settingsFile, config: opts.config, budgetUsd: opts.budgetUsd, runId: opts.runId, taskId: opts.taskId,
+          }), bound, FIX_SELF_CHECK_TIMEOUT_MS);
+          if (result.worker) selfCheckCostUsd += deps.account(result.worker).costUsd ?? 0;
+          const headAfter = (await hostWorktreeGitAsync(opts.worktreePath, ["rev-parse", "HEAD"])).trim();
+          if (headAfter !== commitSha) throw new Error(`the self-check moved the worktree head to ${headAfter}`);
+          decision = decideFixSelfCheck(result.transcript, acceptance);
+        } catch (error) {
+          deps.log("fix.self_check", { ...row, state: "unavailable", criteria_total: acceptance.length,
+            reason: String((error as Error)?.message ?? error).slice(0, 500), duration_ms: systemClock.now() - startedMs });
+          return;
+        }
+        deps.log("fix.self_check", { ...row, state: decision.state, criteria_total: decision.criteriaTotal,
+          cleared_count: decision.clearedCount, uncleared_count: decision.unclearedIndices.length,
+          uncleared_indices: decision.unclearedIndices, duration_ms: systemClock.now() - startedMs });
+        if (decision.state === "clear" || check > FIX_SELF_CHECK_EXTRA_TURNS) return;
+        try {
+          const turnReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}-self-check`,
+            systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath), { prUrl: opts.prUrl, roundId });
+          const turn = await host.spawnFixWorkerBounded({ ...deps, spawn: turnReceipt.spawn }, {
+            ...fixArgs, prompt: [prompt, ...fixSelfCheckUnclearedLines(commitSha, decision.workerItems)].join("\n"),
+            resumeSessionId: fixResult.sessionId, continuation: workerContinuation(fixResult, prompt, opts.worktreePath),
+          }, { runId: opts.runId, taskId: opts.taskId, snapshot: { headSha: priorHeadSha, failingChecks: [] } });
+          if (turn.kind !== "spawned") return;
+          const turnResult = deps.account(turn.result);
+          selfCheckCostUsd += turnResult.costUsd ?? 0;
+          if (fixHarnessOwnsGit && fixLeftEdits()) (deps.harnessCommitForShellLessWorker ?? host.harnessCommitForShellLessWorker)({
+            harnessOwnsGit: true, commitCount: 0, ...(opts.guardRoundHead ? { priorHeadSha: commitSha, branch: opts.branch } : {}),
+            report: workerTranscript(turnResult), worktreePath: opts.worktreePath, declaredPaths: [...fixDeclaredPaths, ...ownRows],
+            acceptance: opts.task.acceptance, admitTests: admitFixTests, assignmentId: turnResult.selectionAssignmentId,
+            derivedCommit: derivedFixCommit(unmet[0]?.claim ?? opts.task.title, opts.prUrl), log: deps.log, say: deps.say,
+          });
+          const turnHead = (await hostWorktreeGitAsync(opts.worktreePath, ["rev-parse", "HEAD"])).trim();
+          if (turnHead === commitSha) return;
+          expectedHeadShaForPush = turnHead;
+        } catch (error) {
+          const reason = String((error as Error)?.message ?? error).slice(0, 500);
+          deps.say(`fix rung: the self-check's extra worker turn failed; pushing ${commitSha.slice(0, 12)}: ${reason}`);
+          return;
+        }
+      }
+    };
 
     // W1-T3079: archive this worker's transcript — see the "Worker transcript archive" section
     // above `runTask`. Design note (i): "EVERY FIX WORKER EXIT" — keyed on `attempt` (this
@@ -5379,6 +5446,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (harnessCommitCount > 0) {
         let landing: FixRoundLanding | undefined;
         try {
+          await selfCheckBeforePush();
           const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
           const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
           landing = await roundLanding(expectedHeadShaForPush);
@@ -5447,6 +5515,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
 
     let roundPush: FixRungOutcome | "refused" | undefined;
+    await selfCheckBeforePush();
     if (expectedHeadShaForPush && fixOutcome?.kind === "FIXED") {
       workerProofResults = await runWorkerAcceptanceProofs({ worktreePath: opts.worktreePath,
         headSha: expectedHeadShaForPush, criteria: unmet }, opts.workerProofIo);

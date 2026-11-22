@@ -41,7 +41,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const SKILL: SkillFilePayload = {
   name: "implement-clean-single-strike",
-  markdown: "---\nname: implement-clean-single-strike\ndescription: d\napplies-to: implement\n---\n\n## Procedure\n- step\n",
+  markdown: "---\nname: implement-clean-single-strike\ndescription: d\napplies-to: implement\n---\n\n## Procedure\n- Run `npm test`.\n",
 };
 
 function tmp(prefix: string): string {

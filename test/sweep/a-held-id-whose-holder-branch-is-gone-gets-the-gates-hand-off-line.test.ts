@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { parse as parseYaml } from "yaml";
@@ -634,7 +634,7 @@ test("W1-T13829 criterion 4: a failed push and a stand-down each spend one attem
   await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
   assert.equal(calls.length, 1, "a failed push is not retried at the same head");
   assert.equal(rows().length, 1, "and ledgered once");
-  answer = { outcome: "stood-down", reason: "the reservation of W1-T13787 started at 2026-11-19T07:00:00.000Z, less than 2 h ago" };
+  answer = { outcome: "stood-down", reason: `holder branch ${HOLDER} of W1-T13787 is on origin` };
   const other = planPr({ headSha: "d".repeat(40) });
   await runSweep([other], deps, DEFAULT_SWEEP_POLICY);
   await runSweep([other], deps, DEFAULT_SWEEP_POLICY);
@@ -767,4 +767,191 @@ test("W1-T13829 criterion 5: dry-run previews a hand-off without taking or spend
   await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
   assert.equal(calls, 1, "the live sweep can still attempt the same head");
   assert.deepEqual(ledger.filter((row) => row.step === sweep.PLAN_REPAIR_STEP).map((row) => row.outcome), ["error"]);
+});
+
+// W1-T14198: #19604's reservation started 05:24:07.232Z, so a sweep inside the 2 h grace stood down and spent the head.
+const STARTED = "2026-11-19T05:24:07.232Z";
+const RETRY_AT = "2026-11-19T07:24:07.232Z";
+
+function handoffRows(ledger: readonly Record<string, unknown>[]) {
+  return ledger.filter((l) => l.step === sweep.PLAN_REPAIR_STEP && l.signature === "held-task-id-handoff");
+}
+
+/** Sweeps at chosen times through the production hand-off effect, against the fixture origin. */
+function youngHolderSweeps(t: TestContext, opts: Partial<Parameters<typeof fixture>[1]> = {}) {
+  const f = fixture(t, { startedAgoMs: NOW - Date.parse(STARTED), ...opts });
+  const root = dirname(f.hooksDir);
+  const ledgerPath = join(root, "ledger.ndjson");
+  const ledger: Record<string, unknown>[] = [];
+  const outcomes: Array<Record<string, unknown>> = [];
+  let clock = Date.parse(STARTED);
+  const effects = sweep.buildSweepEffects({
+    owner: "acme", repo: "remudero", repoRoot: f.host.dir, config: { root, claudeBin: "/bin/true" },
+    ledgerPath, runId: "W1-T14198-test", plan: { tasks: [], byId: new Map() }, log: () => {},
+    nowMsImpl: () => clock, ciGateRequired: [], readJsonImpl: async (args) => f.readJson(args),
+  } as Parameters<typeof sweep.buildSweepEffects>[0]);
+  const deps = {
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, postReview: async () => {},
+    readPlanRepairFacts: () => ({}),
+    repairPlanPr: async (pr: OpenPrView, decision: Parameters<NonNullable<SweepDeps["repairPlanPr"]>>[1]) => {
+      const out = await effects.repairPlanPr!(pr, decision);
+      outcomes.push({ ...out });
+      return out;
+    },
+    ledgerPath, runId: "W1-T14198-test",
+    readLedger: () => ledger, appendLine: (_path: string, line: Record<string, unknown>) => { ledger.push(line); },
+    now: () => clock,
+  } as unknown as SweepDeps;
+  const pass = async (iso: string) => {
+    clock = Date.parse(iso);
+    await withFixtureHooks(f, () => runSweep([planPr({ headSha: f.headSha })], deps, DEFAULT_SWEEP_POLICY));
+  };
+  const spent = () => sweep.planRepairHistoryFromLedger(ledger).has(`19604@${f.headSha}@held-task-id-handoff`);
+  const claims = () => readdirSync(join(root, "plan-handoff-attempts"));
+  return { f, ledger, outcomes, pass, spent, claims, rows: () => handoffRows(ledger) };
+}
+
+test("W1-T14198 criterion 1: a stand-down for a young reservation is ledgered with its retry time and does not spend the head", async (t) => {
+  const s = youngHolderSweeps(t);
+  await s.pass("2026-11-19T05:40:00Z");
+  assert.equal(s.outcomes.length, 1, "the hand-off was tried");
+  assert.equal(s.outcomes[0]!.outcome, "stood-down");
+  assert.equal(s.outcomes[0]!.retryAtMs, Date.parse(RETRY_AT));
+  assert.equal(s.rows().length, 1);
+  const row = s.rows()[0]!;
+  assert.equal(row.outcome, "stood-down");
+  assert.equal(row.retry_at, RETRY_AT);
+  assert.equal(row.retryAtMs, undefined, "the ledger carries the ISO time only");
+  assert.match(String(row.reason), new RegExp(`reservation of W1-T13787 started at ${STARTED}; it must be older than 2 h`));
+  assert.equal(s.spent(), false, "planRepairHistoryFromLedger does not hold the head");
+  assert.deepEqual(s.claims(), [], "no claim file is left for the head");
+  assert.equal(s.f.remote.git("rev-parse", `refs/heads/${FILER}`), s.f.headSha, "nothing was pushed");
+});
+
+test("W1-T14198 criterion 2: a sweep before the retry time does not try the hand-off again", async (t) => {
+  const s = youngHolderSweeps(t);
+  await s.pass("2026-11-19T05:40:00Z");
+  await s.pass("2026-11-19T06:30:00Z");
+  await s.pass("2026-11-19T07:24:07.000Z");
+  assert.equal(s.outcomes.length, 1, "repairPlanPr ran only in the first sweep");
+  assert.equal(s.rows().length, 1, "no second plan repair row");
+  assert.deepEqual(s.claims(), []);
+});
+
+test("W1-T14198 criterion 3: the first sweep after the retry time hands off at the same head", async (t) => {
+  const s = youngHolderSweeps(t);
+  await s.pass("2026-11-19T05:40:00Z");
+  await s.pass("2026-11-19T07:00:00Z");
+  assert.equal(s.f.remote.git("rev-parse", `refs/heads/${FILER}`), s.f.headSha, "no new head was pushed in between");
+  await s.pass("2026-11-19T07:30:00Z");
+  assert.deepEqual(s.outcomes.map((o) => o.outcome), ["stood-down", "handed-off"], "repairPlanPr ran once after the retry time");
+  assert.deepEqual(s.rows().map((r) => r.outcome), ["stood-down", "handed-off"]);
+  const head = s.f.remote.git("rev-parse", `refs/heads/${FILER}`);
+  assert.equal(head, s.outcomes[1]!.newHeadSha);
+  assert.equal(s.f.remote.git("rev-parse", `${head}^`), s.f.headSha, "the hand-off commit sits on the observed head");
+  assert.equal(s.spent(), true, "the hand-off spends the head");
+});
+
+test("W1-T14198 criterion 4: a holder branch on origin beside a young reservation still spends the head", async (t) => {
+  const s = youngHolderSweeps(t, { holderOnOrigin: true });
+  await s.pass("2026-11-19T05:40:00Z");
+  assert.equal(s.outcomes.length, 1);
+  assert.deepEqual(s.outcomes[0], { outcome: "stood-down", reason: `holder branch ${HOLDER} of ${IDS[0]} is on origin` });
+  assert.equal(s.rows()[0]!.retry_at, undefined);
+  assert.equal(s.spent(), true);
+  await s.pass("2026-11-19T07:30:00Z");
+  assert.equal(s.outcomes.length, 1, "not tried again after the grace");
+});
+
+test("W1-T14198 criterion 4: a failed push and every other stand-down still spend the head", async (t) => {
+  const answers: Array<{ outcome: string; reason: string }> = [
+    { outcome: "error", reason: "the push was refused" },
+    { outcome: "stood-down", reason: `holder branch ${HOLDER} of W1-T13787 is on origin` },
+    { outcome: "stood-down", reason: `open PR #19600 has holder branch ${HOLDER} of W1-T13787 as its head` },
+    { outcome: "stood-down", reason: "the named shards already contain the printed hand-offs" },
+    { outcome: "stood-down", reason: "a holder fact is unreadable: the network is down" },
+  ];
+  for (const [i, answer] of answers.entries()) {
+    const ledger: Record<string, unknown>[] = [];
+    let calls = 0;
+    const deps = overlappingSweepDeps(join(ownedFixtureDir(t, `t14198-spent-${i}`).dir, "ledger.ndjson"), ledger, async () => {
+      calls++;
+      return answer;
+    });
+    await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+    deps.now = () => Date.parse(RETRY_AT) + 60_000;
+    await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+    assert.equal(calls, 1, `${answer.reason}: tried once`);
+    assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${HEAD}@held-task-id-handoff`), true, answer.reason);
+    assert.equal(handoffRows(ledger)[0]!.retry_at, undefined, answer.reason);
+  }
+});
+
+test("W1-T14198 criterion 4: two overlapping sweeps after the retry time attempt the hand-off once", async (t) => {
+  const otherModule: string = `${import.meta.resolve("#src/lib/sweep.js")}?t14198-independent`;
+  const { runSweep: runOtherSweep } = (await import(otherModule)) as { runSweep: typeof runSweep };
+  const ledger: Record<string, unknown>[] = [{ step: sweep.PLAN_REPAIR_STEP, run_id: "earlier-sweep", pr_number: 19604, head_sha: HEAD,
+    signature: "held-task-id-handoff", action: "handoff", outcome: "stood-down", retry_at: RETRY_AT,
+    reason: `the reservation of W1-T13787 started at ${STARTED}; it must be older than 2 h` }];
+  let calls = 0;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const inside = new Promise<void>((resolve) => { entered = resolve; });
+  const deps = overlappingSweepDeps(join(ownedFixtureDir(t, "t14198-overlap").dir, "ledger.ndjson"), ledger, async () => {
+    if (++calls === 1) {
+      entered();
+      await released;
+    }
+    return { outcome: "error", reason: "the push was refused" };
+  });
+  assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${HEAD}@held-task-id-handoff`), false, "the youth row left the head open");
+  const first = runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  try {
+    await Promise.race([inside, first.then(() => assert.fail("the first sweep never reached the effect"))]);
+    await runOtherSweep([planPr()], { ...deps, runId: "second-sweep" }, DEFAULT_SWEEP_POLICY);
+  } finally {
+    release();
+    await first;
+  }
+  await runSweep([planPr()], { ...deps, runId: "third-sweep" }, DEFAULT_SWEEP_POLICY);
+  assert.equal(calls, 1, "the retry still goes through the per-head claim and the ledger");
+  assert.deepEqual(handoffRows(ledger).map((r) => r.outcome), ["stood-down", "error"]);
+});
+
+test("W1-T14198 criterion 4: a claim that cannot be given back keeps the head spent", async (t) => {
+  const dir = ownedFixtureDir(t, "t14198-stuck-claim").dir;
+  const ledger: Record<string, unknown>[] = [];
+  let calls = 0;
+  const deps = overlappingSweepDeps(join(dir, "ledger.ndjson"), ledger, async () => {
+    calls++;
+    // The claim path turns into a directory, so it cannot be unlinked.
+    const claims = join(dir, "plan-handoff-attempts");
+    const [claim] = readdirSync(claims);
+    rmSync(join(claims, claim!));
+    mkdirSync(join(claims, claim!));
+    writeFileSync(join(claims, claim!, "kept"), "");
+    return { outcome: "stood-down", reason: `the reservation of W1-T13787 started at ${STARTED}; it must be older than 2 h`,
+      retryAtMs: Date.parse(RETRY_AT) };
+  });
+  deps.now = () => Date.parse("2026-11-19T05:40:00Z");
+  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  const [row] = handoffRows(ledger);
+  assert.equal(row!.retry_at, undefined);
+  assert.equal(typeof row!.claim_release_error, "string");
+  assert.equal(sweep.planRepairHistoryFromLedger(ledger).has(`19604@${HEAD}@held-task-id-handoff`), true);
+  deps.now = () => Date.parse(RETRY_AT) + 60_000;
+  await runSweep([planPr()], deps, DEFAULT_SWEEP_POLICY);
+  assert.equal(calls, 1);
+});
+
+test("W1-T14198 criterion 5: a 30-minute-old reservation stands down with its retry time and pushes nothing", async (t) => {
+  const f = fixture(t, { startedAgoMs: 30 * 60_000 });
+  const out = await handOff(f, planPr({ headSha: f.headSha }));
+  assert.deepEqual(out, {
+    outcome: "stood-down",
+    reason: `the reservation of ${IDS[0]} started at ${new Date(NOW - 30 * 60_000).toISOString()}; it must be older than 2 h`,
+    retryAtMs: NOW - 30 * 60_000 + RESERVATION_PUSH_GRACE_MS,
+  });
+  assert.equal(f.remote.git("rev-parse", `refs/heads/${FILER}`), f.headSha, "nothing was pushed");
 });

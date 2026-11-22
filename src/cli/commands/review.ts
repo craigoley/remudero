@@ -28,6 +28,8 @@ import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, try
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
+import { deriveTaskClass } from "../../lib/task-class.js";
+import { withReceiptWork } from "../../lib/benchmark-run.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -38,7 +40,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -114,6 +116,11 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
     ...(planLintRetryHead !== undefined && /^[a-f0-9]{40}$/i.test(planLintRetryHead) ? { planLintRetryHead } : {}),
     ...(excludeProviders.length ? { excludeProviders } : {}),
   };
+}
+
+/** W1-T14156: the `rmd review` verb runs the model reviewer unless its caller chose a mode. */
+export function operatorReviewArgs(rest: string[]): string[] {
+  return rest.includes("--execution-mode") ? rest : [...rest, "--execution-mode", "semantic"];
 }
 
 export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
@@ -551,11 +558,22 @@ export async function reviewHostedCiFileEvidence(
 }
 
 // Project at the final write: status guards may replace a description with a private failure reason.
-function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
+// W1-T14035: a pending ops post keeps the run its guarded description names, so an ops hold names its owner as a public
+// one does; it carries no code provenance, as no pending post does.
+export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
   return catalog !== "ops" ? post : async options => {
     const description = `remudero-review: ${options.state} — detailed evidence retained on host`;
-    await post({ ...options, description: codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
+    const owner = options.state === "pending" ? reviewStatusOwnerRun(options.description) : undefined;
+    await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
+      : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
   };
+}
+
+/** W1-T14146: what the reviewer's assignment receipt records of the reviewed work — the class of the PR's plan task,
+ *  `deriveTaskClass` of its files as its implement run records it — and nothing when the review has no plan task
+ *  (untasked, or its task unresolved at head), so the receipt names no class rather than the default one. */
+export function reviewedTaskWork(task: { files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">): { taskClass?: string } {
+  return setup.untasked || !setup.head_task_resolved ? {} : { taskClass: deriveTaskClass({ files: task.files }) };
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -581,6 +599,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   readReviewReuseFacts?: () => ReviewReuseFacts | undefined;
   /** Shared GitHub status/review history; injected so review tests never contact the network. */
   readReviewStatusHistory?: ReviewStatusHistoryReader;
+  /** Creation time from the PR view, when the caller already has it. */
+  prCreatedAt?: string;
   report: string;
   /** The implementation worker's complete final report. Kept separate from `report`, which must
    * remain the PR body for body/diff integrity. `judgeReview` reads this only for the strict,
@@ -778,6 +798,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   // HERE and degrades the SAME way: legibility is strictly additive, so a pending-post hiccup must
   // never abort the review it exists to make visible — the terminal post below still runs and is
   // what actually gates the merge, exactly as it always has. A shadow review (W1-T10269) posts nothing.
+  let prCreatedAt = args.prCreatedAt;
   if (!args.shadow) try {
     const pending = await postReviewPending({
       owner,
@@ -789,7 +810,11 @@ export async function runReview(host: ReviewCommandHost, args: {
       prUrl,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
+      fetchLifecycle: async () => {
+        const lifecycle = await fetchPrLifecycleAsync(prUrl);
+        prCreatedAt ??= lifecycle.createdAt;
+        return lifecycle;
+      },
     });
     if (!pending.posted && pending.lifecycle !== undefined) {
       const reason = `pr_${pending.lifecycle}`;
@@ -978,6 +1003,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   }
   try {
 
+  let priorReviewSnapshot: ReturnType<typeof readLedgerLines> | undefined;
+  // ledger-read-intent: live — stability uses the same live rows as the earlier-head prompt.
+  const priorReviewRows = () => priorReviewSnapshot ??= readLedgerLines(args.ledgerPath);
+
   // Advisory semantic layer — a FRESH read-only reviewer (no session inheritance),
   // in a throwaway cwd so it cannot touch the worktree/diff under review.
   let semantic: (boolean | undefined)[] | undefined;
@@ -1073,6 +1102,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     // The proofs are done; the LLM judge waits on its provider, not this host's CPU (the binding judge after it reuses them).
     reportPhase("judge");
     try {
+      const priorHeadFindings = priorHeadFindingsFromLedger(
+        await priorHeadReviewRows(args.ledgerPath, priorReviewRows(), task.id, prUrl, { prCreatedAt, signal }),
+        task.id, prUrl, headSha,
+      );
       // W1-T115: routed through withTempDir so this throwaway cwd is ALWAYS
       // removed on exit — success or thrown error — instead of the bare
       // mkdtempSync this used to be, which never cleaned up on any path and
@@ -1111,6 +1144,7 @@ export async function runReview(host: ReviewCommandHost, args: {
             proofEvidencePath,
             ...scopeContext,
             priorReproducedFailures: initialStatusHistory.kind === "readable" ? initialStatusHistory.failures : [],
+            priorHeadFindings,
           }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
@@ -1119,7 +1153,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerClockBoundMs =
           host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
-        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        const reviewerSpawn = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T14146: every reviewer call, the judge's and its shadow's, carries the reviewed work, so its assignment
+        // receipt records the plan task's class.
+        const reviewedWork = reviewedTaskWork(task, replayInput);
+        const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
@@ -1269,6 +1307,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     // spawn still reported `not_attempted_plan_only`, i.e. the ledger lied in the one direction
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
+    // Only when criteria exist: a review with none has no semantic work to skip, so it keeps the
+    // bare `not_attempted` ("no criteria") value it always reported.
+    deterministicMode: args.spawnReviewer === false && criteria.length > 0,
   });
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
@@ -1368,7 +1409,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     ...narrative,
   });
   const prior = args.ledgerPath && inputDigest !== undefined
-    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath).filter((line) => line.review_input_digest === inputDigest), task.id, args.prUrl)
+    ? priorReviewVerdictFromLedger(priorReviewRows().filter((line) => line.review_input_digest === inputDigest), task.id, args.prUrl)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha,
     prior?.reviewContractDigest === contractDigest ? prior : undefined);
@@ -1967,7 +2008,7 @@ export interface ReviewCommandDeps {
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
   fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
-  /** Operator CLI remains deterministic; only internal unattended callers opt in. */
+  /** The CLI verb defaults to semantic through operatorReviewArgs; internal callers that pass no flag stay deterministic. */
   executionMode?: "deterministic" | "semantic";
   /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
   excludeProviders?: SpawnWorkerArgs["excludeProviders"];
@@ -2242,6 +2283,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     return 2;
   }
   const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
+    createdAt?: string;
     headRefOid: string;
     headRefName: string;
     body: string;
@@ -2719,6 +2761,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
           reviewerCodeFreshness: publicationFreshness,
+          prCreatedAt: view.createdAt,
           readReviewStatusHistory: deps.readReviewStatusHistory,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and

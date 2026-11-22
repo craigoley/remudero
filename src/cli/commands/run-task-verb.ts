@@ -66,7 +66,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bindCanonicalCoreCriteria, bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -80,7 +80,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, runPairedTrial, seal
 import { runProspectiveAaPair } from "../../lib/benchmark-aa-prospective.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "../../lib/self-forecast.js";
 import { readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
-import { releasedTaskIds, assertRunnable, loadPlan, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
+import { releasedTaskIds, assertRunnable, loadPlan, parseTasksFromYaml, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
 import { GENERIC_EXIT_CODE, RmdError } from "../../lib/errors.js";
 import { assertLintClean, lintTask, TaskLintError } from "../../lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "../../lib/dispatch-repair.js";
@@ -94,7 +94,8 @@ import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
 import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_WITHHOLDING_SHARE, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
@@ -133,13 +134,14 @@ import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { runChildCredentialSocket } from "../../lib/secret-boundary.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { resolveOwnerRepoAtAsync } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { buildIntoStore, childEntryStoreRoot } from "../../lib/child-entry-store.js";
 import { buildEngineAfterStore } from "../../lib/engine-tree.js";
 import { chainAbortSignal } from "../../lib/run-child.js";
-import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
+import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
@@ -1139,6 +1141,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task & { catalog?: "public" | "ops" };
   opsCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
+  /** W1-T12936: Core public-plan criteria pinned at one commit, for a target whose own plan lacks the task. */
+  coreCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
   taskId: string;
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
@@ -1864,7 +1868,7 @@ async function ghPrCreateFillCommandAsync(
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
   // Preserve the public authored-title call site; private titles use the immutable catalog binding.
-  const draftTitle = canonicalOps === undefined ? title
+  const draftTitle = canonicalOps === undefined || canonicalOps.catalog !== "ops" ? title
     : prTitleForTask([], { id: canonicalOps.taskId, title: canonicalOps.title }) ?? canonicalOps.title;
   const draft = bodyOverride === undefined
     ? draftPrCreate(worktreePath, owner, repo, branch, draftTitle)
@@ -4949,6 +4953,12 @@ export async function runTask(
   const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
+  // Local working-tree snapshots still go through the destination's filed criteria check.
+  const coreCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "public" && !opts.skipGitSync
+    && !(opts.planSnapshot && isAbsolute(task.sourcePath ?? "") && task.repo === resolveOwnerRepo().repo)
+    ? await pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`, log, boundedVerdictReason)
+    : undefined;
+  if (coreCriteriaAtOpen) log("core_criteria.pinned", { source_commit: coreCriteriaAtOpen.sourceCommit, target: coreCriteriaAtOpen.targetRepository });
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
     const privatePlan = opsPlanForLookup(lookup);
     if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
@@ -5230,6 +5240,7 @@ export async function runTask(
       spawn,
       task,
       opsCriteriaAtOpen,
+      coreCriteriaAtOpen,
       taskId,
       workerAbandonMs,
       workerStateSensor,
@@ -5282,16 +5293,50 @@ export function claimRunTaskFixBranch(input: {
   });
 }
 
-/** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
- *  with a staged retirement offered only on that share. */
-export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "type" | "files">, runId: string): ObservedSkillSelection {
+/** Cross-repository dispatch pins the selected record before any worker starts. Same-repository runs use the local opener. */
+async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  boundReason: (reason: string) => string): Promise<CanonicalOpsCriteriaAtOpen | undefined> {
+  const repoDir = dirname(dirname(planPath)), planRel = relative(repoDir, planPath), shardRel = join(dirname(planRel), "tasks.d");
+  const git = planSyncGitRunnerAsync(repoDir);
+  try {
+    const { owner, repo } = await resolveOwnerRepoAtAsync(repoDir);
+    if (`${owner}/${repo}` === targetRepository) return undefined;
+
+    const source = /^origin\/main:(.+)$/.exec(task.sourcePath ?? "")?.[1];
+    if (source === undefined || (source !== planRel && (dirname(source) !== shardRel || !/\.ya?ml$/.test(source)))) {
+      throw new Error(`${task.id} has no readable source record path`);
+    }
+    const commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    const label = `${commit}:${source}`;
+    const record = parseTasksFromYaml(await git(["show", label]), label).find(t => t.id === task.id);
+    if (record === undefined) throw new Error(`${task.id} is absent from the plan at ${commit}`);
+    if (record.title !== task.title || record.repo !== task.repo
+        || JSON.stringify(record.acceptance ?? []) !== JSON.stringify(task.acceptance ?? [])) {
+      throw new Error(`${task.id} at ${commit} differs from the selected task`);
+    }
+    return bindCanonicalCoreCriteria(record.id, record.title, targetRepository, commit, record.acceptance ?? []);
+  } catch (err) {
+    const reason = boundReason(String(err));
+    log("core_criteria.refused", { task_id: task.id, reason });
+    throw new Error(`core public-plan criteria refused (${reason})`, { cause: err });
+  }
+}
+
+/** The implement lane's skill selection: each eligible skill withheld on its seeded share of tasks, and a skill
+ *  with a staged retirement offered only on that share. W1-T14137: drawn per task, so every run of the task, and
+ *  its fix rounds, land in one arm. */
+export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "id" | "type" | "files">): ObservedSkillSelection {
   const staged = stagedSkillRetirements(join(stateRoot, "state", "inbox-proposals.json"));
   return observeSkillSelection(
     loadInjectableSkills(join(repoRoot, ".claude", "skills")),
     task.type,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     task.files,
-    (skillName) => skillWithheldUnderRetirement(runId, skillName, staged),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: task.id, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, staged),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
 }
 
@@ -5537,6 +5582,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     spawn,
     task,
     opsCriteriaAtOpen,
+    coreCriteriaAtOpen,
     taskId,
     workerAbandonMs,
     workerStateSensor,
@@ -6676,10 +6722,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
-    // resulting text is forced empty. A normal (non-wipe-test) run always passes
-    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
-    // block ran before W1-T86.
-    const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
+    // resulting text is forced empty. Source-change notes are prepared against
+    // the same worktree the implement worker will read.
+    const learningUsage = opts.maskLearnings ? {} : readLearningUsage(learningUsagePath(join(config.root, "state")));
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
       homes: {
         projectDir: learningsDir,
@@ -6694,14 +6739,16 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         propensityDraws: LEARNING_PROPENSITY_DRAWS,
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      source: { repoDir: worktreePath },
     });
+    const preparedLearnings = await learningsResult;
     // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
     const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
       ? {
           onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
           learningLookup: {
             homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
-            allowedIds: learningsResult.selectedIds,
+            allowedIds: preparedLearnings.selectedIds,
           },
         }
       : undefined;
@@ -6709,7 +6756,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = learningsResult.matchedLearnings;
+    const { matchedLearnings, sourceChangeSummary } = preparedLearnings;
     // W1-T419: `matched_ids` sits beside the pre-existing `matched` count — `dropped` already
     // logged ids, so a count-only `matched` was asymmetric and made per-entry injection
     // frequency unrecoverable from the ledger. This row is deliberately NOT added to
@@ -6718,17 +6765,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
     // next reader should know which side of that line this row sits on before "fixing" it.
     log("learnings.injected", {
-      matched: learningsResult.selectedIds.length,
-      matched_ids: learningsResult.selectedIds,
-      dropped: learningsResult.droppedIds,
+      matched: preparedLearnings.selectedIds.length,
+      matched_ids: preparedLearnings.selectedIds,
+      dropped: preparedLearnings.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      matched_by: learningsResult.matchedBy,
-      global_refused_reason: learningsResult.globalRefusedReason,
+      matched_by: preparedLearnings.matchedBy,
+      global_refused_reason: preparedLearnings.globalRefusedReason,
       masked: !!opts.maskLearnings,
       // W1-T4241: the budget cut, not match strength, decided these entries (0 < p < 1), so injected
       // vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
-      propensity: contestedPropensities(learningsResult.propensity),
-      usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
+      propensity: contestedPropensities(preparedLearnings.propensity),
+      source_changes: sourceChangeSummary,
+      usage_sha: opts.maskLearnings ? undefined : createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
     });
 
     // ── Render + provenance-lint the prompt.
@@ -6747,9 +6795,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       "CLAUDE.md",
     );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
-    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = selectImplementSkills(config.root, repoRoot, task, runId);
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of tasks
+    // (taskArmWithheld, W1-T14137), so buildSkillEffectivenessReport has a randomized control cohort.
+    const skillSelection = selectImplementSkills(config.root, repoRoot, task);
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
     // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the
@@ -6795,7 +6843,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
-    log("prompt.manifest", { parts: buildPromptManifest(implementParts) });
+    log("prompt.manifest", { parts: buildPromptManifest(implementParts), learning_source_changes: sourceChangeSummary });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
     // criteria + hard constraints, built ONCE and ledgered here so the anchor
@@ -7319,7 +7367,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       });
     }
 
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logLearningsUsed(log, fullText(impl), preparedLearnings.selectedIds,
+      opts.maskLearnings ? undefined : learningUsagePath(join(config.root, "state")));
     logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
@@ -7766,7 +7815,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
         const publication = opsCriteriaAtOpen ? opsRunPublication(taskId, opsCriteriaAtOpen.title, opsCriteriaAtOpen.criteria) : undefined;
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
-          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
+          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen ?? coreCriteriaAtOpen);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.

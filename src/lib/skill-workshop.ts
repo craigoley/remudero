@@ -28,12 +28,8 @@ import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js
 import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
-import {
-  mineTranscriptWorkflows,
-  renderTranscriptWorkflowSteps,
-  type TranscriptLedgerRow,
-  type TranscriptRun,
-} from "./workflow-mining.js";
+import { TASK_ARM_UNIT } from "./task-arm.js";
+import { mineRecurringProcedures, type TranscriptLedgerRow, type TranscriptRun } from "./workflow-mining.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
  *  header for why this duplicates retro.ts's `ProceduralCandidate` rather than importing it. */
@@ -122,61 +118,54 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
     .slice(0, 16);
 }
 
-/** The transcript corpus {@link renderSkillDraft} mines a distinguishing workflow from (W1-T4668,
- *  design clause ii) — optional so the existing call site (retro.ts's `buildGather`, unchanged by
- *  this task) keeps drafting off signals alone until a future caller wires the ledger through. */
+/** The transcript corpus {@link renderSkillDraft} mines the candidate's recurring procedure from (W1-T13857). */
 export interface TranscriptContext {
   runs: readonly TranscriptRun[];
   records: readonly TranscriptLedgerRow[];
 }
 
+const PROCEDURE_STEP_VERBS = new Map([
+  ["Bash", "Run"], ["Edit", "Change"], ["MultiEdit", "Change"], ["NotebookEdit", "Change"], ["Write", "Create"],
+]);
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...PROCEDURE_STEP_VERBS.keys(), "Read", "WebFetch", "WebSearch"]);
+const CAPABILITY_TOOL_NAMES: ReadonlySet<string> = new Set([...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"]);
+
+function toolNamesIn(text: string, toolNames: ReadonlySet<string>): string[] {
+  return text.match(/\w+/g)?.filter((word) => toolNames.has(word)) ?? [];
+}
+
+/** Writes a census step as an action line, or `undefined` when no action verb fits it. No line names a tool. */
+function procedureStepLine(step: string): string | undefined {
+  const colon = step.indexOf(":");
+  if (colon < 0) return undefined;
+  const target = step.slice(colon + 1).trim();
+  const verb = PROCEDURE_STEP_VERBS.get(step.slice(0, colon));
+  if (!verb || !target || /[`\r\n]/.test(target) || toolNamesIn(target, CAPABILITY_TOOL_NAMES).length > 0) return undefined;
+  return `- ${verb} \`${target}\`.`;
+}
+
 /**
- * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
- * a candidate with no eligible signal or under the two-run floor. Mining already enforces this
- * threshold, but a caller handing this function a single-run candidate
- * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
- * anecdote dressed as a proven procedure.
- *
- * `transcripts`, when supplied, mines the SAME candidate's task type for a {@link
- * TranscriptWorkflow} (workflow-mining.ts, W1-T4668) and appends its distinguishing steps —
- * actual tool-call steps every first-attempt-success run of this shape took that no repaired run
- * ever needed — after the signal-derived steps, so the Procedure section stops restating the
- * outcome ("resolve on the first attempt") and starts naming what a successful worker actually
- * DID. A shape with no transcript workflow (none mined, or none matching this candidate's task
- * type) leaves the Procedure section exactly as before.
+ * Render one procedural candidate as a Claude Code skill draft. `undefined` for a candidate with no eligible signal,
+ * under the two-run floor, or whose runs hold no recurring action procedure the renderer can write (W1-T13857): the
+ * signal's outcome text is never drafted as a step. The Procedure is the highest-scored {@link
+ * mineRecurringProcedures} sequence over the candidate's own runs whose every step is a Run, Change or Create line.
  */
-export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
+export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
-  const eligibleSignals = candidate.signals.filter(skillEligibleSignal);
-  if (eligibleSignals.length === 0) return undefined;
-  const hash = proceduralCandidateHash(candidate);
-  const procedureKey = procedureKeyFor(candidate);
-  // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
-  // evidence accrues rather than minting a new directory per cadence pass.
-  const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
-  const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
+  if (!candidate.signals.some(skillEligibleSignal)) return undefined;
+  const own = new Set(candidate.runIds);
+  const procedure = mineRecurringProcedures(transcripts.runs.filter((r) => own.has(r.runId)), transcripts.records)
+    .find((p) => p.steps.every((step) => procedureStepLine(step) !== undefined));
+  if (!procedure) return undefined;
+  const procedureKey = procedureKeyFor({ taskType: candidate.taskType, steps: procedure.steps });
+  const firstTwo = procedure.steps.slice(0, 2).map((step) => step.slice(step.indexOf(":") + 1)).join(" ");
+  const name = `${kebabSlug(firstTwo)}-${procedureKey.slice(0, 8)}`;
+  const description = `Take the ${procedure.steps.length} actions that ${procedure.recurrence} merged ${candidate.taskType} ` +
+    `runs of ${procedure.taskIds.length} tasks repeated, in the order they took them.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const outcomeFor = (key: string): string =>
-    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key;
   // Every mined outcome reaches the scanner's vocabulary, eligible or not (W1-T4283).
-  const outcomeDescriptions = candidate.signals.map(outcomeFor);
-  const workflow = transcripts
-    ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
-    : undefined;
-  const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
-  // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
-  // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
-  // draft; with no mined steps it stays, so stageSkillDraft refuses the outcome-only procedure.
-  // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
-  const steps = eligibleSignals
-    .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
-    .filter(({ line, outcome }) => workflowSteps.length === 0 || !restatesOutcome(line, outcome))
-    .map(({ line }) => line);
-  const evidence = [
-    ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
-    `- Filed under: ${candidate.taskIds.join(", ")}`,
-    ...(workflow ? workflow.runIds.map((runId) => `- [src: transcript#${runId}]`) : []),
-  ];
+  const outcomeDescriptions = candidate.signals.map((key) => candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key);
+  const round = (n: number): string => String(Math.round(n));
   const markdown = [
     "---",
     `name: ${name}`,
@@ -184,19 +173,22 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
     ...(appliesTo ? [`applies-to: ${appliesTo}`] : []),
     "---",
     "",
-    "<!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15",
+    "<!-- DRAFTED by skill-workshop.ts (W1-T13857) from a command sequence that recurs across runs — a Rule 15",
     "     plan write the Architect proposes and the operator ratifies, not yet ratified. -->",
     "",
     "## Procedure",
     "",
-    ...steps,
-    ...workflowSteps,
+    ...procedure.steps.map((step) => procedureStepLine(step)!),
     "",
     "## Evidence",
     "",
-    ...evidence,
+    `- Recurs in ${procedure.recurrence} runs of ${procedure.taskIds.length} tasks: ${procedure.taskIds.join(", ")}.`,
+    `- Median tool calls from the first step to the last: ${procedure.medianSpannedCalls}.`,
+    procedure.estimatedTokensPerRun === null ? "- tokens: not measured" : `- Estimated output tokens per run: ${round(procedure.estimatedTokensPerRun)}.`,
+    `- Score: ${round(procedure.score)}.`,
+    ...procedure.runIds.map((runId) => `- [src: run#${runId}]`),
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns, outcomeDescriptions };
+  return { name, description, markdown, candidateHash: proceduralCandidateHash(candidate), procedureKey, supportingRuns: procedure.recurrence, outcomeDescriptions };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -311,8 +303,6 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(out);
 }
 
-const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"] as const;
-
 /** Phrasings the untrusted envelope (W1-T2700) would fence as an instruction aimed at the reader
  *  rather than data describing a procedure — a small, curated set of classic injection shapes,
  *  deliberately narrower than "any imperative sentence" (a SKILL.md's whole body is imperative). */
@@ -331,6 +321,60 @@ export interface SkillDraftScanResult {
   ok: boolean;
   offendingLine?: string;
   reason?: string;
+}
+
+/** The verbs a Procedure step may start with (W1-T13857). A new action verb is a new row here. */
+const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
+  "Run", "Rerun", "Change", "Create", "Add", "Delete", "Commit", "Push", "Fetch", "Merge", "Open", "Reserve", "Claim", "Copy",
+]);
+
+const PROCEDURE_BULLET = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)(.*)$/;
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/** Comments and fences are opaque to section tracking. The scanner still checks the raw lines. */
+function* skillDraftLines(markdown: string): Generator<{ line: string; bullet: string | undefined }> {
+  let procedureLevel: number | undefined;
+  let fence: string | undefined;
+  let inComment = false;
+  let paragraph: string | undefined;
+  for (const line of markdown.split(/\r?\n/)) {
+    let bullet: string | undefined;
+    let nextParagraph: string | undefined;
+    if (fence) {
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = undefined;
+    } else if (inComment || /^ {0,3}<!--/.test(line)) {
+      inComment = !line.includes("-->");
+    } else {
+      fence = FENCE_OPEN.exec(line)?.[1];
+      if (!fence) {
+        const atx = /^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/.exec(line);
+        const setext = paragraph === undefined ? null : /^ {0,3}(=+|-+)[ \t]*$/.exec(line);
+        if (atx || setext) {
+          const level = atx ? atx[1]!.length : (setext?.[1]?.startsWith("=") ? 1 : 2);
+          const title = atx ? atx[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim() : paragraph;
+          if (title === "Procedure") procedureLevel = level;
+          else if (procedureLevel !== undefined && level <= Math.max(2, procedureLevel)) procedureLevel = undefined;
+        } else if (!/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
+          const item = PROCEDURE_BULLET.exec(line)?.[1];
+          if (procedureLevel !== undefined) bullet = item;
+          if (item === undefined && /^ {0,3}(?!>)\S/.test(line)) {
+            nextParagraph = paragraph === undefined ? line.trim() : "";
+          }
+        }
+      }
+    }
+    paragraph = nextParagraph;
+    yield { line, bullet };
+  }
+}
+
+function hasNonblankCodeSpan(text: string): boolean {
+  for (const span of text.matchAll(/(?<![`\\])(`+)(?!`)(.*?)(?<!`)\1(?!`)/g)) {
+    if (span[2]!.trim()) return true;
+  }
+  return false;
 }
 
 const STEP_FILLER_WORDS = new Set("a an the and or are as at be been being by for from has have had in is it of on that to was were with".split(" "));
@@ -359,9 +403,8 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
-  let inProcedure = false;
-  for (const line of draft.markdown.split("\n")) {
-    if (line.startsWith("## ")) inProcedure = line === "## Procedure";
+  const knownTools = allowlist.capabilityContext ? CAPABILITY_TOOL_NAMES : KNOWN_TOOL_NAMES;
+  for (const { line, bullet } of skillDraftLines(draft.markdown)) {
     const hostMatch = line.match(/https?:\/\/([a-zA-Z0-9.-]+)/);
     if (hostMatch && !allowlist.allowedHosts.includes(hostMatch[1])) {
       return { ok: false, offendingLine: line, reason: `names host '${hostMatch[1]}' outside the worker allowlist` };
@@ -371,11 +414,9 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolNames = allowlist.capabilityContext ? [...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"] : KNOWN_TOOL_NAMES;
-    const toolMatches = line.matchAll(new RegExp(`\\b(${toolNames.join("|")})\\b`, "g"));
-    for (const toolMatch of toolMatches) {
-      if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
-        return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+    for (const toolName of toolNamesIn(line, knownTools)) {
+      if (!allowlist.allowedTools.some(t => t === toolName || (!allowlist.capabilityContext && t.startsWith(`${toolName}(`)))) {
+        return { ok: false, offendingLine: line, reason: `names tool '${toolName}' outside the worker allowlist` };
       }
     }
     for (const pattern of INSTRUCTION_INJECTION_PATTERNS) {
@@ -387,10 +428,14 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         };
       }
     }
-    if (inProcedure && line.startsWith("- ")) {
-      const tokens = stepContentTokens(line);
-      if (outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
+    if (bullet !== undefined) {
+      const tokens = stepContentTokens(bullet);
+      if (tokens.length > 0 && outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
         return { ok: false, offendingLine: line, reason: "outcome-only: step restates its mined outcome without adding behavioral content" };
+      }
+      const verb = bullet.split(/\s+/, 1)[0]!;
+      if (!SKILL_ACTION_VERBS.has(verb) || !hasNonblankCodeSpan(bullet)) {
+        return { ok: false, offendingLine: line, reason: "not-an-action: a Procedure step starts with an action verb and names a backticked command or path" };
       }
     }
   }
@@ -424,10 +469,10 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
 
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
-/** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
- *  run set. Hashed so the id stays the same shape as before. */
-export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeKey" | "taskType">): string {
-  return createHash("sha256").update(`${candidate.taskType}|${candidate.shapeKey}`).digest("hex").slice(0, 16);
+/** W1-T3385c, W1-T13857 — the PROCEDURE's identity: the task type and its ordered steps, and NOT its run set, so
+ *  one procedure keeps one proposal id as its runs grow. */
+export function procedureKeyFor(procedure: { taskType: string; steps: readonly string[] }): string {
+  return createHash("sha256").update([procedure.taskType, ...procedure.steps].join("|")).digest("hex").slice(0, 16);
 }
 
 /**
@@ -480,8 +525,11 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
 }
 
 function procedureStepLines(markdown: string): string[] {
-  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) => line.startsWith("- "));
+  const steps: string[] = [];
+  for (const { bullet } of skillDraftLines(markdown)) {
+    if (bullet !== undefined) steps.push(bullet);
+  }
+  return steps;
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
@@ -489,10 +537,11 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
   return procedureStepLines(markdown).filter((line) => !descriptions.some((description) => restatesOutcome(line, description)));
 }
 
-const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT));
 
-/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
-function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
+/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. Pure over the stored markdown:
+ *  {@link stageSkillDraft} applies it before staging and the fleet's auto eval (W1-T13861) before it spends. */
+export function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
   const steps = procedureStepLines(markdown);
   if (steps.length === 0 || !steps.every((line) => SIGNAL_TABLE_STEP_LINES.has(line))) return undefined;
   return "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
@@ -506,7 +555,7 @@ function storedSkillSha256(proposal: Proposal): string {
 }
 
 /** True when the workshop already closed this entry's stored text. An operator restore keeps the record. */
-function workshopClosedSkillDraft(proposal: Proposal): boolean {
+export function workshopClosedSkillDraft(proposal: Proposal): boolean {
   return proposal.skillDraftClose?.skillSha256 === storedSkillSha256(proposal);
 }
 
@@ -520,7 +569,7 @@ type SkillDraftLog = (step: string, extra?: Record<string, unknown>, expectedLiv
 function closeSkillDraft(
   registryPath: string,
   proposalId: string,
-  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion: string } | undefined),
+  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion?: string } | undefined),
   log: SkillDraftLog,
   clock: Pick<Clock, "iso">,
 ): boolean {
@@ -822,6 +871,10 @@ export interface SkillSelectionObservation extends Record<string, unknown> {
   zero_selection: boolean;
   /** Present only when the caller randomized: eligible skills withheld from this run by assignment. */
   withheld_names?: string[];
+  /** W1-T14137: present when the assignment was drawn per task ({@link import("./task-arm.js").taskArmWithheld}).
+   *  A randomized row without it was drawn per run, a different design the report never pools with this one. */
+  arm_unit?: typeof TASK_ARM_UNIT;
+  arm_epoch?: string;
   /** Each eligible skill's {@link skillContentDigest}: the version a selected run read and a withheld run did
    *  not, so effectiveness evidence can be told apart across edits of one skill. */
   skill_digests: Record<string, string>;
@@ -838,20 +891,27 @@ export interface ObservedSkillSelection {
   observation: SkillSelectionObservation;
 }
 
-/** Predeclared share of eligible runs on which each approved skill is withheld. Without it a skill
+/** Predeclared share of eligible tasks on which each approved skill is withheld. Without it a skill
  *  that fits the budget is selected on every eligible run and the report's control cohort is empty. */
 export const SKILL_WITHHOLDING_SHARE = 0.25;
 
-/** Seeded per-(run, skill) assignment, independent across skills and recomputable from the ledger. */
+/** The RETIRED per-(run, skill) assignment that rows without `arm_unit` record, kept so such a row's arm stays
+ *  recomputable from the ledger. No lane draws with it: W1-T14137 draws per task (`taskArmWithheld`). */
 export function skillWithheldForRun(runId: string, skillName: string, share: number = SKILL_WITHHOLDING_SHARE): boolean {
   const digest = createHash("sha256").update(`${runId}\0${skillName}`).digest();
   return digest.readUInt32BE(0) / 0x1_0000_0000 < share;
 }
 
-/** A skill with a staged retirement is offered only on the seeded share of runs that would have withheld it: the
- *  arms flip, so evidence keeps accruing, and a withdrawn proposal restores the normal share. */
-export function skillWithheldUnderRetirement(runId: string, skillName: string, staged: ReadonlySet<string>): boolean {
-  const withheld = skillWithheldForRun(runId, skillName);
+/** The skill arm's design, recorded on each `skills.selection` row it drew. */
+export interface SkillArmDesign {
+  unit: typeof TASK_ARM_UNIT;
+  epoch: string;
+}
+
+/** A skill with a staged retirement is offered only on the seeded share of tasks that would have withheld it: the
+ *  arms flip, so evidence keeps accruing, and a withdrawn proposal restores the normal share. `withheld` is the
+ *  task's own draw for the skill. */
+export function skillWithheldUnderRetirement(withheld: boolean, skillName: string, staged: ReadonlySet<string>): boolean {
   return staged.has(skillName) ? !withheld : withheld;
 }
 
@@ -872,6 +932,7 @@ export function observeSkillSelection(
   budgetChars: number,
   taskFiles?: readonly string[],
   withhold?: (skillName: string) => boolean,
+  arm?: SkillArmDesign,
 ): ObservedSkillSelection {
   const want = taskType.toLowerCase();
   const taskTypeEligible = skills.filter((s) => s.appliesTo.includes(want));
@@ -901,6 +962,7 @@ export function observeSkillSelection(
       budget_chars: budgetChars,
       zero_selection: selected.length === 0,
       ...(withhold ? { withheld_names: withheld.map((s) => s.name) } : {}),
+      ...(withhold && arm ? { arm_unit: arm.unit, arm_epoch: arm.epoch } : {}),
       skill_digests: Object.fromEntries(eligible.map((s) => [s.name, skillContentDigest(s)])),
     },
   };
@@ -948,8 +1010,11 @@ export const SKILL_EFFECTIVENESS_HARM_ALPHA = 0.05;
  *  step filter. W1-T10764: a filter without the merge rows hands the report no merge, so both arms read
  *  `merged_runs=0` by construction and only the harm signal can ever decide. Both merge-row steps
  *  {@link isMergedLedgerRow} accepts are here: the sweep's `verdict.merged` credit backfill, and the
- *  `pr.terminal` row the direct merge writes, which is the only record of most merges. */
-export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = ["skills.selection", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done"];
+ *  `pr.terminal` row the direct merge writes, which is the only record of most merges. W1-T14137: `pr.opened` names
+ *  the PR of a run whose verdict omits it, so a run counted apart keeps that PR's later merge out of the comparison. */
+export const SKILL_EFFECTIVENESS_LEDGER_STEPS: readonly string[] = [
+  "skills.selection", "pr.opened", "verdict", "verdict.merged", PR_TERMINAL_STEP, "fix.done",
+];
 /** Bootstrap draws for the cost comparison, the count retireCertainties uses. */
 export const SKILL_COST_BOOTSTRAP_DRAWS = 400;
 /** One-sided confidence for the cost rule and the percentile of verdict-to-merge time that settles a run. */
@@ -1048,6 +1113,12 @@ export interface SkillEffectivenessReport {
   /** `randomized`: arms by seeded assignment, `selected` meaning not withheld (intent to treat).
    *  `observational`: legacy rows only, where the control is whatever the budget omitted. */
   assignment: "randomized" | "observational";
+  /** W1-T14137: the task-keyed arm epoch the comparison reads, the newest among this skill's rows (the one whose
+   *  rows began last); null when no row carries one, and the run-keyed or observational rows are compared as before. */
+  arm_epoch: string | null;
+  /** Eligible rows of every other assignment design, counted here and never pooled into the arms above. Their
+   *  runs' rows, and PRs only those rows name, feed nothing compared: not the settle window, the clock or a merge. */
+  apart: SkillEffectivenessApartRows[];
   /** Terminal compared runs per skill version, in first-seen order; `digest: null` is a row written before
    *  versions were recorded. The comparison above pools every version listed here. */
   versions: SkillEffectivenessVersion[];
@@ -1057,6 +1128,13 @@ export interface SkillEffectivenessReport {
   cost_difference_lower_bound_usd: number | null;
 }
 
+export interface SkillEffectivenessApartRows {
+  /** `run-keyed` (drawn per run, before task-keyed arms), `observational` (no assignment), or an older arm epoch. */
+  design: string;
+  eligible_runs: number;
+  terminal_runs: number;
+}
+
 export interface SkillEffectivenessVersion {
   digest: string | null;
   selected_terminal_runs: number;
@@ -1064,6 +1142,18 @@ export interface SkillEffectivenessVersion {
 }
 
 type SkillLedgerRow = Record<string, unknown>;
+
+/** One run's (and task's) `skills.selection` evidence for the skill a report is built for. */
+interface SelectionObservation {
+  runId: string;
+  /** False on a row that names no task: it joins any verdict of its run, as before W1-T14137. */
+  namesTask: boolean;
+  selected: boolean;
+  withheld?: boolean;
+  digest: string | null;
+  epoch: string | null;
+  startMs: number;
+}
 
 const stringArray = (value: unknown): string[] =>
   Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : [];
@@ -1102,7 +1192,7 @@ const rowCostUsd = (row: SkillLedgerRow): number | undefined => {
 
 /**
  * Deterministically joins `taskType`'s `skills.selection` row emitted at prompt assembly to the
- * terminal `verdict` row that carries the same run id.  It never reads or writes the approved
+ * terminal `verdict` row that carries the same run id (and task id, W1-T14137).  It never reads or writes the approved
  * tree: results are evidence for an operator's later decision, not a lifecycle action.
  *
  * A direct merge records its own terminal verdict. Handed-off runs can merge under another run id
@@ -1114,56 +1204,115 @@ export function buildSkillEffectivenessReport(
   skillName: string,
   taskType: string = SKILL_EFFECTIVENESS_TASK_TYPE,
 ): SkillEffectivenessReport {
-  const terminalVerdictByRun = new Map<string, { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined }>();
-  const mergedAtMs = new Map<string, number | undefined>();
-  const timedClosedPrKeys = new Set<string>();
-  const fixCostByPr = new Map<string, number>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
-  let latestMs: number | undefined;
-
+  // W1-T14137: one sweep pass logs every task's rows under its one pass-wide run id, so a selection is keyed by run
+  // AND task, and its outcome joins on the same pair (see terminalOf for a row or verdict that names no task).
+  const runTaskKey = (row: SkillLedgerRow): string =>
+    `${row.run_id as string}\0${typeof row.task_id === "string" ? row.task_id : ""}`;
+  const isSkillSelection = (row: SkillLedgerRow): row is SkillLedgerRow & { run_id: string } =>
+    row.step === "skills.selection" && row.task_type === taskType && typeof row.run_id === "string" &&
+    stringArray(row.approved_eligible_names).includes(skillName);
+  const selectionByKey = new Map<string, SelectionObservation>();
   for (const row of rows) {
-    const ms = rowMs(row);
-    if (ms !== undefined && (latestMs === undefined || ms > latestMs)) latestMs = ms;
-    if (isMergedLedgerRow(row)) {
-      const prKey = effectivenessPrKey(row);
-      if (prKey !== undefined) {
-        const prior = mergedAtMs.get(prKey);
-        mergedAtMs.set(prKey, prior === undefined ? ms : ms === undefined ? prior : Math.min(prior, ms));
-      }
-    }
-    if (row.step === PR_TERMINAL_STEP && row.state === "closed" && ms !== undefined) {
-      const prKey = effectivenessPrKey(row);
-      if (prKey !== undefined) timedClosedPrKeys.add(prKey);
-    }
-    if (row.step === "fix.done") {
-      const prKey = effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url);
-      const cost = rowCostUsd(row);
-      if (prKey !== undefined && cost !== undefined) fixCostByPr.set(prKey, (fixCostByPr.get(prKey) ?? 0) + cost);
-      continue;
-    }
-    if (row.step === "verdict" && typeof row.run_id === "string" && typeof row.verdict === "string") {
-      terminalVerdictByRun.set(row.run_id, { verdict: row.verdict, prKey: effectivenessPrKey(row), ms, cost: rowCostUsd(row) });
-      continue;
-    }
-    if (
-      row.step !== "skills.selection" ||
-      row.task_type !== taskType ||
-      typeof row.run_id !== "string"
-    ) continue;
-    const eligible = stringArray(row.approved_eligible_names);
-    if (!eligible.includes(skillName)) continue;
+    if (!isSkillSelection(row)) continue;
     const digests = row.skill_digests;
     const digest = digests !== null && typeof digests === "object" ? (digests as Record<string, unknown>)[skillName] : undefined;
-    selectionByRun.set(row.run_id, {
+    selectionByKey.set(runTaskKey(row), {
+      runId: row.run_id,
+      namesTask: typeof row.task_id === "string",
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
       digest: typeof digest === "string" ? digest : null,
+      epoch: row.arm_unit === TASK_ARM_UNIT ? (typeof row.arm_epoch === "string" ? row.arm_epoch : "unrecorded-epoch") : null,
+      startMs: rowMs(row) ?? Number.NEGATIVE_INFINITY,
     });
+  }
+
+  // W1-T14137: rows drawn per task and rows drawn per run are two designs, and two epochs are two experiments, so
+  // only the newest epoch's rows are compared: the one whose rows began last, whatever order the rows are read in.
+  const epochStartMs = new Map<string, number>();
+  for (const o of selectionByKey.values()) {
+    if (o.epoch !== null) epochStartMs.set(o.epoch, Math.min(epochStartMs.get(o.epoch) ?? Number.POSITIVE_INFINITY, o.startMs));
+  }
+  const armEpoch = [...epochStartMs]
+    .sort(([epochA, a], [epochB, b]) => (a !== b ? (a < b ? -1 : 1) : epochA < epochB ? -1 : epochA > epochB ? 1 : 0))
+    .at(-1)?.[0] ?? null;
+  const compared = (o: { epoch: string | null }): boolean => o.epoch === armEpoch;
+  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
+  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
+  const randomized = [...selectionByKey.values()].some((o) => compared(o) && o.withheld !== undefined);
+  const inArm = (o: SelectionObservation, treated: boolean): boolean =>
+    compared(o) && (randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated);
+  const isApart = (o: SelectionObservation): boolean => !inArm(o, true) && !inArm(o, false);
+  const runApart = new Map<string, boolean>();
+  for (const o of selectionByKey.values()) runApart.set(o.runId, (runApart.get(o.runId) ?? true) && isApart(o));
+  // Every row a run of this skill wrote, whatever its step, takes its selection's side, joined as terminalOf joins:
+  // its own run+task key's, else (naming a task) its run's task-less one, never another task's; a row naming no
+  // task is apart when every selection of its run is. Undefined: no such run (a sweep's `pr.terminal`, task SWEEP).
+  const apartOf = (row: SkillLedgerRow): boolean | undefined => {
+    if (typeof row.run_id !== "string") return undefined;
+    const namesTask = typeof row.task_id === "string";
+    const own = selectionByKey.get(runTaskKey(row)) ?? (namesTask ? selectionByKey.get(`${row.run_id}\0`) : undefined);
+    return own !== undefined ? isApart(own) : namesTask ? undefined : runApart.get(row.run_id);
+  };
+  // A PR takes the side of every attributed row naming it, read before any outcome so read order never matters:
+  // a thrown run's verdict omits the PR its `pr.opened` names, and a fix round names it by `repair_pr_url`.
+  const rowApart = rows.map(apartOf);
+  const rowPrKey = rows.map((row) =>
+    row.step === "fix.done" ? effectivenessPrKey(row) ?? prUrlKey(row.repair_pr_url) : effectivenessPrKey(row));
+  const apartPrKeys = new Set<string>();
+  const comparedPrKeys = new Set<string>();
+  rowPrKey.forEach((prKey, i) => {
+    if (prKey !== undefined && rowApart[i] !== undefined) (rowApart[i] ? apartPrKeys : comparedPrKeys).add(prKey);
+  });
+  // A run counted apart feeds nothing compared, and a PR only such runs name is theirs: not the settle window, the
+  // clock, a merge, a close or a fix cost.
+  const fenced = rowPrKey.map((prKey, i) =>
+    rowApart[i] === true || (prKey !== undefined && apartPrKeys.has(prKey) && !comparedPrKeys.has(prKey)));
+
+  type Terminal = { verdict: string; prKey: string | undefined; ms: number | undefined; cost: number | undefined };
+  const verdictByKey = new Map<string, Terminal>();
+  const verdictByRun = new Map<string, Terminal>();
+  const anyVerdictKeys = new Set<string>();
+  const anyVerdictRuns = new Set<string>();
+  for (const [i, row] of rows.entries()) {
+    if (row.step !== "verdict" || typeof row.run_id !== "string" || typeof row.verdict !== "string") continue;
+    anyVerdictKeys.add(runTaskKey(row));
+    anyVerdictRuns.add(row.run_id);
+    if (fenced[i]) continue;
+    const terminal = { verdict: row.verdict, prKey: rowPrKey[i], ms: rowMs(row), cost: rowCostUsd(row) };
+    verdictByKey.set(runTaskKey(row), terminal);
+    verdictByRun.set(row.run_id, terminal);
+  }
+  // A row naming a task joins its own verdict, else its run's task-less one, never another task's; a row naming
+  // no task joins any verdict of its run.
+  const terminalOf = (key: string, o: SelectionObservation): Terminal | undefined =>
+    verdictByKey.get(key) ?? (o.namesTask ? verdictByKey.get(`${o.runId}\0`) : verdictByRun.get(o.runId));
+  const hasAnyVerdict = (key: string, o: SelectionObservation): boolean =>
+    anyVerdictKeys.has(key) || (o.namesTask ? anyVerdictKeys.has(`${o.runId}\0`) : anyVerdictRuns.has(o.runId));
+
+  const mergedAtMs = new Map<string, number | undefined>();
+  const timedClosedPrKeys = new Set<string>();
+  const fixCostByPr = new Map<string, number>();
+  let latestMs: number | undefined;
+  for (const [i, row] of rows.entries()) {
+    if (fenced[i]) continue;
+    const prKey = rowPrKey[i];
+    const ms = rowMs(row);
+    if (ms !== undefined && (latestMs === undefined || ms > latestMs)) latestMs = ms;
+    if (isMergedLedgerRow(row) && prKey !== undefined) {
+      const prior = mergedAtMs.get(prKey);
+      mergedAtMs.set(prKey, prior === undefined ? ms : ms === undefined ? prior : Math.min(prior, ms));
+    }
+    if (row.step === PR_TERMINAL_STEP && row.state === "closed" && ms !== undefined && prKey !== undefined) timedClosedPrKeys.add(prKey);
+    if (row.step === "fix.done") {
+      const cost = rowCostUsd(row);
+      if (prKey !== undefined && cost !== undefined) fixCostByPr.set(prKey, (fixCostByPr.get(prKey) ?? 0) + cost);
+    }
   }
 
   const isMerged = (prKey: string | undefined): boolean => prKey !== undefined && mergedAtMs.has(prKey);
   const delays: number[] = [];
-  for (const terminal of terminalVerdictByRun.values()) {
+  for (const terminal of verdictByKey.values()) {
     const mergedMs = terminal.verdict === "merged" ? terminal.ms
       : terminal.prKey === undefined ? undefined : mergedAtMs.get(terminal.prKey);
     if (terminal.ms !== undefined && mergedMs !== undefined) delays.push(Math.max(0, mergedMs - terminal.ms));
@@ -1173,8 +1322,8 @@ export function buildSkillEffectivenessReport(
 
   // Resolved only after every row is read: the merge row is written after the run's verdict, but a union
   // read need not return them in that order.
-  const resolve = (runId: string): { outcome: string; cost: number | undefined } | undefined => {
-    const terminal = terminalVerdictByRun.get(runId);
+  const resolve = (key: string, o: SelectionObservation): { outcome: string; cost: number | undefined } | undefined => {
+    const terminal = terminalOf(key, o);
     if (terminal === undefined) return undefined;
     const cost = terminal.cost === undefined ? undefined
       : terminal.cost + (terminal.prKey === undefined ? 0 : fixCostByPr.get(terminal.prKey) ?? 0);
@@ -1186,20 +1335,24 @@ export function buildSkillEffectivenessReport(
     return { outcome: terminal.verdict, cost };
   };
 
-  // Once any randomized row exists for this skill, only randomized rows are compared: the arms are then
-  // assigned, so a budget omission (which tracks how many skills a task drew) cannot bias them.
-  const randomized = [...selectionByRun.values()].some((o) => o.withheld !== undefined);
-  const inArm = (o: { selected: boolean; withheld?: boolean }, treated: boolean): boolean =>
-    randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated;
+  const apartByDesign = new Map<string, SkillEffectivenessApartRows>();
+  for (const [key, o] of selectionByKey) {
+    if (!isApart(o)) continue;
+    const design = o.epoch ?? (o.withheld === undefined ? "observational" : "run-keyed");
+    const apart = apartByDesign.get(design) ?? { design, eligible_runs: 0, terminal_runs: 0 };
+    apart.eligible_runs++;
+    if (hasAnyVerdict(key, o)) apart.terminal_runs++;
+    apartByDesign.set(design, apart);
+  }
 
   const costSamples = { selected: [] as CostSample[], control: [] as CostSample[] };
   const buildCohort = (selected: boolean): SkillEffectivenessArm => {
     const cohort = emptyCohort();
     const samples = selected ? costSamples.selected : costSamples.control;
-    for (const [runId, observation] of selectionByRun) {
+    for (const [key, observation] of selectionByKey) {
       if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
-      const resolved = resolve(runId);
+      const resolved = resolve(key, observation);
       if (!resolved) continue;
       const { outcome, cost } = resolved;
       cohort.terminal_runs++;
@@ -1208,7 +1361,7 @@ export function buildSkillEffectivenessReport(
       if (outcome === "not_merged") cohort.not_merged_runs++;
       if (PENDING_VERDICTS.includes(outcome)) cohort.pending_merge_runs++;
       if ((SKILL_EFFECTIVENESS_HARM_OUTCOMES as readonly string[]).includes(outcome)) cohort.harmful_terminal_runs++;
-      if (cost !== undefined) samples.push({ runId, cost, merged: outcome === "merged" });
+      if (cost !== undefined) samples.push({ runId: key, cost, merged: outcome === "merged" });
     }
     // Summed in run order, so the same rows in any order give the same figures.
     samples.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
@@ -1222,9 +1375,9 @@ export function buildSkillEffectivenessReport(
   const selected = buildCohort(true);
   const control = buildCohort(false);
   const versionByDigest = new Map<string | null, SkillEffectivenessVersion>();
-  for (const [runId, observation] of selectionByRun) {
+  for (const [key, observation] of selectionByKey) {
     const treated = inArm(observation, true);
-    if ((!treated && !inArm(observation, false)) || !terminalVerdictByRun.has(runId)) continue;
+    if ((!treated && !inArm(observation, false)) || terminalOf(key, observation) === undefined) continue;
     let version = versionByDigest.get(observation.digest);
     if (version === undefined) {
       version = { digest: observation.digest, selected_terminal_runs: 0, control_terminal_runs: 0 };
@@ -1281,6 +1434,8 @@ export function buildSkillEffectivenessReport(
     control,
     harm_outcomes: SKILL_EFFECTIVENESS_HARM_OUTCOMES,
     assignment: randomized ? "randomized" : "observational",
+    arm_epoch: armEpoch,
+    apart: [...apartByDesign.values()].sort((a, b) => (a.design < b.design ? -1 : a.design > b.design ? 1 : 0)),
     versions: [...versionByDigest.values()],
     settle_window_ms: settleWindowMs,
     cost_difference_lower_bound_usd: costLowerBound,
@@ -1316,11 +1471,21 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
         "selected is every other eligible run (intent to treat)."
       : "assignment: observational — control is eligible runs on which the budget omitted the skill.",
+    `arm design: ${renderArmDesign(report)}`,
     report.assignment === "randomized"
       ? "interpretation: a randomized comparison at a small horizon is evidence, not proof; this report does not modify a skill."
       : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
     `skill versions: ${renderSkillVersions(report.versions)}`,
   ].join("\n");
+}
+
+/** The compared assignment design, and every other design's rows, which the comparison never pools. */
+function renderArmDesign(report: SkillEffectivenessReport): string {
+  const compared = report.arm_epoch === null
+    ? "before task-keyed arms (run-keyed or observational rows)" : `task-keyed, epoch ${report.arm_epoch}`;
+  const apart = report.apart.length === 0 ? "none"
+    : report.apart.map((a) => `${a.design} eligible=${a.eligible_runs} terminal=${a.terminal_runs}`).join("; ");
+  return `${compared}; apart, never pooled: ${apart}`;
 }
 
 /** The settle window and the cost bound a verdict rests on. */
@@ -1563,7 +1728,7 @@ export function stageSkillDrafts(
   drafts: readonly SkillDraft[],
   allowlist: WorkerAllowlist | ((draft: SkillDraft) => WorkerAllowlist),
   reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  log: SkillDraftLog,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
@@ -1577,6 +1742,51 @@ export function stageSkillDrafts(
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, closed, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  withdrawLegacyOutcomeOnlyDrafts(registryPath, new Set(drafts.map((draft) => skillDraftProposalId(draft.procedureKey))), log);
+}
+
+/** Legacy signal-only text no longer comes back through renderSkillDraft. Recheck the stored payload in place. */
+function withdrawLegacyOutcomeOnlyDrafts(registryPath: string, incomingIds: ReadonlySet<string>, log: SkillDraftLog): void {
+  let proposals: Proposal[];
+  try {
+    proposals = loadProposalRegistry(registryPath);
+  } catch (error) {
+    log("skill.stage_failed", { error: String(error) });
+    return;
+  }
+  const stateDir = dirname(registryPath);
+  const livePath = ledgerLivePath(stateDir);
+  for (const proposal of proposals) {
+    const { id, skillFile } = proposal;
+    if (!id.startsWith(SKILL_DRAFT_ID_PREFIX) || incomingIds.has(id) || !skillFile ||
+      workshopClosedSkillDraft(proposal) || !outcomeOnlyDraftRefusal(skillFile.markdown)) continue;
+    try {
+      let refusal: string | undefined;
+      const closed = withSkillDraftVerdictLock(stateDir, id, () => withLedgerRotationLock(stateDir, () =>
+        closeSkillDraft(registryPath, id, (entry) => {
+          refusal = entry.skillFile && outcomeOnlyDraftRefusal(entry.skillFile.markdown);
+          if (!refusal) return undefined;
+          const liveVersion = archiveVersion(livePath);
+          const pattern = new RegExp(JSON.stringify(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+          const union = readLedgerUnionRecordsSync(stateDir, {
+            step: SKILL_DRAFT_VERDICT_STEPS, pattern, where: (row) => row.task_id === id, refuseIncomplete: true,
+          });
+          if (!union.ok || union.torn > 0 || liveVersion !== archiveVersion(livePath)) {
+            throw new Error(`could not verify the ledger verdict for ${id}`);
+          }
+          const verdicts = ledgerProposalVerdicts(union.rows);
+          if (verdicts.isRatified(id) || verdicts.isDeclined(id) !== undefined) return undefined;
+          return { reason: `withdrawn: ${refusal}`, liveVersion };
+        }, log, systemClock)));
+      if (typeof closed === "object") throw new Error(closed.unmeasured);
+      if (closed) {
+        log("skill.staged", { name: skillFile.name, staged: false, already: false, backfilled: false, refreshed: false,
+          refused: true, closed, reason: refusal });
+      }
+    } catch (error) {
+      log("skill.stage_failed", { name: skillFile.name, error: String(error) });
     }
   }
 }

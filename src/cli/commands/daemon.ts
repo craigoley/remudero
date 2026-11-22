@@ -59,6 +59,7 @@ import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
+import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
@@ -70,7 +71,7 @@ import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
-import { createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
+import { boardPrsRestArgs, createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/feedback-landing.js";
@@ -84,6 +85,8 @@ import { ledgerMemoHolders, readLedgerUnionRecordsSync } from "../../lib/ledger-
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
+import { catalogFilingReader, opsFilingBinding, type CatalogFilingReaderOpts, type OpsFilingBinding } from "../../lib/dispatch-filing-catalogs.js";
+import { filingDatesFromPlanHistory } from "../../lib/dispatch-value.js";
 import { PLAN_DESTINATION_KINDS, planDestinationRepository, planDestinationPath, resolvePlanDestination, type PlanDestinationRepository } from "../../lib/plan-destination.js";
 import { readOperatorReleaseRecords } from "../../lib/machine-filing-judge.js";
 import { readReleaseLedgerLines } from "../../lib/operator-release.js";
@@ -136,7 +139,7 @@ import {
   bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
 } from "../../lib/run-child-mode.js";
-import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot } from "../../lib/tick-read-worker.js";
+import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
 
 /**
  * W1-T9333: everything `daemonCommand` reaches in `src/run-task.ts` that is not a `src/lib` symbol. This module
@@ -827,6 +830,26 @@ export async function readPushedRunBranchesOutputAsync(
   }
 }
 
+/** The drain reader's page bound; W1-T9243 owns replacing it. */
+const CLOSED_RUN_BRANCH_PR_MAX_PAGES = 8;
+
+/** W1-T14233: the daemon's closed-PR listing for `readClosedRunBranchPrs`, awaited so the loop never blocks on gh.
+ *  REJECTS on any failed or malformed page, so the daemon ledgers it and every ref keeps blocking. */
+export async function readClosedRunBranchPrsOutputAsync(
+  owner: string, repo: string, fetch: (args: string[]) => Promise<unknown> = (args) => ghJsonAsync(args),
+): Promise<string> {
+  const lines: string[] = [];
+  for (let page = 1; page <= CLOSED_RUN_BRANCH_PR_MAX_PAGES; page++) {
+    const rows = await fetch(boardPrsRestArgs(owner, repo, "closed", page, 100));
+    if (!Array.isArray(rows)) throw new Error(`closed pull-request page ${page} of ${owner}/${repo} is not a list`);
+    for (const row of rows as Array<{ head?: { ref?: string }; merged_at?: string | null }>) {
+      if (row.head?.ref) lines.push(`${row.head.ref}\t${row.merged_at == null}`);
+    }
+    if (rows.length < 100) break;
+  }
+  return lines.join("\n");
+}
+
 /** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
 function renderDaemonSummary(s: DaemonSummary): string {
   return [
@@ -913,7 +936,11 @@ export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
 
 export function opsCatalogShadowFeed(
   source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock,
-  opts: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void } = {},
+  opts: {
+    refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void;
+    /** W1-T14218: told each settled refresh, after it is the evidence and its row is written. */
+    onSettled?: (input: OpsCatalogShadowInput) => void;
+  } = {},
 ): {
   current(): OpsCatalogShadowInput | undefined;
   forDispatch(): OpsCatalogShadowInput | undefined;
@@ -942,7 +969,16 @@ export function opsCatalogShadowFeed(
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
     void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
       latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
-    }).then(() => { if (latest) logRefresh(latest, clock.now() - startedAt); }).finally(() => { inFlight = false; });
+    }).then(() => {
+      if (!latest) return;
+      logRefresh(latest, clock.now() - startedAt);
+      try {
+        opts.onSettled?.(latest);
+      } catch (error) {
+        // A listener that throws never changes the evidence the refresh produced, nor its row.
+        void error;
+      }
+    }).finally(() => { inFlight = false; });
   };
   const timer = opts.refreshEveryMs === undefined ? undefined : setInterval(start, opts.refreshEveryMs);
   timer?.unref();
@@ -955,6 +991,28 @@ export function opsCatalogShadowFeed(
     },
     stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
+}
+
+/**
+ * W1-T14218: the ops catalog feed and the catalog-aware filing reader, wired so the reader is warm before a selection
+ * needs it. W1-T14214's reader read the ops history only behind a selection, and the source's first read starts
+ * unawaited at boot, so the first selection after a boot (about the only one a boot gets) dated no ops task. Each
+ * settled ok snapshot now starts the ops filing read, unawaited and off the loop; selections keep their prefetch
+ * behind. A commit already dated is answered from its settled read, so a steady source costs no git read.
+ */
+export function opsCatalogFilingFeeds(
+  source: { refresh(): Promise<OpsCatalogShadowInput> } | undefined, clock: Clock,
+  feed: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void },
+  filing: Omit<CatalogFilingReaderOpts, "ops"> & { ops: (latest: OpsCatalogShadowInput | undefined) => OpsFilingBinding | undefined },
+): { opsShadow: ReturnType<typeof opsCatalogShadowFeed> | undefined; datedFiling: ReturnType<typeof catalogFilingReader> } {
+  function warmOpsFiling(input: OpsCatalogShadowInput): void {
+    if (input.outcome !== "ok") return;
+    // A warm-up that cannot read leaves the selection's own prefetch-behind read, which names any refusal.
+    datedFiling.refresh().then(undefined, (error: unknown) => { void error; });
+  }
+  const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(source, clock, { ...feed, onSettled: warmOpsFiling });
+  const datedFiling = catalogFilingReader({ ...filing, ops: () => filing.ops(opsShadow?.forDispatch()) });
+  return { opsShadow, datedFiling };
 }
 
 type OpsDispatchSelection = PlanTaskMoveFlag;
@@ -1095,6 +1153,8 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** W1-T14233: the transport under the closed-PR reader; production uses the async gh transport. */
+    closedRunBranchPrFetch?: (args: string[]) => Promise<unknown>;
     runTask?: DaemonCommandHost["runTask"];
     readRunChildMode?: () => RunChildMode;
     /** Stand-in for `sweep.observedOverlap.mode` (policy.ts); absent reads the installation's policy. */
@@ -1679,8 +1739,10 @@ export async function daemonCommand(
   };
   const openPrCount = () => openPrOwnership().owned;
   // W1-T11026: the focus gardener judges every new-task consultation and holds it while the stuck stack is deep.
-  const queueGate = focusGateFor(queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure),
-    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now) });
+  // W1-T13990: the fix-round reader joins the ledger union with the gate's own live read; a hold with no round run lifts.
+  const governorGate = queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now, deps.readQueuePressure);
+  const queueGate = focusGateFor(governorGate,
+    { stateDir: dirname(ledgerPath), log, clock: clockFromMillisFn(deps.now), readFixRounds: governorGate.readFixRounds });
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -2291,7 +2353,9 @@ export async function daemonCommand(
     const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
     const source = opsSourceRepository === undefined ? undefined
       : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
-    const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(shadowOpsCatalog ? source : {
+    // W1-T14214: an ops task is dated from the ops checkout's history at the commit the dispatch capture is bound to.
+    // W1-T14218: each ok snapshot the source settles starts that read, so the first selection after a boot is dated.
+    const { opsShadow, datedFiling } = opsCatalogFilingFeeds(source === undefined ? undefined : shadowOpsCatalog ? source : {
       refresh: () => {
         const current = opsDispatchSelection(join(config.root, "state"));
         return current.outcome === "on" && current.repository === opsSourceRepository
@@ -2301,7 +2365,9 @@ export async function daemonCommand(
       ...(opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {}),
       // W1-T13705: only the dispatch feed ledgers its refreshes; --shadow-ops-catalog keeps W1-T11770's one aggregate row.
       ...(shadowOpsCatalog ? {} : { log }),
-    });
+    }, { publicReader: dispatchFilingPrefetch, log,
+      ports: { parseFilingDates: filingDatesFromPlanHistory, gitFor: planSyncGitRunnerAsync },
+      ops: (latest) => opsFilingBinding(opsDispatchSelection(join(config.root, "state")), opsSourceRepository, latest) });
     if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
     opsShadow?.current();
     const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
@@ -2363,7 +2429,7 @@ export async function daemonCommand(
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, datedFiling(dispatchPlan)),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
@@ -2399,6 +2465,8 @@ export async function daemonCommand(
         // daemon awaits it, at each tick and lane refill, and ledgers the failure.
         // W1-T10897: the TARGET repo's origin — the engine checkout's lists only the engine's run branches.
         readPushedRunBranches: () => readPushedRunBranchesOutputAsync(targetCheckoutRoot),
+        // W1-T14233: without it the W1-T1207 closed-unmerged exemption never applies in the daemon.
+        readClosedRunBranchPrs: () => readClosedRunBranchPrsOutputAsync(target.owner, target.repo, deps.closedRunBranchPrFetch),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
@@ -2571,7 +2639,10 @@ export async function daemonCommand(
         // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
         // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
         // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: async () => { await sweepStrandedReviewWorktreesAsync(config, log); },
+        sweepStrandedReviewWorktrees: async () => {
+          await sweepStrandedReviewWorktreesAsync(config, log);
+          await reapRetiredReviewerTreesAsync(config, log); // W1-T14148: retired engines/worktrees reviewer trees
+        },
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),

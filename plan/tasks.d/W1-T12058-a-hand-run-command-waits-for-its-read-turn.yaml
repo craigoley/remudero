@@ -18,7 +18,7 @@
     - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
     - test/the-transport-paces-its-own-reads.test.ts
     - test/next-task-id-waits-for-the-shared-read-floor.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A hand-run command whose first read comes inside the cadence window waits for its turn and then runs, when no mode is set"

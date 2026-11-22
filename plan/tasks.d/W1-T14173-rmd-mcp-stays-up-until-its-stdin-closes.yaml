@@ -17,7 +17,8 @@
     - src/lib/operator-mcp.ts
     - test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts
     - test/fixtures/operator-mcp-cli-entry.ts
-  status: queued
+    - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:mcp-lives-until-stdin-ends — operatorMcpCommand with injected stdin and stdout streams (PassThrough) and a fixture service-tokens.json returns a promise that is still pending after it has answered an initialize request. It resolves to 0 only after stdin ends, and it closes the server before it resolves"
@@ -31,7 +32,7 @@
     - claim: "A bad argument still throws the usage error, and --enable-write without a write token still throws, before any transport starts"
       proof: "grep: W1-T14173 criterion 4: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
     - claim: "operatorMcpCommand waits for the end of its input before it returns"
-      proof: "grep: \"end\" in src/lib/operator-mcp.ts"
+      proof: "grep: const code = await Promise.race in src/lib/operator-mcp.ts"
   rationale: |
     WHY: `rmd mcp` cannot be used. It exits at once and answers nothing.
     MEASURED on the Azure host, 2026-11-21: a JSON-RPC initialize request piped into
@@ -71,6 +72,9 @@
        a temp root holding state/service-tokens.json ({ "read": "r-token" }), and a node:http fake server on
        127.0.0.1 port 0. Each child read has a 10 s bound, so a hang fails the test and does not stall the run.
        Load test/setup/tmp-hygiene.ts.
+    4. test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts stubs server.connect and awaits operatorMcpCommand on the
+       default process.stdin, which a test runner child may hold open. Once the verb waits for the end of its input that
+       test would hang, so it passes the new io argument with stdin already ended. Its assertions do not change.
     MEASURE AFTER DEPLOY: the same docker exec pipe as above prints an initialize result on stdout and the
     process stays up until stdin closes.
   falsifier: |
@@ -85,3 +89,6 @@
     Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
     Never point a test at the live serve; the write route stays off in every test.
     Not in scope: new MCP tools, the tokens, and the control-server routes.
+    Proof amended 2026-11-21 (operator session): criterion 5's proof wrapped "end" in quotes, which the
+    acceptance-author gate refuses (proof-shape), and a bare end matches main too. It now greps the race
+    line the build adds, which main lacks.

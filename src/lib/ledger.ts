@@ -835,6 +835,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // impl-EV: ops.ts's `priorReconciledAlertFeedbackIds` counts these to decide whether an
   // alert-feedback entry was already closed; the local entry stays `new`, so the line IS the dedup.
   "ops.feedback_reconciled",
+  "inbox.drafted",
+  "inbox.draft_cache_missing",
   "ratify.approved",
   "approve.id_materialized", // The saved improvement filing receipt recovers the actual task identities from this row.
   "ratify.reframed",
@@ -860,6 +862,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.commit_refused",
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
+  "fix.self_check", // W1-T14136: what a fix round's pre-push review left uncleared, kept for the after-deploy measure.
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
   "fix.stall_remedy", // W1-T12710: the remedies a stalled criterion had; the operator is asked once.
   "fix.progress_reused", // fixSeedRead distinguishes reused judgment metadata from an owning worker rung.

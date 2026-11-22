@@ -1,15 +1,20 @@
+// @source-text-subject: criteria 2 and 4 classify the real src/run-task.ts text itself (which top-level units the review walk reaches, and the review child's argument list); importing run-task.ts would trip the affected-suite reach ratchet.
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK,
   SELF_SYNC_GUARD_ENV,
   checkReviewerCodeFreshness,
   reviewPathSpans,
+  reviewerCodeFreshnessAt,
+  topLevelUnits,
   runTaskAdvanceTouchesReviewPath,
   type GitRunner,
 } from "../src/lib/self-sync.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T4469. REVIEW_MATERIAL_ADVANCE_PATHS listed all of src/run-task.ts, so 17 of 23 withheld
 // verdicts in a day were caused by run-task.ts hunks in the daemon, serve or sweep wiring. A
@@ -221,4 +226,260 @@ test("the guarded freshness check reads a run-task.ts past the 1 MiB exec buffer
 
   const freshness = checkReviewerCodeFreshness(reviewer.dir, { [SELF_SYNC_GUARD_ENV]: "1" });
   assert.deepEqual(freshness, { status: "fresh", codeSha: oldSha, originMainSha: newSha, advance: "immaterial" });
+});
+
+// W1-T14152. #19940 (93b21bd1b) changed only how the parent process finds, cuts, leases and removes the tree a
+// stale-code review runs in, and it requeued 22 delivered verdicts. Those units never compute a verdict: the child
+// `rmd review` in that tree does, and records its own HEAD as the reviewer code. So the walk does not enter them.
+
+// Spliced in so the fixture-copy census does not count this fixture text as a test-owned repo builder.
+const INSPECT_FRESH_REVIEWER_TREE = "inspectFreshReviewerWorktree";
+
+const PLACEMENT_BASE = [
+  'import { judge } from "./lib/review.js";',
+  'import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";',
+  "",
+  "async function runReview(pr: string): Promise<string> {",
+  "  return judge(pr) + judgeMore(pr) + verdictHelper();",
+  "}",
+  "",
+  "function verdictHelper(): string {",
+  '  return "verdict helper";',
+  "}",
+  "",
+  "async function reviewCommand(pr: string): Promise<number> {",
+  '  const seams: FreshTreeReviewSeams = { git: (args) => args.join(" "), spawnReview: spawnRmdReviewForFreshTree, worktreeRoot: "/wt" };',
+  '  const fresh = buildFreshTreeReviewRunner("/repo", seams);',
+  '  const approve = freshOriginMainTreeRunner("/repo", seams);',
+  "  return (await runReview(pr)).length + ((await fresh(pr, [])) ?? 0) + (await approve()).length;",
+  "}",
+  "",
+  "export type FreshTreeReviewSeams = {",
+  "  git: (args: string[]) => string;",
+  "  spawnReview: (worktree: string, args: string[]) => Promise<number>;",
+  "  worktreeRoot: string;",
+  "};",
+  "",
+  'export type FreshTreeTools = Omit<FreshTreeReviewSeams, "spawnReview">;',
+  "",
+  `function ${INSPECT_FRESH_REVIEWER_TREE}(path: string, git: (args: string[]) => string): "absent" | "reusable" {`,
+  '  const listed = git(["worktree", "list", "--porcelain"]);',
+  '  return listed.includes(path) ? "reusable" : "absent";',
+  "}",
+  "",
+  'function freshTreeInspector(deps: FreshTreeTools): (path: string) => "absent" | "reusable" {',
+  "  return (path) => inspectFreshReviewerWorktree(path, deps.git);",
+  "}",
+  "",
+  "function perAttemptTreePath(deps: FreshTreeTools, sha: string): string {",
+  "  return `${deps.worktreeRoot}/reviewer-${sha.slice(0, 12)}`;",
+  "}",
+  "",
+  "function prepareFreshOriginMainTree(deps: FreshTreeTools, sha: string): string {",
+  "  const path = perAttemptTreePath(deps, sha);",
+  '  if (freshTreeInspector(deps)(path) === "absent") deps.git(["worktree", "add", "--detach", path, sha]);',
+  "  makeTreeRunnable(deps, path);",
+  "  return path;",
+  "}",
+  "",
+  "function makeTreeRunnable(deps: FreshTreeTools, path: string): void {",
+  '  deps.git(["-C", path, "link-node-modules"]);',
+  "}",
+  "",
+  "async function removePerAttemptTree(deps: FreshTreeTools, path: string): Promise<void> {",
+  '  deps.git(["worktree", "remove", path]);',
+  "}",
+  "",
+  "export function buildFreshTreeReviewRunner(repoDir: string, deps: FreshTreeReviewSeams) {",
+  "  return async (prArg: string, rest: string[]): Promise<number | undefined> => {",
+  "    const tree = prepareFreshOriginMainTree(deps, repoDir);",
+  "    return withReviewerWorktreeLease(tree, () => deps.spawnReview(tree, [prArg, ...rest]));",
+  "  };",
+  "}",
+  "",
+  "export function freshOriginMainTreeRunner(repoDir: string, deps: FreshTreeTools) {",
+  "  return async (): Promise<string> => {",
+  "    const tree = prepareFreshOriginMainTree(deps, repoDir);",
+  "    await removePerAttemptTree(deps, tree);",
+  "    return tree;",
+  "  };",
+  "}",
+  "",
+  "export function spawnRmdReviewForFreshTree(worktree: string, args: string[]): Promise<number> {",
+  "  return Promise.resolve(spawnHelper(worktree, args));",
+  "}",
+  "",
+  "function spawnHelper(worktree: string, args: string[]): number {",
+  "  return worktree.length + args.length;",
+  "}",
+  "",
+  "export function garden(): number {",
+  "  return 1;",
+  "}",
+  "",
+].join("\n");
+
+const REVIEW_TS = "export const judge = (pr: string) => pr;\n";
+const LEASE_TS = "export function withReviewerWorktreeLease<T>(path: string, action: () => T): T {\n  return action();\n}\n";
+const LEASE_TS_AFTER = `${LEASE_TS}export class ReviewerWorktreeLeasedError extends Error {}\n`;
+
+type Edit = readonly [from: string, to: string];
+
+/** The #19940 shape: (a) hunks inside the placement units and the seams type, (b) a new class beside them and used
+ *  only by them, (c) an import binding used only inside them. (d), the lease file, is a separate file change. */
+const PLACEMENT_EDITS: readonly Edit[] = [
+  ['import { withReviewerWorktreeLease } from', 'import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from'],
+  ["  worktreeRoot: string;\n", "  worktreeRoot: string;\n  removeWorktree?: (path: string) => Promise<void>;\n"],
+  ['  const listed = git(["worktree", "list", "--porcelain"]);', '  const listed = git(["-C", path, "worktree", "list", "--porcelain"]);'],
+  ["reviewer-${sha.slice(0, 12)}`", "reviewer-${sha.slice(0, 12)}-${process.pid}`"],
+  ["function prepareFreshOriginMainTree(", "class UnprovenFreshTreeError extends Error {\n  constructor(path: string) {\n    super(`unproven ${path}`);\n  }\n}\n\nfunction prepareFreshOriginMainTree("],
+  ["  const path = perAttemptTreePath(deps, sha);\n", "  const path = perAttemptTreePath(deps, sha);\n  if (path.length === 0) throw new UnprovenFreshTreeError(path);\n"],
+  ['  deps.git(["worktree", "remove", path]);', '  deps.git(["worktree", "remove", "--force", path]);'],
+  ["    return withReviewerWorktreeLease(tree, () => deps.spawnReview(tree, [prArg, ...rest]));",
+    "    try {\n      return await withReviewerWorktreeLease(tree, () => deps.spawnReview(tree, [prArg, ...rest]));\n    } catch (err) {\n" +
+    "      if (!(err instanceof ReviewerWorktreeLeasedError) && !(err instanceof UnprovenFreshTreeError)) throw err;\n      return undefined;\n    }"],
+  ["    await removePerAttemptTree(deps, tree);", "    await removePerAttemptTree(deps, tree).catch(() => undefined);"],
+];
+
+function applyEdits(source: string, edits: readonly Edit[]): string {
+  return edits.reduce((text, [from, to]) => {
+    assert.equal(text.split(from).length, 2, `the fixture must contain ${JSON.stringify(from)} exactly once`);
+    return text.replace(from, () => to);
+  }, source);
+}
+
+interface Advance { runTask?: readonly Edit[]; review?: string; lease?: string; base?: string }
+
+/** A real repository: reviewer code at a base commit, origin/main one commit on, judged by the production predicate. */
+function placementAdvance(advance: Advance) {
+  const repo = gitRepo({ kind: "t14152-placement" });
+  const write = (path: string, text: string) => {
+    mkdirSync(join(repo.dir, path, ".."), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+  };
+  const base = advance.base ?? PLACEMENT_BASE;
+  write("src/run-task.ts", base);
+  write("src/lib/review.ts", REVIEW_TS);
+  write("src/lib/reviewer-worktree-lease.ts", LEASE_TS);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "reviewer code");
+  const codeSha = repo.git("rev-parse", "HEAD");
+  write("src/run-task.ts", applyEdits(base, advance.runTask ?? []));
+  write("src/lib/review.ts", advance.review ?? REVIEW_TS);
+  write("src/lib/reviewer-worktree-lease.ts", advance.lease ?? LEASE_TS);
+  repo.git("add", "-A");
+  repo.git("commit", "--quiet", "-m", "main advance");
+  const originMainSha = repo.git("rev-parse", "HEAD");
+  const git: GitRunner = (args) => repo.git(...args);
+  return { freshness: reviewerCodeFreshnessAt(codeSha, originMainSha, git), codeSha, originMainSha };
+}
+
+const PLACEMENT_ONLY: Advance = { runTask: PLACEMENT_EDITS, lease: LEASE_TS_AFTER };
+
+test("W1-T14152 criterion 1: an advance that changes only the tree-placement units and the lease file is immaterial", () => {
+  const { freshness, codeSha, originMainSha } = placementAdvance(PLACEMENT_ONLY);
+  assert.deepEqual(freshness, { status: "fresh", codeSha, originMainSha, advance: "immaterial" });
+  // Each part alone is immaterial too, so no single part hides behind another.
+  for (const [i, edit] of PLACEMENT_EDITS.entries()) {
+    assert.equal(placementAdvance({ runTask: [edit] }).freshness.status, "fresh", `placement edit ${i}: ${edit[0]}`);
+  }
+  assert.equal(placementAdvance({ lease: LEASE_TS_AFTER }).freshness.status, "fresh", "the lease file alone");
+});
+
+const CLOSURE_CHANGES: ReadonlyArray<{ name: string; advance: Advance; path: string }> = [
+  { name: "one code token in src/lib/review.ts", advance: { review: REVIEW_TS.replace("=> pr;", "=> pr.trim();") }, path: "src/lib/review.ts" },
+  { name: "a hunk in runReview", path: "src/run-task.ts",
+    advance: { runTask: [["  return judge(pr) + judgeMore(pr) + verdictHelper();", '  return judge(pr) + judgeMore(pr) + verdictHelper() + "!";']] } },
+  { name: "a hunk in a helper only runReview calls", path: "src/run-task.ts",
+    advance: { runTask: [['  return "verdict helper";', '  return "verdict helper, changed";']] } },
+  { name: "a hunk in reviewCommand", path: "src/run-task.ts",
+    advance: { runTask: [['  const fresh = buildFreshTreeReviewRunner("/repo", seams);', '  const fresh = buildFreshTreeReviewRunner("/other", seams);']] } },
+  { name: "a hunk in spawnRmdReviewForFreshTree", path: "src/run-task.ts",
+    advance: { runTask: [["  return Promise.resolve(spawnHelper(worktree, args));", '  return Promise.resolve(spawnHelper(worktree, [...args, "--json"]));']] } },
+  { name: "a hunk in a toolchain helper only the placement units call", path: "src/run-task.ts",
+    advance: { runTask: [['  deps.git(["-C", path, "link-node-modules"]);', '  deps.git(["-C", path, "link-node-modules", "--proof"]);']] } },
+  { name: "an import line that adds a binding runReview uses", path: "src/run-task.ts",
+    advance: { runTask: [['import { judge } from "./lib/review.js";', 'import { judge, judgeMore } from "./lib/review.js";']] } },
+  { name: "src/lib/reviewer-worktree-lease.ts together with src/lib/review.ts", path: "src/lib/review.ts",
+    advance: { lease: LEASE_TS_AFTER, review: REVIEW_TS.replace("=> pr;", "=> pr.trim();") } },
+];
+
+test("W1-T14152 criterion 2: a change inside the verdict closure still makes the reviewer code stale", () => {
+  for (const { name, advance, path } of CLOSURE_CHANGES) {
+    const together: Advance = {
+      runTask: [...PLACEMENT_EDITS, ...(advance.runTask ?? [])], lease: LEASE_TS_AFTER, ...(advance.review ? { review: advance.review } : {}),
+    };
+    for (const [form, shape] of [["alone", advance], ["with the placement changes", together]] as const) {
+      const { freshness } = placementAdvance(shape);
+      assert.equal(freshness.status, "stale", `${name}, ${form}: ${JSON.stringify(freshness)}`);
+      assert.ok((freshness as { changedPaths: string[] }).changedPaths.includes(path), `${name}, ${form}: ${path} is named`);
+    }
+  }
+
+  // In the real src/run-task.ts the walk passes through the placement units, so the toolchain code they call stays reached.
+  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const scan = reviewPathSpans(source);
+  assert.ok("spans" in scan, "the real src/run-task.ts must scan");
+  const reached = new Set(topLevelUnits(source)!.filter((unit) => !unit.imports && scan.spans.some(([from]) => from === unit.start))
+    .flatMap((unit) => unit.names!));
+  for (const name of ["makeTreeRunnable", "prepareWorktreeToolchain", "pathOccupied"]) assert.ok(reached.has(name), `${name} stays on the review path`);
+  for (const name of REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK) assert.equal(reached.has(name), false, `${name} is passed through, not counted`);
+});
+
+test("W1-T14152 criterion 3: the tree-placement set fails closed", () => {
+  // A placement unit under a name the set does not hold, and reached from reviewCommand, is walked as today.
+  const renamed = PLACEMENT_BASE.replaceAll("freshOriginMainTreeRunner", "approveTreeRunner");
+  assert.ok(!(REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK as readonly string[]).includes("approveTreeRunner"));
+  const hunk: Edit = ["    await removePerAttemptTree(deps, tree);", "    await removePerAttemptTree(deps, tree).catch(() => undefined);"];
+  assert.equal(placementAdvance({ runTask: [hunk] }).freshness.status, "fresh", "under its set name the same hunk is immaterial");
+  const renamedFreshness = placementAdvance({ base: renamed, runTask: [hunk] }).freshness;
+  assert.equal(renamedFreshness.status, "stale", JSON.stringify(renamedFreshness));
+  assert.deepEqual((renamedFreshness as { changedPaths: string[] }).changedPaths, ["src/run-task.ts"]);
+  const reason = runTaskAdvanceTouchesReviewPath(...reviewPathShas(renamed, applyEdits(renamed, [hunk])));
+  assert.match(reason.reason, /meets the review path/);
+
+  // A name the set holds that the source lacks changes nothing: the advance is judged as if the set did not name it.
+  const absent = REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK.filter((name) => !new RegExp(`\\b${name}\\b`).test(PLACEMENT_BASE));
+  assert.ok(absent.includes("inPerAttemptTree"), `the fixture lacks some set names: ${absent.join(", ")}`);
+  assert.ok("spans" in reviewPathSpans(PLACEMENT_BASE), "a source without every set name still scans");
+  assert.equal(placementAdvance({ runTask: [['  return 1;', '  return 2;']] }).freshness.status, "fresh", "an unreached hunk stays immaterial");
+  assert.equal(placementAdvance(PLACEMENT_ONLY).freshness.status, "fresh", "the placement-only advance stays immaterial");
+
+  // A missing review root still reads as material, as on origin/main.
+  const rootless = PLACEMENT_BASE.replaceAll("runReview", "runVerdict");
+  const missing = runTaskAdvanceTouchesReviewPath(...reviewPathShas(rootless, applyEdits(rootless, [['  return 1;', '  return 2;']])));
+  assert.equal(missing.touchesReviewPath, true);
+  assert.match(missing.reason, /review path symbol runReview not found/);
+  assert.equal(placementAdvance({ base: rootless, runTask: [['  return 1;', '  return 2;']] }).freshness.status, "stale");
+});
+
+function reviewPathShas(before: string, after: string): [GitRunner, string, string] {
+  const repo = gitRepo({ kind: "t14152-root" });
+  const codeSha = commitRunTask(repo, before);
+  const originMainSha = commitRunTask(repo, after);
+  return [(args) => repo.git(...args), codeSha, originMainSha];
+}
+
+test("W1-T14152 criterion 4: the review child's argument list stays pinned in the real src/run-task.ts", () => {
+  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
+  const units = topLevelUnits(source);
+  assert.ok(units, "the real src/run-task.ts must scan");
+  const lines = source.split("\n");
+  const placement = new Set<string>(REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK);
+  const named = units.filter((unit) => !unit.imports && unit.names?.some((name) => placement.has(name)));
+  for (const name of placement) assert.ok(named.some((unit) => unit.names!.includes(name)), `${name} is declared in src/run-task.ts`);
+  let pinned = 0;
+  for (const unit of named) {
+    const name = unit.names![0];
+    const code = lines.slice(unit.start - 1, unit.end).join("\n").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+    const calls = [...code.matchAll(/deps\.spawnReview\(\s*([^,()]+),\s*(\[[^\]]*\])/g)];
+    assert.equal(calls.length, (code.match(/\bspawnReview\s*\(/g) ?? []).length, `${name}: every spawnReview call is deps.spawnReview(tree, [...])`);
+    for (const call of calls) {
+      assert.equal(name, "buildFreshTreeReviewRunner", `${name} calls spawnReview; only buildFreshTreeReviewRunner may`);
+      assert.equal(call[2].trim(), "[prArg, ...rest]", `${name} passes ${call[2]} to the review child`);
+      pinned++;
+    }
+    assert.doesNotMatch(code, /(?<![\w$.])spawn(?:Sync)?\s*\(/, `${name} spawns a process`);
+  }
+  assert.ok(pinned >= 1, "buildFreshTreeReviewRunner must hand the review child its arguments, or this pin proves nothing");
 });

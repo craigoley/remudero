@@ -26,7 +26,7 @@ import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type Reli
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCausalScope, type InboxInputReference, type ThreadEvent, type ThreadEventKind, type ThreadMessageExtra, type ThreadStoreDeps } from "./inbox-thread.js";
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
-import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
+import { skillEvalApprovalRefusal, skillEvalInboxStatus } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultGetProcessStartTime, isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
@@ -110,7 +110,21 @@ export interface Proposal {
   skillFile?: SkillFilePayload;
   skillFileStagedAt?: string;
   skillEval?: SkillEvalRecord;
+  /** W1-T13861: the fleet's own eval of the text with this sha256: claimed (running, or stopped with no verdict) or
+   *  waiting on a gate. Written only by skill-eval-auto.ts. */
+  skillEvalAuto?: SkillEvalAutoRecord;
   skillDraftClose?: { at: string; reason: string; skillSha256: string };
+}
+
+/** W1-T13861: one auto-eval state for one stored text. A claim is never released once an attempt was dispatched. */
+export interface SkillEvalAutoRecord {
+  draftSha256: string;
+  state: "claimed" | "waiting";
+  /** The eval's run id; present on a claim. */
+  runId?: string;
+  /** Why the pass waited; present while waiting. */
+  reason?: string;
+  at: string;
 }
 
 export interface SkillEvalRecord {
@@ -378,7 +392,10 @@ export interface DraftExclusion {
 export type DraftSelectionContext = Pick<
   ReadinessContext,
   "isRatified" | "isDeclined" | "boardReferents" | "grepAnchorTrue" | "openProposalIds" | "retirement"
->;
+> & {
+  draftLedgerRows?: readonly Record<string, unknown>[];
+  onMissingCleanDraft?: (proposalId: string, inputKey: string) => void;
+};
 
 function readDraftExclusion(check: () => DraftExclusion | undefined): DraftExclusion | undefined {
   try {
@@ -443,8 +460,7 @@ function rankDraftSelection(proposals: Proposal[], drafts: DraftCache): Proposal
   return [...proposals].sort((a, b) => draftSelectionRank(a, drafts) - draftSelectionRank(b, drafts) || a.id.localeCompare(b.id));
 }
 
-/** Unthrottled manual force, wrapped by draftsDueOnDaemon; readiness context enables daemon-only exclusions. */
-export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
+function draftableProposals(proposals: Proposal[], ctx?: DraftSelectionContext): Proposal[] {
   return proposals.filter((p) => {
     if (isAgeOnlyInboxInformation(p)) {
       let informational = true;
@@ -458,14 +474,20 @@ export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache,
       if (informational) return false;
     }
     if (p.lifecycleAction || p.skillFile) return false;
-    if (ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired) return false;
+    return !(ctx ? draftExclusionForProposal(p, ctx) : p.trigger && !p.trigger.fired);
+  });
+}
+
+/** Manual force uses the anchor fingerprint to decide whether an existing draft needs replacement. */
+export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache, ctx?: DraftSelectionContext): Proposal[] {
+  return draftableProposals(proposals, ctx).filter((p) => {
     const cached = drafts[p.id];
     return !cached || isDraftStale(cached, p.evidenceAnchors);
   });
 }
 
 // ── Daemon-side idempotence (W1-T192) ──────────────────────────────────────────────────────
-// One attempt per invalidation: DraftAttemptCache records draftAttemptKey on success AND failure.
+// Clean inputs are retired by ledger receipts. Failed attempts are throttled per lane.
 
 /** The configured drafting lane whose attempts share one idempotence key. */
 export interface DraftLaneIdentity {
@@ -494,13 +516,111 @@ export function inboxDraftLaneForMount(mount: Mount, capabilities: CapabilityLad
     : { leadDeployment, effort: mount.effort };
 }
 
+/** W1-T13864: what a draft is drafted from, without the lane: the anchor fingerprint and the reframe count. */
+export function draftInputKey(proposal: Pick<Proposal, "evidenceAnchors" | "reframeHistory">): string {
+  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
+}
+
+/**
+ * Every draft_input_key that has a lint-clean inbox.drafted row, per proposal. Design item 2 (invariant
+ * one-clean-draft-per-input): each clean input stays retired, so a proposal that returns to an input it already had
+ * (a retired proposal recreated under its stable id at the same anchors and reframe count) is not drafted again.
+ * Row order and `ts` do not decide which keys count, so a clock rollback cannot bring an input back.
+ */
+export function cleanDraftInputKeys(rows: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const clean = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (row?.step !== "inbox.drafted" || row.lint_clean !== true || typeof row.proposal_id !== "string" ||
+      typeof row.draft_input_key !== "string") continue;
+    const keys = clean.get(row.proposal_id) ?? new Set<string>();
+    keys.add(row.draft_input_key);
+    clean.set(row.proposal_id, keys);
+  }
+  return clean;
+}
+
+function draftReceiptRow(row: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (typeof row?.proposal_id !== "string" || typeof row.draft_input_key !== "string") return undefined;
+  const identity = { proposal_id: row.proposal_id, draft_input_key: row.draft_input_key };
+  if (row.step === "inbox.drafted" && row.lint_clean === true) {
+    return { step: row.step, ...identity, lint_clean: true, ...(typeof row.ts === "string" ? { ts: row.ts } : {}) };
+  }
+  if (row.step === "inbox.draft_cache_missing") return { step: row.step, ...identity };
+  return undefined;
+}
+
+/**
+ * GitHub names a repository case-insensitively, and the daemon keeps `--repo` as typed: `Owner/target` and
+ * `owner/target` are one repository, so its receipts are scoped and indexed under one lower-case name.
+ */
+function receiptRepository(repository: string): string {
+  return repository.trim().toLowerCase();
+}
+
+function draftReceiptIndexPath(stateDir: string, repository: string): string {
+  return join(stateDir, "inbox-draft-receipts", `${encodeURIComponent(receiptRepository(repository))}.json`);
+}
+
+function mergeDraftReceiptIndex(path: string, observed: readonly Record<string, unknown>[]) {
+  const stored: unknown = JSON.parse(readFileIfExists(path) ?? "[]");
+  if (!Array.isArray(stored)) throw new Error(`invalid inbox draft receipt index at ${path}`);
+  const index = new Map<string, Record<string, unknown>>();
+  for (const row of stored) {
+    const receipt = draftReceiptRow(row);
+    if (!receipt) throw new Error(`invalid inbox draft receipt at ${path}`);
+    index.set(JSON.stringify(receipt), receipt);
+  }
+  const priorCount = index.size;
+  for (const row of observed) {
+    const receipt = draftReceiptRow(row);
+    if (receipt) index.set(JSON.stringify(receipt), receipt);
+  }
+  return { rows: [...index.values()], changed: index.size !== priorCount };
+}
+
+function retainDraftReceipts(
+  stateDir: string,
+  repository: string,
+  observed: readonly Record<string, unknown>[],
+  log: DraftRungDeps["log"],
+  registryLocked: boolean,
+): Record<string, unknown>[] {
+  const path = draftReceiptIndexPath(stateDir, repository);
+  const scoped = observed.filter(row => row && (row.repository === undefined ||
+    (typeof row.repository === "string" && receiptRepository(row.repository) === receiptRepository(repository))));
+  let rows = scoped;
+  try {
+    const merged = mergeDraftReceiptIndex(path, scoped);
+    rows = merged.rows;
+    const persist = (latest: typeof merged) => {
+      rows = latest.rows;
+      if (latest.changed) writeAtomic(path, JSON.stringify(rows), { mode: 0o600 });
+    };
+    if (merged.changed && registryLocked) persist(merged);
+    else if (merged.changed) updateProposalRegistry(join(stateDir, "inbox-proposals.json"), () => {
+      persist(mergeDraftReceiptIndex(path, scoped));
+      return null;
+    });
+  } catch (error) {
+    log("inbox.draft_history_partial", { unread: [path], repository, error: String(error) });
+  }
+  return rows;
+}
+
+/** Index readable receipts under the registry lock. On index failure, use the receipts already read. */
+export function indexInboxDraftReceipts(
+  stateDir: string, repository: string, observed: readonly Record<string, unknown>[], log: DraftRungDeps["log"],
+): Record<string, unknown>[] {
+  return retainDraftReceipts(stateDir, repository, observed, log, false);
+}
+
 function draftLaneFingerprint(lane: DraftLaneIdentity): string {
   return JSON.stringify([lane.leadDeployment, lane.effort, lane.escalationDeployment ?? null, lane.escalationEffort ?? null]);
 }
 
-/** Lead + Sonnet rescue fingerprint: old lanes become due once, unless a clean cached draft already wins. */
+/** Failed-attempt identity includes the lead and rescue lanes, so changing lanes allows a retry. */
 export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
-  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${draftLaneFingerprint(lane)}`;
+  return `${draftInputKey(proposal)}::${draftLaneFingerprint(lane)}`;
 }
 
 /** Daemon-only last cause per proposal: <config.root>/state/inbox-draft-attempts.json; manual force never reads/writes. */
@@ -514,7 +634,7 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
   try {
     const raw = JSON.parse(text) as unknown;
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-    return raw as DraftAttemptCache;
+    return Object.fromEntries(Object.entries(raw).filter(([, key]) => typeof key === "string"));
   } catch {
     return {};
   }
@@ -535,8 +655,7 @@ export function parseDraftAttemptCache(text: string | undefined): DraftAttemptCa
 // Why: the measured batch duration and rung cadence — docs/forensics/inbox.md.
 export const DAEMON_DRAFT_BATCH_CAP = 3;
 
-/** Proposals the DAEMON-SIDE rung should attempt this poll — {@link proposalsNeedingDraft} throttled so the same
- *  cause is never re-spawned. `rmd inbox` skips this, which is what makes it a force. */
+/** Daemon selection compares the full draft input and applies both the clean and failed attempt history. */
 export function draftsDueOnDaemon(
   proposals: Proposal[],
   drafts: DraftCache,
@@ -545,10 +664,28 @@ export function draftsDueOnDaemon(
   ctx?: DraftSelectionContext,
   lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
-  const due = rankDraftSelection(
-    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p, lane)),
-    drafts,
-  );
+  const clean = cleanDraftInputKeys(ctx?.draftLedgerRows ?? []);
+  const candidates = draftableProposals(proposals, ctx).filter((p) => {
+    const inputKey = draftInputKey(p);
+    const cached = drafts[p.id];
+    const completion = cached?.completion;
+    const cachedInput = completion?.snapshot?.proposal;
+    // Legacy drafts carry only anchors. A completion read from disk must identify a valid input.
+    const hasCurrentDraft = completion === undefined
+      ? Boolean(cached && !isDraftStale(cached, p.evidenceAnchors))
+      : completion?.lintClean === true && cachedInput?.id === p.id &&
+        Array.isArray(cachedInput.evidenceAnchors) &&
+        cachedInput.evidenceAnchors.every(anchor => typeof anchor?.pattern === "string" &&
+          (anchor.path === undefined || typeof anchor.path === "string")) &&
+        (cachedInput.reframeHistory === undefined || Array.isArray(cachedInput.reframeHistory)) &&
+        draftInputKey(cachedInput) === inputKey;
+    if (clean.get(p.id)?.has(inputKey)) {
+      if (!hasCurrentDraft) ctx?.onMissingCleanDraft?.(p.id, inputKey);
+      return false;
+    }
+    return !hasCurrentDraft && attempts[p.id] !== draftAttemptKey(p, lane);
+  });
+  const due = rankDraftSelection(candidates, drafts);
   return cap > 0 ? due.slice(0, cap) : due;
 }
 
@@ -716,6 +853,7 @@ export interface InboxClassification {
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
   skillFile?: SkillFilePayload;
   skillEval?: SkillEvalRecord;
+  skillEvalAuto?: SkillEvalAutoRecord;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -1451,7 +1589,8 @@ export function classifyProposal(
   // W1-T4338: a skill draft needs no Architect-drafted task — the staged SKILL.md IS the artifact approval writes.
   if (proposal.skillFile) {
     return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile,
-      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}), ...referentUnverified };
+      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}),
+      ...(proposal.skillEvalAuto ? { skillEvalAuto: proposal.skillEvalAuto } : {}), ...referentUnverified };
   }
 
   const reasons: PredicateFailure[] = [];
@@ -2099,7 +2238,7 @@ function validDraftSnapshot(snapshot: InboxDraftSnapshot, scope: InboxCausalScop
     JSON.stringify(snapshot.inputs) === JSON.stringify(draftSnapshotInputs(snapshot.proposal, scope));
 }
 
-/** Only pending publication lives here. Successful publication remains in the existing ledger. */
+/** Only pending publication lives here. Clean receipts also enter the durable selection index. */
 interface DraftCompletionOutboxEntry { completion: InboxDraftCompletion; adopted: boolean }
 
 export function commitInboxDraftOutcomes(opts: {
@@ -2123,7 +2262,7 @@ export function commitInboxDraftOutcomes(opts: {
   // Idle recovery must not synchronously scan every shard. Pending receipts are re-read under lock.
   if (opts.outcomes.length === 0 && Object.keys(readObject(outboxPath)).length === 0) return;
   updateProposalRegistry(registryPath, current => {
-    const drafts = readObject(draftsPath) as DraftCache, attempts = (opts.lane ? readObject(attemptsPath) : {}) as DraftAttemptCache,
+    const drafts = readObject(draftsPath) as DraftCache, attempts = opts.lane ? parseDraftAttemptCache(readFileIfExists(attemptsPath)) : {},
       outbox = readObject(outboxPath) as Record<string, DraftCompletionOutboxEntry>;
     const cashResumes = opts.lane ? readDraftCashResumes(opts.stateDir) : undefined;
     const saveOutbox = () => writeAtomic(outboxPath, JSON.stringify(outbox));
@@ -2138,10 +2277,14 @@ export function commitInboxDraftOutcomes(opts: {
           if (drafts[snapshot.proposal.id]?.completion?.snapshot.completionId !== id) continue;
           record.adopted = true; saveOutbox();
         }
-        opts.log("inbox.drafted", { proposal_id: snapshot.proposal.id, repository: snapshot.repository, completion_id: id,
+        const receipt = { ts: systemClock.iso(), proposal_id: snapshot.proposal.id, draft_input_key: draftInputKey(snapshot.proposal),
+          repository: snapshot.repository, completion_id: id,
           ...(completion.modelFields ?? draftModelFields()),
-          consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations });
+          consumed_inputs: snapshot.inputs, cache_adopted: true, lint_clean: completion.lintClean, unresolved_violations: completion.violations };
+        opts.log("inbox.drafted", receipt);
         delete outbox[id]; saveOutbox();
+        if (completion.lintClean) retainDraftReceipts(opts.stateDir, snapshot.repository,
+          [{ step: "inbox.drafted", ...receipt }], opts.log, true);
       }
     };
     flush();
@@ -2164,9 +2307,13 @@ export function commitInboxDraftOutcomes(opts: {
         if (completion) { outbox[completion.snapshot.completionId] = { completion, adopted: false }; saveOutbox(); }
         drafts[outcome.proposalId] = outcome.candidate;
       }
-      if (opts.lane && (outcome.ok || !outcome.refused)) attempts[outcome.proposalId] = draftAttemptKey(snapshot.proposal, opts.lane);
-      if (opts.lane) writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
-      else writeAtomic(draftsPath, JSON.stringify(drafts));
+      if (opts.lane) {
+        if (outcome.ok && outcome.candidate.completion?.lintClean === true) delete attempts[outcome.proposalId];
+        else if (outcome.ok ? outcome.candidate.completion?.lintClean === false : !outcome.refused) {
+          attempts[outcome.proposalId] = draftAttemptKey(snapshot.proposal, opts.lane);
+        }
+        writeDraftAttemptPair(draftsPath, attemptsPath, drafts, attempts);
+      } else writeAtomic(draftsPath, JSON.stringify(drafts));
       const previousResume = cashResumes?.[outcome.proposalId];
       if (cashResumes && previousResume && (outcome.ok || previousResume.generation !== snapshot.generation)) {
         delete cashResumes[outcome.proposalId];
@@ -2667,6 +2814,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
         }
         deps.log("inbox.draft_synthesized", {
           proposal_id: proposal.id,
+          draft_input_key: draftInputKey(proposal),
           attempt,
           session_id: worker.sessionId,
           cost_usd: worker.costUsd,
@@ -2707,6 +2855,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
             });
             deps.log("inbox.draft_synthesized", {
               proposal_id: proposal.id,
+              draft_input_key: draftInputKey(proposal),
               attempt: attempts + 1,
               session_id: escalated.sessionId,
               cost_usd: escalated.costUsd,
@@ -2773,7 +2922,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
       };
       // A still-dirty draft after the bounded retries is cached anyway and surfaces NOT-READY, but the unresolved set
       // is named on the ledger so the retro sees what the rung could not fix.
-      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
+      if (!deps.causalScope) deps.log("inbox.drafted", { proposal_id: proposal.id, draft_input_key: draftInputKey(proposal), ...draftModelFields(lastWorker), lint_clean: violations.length === 0, unresolved_violations: violations.map((v) => v.message) });
       return { proposalId: proposal.id, ok: true, candidate };
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
@@ -3123,6 +3272,8 @@ export function renderInbox(classifications: InboxClassification[]): string {
     } else {
       lines.push(`  draft: not cached`);
     }
+    // W1-T13861: a skill draft's held-out eval state, the line the panel's ready item carries too.
+    if (c.skillFile) lines.push(`  ${skillEvalInboxStatus(c.skillFile.markdown, c.skillEval, c.skillEvalAuto)}`);
   }
   // W1-T193: a proposal currently mid-draft is named, with its spawn time — the same
   // never-render-nothing-during-a-legitimate-window bar the console's card carries.

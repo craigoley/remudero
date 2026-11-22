@@ -26,6 +26,11 @@
     - src/lib/host-memory-learning.ts
     - test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts
     - test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts
+    - test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts
+    - test/npm-run-typecheck-is-incremental-and-slotted.test.ts
+    - test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts
+    - test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts
+    - "src/lib/test-slot.ts"
   status: queued
   attempts: 0
   acceptance:
@@ -35,7 +40,7 @@
       proof: "grep: W1-T14153 criterion 2: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
     - claim: "The warm peak is the measured warm peak, which equals the cold one"
       proof: "grep: export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES; in src/lib/typecheck-buildinfo.ts"
-    - claim: "The author preflight's warm typecheck is admitted through admitStaticWork at the warm peak: with a usable buildinfo and a headroom reading below the peak at wait bound 0, it returns typecheck NOT_RUN and its spawn port is never called"
+    - claim: "The author preflight's warm typecheck is admitted through admitStaticWork at the warm peak: with a usable buildinfo it holds a static admission naming the warm peak while tsc runs, and when that admission does not allow execution (private coordination, a live peer and a headroom reading below the peak at wait bound 0) it returns typecheck NOT_RUN and its spawn port is never called"
       proof: "grep: W1-T14153 criterion 4: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
     - claim: "The sandboxed worker check asks its admission for typecheckPeakBytes whether or not the buildinfo is usable"
       proof: "grep: acquireTestSlotAsync(\"typecheck:bwrap\", { memoryBytes: typecheckPeakBytes( in src/lib/worker-provider.ts"
@@ -133,6 +138,14 @@
     6. test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts: its first test now
        asserts that the warm first check asks for the warm peak and does not run cold (no
        typecheck.cold line). Other tests in that file are unchanged.
+    6b. Four existing tests assert the old "warm is free" rule and change with it, nothing else in
+       them: test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts (the preflight, merge-probe and
+       bwrap warm checks now hold their admission too), test/npm-run-typecheck-is-incremental-and-slotted.test.ts
+       (a warm npm run typecheck now holds typecheck:npm), and
+       test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts and
+       test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts (the warm peak
+       equals the cold one, not half). A plain admitStaticWork never refuses on memory alone (past
+       its wait bound it runs anyway), so criterion 4's refusal is driven through private coordination.
     7. test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts, titled
        "W1-T14153 criterion N: ...", with injected ports (acquireSlot, spawn, testSlot readings,
        sampler listProcesses/readFile). Load test/setup/tmp-hygiene.ts; never read the real host

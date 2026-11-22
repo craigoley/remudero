@@ -75,9 +75,9 @@ test("typecheckEnv sets GOMEMLIMIT=3GiB when unset and keeps an explicit value",
   assert.deepEqual(typecheckEnv({ HOME: "/h" }, undefined), { HOME: "/h", GOMEMLIMIT: "3GiB" });
 });
 
-test("a cold check's slot asks for the measured 3.25 GiB peak, a warm one half of it", () => {
+test("a check's slot asks for the measured 3.25 GiB peak, warm or cold (W1-T14153)", () => {
   assert.equal(TYPECHECK_COLD_PEAK_BYTES, 3.25 * GiB);
-  assert.equal(TYPECHECK_WARM_PEAK_BYTES, 1.625 * GiB);
+  assert.equal(TYPECHECK_WARM_PEAK_BYTES, 3.25 * GiB);
 });
 
 test("npm run typecheck's real spawn passes GOMEMLIMIT=3GiB to tsc, and an explicit limit wins", (t) => {

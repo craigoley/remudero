@@ -137,7 +137,11 @@ export type FixReviewFinding = { criterionIndex: number; path: string; line: num
 
 export interface FixEvidence {
   planGateFindings?: readonly { check: string; firstLine: string }[];
-  review?: { unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[] };
+  review?: {
+    unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[];
+    /** W1-T14136: the visible criteria the last review passed; the reviewer-unmet prompt lists them under KEEP MET. */
+    metCriteria?: readonly { criterionIndex: number; claim: string; proof: string }[];
+  };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
   mergeConflict?: MergeConflictEvidence;
@@ -247,6 +251,12 @@ function renderUnmetCriteria(review: NonNullable<FixEvidence["review"]>): string
     .join("\n");
 }
 
+function keepMetLines(met: NonNullable<NonNullable<FixEvidence["review"]>["metCriteria"]>): string[] {
+  if (met.length === 0) return [];
+  return ["", "KEEP MET: these criteria passed the last review. Keep them passing; the self-check judges all of them before the push.",
+    ...met.map((c) => `${c.criterionIndex}. claim: ${c.claim}\n   proof: ${c.proof}`)];
+}
+
 /** W1-T10661: a paste-ready Acceptance block naming each unmet claim and proof verbatim, so a
  *  body-coverage round resolves in ONE pass instead of the worker re-deriving the keywords. */
 export function bodyCoverageAcceptanceBlock(unmet: readonly { claim: string; proof: string; criterionIndex?: number }[]): string[] {
@@ -322,6 +332,15 @@ export function deriveFixMode(evidence: FixEvidence, rules: readonly FixModeRule
   const rule = rules.find((r) => r.when(evidence));
   return rule ? rule.mode : "reviewer-unmet";
 }
+
+/** W1-T14167: a reviewer-unmet round fixes the class a finding probes, not only the input shown.
+ *  Rendered by renderFixPrompt only when that round has unmet criteria; no other mode carries it. */
+export const FIX_CLASS_NOT_PROBE_LINES: readonly string[] = [
+  "CLASS, NOT PROBE (W1-T14167): each review finding above is one probe of a class of inputs, not the whole defect.",
+  "Fix the rule the probe broke so its neighbouring inputs are covered: e.g. a parser validates the record's whole shape, not only the malformed field shown.",
+  "In your REPORT, name each finding's class and the test that now covers that class.",
+  "Never reverse a requirement an earlier round of this PR satisfied without naming that requirement in your REPORT.",
+];
 
 /**
  * Render the fix worker's prompt. The prompt NAMES its derived MODE and
@@ -887,6 +906,8 @@ export function renderFixPrompt(opts: {
     `${summary}`,
     "",
     list,
+    ...keepMetLines(opts.evidence.review?.metCriteria ?? []),
+    ...(n > 0 ? ["", ...FIX_CLASS_NOT_PROBE_LINES] : []),
     ...footer,
   ].join("\n");
 }
