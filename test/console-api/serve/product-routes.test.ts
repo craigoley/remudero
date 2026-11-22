@@ -941,19 +941,24 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff;
   const ledgerPath = join(root, "state/ledger.ndjson");
   const argsFile = join(root, "child-args.txt");
   const countFile = join(root, "child-count.txt");
+  const releaseFile = join(root, "release-planner");
   writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
 fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
-setTimeout(() => {
+const release = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(root)})) process.exit(2);
+  if (!fs.existsSync(${JSON.stringify(releaseFile)})) return;
+  clearInterval(release);
   const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
   const rows = [
     { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
     { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
   ];
   fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
-}, 1000);
+}, 20);
+setTimeout(() => process.exit(2), 30000).unref();
 `);
   chmodSync(join(tree, "bin", "rmd"), 0o755);
   mkdirSync(join(root, "state"), { recursive: true });
@@ -997,7 +1002,8 @@ setTimeout(() => {
   assert.equal(pending.body.planOperation?.targetHead, head);
   assert.equal(pending.body.replayed, false);
   const operationId = pending.body.planOperation!.operationId;
-  // The maintained gateway starts the real child and records its own rows; wait for its exit row.
+  // Publish only after observing the pending response, even when the ledger reader starts slowly.
+  writeFileSync(releaseFile, "");
   const deadline = Date.now() + 20_000;
   while (!childRows().some((row) => row.step === "ratify.cli_exited") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
   const rows = childRows();
