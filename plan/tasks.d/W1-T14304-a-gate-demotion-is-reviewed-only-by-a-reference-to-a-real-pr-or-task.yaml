@@ -6,8 +6,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: low # one gate's escape hatch, made the same rule its sibling already enforces; a refused demotion names the remedy
-  band_meaning: blast-radius
+  risk: high # the rule for demoting a REQUIRED gate; it spans the check and the W1-T3519 suite whose fixtures it moves
+  band_meaning: span
   origin: operator-session#follow-ups-2026-11-22
   plan_refs: [W1-T204]
   files:

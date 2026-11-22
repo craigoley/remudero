@@ -12,7 +12,7 @@
   plan_refs: [W1-T12415, W1-T14119]
   files:
     - scripts/test-with-retry.mjs
-    - test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts
+    - test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -38,13 +38,16 @@
        Both repair spawn sites use it, so the argv is built in one place.
     2. The comment beside it says to drop the flags with the shard runner's, once the pinned Node carries 77fdeb6.
 
+    3. The proofs live in this task's own suite, named after the shard. No existing suite drives --rebuild-coverage, and
+       test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts (the shard runner's flags) does not change.
+
     INVARIANT every-coverage-exit-runs-without-concurrent-compilation: each process the coverage shard starts that ends in process.exit after the coverage summary runs with both workaround flags.
   acceptance:
     - claim: "invariant:every-coverage-exit-runs-without-concurrent-compilation — the repair child's argv carries both NODE_EXIT_DEADLOCK_WORKAROUND_ARGS flags, and no --rebuild-coverage spawn in test-with-retry.mjs builds its argv outside rebuildCoverageChildArgs"
       kind: guard
-      proof: "grep: W1-T14306 criterion 1: in test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts"
+      proof: "grep: W1-T14306 criterion 1: in test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts"
     - claim: "The real repair child, spawned with that argv over a raw coverage directory, rebuilds the lcov and exits 0"
-      proof: "grep: W1-T14306 criterion 2: in test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts"
+      proof: "grep: W1-T14306 criterion 2: in test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts"
   falsifier: |
     Take the flags out of rebuildCoverageChildArgs, or build one spawn site's argv inline again, and criterion 1 must fail.
     Restore and require all to pass.

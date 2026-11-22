@@ -12,7 +12,7 @@
   plan_refs: [W1-T12143]
   files:
     - src/lib/config-gardener.ts
-    - test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts
+    - test/gardeners/a-randomised-winner-no-row-can-take-is-a-finding-not-silence.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -44,15 +44,22 @@
     3. A recommendation with at least one editable row is unchanged: one candidate, its reason naming the rows left
        alone, and no finding.
 
+    4. The proofs live in this task's own suite, named after the shard. The W1-T12143 suite,
+       test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts, covers a winner with an
+       editable row and does not change. lint-plan names test/worker-config-tends-itself.test.ts,
+       test/a-never-worked-run-judges-no-canary-and-fills-no-arm.test.ts and
+       test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts as naming cellKey or mountCandidate; a build
+       that finds one of them pinning the all-declined silence amends this task's scope first.
+
     INVARIANT no-silent-randomised-winner: a concluded randomised winner either becomes a candidate or leaves a finding naming why each covered row could not take it.
   acceptance:
     - claim: "invariant:no-silent-randomised-winner — a concluded winner whose covered rows are all blocks holding a comment, a blank line inside or a quoted value yields no candidate and one config.randomised_finding row naming each row and its reason"
       kind: guard
-      proof: "grep: W1-T14305 criterion 1: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+      proof: "grep: W1-T14305 criterion 1: in test/gardeners/a-randomised-winner-no-row-can-take-is-a-finding-not-silence.test.ts"
     - claim: "A second pass on the same evidence day writes no second finding for that winner"
-      proof: "grep: W1-T14305 criterion 2: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+      proof: "grep: W1-T14305 criterion 2: in test/gardeners/a-randomised-winner-no-row-can-take-is-a-finding-not-silence.test.ts"
     - claim: "A winner with at least one editable covered row still yields one candidate whose reason names the rows left alone, and no finding"
-      proof: "grep: W1-T14305 criterion 3: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+      proof: "grep: W1-T14305 criterion 3: in test/gardeners/a-randomised-winner-no-row-can-take-is-a-finding-not-silence.test.ts"
   falsifier: |
     Drop the finding for a recommendation with no edit and criterion 1 must fail. Skip the findingKey dedupe and criterion
     2 must fail. Restore and require all to pass.

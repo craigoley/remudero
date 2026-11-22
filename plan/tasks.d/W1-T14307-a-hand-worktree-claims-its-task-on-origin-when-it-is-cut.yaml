@@ -6,10 +6,10 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: medium # a new push from a local command; a refused or unreachable claim must refuse the worktree, never pass silently
-  band_meaning: blast-radius
+  risk: high # a new push from a local command, across the module, its CLI verb and its suite; a failed claim must refuse, never pass
+  band_meaning: span
   origin: operator-session#follow-ups-2026-11-22
-  plan_refs: [W1-T5533, W1-T1268, W1-T916]
+  plan_refs: [W1-T5533, W1-T1268, W1-T916, W1-T5859]
   files:
     - src/lib/hand-worktree.ts
     - src/run-task.ts
@@ -33,28 +33,38 @@
       task during the build. Before that habit, a hand worktree for W1-T14147 (run-W1-T14147-1795267857156, cut
       2026-11-21T13:30Z, with a local commit 0795f81f0) was never pushed, and the fleet dispatched the same task at
       2026-11-22T03:04Z (run-W1-T14147-1795316685831, #20129): two builds of one task.
-    - The web session's proxy cannot push `refs/rmd-id/*` (docs/operator-guide.md "Minting a task id"); a branch push
-      works from every host. So the claim this command makes is the run branch, which every host can push and the
-      drain already reads.
+    - `rmd claim <task-id>` (W1-T5859, run-task.ts claimCommand, test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts)
+      already takes the fleet's own compare-and-swap claim, `refs/rmd-dispatch/<id>`, for a hand build. It is a separate
+      step a builder must remember: this session's four builds pushed run branches by hand instead.
+    - A pushed run branch reaches the drain too (hasPushedRunBranch), and dispatch-claim.ts claimLastSignOfLife counts its
+      newest commit as a claim's sign of life. The web session's proxy cannot push `refs/rmd-id/*` (docs/operator-guide.md
+      "Minting a task id"); whether it accepts a `refs/rmd-dispatch/*` push is UNVERIFIED. A branch push works from every host.
   design: |
     1. duplicateWork also refuses when origin holds `refs/rmd-dispatch/<id>`, naming the claim and its holder. A failed
        read refuses, never reads as free.
-    2. For a filed id, after the worktree is cut, createHandWorktree pushes `run-<id>-<epochMs>` to origin at its base sha:
-       the published claim the drain reads. `unfiled` pushes nothing. A `--no-claim` flag (and request field) skips the
-       push for an offline host and says so.
+    2. For a filed id, after the worktree is cut, createHandWorktree takes the dispatch claim through the reserver
+       `rmd claim` uses (dispatchClaimReserverFor) and pushes `run-<id>-<epochMs>` to origin at its base sha. A refused
+       dispatch-claim push (a host whose proxy refuses `refs/rmd-*`) is said, and the run branch alone is the claim; a
+       refused branch push refuses the worktree. `unfiled` pushes nothing. A `--no-claim` flag (and request field) skips
+       both for an offline host and says so. The claim's liveness is the fleet's own: the run branch's commits renew it.
     3. After the push it lists origin's `run-<id>-*` heads again. Another branch for the same id, or a failed push or
        listing, removes the new worktree and branch it just made and refuses with the reason, so two builders never both
        proceed.
     4. renderHandWorktree prints the claim line: pushed at <sha>, skipped (--no-claim), or not applicable (unfiled).
 
+    5. The claim push and the post-push listing are host git spawns into a worktree, so they go through the hardened
+       leaf test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts census enforces. The suites lint-plan
+       names for dispatchClaimRef and epochMs read those symbols and do not change: this task calls dispatchClaimRef and
+       never alters it, and keeps the run branch's epochMs format.
+
     INVARIANT a-hand-build-is-published-before-it-is-built: a filed hand worktree exists only with its run branch on origin, or with the operator's explicit --no-claim.
   acceptance:
-    - claim: "invariant:a-hand-build-is-published-before-it-is-built — for a filed id, rmd hand-worktree leaves run-<id>-<epochMs> on a bare origin at the worktree's base sha"
+    - claim: "invariant:a-hand-build-is-published-before-it-is-built — for a filed id, rmd hand-worktree leaves run-<id>-<epochMs> at the worktree's base sha and refs/rmd-dispatch/<id> on a bare origin"
       kind: guard
       proof: "grep: W1-T14307 criterion 1: in test/a-hand-build-worktree-is-one-command.test.ts"
     - claim: "A dispatch claim on origin for the id, a second run branch for the id appearing during the push, or a failed push refuses and leaves no new worktree or branch behind"
       proof: "grep: W1-T14307 criterion 2: in test/a-hand-build-worktree-is-one-command.test.ts"
-    - claim: "--no-claim and unfiled cut the worktree with no push, and the output says which"
+    - claim: "--no-claim and unfiled cut the worktree with no push, a refused dispatch-claim push keeps the run branch as the claim, and the output says which claim it holds"
       proof: "grep: W1-T14307 criterion 3: in test/a-hand-build-worktree-is-one-command.test.ts"
   falsifier: |
     Drop the claim push and criterion 1 must fail. Drop the refs/rmd-dispatch read or the post-push listing and criterion
