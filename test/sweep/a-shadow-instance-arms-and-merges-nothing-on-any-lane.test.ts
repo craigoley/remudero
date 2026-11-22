@@ -18,6 +18,7 @@ import {
   type ArmLane,
 } from "#src/lib/arm-auto-merge.js";
 import type { loadConfig } from "#src/lib/config.js";
+import type { MergedRatchetJudgement } from "#src/lib/merged-ratchet-verdict.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 
@@ -133,8 +134,10 @@ test("W1-T13698 criterion 1: a review context that already names repoMode shadow
   const refused = rows.filter(([step]) => step === "automerge.shadow_refused");
   assert.equal(refused.length, 1, "one row, not one from the context and one from the attribution");
   assert.equal(refused[0]?.[1].lane, "review");
-  assert.equal(armIfVerdictPermits(PASS, ctxFor([], "shadow"), { arm: (prUrl) => (calls.push(prUrl), "armed" as const) }), "shadow-refused");
-  assert.deepEqual(calls, []);
+  // A fresh spy: `assert.deepEqual(calls, [])` above narrows `calls` to never[] for the rest of this scope.
+  const syncCalls: string[] = [];
+  assert.equal(armIfVerdictPermits(PASS, ctxFor([], "shadow"), { arm: (prUrl) => (syncCalls.push(prUrl), "armed" as const) }), "shadow-refused");
+  assert.deepEqual(syncCalls, []);
 });
 
 test("W1-T13698 criterion 1: only the declared repository's shadow row refuses — a foreign shadow row, a live row and an absent registry do not", async () => {
@@ -156,7 +159,7 @@ test("W1-T13698 criterion 1: only the declared repository's shadow row refuses �
 test("W1-T13698 criterion 2: every arm entry point refuses a shadow instance before its first read or write", async () => {
   const entries: Array<[string, (deps: ArmDeps) => unknown]> = [
     ["armAutoMergeDetailed", (deps) => armAutoMergeDetailed(PR_URL, TASK_ID, deps)],
-    ["armAutoMergeDetailedAsync", (deps) => armAutoMergeDetailedAsync(PR_URL, TASK_ID, deps)],
+    ["armAutoMergeDetailedAsync", (deps) => armAutoMergeDetailedAsync(PR_URL, TASK_ID, deps as unknown as ArmDeps<true>)],
     ["attemptArm", (deps) => attemptArm(PR_URL, deps)],
     ["armAutoMergeAtOpen", (deps) => armAutoMergeAtOpen(PR_URL, deps)],
     ["armAutoMergeAtOpenAsync", (deps) => armAutoMergeAtOpenAsync(PR_URL, deps)],
@@ -187,7 +190,7 @@ test("W1-T13698 criterion 2: every caller of armAndLogOutcome — operator, revi
 });
 
 test("W1-T13698 criterion 2: the direct merge behind a ratchet-judge decision is never reached — not the judge, the quota fallback or the clean-status merge", async () => {
-  const clean = { verdict: "clean", rows: [], counted: [], uncounted: [] } as const;
+  const clean: MergedRatchetJudgement = { verdict: "clean", rows: [], counted: [], uncounted: [] };
   const wiring = (armAuto: ArmDeps["armAuto"], calls: string[]): Partial<ArmDeps> => ({
     armAuto,
     readMergedRatchets: () => (calls.push("readMergedRatchets"), clean),
