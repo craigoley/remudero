@@ -6,7 +6,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # observability only; no decision changes
+  risk: high # observability only; no decision changes. Raised 2026-11-22: the scope amendment spans 5 concerns (Rule 19)
   band_meaning: span
   origin: "operator-session#idle-lanes-2026-11-16"
   plan_refs:
