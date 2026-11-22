@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # Rule 19 sizing (three test or source surfaces): one extra stderr line in planGhReadCadence's addPause, and two test files; no change to any wait, refusal, queue, stamp or mode
+  risk: high # Rule 19 sizing (four test or source surfaces): one extra stderr line in planGhReadCadence's addPause, and three test files; no change to any wait, refusal, queue, stamp or mode
   origin: "operator-session#merged-pr-gap-check-2026-11-21"
   plan_refs:
     - W1-T12058
@@ -16,6 +16,7 @@
     - src/lib/github-transport.ts
     - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
     - test/next-task-id-waits-for-the-shared-read-floor.test.ts
+    - test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -67,6 +68,9 @@
        line. Replace the line 97 assert with the criterion 5 regex.
     4. test/next-task-id-waits-for-the-shared-read-floor.test.ts line 93 test: pin the start line
        ("waiting 60s for the 180s floor") and the closing line ("waited 210s for the 180s floor").
+    5. PINNED: test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts asserts
+       exactly one warning for a wait-mode read. With the start line a wait-mode read prints two, so the
+       test asserts two lines in wait mode and one in advisory mode, each naming its mode.
     Load test/setup/tmp-hygiene.ts in every test run.
   falsifier: |
     On origin/main criterion 1 fails: the first warn event comes after every sleep event. Print the

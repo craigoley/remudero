@@ -160,6 +160,7 @@ import {
   type PredicateFailure,
   type Proposal,
 } from "./inbox.js";
+import { skillEvalInboxStatus } from "./skill-eval-gate.js";
 
 export interface PanelGraphDeps {
   inboxSourceIdentity?: InboxSourceIdentity;
@@ -1898,6 +1899,8 @@ export interface InboxReadyItem extends InboxSender {
   draftedTasks: InboxDraftedTask[];
   /** W1-T10077: set when an operator's decline lapsed because the state it was given on changed; says what changed. */
   reopenedBecause?: string;
+  /** W1-T13861: a skill draft's held-out eval state, the same line `rmd inbox` prints under its READY entry. */
+  skillEvalStatus?: string;
 }
 
 /** One proposal currently mid-draft (W1-T193): an Architect worker is running for it right now.
@@ -2773,6 +2776,8 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         ...reopened(classification),
         stampLine: pendingStampLine(classification.draft?.stampLine),
         draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
+        ...(classification.skillFile ? { skillEvalStatus: skillEvalInboxStatus(classification.skillFile.markdown,
+          classification.skillEval, classification.skillEvalAuto) } : {}),
       });
     } else if (classification.state === "drafting") {
       allDrafting.push({ ...senderOf(proposal.id), proposalId: proposal.id, summary: proposal.summary, plain: servedPlain(proposal, "drafting"), ...recommended(proposal, "drafting"), spawnedAt: classification.draftSpawnedAt ?? "" });

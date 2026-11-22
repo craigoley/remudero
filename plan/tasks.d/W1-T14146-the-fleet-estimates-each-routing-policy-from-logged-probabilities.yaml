@@ -19,7 +19,7 @@
     - test/routing/the-fleet-estimates-each-routing-policy-from-logged-probabilities.test.ts
     - "src/cli/commands/review.ts"
     - "src/lib/benchmark-run.ts"
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main dd829e355 (2026-11-21).
