@@ -12,10 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
+import { gitClaimRunnerAsync, gitDispatchClaimReserverAsync, type DispatchClaimListing } from "#src/lib/dispatch-claim.js";
 import { runnableCandidates } from "#src/lib/drain.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS } from "#src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const T0 = Date.parse("2026-11-16T15:00:00.000Z");
 const HELD = "W1-T12114";
@@ -40,8 +42,10 @@ function plan(): Plan {
 interface FleetOpts {
   ticks: number;
   tickMs: number;
-  /** The tick from which the claim is gone: a release row lands in the ledger and the next run takes the claim. */
+  /** The tick from which the claim is gone and the next run takes the claim. */
   claimGoneAtTick?: number;
+  dropWithoutLedger?: () => void;
+  listHeld?: (tick: number) => Promise<DispatchClaimListing>;
   /** Rows the refusing run writes besides its own `dispatch.claim` and `verdict` rows. */
   extraRunRows?: (runId: string, atMs: number) => Row[];
   /** `throws`: the ledger reads fine at boot and fails once a run has started, so only the deferral's read meets it. */
@@ -59,10 +63,12 @@ async function fleet(opts: FleetOpts) {
   let tick = 0;
   let nowMs = T0;
   let runs = 0;
+  let sweepSettled: Promise<void> | undefined;
   const claimHeld = () => opts.claimGoneAtTick === undefined || tick < opts.claimGoneAtTick;
   const readLedger = opts.readLedger ?? "lines";
+  const refreshMerged = () => (id: string) => merged.has(id);
   const deps = {
-    refreshMerged: () => (id: string) => merged.has(id),
+    refreshMerged,
     now: () => new Date(nowMs),
     sleep: async () => {},
     checkStop: () => (tick > opts.ticks ? "test tick cap" : undefined),
@@ -70,14 +76,28 @@ async function fleet(opts: FleetOpts) {
       if (step === "daemon.tick") {
         tick++;
         nowMs = T0 + (tick - 1) * opts.tickMs;
-        if (opts.claimGoneAtTick === tick) {
-          // The holder's own release (run-task's holder arm), the row any claim drop writes.
+        if (opts.claimGoneAtTick === tick && opts.dropWithoutLedger) {
+          opts.dropWithoutLedger();
+        } else if (opts.claimGoneAtTick === tick) {
+          // The holder's own release through run-task records the successful drop.
           ledger.push({ ts: iso(nowMs), run_id: "holder-run", task_id: HELD, step: "dispatch.claim_released", ref: REF,
             arm: "holder", release: true, dropped: true });
         }
       }
       rows.push({ step, extra });
     },
+    ...(opts.listHeld === undefined ? {} : {
+      refreshMergedAsync: async () => {
+        // Fixture ticks run back-to-back, so let the preceding sweep finish before starting a new one.
+        await sweepSettled;
+        return refreshMerged();
+      },
+      releaseLandedClaims: () => {
+        const listing = opts.listHeld!(tick);
+        sweepSettled = Object.assign(listing.then(() => {}, () => {}), { listing });
+        return sweepSettled;
+      },
+    }),
     ...(readLedger === "absent" ? {} : {
       readLedgerLines: () => {
         if (readLedger === "throws" && runs > 0) throw new Error("ledger read failed: EIO");
@@ -111,6 +131,7 @@ async function fleet(opts: FleetOpts) {
     dispatchFix: async () => { counts.fixes++; },
   } as unknown as DaemonDeps;
   const summary = await runDaemon(plan(), deps, { max: 40, laneCount: opts.laneCount ?? 1 });
+  await sweepSettled;
   const deferrals = rows.filter((r) => r.step === "dispatch.claim_held_deferred");
   const heldTicks = dispatches.filter((d) => d.id === HELD).map((d) => d.tick);
   const ticksWith = (n: number) => dispatches.filter((d) => d.tick === n).map((d) => d.id);
@@ -209,4 +230,45 @@ test("W1-T13242: an unreadable ledger leaves the refusal a plain continue and sa
   assert.equal(unreadable[0]!.extra.task, HELD);
   assert.match(String(unreadable[0]!.extra.error), /EIO/);
   assert.deepEqual(run.heldTicks, [1, 2]);
+});
+
+test("W1-T13356 criterion 1: a ref dropped from origin without a ledger row is offered on that tick", async (t) => {
+  const origin = gitRepo({ bare: true, scope: t });
+  const work = gitRepo({ scope: t });
+  work.addRemote("origin", origin.dir);
+  work.git("push", "--quiet", "origin", `HEAD:${REF}`);
+  work.git("push", "--quiet", "origin", "HEAD:refs/rmd-dispatch/unrelated");
+  const reserver = gitDispatchClaimReserverAsync({ run: gitClaimRunnerAsync(work.dir) });
+
+  const run = await fleet({
+    ticks: 4,
+    tickMs: FIFTEEN_MIN,
+    claimGoneAtTick: 3,
+    dropWithoutLedger: () => { work.git("push", "--quiet", "origin", `:${REF}`); },
+    listHeld: () => Promise.resolve(reserver.listHeld!()),
+  });
+  assert.deepEqual(run.heldTicks, [1, 3]);
+  assert.equal(run.ticksWith(3)[0], HELD);
+  assert.ok(run.summary.merged.includes(HELD));
+  assert.ok(!run.ledger.some((row) => row.ref === REF && row.dropped === true));
+  const lifts = run.rows.filter((row) => row.step === "daemon.block.rearmed");
+  assert.deepEqual(lifts.map((row) => row.extra), [
+    { task: HELD, ref: REF, reason: "absent from origin's held-claims listing" },
+  ]);
+});
+
+test("W1-T13356 criterion 2: an unreadable listing and a still-listed ref preserve the deferral", async () => {
+  const run = await fleet({
+    ticks: 5,
+    tickMs: 2 * 60 * 60_000,
+    listHeld: async (tick) => {
+      if (tick === 2) return { ok: false, stderr: "origin is unreachable" };
+      if (tick === 3) throw new Error("listing failed");
+      return { ok: true, claims: [{ taskId: HELD, holder: "a".repeat(40) }] };
+    },
+  });
+  assert.deepEqual(run.heldTicks, [1, 4], "a listed ref, including one at a different SHA, holds until the cooldown");
+  assert.ok(run.rows.some((row) => row.step === "dispatch.claim_sweep_failed" &&
+    row.extra.error === "listing failed"), "the rejected listing is reported");
+  assert.ok(!run.rows.some((row) => row.step === "daemon.block.rearmed"));
 });

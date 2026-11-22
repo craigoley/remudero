@@ -159,7 +159,7 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
-import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow } from "./dispatch-claim.js";
+import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow, dispatchClaimRef, type DispatchClaimListing } from "./dispatch-claim.js";
 import {
   OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
@@ -1588,8 +1588,10 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits (`releaseLandedDispatchClaims`:
    *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
-   *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
-  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
+   *  listing ledgered and never read as no claims). The sweep itself stays detached. It can publish its listing
+   *  separately so selection can reconcile claim-held deferrals before offering work. */
+  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) =>
+    Promise<void> & { listing?: Promise<DispatchClaimListing> };
   claimSweepSettled?: Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
@@ -7662,11 +7664,28 @@ export async function runDaemon(
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
     }
 
+    let tickClaimEvidence: {
+      deferrals: typeof claimHeldDeferrals;
+      listing: Promise<DispatchClaimListing | undefined>;
+    } | undefined;
     // W1-T8616: a merged task's dispatch claim is released here, from the cycle's own `isMerged`.
     if (deps.releaseLandedClaims && !landedClaimSweepInFlight) {
       landedClaimSweepInFlight = true;
       const releaseLanded = deps.releaseLandedClaims;
-      void (deps.claimSweepSettled ? deps.claimSweepSettled.then(() => releaseLanded(isMerged)) : releaseLanded(isMerged))
+      const startSweep = () => {
+        const sweep = releaseLanded(isMerged);
+        if (sweep.listing) {
+          tickClaimEvidence = {
+            deferrals: new Map(claimHeldDeferrals),
+            listing: sweep.listing.catch((error: unknown) => {
+              log("dispatch.claim_sweep_failed", { surface: "tick-listing", error: String((error as Error)?.message ?? error).slice(0, 300) });
+              return undefined;
+            }),
+          };
+        }
+        return sweep;
+      };
+      void (deps.claimSweepSettled ? deps.claimSweepSettled.then(startSweep) : startSweep())
         .catch((e) => log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: String((e as Error)?.message ?? e).slice(0, 300) }))
         .finally(() => {
           landedClaimSweepInFlight = false;
@@ -8258,6 +8277,18 @@ export async function runDaemon(
       const lines = tickLedgerLines;
       for (const [taskId, deferral] of claimHeldDeferrals) {
         if (claimDroppedSince(lines, deferral.ref, deferral.sinceMs)) claimHeldDeferrals.delete(taskId);
+      }
+    }
+    if (tickClaimEvidence?.deferrals.size) {
+      const { listing, deferrals } = tickClaimEvidence;
+      const result = await listing;
+      if (result?.ok) {
+        const heldRefs = new Set(result.claims.map(({ taskId }) => dispatchClaimRef(taskId)));
+        for (const [taskId, deferral] of deferrals) {
+          if (claimHeldDeferrals.get(taskId) !== deferral || heldRefs.has(deferral.ref)) continue;
+          claimHeldDeferrals.delete(taskId);
+          log("daemon.block.rearmed", { task: taskId, ref: deferral.ref, reason: "absent from origin's held-claims listing" });
+        }
       }
     }
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {
