@@ -7,9 +7,27 @@
  *
  * This module measures the reviewer's own outcome mix per REVIEWER CODE SHA (the HEAD the judging
  * process loaded: the boot head in-process, the tree's sha in a fresh-tree child) and judges a
- * departure from its own history the way model-drift.ts judges drift: the current sha's Wilson
- * interval against the pooled interval of the shas before it, at a family alpha split over every sha
- * judged. No count, rate or time constant decides; a thin sample reads `insufficient`, never healthy.
+ * departure from its own history: the current sha's interval against the pooled interval of the shas
+ * before it, at a family alpha split over every sha judged. No count, rate or time constant decides; a
+ * thin sample reads `insufficient`, never healthy.
+ *
+ * W1-T13392 — THE STATISTICAL CONTRACT. Both intervals are EXACT binomial (Clopper-Pearson) bounds, each
+ * side at the one-sided family tail REVIEWER_HEALTH_FAMILY_ALPHA / (2 * family); `z` is that tail's normal
+ * quantile, reported only. Regressed: the sha's lower bound lies above the baseline's upper bound. Healthy:
+ * not regressed, and an all-failing sample of the same size would have read regressed. The Wilson bound
+ * this replaced puts ONE failure in one unit at 0.0455 against a clean baseline's 0.00397 (0 of 5267 at a
+ * family of 2152), so a single unposted review opened an incident, and the same refused PR head re-read
+ * regressed at every main commit; the exact lower bound of 1 of n is about tail / n (2.3e-6 at 1 of 1
+ * against the exact upper 0.00246), which no lone failure crosses. For OPENING, a sha that does not read
+ * regressed on its own sample is also judged on its RUN OF UNPROVEN SHAS: it is pooled with every
+ * non-healed, non-regressed sha after the newest one whose own sample reads healthy, against the history
+ * before that run, so a total outage spread thinly over a fast-moving main adds up. The replay numbers
+ * this record's acceptance pins: 30 shas of 2 refused units each open at k=3 n=3 on the run and never per
+ * sha; 200 shas of 7 posted reviews with one head refused at each, or one new head refused every 25 shas,
+ * open nothing, where the Wilson bound judged 200 and 8 regressed; the 10-20 storm still opens at k=3 n=3.
+ * Closing is not redesigned here (W1-T13393): returnedToBaseline and blameCleared judge
+ * the current or healed pool through judgeCounts, so by the exact bound, and still compare it against the
+ * regressed level's Wilson interval at the same tail's z, as before.
  *
  * A departure opens ONE incident naming the boot head at onset, the regressed reviewer code sha (they
  * differ: the 10-20 onset rows came from a fresh tree at the offending sha while the boot head predated
@@ -510,7 +528,11 @@ export interface ReviewerShaJudgment {
   baseline: { k: number; n: number };
   interval: { lower: number; upper: number } | null;
   baselineInterval: { lower: number; upper: number } | null;
+  /** The normal quantile of the family tail the exact bounds were read at: reported, it decides nothing. */
   z: number | null;
+  /** W1-T13392: present when the sha read regressed on its run of unproven shas rather than its own sample: k and n
+   *  pool `shas` shas, and `since` is the newest earlier sha whose own sample read healthy (null: none tracked). */
+  run?: { shas: number; since: string | null };
 }
 
 /** k = units not posted though the reviewer ran or was refused by setup; n adds the posted units.
@@ -526,9 +548,51 @@ export function shaCounts(rec: ReviewerShaRecord): { k: number; n: number } {
   return { k, n };
 }
 
-function familyZ(state: ReviewerHealthState): number {
+/** The one-sided tail each bound is read at: the family alpha split (Bonferroni) over every sha with outcomes. */
+function familyTail(state: ReviewerHealthState): number {
   const family = Object.values(state.shas).filter((rec) => shaCounts(rec).n > 0).length + state.pooled.shas;
-  return upperNormalQuantile(REVIEWER_HEALTH_FAMILY_ALPHA / (2 * Math.max(1, family)));
+  return REVIEWER_HEALTH_FAMILY_ALPHA / (2 * Math.max(1, family));
+}
+
+/** P(X <= k) for X ~ Binomial(n, p). Each term is carried in log space, so a large n cannot underflow the sum. */
+function binomialAtMost(k: number, n: number, p: number): number {
+  if (k < 0) return 0;
+  if (k >= n || p <= 0) return 1;
+  if (p >= 1) return 0;
+  const ratio = Math.log(p) - Math.log1p(-p);
+  let term = n * Math.log1p(-p);
+  let sum = Math.exp(term);
+  for (let i = 1; i <= k; i += 1) {
+    term += Math.log((n - i + 1) / i) + ratio;
+    sum += Math.exp(term);
+  }
+  return Math.min(1, sum);
+}
+
+/** P(X >= k), summed over the shorter side: past the middle, the upper tail by symmetry. */
+const binomialAtLeast = (k: number, n: number, p: number): number =>
+  (k - 1 <= n - k ? 1 - binomialAtMost(k - 1, n, p) : binomialAtMost(n - k, n, 1 - p));
+
+/** The p in (0, 1) at which a monotone `f` crosses `target`; `rising` says which way `f` runs. */
+function solveProbability(f: (p: number) => number, target: number, rising: boolean): number {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 100; i += 1) {
+    const mid = (lo + hi) / 2;
+    if ((f(mid) < target) === rising) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * W1-T13392 — the exact (Clopper-Pearson) interval of `k` in `n`, each side at the one-sided `tail`: the lower bound
+ * is the p at which P(X >= k) = tail, the upper the p at which P(X <= k) = tail. Unlike Wilson's, its lower bound
+ * for one failure is about tail / n whatever n is, so a lone failure cannot read far above a clean baseline.
+ */
+export function clopperPearsonInterval(k: number, n: number, tail: number): { lower: number; upper: number } {
+  const lower = k <= 0 ? 0 : k >= n ? Math.exp(Math.log(tail) / n) : solveProbability((p) => binomialAtLeast(k, n, p), tail, true);
+  const upper = k >= n ? 1 : k <= 0 ? -Math.expm1(Math.log(tail) / n) : solveProbability((p) => binomialAtMost(k, n, p), tail, false);
+  return { lower, upper };
 }
 
 /** The pooled outcomes of the non-healed shas before `rec` that were never judged regressed, and
@@ -545,19 +609,23 @@ function baselineFor(state: ReviewerHealthState, rec: ReviewerShaRecord): { k: n
   return { k, n };
 }
 
-/** Judge outcomes {k, n} against a baseline. Regressed: the interval lies wholly above the
- *  baseline's. Healthy: not regressed, AND the sample could have shown a regression — had every unit
- *  failed, that interval would lie above the baseline's. Anything else is insufficient. */
+/** Judge outcomes {k, n} against a baseline, both by the exact bound at the family tail. Regressed: the
+ *  interval lies wholly above the baseline's. Healthy: not regressed, AND the sample could have shown a
+ *  regression — had every unit failed, that interval would lie above the baseline's. Anything else is
+ *  insufficient. */
 function judgeCounts(state: ReviewerHealthState, sha: string, k: number, n: number, baseline: { k: number; n: number }, regressedAt?: string): ReviewerShaJudgment {
+  return judgeAtTail(familyTail(state), sha, k, n, baseline, regressedAt);
+}
+
+function judgeAtTail(tail: number, sha: string, k: number, n: number, baseline: { k: number; n: number }, regressedAt?: string): ReviewerShaJudgment {
   const counted = { sha, k, n, baseline, interval: null, baselineInterval: null, z: null };
   if (n === 0) return { ...counted, state: regressedAt ? "regressed" : "insufficient", reason: "no-outcomes" };
   if (baseline.n === 0) return { ...counted, state: regressedAt ? "regressed" : "insufficient", reason: "no-baseline" };
-  const z = familyZ(state);
-  const interval = wilsonInterval(k, n, z);
-  const baselineInterval = wilsonInterval(baseline.k, baseline.n, z);
-  const judged = { ...counted, interval, baselineInterval, z };
+  const interval = clopperPearsonInterval(k, n, tail);
+  const baselineInterval = clopperPearsonInterval(baseline.k, baseline.n, tail);
+  const judged = { ...counted, interval, baselineInterval, z: upperNormalQuantile(tail) };
   if (regressedAt !== undefined || interval.lower > baselineInterval.upper) return { ...judged, state: "regressed", reason: null };
-  if (wilsonInterval(n, n, z).lower <= baselineInterval.upper) return { ...judged, state: "insufficient", reason: "thin-sample" };
+  if (clopperPearsonInterval(n, n, tail).lower <= baselineInterval.upper) return { ...judged, state: "insufficient", reason: "thin-sample" };
   return { ...judged, state: "healthy", reason: null };
 }
 
@@ -569,6 +637,51 @@ export function judgeReviewerSha(state: ReviewerHealthState, sha: string): Revie
   }
   const { k, n } = shaCounts(rec);
   return judgeCounts(state, sha, k, n, baselineFor(state, rec), rec.regressedAt);
+}
+
+/**
+ * W1-T13392 — the judgment that opens or extends an incident: `sha`'s own sample, and when that does not read
+ * regressed, its RUN OF UNPROVEN SHAS — it is pooled with every non-healed, non-regressed sha after the newest earlier
+ * one whose own sample reads healthy, judged against the history before that run. Many thin shas of a total outage
+ * add up; a sha whose own sample already reads regressed is never diluted by the thin clean shas before it.
+ */
+function judgeForOpening(state: ReviewerHealthState, sha: string): ReviewerShaJudgment {
+  const own = judgeReviewerSha(state, sha);
+  const rec = state.shas[sha];
+  if (rec === undefined || rec.healed || own.state === "regressed") return own;
+  const tail = familyTail(state);
+  const incidentFrom = state.incident?.regressedSeq ?? Number.POSITIVE_INFINITY;
+  const earlier = Object.values(state.shas).filter((other) => other.seq < rec.seq && !other.healed).sort((a, b) => a.seq - b.seq);
+  // baselineFor(other) for each earlier sha, in one forward pass.
+  const before: Array<{ k: number; n: number }> = [];
+  const pooled = { k: state.pooled.k, n: state.pooled.n };
+  for (const other of earlier) {
+    before.push({ ...pooled });
+    if (other.regressedAt !== undefined || other.seq >= incidentFrom) continue;
+    const c = shaCounts(other);
+    pooled.k += c.k;
+    pooled.n += c.n;
+  }
+  let { k, n } = shaCounts(rec);
+  let shas = 1;
+  let baseline = own.baseline;
+  let since: string | null = null;
+  for (let i = earlier.length - 1; i >= 0; i -= 1) {
+    const other = earlier[i]!;
+    if (other.regressedAt !== undefined) continue;
+    const c = shaCounts(other);
+    if (judgeAtTail(tail, other.sha, c.k, c.n, before[i]!).state === "healthy") {
+      since = other.sha;
+      break;
+    }
+    k += c.k;
+    n += c.n;
+    if (c.n > 0) shas += 1;
+    baseline = before[i]!;
+  }
+  if (shas === 1) return own;
+  const run = judgeAtTail(tail, sha, k, n, baseline);
+  return run.state === "regressed" ? { ...run, run: { shas, since } } : own;
 }
 
 /** The incident's regressed shas, newest last. */
@@ -617,7 +730,8 @@ export interface ReviewerBlameEvidence {
 /**
  * W1-T13902 — INVARIANT healing-keeps-its-incident: has the healed tree failed no less often than the
  * code it was healed from? The healed pool is judged against the incident's pre-onset baseline with
- * judgeCounts (Wilson at the family z), and is `insufficient` too when even all-posted healed reviews could not
+ * judgeCounts (the exact bound at the family tail since W1-T13392; the regressed pool keeps its Wilson interval
+ * at that tail's z), and is `insufficient` too when even all-posted healed reviews could not
  * have read clearly better than the regressed pool: `insufficient` never clears. When it is sufficient and its
  * interval's upper bound is not below the regressed pool's lower bound, reverting the blamed merge did
  * not help, so the blame was wrong and the incident closes. A healed reviewer clearly better than the
@@ -1074,7 +1188,8 @@ export function reviewerRegressionEvidenceText(incident: ReviewerIncident): stri
   const range = (i: { lower: number; upper: number } | null) => (i === null ? "n/a" : `[${pct(i.lower)}, ${pct(i.upper)}]`);
   return [
     `Reviewer code ${incident.regressedSha.slice(0, 12)} ended ${e.k} of ${e.n} code-PR reviews not posted though the reviewer ran or setup refused it ` +
-      `(Wilson ${range(e.interval)} at z=${e.z === null ? "n/a" : e.z.toFixed(2)}), against ${e.baseline.k} of ${e.baseline.n} ` +
+      `${e.run === undefined ? "" : `over its run of ${e.run.shas} unproven reviewer code shas `}` +
+      `(exact ${range(e.interval)} at the family tail, z=${e.z === null ? "n/a" : e.z.toFixed(2)}), against ${e.baseline.k} of ${e.baseline.n} ` +
       `for the reviewer code before it (${range(e.baselineInterval)}).`,
     `Failure signature: ${incident.signature.join(", ") || "(none named)"}.`,
     `Boot head at onset: ${incident.bootHeadSha?.slice(0, 12) ?? "unknown"}; last healthy reviewer code: ${incident.lastHealthySha?.slice(0, 12) ?? "none judged"}.`,
@@ -1573,7 +1688,8 @@ export async function evaluateReviewerHealthNow(
       .filter((rec): rec is ReviewerShaRecord => rec !== undefined && !rec.healed && rec.regressedAt === undefined)
       .sort((a, b) => a.seq - b.seq);
     for (const rec of candidates) {
-      const judgment = judgeReviewerSha(state, rec.sha);
+      // W1-T13392: its own sample, else its run of unproven shas, by the exact bound.
+      const judgment = judgeForOpening(state, rec.sha);
       if (judgment.state !== "regressed") continue;
       rec.regressedAt = clock.iso();
       if (state.incident === null) {
