@@ -218,6 +218,7 @@ function adapterFixture(options: AdapterFixtureOptions = {}) {
     pr_url: "https://github.com/acme/scratch/pull/3704",
     decision_verdict: prior,
     reviewer_code_sha: REVIEWER_CODE,
+    reviewer_outcome: "success", // W1-T14235: a reused code pass records the semantic judgement it came from
   });
   process.env.PATH = `${bin}:${oldPath}`;
   const effects = buildSweepEffects({
@@ -412,6 +413,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
     pr_url: "https://github.com/acme/scratch/pull/3704",
     decision_verdict: prior,
     reviewer_code_sha: REVIEWER_CODE,
+    reviewer_outcome: "success", // W1-T14235: a reused code pass records the semantic judgement it came from
   });
   process.env.PATH = `${bin}:${oldPath}`;
   try {
@@ -528,6 +530,7 @@ test("W1-T3901 run-task adapter posts proof-only discrimination and records effe
       run_id: "prior", task_id: `PR-${PR_NUMBER}`, step: "review.posted", state: prior.state, head_sha: PRIOR_HEAD, pr_url: PR_URL,
       decision_verdict: options.verdict ? options.verdict(prior) : prior,
       reviewer_code_sha: REVIEWER_CODE,
+      reviewer_outcome: "success", // W1-T14235: a reused code pass records the semantic judgement it came from
     };
     appendLedger(ledgerPath, { run_id: "other", task_id: "PR-1", step: "review.posted", state: "failure", pr_url: "https://github.com/acme/scratch/pull/1", decision_verdict: { ...prior, state: "failure" } });
     if ((options.prior ?? "live") === "live") appendLedger(ledgerPath, row);

@@ -1,0 +1,70 @@
+- id: W1-T14253
+  title: A test slot whose owner died is released on a host with no dedicated cgroup scope, by a named and ledgered evidence rule, not held until reboot
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # changes when the shared test-slot guard frees capacity; operator review required before merge
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T9928, W1-T11808, W1-T12415]
+  files:
+    - src/lib/test-slot.ts
+    - scripts/test-slot-owner-release.mjs
+    - test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts
+    - test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts
+    - test/ci/suites/a-dead-owner-slot-is-released-without-a-dedicated-cgroup-scope.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 86455aa29 (2026-11-22). OPERATOR REVIEW: this changes a safety guard, so its evidence rule is
+    the operator's decision.
+    - src/lib/test-slot.ts frees a dead owner's slot only on complete terminal evidence (verifiedTerminalEvidence).
+      probeReservedTree can return `ended` only through a dedicated cgroup scope (probeCgroupScope). Its /proc scan
+      returns at best `unknown`: "none of N process(es) carries the marker; marker absence does not prove complete
+      process-tree quiescence". The documented reason: a descendant can replace its environment or fork during a scan.
+    - On a host whose leases record `cgroupScope: { dedicated: false }`, nothing frees a dead owner's slot before the
+      next boot (earlierBootEvidence). releaseTestSlotForOwner (W1-T11808, scripts/test-slot-owner-release.mjs)
+      demands the same terminal evidence. So an owner's own exact-identity release is refused too.
+    - OBSERVED 2026-11-22 on this session's host, where every lease records `dedicated: false`:
+      - slot-2 was held by a preflight (pid 9043) stopped by its session at about 03:21Z. The reclaim logged
+        `test_slot.reclaim_withheld` with the reason above, 3 processes scanned and none unreadable.
+      - The owner release refused with "covered work is not proven ended".
+      - The session removed that one lease file by hand after it proved no user process from the run survived.
+      - slot-1 (pid 28141, last heartbeat 2026-11-21T23:41Z) is still held. The host then has one usable slot, and the
+        W1-T14137 amendment preflight earlier waited out its 900 s slot limit with slot-1 named as a holder.
+    THREAT MODEL. A wrong release lets two runs share capacity a slot was meant to reserve: higher load, slower tests and
+    possibly an OOM. A stuck slot halves this host's test capacity until a reboot and silently stalls every author
+    preflight. Neither failure corrupts data, and a stuck slot is the one seen live here.
+  design: |
+    1. Measure first (replay-then-audit): read the ledger union for test_slot.reclaim_withheld rows by coverage and
+       reason, and how long each slot stayed held after its owner pid died.
+    2. Add one named evidence class, for example `proc-scan-quiescent`, for the case today's probe calls unknown. It
+       applies when all of these hold:
+       - the owner pid is dead, or its start no longer matches;
+       - boot, pid namespace and uid match;
+       - the lease records no dedicated scope;
+       - repeated complete /proc scans, spaced over the heartbeat cadence, find no reservation marker and no unreadable
+         process.
+       Record it as weaker than scope evidence: a `test_slot.reclaimed_quiescent` row carrying the class, the scan
+       count and the spacing.
+    3. A host with a dedicated scope keeps today's rule unchanged, and any unreadable process or marker carrier still
+       withholds.
+    4. releaseTestSlotForOwner accepts the same class for its exact-identity request.
+    The scan count and spacing are derived from the measured heartbeat cadence and the replay. They are not a hard
+    ceiling, and the operator rules on them in review.
+
+    INVARIANT scope-evidence-unchanged: wherever a dedicated cgroup scope is recorded, a slot is freed exactly as on origin/main.
+  acceptance:
+    - claim: "invariant:scope-evidence-unchanged — with a dedicated scope recorded, a live, unreadable or marker-carrying process still withholds the slot, and an ended scope frees it, exactly as on origin/main"
+      kind: guard
+      proof: "grep: W1-T14253 criterion 1: in test/ci/suites/a-dead-owner-slot-is-released-without-a-dedicated-cgroup-scope.test.ts"
+    - claim: "With no dedicated scope, a dead owner whose repeated complete scans find no marker and no unreadable process is released, and a test_slot.reclaimed_quiescent row names the evidence class, scan count and spacing"
+      proof: "grep: W1-T14253 criterion 2: in test/ci/suites/a-dead-owner-slot-is-released-without-a-dedicated-cgroup-scope.test.ts"
+    - claim: "One scan, a scan that finds a marker carrier, or a scan with an unreadable process does not release; the owner release script accepts the same evidence class for its exact-identity request"
+      proof: "grep: W1-T14253 criterion 3: in test/ci/suites/a-dead-owner-slot-is-released-without-a-dedicated-cgroup-scope.test.ts"
+  falsifier: |
+    Release on a single scan and criterion 3 must fail. Let the new class apply where a dedicated scope is recorded and
+    criterion 1 must fail. Restore and require all to pass.

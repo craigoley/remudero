@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # one more rescue rule in rotateLedger PASS 4 for one step, bounded by one row per PR that has a kept sweep.disposed row; no reader changes
+  risk: high  # Rule 19 span: widened to a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time, ledger by a scope amendment for its build
   band_meaning: blast-radius
   origin: "operator-session#audit-small-findings-2026-11-21"
   plan_refs:
@@ -17,6 +17,7 @@
   files:
     - src/lib/ledger.ts
     - test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts
+    - test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -66,6 +67,11 @@
        "W1-T14203 criterion N: ...", built like test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts.
        Criterion 1 also runs the production observer and reviewInputQueuedAt (through selectReviewAdmissions)
        on the rotated rows. Load test/setup/tmp-hygiene.ts.
+    5. PINNED: test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts. Its test
+       "W1-T12534 criterion 3: production selection uses mint fallback, then createdAt when neither row is live"
+       asserts that no sweep.review_eligible row of PR 731 is live after rotation. Its positive-control light pass
+       writes a sweep.disposed row for PR 731, so this rule keeps that row. The test drops the sweep.disposed rows
+       before it rotates, so it still pins the fallback when neither row is live. Its order assertions do not change.
     MEASURE AFTER DEPLOY: on the host ledger, for each open PR with a live sweep.review_eligible row at its
     current head, count the PRs with no live row at an earlier head although the archives hold one. Expect 0
     for PRs with a kept sweep.disposed row.

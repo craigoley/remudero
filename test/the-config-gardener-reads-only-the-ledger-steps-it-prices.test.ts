@@ -33,7 +33,10 @@ test("W1-T10962: learning reads bound bytes and discard incomplete or malformed 
     return read(fd, buffer, offset, length, position);
   });
   assert.equal(readFileTail(path, 14), "🙂é終\n");
-  assert.ok(bytes <= 14);
+  assert.ok(bytes <= 15, "the 14-byte tail may inspect one preceding byte for a line boundary");
+  bytes = 0;
+  assert.equal(readFileTail(path, 10), "🙂é終\n", "a full row at the start of the tail is retained");
+  assert.ok(bytes <= 11);
   writeFileSync(path, "one unbroken record");
   assert.equal(readFileTail(path, 8), "");
   writeFileSync(path, "whole\n");
