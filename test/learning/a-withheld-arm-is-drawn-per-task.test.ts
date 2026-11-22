@@ -246,16 +246,17 @@ const iso = (ms: number): string => new Date(ms).toISOString();
 const PR = "https://github.com/acme/widgets/pull/";
 const merge = (n: number, ms: number): Row => ({ ts: iso(ms), step: "pr.terminal", pr_url: `${PR}${n}`, pr_number: n, state: "merged" });
 
-/** Ten treated runs whose PRs are still open, and ten controls of which five merged directly: INSUFFICIENT
- *  EVIDENCE while the treated runs are pending, RETIRE-CANDIDATE once they settle unmerged. */
-const pendingComparison = (treatedMs: number, controlMs: number): Row[] => {
+/** Ten treated runs whose PRs are still open, and ten controls of which `controlMerged` merged directly: INSUFFICIENT
+ *  EVIDENCE while the treated runs are pending. With all ten controls merged, the confidence sequence reads
+ *  RETIRE-CANDIDATE once the treated runs settle unmerged; five of ten leave it undecided. */
+const pendingComparison = (treatedMs: number, controlMs: number, controlMerged = 5): Row[] => {
   const rows: Row[] = [];
   for (let i = 0; i < 10; i++) {
     const at = { epoch: SKILL_ARM_EPOCH, ts: iso(treatedMs) };
     rows.push(selectionRow(`t-${i}`, false, at),
       verdict(`t-${i}`, "handed_off", { ts: iso(treatedMs), pr_url: `${PR}${100 + i}`, total_cost_usd: 1 }));
     const ctl = { epoch: SKILL_ARM_EPOCH, ts: iso(controlMs) };
-    rows.push(selectionRow(`c-${i}`, true, ctl), verdict(`c-${i}`, i < 5 ? "merged" : "no_diff", { ts: iso(controlMs), pr_url: `${PR}${200 + i}` }));
+    rows.push(selectionRow(`c-${i}`, true, ctl), verdict(`c-${i}`, i < controlMerged ? "merged" : "no_diff", { ts: iso(controlMs), pr_url: `${PR}${200 + i}` }));
   }
   return rows;
 };
@@ -273,8 +274,8 @@ const comparison = (rows: readonly Record<string, unknown>[]): Record<string, un
   return rest;
 };
 
-const pendingWithSettleWindow = (): Row[] => [
-  ...pendingComparison(T0 + 5 * HOUR, T0 + 5 * HOUR),
+const pendingWithSettleWindow = (controlMerged = 5): Row[] => [
+  ...pendingComparison(T0 + 5 * HOUR, T0 + 5 * HOUR, controlMerged),
   ...Array.from({ length: 10 }, (_, i) => verdict(`direct-${i}`, "merged", { ts: iso(T0), pr_url: `${PR}${300 + i}` })),
 ];
 
@@ -283,7 +284,7 @@ test("W1-T14137 criterion 3, fenced settle window: ten legacy merges leave the n
   const current = pendingComparison(T0, T0 + 5 * HOUR);
   const before = buildSkillEffectivenessReport(current, "proc");
   assert.equal(before.status, "INSUFFICIENT EVIDENCE");
-  assert.equal(before.basis, "pending-shipment");
+  assert.equal(before.basis, "undecided");
   assert.equal(before.settle_window_ms, null);
   assert.equal(before.selected.pending_merge_runs, 10);
   // Ten legacy runs that merged an hour after their verdict, all before the current epoch began.
@@ -480,7 +481,8 @@ test("W1-T14137 criterion 3: a PR opened by an apart run is fenced even when its
 });
 
 test("W1-T14137 criterion 3: fix completions from apart runs contribute neither elapsed time nor repair cost", () => {
-  const current = pendingWithSettleWindow();
+  // Every control merged, so ten settled-unmerged treated runs are a size the confidence sequence decides.
+  const current = pendingWithSettleWindow(10);
   const before = buildSkillEffectivenessReport(current, "proc");
   const legacy = { ts: iso(T0 - 30 * HOUR), taskId: "W1-T9202" };
   const legacyRows = [

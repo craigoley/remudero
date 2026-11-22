@@ -396,8 +396,8 @@ test("W1-T3379 criterion 4: zero selection, no improvement, and named harm retir
   assert.equal(zero.basis, "zero-selection");
 
   const noImprovement = buildSkillEffectivenessReport(effectivenessRows(
-    [...Array(5).fill("merged"), ...Array(5).fill("no_diff")],
-    [...Array(5).fill("merged"), ...Array(5).fill("no_diff")],
+    [...Array(3).fill("merged"), ...Array(27).fill("no_diff")],
+    [...Array(27).fill("merged"), ...Array(3).fill("no_diff")],
   ), "procedure");
   assert.equal(noImprovement.status, "RETIRE-CANDIDATE");
   assert.equal(noImprovement.basis, "not-better-than-control");
@@ -410,8 +410,8 @@ test("W1-T3379 criterion 4: zero selection, no improvement, and named harm retir
   assert.equal(harmful.basis, "named-harm-signal");
 
   const favorable = buildSkillEffectivenessReport(effectivenessRows(
-    [...Array(8).fill("merged"), ...Array(2).fill("no_diff")],
-    [...Array(3).fill("merged"), ...Array(7).fill("no_diff")],
+    [...Array(27).fill("merged"), ...Array(3).fill("no_diff")],
+    [...Array(3).fill("merged"), ...Array(27).fill("no_diff")],
   ), "procedure");
   assert.equal(favorable.status, "REVIEW-CANDIDATE");
   assert.equal(favorable.basis, "favorable-comparison");
@@ -460,7 +460,7 @@ test("W1-T3379: the report command reads one complete union and refuses malforme
       unread: [],
       unclassified: [],
       ok: true,
-      rows: effectivenessRows(Array(10).fill("merged"), Array(10).fill("no_diff")),
+      rows: effectivenessRows(Array(24).fill("merged"), Array(24).fill("no_diff")),
       torn: 0,
       filesRead: 1,
     };

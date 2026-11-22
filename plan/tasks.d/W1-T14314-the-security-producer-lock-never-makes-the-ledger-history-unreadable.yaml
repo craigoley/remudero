@@ -1,0 +1,69 @@
+- id: W1-T14314
+  title: "The security producer's lock file is the ledger's own sidecar, so it never makes a strict history reader refuse"
+  repo: remudero
+  depends_on: []
+  priority: 0
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # one concern across three modules: which files the strict ledger union accepts beside the ledger
+  band_meaning: span
+  origin: "operator-session#automation-root-causes-2026-11-22"
+  plan_refs: [W1-T13787, W1-T5763, W1-T5807]
+  files:
+    - src/lib/ledger-path.ts
+    - src/lib/ledger-union.ts
+    - src/lib/sweep.ts
+    - test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts
+    - test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    WHY: one empty lock file has blinded the fleet's self-repair since 2026-11-21T08:53Z.
+    - src/lib/sweep.ts:18557 (W1-T13787, #19649) opens a SQLite lock at `<ledger>.security-producer.lock.sqlite`.
+      SQLite leaves that file in place. Nothing removes it.
+    - listedLedgerFiles (src/lib/ledger-union.ts:305-331) reports every `ledger.*` name it does not know as
+      unclassified. W1-T5763 and W1-T5807 exempted the sidecars that existed then. This one came later.
+    - Each reader that requires an empty `unclassified` then refuses for as long as the file exists.
+    OBSERVED, read-only, in the core ledger and its rotations:
+    - The file was created at 2026-11-21T08:53:25Z with size 0.
+    - sweep.arm_verdict_history_read was complete=true at 08:52Z and every time before it on 11-20 and 11-21. It is
+      complete=false on every read from 08:54Z.
+    - From 09:08Z to 2026-11-22T13:43Z all 51 reconcile rows are reconcile.unreadable, naming this file. The fleet
+      reconciler repaired nothing for 28 hours.
+    - About 100 rows read "refresh history is unreadable".
+    READ in code at 51105aaa3, the other readers it blinds:
+    - headContractRefreshHistory (sweep.ts:11419). lightPassHeadContractRefresh then returns without a candidate, so
+      that path never refreshes a branch whose scope amendment merged.
+    - readFixScopeHistory (fix-scope-history.ts:15), which throws.
+    - the provider startup comparison (cli/commands/daemon.ts:307) and the reservation reap history (run-task.ts:17825).
+    - cash-trial, now-view, retro, reader-agreement and triage-lane-outcomes.
+  design: |
+    INVARIANT unknown-ledger-files-still-refuse: a `ledger.*` file that is no rotation, no valid metadata sidecar and no named own lock stays unclassified, and strict readers still refuse on it.
+    1. src/lib/ledger-path.ts gains LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX = ".security-producer.lock.sqlite".
+    2. sweep.ts builds the lock path from that constant. The path on disk does not change, so a file that already
+       exists is covered without anyone moving or deleting it.
+    3. The classifier accepts exactly that name, and SQLite's `-journal` form of it, as the ledger's own file. It is
+       not read as rows and is not a rotation. Follow the rotation lock's exact-name exemption, never a wildcard.
+    4. The class fix: the new suite reads src/ for file names built as the ledger path plus a literal or a named
+       suffix constant, and fails when listedLedgerFiles would call one of them unclassified. The next sidecar then
+       fails CI instead of silently blinding the fleet. Use the shared repository-root helper.
+    NOT IN SCOPE: what any reader does when history really is incomplete.
+  acceptance:
+    - claim: "With the live ledger, a rotation and ledger.ndjson.security-producer.lock.sqlite in the state dir, listedLedgerFiles reports nothing unclassified, and the reconciler's, the arm decision's and the head-contract refresh's history reads are complete"
+      proof: "grep: W1-T14314 criterion 1 in test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts"
+    - claim: "A source census fails when src writes a ledger sidecar that the corpus classifier would report as unclassified"
+      proof: "grep: W1-T14314 criterion 2 in test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts"
+    - claim: "invariant:unknown-ledger-files-still-refuse — ledger.ndjson.bak, another *.lock.sqlite name and a misnamed rotation stay unclassified and still make a strict reader refuse"
+      kind: guard
+      proof: "grep: W1-T14314 criterion 3 in test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts"
+    - claim: "The security producer builds its lock path from the shared suffix"
+      proof: "grep: LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX in src/lib/sweep.ts"
+  falsifier: |
+    Remove the exemption and criterion 1 fails. Add an unregistered sidecar write in src and criterion 2 fails.
+    Exempt every *.lock.sqlite and criterion 3 fails.
+  note: |
+    reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
+    Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: the producer suite is in files. test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts injects its history and does not change.
