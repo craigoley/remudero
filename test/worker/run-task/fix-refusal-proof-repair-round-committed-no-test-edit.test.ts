@@ -17,8 +17,8 @@ test("W1-T11334: fix_refusal:proof-repair-round-committed-no-test-edit is preven
   const base = { stageable: ["test/a.test.ts"], changedFiles: [] as string[], proofs: ["unit test: a"] };
   // Stale evidence: the proof already discriminates at head — no edit owed, so not the no-test-edit failure.
   const healed = proofRepairRefusal({ ...base, checkProofStatus: () => 0 });
-  assert.match(healed?.reason ?? "", /not needed/);
-  assert.doesNotMatch(healed?.reason ?? "", /committed no test edit/);
+  // No refusal object at all — the caller only records fix.commit_refused / stands down on a defined result.
+  assert.equal(healed, undefined);
   // A genuinely empty round on a proof that still needs repair stays refused.
   const empty = proofRepairRefusal({ ...base, checkProofStatus: () => 5 });
   assert.match(empty?.reason ?? "", /committed no test edit/);

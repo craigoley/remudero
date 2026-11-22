@@ -9188,9 +9188,9 @@ export function proofRepairRefusal(input: {
     // discriminates at the PR head the evidence was stale and no edit was owed.
     const allDiscriminate =
       input.proofs.length > 0 && input.proofs.every((proof) => input.checkProofStatus(proof) === CHECK_PROOF_EXIT.pass);
-    if (allDiscriminate) {
-      return { reason: "proof-repair round not needed: every named proof already passes at the head and fails at the merge base", undeclared: [] };
-    }
+    // No refusal at all: the caller sets `harnessCommitRefused` (and logs `fix.commit_refused`) only on a defined
+    // result, so returning one — even renamed — would still dispatch/record a refused round.
+    if (allDiscriminate) return undefined;
     return { reason: "proof-repair round committed no test edit — nothing was pushed", undeclared: [] };
   }
   const outside = input.changedFiles.filter((file) => !input.stageable.includes(file));
