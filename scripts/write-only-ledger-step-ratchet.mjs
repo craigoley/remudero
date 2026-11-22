@@ -19,6 +19,9 @@
 // base; an entry that gained a reader must leave it. A new write-only step needs a reader, or a
 // `recordOnly` row with a non-empty reason. A step, not a job: it rides ci.yml's light gates beside
 // console-parity and reports under the required comment-load-ratchet check.
+// TRAP: CI measures the MERGE ref, so a step main landed while this PR was open would read as this
+// diff's. A refusal is re-judged against the merge base's own tree, as comment-load-ratchet does: a
+// step already write-only there, or a debt entry already read there, is inherited and only reported.
 //
 // FALSIFIER: test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts.
 
@@ -400,22 +403,28 @@ export function parseBaseline(text, label) {
  * The ratchet. Refuses a write-only step recorded nowhere, a debt entry that is no longer write-only,
  * a debt entry the merge base's list lacks (`baseBaseline` null: no baseline there, nothing to
  * shrink against) and a record-only entry with an empty reason. `recordOnlyRead` is reported only.
+ * `baseWriteOnly` (the merge base tree's own write-only steps, or null when not measured) moves main's
+ * drift into `inherited`: an unrecorded step already write-only there, a stale entry not write-only there.
  */
-export function ratchetVerdict({ writeOnly, baseline, baseBaseline }) {
+export function ratchetVerdict({ writeOnly, baseline, baseBaseline, baseWriteOnly = null }) {
   const current = new Set(writeOnly);
   const debt = new Set(baseline.writeOnly);
+  const atBase = new Set(baseWriteOnly ?? []);
   const recorded = Object.keys(baseline.recordOnly);
-  const unrecorded = writeOnly.filter((step) => !debt.has(step) && !Object.hasOwn(baseline.recordOnly, step));
-  const stale = baseline.writeOnly.filter((step) => !current.has(step)).sort();
+  const missing = writeOnly.filter((step) => !debt.has(step) && !Object.hasOwn(baseline.recordOnly, step));
+  const noLongerWriteOnly = baseline.writeOnly.filter((step) => !current.has(step)).sort();
+  const unrecorded = baseWriteOnly === null ? missing : missing.filter((step) => !atBase.has(step));
+  const stale = baseWriteOnly === null ? noLongerWriteOnly : noLongerWriteOnly.filter((step) => atBase.has(step));
+  const inherited = [...missing, ...noLongerWriteOnly].filter((step) => !unrecorded.includes(step) && !stale.includes(step)).sort();
   const grown = baseBaseline === null ? [] : baseline.writeOnly.filter((step) => !baseBaseline.writeOnly.includes(step)).sort();
   const emptyReasons = recorded.filter((step) => baseline.recordOnly[step].trim() === "").sort();
   const recordOnlyRead = recorded.filter((step) => !current.has(step)).sort();
   const ok = unrecorded.length + stale.length + grown.length + emptyReasons.length === 0;
-  return { ok, unrecorded, stale, grown, emptyReasons, recordOnlyRead };
+  return { ok, unrecorded, stale, grown, emptyReasons, recordOnlyRead, inherited };
 }
 
 export function formatReport({ scan, verdict, baselinePath, base }) {
-  const { unrecorded, stale, grown, emptyReasons, recordOnlyRead } = verdict;
+  const { unrecorded, stale, grown, emptyReasons, recordOnlyRead, inherited = [] } = verdict;
   const out = [
     `${GATE}: ${scan.emitted.size} step(s) emitted in src/, ${scan.emitted.size - scan.writeOnly.length} read outside their writer, ` +
       `${scan.writeOnly.length} write-only.`,
@@ -436,7 +445,9 @@ export function formatReport({ scan, verdict, baselinePath, base }) {
     'A new write-only step is declared in "recordOnly" with a reason, never added to the debt list.');
   section(emptyReasons, 'EMPTY REASON — a "recordOnly" entry must say why nothing reads it:');
   section(recordOnlyRead, 'FELL — declared record-only but now read, or no longer emitted; its "recordOnly" row can go:');
-  if (verdict.ok) out.push(recordOnlyRead.length > 0 ? "OK (with a recordable shrink above)." : "OK — unchanged.");
+  section(inherited, "INHERITED — main's own drift: already write-only at the merge base, or a debt entry already read there:",
+    `Not this diff's to answer for; re-record ${baselinePath} against the merge base to retire it.`);
+  if (verdict.ok) out.push(recordOnlyRead.length + inherited.length > 0 ? "OK (with a recordable shrink above)." : "OK — unchanged.");
   return out.join("\n");
 }
 
@@ -444,6 +455,23 @@ function gitText(root, args, what) {
   const res = git(args, { cwd: root });
   if (res.status !== 0) throw new Error(`${what}: ${String(res.stderr).trim()}`);
   return res.stdout;
+}
+
+/** Every src/ source at `rev`, read through one `git cat-file --batch` rather than a spawn per file. */
+function readTreeSources(root, rev) {
+  const paths = gitText(root, ["ls-tree", "-r", "-z", "--name-only", rev, "--", "src"], `cannot list src/ at ${rev}`)
+    .split("\0").filter((p) => SOURCE_RE.test(p));
+  const input = paths.map((path) => `${rev}:${path}\n`).join("");
+  const res = git(["cat-file", "--batch"], { cwd: root, input, encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 });
+  if (res.status !== 0) throw new Error(`cannot read src/ at ${rev}: ${String(res.stderr).trim()}`);
+  let at = 0;
+  return paths.map((path) => {
+    const eol = res.stdout.indexOf(10, at);
+    const [, type, size] = res.stdout.toString("utf8", at, eol).split(" ");
+    if (type !== "blob") throw new Error(`cannot read ${rev}:${path}`);
+    at = eol + 1 + Number(size) + 1;
+    return { path, text: res.stdout.toString("utf8", eol + 1, at - 1) };
+  });
 }
 
 function readText(path, label) {
@@ -472,7 +500,13 @@ export function main(argv, { log = console.log } = {}) {
     const mergeBase = gitText(root, ["merge-base", values.base, "HEAD"], `cannot resolve the merge base against ${values.base}`).trim();
     const shown = git(["show", `${mergeBase}:${values.baseline}`], { cwd: root });
     const baseBaseline = shown.status === 0 ? parseBaseline(shown.stdout, `${mergeBase}:${values.baseline}`) : null;
-    const verdict = ratchetVerdict({ writeOnly: scan.writeOnly, baseline, baseBaseline });
+    let verdict = ratchetVerdict({ writeOnly: scan.writeOnly, baseline, baseBaseline });
+    const head = gitText(root, ["rev-parse", "HEAD"], "cannot resolve HEAD").trim();
+    // A refusal only: a clean run never reads the base tree. At HEAD == base nothing can be inherited.
+    if (verdict.unrecorded.length + verdict.stale.length > 0 && mergeBase !== head) {
+      const baseWriteOnly = scanLedgerSteps(readTreeSources(root, mergeBase)).writeOnly;
+      verdict = ratchetVerdict({ writeOnly: scan.writeOnly, baseline, baseBaseline, baseWriteOnly });
+    }
     log(formatReport({ scan, verdict, baselinePath: values.baseline, base: baseBaseline === null ? null : mergeBase }));
     return verdict.ok ? 0 : 1;
   } catch (e) {

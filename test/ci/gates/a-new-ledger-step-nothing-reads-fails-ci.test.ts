@@ -26,13 +26,19 @@ type Verdict = {
   grown: string[];
   emptyReasons: string[];
   recordOnlyRead: string[];
+  inherited?: string[];
 };
 
 const mod = ratchet as unknown as {
   GATE: string;
   BASELINE_PATH: string;
   scanLedgerSteps: (sources: Array<{ path: string; text: string }>) => Scan;
-  ratchetVerdict: (input: { writeOnly: string[]; baseline: Baseline; baseBaseline: Baseline | null }) => Verdict;
+  ratchetVerdict: (input: {
+    writeOnly: string[];
+    baseline: Baseline;
+    baseBaseline: Baseline | null;
+    baseWriteOnly?: string[] | null;
+  }) => Verdict;
   parseBaseline: (text: string, label: string) => Baseline;
   formatReport: (input: { scan: Scan; verdict: Verdict; baselinePath: string; base: string | null }) => string;
   main: (argv: string[], io?: { log?: (line: string) => void }) => number;
@@ -377,6 +383,36 @@ test("W1-T14149: a record-only step that gained a reader is reported, and a clea
   for (const needle of [/BLOCKED/, /s\.one/, /g\.one/, /e\.one/, /merge base f00/]) assert.match(blocked, needle);
 });
 
+test("W1-T14149: main's own drift at the merge base is inherited, and this diff's own steps still refuse", () => {
+  const baseline = { writeOnly: ["debt.kept", "debt.read_on_main", "debt.read_here"], recordOnly: {} };
+  const writeOnly = ["debt.kept", "diff.new", "main.new"];
+  const unjudged = mod.ratchetVerdict({ writeOnly, baseline, baseBaseline: null });
+  assert.equal(unjudged.ok, false);
+  assert.deepEqual(unjudged.unrecorded, ["diff.new", "main.new"]);
+  assert.deepEqual(unjudged.stale, ["debt.read_here", "debt.read_on_main"]);
+  assert.deepEqual(unjudged.inherited, [], "with no base measurement nothing is inherited");
+
+  // At the base: main.new was already write-only, debt.read_on_main already read; debt.read_here was not.
+  const judged = mod.ratchetVerdict({ writeOnly, baseline, baseBaseline: null, baseWriteOnly: ["debt.kept", "debt.read_here", "main.new"] });
+  assert.equal(judged.ok, false);
+  assert.deepEqual(judged.unrecorded, ["diff.new"], "a step this diff wrote unread still refuses");
+  assert.deepEqual(judged.stale, ["debt.read_here"], "a debt entry this diff gave a reader must still leave");
+  assert.deepEqual(judged.inherited, ["debt.read_on_main", "main.new"]);
+
+  const clean = mod.ratchetVerdict({
+    writeOnly: ["debt.kept", "main.new"],
+    baseline: { writeOnly: ["debt.kept", "debt.read_on_main"], recordOnly: {} },
+    baseBaseline: null,
+    baseWriteOnly: ["debt.kept", "main.new"],
+  });
+  assert.equal(clean.ok, true);
+  const result = scan({ "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("debt.kept"); log("main.new"); };' });
+  const report = mod.formatReport({ scan: result, verdict: clean, baselinePath: mod.BASELINE_PATH, base: null });
+  assert.match(report, /\nINHERITED — [^\n]*\n {2}debt\.read_on_main\n {2}main\.new\n/);
+  assert.match(report, /^OK \(with a recordable shrink above\)\.$/m);
+  assert.doesNotMatch(report, /BLOCKED/);
+});
+
 // ── reviewer repros: the rule each probe broke, not only the probe ─────────────────────────────
 
 test("W1-T14149 criterion 1: a ledger append writes its step dotted or not (dispatch_wip_observed)", () => {
@@ -544,6 +580,30 @@ test("W1-T14149: the CLI measures the checkout against the merge base's baseline
 
   put(repo, { [mod.BASELINE_PATH]: baselineText(["cli.debt"], { "cli.new": "an audit trail no loop reads" }) });
   assert.equal(run(["--root", repo.dir, "--base", "main"]).code, 0);
+});
+
+test("W1-T14149: the CLI re-judges a refusal on a merge ref against the merge base's own tree", (t) => {
+  const repo = gitRepo({ scope: t, kind: "w1t14149" });
+  put(repo, { "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("drift.kept"); log("drift.read_on_main"); };' });
+  repo.git("checkout", "--quiet", "-b", "feature");
+  put(repo, { [mod.BASELINE_PATH]: baselineText(["drift.kept", "drift.read_on_main"]) });
+  // main moves on while the branch is open: one new unread step, one reader for a recorded debt entry.
+  repo.git("checkout", "--quiet", "main");
+  put(repo, {
+    "src/lib/main-new.ts": 'export const m = (log: (s: string) => void) => log("drift.main_new");',
+    "src/lib/reader.ts": 'export const r = (row: { step: string }) => row.step === "drift.read_on_main";',
+  });
+  repo.git("checkout", "--quiet", "feature");
+  repo.git("merge", "--quiet", "--no-edit", "main");
+  const merged = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(merged.code, 0, merged.out);
+  assert.match(merged.out, /\nINHERITED — [^\n]*\n {2}drift\.main_new\n {2}drift\.read_on_main\n/);
+
+  put(repo, { "src/lib/feature-new.ts": 'export const f = (log: (s: string) => void) => log("drift.feature_new");' });
+  const own = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(own.code, 1, own.out);
+  assert.match(own.out, /\nWRITE-ONLY — [^\n]*\n {2}drift\.feature_new\nGive each/, "only this diff's own step is unrecorded");
+  assert.match(own.out, /\nINHERITED — [^\n]*\n {2}drift\.main_new\n {2}drift\.read_on_main\n/);
 });
 
 test("W1-T14149: the CLI refuses to report OK when it cannot measure", (t) => {
