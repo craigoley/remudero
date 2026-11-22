@@ -1429,6 +1429,7 @@
   ],
   "recordOnly": {
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
-    "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate."
+    "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
+    "reviewer_tree.reaped": "A janitor's receipt from the retired reviewer-tree reaper: it names the trees it removed, the bytes freed and any tree kept for an unexpected reason, and nothing decides on it."
   }
 }
