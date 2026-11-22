@@ -8,7 +8,8 @@ import { test, type TestContext } from "node:test";
 import { readClosedRunBranchPrsOutputAsync } from "#src/cli/commands/daemon.js";
 import { aCandidateHoldsARunBranch, runDaemon, type DaemonDeps, type DaemonSummary } from "#src/lib/daemon.js";
 import { loadPlan } from "#src/lib/plan.js";
-import { daemonCommand, type RunResult } from "#src/run-task.js";
+import type { RunResult } from "#src/lib/run-result.js";
+import { daemonCommand } from "#src/run-task.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const A = "W1-T9001";
