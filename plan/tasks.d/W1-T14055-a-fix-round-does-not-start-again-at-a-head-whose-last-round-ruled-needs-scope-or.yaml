@@ -3,7 +3,6 @@
   repo: remudero
   depends_on:
     - W1-T13865
-  priority: 2
   type: implement
   verify: auto
   principles:
@@ -18,7 +17,9 @@
     - src/lib/fix-progress-judge.ts
     - src/lib/sweep.ts
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # duplicate held follow-up; W1-T14201 fixes the gap this criterion left
+  superseded_by: W1-T14201
   attempts: 0
   acceptance:
     - claim: invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds
@@ -54,7 +55,9 @@
   falsifier: |
     Remove the priorRoundHold call from the sweep: criterion 4's fixture spawns a second fix worker at the same head
     after a FLAKE round and the test fails.
-  needs_input:
-    question: 'Pull request https://github.com/craigoley/remudero/pull/19767 (task W1-T13865) cannot meet these criteria without your input. "invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds". What it needs: fix stall on review:invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds: 4 rounds left it unmet with the same failure'
-    source_pr: https://github.com/craigoley/remudero/pull/19767
-    asked_at: 2026-11-20T18:17:48.070Z
+  note: |
+    WITHDRAWN 2026-11-21 (operator session): W1-T14201 supersedes W1-T14055. The sweep filed this held follow-up of
+    W1-T13865 for criterion 3 of https://github.com/craigoley/remudero/pull/19767 (at dc2f09d77c), one of nineteen copies
+    (W1-T14001 to W1-T14110). #19767 has merged, so the question to the operator has no pull request to answer.
+    The real gap is that a FLAKE round whose rerun came back red (flake_claim refuted or repeated) still holds its
+    head; W1-T14201 fixes it. W1-T13944 fixes the repeated filing. This record keeps no question.

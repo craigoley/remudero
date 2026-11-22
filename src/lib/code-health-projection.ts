@@ -89,7 +89,7 @@ export interface CodeHealthSourceProvenance {
   rulesVersion: string | null;
   configHash: string;
   exclusions: string[];
-  scope: { kind: "explicit-analysis-targets" | "instrumented-source-files"; fileCount: number; hash: string | null };
+  scope: { kind: "explicit-analysis-targets" | "codeql-extracted-files" | "instrumented-source-files"; fileCount: number; hash: string | null };
   completion?: { kind: "original-invocations" | "workflow-analysis-step"; state: "success"; at: string } | null;
   runAttempt?: string;
   language?: string;
@@ -113,7 +113,8 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
       !(p.toolVersion === null || text(p.toolVersion)) || !(p.rulesVersion === null || digest(p.rulesVersion)) || !digest(p.configHash) ||
       !Array.isArray(p.exclusions) || p.exclusions.length > 128 || p.exclusions.some(path => !text(path)) ||
       !p.scope || typeof p.scope !== "object" || !only(p.scope, "kind fileCount hash") ||
-      p.scope.kind !== (p.kind === "quality" ? "explicit-analysis-targets" : "instrumented-source-files") ||
+      (p.kind === "quality" ? p.scope.kind !== "explicit-analysis-targets" && p.scope.kind !== "codeql-extracted-files" :
+        p.scope.kind !== "instrumented-source-files") ||
       !Number.isSafeInteger(p.scope.fileCount) || p.scope.fileCount < 0 || p.scope.fileCount > 100_000 || !(p.scope.hash === null || digest(p.scope.hash))) return fail();
   if (p.kind === "quality") {
     if (p.completion !== null && (!p.completion || typeof p.completion !== "object" || !only(p.completion, "kind state at") ||
@@ -122,6 +123,8 @@ export function validateCodeHealthProvenance(value: unknown, expected: { reposit
     if (!p.runAttempt || !/^[1-9][0-9]{0,5}$/.test(p.runAttempt) || !p.language || !/^[a-z][a-z0-9-]{0,63}$/.test(p.language) ||
         !p.sarifId || !/^[a-f0-9-]{36}$/i.test(p.sarifId) || !Number.isSafeInteger(p.ruleCount) || p.ruleCount! < 0 || p.ruleCount! > 2_560_000 ||
         p.scanId !== `codeql:${p.runId}:${p.runAttempt}:${p.language}:${p.sarifId}`) return fail();
+    if (p.scope.kind === "codeql-extracted-files" && (!["javascript-typescript", "python", "actions"].includes(p.language) ||
+        !p.completion || !p.scope.hash || !p.scope.fileCount || !p.toolVersion)) return fail();
   } else if (!coverageMeasurementShape(p.measurement) || !p.check || typeof p.check !== "object" || !only(p.check, "id met reason") || p.check.id !== "coverage-existing-tier" ||
       typeof p.check.met !== "boolean" || !text(p.check.reason, 2048) || p.scanId !== `coverage-nightly:${p.runId}`) return fail();
   if (p.state === "complete" ? p.reasons.length > 0 || !p.toolVersion || !p.rulesVersion || !p.scope.hash || !p.scope.fileCount || p.kind === "quality" && (!p.ruleCount || !p.completion) || p.kind === "coverage" && (!p.measurement!.branches.total || !p.measurement!.lines.total) : !p.reasons.length) return fail();

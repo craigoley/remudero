@@ -1,5 +1,6 @@
 import { operatorReleasePin } from "#src/lib/operator-release.js";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { test, type TestContext } from "node:test";
 
@@ -7,7 +8,7 @@ import { RELEASE_LEDGER_STEP, assertRunnable, loadPlan, parseTasksFromYaml, rele
 import { nextRunnable, resolveReleasedIds, resolveReleases, runDrain } from "#src/lib/drain.js";
 import { OPERATOR_RELEASES_FILE, readOperatorReleaseRecords } from "#src/lib/machine-filing-judge.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import { composeSecondaryPlan } from "#src/lib/task-lookup.js";
+import { composeSecondaryPlan, readReleasePublicPlan } from "#src/lib/task-lookup.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +17,11 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { readOriginMainSha } from "#src/lib/inbox.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { appendLedger } from "#src/lib/ledger.js";
-import { productionStuckStatePorts, opsRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
-import { approveCommand, approveParkedTask, namesATask } from "#src/run-task.js";
+import { writeDaemonTargetRecord } from "#src/lib/repo-location.js";
+import { approveInChild, productionStuckStatePorts, opsRecordDigest, publicRecordDigest, runStuckStateGardener } from "#src/lib/stuck-state-gardener.js";
+import { approveCommand, approveParkedTask, namesATask, stripRepoRootFlag } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /**
  * W1-T3206 — `verify: human` WAS A ONE-WAY PARK WITH NO RELEASE.
@@ -610,11 +613,12 @@ test("W1-T13386 criterion 4: an id in neither catalog is refused as unknown and 
   assert.equal(onHost.wroteAnything(), false);
 });
 
-test("W1-T13386 criterion 4: a task in the public plan is located, pinned and released as before, with no read of the ops catalog", async t => {
+test("W1-T13386 criterion 4: a public release keeps its pin and reads ops only while a destination is named (W1-T13785 criterion 2)", async t => {
   const host = hostWithSecondCatalog(t, { transport: "down" }), said = everythingSaid(t);
   const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
   assert.equal(await approveCommand([PUBLIC_ID], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
-  assert.equal(host.calls.length, 0, "a public hit opens no private reader");
+  // W1-T13785 criterion 2 supersedes "a public hit opens no private reader": the read is attempted, fails, and the release stands.
+  assert.equal(host.calls.length, 1, "a public hit attempts one ops read while a destination is named");
   const rows = host.releaseRows(PUBLIC_ID);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.run_id, `APPROVE-${PUBLIC_ID}`);
@@ -622,10 +626,313 @@ test("W1-T13386 criterion 4: a task in the public plan is located, pinned and re
   assert.deepEqual(Object.keys(host.durableRecords()), [PUBLIC_ID]);
   assert.equal(host.durableRecords()[PUBLIC_ID]!.pin, pinBeforeThisTask(record));
 
-  // And as the host runs the verb: its own checkout holds the id, so the catalogs are never asked.
+  // And as the host runs the verb: its own checkout holds the id; the catalog is asked whether the tick holds it.
   const onHost = hostWithSecondCatalog(t, { transport: "down" });
   assert.equal(await approveAsTheHostRunsIt(onHost, [PUBLIC_ID]), 0, said.join("\n"));
-  assert.equal(onHost.calls.length, 0);
+  assert.equal(onHost.calls.length, 1, "W1-T13785 criterion 2: the read is attempted while a destination is named");
   assert.equal(onHost.releaseRows(PUBLIC_ID).length, 1);
   assert.equal(onHost.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record));
+
+  for (const handed of [true, false]) {
+    const off = hostWithSecondCatalog(t);
+    rmSync(join(off.stateDir, "plan-destination.json"));
+    const code = handed
+      ? await approveCommand([PUBLIC_ID], { config: off.config, planPath: off.planPath, taskLookup: { api: off.api } })
+      : await approveAsTheHostRunsIt(off, [PUBLIC_ID]);
+    assert.equal(code, 0, said.join("\n"));
+    assert.equal(off.calls.length, 0, "a public hit opens no ops reader while the destination is off");
+    assert.deepEqual(off.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)]);
+  }
+});
+
+// W1-T13785: the composition holds public records too. Approve composes a public hit while a destination is named.
+const DEPENDANT_ID = "W1-T1042";
+const dependingOn = (id: string, dependency: string): string => shardText(id).replace("depends_on: []", `depends_on: [${dependency}]`);
+/** The ops catalog repeats the public id without moved_from: both copies are held (duplicate_task_id). */
+const REPEATS_PUBLIC_ID = shardText(OPS_ID) + shardText(PUBLIC_ID);
+
+/** A public plan published at origin/main in a git checkout detached at the boot commit, as the host runs. */
+function publicMainAt(t: TestContext, bootText: string, mainText = bootText) {
+  const checkout = gitRepo({ scope: t, seedCommit: false });
+  const planPath = join(checkout.dir, "plan", "tasks.yaml");
+  mkdirSync(join(checkout.dir, "plan"));
+  const publish = (text: string) => {
+    writeFileSync(planPath, text);
+    checkout.git("add", "plan/tasks.yaml");
+    checkout.git("commit", "--quiet", "--allow-empty", "-m", "fixture main");
+    const sha = checkout.git("rev-parse", "HEAD");
+    checkout.git("update-ref", "refs/remotes/origin/main", sha);
+    return sha;
+  };
+  const boot = publish(bootText);
+  const main = publish(mainText);
+  checkout.git("checkout", "--quiet", "--detach", boot);
+  return { dir: checkout.dir, planPath, main };
+}
+
+/** `rmd --repo-root <root> approve <rest>` with the host's state directory: the verb finds the plan in that root. */
+async function approveAtRoot(root: string, host: ReturnType<typeof hostWithSecondCatalog>, rest: string[], api = host.api): Promise<number> {
+  const argv = [...process.argv];
+  process.argv.push("--repo-root", root);
+  try {
+    return await approveCommand(rest, { config: host.config, taskLookup: { api } });
+  } finally {
+    process.argv.splice(0, process.argv.length, ...argv);
+  }
+}
+
+const MODES = ["checkout, plan handed", "checkout, as the host runs it", "working tree, plan handed", "working tree, as the host runs it"] as const;
+async function approveIn(mode: (typeof MODES)[number], t: TestContext, host: ReturnType<typeof hostWithSecondCatalog>, bootText: string, subject: string,
+  mainText = bootText) {
+  writeFileSync(host.planPath, bootText);
+  if (mode.startsWith("working tree")) {
+    const code = mode.endsWith("handed")
+      ? await approveCommand([subject], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } })
+      : await approveAsTheHostRunsIt(host, [subject]);
+    return { code, main: undefined, planPath: host.planPath };
+  }
+  const world = publicMainAt(t, bootText, mainText);
+  const code = mode.endsWith("handed")
+    ? await approveCommand([subject], { config: host.config, planPath: world.planPath, taskLookup: { api: host.api } })
+    : await approveAtRoot(world.dir, host, [subject]);
+  return { code, main: world.main, planPath: world.planPath };
+}
+
+test("W1-T13785 criterion 1: approve refuses a public record the composition holds, handed a plan and as the host runs it, releases nothing, and writes one refusal row with the public record's digest", async t => {
+  const everything = everythingSaid(t);
+  const worlds = [
+    { reason: "duplicate_task_id", edge: `${PUBLIC_ID} in both catalogs`, opsText: REPEATS_PUBLIC_ID, publicRecord: shardText(PUBLIC_ID) },
+    { reason: "invalid_cross_catalog_dependency", edge: `${PUBLIC_ID} -> ${OPS_ID}`, opsText: shardText(OPS_ID), publicRecord: dependingOn(PUBLIC_ID, OPS_ID) },
+  ];
+  for (const world of worlds) {
+    const publicText = world.publicRecord + dependingOn(DEPENDANT_ID, PUBLIC_ID);
+    for (const subject of [PUBLIC_ID, DEPENDANT_ID]) {
+      for (const mode of MODES) await t.test(`${world.reason}, ${subject}, ${mode}`, async sub => {
+        const host = hostWithSecondCatalog(sub, { opsText: world.opsText }), from = everything.length;
+        const { code, main, planPath } = await approveIn(mode, sub, host, publicText, subject);
+        const said = everything.slice(from).join("\n");
+        const whose = subject === PUBLIC_ID ? "its own edge" : `the edge of ${PUBLIC_ID}, which it depends on`;
+        assert.equal(code, 1, said);
+        assert.ok(said.includes(`cannot release '${subject}': it is held by ${whose} (${world.reason}: ${world.edge}) — nothing released`), said);
+        assert.doesNotMatch(said, /RELEASED|unknown task|cannot be read/);
+        assert.deepEqual(host.releaseRows(subject), []);
+        assert.equal(existsSync(host.durablePath), false);
+        const rows = host.rawLines().map(line => JSON.parse(line) as Record<string, unknown>);
+        assert.deepEqual(rows.map(row => row.step), ["approve.release_refused"]);
+        const record = parseTasksFromYaml(publicText, "public.yaml").find(task => task.id === subject)!;
+        if (world.reason === "invalid_cross_catalog_dependency") assert.throws(() => loadPlan(planPath), /depends_on unknown task/);
+        const opsCommit = createHash("sha1").update(world.opsText).digest("hex");
+        assert.deepEqual(
+          [rows[0]!.task_id, rows[0]!.class, rows[0]!.reason, rows[0]!.edge, rows[0]!.public_commit, rows[0]!.ops_commit, rows[0]!.ops_record_digest, rows[0]!.public_record_digest],
+          [subject, "release-compose", `held-${world.reason}`, world.edge, main ?? null, opsCommit, null, publicRecordDigest(record)]);
+      });
+    }
+  }
+});
+
+test("W1-T13785 criterion 4: the real approve retry releases the verified origin/main record from the checkout that refused it", async t => {
+  const currentText = shardText(PUBLIC_ID);
+  const bootText = currentText.replace(`Fixture ${PUBLIC_ID}`, "Older boot record");
+  const world = publicMainAt(t, bootText, currentText);
+  const daemon = publicMainAt(t, bootText, bootText);
+  const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+  const cleared = hostWithSecondCatalog(t);
+  let api = host.api;
+  const said = everythingSaid(t);
+  assert.equal(await approveAtRoot(world.dir, host, [PUBLIC_ID], api), 1, said.join("\n"));
+  const currentPlan = await readReleasePublicPlan(world.dir);
+  const currentRecord = currentPlan.plan.byId.get(PUBLIC_ID)!;
+  assert.notEqual(operatorReleasePin(loadPlan(world.planPath).byId.get(PUBLIC_ID)!), operatorReleasePin(currentRecord));
+  const retries: string[][] = [];
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: path => api(path), gardenNames: [], publicRoot: daemon.dir,
+    publicMainCommit: readOriginMainSha, destinationRead: async () => undefined, escalate: () => null,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: PUBLIC_ID, ...fields, step }),
+    approve: approveInChild({ publicRoot: daemon.dir, execArgv: [], entry: "src/run-task.ts", env: {},
+      run: async (_file, args) => {
+        retries.push([...args]);
+        assert.equal(await approveAtRoot(args[5]!, host, stripRepoRootFlag(args.slice(2)), api), 0, said.join("\n"));
+      },
+    }),
+  });
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, []);
+  assert.equal(host.rawLines().some(line => JSON.parse(line).step === "stuck_state.record_changed"), false);
+  api = cleared.api;
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.deepEqual(retries, [["src/run-task.ts", "approve", PUBLIC_ID, `--replay-public-digest=${publicRecordDigest(currentRecord)}`, "--repo-root", world.dir]]);
+  assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [operatorReleasePin(currentRecord)]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, operatorReleasePin(currentRecord));
+  assert.deepEqual([...readReleasedTaskIds(host.rawLines(), currentPlan.plan)], [PUBLIC_ID]);
+  assert.ok(host.rawLines().some(line => JSON.parse(line).step === "stuck_state.cleared" && JSON.parse(line).retry === "approve"));
+});
+
+test("W1-T13785 criterion 4: the real approve retry releases a verified working-tree record after the destination turns off", async t => {
+  const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+  const said = everythingSaid(t);
+  assert.equal(await approveAsTheHostRunsIt(host, [PUBLIC_ID]), 1, said.join("\n"));
+  const record = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
+  const run = t.mock.fn(async (_file: string, args: readonly string[]) => {
+    assert.ok(args.includes("--replay-public-working-tree"));
+    assert.equal(await approveAtRoot(host.root, host, stripRepoRootFlag(args.slice(2))), 0, said.join("\n"));
+  });
+  const ports = productionStuckStatePorts({
+    stateDir: host.stateDir, api: host.api, gardenNames: [], publicRoot: host.root, publicMainCommit: () => undefined,
+    destinationRead: async () => undefined, escalate: () => null,
+    log: (step, fields) => appendLedger(ledgerPathFor(host.config), { run_id: "GARDEN", task_id: PUBLIC_ID, ...fields, step }),
+    approve: approveInChild({ publicRoot: host.root, execArgv: [], entry: "src/run-task.ts", env: {}, run }),
+  });
+  rmSync(join(host.stateDir, "plan-destination.json"));
+  const opsCalls = host.calls.length;
+  await runStuckStateGardener(ports);
+  await runStuckStateGardener(ports);
+  assert.equal(run.mock.callCount(), 1, "the ops-only change is seen even before the first pass");
+  assert.equal(host.calls.length, opsCalls, "the disabled destination opens no ops reader");
+  assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)]);
+  assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pinBeforeThisTask(record));
+});
+
+test("W1-T13785 criterion 2: a held public record is released as on origin/main when the ops catalog cannot be read or the destination is off, and a sound public task beside a held one keeps the local pin", async t => {
+  const everything = everythingSaid(t);
+  const record = loadPlan(hostWithSecondCatalog(t).planPath).byId.get(PUBLIC_ID)!;
+  for (const handed of [true, false]) {
+    // The transport is down: the tick dispatches the public plan alone, so approve releases the public copy.
+    const down = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" }), from = everything.length;
+    const code = handed
+      ? await approveCommand([PUBLIC_ID], { config: down.config, planPath: down.planPath, taskLookup: { api: down.api } })
+      : await approveAsTheHostRunsIt(down, [PUBLIC_ID]);
+    const label = `${handed ? "handed" : "as the host runs it"}: ${everything.slice(from).join("\n")}`;
+    assert.equal(code, 0, label);
+    assert.ok(down.calls.length > 0, `the ops read is attempted while a destination is named — ${label}`);
+    assert.equal(down.releaseRows(PUBLIC_ID).length, 1, label);
+    assert.equal(down.releaseRows(PUBLIC_ID)[0]!.release_pin, pinBeforeThisTask(record), `the pin origin/main wrote — ${label}`);
+    assert.equal(down.durableRecords()[PUBLIC_ID]!.pin, pinBeforeThisTask(record), label);
+
+    // The destination is off: no ops read at all, and the release is origin/main's.
+    const off = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID });
+    rmSync(join(off.stateDir, "plan-destination.json"));
+    const offCode = handed
+      ? await approveCommand([PUBLIC_ID], { config: off.config, planPath: off.planPath, taskLookup: { api: off.api } })
+      : await approveAsTheHostRunsIt(off, [PUBLIC_ID]);
+    assert.equal(offCode, 0, label);
+    assert.equal(off.calls.length, 0, `no ops read while the destination is off — ${label}`);
+    assert.equal(off.releaseRows(PUBLIC_ID)[0]?.release_pin, pinBeforeThisTask(record), label);
+  }
+  // A sound public task beside the held copy: released from the boot's local record, never origin/main's newer one.
+  const boot = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID), main = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID).replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  for (const mode of MODES.filter(m => m.startsWith("checkout"))) {
+    const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID }), from = everything.length;
+    const { code, planPath } = await approveIn(mode, t, host, boot, DEPENDANT_ID, main);
+    const label = `${mode}: ${everything.slice(from).join("\n")}`;
+    assert.equal(code, 0, label);
+    const local = loadPlan(planPath).byId.get(DEPENDANT_ID)!;
+    assert.notEqual(pinBeforeThisTask(local), pinBeforeThisTask(parseTasksFromYaml(main, "main.yaml").find(task => task.id === DEPENDANT_ID)!),
+      "control: the boot's record and origin/main's pin apart");
+    assert.equal(host.releaseRows(DEPENDANT_ID)[0]?.release_pin, pinBeforeThisTask(local), `pinned from the local plan as origin/main does — ${label}`);
+    assert.deepEqual(host.rawLines().map(line => (JSON.parse(line) as Record<string, unknown>).step), [RELEASE_LEDGER_STEP], `no refusal row — ${label}`);
+  }
+});
+
+test("W1-T13785 criterion 2: the public-only fallback rejects an unresolved dependency as the strict loader does", async t => {
+  everythingSaid(t);
+  const text = dependingOn(PUBLIC_ID, OPS_ID) + dependingOn(DEPENDANT_ID, PUBLIC_ID);
+  for (const mode of MODES) {
+    for (const destination of ["offline", "off", "malformed"] as const) {
+      const host = hostWithSecondCatalog(t, { opsText: shardText(OPS_ID), transport: "down" });
+      if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+      if (destination === "malformed") writeFileSync(join(host.stateDir, "plan-destination.json"), "{invalid");
+      const error = { name: "PlanError", message: `task ${PUBLIC_ID}: depends_on unknown task '${OPS_ID}'` };
+      writeFileSync(host.planPath, text);
+      assert.throws(() => loadPlan(host.planPath), error, "control: strict public loader rejects the whole plan");
+      await assert.rejects(approveIn(mode, t, host, text, DEPENDANT_ID, shardText(PUBLIC_ID) + shardText(DEPENDANT_ID)),
+        error, `${mode}, ${destination}`);
+      assert.equal(host.calls.length > 0, destination === "offline", `${mode}, ${destination}: ops read attempted`);
+      assert.equal(host.wroteAnything(), false, `${mode}, ${destination}: no ledger or durable release`);
+    }
+  }
+});
+
+test("W1-T13785 criterion 2: a readable reverse edge holds its own record, and a sound public neighbour in that plan is refused by the strict loader as on origin/main", async t => {
+  everythingSaid(t);
+  const boot = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID);
+  const main = boot.replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  const error = { name: "PlanError", message: `task ${PUBLIC_ID}: depends_on unknown task '${OPS_ID}'` };
+  for (const mode of MODES) {
+    const host = hostWithSecondCatalog(t);
+    writeFileSync(host.planPath, boot);
+    assert.throws(() => loadPlan(host.planPath), error, "control: origin/main's approve loads this plan strictly and refuses it");
+    await assert.rejects(approveIn(mode, t, host, boot, DEPENDANT_ID, main), error, mode);
+    assert.ok(host.calls.length > 0, `${mode}: the readable ops catalog is read`);
+    assert.equal(host.wroteAnything(), false, `${mode}: no release, refusal row or durable record`);
+  }
+});
+
+test("W1-T13785 criterion 2: an unreadable ops catalog leaves a deferred origin/main edge to the strict loader's fallback", async t => {
+  everythingSaid(t);
+  const boot = shardText(PUBLIC_ID) + shardText(DEPENDANT_ID);
+  const main = dependingOn(PUBLIC_ID, OPS_ID) + shardText(DEPENDANT_ID).replace(`Fixture ${DEPENDANT_ID}`, "Retitled on main");
+  const host = hostWithSecondCatalog(t, { transport: "down" });
+  const { code, planPath } = await approveIn("checkout, as the host runs it", t, host, boot, DEPENDANT_ID, main);
+  const local = loadPlan(planPath).byId.get(DEPENDANT_ID)!;
+  assert.equal(code, 0);
+  assert.equal(host.calls.length, 1, "strict fallback reuses the unsuccessful catalog read");
+  assert.deepEqual(host.releaseRows(DEPENDANT_ID).map(row => row.release_pin), [pinBeforeThisTask(local)]);
+});
+
+test("W1-T13785 criterion 2: approve skips an invalid cwd plan and releases the daemon target's copy during an ops outage or shutdown", t => {
+  const cwd = publicMainAt(t, shardText(PUBLIC_ID) + dependingOn(DEPENDANT_ID, OPS_ID));
+  writeFileSync(join(cwd.dir, "plan", "policy.yaml"), "risk: { verifyHumanReleaseEnabled: { value: true, origin: fixture } }\n");
+  assert.throws(() => loadPlan(cwd.planPath), /depends_on unknown task/, "cwd contains the id, but the strict loader rejects the plan");
+  const hosts = ["offline", "off"].map(destination => {
+    const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" });
+    writeFileSync(host.planPath, shardText(PUBLIC_ID).replace(`Fixture ${PUBLIC_ID}`, "Daemon target copy"));
+    assert.deepEqual(writeDaemonTargetRecord(host.stateDir, {
+      owner: "fixture", repo: "consumer", isSelf: false, checkoutRoot: host.root,
+    }), { written: true });
+    if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+    return host;
+  });
+  const child = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "--eval", `
+    const { approveCommand } = await import(process.argv[2]);
+    const results = [];
+    for (const root of process.argv.slice(3)) {
+      let reads = 0;
+      const code = await approveCommand([process.argv[1]], {
+        config: { root },
+        taskLookup: { api: async () => { reads++; throw new Error("fixture ops outage"); } },
+      });
+      results.push({ code, reads });
+    }
+    console.log(JSON.stringify(results));
+  `, PUBLIC_ID, join(REPO_ROOT, "src", "run-task.ts"), ...hosts.map(host => host.root)], {
+    cwd: cwd.dir, encoding: "utf8", timeout: 60_000,
+  });
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout.trim().split("\n").at(-1)!), [{ code: 0, reads: 1 }, { code: 0, reads: 0 }], child.stderr);
+  for (const host of hosts) {
+    const target = loadPlan(host.planPath).byId.get(PUBLIC_ID)!;
+    const pin = pinBeforeThisTask(target);
+    assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pin]);
+    assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pin);
+  }
+});
+
+test("W1-T13785 criterion 2: the public loader still normalizes scalar dependencies before an ops outage or destination shutdown", async t => {
+  everythingSaid(t);
+  const text = shardText(PUBLIC_ID).replace("depends_on: []", `depends_on: ${OPS_ID}`);
+  for (const mode of MODES) {
+    for (const destination of ["offline", "off"] as const) {
+      const host = hostWithSecondCatalog(t, { opsText: REPEATS_PUBLIC_ID, transport: "down" });
+      if (destination === "off") rmSync(join(host.stateDir, "plan-destination.json"));
+      const { code, planPath } = await approveIn(mode, t, host, text, PUBLIC_ID);
+      const label = `${mode}, ${destination}`;
+      const record = loadPlan(planPath).byId.get(PUBLIC_ID)!;
+      assert.deepEqual(record.depends_on, [], label);
+      assert.equal(code, 0, label);
+      assert.equal(host.calls.length > 0, destination === "offline", label);
+      assert.deepEqual(host.releaseRows(PUBLIC_ID).map(row => row.release_pin), [pinBeforeThisTask(record)], label);
+      assert.equal(host.durableRecords()[PUBLIC_ID]?.pin, pinBeforeThisTask(record), label);
+    }
+  }
 });

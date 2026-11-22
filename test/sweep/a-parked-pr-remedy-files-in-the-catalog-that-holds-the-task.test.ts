@@ -14,6 +14,7 @@ import { actOnParkedPr, PARKED_PR_REMEDY_STEP, parkedPrFacts, parkedPrRemedy, re
 import { mergePlanBlobs } from "#src/lib/plan.js";
 import { buildSweepEffects, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { originWithClone } from "#test/helpers/git-repo.js";
 import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 
 // W1-T13048: the parked-PR remedy (W1-T12709) read and landed task files in the public plan only. A pull request whose task
@@ -38,10 +39,10 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
   // Both checkouts hold a file for the id, so a read or a landing in the wrong repository is seen by its title. The public
   // decoy of an ops task has one criterion, so a count read from the wrong checkout chooses a different remedy.
   const publicText = catalog === "public" ? yaml("public") : yaml("public", [CLAIMS[1]!]);
-  for (const [dir, body] of [[publicDir, publicText], [opsDir, yaml("ops")]] as const) {
-    mkdirSync(dirname(join(dir, SHARD)), { recursive: true });
-    writeFileSync(join(dir, SHARD), body);
-  }
+  // The held follow-up lookup fetches origin/main in the selected checkout before the faked landing runs.
+  mkdirSync(join(root, "repos"));
+  originWithClone(publicDir, { scope: t, seed: { [SHARD]: publicText } });
+  originWithClone(opsDir, { scope: t, seed: { [SHARD]: yaml("ops") } });
   mkdirSync(join(root, "state"));
   const hostFile = join(root, "state", "plan-destination.json");
   if (host === "named") writeFileSync(hostFile, JSON.stringify({ repository: OPS, kinds: ["decision", "feedback"] }));

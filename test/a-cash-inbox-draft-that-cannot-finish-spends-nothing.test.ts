@@ -491,8 +491,9 @@ test("W1-T13863 criterion 4: three oversized proposals release the next daemon b
   const stateDir = join(run.config.root, "state");
   const attempts = JSON.parse(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8"));
   const drafts = JSON.parse(readFileSync(join(stateDir, "inbox-drafts.json"), "utf8"));
-  assert.deepEqual(Object.keys(attempts), [fitting.id]);
+  assert.deepEqual(attempts, {});
   assert.deepEqual(Object.keys(drafts), [fitting.id]);
+  assert.deepEqual(run.rows.filter(row => row.step === "inbox.drafted" && row.lint_clean === true).map(row => row.proposal_id), [fitting.id]);
   assert.deepEqual(draftsDueOnDaemon(proposals, drafts, attempts).map(item => item.id), ["P1", "P2", "P3"]);
   assert.throws(() => readFileSync(openWeightAllowancePath(run.config)), { code: "ENOENT" });
 });

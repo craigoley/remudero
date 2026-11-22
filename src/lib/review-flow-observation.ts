@@ -84,8 +84,8 @@ export function observeReviewFlow(rows: readonly Row[], asOf: string, windowStar
       unresolvedSourceGap: cohorts.filter(row => row.status === "unresolved-source-gap").length },
     completedOnly: { n: times.length, medianMs: quantile(0.5), p95Ms: quantile(0.95) },
     semantic: { succeeded: delivered.filter(row => row.reviewerOutcome === "success").length,
-      notAttempted: delivered.filter(row => row.reviewerOutcome === "not_attempted").length,
-      failed: delivered.filter(row => row.reviewerOutcome !== null && row.reviewerOutcome !== "success" && row.reviewerOutcome !== "not_attempted").length,
+      notAttempted: delivered.filter(row => row.reviewerOutcome?.startsWith("not_attempted") === true).length,
+      failed: delivered.filter(row => row.reviewerOutcome !== null && row.reviewerOutcome !== "success" && !row.reviewerOutcome.startsWith("not_attempted")).length,
       unknown: delivered.filter(row => row.reviewerOutcome === null).length },
     cohorts: cohorts.slice(-200), omittedCohorts: Math.max(0, cohorts.length - 200) };
 }

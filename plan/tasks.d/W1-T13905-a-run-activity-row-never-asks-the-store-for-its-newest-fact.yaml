@@ -15,7 +15,7 @@
   files:
     - src/lib/ledger-projector.ts
     - test/a-run-newest-fact-read-uses-a-task-run-index.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The projector's store carries the fact_task_run index, and the board's per-run newest-fact statement uses it"
