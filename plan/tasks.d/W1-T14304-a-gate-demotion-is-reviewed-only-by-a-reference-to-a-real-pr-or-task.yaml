@@ -1,0 +1,56 @@
+- id: W1-T14304
+  title: A required gate's demotion counts as reviewed only when its GATE_RATIONALE names a real PR or task the previous rationale did not
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the rule for demoting a REQUIRED gate; it spans the check and the W1-T3519 suite whose fixtures it moves
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T204]
+  files:
+    - scripts/gate-monotonic-check.mjs
+    - test/a-required-gate-can-be-demoted-in-silence.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 8923f5635 (2026-11-22).
+    - scripts/gate-monotonic-check.mjs (W1-T3519) lets a context leave the REQUIRED set when ci-gate.yml's GATE_RATIONALE
+      "names the PR/task that reviewed it". The test is PR_REFERENCE_RE = /(#\d+|W1-T\d+)/ (:34) through
+      gateRationaleNamesAPr (:38-40), and staleness is text equality with the base rationale (:83).
+    - Its doc comment says "Identical contract to bumpRationaleNamesAPr (baseline-monotonic-check.mjs)". That stopped being
+      true in #20033: scripts/baseline-monotonic-check.mjs now reads only whole-word references (PR_REFERENCES_RE, :64),
+      counts a `#<n>` only for a PR merged in the base's history or the PR under check (knownPrs, currentPrFromRef), a
+      `W1-T<n>` only for a filed shard (planTasks), and judges staleness by references, not text (freshReviewReferences).
+    - REPRODUCED through the real evaluateGateMonotonic at 8923f5635, demoting `head-identity-gate`: each of
+      `#999999999999999999999999`, `W1-T2906bogus`, `#0: nothing`, `see #1 maybe` and `W1-T` followed by eight nines reads `reviewed`.
+      A rationale identical to the base's plus one trailing space also reads `reviewed`, not `stale-rationale`.
+      baseline-monotonic's rationaleReferences reads `W1-T2906bogus` and `#0` as naming nothing.
+    - So a required gate can be demoted under a reference that names no review at all. gate-monotonic.yml checks out with
+      fetch-depth 0, so the merged-PR history knownPrs reads is present in CI.
+  design: |
+    1. gate-monotonic-check.mjs imports rationaleReferences, freshReviewReferences, knownPrs, planTasks and currentPrFromRef
+       from baseline-monotonic-check.mjs, so the two gates share one reference rule. gateRationaleNamesAPr delegates to it.
+    2. evaluateGateMonotonic(base, head, plan, prs) passes a demotion only when freshReviewReferences(head.rationale,
+       base.rationale, plan, prs).fresh is non-empty. With references but none fresh it reads `stale-rationale`; with none
+       it reads `unreviewed`; the detail names each reference that cannot count and why, as evaluateRow does.
+    3. main() builds plan = planTasks(repoRoot) and prs = knownPrs(repoRoot, baseRef, values.pr ?? currentPrFromRef(
+       process.env.GITHUB_REF)), with a `--pr` option as baseline-monotonic-check has. An unreadable plan or history
+       counts no reference and says why; it never reports OK.
+    4. The existing W1-T3519 tests keep their titles verbatim; only their fixtures change, to name a PR their git
+       fixture's history holds or the PR passed with `--pr`.
+
+    INVARIANT a-demotion-names-a-real-review: a REQUIRED context leaves the gate set only under a rationale naming a merged PR, this PR or a filed task that the base rationale did not name.
+  acceptance:
+    - claim: "invariant:a-demotion-names-a-real-review — a demotion whose rationale names only a number no PR held, a task with no shard, a zero, or a reference glued to a word is REFUSED"
+      kind: guard
+      proof: "grep: W1-T14304 criterion 1: in test/a-required-gate-can-be-demoted-in-silence.test.ts"
+    - claim: "A demotion whose rationale names this PR's own number, or a filed task the base rationale did not, exits 0 through main() on a git fixture"
+      proof: "grep: W1-T14304 criterion 2: in test/a-required-gate-can-be-demoted-in-silence.test.ts"
+    - claim: "A rationale that pads, re-spells or zero-pads the base rationale's references reads stale-rationale"
+      proof: "grep: W1-T14304 criterion 3: in test/a-required-gate-can-be-demoted-in-silence.test.ts"
+  falsifier: |
+    Restore PR_REFERENCE_RE as the test and criterion 1 must fail. Restore text equality as the staleness rule and
+    criterion 3 must fail. Restore and require all to pass.

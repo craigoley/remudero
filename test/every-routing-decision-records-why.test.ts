@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -97,6 +97,14 @@ test("a pinned lane with no capacity reading still names the provider it was pin
 });
 
 // ── Through the real spawn path ─────────────────────────────────────────────────────────────────
+
+/** W1-T14297: the committed table without only its `balanced: codex` row, so the auction this suite proves still applies. */
+function mountWithoutBalancedPreference(root: string): void {
+  const table = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+  assert.ok(table.includes("    balanced: codex\n"), "the committed table carries the W1-T14297 row stripped here");
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), table.replace("    balanced: codex\n", ""));
+}
 
 function fixtureRoot(prefix: string): string {
   const parent = [tmpdir(), dirname(REPO_ROOT)].find((candidate) => gitWorkTreeAncestor(candidate) === undefined);
@@ -218,6 +226,7 @@ function codexResult(): WorkerResult {
 
 test("a Codex spawn records the tier on both the auction and the pinned path", async () => {
   const root = fixtureRoot("rmd-decision-codex-");
+  mountWithoutBalancedPreference(root);
   try {
     for (const mountProvider of [undefined, "codex" as const]) {
       const assignments: WorkerSelectionAssignment[] = [];

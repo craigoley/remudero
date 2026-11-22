@@ -1,6 +1,6 @@
 import { attributeAttemptOutcome } from "#src/lib/attempt-outcome-attribution.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mock, test } from "node:test";
@@ -295,6 +295,14 @@ test("crossover: a decision serving another arm than the task was assigned is re
 
 // ── Through the real spawn path ─────────────────────────────────────────────────────────────────
 
+/** W1-T14297: the committed table without only its `balanced: codex` row, so the auction this suite proves still applies. */
+function mountWithoutBalancedPreference(root: string): void {
+  const table = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+  assert.ok(table.includes("    balanced: codex\n"), "the committed table carries the W1-T14297 row stripped here");
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), table.replace("    balanced: codex\n", ""));
+}
+
 function fixtureRoot(prefix: string): string {
   const parent = [tmpdir(), dirname(REPO_ROOT)].find((candidate) => gitWorkTreeAncestor(candidate) === undefined);
   assert.ok(parent, "the test host must provide a scratch parent outside every Git work tree");
@@ -353,6 +361,7 @@ async function spawnExperiment(root: string, taskId: string, runId: string, prom
 
 test("stable arm through the real spawn: a retry and a fix rung of one task reuse its task-keyed draw", async () => {
   const root = fixtureRoot("rmd-routing-propensity-");
+  mountWithoutBalancedPreference(root);
   try {
     for (const taskId of ["W1-T9100", "W1-T9101", "W1-T9102", "W1-T9103"]) {
       const rows = [

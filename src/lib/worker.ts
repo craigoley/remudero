@@ -2038,6 +2038,8 @@ function emitFixRoutingDecision(learned: FixLearnedArms, fields: Record<string, 
  * W1-T5535: shape ONE fix-lane auction by commit acceptance. Steers the Codex read to the arm whose Thompson draw
  * beats the model the read served (revalidated by that read: a model without headroom is bypassed, never forced),
  * then weighs every eligible provider's served arm. Never throws: an unreadable re-read keeps the original capacity.
+ * W1-T14297: `only` is the provider a serving capability or role preference names; the learner then ranks that
+ * provider's models alone, so a Claude preference re-reads no Codex model and weighs no Codex arm.
  */
 async function applyFixLearner(input: {
   args: SpawnWorkerArgs;
@@ -2050,11 +2052,12 @@ async function applyFixLearner(input: {
   reservePercent: number;
   headroomTiming?: ProviderHeadroomTiming;
   readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
+  only?: WorkerProviderId;
 }): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
   const { args, learned, seed, capability, capabilities } = input;
   let capacities = input.capacities;
   const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
-  if (codexIndex >= 0 && capability && !input.codexPreference) {
+  if (codexIndex >= 0 && capability && !input.codexPreference && (input.only ?? "codex") === "codex") {
     const current = capacities[codexIndex];
     // W1-T6360: only arms the lane's current capability row mounts compete; with no rival to the served model, no draw.
     // W1-T13450: and only those AHEAD of the served model in that row; a trailing entry is an availability fallback.
@@ -2078,7 +2081,8 @@ async function applyFixLearner(input: {
     }
   }
   const candidates = capacities
-    .filter((capacity) => providerEligibility(capacity, input.reservePercent, input.headroomTiming).eligible)
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent, input.headroomTiming).eligible
+      && (input.only ?? capacity.provider) === capacity.provider)
     .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
   const weights = learned.weigh(candidates, seed);
   return {
@@ -2899,14 +2903,20 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const draw = args.providerRouting?.draw ?? keyed;
       const learned = args.providerRouting?.learnedArms;
       let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
+      // W1-T14297: a capability or role preference that is not bypassed names the provider, never the learner's mix.
+      const byPreference = (current: ProviderCapacity[]) => auction.policy.preference === "automatic" ? undefined
+        : selectWorkerProviderWithExclusions(current, auction.policy, draw, args.excludeProviders, headroomTiming);
       if (learned) {
+        // W1-T14297: only the OPERATOR's own preference stands the learner aside, never one the committed table produced.
         const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
-          : auction.policy.preference !== "automatic" ? "operator-preference" : undefined;
+          : routingPolicy.preference !== "automatic" ? "operator-preference" : undefined;
         if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
         else {
+          const preferred = byPreference(capacities);
           const learning = await applyFixLearner({
             args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
             codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, headroomTiming, readCodexFor,
+            ...(preferred && !preferred.preferenceBypass ? { only: preferred.selection.provider } : {}),
           });
           capacities = learning.capacities;
           fixLearning = { mixing: learning.mixing, weights: learning.weights };
@@ -2915,13 +2925,22 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const finalCandidates = providerExclusionCandidates(
         capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders, headroomTiming,
       );
-      const routed = fixLearning
+      const preferred = fixLearning ? byPreference(capacities) : undefined;
+      const routed = fixLearning && preferred && !preferred.preferenceBypass
+        // The preference serves: its provider holds the whole share, and the learner shaped only that provider's model.
+        ? {
+          selection: selectWorkerProvider([preferred.selection.capacity], auction.policy.reservePercent, draw, fixLearning.mixing,
+            headroomTiming),
+          preferenceBypass: undefined,
+          exclusion_unhonoured: preferred.exclusion_unhonoured,
+        }
+        : fixLearning
         ? {
           selection: selectWorkerProvider(
             finalCandidates.capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
             auction.policy.reservePercent, draw, fixLearning.mixing, headroomTiming,
           ),
-          preferenceBypass: undefined,
+          preferenceBypass: preferred?.preferenceBypass,
           exclusion_unhonoured: finalCandidates.exclusion_unhonoured,
         }
         : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders, headroomTiming);
