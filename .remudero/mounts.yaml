@@ -221,17 +221,25 @@ capabilities:
   # runs (retro, retro preflight repair, plan synthesis) were routed to Codex gpt-5.6-sol, because
   # the auction splits a capability by headroom alone. The operator's direction is Opus 5.5 first
   # and Sol 6 only if absolutely necessary, so frontier takes Claude whenever Claude has headroom
-  # and the auction (and so Sol) decides only when Claude is below reserve or unreadable. Balanced and
-  # economy stay pure headroom auctions -- Luna carrying that work is the point. An operator's
+  # and the auction (and so Sol) decides only when Claude is below reserve or unreadable. Economy
+  # stays a pure headroom auction -- Luna carrying that work is the point. An operator's
   # explicit console preference still wins over this row.
+  # BALANCED BUILDS AND FIXES PREFER CODEX (W1-T14297). DECIDED by the operator on 2026-11-22 (routing option A):
+  # reserve Claude for reviews and send implementation to Codex. Evidence: Codex semantic reviews passed about 6-7%
+  # (3 of 51, then 4 of 57) against Claude's 21 of 21 under the 2026-11-21 override, and when Claude fell below its
+  # reserve on 2026-11-19 reviews moved to Codex and FAIL went from 5% to 60%. The reviewer keeps Claude through
+  # role_preference below, which is applied before this row. A balanced spawn returns to the headroom auction when
+  # Codex is below its reserve, unreadable or excluded; the fix-routing learner then ranks only Codex models while
+  # Codex serves. An operator's console preference still wins over this row.
   provider_preference:
     frontier: claude
+    balanced: codex
   # A REVIEW GOES TO CLAUDE FIRST (W1-T12172). DECIDED by the operator on 2026-11-10: Sonnet reviews first and
   # the balanced Codex model is the backup. MEASURED in the randomised experiment sol61-vs-sonnet55 over 293
   # pull requests, 2026-10-27 to 2026-11-10, by assigned reviewer: 42.4% failed review at least once with
   # gpt-6.1-sol and 21.1% with claude-sonnet-5-5; $1.63 and 20.6 worker minutes for each merged pull request
   # against $1.16 and 12.4. The key is a worker role, not a capability: the reviewer shares the balanced
-  # capability with builds and fixes, and those stay in the headroom auction. The reviewer goes to Codex when
+  # capability with builds and fixes, which prefer Codex since W1-T14297. The reviewer goes to Codex when
   # Claude is below its reserve, unreadable, or excluded for that review. An operator's console preference
   # still wins over this row. The experiment still records the arm each task drew, so the reviewer rows show
   # how many reviews this row moved. Revisit when W1-T12142 and W1-T12145 report.
