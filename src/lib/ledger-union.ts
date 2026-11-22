@@ -13,6 +13,7 @@ import {
   LEDGER_FILENAME,
   LEDGER_RETAINED_STEPS_SUFFIX,
   LEDGER_ROTATION_LOCK_SUFFIX,
+  LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX,
   LEDGER_STAGE_TAGS,
 } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
@@ -246,6 +247,13 @@ function sanitizeRegExp(pattern: string): string {
 
 const LEDGER_STAGE_SUFFIX = new RegExp(`\\.(?:${LEDGER_STAGE_TAGS.join("|")})-\\d+-[0-9a-f-]{36}$`);
 
+// W1-T14314: the ledger's own SQLite locks, by exact name: the security producer's lock and the rollback
+// journal SQLite writes beside it during a transaction. Never a wildcard: another `*.lock.sqlite` stays unclassified.
+const LEDGER_OWN_SQLITE_LOCK_NAMES: ReadonlySet<string> = new Set([
+  `${LEDGER_FILENAME}${LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX}`,
+  `${LEDGER_FILENAME}${LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX}-journal`,
+]);
+
 // A rotation's own transient files: its lock, and `<ledger file>.<known tag>-<pid>-<uuid>` stages.
 function isRotationOwnFile(name: string): boolean {
   if (name === `${LEDGER_FILENAME}${LEDGER_ROTATION_LOCK_SUFFIX}`) return true;
@@ -295,8 +303,8 @@ function readsAsValidMetadata(path: string, valid: (raw: unknown) => boolean, re
 
 /**
  * The single corpus classifier. Rotations are archives; the two canonical producer metadata files are
- * `auxiliary` only when they read as valid under their producer shape; anything else `ledger.*` stays
- * `unclassified`. Callers that pass no `readFileSync` cannot validate, so metadata stays unclassified for them.
+ * `auxiliary` only when they read as valid under their producer shape; the rotation's and the security producer's
+ * named locks are the ledger's own files and are never read; anything else `ledger.*` stays `unclassified`. Callers that pass no `readFileSync` cannot validate, so metadata stays unclassified for them.
  */
 export function listedLedgerFiles(
   stateDir: string,
@@ -326,6 +334,7 @@ export function listedLedgerFiles(
     .filter((n) => n.startsWith("ledger.") && n !== NEVER_ROTATE_FILENAME)
     .filter((n) => !auxiliaryNames.has(n))
     .filter((n) => !isRotationOwnFile(n))
+    .filter((n) => !LEDGER_OWN_SQLITE_LOCK_NAMES.has(n))
     .map((n) => join(stateDir, n))
     .filter((p) => !rotationPaths.has(p));
   return { rotations, unclassified, auxiliary };
