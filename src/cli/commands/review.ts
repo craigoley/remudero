@@ -1555,6 +1555,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
+    // W1-T14235 (invariant no-semantic-no-code-pass): a code pass publishes only on this run's own semantic judgement.
+    semanticJudgement: { planOnly: planOnlySkip, reviewerOutcome: outcome },
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -1562,6 +1564,13 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
+  if (posted.semanticHold !== undefined) {
+    // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
+    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   if (posted.effectiveState === "pending") {
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
@@ -2814,12 +2823,18 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchPublisher: deps.fetchView,
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
       cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      // W1-T14235: a replayed decision re-publishes a code pass only when its recorded judgement was semantic.
+      semanticJudgement: { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome },
     });
     verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
     if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
     if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
       { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-    if (restored.posted) {
+    if (restored.semanticHold !== undefined) {
+      if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
+        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+      verdict.verdictWithheld = restored.reason ?? restored.semanticHold;
+    } else if (restored.posted) {
       replayStatusAction = "restored";
       const { unmetClaims, reasons } = reviewUnmetFields(verdict);
       const reviewPostedRow = {

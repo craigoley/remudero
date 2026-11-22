@@ -11,6 +11,7 @@ import { netStateAdvisorySectionFor, openTaskIdsFromPlan, runReview, scopeGuardO
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { StatusProjection } from "../src/lib/status.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T322 — SHIPS-UNWIRED advisory floor. ONE reachability scan (lib/reachability.ts),
 // consumed at review time (judgeReview's `unwiredAdvisories`, ADVISORY ONLY — never touches
@@ -572,10 +573,13 @@ test("the retro's NET STATE scan degrades to an empty section when MASTER-PLAN.m
   }
 });
 
-test("runReview ledgers one review.unwired_advisory line per advisory, and none when the scan finds nothing", async () => {
+test("runReview ledgers one review.unwired_advisory line per advisory, and none when the scan finds nothing", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-unwired-review-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-unwired-gh-"));
-  const checkoutDir = makeCheckout();
+  // W1-T14235: a code pass needs a semantic judgement that ran, and the reviewer judges a snapshot of the PR head, so
+  // the head checkout is a real repository whose HEAD is the head sha the review posts to.
+  const head = gitRepo({ scope: t, kind: "ships-unwired-head" });
+  const checkoutDir = head.dir;
   const oldPath = process.env.PATH;
   try {
     mkdirSync(join(root, "state"), { recursive: true });
@@ -584,6 +588,9 @@ test("runReview ledgers one review.unwired_advisory line per advisory, and none 
 
     // The head checkout carries an ADDED export nothing reaches — the `unwired_export` shape.
     writeFile(checkoutDir, "src/lib/stranded.ts", "export function strandedFn(): number {\n  return 1;\n}\n");
+    head.git("add", "src/lib/stranded.ts");
+    head.git("commit", "-qm", "stranded export");
+    const headSha = head.git("rev-parse", "HEAD");
     const diff = [
       "diff --git a/src/lib/stranded.ts b/src/lib/stranded.ts",
       "+++ b/src/lib/stranded.ts",
@@ -604,12 +611,12 @@ case "$1 $2" in
     # No backticks in here: this script sits inside a JS template literal.
     case "$*" in
       *commits/*/statuses[?]*) echo '[[]]' ;;
-      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"deadbeefcafe01"}}' ;;
+      *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${headSha}"}}' ;;
       *) echo '{}' ;;
     esac ;;
   "pr view")
     case "$*" in
-      *headRefOid*) echo '{"headRefOid":"deadbeefcafe01"}' ;;
+      *headRefOid*) echo '{"headRefOid":"${headSha}"}' ;;
       *state*) echo '{"state":"OPEN"}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -638,8 +645,12 @@ esac
         log: (step: string, extra: Record<string, unknown> = {}) => void lines.push({ step, extra: extra ?? {} }),
         say: () => {},
         account: (r: WorkerResult) => r,
-        spawnReviewer: false,
         reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+        // W1-T14235: the advisory rides on a published pass, so the review's semantic judgement runs (and passes).
+        reviewerSpawnWorker: async () => ({ sessionId: "unwired-reviewer", text: "REVIEW_VERDICT 1: PASS", blocks: [],
+          stderr: "", exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [],
+          model: "sonnet", effort: "medium", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {}, compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false }) as WorkerResult,
         headCheckoutDir,
         ledgerPath,
         runId: "REVIEW-UNWIRED-1",
@@ -665,7 +676,7 @@ esac
       "the line carries the reason code W1-T323 will measure",
     );
     assert.deepEqual(withCheckout.advised[0].extra.symbols, ["src/lib/stranded.ts::strandedFn"], "and the offending symbol");
-    assert.equal(withCheckout.advised[0].extra.head_sha, "deadbeefcafe01", "attributed to the head sha it scanned");
+    assert.equal(withCheckout.advised[0].extra.head_sha, headSha, "attributed to the head sha it scanned");
     assert.equal(withCheckout.advised[0].extra.pr_url, "https://github.com/acme/remudero/pull/1292");
     // W1-T1118: the SAME already-existing review.posted row now names what the scan examined —
     // no second ledger line. One export was examined, and it was flagged (not cleared).
@@ -679,17 +690,12 @@ esac
     // asserting only the presence of lines could pass on a loop that ran unconditionally.
     const withoutCheckout = await runOnce(undefined);
     assert.deepEqual(withoutCheckout.advised, [], "no checkout to scan ledgers no advisory at all");
-    // W1-T1118: this is exactly the state the reporting entry could not tell apart from "scanned
-    // 0" — `null`, never a fake 0, on the SAME review.posted row the case above also populated.
-    assert.equal(
-      withoutCheckout.posted?.extra.reachability_scanned,
-      null,
-      "no checkout ⇒ null on review.posted, never a count of zero",
-    );
+    // W1-T14235: with no checkout the reviewer has no snapshot to judge, so its semantic judgement never runs and the
+    // code pass is not published at all — no review.posted row to carry a scanned count of any kind.
+    assert.equal(withoutCheckout.posted, undefined, "no checkout ⇒ no semantic judgement ⇒ no published pass");
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
     rmSync(binDir, { recursive: true, force: true });
-    rmSync(checkoutDir, { recursive: true, force: true });
   }
 });

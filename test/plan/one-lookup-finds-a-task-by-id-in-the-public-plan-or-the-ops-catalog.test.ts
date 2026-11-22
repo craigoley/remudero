@@ -16,6 +16,7 @@ import { reviewCommand, runReview, type ReviewCommandHost, type ReviewCommandDep
 import { readLedgerLines } from "#src/lib/status.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
+import type { WorkerResult } from "#src/lib/worker.js";
 
 const ID = "W1-T900000", REPOSITORY = "fixture-private/ops";
 const yaml = (id = ID) => `- id: ${id}\n  title: Private lookup fixture\n  repo: remudero\n  depends_on: []\n  type: implement\n  priority: 0\n  risk: high\n  budget_usd: 0.5\n  files: [src/fixture.ts]\n  design: Private canonical design\n  acceptance:\n    - claim: canonical private criterion\n      proof: "grep: lookup-fixture in src/fixture.ts"\n`;
@@ -348,6 +349,7 @@ for (const mode of ["ops-pass", "ops-fail", "ops-fresh", "public-pass"] as const
       reviewSubjectGit: (_dir: string, args: string[]) => args[0] === "config" ? "https://github.com/fixture/subject.git" : subject.git(...args),
       readHeadShaRest: () => head,
       reviewPostedDescription: () => design,
+      reviewerClockBoundMs: () => 60_000,
     } as unknown as ReviewCommandHost;
     const code = await reviewCommand(host, "42", ["--repo", "subject"], {
       loadConfig: () => ({ root }) as never,
@@ -362,7 +364,15 @@ for (const mode of ["ops-pass", "ops-fail", "ops-fresh", "public-pass"] as const
         assert.deepEqual(args.task.files, ["src/marker.ts", privatePath]);
         assert.equal(args.task.risk, "high"); assert.equal(args.task.budget_usd, 0.37);
         assert.equal(args.task.design, design); assert.equal(args.task.acceptance?.[0]?.claim, claim);
-        return runReview(host, { ...args, reviewerCodeFreshness: mode === "ops-fresh" ? () => ({ status: "fresh", codeSha: "a".repeat(40), originMainSha: "a".repeat(40), advance: "none" }) : undefined, spawnReviewer: false,
+        return runReview(host, { ...args, reviewerCodeFreshness: mode === "ops-fresh" ? () => ({ status: "fresh", codeSha: "a".repeat(40), originMainSha: "a".repeat(40), advance: "none" }) : undefined,
+          // W1-T14235: a code pass publishes only on a semantic judgement that ran, so the review's reviewer runs on the
+          // head snapshot and judges the one criterion with the floor (what is published is the subject here).
+          spawnReviewer: true, reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+          reviewerSpawnWorker: async () => ({ sessionId: "ops-publication-reviewer",
+            text: mode === "ops-fail" ? "REVIEW_VERDICT 1: FAIL — the marker is missing" : "REVIEW_VERDICT 1: PASS", blocks: [],
+            stderr: "", exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [],
+            model: "sonnet", effort: "medium", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+            modelUsage: {}, compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false }) as WorkerResult,
           readReviewReuseFacts: () => undefined, disarm: () => "not-armed", arm: () => "ledger-refused" });
       },
     });

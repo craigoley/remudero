@@ -31,6 +31,9 @@ const abandoned = () => new WorkerAbandonedError({ elapsedMs: 2000, boundMs: 123
 async function fixture(
   results: (WorkerResult | Error)[],
   mutateAttempt?: number,
+  // W1-T14235: only a terminal decision replays. A held code pass (no semantic judgement) is not terminal, so the
+  // next review of the same decision runs its reviewer again; only the test that reaches a terminal asks for a replay.
+  withReplay = false,
 ) {
   const repo = gitRepo({ kind: "reviewer-rerun" });
   const oldPath = process.env.PATH;
@@ -111,7 +114,7 @@ async function fixture(
       }
     }
     return { verdict, rows, spawns, accounted, calls: shim.calls(), headSha,
-      replay: await runReview(args) };
+      replay: withReplay ? await runReview(args) : undefined };
   } finally {
     process.env.PATH = oldPath;
     repo.cleanup();
@@ -134,7 +137,7 @@ test("test/a-signal-ended-reviewer-is-re-run-once.test.ts", async (t) => {
   await t.test("SIGTERM reruns once and posts the rerun's semantic verdict", async () => {
     const first = signal("SIGTERM", "first");
     const second = success("second");
-    const f = await fixture([first, second]);
+    const f = await fixture([first, second], undefined, true);
     assert.equal(f.spawns.length, 2);
     assert.deepEqual(f.accounted, [first, second]);
     assert.equal(f.verdict.state, "failure");
@@ -146,23 +149,23 @@ test("test/a-signal-ended-reviewer-is-re-run-once.test.ts", async (t) => {
     assert.equal(f.rows.find((r) => r.step === "review.reviewer.rerun")?.fields.session_id, "first");
     assert.equal(f.rows.some((r) => r.step === "review.reviewer.signal_ended_twice"), false);
     assert.ok(f.calls.some((call) => call.includes(`/statuses/${f.headSha}`) && call.includes("state=failure")));
-    assert.equal(f.replay.decisionDisposition, "replayed");
+    assert.equal(f.replay?.decisionDisposition, "replayed");
   });
 
-  await t.test("two signals post the floor alone and ledger both signal names", async () => {
+  await t.test("two signals hold the floor's pass as pending and ledger both signal names", async () => {
     const f = await fixture([signal("SIGTERM", "first"), signal("SIGKILL", "second")]);
     assert.equal(f.spawns.length, 2);
     assert.equal(f.accounted.length, 2);
-    assert.equal(f.verdict.state, "success");
+    // W1-T14235: on a code diff the floor's pass after a failed reviewer is held as pending, naming the outcome.
+    assert.equal(f.verdict.state, "pending");
     assert.equal(f.verdict.reviewerOutcome, "signal_terminated");
     const twice = f.rows.filter((r) => r.step === "review.reviewer.signal_ended_twice");
     assert.equal(twice.length, 1);
     assert.equal(twice[0]!.fields.first_signal, "SIGTERM");
     assert.equal(twice[0]!.fields.second_signal, "SIGKILL");
-    const posted = f.rows.find((r) => r.step === "review.posted");
-    assert.equal(posted?.fields.reviewer_outcome, "signal_terminated");
-    assert.equal(posted?.fields.state, "success");
-    assert.ok(f.calls.some((call) => call.includes(`/statuses/${f.headSha}`) && call.includes("state=success")));
+    assert.equal(f.rows.some((r) => r.step === "review.posted"), false, "no floor pass is recorded");
+    assert.match(f.verdict.verdictWithheld ?? "", /semantic-review-not-run: signal_terminated/);
+    assert.equal(f.calls.some((call) => call.includes(`/statuses/${f.headSha}`) && call.includes("state=success")), false);
   });
 
   for (const ending of [crash("first"), success("first"),
@@ -182,7 +185,7 @@ test("test/a-signal-ended-reviewer-is-re-run-once.test.ts", async (t) => {
     await t.test(`a rerun ${ending instanceof Error ? ending.name : ending.subtype} never gets a third attempt`, async () => {
       const f = await fixture([signal("SIGTERM", "first"), ending]);
       assert.equal(f.spawns.length, 2);
-      assert.equal(f.verdict.state, "success");
+      assert.equal(f.verdict.state, "pending", "W1-T14235: the floor's pass is held without a semantic judgement");
       assert.equal(f.verdict.reviewerOutcome, ending instanceof Error ? "spawn_error" : ending.subtype);
       assert.equal(f.rows.some((r) => r.step === "review.reviewer.signal_ended_twice"), false);
       if (ending instanceof WorkerAbandonedError) {
@@ -195,7 +198,7 @@ test("test/a-signal-ended-reviewer-is-re-run-once.test.ts", async (t) => {
     await t.test(`snapshot integrity rejects mutation on attempt ${attempt}`, async () => {
       const f = await fixture([signal("SIGTERM", "first"), success("second")], attempt);
       assert.equal(f.spawns.length, attempt);
-      assert.equal(f.verdict.state, "success");
+      assert.equal(f.verdict.state, "pending", "W1-T14235: the floor's pass is held without a semantic judgement");
       assert.equal(f.verdict.reviewerOutcome, "spawn_error");
       assert.equal(f.rows.find((r) => r.step === "review.reviewer.integrity_error")?.fields.reason, "dirty");
     });
