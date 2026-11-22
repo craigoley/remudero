@@ -1128,6 +1128,7 @@ export function healedChildLedgerMark(ledgerPath: string): HealedChildLedgerMark
     const { ino, size } = statSync(ledgerPath);
     return { ino, size };
   } catch (error) {
+    // No ledger yet is a real empty mark; any other read error is null, which reads as started, never as a death.
     return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { ino: null, size: 0 } : null;
   }
 }
