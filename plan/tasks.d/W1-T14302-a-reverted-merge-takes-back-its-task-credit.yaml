@@ -1,0 +1,191 @@
+- id: W1-T14302
+  title: "A task whose credited merge is later reverted on main loses that credit, and a shard already flipped to merged by that credit goes back to queued with a declared ledger row, so reverted work is built again"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it removes merge credit, the input that stops dispatch; a wrong rule re-dispatches finished work, so it acts only on a positive revert record, never on missing credit
+  origin: "operator-session#a-reverted-merge-keeps-its-credit-2026-11-22"
+  plan_refs:
+    - W1-T11112
+    - W1-T11459
+    - W1-T11728
+    - W1-T5113
+    - W1-T3043
+    - W1-T3084
+    - W1-T2970
+    - W1-T5353
+    - W1-T2387
+    - W1-T13816
+    - W1-T14149
+  files:
+    - src/lib/reverted-merges.ts
+    - src/lib/status.ts
+    - src/lib/plan-reconcile.ts
+    - src/lib/plan-reconcile-batch.ts
+    - src/lib/measurement-cadence.ts
+    - src/lib/feedback-landing.ts
+    - src/run-task.ts
+    - src/lib/ledger-steps.ts
+    - scripts/write-only-ledger-step-baseline.json
+    - test/a-reverted-merge-takes-back-its-task-credit.test.ts
+    - test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts
+    - test/plan-reconcile-credit-parity.test.ts
+    - test/plan/the-plan-reconcile-landing-is-one-bounded-batch.test.ts
+    - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
+    - test/the-plan-reconciler-runs-on-a-cadence.test.ts
+    - test/measurement-cadence-production-wiring.test.ts
+    - test/a-plan-pass-reads-each-shared-input-once.test.ts
+    - test/commit-trailer-surface-squash-setting.test.ts
+    - test/un-crediting-a-task-today-means-editing-a-merged-pr-body.test.ts
+    - test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts
+    - test/an-override-refuses-one-pairing-not-the-task.test.ts
+    - test/plan/a-reconciled-status-flip-keeps-an-operator-release-pin-valid.test.ts
+    - test/plan/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts
+    - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
+    - test/plan-reconcile-truncated-read-is-coverage-aware.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:a-revert-takes-back-its-credit — projectPlan over a fixture main history where PR 101 (subject ends (#101), body Remudero-Task: W1-T1) is followed by a commit whose body says 'This reverts commit <sha of PR 101>' gives W1-T1 merged false, status queued and a revertedCredit field that names pr 101 and the revert sha. This holds when the credit comes from the durable credit store, from the PR body trailer, from the commit trailer and from a carried previous projection"
+      kind: guard
+      proof: "grep: W1-T14302 criterion 1: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "The exclusion is per pairing. In the same fixture, a later merged PR 140 with Remudero-Task: W1-T1 credits W1-T1 again. A later commit that reverts the revert (its body names the revert's sha) gives the credit back to PR 101. Two reverts of the same commit count as one"
+      proof: "grep: W1-T14302 criterion 2: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "A restored revert keeps its credit. A later commit on main whose Remudero-Task task lists the reverted task in plan_refs, and whose shard names the revert's pull request as #<n> or PR-<n>, keeps the reverted task merged. The fixture copies the W1-T11459 case: PR 17260 reverted by PR 17304, then restored by W1-T11728 in PR 17408"
+      proof: "grep: W1-T14302 criterion 3: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "invariant:a-dark-revert-read-changes-nothing — when the history read fails, the checkout's origin is another repository, or the revert line names a sha that is not on the read ref, no credit is taken back and every projection is the same as on origin/main"
+      kind: guard
+      proof: "grep: W1-T14302 criterion 4: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "requeueRevertedShard turns '  status: merged' into '  status: queued' only for a shard whose projection carries revertedCredit and is not merged. Every other byte stays the same. A retired shard, a queued shard, a shard with no revertedCredit, and an indeterminate projection are left alone and the reason is named. reconcileShardStatus is unchanged: it still never moves merged to queued"
+      proof: "grep: W1-T14302 criterion 5: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "buildPlanReconcileCadenceInput lands the re-queue in the same bounded plan-reconcile landing as the merged flips. The landing applies the re-queue edit to main's current text, and the landing's carry-forward keeps an earlier re-queue. The PR body proof for a re-queued shard is 'grep: ^  status: queued$ in <file>'. The next reconcile pass does not flip the shard back to merged"
+      proof: "grep: W1-T14302 criterion 6: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "Each re-queue writes one ledger row plan.reconcile.reverted_requeue with task, pr, revert_sha and file. The step is declared in LEDGER_STEPS and in the recordOnly map of scripts/write-only-ledger-step-baseline.json with a reason"
+      proof: "grep: W1-T14302 criterion 7: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "The step is declared in the ledger step registry"
+      proof: "grep: step: \"plan\\.reconcile\\.reverted_requeue\" in src/lib/ledger-steps.ts"
+    - claim: "Production projection calls the revert index"
+      proof: "grep: revertedMergesFromLog( in src/lib/status.ts"
+    - claim: "Production reconcile calls the re-queue"
+      proof: "grep: requeueRevertedShard( in src/lib/measurement-cadence.ts"
+  rationale: |
+    WHAT HAPPENED (2026-11-22). W1-T11112 merged as #20049 (3a6fe5dd57). With #20077 it broke main's
+    typecheck at test/a-paired-dispatch-trial-shares-one-grader.test.ts:836 (TS2739). The fleet's
+    main repair reverted it at about 05:05Z: #20136 (b17638178d) and a twin #20134 (483ea392eb). Both
+    say "This reverts commit 3a6fe5dd57cf51426e501fb002973b4a8fbb1d6e." At 06:28Z the plan reconcile
+    #20154 (94f3287c56) still flipped plan/tasks.d/W1-T11112-observed-worker-harness-contract.yaml
+    from queued to merged. The code is gone from main, the plan says the task is done, and nothing
+    will build it again. That is lost work with no signal.
+    OTHER CASES on main (every "This reverts commit" body in main's whole history, checked by hand):
+    - W1-T11459: #17260 reverted by #17304 on 2026-11-08, flipped to merged by reconcile #17755 on
+      2026-11-10. Not lost: W1-T11728 (#17408) restored it under its own id. Its shard lists W1-T11459
+      in plan_refs and its origin names "revert PR-17304". Criterion 3 keeps this case merged.
+    - W1-T5113: #9091 reverted by #9131 on 2026-10-04 and flipped to merged by #9157 the same day.
+      It was built again as #9213 with its own trailer, so its credit is real now (criterion 2).
+    - The other matches are branch commits inside squash merges. Their sha is not on main.
+    WHERE THE CREDIT IS DECIDED (origin/main 77d91a0c21):
+    - The reconcile landing (src/lib/feedback-landing.ts:101, planReconcileLanding at :1877) lands
+      the writes that planReconcileCadence (src/lib/measurement-cadence.ts:1514) gets from
+      reconcilePlan (src/lib/plan-reconcile.ts:96). The credit set comes from
+      buildPlanReconcileCadenceInput (measurement-cadence.ts:1582) and creditProjectionWithReadState
+      (src/run-task.ts:19053). That calls buildCreditCandidates (src/lib/tick-read-worker.ts:3295),
+      which calls projectPlan (src/lib/status.ts:4147) and filters with creditIsReconcilable
+      (tick-read-worker.ts:136).
+    - projectPlan runs deriveStatus (status.ts:3730) and derivePrPrecedence (status.ts:2620) per
+      task. The rungs credit a task from: an operator correction, the durable credit store
+      (merge-credit.json, status.ts:2659-2712), a manual completion, the ledger pr.opened PR, the PR
+      body trailer, the run branch, and the commit trailer index (buildCommitTrailerIndex,
+      status.ts:4074, a full `git log` of origin/main). Each rung asks only "did a PR with this task's
+      trailer merge?". GitHub keeps #20049 MERGED after the revert, and its commit stays in main's
+      history. No rung asks whether a later commit on main reverted it.
+    - The only subtraction is plan/credit-overrides.yaml (creditOverrideExclusion, status.ts:2572;
+      applyCreditOverride after it). It is a hand-written operator ruling per (task, PR) pairing.
+      Nothing writes one for a revert.
+    - The status file is one-way by design: reconcileShardStatus (plan-reconcile.ts:57) only moves
+      queued to merged, so that a GitHub outage that reads every task as uncredited cannot reopen
+      the plan. So even a correct projection would never move W1-T11112 back to queued.
+    - Dispatch reads the projection, not the status field (plan-reconcile.ts header; planTaskLanded,
+      src/run-task.ts:39456). A hand edit to queued does not dispatch the task, and the next
+      reconcile (about every 4 to 6 h: #20114 02:17Z, #20154 06:28Z, #20210 11:56Z) flips it back.
+    PRIOR ART: src/lib/learnings.ts:1746 and src/lib/verdict-calibration.ts:383 already match
+    /This reverts commit\s+([0-9a-f]{7,40})/i. No filed task covers revert and credit (grep of
+    plan/tasks.d for revert with credit or reconcile, 2026-11-22).
+  design: |
+    INVARIANT a-revert-takes-back-its-credit: a (task, PR) credit whose squash commit a later commit on main reverts does not stand, unless the work was merged again or the revert was itself reverted or restored.
+    INVARIANT a-dark-revert-read-changes-nothing: an unreadable or foreign history adds no exclusion; only a positive revert record on the read ref takes credit back or re-queues a shard.
+    1. src/lib/reverted-merges.ts (new, pure):
+       - revertedMergesFromLog(records): records are { sha, subject, body } from a main history walk.
+         Map each commit with a squash subject (prNumberFromSquashSubject) to its PR number. For each
+         body line "This reverts commit <7-40 hex>", resolve the sha by prefix among the records. A
+         name that is not on the walk is ignored. Two reverts of one commit count once. A revert of a
+         revert cancels the first revert. Returns a map from reverted PR number to { revertSha,
+         revertPr }, where revertPr comes from the revert's own squash subject.
+    2. src/lib/status.ts:
+       - Build the revert map from the same `git log <ref> --format=%H%x00%s%x00%b%x1e` walk that
+         buildCommitTrailerIndex already runs. Do not add a new synchronous spawn site: the row for
+         buildCommitTrailerIndex in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts must
+         not grow, and no new name may join that table. Keep the same origin-slug check: a foreign
+         checkout gives an empty map, and a failed read gives null, which means no exclusion.
+       - Expose it on ghGateway and buildBatchedGithub as an optional GitHub method
+         revertedMergePr?(prNumber). Re-read it when origin/main moves: a gateway that lives across
+         ticks must not keep a map from before a new revert. Key the memo on the origin/main sha, as
+         resolveMergeLogReadOptions (tick-read-worker.ts) does.
+       - In creditOverrideExclusion, a pairing is also excluded when revertedMergePr(pr) answers and
+         no restoration applies. So every rung, the durable rung and the applyCreditOverride backstop
+         skip it, and a later legitimate merge of the task still credits it. Restoration: a later
+         commit on main carries Remudero-Task for a task whose shard lists this task in plan_refs and
+         names the revert PR as #<n> or PR-<n>. projectPlan holds the plan, so it supplies this check.
+       - An excluded projection carries a sparse revertedCredit: { pr, revertSha, revertPr? } field
+         beside creditOverride, so the board can say why a merged task reads queued.
+    3. src/lib/plan-reconcile.ts: add requeueRevertedShard(text, taskId, projection). It changes
+       "  status: merged" to "  status: queued" only when the projection carries revertedCredit, is
+       not merged and is not indeterminate, and the shard has no retirement. It names its reason when
+       it declines. Do not change reconcileShardStatus: its one-way rule and its tests stay as they are.
+    4. src/lib/measurement-cadence.ts and src/run-task.ts: creditProjectionWithReadState also returns
+       the reverted projections, as a sparse field that is present only when it is not empty, so
+       today's result shapes stay the same. buildPlanReconcileCadenceInput adds the re-queue writes to the same
+       landing, with an edit that runs requeueRevertedShard on main's current text (the W1-T13816
+       rule). planReconcileCadence reports them as requeued task ids beside drift.
+    5. src/lib/plan-reconcile-batch.ts and src/lib/feedback-landing.ts: the proof for a re-queued file
+       is "grep: ^  status: queued$ in <file>". The carry-forward check near feedback-landing.ts:1749
+       re-derives an earlier pending blob with that file's own edit, not only reconcileShardStatus.
+    6. Ledger: one row plan.reconcile.reverted_requeue { task, pr, revert_sha, file } per re-queue,
+       written where the landing input is built. Declare it in src/lib/ledger-steps.ts and in the
+       recordOnly map of scripts/write-only-ledger-step-baseline.json (W1-T14149).
+    7. Tests in test/a-reverted-merge-takes-back-its-task-credit.test.ts, titled "W1-T14302 criterion
+       N: ...". Use fixture git repos made with `git init -b main` in a temp dir, or injected log
+       records. Load test/setup/tmp-hygiene.ts. No test reads the real repository's history or calls
+       GitHub. Change the listed existing tests only where a shape they pin changes (for example the
+       cadence result or the batch proof).
+    AFTER THE BUILD MERGES: the first reconcile pass re-queues W1-T11112 and writes one
+    plan.reconcile.reverted_requeue row for it. W1-T11459 and W1-T5113 stay merged. Check both on the
+    host with `rmd ledger-grep plan.reconcile.reverted_requeue` and the next reconcile PR's file list.
+  falsifier: |
+    On origin/main, criterion 1 reads W1-T1 as merged after the revert. Remove the exclusion from the
+    durable rung only: criterion 1's durable-store case stays merged. Exclude per task, not per
+    pairing: criterion 2's later PR 140 does not credit. Drop the restoration check: criterion 3
+    re-queues the W1-T11459 fixture. Treat a failed history read as "every PR reverted": criterion 4
+    changes projections. Let requeueRevertedShard act on missing credit instead of revertedCredit:
+    criterion 5's no-revertedCredit shard is rewritten. Leave the landing's carry-forward as it is:
+    criterion 6's earlier re-queue is dropped. Wire the re-queue only in tests: the
+    requeueRevertedShard( grep in src/lib/measurement-cadence.ts finds nothing.
+  note: |
+    Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795351998000. The filer did
+    not push a reservation; the shipper reserves it.
+    Filed by the operator session on 2026-11-22. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Not in scope: how main repair picks a commit to revert, the twin revert PRs it opened, and the
+    W1-T11112 rebuild itself.
+    W1-T11112 HAND-OFF: before W1-T11112 is built again, its shard needs two changes. Its design must
+    say that its capability record is not the paired trial's runtime receipt: W1-T11113 (#20077)
+    reads a harnessContract property off the worker result in sealedPairedAttemptDispatcher
+    (src/lib/paired-trial.ts:601) and passes it to benchmarkRunAssignmentReceipt
+    (src/lib/paired-trial.ts:315). The first build typed the same field, and main's typecheck failed
+    at test/a-paired-dispatch-trial-shares-one-grader.test.ts:836 (TS2739). Its files: must add that
+    test. This filing does not make that edit: W1-T11112 is author_class machine with a pinned risk
+    ruling, so any edit makes the pin stale (machine-author-verify), and verify: human is refused by
+    machine-filing-admission. It needs a new ruling or an operator release.
