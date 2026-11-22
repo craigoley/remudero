@@ -168,6 +168,62 @@ export function viewKey(params: URLSearchParams): string {
     .join("&");
 }
 
+/** A run id the task activity feed accepts: the shape a run's tail file is named by, never a path. */
+export const TASK_ACTIVITY_RUN_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
+/** PRIMARY CONTROL: the longest `activityCursor` a request may carry; a longer one is refused before it can become a demand key. */
+export const TASK_ACTIVITY_CURSOR_MAX_BYTES = 256;
+
+/**
+ * One position in a task run's activity feed, as it travels in `activityCursor`: the scope it was issued for
+ * (instance, task, exact run), the projector generation it was issued at, and the identity of the activity
+ * ring row it stands after (`s` the ring's apply sequence, `m` the row's ms timestamp, `h` its line hash as a
+ * decimal string). Timestamps alone never identify a row: equal-millisecond rows differ in `s` and `h`.
+ */
+export interface TaskActivityCursor { i: string; t: string; r: string; g: number; s: number; m: number; h: string }
+
+/** The cursor as a request carries it: base64url of its compact JSON. */
+export function encodeTaskActivityCursor(cursor: TaskActivityCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor })).toString("base64url");
+}
+
+/** The cursor a request carries for exactly this scope, or why it is refused (malformed, oversized, foreign or another run's). */
+export function readTaskActivityCursor(raw: string, scope: { instance: string; id: string; run: string }): { cursor: TaskActivityCursor } | { error: string } {
+  if (Buffer.byteLength(raw) > TASK_ACTIVITY_CURSOR_MAX_BYTES) return { error: `activityCursor is longer than ${TASK_ACTIVITY_CURSOR_MAX_BYTES} bytes` };
+  if (!/^[A-Za-z0-9_-]+$/.test(raw)) return { error: "activityCursor is not an activity cursor" };
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Record<string, unknown>;
+  } catch (error) {
+    // Carried, not erased: the refusal names the cause.
+    return { error: `activityCursor is not an activity cursor: ${(error as Error).message}` };
+  }
+  const int = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  if (parsed === null || typeof parsed !== "object" || parsed.v !== 1 || typeof parsed.i !== "string" || typeof parsed.t !== "string" || typeof parsed.r !== "string"
+    || !int(parsed.g) || !int(parsed.s) || !int(parsed.m) || typeof parsed.h !== "string" || !/^-?\d{1,20}$/.test(parsed.h)) {
+    return { error: "activityCursor is not an activity cursor of this version" };
+  }
+  if (parsed.i !== scope.instance || parsed.t !== scope.id) return { error: "activityCursor was issued for another instance or task" };
+  if (parsed.r !== scope.run) return { error: "activityCursor was issued for another run" };
+  return { cursor: { i: parsed.i, t: parsed.t, r: parsed.r, g: parsed.g, s: parsed.s, m: parsed.m, h: parsed.h } };
+}
+
+/**
+ * Memory-only validation of the task view's optional activity parameters, before any held body, ETag or demand
+ * want: `activityRun` names one exact run, `activityCursor` (which needs it) is a cursor issued for that very
+ * instance, task and run. A refused request never becomes a demand key.
+ */
+export function validateTaskActivityRequest(params: URLSearchParams): ViewRequestFailure | undefined {
+  const refuse = (detail: string): ViewRequestFailure => ({ error: "invalid_request", detail });
+  if (params.getAll("activityRun").length > 1 || params.getAll("activityCursor").length > 1) return refuse("activityRun and activityCursor may each be given once");
+  const run = params.get("activityRun");
+  const cursor = params.get("activityCursor");
+  if (run === null) return cursor === null ? undefined : refuse("activityCursor needs ?activityRun=");
+  if (!TASK_ACTIVITY_RUN_SHAPE.test(run)) return refuse("activityRun is not a run id");
+  if (cursor === null) return undefined;
+  const read = readTaskActivityCursor(cursor, { instance: params.get("instance") ?? "", id: params.get("id") ?? "", run });
+  return "error" in read ? refuse(read.error) : undefined;
+}
+
 /** The newest row a body reflects: the latest `asOf` among its `ledger:<instance>` sources, and `rowTs` when given. */
 export function newestLedgerRow(sources: readonly ViewSource[], rowTs?: string): string | undefined {
   const rows = sources.filter((source) => source.name.startsWith("ledger:") && source.asOf !== null).map((source) => source.asOf!);
@@ -333,7 +389,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     const sampled = shadowSampled(opts.readModel?.switches().views[name]) && opts.shadow !== undefined;
     const fallback = legacy.get(name);
     const source = mode !== "serve" || !opts.readModel ? undefined : probe ? withoutDemand(opts.readModel) : opts.readModel;
-    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest)?.(params, source);
+    const refused = (opts.requestValidators?.[name] ?? fallback?.validateRequest ?? (name === TASK_VIEW_NAME ? validateTaskActivityRequest : undefined))?.(params, source);
     if (refused) {
       const { status = 400, ...body } = refused;
       return { shadowSampled: sampled, answer: json(status, body) };

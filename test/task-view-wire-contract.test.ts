@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BOARD_PROJECTION_DDL } from "#src/lib/board-projection.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { openProjectorReadModel } from "#src/lib/ledger-projector.js";
+import { ACTIVITY_RING_PROJECTION, ledgerLineIdentity, openProjectorReadModel } from "#src/lib/ledger-projector.js";
 import { ledgerSource } from "#src/lib/read-model-worker.js";
 import { createTaskView, taskViewKey, TASK_VIEW_FACT_ROWS, TASK_VIEW_LISTED_FACTS, TASK_VIEW_PR_RUNS, TASK_VIEW_TAIL_LINES, TASK_VIEW_VERSION, type ReadModelInstanceState, type TaskViewOptions } from "#src/lib/task-view.js";
 import { makeTempDir } from "#src/lib/tmp.js";
 import { createDemandBook, TASK_VIEW_NAME, VIEW_DEMAND_RETRY_MS } from "#src/lib/view-demand.js";
-import { buildReadModelViewRoutes, renderView, type ViewBodySource, type ViewSwitchMode } from "#src/lib/views.js";
+import { buildReadModelViewRoutes, encodeTaskActivityCursor, renderView, viewKey, type ViewBodySource, type ViewSwitchMode } from "#src/lib/views.js";
 import { fakeGitHub } from "#test/helpers/fake-github.js";
-import { declaredBody, operation, resolve, violations, type Schema } from "#test/helpers/openapi-strict.js";
+import { declaredBody, operation, resolve, SPEC, violations, type Schema } from "#test/helpers/openapi-strict.js";
 
 const PATH = "/v1/views/task";
 const ID = "W1-T1";
@@ -22,7 +22,7 @@ const clock = fixedClock(NOW);
 const state: ReadModelInstanceState = { instance: "core", generation: 1, lease: "held", failures: 0, tickedAt: NOW, newestTs: clock.iso() };
 type TestCtx = { after: (fn: () => void) => void };
 
-function materialize(t: TestCtx) {
+function materialize(t: TestCtx, extraKeys: string[] = []) {
   const root = makeTempDir("task-wire-contract");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ledgerDir = join(root, "ledger");
@@ -49,6 +49,7 @@ function materialize(t: TestCtx) {
   demand.want(TASK_VIEW_NAME, taskViewKey("core", ID));
   demand.want(TASK_VIEW_NAME, taskViewKey("core", "W1-T404"));
   demand.want(TASK_VIEW_NAME, taskViewKey("absent", ID));
+  for (const key of extraKeys) demand.want(TASK_VIEW_NAME, key);
   const github = fakeGitHub({ prByRef: (url) => typeof url === "string" && url.endsWith("/12") ? { number: 12, url, state: "OPEN", title: "the PR" } : null });
   const options: TaskViewOptions = { instances: [instance], ledgerSource, demand, clock, github: () => ({ github, source: { asOf: clock.iso(), state: "fresh" } }) };
   const build = (overrides: Partial<TaskViewOptions> = {}, withDb = true) => {
@@ -59,7 +60,7 @@ function materialize(t: TestCtx) {
       return { view: view.name, version: view.version, key: entry.key, generation: 1, ...rendered };
     });
   };
-  return { build };
+  return { build, db };
 }
 
 test("the published task view contract covers real found and missing task bodies", (t) => {
@@ -128,7 +129,7 @@ test("the published task view contract resolves every response component referen
 test("the task wire contract declares required keys, etag responses and demand misses", async (t) => {
   const entry = materialize(t).build()[0]!;
   const op = operation(PATH, "GET");
-  assert.deepEqual(op.parameters?.filter((param) => param.in === "query").map((param) => [param.name, param.required]).sort(), [["id", true], ["instance", true]]);
+  assert.deepEqual(op.parameters?.filter((param) => param.in === "query").map((param) => [param.name, param.required]).sort(), [["activityCursor", false], ["activityRun", false], ["id", true], ["instance", true]]);
   assert.equal(resolve(op.responses["304"]).content, undefined);
   let mode: ViewSwitchMode = "serve";
   let ready = true;
@@ -164,4 +165,72 @@ test("the task wire contract declares required keys, etag responses and demand m
     assert.deepEqual(await dark.clone().json(), { error: next === "off" ? "view_disabled" : "view_shadow", view: "task" });
     assert.deepEqual(violations(await dark.json(), declaredBody(PATH, "GET", 404)), []);
   }
+});
+
+test("task activity cursor wire contract preserves bounds privacy and observational authority", async (t) => {
+  const RUN = `${ID}-12`;
+  const activityKey = viewKey(new URLSearchParams({ instance: "core", id: ID, activityRun: RUN }));
+  const { build, db } = materialize(t, [activityKey]);
+  db.exec(ACTIVITY_RING_PROJECTION.ddl);
+  const secret = { prompt: "SECRET-PROMPT write the exploit", api_key: "sk-SECRET-KEY", tool_args: { command: "cat ~/.ssh/id_rsa" }, transcript: "PRIVATE-TRANSCRIPT", verdict: "pass", status: "merged" };
+  Array.from({ length: 3 }, (_, n) => JSON.stringify({ ts: new Date(NOW - 5_000 + n).toISOString(), step: `worker.tool.${n}`, task_id: ID, run_id: RUN, ...secret }))
+    .forEach((line) => ACTIVITY_RING_PROJECTION.apply(db, line, ledgerLineIdentity(line), () => JSON.parse(line) as Record<string, unknown>));
+  const entries = build();
+  const plain = entries[0]!;
+  const withActivity = entries.find((entry) => entry.key === activityKey)!;
+  const schema = declaredBody(PATH, "GET", 200);
+  assert.deepEqual(violations(withActivity.body, schema), [], "the served body satisfies the published contract");
+  const activity = withActivity.body.data.activity!;
+  assert.equal(activity.state, "available");
+  assert.equal(activity.events.length, 3);
+  assert.ok(activity.events.every((event) => JSON.stringify(Object.keys(event).sort()) === JSON.stringify(["id", "seq", "step", "ts"])), "an event is its identity and step, nothing else");
+  const wire = JSON.stringify(withActivity.body);
+  for (const leaked of ["SECRET-PROMPT", "sk-SECRET-KEY", "id_rsa", "PRIVATE-TRANSCRIPT"]) assert.ok(!wire.includes(leaked), `${leaked} never reaches the wire`);
+  // observation only: the activity page changes none of the task's own outcome fields.
+  const { activity: _activity, ...rest } = withActivity.body.data;
+  assert.deepEqual(rest, plain.body.data, "found, runs, projection and trace are the plain view's, untouched");
+  assert.equal(plain.body.data.activity, undefined, "a request without activityRun carries no activity");
+  const spec = resolve({ $ref: "#/components/schemas/TaskActivity" });
+  assert.deepEqual(Object.keys(spec.properties as object).sort(), ["cursor", "events", "hasMore", "reason", "reset", "retentionGap", "ring", "runId", "state"]);
+  assert.deepEqual(Object.keys(SPEC.paths[PATH]!), ["get"], "the path has no verb that could start, resume, retry or complete a worker");
+  const bounds = spec.properties as Record<string, Schema>;
+  assert.equal(bounds.events.maxItems, 50);
+  assert.equal(bounds.cursor.maxLength, 256);
+  assert.ok(violations({ ...withActivity.body, data: { ...withActivity.body.data, activity: { ...activity, verdict: "pass" } } }, schema).length > 0, "an undeclared outcome key is a violation");
+
+  // the served route: validation answers before any body, ETag or demand want.
+  const asked: string[] = [];
+  const source: ViewBodySource = { body: (_view, key) => (asked.push(String(key)), key === activityKey ? withActivity : undefined), judge: (sources) => [...sources], switches: () => ({ views: { task: "serve" } }) };
+  const route = buildReadModelViewRoutes({ legacy: [], readModelViews: [TASK_VIEW_NAME], readModel: source, clock })[0]!;
+  const server = createServer((req, res) => void route.handler(req, res, { params: {} }));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${PATH}`;
+  const ok = await fetch(`${base}?${activityKey}`);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(violations(await ok.json(), schema), []);
+  const good = encodeTaskActivityCursor({ i: "core", t: ID, r: RUN, g: 1, s: 1, m: NOW, h: "1" });
+  const query = (extra: Record<string, string>) => `${base}?${new URLSearchParams({ instance: "core", id: ID, ...extra })}`;
+  const refused: Array<[string, string]> = [
+    ["a cursor with no run", query({ activityCursor: good })],
+    ["a run that is a path", query({ activityRun: "../ledger" })],
+    ["a malformed cursor", query({ activityRun: RUN, activityCursor: "not-a-cursor!" })],
+    ["an undecodable cursor", query({ activityRun: RUN, activityCursor: "AAAA" })],
+    ["an oversized cursor", query({ activityRun: RUN, activityCursor: "A".repeat(257) })],
+    ["another task's cursor", query({ activityRun: RUN, activityCursor: encodeTaskActivityCursor({ i: "core", t: "W1-T2", r: RUN, g: 1, s: 1, m: NOW, h: "1" }) })],
+    ["another instance's cursor", query({ activityRun: RUN, activityCursor: encodeTaskActivityCursor({ i: "elsewhere", t: ID, r: RUN, g: 1, s: 1, m: NOW, h: "1" }) })],
+    ["another run's cursor", query({ activityRun: `${ID}-13`, activityCursor: good })],
+    ["a repeated run", `${query({ activityRun: RUN })}&activityRun=${ID}-13`],
+  ];
+  asked.length = 0;
+  for (const [label, url] of refused) {
+    const response = await fetch(url);
+    assert.equal(response.status, 400, label);
+    const body = await response.json();
+    assert.equal(body.error, "invalid_request", label);
+    assert.deepEqual(violations(body, declaredBody(PATH, "GET", 400)), [], label);
+  }
+  assert.deepEqual(asked, [], "a refused request never reaches a held body or becomes a demand key");
+  const accepted = await fetch(query({ activityRun: RUN, activityCursor: good }));
+  assert.notEqual(accepted.status, 400, "the same cursor for its own scope is accepted by validation");
 });

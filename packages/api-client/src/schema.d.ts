@@ -5771,6 +5771,33 @@ export interface components {
         firstTs?: string;
         lastTs?: string;
       };
+      activity?: TaskActivity;
+    };
+    /** One bounded page of one run's activity (src/lib/task-view.ts; W1-T11395), present only when the request named activityRun. Read from the projector's activity_ring, matched on the row's own task_id and run_id and delivered in ring apply order. An empty available page with a cursor is caught up at that position; retentionGap and reset say the cursor could not be continued and the page restarts at the oldest retained event; unavailable says nothing about history. It is an observation feed only: it carries no prompt, credential, transcript body or tool argument, and it never starts, resumes, retries, reassigns or completes a worker. */
+    TaskActivity: {
+      state: "available" | "unavailable";
+      runId: string;
+      events: (TaskActivityEvent)[];
+      /** More events of this run follow in the ring than this page carries. */
+      hasMore: boolean;
+      /** The ring rolled past the cursor, so events between it and the first one here may be lost. */
+      retentionGap: boolean;
+      /** The cursor does not belong to this ring (another corpus, a future position or a rebuilt store). */
+      reset: boolean;
+      /** Pass back as activityCursor. After the last event while hasMore, else the validated ring tail. */
+      cursor?: string;
+      ring?: {
+        rows: number;
+        capacity: number;
+      };
+      reason?: string;
+    };
+    TaskActivityEvent: {
+      seq: number;
+      /** The row's stable identity, its millisecond timestamp and line hash. */
+      id: string;
+      ts: string;
+      step: string;
     };
     /** TaskCardRun extended with optional gateway PR evidence (src/lib/task-view.ts). */
     TaskViewRun: {
