@@ -53,6 +53,7 @@ const SHARED_PROOF_FRAGMENT = `
   files: [src/lib/plan.ts, test/plan/example.test.ts]
   design: |
     CREATES: test/plan/example.test.ts
+    NO-INVARIANTS: the draft adds a new suite only; no prior behavior changes.
   acceptance:
     - claim: "the first behaviour"
       proof: "unit test: test/plan/example.test.ts"

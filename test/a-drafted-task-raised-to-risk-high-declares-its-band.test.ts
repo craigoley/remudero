@@ -51,6 +51,8 @@ function highDraft(extra: string[] = [], id = "NEW-1"): string {
     "  files:",
     "    - src/lib/verify-human-judge.ts",
     "    - src/lib/inbox.ts",
+    "  design: |",
+    "    NO-INVARIANTS: the fixture drafts a new automate-remedy applier only; no prior behavior changes.",
     "  acceptance:",
     '    - claim: "the judged automate remedy is applied without an operator"',
     '      proof: "unit test: the judged automate remedy is applied without an operator"',

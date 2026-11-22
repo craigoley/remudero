@@ -306,7 +306,7 @@ test("a residual mechanical followup reaches the existing fleet gates and durabl
   assert.equal(f.source().classifications.find(c => c.proposalId === ID)?.needsTriageReason, undefined);
   const approved: string[] = [], deps = { stateDir: f.state, ledgerPath: f.ledgerPath, mergedLastDay: () => 3, approve: (id: string) => { approved.push(id); } };
   assert.deepEqual(triageFleetLane(deps).filed, [], "normal draft/readiness gate still holds");
-  const fragmentYaml = `- id: W1-T2300\n  title: Repair the proof with a bounded regression\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  status: queued\n  attempts: 0\n  origin: architect\n  files: [src/lib/inbox.ts]\n  acceptance:\n    - claim: bounded repair\n      proof: 'unit test: bounded repair fixture'\n`;
+  const fragmentYaml = `- id: W1-T2300\n  title: Repair the proof with a bounded regression\n  repo: core\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  status: queued\n  attempts: 0\n  origin: architect\n  files: [src/lib/inbox.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one bounded repair task only; no prior behavior changes.\n  acceptance:\n    - claim: bounded repair\n      proof: 'unit test: bounded repair fixture'\n`;
   writeFileSync(join(f.state, "inbox-drafts.json"), JSON.stringify({ [ID]: { proposalId: ID, fragmentYaml,
     stampLine: `- ${ID} (plan) — RATIFIED 2026-10-16 -> W1-T2300.`, anchorFingerprint: anchorFingerprint(proposal.evidenceAnchors) } }));
   await f.refresh();

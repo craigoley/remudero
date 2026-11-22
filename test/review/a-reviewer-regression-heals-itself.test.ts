@@ -346,13 +346,24 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.equal(await route("208", [], {}, async () => { normal++; return 0; }), 0);
   assert.equal(normal, 2);
   const filed = h.calls.issues.slice(before);
-  assert.equal(filed.length, 1, "escalated once per incident and origin/main");
+  assert.equal(filed.length, 1, "escalated once per incident");
   assert.match(filed[0]!.body, /does not apply/);
   assert.match(filed[0]!.body, /src\/lib\/required-semantic-review\.ts/);
   assert.ok(logs.includes("reviewer.healed_tree_unavailable"));
   const rememberedConflict = logRows.filter((row) => row.step === "reviewer.healed_tree_unavailable").at(-1)!;
   assert.equal(rememberedConflict.extra.remembered, true, "the route exposes the same-main conflict memo");
   assert.deepEqual(rememberedConflict.extra.conflict_paths, ["src/lib/required-semantic-review.ts"]);
+  // W1-T13393: once per INCIDENT — a main advance that still conflicts, and a restart, raise nothing more.
+  pushMain(f, { "docs/more.md": "more\n" }, "docs: a main advance that still conflicts (#105)");
+  assert.equal(await route("217", [], {}, async () => { normal++; return 0; }), 0);
+  health.resetHealedReviewerTrees();
+  const restarted = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath,
+    (step, extra = {}) => { logs.push(step); logRows.push({ step, extra }); },
+    freshTree(f, async () => { throw new Error("no healed tree exists to spawn"); }), h.issues, h.lane);
+  assert.equal(await restarted("218", [], {}, async () => { normal++; return 0; }), 0);
+  assert.equal(normal, 4);
+  assert.equal(h.calls.issues.length - before, 1, "escalated once per incident: not again on a main advance or after a restart");
+  assert.equal(health.loadReviewerHealthState(h.statePath).incident?.healedTree?.state, "conflict", "the conflict is recorded on the incident");
   // When main itself reverts the offending merge, the healed patch is empty: the healed tree IS origin/main.
   f.work.git("revert", "--no-edit", m4);
   f.work.git("revert", "--no-edit", f.m2);
@@ -1178,7 +1189,8 @@ test("W1-T14283: the death names its own escalation, claimed once per incident a
   const e = health.reviewerHealedChildDiedEscalation(incident, "SyntaxError: no export");
   assert.match(e.summary, new RegExp(DIES));
   assert.match(e.detail, /reporting no cause: SyntaxError: no export/);
-  assert.equal(e.recommendation, "Heal with a fix PR");
+  assert.equal(e.recommendation, "Let the revert PR merge", "W1-T14351: the heal verb is not registered, so it is neither offered nor recommended");
+  assert.ok(!e.options.some((o) => o.label === "Heal with a fix PR"));
   assert.equal(health.claimHealedDeathEscalation(incident), true);
   assert.equal(health.claimHealedDeathEscalation(incident), false);
   health.resetHealedReviewerTrees();

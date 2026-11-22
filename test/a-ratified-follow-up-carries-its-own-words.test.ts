@@ -77,7 +77,7 @@ test("W1-T5541: a rationale-less draft is written with the follow-up text", () =
   const corpus = loadCorpus({ cwd: root });
   assert.equal(corpus.shardCount, 1);
   assert.equal(corpus.units.length, 2);
-  assert.equal(corpus.units[1].text, task.rationale);
+  assert.equal(corpus.units[1].text, [task.rationale, task.design].join("\n\n"));
 });
 
 test("W1-T5541: a directory in files or a grep proof is refused", () => {

@@ -4,8 +4,9 @@
 # WHAT IT DOES: removes regenerable `node_modules` and `coverage` trees from
 # idle disposable scratch checkouts. It discovers nested Remudero checkouts
 # and checkouts in explicit scratch namespaces on macOS and Linux. A linked
-# worktree is retired only after 6 hours of inactivity, with clean Git state
-# and no running process, cwd, or open-file use. Its current HEAD must be
+# worktree normally waits 6 idle hours. Finished pull requests can retire
+# sooner, and held new worktrees can wait longer. Clean Git state and no
+# running process, cwd, or open-file use are required. Its current HEAD must be
 # published by fresh remote evidence, including detached PR tips. Standalone
 # clones retain their object stores until cross-account lending is proven safe;
 # their old regenerable caches can still be cleaned.
@@ -43,6 +44,7 @@ if [ ! -f "$GUARD_DIR/workspace-retirement-guard.sh" ] || [ ! -f "$GUARD_DIR/dep
 fi
 # shellcheck source=deploy/workspace-retirement-guard.sh
 source "$GUARD_DIR/workspace-retirement-guard.sh"
+RMD_PUB_INCLUDE_HOLDS=1
 # shellcheck source=deploy/dependency-seed-guard.sh
 source "$GUARD_DIR/dependency-seed-guard.sh"
 
@@ -1118,6 +1120,22 @@ for directory_root in "${DIRECTORY_ROOTS[@]+"${DIRECTORY_ROOTS[@]}"}"; do
   done
 done
 
+keep_held_worktree() {
+  local repo="$1" branch="$2" relation="$3" ref
+  [ "$relation" = 0 ] && ref=$(rmd_worktree_hold_ref "$repo" "$branch") && [ -n "$ref" ] || return 1
+  skipped_worktrees=$((skipped_worktrees+1))
+  log "SKIP not-started-held $ref $repo"
+}
+
+log_worktree_publication_skip() {
+  local repo="$1" relation="$2" fallback="$3"
+  if [ "$relation" = 0 ] && [ "$RMD_PUB_REFS_READ" = 0 ]; then
+    log "SKIP publication-unverified $repo (not-started-refs-unreadable)"
+  else
+    log "$fallback"
+  fi
+}
+
 for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
     RMD_DECISION_KNOWN_BYTES=unknown
     marker="$repo/.git"
@@ -1151,15 +1169,17 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
       skipped_worktrees=$((skipped_worktrees+1)); log "SKIP unverified-activity $repo"; continue;
     }
     activity_age=$(( (NOW - activity_stamp) / 3600 ))
-    # A linked worktree that is clean, whose HEAD GitHub holds, and whose pull
-    # requests are all merged or closed has no work in progress for the six
-    # hours to protect. Every other test below still applies; any answer that
-    # cannot be read leaves the six-hour rule of today.
-    finished=0; retire_age="${activity_age}h"
+    # Only a published head with work of its own can skip the idle window.
+    # Main's history includes other runs' closed pull requests.
+    main_relation=2; finished=0; retire_age="${activity_age}h"
     if [ -f "$marker" ] \
+      && finished_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null); then
+      rmd_worktree_main_relation "$repo" "$finished_head"
+      main_relation=$?
+    fi
+    if [ "$main_relation" = 1 ] \
       && finished_status=$(rmd_retirement_git "$repo" status --porcelain --untracked-files=all 2>/dev/null) \
       && [ -z "$finished_status" ] \
-      && finished_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) \
       && rmd_workspace_published "$repo" \
       && rmd_commit_pulls_finished "$repo" "$finished_head"; then
       finished=1; retire_age="pull-request-finished"
@@ -1222,13 +1242,16 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
 
     if [ -f "$marker" ]; then
       if ! rmd_workspace_published "$repo"; then
-        skipped_worktrees=$((skipped_worktrees+1)); log "SKIP $RMD_PUB_REASON $repo (HEAD=$head)"; continue
+        skipped_worktrees=$((skipped_worktrees+1))
+        log_worktree_publication_skip "$repo" "$main_relation" "SKIP $RMD_PUB_REASON $repo (HEAD=$head)"
+        continue
       fi
       listing=$(rmd_retirement_git "$repo" worktree list --porcelain 2>/dev/null) || listing=""
       registration=$(worktree_registration "$listing" "$repo")
       if [ "$registration" != "registered" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP worktree-$registration $repo"; continue
       fi
+      if keep_held_worktree "$repo" "$branch" "$main_relation"; then continue; fi
       common_dir=$(rmd_retirement_git "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
       if [ -z "$common_dir" ] || [ ! -d "$common_dir" ]; then
         skipped_worktrees=$((skipped_worktrees+1)); log "SKIP git-unverified $repo"; continue
@@ -1266,10 +1289,17 @@ for repo in "${RETAINED_CHECKOUTS[@]+"${RETAINED_CHECKOUTS[@]}"}"; do
           skipped_worktrees=$((skipped_worktrees+1)); log "SKIP changed-before-remove $repo"; continue
         fi
         current_head=$(rmd_retirement_git "$repo" rev-parse --verify HEAD 2>/dev/null) || current_head=""
-        if [ "$current_head" != "$head" ] || ! rmd_workspace_published "$repo" head 1; then
+        if [ "$current_head" != "$head" ]; then
           log "SKIP ref-changed-or-not-proven-published-before-remove $repo"; continue
         fi
-        if [ "$finished" = 1 ] && ! rmd_commit_pulls_finished "$repo" "$current_head"; then
+        rmd_worktree_main_relation "$repo" "$current_head"
+        main_relation=$?
+        if ! rmd_workspace_published "$repo" head 1; then
+          log_worktree_publication_skip "$repo" "$main_relation" "SKIP ref-changed-or-not-proven-published-before-remove $repo"
+          continue
+        fi
+        if keep_held_worktree "$repo" "$branch" "$main_relation"; then continue; fi
+        if [ "$finished" = 1 ] && { [ "$main_relation" != 1 ] || ! rmd_commit_pulls_finished "$repo" "$current_head"; }; then
           log "SKIP pull-request-unfinished-before-remove $repo"; continue
         fi
         head_stamp=$(artifact_mtime "$head_file" 2>/dev/null) || head_stamp=0

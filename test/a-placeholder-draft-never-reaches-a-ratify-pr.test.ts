@@ -108,7 +108,7 @@ test("each placeholder form independently blocks a draft while ordinary titles a
       t.title = "Future";
       t.acceptance[0].proof = proof;
       t.files.push("test/plan/future.test.ts");
-      t.design = "CREATES: test/plan/future.test.ts";
+      t.design = "CREATES: test/plan/future.test.ts\nINVARIANT a-valid-input-parses-as-before: every non-empty input parses as before.";
     }),
       PROPOSAL, GOOD_STAMP, KNOWN), []);
   }
