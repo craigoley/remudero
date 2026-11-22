@@ -85,7 +85,7 @@ export function fixFailureSelectionText(input: Pick<FixLearningsShadowInput, "fa
 export function recordFixLearningsShadow(
   input: FixLearningsShadowInput,
   log: Log,
-  deps: { load: typeof loadLayeredLearningsForTaskFiles; select: typeof selectLearnings } = REAL_READERS,
+  readers: typeof REAL_READERS = REAL_READERS,
 ): Record<string, unknown> {
   const budgetChars = input.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
   const base = {
@@ -97,8 +97,8 @@ export function recordFixLearningsShadow(
   const context = { text: fixFailureSelectionText(input) };
   let row: Record<string, unknown>;
   try {
-    const { entries } = deps.load(input.homes, undefined, context);
-    const { selected } = deps.select(entries, undefined, budgetChars, context);
+    const { entries } = readers.load(input.homes, undefined, context);
+    const { selected } = readers.select(entries, undefined, budgetChars, context);
     const matched = selected.map((entry) => {
       const counts = learningMatchCounts(entry, undefined, context);
       const kind: FixLearningsMatchKind = counts.error > 0 ? (counts.symbol > 0 ? "both" : "error") : "symbol";
