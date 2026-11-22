@@ -1021,7 +1021,7 @@ export function readLedgerUnionRawLinesSync(
   };
 }
 
-/** Whether a ledger row is stamped inside [minimumTs, maximumTs]; a row with no readable stamp is outside any window. */
+/** A closed window includes only rows with readable timestamps inside its bounds. */
 function lineStampedWithin(line: string, minimumTs: number | undefined, maximumTs: number): boolean {
   let ts: unknown;
   try { ts = (JSON.parse(line) as { ts?: unknown } | null)?.ts; } catch { return false; /* deliberate: a torn line is no evidence */ }
@@ -1029,10 +1029,7 @@ function lineStampedWithin(line: string, minimumTs: number | undefined, maximumT
   return !Number.isNaN(at) && at <= maximumTs && (minimumTs === undefined || at >= minimumTs);
 }
 
-/**
- * The time range of one rotated archive from a manifest already stored and current for it, or undefined when there is
- * none: unlike {@link readLedgerKeyManifest} this never builds one, so a window read streams no archive it will not read.
- */
+/** Reuses a current manifest's time range. Without one, the caller reads the archive once. */
 async function cachedArchiveCoverage(stateDir: string, entry: LedgerCorpusEntry): Promise<{ minTs?: string; maxTs?: string } | undefined> {
   try {
     const archive = basename(entry.path);
@@ -1045,12 +1042,12 @@ async function cachedArchiveCoverage(stateDir: string, entry: LedgerCorpusEntry)
       (manifest.minTs !== undefined && typeof manifest.minTs !== "string") || (manifest.maxTs !== undefined && typeof manifest.maxTs !== "string")) return undefined;
     return { minTs: manifest.minTs, maxTs: manifest.maxTs };
   } catch {
-    // deliberate: no current manifest (or an unreadable one) means the archive is read, never skipped.
+    // deliberate: a missing or unreadable manifest leaves the archive eligible.
     return undefined;
   }
 }
 
-/** Whether the live ledger's first row is stamped after `maximumTs`; false whenever that cannot be told. */
+/** The live ledger is append-ordered, so a first row after the window excludes it. */
 function liveOpensAfter(livePath: string, maximumTs: number): boolean {
   let fd: number | undefined;
   try {
@@ -1065,7 +1062,7 @@ function liveOpensAfter(livePath: string, maximumTs: number): boolean {
     const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
     return !Number.isNaN(at) && at > maximumTs;
   } catch {
-    // deliberate: an unreadable or unparsable first row cannot place the file after the window, so it is read.
+    // deliberate: an unreadable first row leaves the live file eligible.
     return false;
   } finally {
     if (fd !== undefined) try { nodeCloseSync(fd); } catch { /* deliberate: nothing further to release */ }
@@ -1075,13 +1072,8 @@ function liveOpensAfter(livePath: string, maximumTs: number): boolean {
 /** Yields the event loop between slices of one file's lines. */
 const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
-/**
- * {@link readLedgerUnionRawLinesSync} off the event loop: the same files in the same order, the same filters and
- * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
- * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
- * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
- * `untilTs` selects archives by verified row coverage for a closed window. Callers still filter individual rows.
- */
+/** Like {@link readLedgerUnionRawLinesSync}, with asynchronous reads and decompression and a yield between line
+ * slices. `untilTs` limits returned rows to the window and lets verified coverage skip disjoint archives. */
 export async function readLedgerUnionRawLinesAsync(
   stateDir: string, opts: LedgerUnionRawReadOptions & { untilTs?: string } = {},
 ): Promise<LedgerUnionRawRead> {
@@ -1094,9 +1086,6 @@ export async function readLedgerUnionRawLinesAsync(
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
   const maximumTs = opts.untilTs === undefined ? undefined : Date.parse(opts.untilTs);
-  // A closed window answers rows inside it and nothing else, whichever file they came from: a row stamped outside
-  // the window (or with no readable stamp) is dropped here, so a post-window row in the live file or in an archive
-  // read for want of a manifest never reaches the caller.
   const keepInWindow = opts.keep;
   const { rawLines, scan } = rawLineCollector(maximumTs === undefined ? opts : {
     ...opts,
@@ -1115,11 +1104,8 @@ export async function readLedgerUnionRawLinesAsync(
     if (maximumTs === undefined) {
       if (rotationBeforeWindow(entry, minimumTs)) return;
     } else {
-      // A rotation cut before the window opened holds no row of it (the name is the cut's time, as for the open read).
       if (rotationBeforeWindow(entry, minimumTs)) return;
-      // Compaction combines nonadjacent rotations, so a later-stamped archive can hold earlier rows: only verified row
-      // coverage can exclude one from the window's far side. Coverage already built is used; none is built here.
-      // An archive with no current manifest is read once (rows filtered above), never streamed whole to build one first.
+      // Compaction combines nonadjacent rotations, so excluding a later archive requires verified row coverage.
       const coverage = await cachedArchiveCoverage(stateDir, entry);
       if (coverage !== undefined) {
         const { minTs, maxTs } = coverage;
@@ -1141,7 +1127,6 @@ export async function readLedgerUnionRawLinesAsync(
 
   const readLive = async (): Promise<void> => {
     if (!liveFileRead) return;
-    // The live file is append-ordered: one that opens after the window closed holds nothing of it.
     if (maximumTs !== undefined && liveOpensAfter(livePath, maximumTs)) return;
     let buf: Buffer;
     try {
