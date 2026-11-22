@@ -11548,6 +11548,10 @@ export const REFRESH_ADMISSION_FORCED_BY = "base-fixed-admission";
 export const LIGHT_REFRESH_HANDOFF_FIELD = "refresh_handoff";
 /** W1-T12945 — the hand-off cause of a head held as base-red whose held check main no longer fails. */
 export const BASE_RED_MAIN_GREEN_CAUSE = "base-red-main-green";
+/** W1-T13156 — the hand-off cause of a head whose failing test files main already fixed, the reproduction clear. */
+export const BASE_FIXED_MAIN_CAUSE = "base-fixed-main";
+/** W1-T13156 — the hand-off cause of a no-commit CI fix whose failed run was cut from a main that has since moved. */
+export const NO_COMMIT_MOVED_MAIN_CAUSE = "no-commit-fix-moved-main";
 const LIGHT_REFRESH_HANDOFF_HOLD = "the branch refresh waits for the light pass's refresh admission";
 
 export interface RefreshAdmissionReading {
@@ -26958,6 +26962,16 @@ export async function runSweep(
                 }
                 const refresh = runBaseSha !== undefined && mainTipSha !== undefined && runBaseSha !== mainTipSha;
                 if (refresh && !deps.updateBranch) {
+                  if (handsRefreshToLightAdmission) {
+                    // W1-T13156: a light pass presses nothing; it names the head, and the pass's one admission presses it.
+                    const taskId = pr.taskId ?? "SWEEP";
+                    extraDisposedFields = { ...extraDisposedFields, [LIGHT_REFRESH_HANDOFF_FIELD]: { cause: NO_COMMIT_MOVED_MAIN_CAUSE,
+                      refresh_row: { run_id: deps.runId, task_id: taskId, step: "sweep.disposed", pr_number: pr.prNumber, head_sha: pr.headSha,
+                        disposition: "wait", acted: true, no_commit_refresh_attempted: true, run_base_sha: runBaseSha, main_sha: mainTipSha,
+                        no_commit_rerun_attempted: true, no_commit_rerun_round_id: noCommitRound, cause: NO_COMMIT_MOVED_MAIN_CAUSE } } };
+                    standDownReason = `no-commit CI fix: the branch refresh for the moved main ${mainTipSha} — ${LIGHT_REFRESH_HANDOFF_HOLD}`;
+                    break;
+                  }
                   standDownReason = "no-commit CI fix awaits a branch-update gateway for the moved main";
                   break;
                 }
@@ -27002,6 +27016,14 @@ export async function runSweep(
                 standDownReason = `no-commit CI fix: failed-job rerun ${result.outcome}` + (result.reason ? ` — ${result.reason}` : "");
                 if (result.outcome !== "unavailable") break;
                 unavailableRerunStandDown = standDownReason;
+              }
+              // W1-T13156: the light admission's refresh of this head took, so this view predates the head it produced.
+              if (handsRefreshToLightAdmission && noCommitRound !== undefined && ledgerLines.some((row) => row.step === "sweep.disposed" &&
+                  row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.cause === NO_COMMIT_MOVED_MAIN_CAUSE &&
+                  row.no_commit_refresh_outcome === "updated")) {
+                acted = false;
+                standDownReason = "no-commit CI fix: the light pass's refresh admission requested the branch refresh (updated) — awaiting the refreshed head";
+                break;
               }
               if (noCommitRound !== undefined && rerunAttempted && deps.fixProgressJudge) {
                 progressParkedReason = "rerun-still-red: failed-job rerun left this head red";
@@ -27500,6 +27522,15 @@ export async function runSweep(
                   break;
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
+                // W1-T13156: the light admission's refresh of this head took, so this view predates the head it produced.
+                if (handsRefreshToLightAdmission && baseRedHistory.refreshed.has(key) &&
+                    ledgerLines.some((line) => line.step === BASE_FIXED_REFRESH_STEP && line.cause === BASE_FIXED_MAIN_CAUSE &&
+                      line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.outcome === "updated")) {
+                  baseRedStandDownPrs.add(pr.prNumber);
+                  acted = false;
+                  standDownReason = "base fixed on main: the light pass's refresh admission requested the branch refresh (updated) — awaiting the refreshed head, no fix dispatched or strike spent";
+                  break;
+                }
                 // W1-T6024: an unrunnable or partial probe never erases main's reproduced reds; hold until main is green.
                 const mainFailing = verdict === "clear" || contradicted ? undefined : mainFailingTestFiles(reproductionHistory);
                 if (mainFailing !== undefined && reproductionFiles.every((file) => mainFailing.has(file))) {
@@ -27534,14 +27565,22 @@ export async function runSweep(
                 const admit = { pr, arm, heldSinceMs: heldSinceMs(pr), row: fixedOnMain
                   ? baseFixedRefreshRow(deps.runId, pr, mainTipSha, reproductionFiles, undefined, refreshChecks)
                   : { ...row, step: BASE_RED_REFRESH_STEP, check_names: refreshChecks } };
-                const clearance = refreshable && deps.updateBranch
-                  ? await admissionClearance(pr, arm, refreshChecks, reproductionFiles, mainTipSha) : undefined;
-                if (clearance?.refresh === false) refreshAdmission.refuse(admit, clearance.evidence);
+                // W1-T13156: a light pass assesses the head, presses nothing, and names it for the pass's one admission.
+                const handOff = handsRefreshToLightAdmission && refreshable && fixedOnMain;
+                const clearance = refreshable && (deps.updateBranch || handOff)
+                  ? (handOff && clearedRefreshKeys.has(`${pr.prNumber}@${pr.headSha}@${mainTipSha}`) ? { refresh: true as const }
+                    : await admissionClearance(pr, arm, refreshChecks, reproductionFiles, mainTipSha)) : undefined;
+                if (clearance?.refresh === false && !handOff) refreshAdmission.refuse(admit, clearance.evidence);
                 if (refreshable && clearance?.refresh !== false) {
                   acted = false;
                   const clearText = fixedOnMain ? `failing test file(s) ${reproductionFiles.join(", ")} already fixed on main ${mainTipSha}`
                     : `base reproduction clear at main ${mainTipSha}`;
-                  const held = clearance === undefined ? refreshUnwired : refreshAdmission.hold(admit);
+                  if (handOff) {
+                    extraDisposedFields = { ...extraDisposedFields, [LIGHT_REFRESH_HANDOFF_FIELD]: { cause: BASE_FIXED_MAIN_CAUSE,
+                      ...(Number.isFinite(admit.heldSinceMs) ? { held_since: clockFromMillisFn(() => admit.heldSinceMs).iso() } : {}),
+                      refresh_row: { ...admit.row, cause: BASE_FIXED_MAIN_CAUSE } } };
+                  }
+                  const held = handOff ? LIGHT_REFRESH_HANDOFF_HOLD : clearance === undefined ? refreshUnwired : refreshAdmission.hold(admit);
                   if (held === undefined) {
                     await refreshAdmission.enter({ ...admit,
                       refresh: () => pressRefresh(pr, admit.row, (outcome) => { baseRedHistory.refreshed.add(key); recordRefresh(pr, refreshChecks, reproductionFiles, outcome); }),
@@ -29489,8 +29528,11 @@ function lightPassRefreshHandOffs(
     const latest = disposed.get(pr.prNumber);
     const handed = latest?.head_sha === pr.headSha ? latest[LIGHT_REFRESH_HANDOFF_FIELD] as Record<string, unknown> | null | undefined : undefined;
     const row = handed?.refresh_row;
-    if (handed?.cause !== BASE_RED_MAIN_GREEN_CAUSE || row === null || typeof row !== "object") return [];
-    return [{ pr, arm: "base-red", heldSinceMs: since(handed.held_since), row: { ...(row as LedgerLine), run_id: runId } }];
+    const cause = handed?.cause;
+    const arm = cause === BASE_RED_MAIN_GREEN_CAUSE ? "base-red" as const : cause === BASE_FIXED_MAIN_CAUSE ? "base-fixed" as const
+      : cause === NO_COMMIT_MOVED_MAIN_CAUSE ? "fix-rung" as const : undefined;
+    if (arm === undefined || row === null || typeof row !== "object") return [];
+    return [{ pr, arm, heldSinceMs: since(handed?.held_since), row: { ...(row as LedgerLine), run_id: runId } }];
   });
 }
 
@@ -29526,20 +29568,27 @@ export async function runLightPassRefreshAdmission(
     for (const handed of incidentHold ? [] : handOffs) {
       const { pr } = handed;
       const ownRecord = handed.arm === OWN_TASK_RECORD_MISSING_CAUSE;
-      if (!ownRecord && refreshed.has(`${pr.prNumber}@${pr.headSha}`)) continue;
+      // W1-T13156: a no-commit fix's one record is its `sweep.disposed` receipt, which the fan-out reads as spent.
+      const noCommit = handed.row.cause === NO_COMMIT_MOVED_MAIN_CAUSE;
+      if (!ownRecord && !noCommit && refreshed.has(`${pr.prNumber}@${pr.headSha}`)) continue;
       const row = { ...handed.row, surface: "light" };
-      const forcedBy = ownRecord ? OWN_TASK_RECORD_MISSING_CAUSE : REFRESH_ADMISSION_FORCED_BY;
+      const forcedBy = ownRecord ? OWN_TASK_RECORD_MISSING_CAUSE : noCommit ? NO_COMMIT_MOVED_MAIN_CAUSE : REFRESH_ADMISSION_FORCED_BY;
       await admission.enter({ ...handed, row, settle: () => {}, refresh: async () => {
         let outcome: string;
         try {
           // W1-T7735: the value test every repair refresh takes; CI in flight at this head holds the press.
           const gate = await (valueGate ??= buildRefreshValueGate(deps, openPrs, ledgerLines, clockFromMillisFn(deps.now).now(), appendLine));
-          outcome = await gate.settle({ prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) },
-            pr, ownRecord ? "plan-repair" : "base-red", undefined, forcedBy) ? await updateBranch(pr) : "value-skip";
+          const allowed = await gate.settle({ prNumber: pr.prNumber, prUrl: pr.prUrl, headSha: pr.headSha, ...(pr.taskId === undefined ? {} : { taskId: pr.taskId }) },
+            pr, ownRecord ? "plan-repair" : "base-red", undefined, forcedBy);
+          // Claim before the press, as the full surface does: a crash or a partial refresh never retries this head.
+          if (allowed && noCommit) appendLine(deps.ledgerPath, row);
+          outcome = allowed ? await updateBranch(pr) : "value-skip";
         } catch (error) { outcome = `error: ${String((error as Error)?.message ?? error)}`; }
         // The one record per head and cause. W1-T9232's refresh has no value test of its own, so a value-skip there
         // pressed nothing and spends nothing; a base-red value-skip is recorded, as the full pass records it.
-        if (!ownRecord || outcome !== "value-skip") appendLine(deps.ledgerPath, { ...row, outcome, forced_by: forcedBy });
+        if (noCommit) {
+          if (outcome !== "value-skip") appendLine(deps.ledgerPath, { ...row, outcome, no_commit_refresh_outcome: outcome, forced_by: forcedBy });
+        } else if (!ownRecord || outcome !== "value-skip") appendLine(deps.ledgerPath, { ...row, outcome, forced_by: forcedBy });
         return outcome;
       } });
     }
