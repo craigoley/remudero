@@ -25,18 +25,18 @@
   acceptance:
     - claim: "A split-follow-up for a task and criterion that a task on origin/main already holds (depends_on names the task, the title ends with (held follow-up), and its acceptance carries the criterion's claim) reserves no id, lands no file, and writes one taken parked_pr.remedy row that names that task as held_task_id, with a ledger that holds no earlier parked_pr.remedy row"
       proof: "grep: W1-T13944 criterion 1: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
-    - claim: "The same holds when the held follow-up is not on origin/main but waits in the task-files landing queue, staged or carried by an open landing pull request"
+    - claim: "The same holds when the held follow-up is not on origin/main but waits in the task-files landing queue, staged locally or carried by the head of an open landing pull request as GitHub reports it, including a file the local queue has set aside while that pull request is still open"
       proof: "grep: W1-T13944 criterion 2: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
-    - claim: "invariant:one-held-follow-up-per-criterion — two remedy calls for the same task and criterion started together on an empty ledger reserve exactly one id, and every file they land names that one id"
+    - claim: "invariant:one-held-follow-up-per-criterion — two remedy calls for the same task and criterion started together on an empty ledger reserve exactly one id, and every file they land names that one id; this holds when the two calls move overlapping criterion sets (one moves A and B, the other B), and when a pass stops after any single write of its claim step"
       kind: guard
       proof: "grep: W1-T13944 criterion 3: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
-    - claim: "After a restart, a pass with a new host and an empty ledger that finds a claim left by a pass that reserved an id and stopped before its file staged lands that same id again and reserves none"
+    - claim: "After a restart, a pass with a new host and an empty ledger that finds a claim left by a pass that reserved an id and stopped before its file staged lands that same id again and reserves none, also when the stopped pass's pid now belongs to an unrelated live process"
       proof: "grep: W1-T13944 criterion 4: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
     - claim: "A split whose held file stages but whose edit of the parent task file the plan preflight refuses writes a row that names held_task_id, and the next call, with every parked_pr.remedy row removed from its ledger, reserves no id"
       proof: "grep: W1-T13944 criterion 5: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
     - claim: "A different criterion of the same task, and the same criterion of a different task, each still file their own held follow-up"
       proof: "grep: W1-T13944 criterion 6: in test/sweep/one-held-follow-up-per-task-and-criterion.test.ts"
-    - claim: "The sweep's parked pull request host gives the remedy the held follow-ups on the plan and in the landing queue"
+    - claim: "The sweep's parked pull request host gives the remedy the held follow-ups on freshly fetched origin/main and in the landing queue, and a record that neither holds (for example one removed by a merged plan edit) counts as absent even when the daemon's own checkout still has it"
       proof: "grep: readHeldFollowUps: in src/lib/sweep.ts"
   rationale: |
     WHY: between 07:46 and 11:17 UTC on 2026-11-20 the sweep filed eleven identical held follow-ups of
@@ -88,6 +88,22 @@
        stagedTaskFiles(config.root), and passes config.root for the claims.
     6. ledger-steps.ts: the parked_pr.remedy meaning names reused and partial_refusal.
     No count or cap: a held follow-up stops the next one only while it exists.
+    THREAT MODEL (restructure 2026-11-21, after seven review rounds on PR 19871 each found a new race; every
+    case below must hold, and anything not listed keeps origin/main's behaviour):
+    T1 matching: a held task matches on the three predicates in item 1 alone. No other field (rationale,
+       origin, note, an inherited depends_on entry beside the parent) can stop or make a match.
+    T2 sources: the plan source is origin/main fetched in the selected checkout at the time of the read, never
+       the daemon's own checkout. The landing queue source is the union of the local staged files and the task
+       files on the head of every open task-files landing pull request, read from GitHub. A file counts while
+       any one source holds it.
+    T3 claims are per criterion: one claim file per (parent id, criterion claim), created by exclusive create
+       and written whole by write-then-rename, so a stop leaves no claim or a complete one. A split takes its
+       criteria's claims one at a time in sorted claim order. A criterion whose claim already names an id is
+       not filed again: the split reuses that id for it, and files only the criteria it newly claimed.
+    T4 holder identity: a claim records its holder's pid and process start time. A holder whose pid is gone,
+       or whose pid now has a different start time, is dead; its id is landed again, as item 3 says.
+    T5 a source that cannot be read (GitHub down, fetch failed) makes the split refuse with a named reason and
+       file nothing; it never reads as "no held follow-up".
   falsifier: |
     Remove the readHeldFollowUps lookup and the claim: criterion 1's fixture reserves a second id and lands a
     second held file, and criterion 3's two concurrent calls reserve two ids.
@@ -96,6 +112,8 @@
     separate plan-only pull request, superseded by W1-T13919. Not in scope: the split of a criterion that proves
     the parent's INVARIANT always fails design-invariant-proof on the parent edit; with this task it files once
     and stays held instead of filing again.
+    RESTRUCTURED 2026-11-21 (operator standing rule; tightening only, no criterion narrowed): criteria 2, 3, 4
+    and 7 gain the cases the PR 19871 reviews found, and the design gains the threat model T1 to T5.
     Scope amended 2026-11-21: the held follow-up lookup now fetches origin/main in the selected checkout, so
     test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts seeds its two catalog fixtures
     as clones with a local origin (PR 19871 commit 046f5a140). The acceptance-author gate refused that file as
