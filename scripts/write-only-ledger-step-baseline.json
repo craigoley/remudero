@@ -1,5 +1,5 @@
 {
-  "_comment": "W1-T14149: initial debt measured on merge-base 35e8258f4069ac20ab069be6e197ba383f24649b (2394 emitted, 970 read outside their writers, 1424 write-only). \"writeOnly\" is pre-existing debt and only shrinks. Remove an entry when it gains a reader or stops being emitted. A new write-only step needs an external reader or a \"recordOnly\" entry with a non-empty reason.",
+  "_comment": "W1-T14149: initial debt measured on merge-base b17638178da45ac1754cb0883a35089579e765ba (2399 emitted, 972 read outside their writers, 1427 write-only). \"writeOnly\" is pre-existing debt and only shrinks. Remove an entry when it gains a reader or stops being emitted. A new write-only step needs an external reader or a \"recordOnly\" entry with a non-empty reason.",
   "writeOnly": [
     "acceptance.fallback.diff_anchor_unavailable",
     "acceptance.repair.error",
@@ -530,6 +530,7 @@
     "inbox.draft_cash_skipped",
     "inbox.draft_deferral_recorded",
     "inbox.draft_fellthrough",
+    "inbox.draft_history_partial",
     "inbox.draft_readiness_unavailable",
     "inbox.draft_relint",
     "inbox.draft_rung.error",
@@ -739,6 +740,7 @@
     "orientation.regenerated",
     "orientation.write.error",
     "paired_trial.error",
+    "parked_pr.held_follow_ups_unread",
     "pause.lapsed",
     "pause.needs_human",
     "pause.needs_human_failed",
@@ -993,6 +995,7 @@
     "risk_judge.parse_attempt",
     "risk_judge.typed_shadow",
     "routing.experiment.result",
+    "routing.policy.estimate",
     "run.agent_wait_heap",
     "run.disk_reclaim",
     "run.handoff_declined",
