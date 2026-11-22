@@ -60,6 +60,9 @@
 #   RMD_CLEANUP_HOME            the home whose ~/*/.claude/{worktrees,projects} are swept
 #   RMD_CLEANUP_WORKTREE_ROOTS  colon-separated roots whose immediate Git worktrees are swept
 #   RMD_CLEANUP_LIVE_CHECKOUTS  live checkouts kept while judging only untracked immediate clones
+#   RMD_CLEANUP_RECLAIM_ROOT_HAND_WORKTREES  1 enables reclaim of idle registered hand worktrees on
+#                               the root filesystem (default report-only). Remove a private
+#                               node_modules first, then assess the remaining tree on a later pass.
 #   RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS  exact checkout paths excluded from those scans
 #                               (plus each ${RMD_SCRATCH_ROOT:-/mnt/scratch}/rmd/*/remudero|serve-repo, W1-T9617)
 #   RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT  durable location for unpublished clean HEAD bundles
@@ -159,6 +162,7 @@ STATE_DISK="${RMD_CLEANUP_STATE_DISK:-/mnt/rmd}"
 SCRATCH_DISK="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
 WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees}"  # 2026-10-01 coordinator: $HOME trees are live checkouts (rmd-mint, rmd-op); never swept
 LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-$CLEAN_HOME/rmd-mint:$CLEAN_HOME/rmd-op}"
+RECLAIM_ROOT_HAND_WORKTREES="${RMD_CLEANUP_RECLAIM_ROOT_HAND_WORKTREES:-0}"
 PROTECTED_WORKTREE_ROOTS="${RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS-$CLEAN_HOME/rmd-serve-repo}"
 # W1-T9617: with the hot checkouts on scratch (deploy/scratch-mounts.sh), each daemon's own checkout
 # and serve's code dir live at <scratch>/rmd/<key>/remudero and .../serve-repo. They are live
@@ -471,13 +475,23 @@ is_protected_worktree() {
   return 1
 }
 
+ROOT_HAND_WORKTREES=()
+root_hand_overlap() {
+  local p="${1%/}" wt
+  for wt in ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"}; do
+    case "$p" in "$wt"|"$wt"/*) return 0 ;; esac
+    case "$wt" in "$p"/*) return 0 ;; esac
+  done
+  return 1
+}
+
 # W1-T12454: a path under a worktree root belongs to the worktree rules, so the scratch walks leave it.
 worktree_root_of() {   # prints the worktree root that is $1 or holds it
   local p="${1%/}" r
   while IFS= read -r r; do
     r="${r%/}"; [ -n "$r" ] || continue
     case "$p" in "$r"|"$r"/*) printf '%s\n' "$r"; return 0 ;; esac
-  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n'; printf '%s\n' ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"})
   return 1
 }
 worktree_root_inside() {   # prints a worktree root strictly inside $1
@@ -485,13 +499,14 @@ worktree_root_inside() {   # prints a worktree root strictly inside $1
   while IFS= read -r r; do
     r="${r%/}"; [ -n "$r" ] || continue
     case "$r" in "$p"/*) printf '%s\n' "$r"; return 0 ;; esac
-  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n'; printf '%s\n' ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"})
   return 1
 }
 
 # One decision per path: keep-with-reason, or remove.
 sweep_path() {
   local p="$1" idle_status seed_reason entries bytes
+  root_hand_overlap "$p" && return
   keep_container_path "$p" && return
   # Generic temp globs must not bypass Git safety for a checkout or a unit
   # containing one. Incomplete walks are not permission to remove a tree.
@@ -602,6 +617,21 @@ clone_live_worktree() {
   done
   return 1
 }
+
+worktree_cache_safe() {
+  local wt="$1" name="$2" tree="$1/$2" found tracked
+  CACHE_REASON="not a private cache directory"
+  [ -d "$tree" ] && [ ! -L "$tree" ] || return 1
+  CACHE_REASON="Git does not confirm it is ignored and untracked"
+  rgit "$wt" check-ignore -q -- "$name" 2>/dev/null &&
+    tracked="$(rgit "$wt" ls-files -- "$name" 2>/dev/null)" && [ -z "$tracked" ] || return 1
+  CACHE_REASON="holds a bundle or repository, or its scan failed"
+  found="$(find "$tree" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null)" && [ -z "$found" ] || return 1
+  CACHE_REASON="dependency seed"
+  if rmd_dependency_seed_risk "$tree" >/dev/null; then return 1; fi
+  return 0
+}
+
 # A worktree kept for a work reason (uncommitted changes, unpublished HEAD, unknown ignored data, a
 # lock) still loses its generated node_modules/ and coverage/ once it is idle, unheld and unmounted:
 # generated output never holds the checkout's work (the Mac janitor's rule since 2026-11-02). On
@@ -609,21 +639,14 @@ clone_live_worktree() {
 # by exact name, never through a symlink, while Git confirms it is ignored and tracks nothing in it,
 # and never one holding a nested .git or a *.bundle.
 prune_held_worktree() {
-  local wt="$1" reason="$2" name tree found tracked bytes
+  local wt="$1" reason="$2" name tree bytes CACHE_REASON
   log "KEEP $wt: $reason"
   is_worktree_idle "$wt" || return 0
   if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
   for name in node_modules coverage; do
     tree="$wt/$name"
     [ -d "$tree" ] && [ ! -L "$tree" ] || continue
-    if ! rgit "$wt" check-ignore -q -- "$name" 2>/dev/null || \
-       ! tracked="$(rgit "$wt" ls-files -- "$name" 2>/dev/null)" || [ -n "$tracked" ]; then
-      log "KEEP $tree: Git does not confirm it is ignored and untracked"; continue
-    fi
-    if ! found="$(find "$tree" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null)" || [ -n "$found" ]; then
-      log "KEEP $tree: holds a bundle or repository, or its scan failed"; continue
-    fi
-    if rmd_dependency_seed_risk "$tree" >/dev/null; then log "KEEP $tree: dependency seed"; continue; fi
+    if ! worktree_cache_safe "$wt" "$name"; then log "KEEP $tree: $CACHE_REASON"; continue; fi
     if [ "$DRY_RUN" != 1 ]; then snapshot_open; snapshot_docker; fi
     if ! is_idle "$tree" || is_open "$tree" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$tree"; then
       log "KEEP $tree: recent, active or unverified cache"; continue
@@ -747,6 +770,7 @@ sweep_live_checkout() {
   [ "$top" = "$(cd -P -- "$checkout" && pwd -P)" ] || return
   for wt in "$checkout"/* "$checkout"/.[!.]* "$checkout"/..?*; do
     [ -d "$wt/.git" ] && [ ! -L "$wt" ] && [ ! -L "$wt/.git" ] || continue
+    root_hand_overlap "$wt" && continue
     child="${wt##*/}"
     rgit "$checkout" ls-files --error-unmatch -- "$child/" >/dev/null 2>&1; status=$?
     [ "$status" = 1 ] || continue
@@ -762,6 +786,124 @@ sweep_live_checkout() {
 fs_id() {
   if [ -n "$FSID_CMD" ]; then $FSID_CMD "$1"
   else stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; fi
+}
+
+is_hand_worktree_name() {
+  [[ "$1" == wt-* || "$1" =~ ^run-(unfiled|[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?)-[0-9]+$ ]]
+}
+
+discover_root_hand_worktrees() {
+  local checkout entry wt branch device seen listed
+  local -a fields
+  ROOT_HAND_DEVICE="$(fs_id "$ROOT_FS")" || ROOT_HAND_DEVICE=""
+  while IFS= read -r checkout; do
+    checkout="${checkout%/}"
+    [ ! -L "$checkout" ] && [ ! -L "$checkout/.git" ] &&
+      { [ -d "$checkout/.git" ] || [ -f "$checkout/.git" ]; } || continue
+    fields=(); listed=0
+    while IFS= read -r -d '' entry; do
+      if [ "$entry" = 'rmd-list-complete' ]; then listed=1; break; fi
+      fields+=("$entry")
+    done < <(rgit "$checkout" worktree list --porcelain -z 2>/dev/null && printf 'rmd-list-complete\0')
+    if [ "$listed" = 0 ]; then log "KEEP $checkout: cannot list registered hand worktrees"; continue; fi
+    wt=""; branch=""
+    for entry in ${fields[@]+"${fields[@]}"}; do
+      case "$entry" in
+        'worktree '*) wt="${entry#worktree }"; branch=""; continue ;;
+        'branch refs/heads/'*) branch="${entry#branch refs/heads/}"; continue ;;
+        '') ;;
+        *) continue ;;
+      esac
+      case "$wt" in */.claude/worktrees/*|*$'\n'*|*$'\t'*) continue ;; /*) ;; *) continue ;; esac
+      is_hand_worktree_name "${wt##*/}" || is_hand_worktree_name "$branch" || continue
+      [ -d "$wt" ] && [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ] || continue
+      [ "$(cd -P -- "$wt" 2>/dev/null && pwd -P)" = "$wt" ] || continue
+      device="$(fs_id "$wt")" || device=""
+      if [ -n "$device" ] && [ -n "$ROOT_HAND_DEVICE" ] && [ "$device" != "$ROOT_HAND_DEVICE" ]; then continue; fi
+      for seen in ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"}; do
+        [ "$wt" != "$seen" ] || continue 2
+      done
+      ROOT_HAND_WORKTREES+=("$wt")
+    done
+  done < <(printf '%s\n' "$LIVE_CHECKOUTS" "$PROTECTED_WORKTREE_ROOTS" | tr ':' '\n' | awk 'NF && !seen[$0]++')
+}
+
+root_hand_hold() {
+  local wt="$1" gitdir="$2" device
+  ROOT_HAND_REASON="filesystem or worktree registration changed or unreadable"
+  device="$(fs_id "$wt")" && [ -n "$device" ] && [ "$device" = "$ROOT_HAND_DEVICE" ] &&
+    [ "$(cd -P -- "$wt" 2>/dev/null && pwd -P)" = "$wt" ] &&
+    [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ] && [ -d "$gitdir" ] &&
+    [ "$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" = "$gitdir" ] || return 0
+  ROOT_HAND_REASON="Git worktree is locked"
+  if [ -e "$gitdir/locked" ] || [ -L "$gitdir/locked" ]; then return 0; fi
+  ROOT_HAND_REASON="recent or unverified worktree activity"
+  git_head_idle "$wt" && is_worktree_idle "$wt" || return 0
+  ROOT_HAND_REASON="held open by a process or open-file probe failed"
+  if is_open "$wt"; then return 0; fi
+  ROOT_HAND_REASON="Docker mount snapshot failed (unknown)"
+  [ "$DOCKER_OK" = 1 ] || return 0
+  if is_docker_mount "$wt"; then ROOT_HAND_REASON="$DOCKER_PATH_REASON"; return 0; fi
+  return 1
+}
+
+sweep_root_hand_worktree() {
+  local wt="$1" gitdir tree="$1/node_modules" head bytes seed_reason found ROOT_HAND_REASON CACHE_REASON
+  local RMD_GH_KNOWN=" " report_only=0
+  if [ "$DRY_RUN" = 1 ] || [ "$RECLAIM_ROOT_HAND_WORKTREES" != 1 ]; then report_only=1; fi
+  if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"; return; fi
+  if keep_marker "$wt"; then log "KEEP $wt: scratch keep marker"; return; fi
+  if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
+  gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || { log "KEEP $wt: Git metadata is unreadable"; return; }
+  if root_hand_hold "$wt" "$gitdir"; then log "KEEP $wt: $ROOT_HAND_REASON"; return; fi
+
+  if [ -d "$tree" ] && [ ! -L "$tree" ]; then
+    if ! worktree_cache_safe "$wt" node_modules; then log "KEEP $tree: $CACHE_REASON"; return; fi
+    bytes="$(du_bytes "$tree")"
+    if [ "$report_only" = 1 ]; then
+      RMD_DECISION_KNOWN_BYTES="$bytes" log "WOULD-PRUNE $tree: ${bytes:-unknown} bytes, installed dependencies"; return
+    fi
+    snapshot_open; snapshot_docker
+    if root_hand_hold "$wt" "$gitdir"; then log "KEEP $wt: $ROOT_HAND_REASON"; return; fi
+    if ! worktree_cache_safe "$wt" node_modules; then log "KEEP $tree: $CACHE_REASON"; return; fi
+    if ! audit_writable; then log "KEEP $tree: audit log unwritable ($AUDIT_LOG)"; return; fi
+    RMD_DECISION_KNOWN_BYTES="$bytes" log "PRUNE $tree: ${bytes:-unknown} bytes, installed dependencies"
+    act rm -rf -- "$tree" && tally "root hand dependencies ${wt%/*}" "$bytes"
+    return
+  fi
+
+  if ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt"; then
+    log "KEEP $wt: uncommitted, unrecognized ignored or unreadable data"; return
+  fi
+  if ! found="$(find "$wt" -name '*.bundle' -print -quit 2>/dev/null)" || [ -n "$found" ]; then
+    log "KEEP $wt: holds a bundle or the scan failed"; return
+  fi
+  if ! lender_check "$wt"; then log "KEEP $wt: $SCRATCH_REASON"; return; fi
+  if ! rmd_remote_outside_retirement "$wt" "$wt"; then
+    log "KEEP $wt: origin is inside the worktree or unverified"; return
+  fi
+  head="$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
+  if ! rmd_publication_snapshot "$wt" || ! rmd_commit_published "$wt" "$head"; then
+    log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; return
+  fi
+  bytes="$(du_bytes "$wt")"
+  if [ "$report_only" = 1 ]; then
+    RMD_DECISION_KNOWN_BYTES="$bytes" log "WOULD-REMOVE $wt: ${bytes:-unknown} bytes, published linked worktree"; return
+  fi
+  RMD_GH_KNOWN=" "
+  if ! rmd_publication_snapshot "$wt" 1 || ! rmd_commit_published "$wt" "$head"; then
+    log "KEEP $wt: $RMD_PUB_REASON before remove HEAD=$head"; return
+  fi
+  snapshot_open; snapshot_docker
+  if root_hand_hold "$wt" "$gitdir"; then log "KEEP $wt: $ROOT_HAND_REASON"; return; fi
+  if ! worktree_clean "$wt" || ! worktree_ignored_safe "$wt" ||
+     [ "$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" != "$head" ]; then
+    log "KEEP $wt: changed or not-proven-published before remove"; return
+  fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG)"; return; fi
+  RMD_DECISION_KNOWN_BYTES="$bytes" log "REMOVE $wt (linked worktree)"
+  if rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then tally "root hand worktrees ${wt%/*}" "$bytes"
+  else log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"; fi
 }
 
 DOCKER_OK=1
@@ -1126,6 +1268,7 @@ snapshot_alternates() {
   done < <(printf '%s\n%s\n%s\n%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$TMP_ROOTS" | tr ':' '\n'
              # the preserve-then-retire phase judges these too, so their borrowers count (full pass only)
              [ "$ONLY_TMP" = 1 ] || printf '%s\n' "$PRESERVE_ROOTS" | tr ':' '\n'
+             printf '%s\n' ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"}
              state_units)
 }
 # Sets SCRATCH_REASON and fails when unit $1 must stay: it borrows from a store that is gone, or a
@@ -1327,6 +1470,7 @@ sweep_nested_coverage() {
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     [[ "${p##*/}" =~ ^rmd-c-[0-9a-f]{12}$ ]] || continue
+    root_hand_overlap "$p" && continue
     ruling_namespace "$p" && continue
     case "$NESTED_COVERAGE_SEEN" in *"|$p|"*) continue ;; esac
     NESTED_COVERAGE_SEEN="$NESTED_COVERAGE_SEEN|$p|"
@@ -1772,6 +1916,7 @@ ruling_retire() {
     log "MARKER-RULING $n: operator 2026-10-23: retire idle operator/wt-* worktrees and top-level tmp, tmp-*, t3.*; keep everything else (an active operator session whose plan records holds)"
     for c in "$n"/operator/wt-* "$n"/tmp "$n"/tmp-* "$n"/t3.*; do
       [ -d "$c" ] && [ ! -L "$c" ] || continue
+      root_hand_overlap "$c" && continue
       RULING_CHILD="$c"
       if scan_find "$c" -name node_modules -prune -o \( -name .git -o -name '*.bundle' \) -print -quit && [ -z "$SCAN_OUT" ]; then
         ruling_remove_plain "$c" "$n"
@@ -2066,6 +2211,7 @@ sweep_agent_scratch() {
   [ -d "$root" ] && [ ! -L "$root" ] || return 0
   for e in "$root"/* "$root"/.[!.]* "$root"/..?*; do
     { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    root_hand_overlap "$e" && continue
     keep_container_path "$e" && continue
     if keep_marker "$e"; then log "KEEP $e: scratch keep marker"; continue; fi
     if [ -d "$e" ] && [ ! -L "$e" ]; then
@@ -2322,6 +2468,7 @@ snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: $OPEN_FAILURE — keeping everything (fail closed)"
 
 snapshot_docker
+discover_root_hand_worktrees
 snapshot_alternates
 while IFS= read -r root; do
   [ -n "$root" ] && sweep_scratch_root "$root"
@@ -2366,6 +2513,7 @@ reclaim_host_inflight_locks
 if [ "$ONLY_TMP" != 1 ]; then
   for wt in "$CLEAN_HOME"/*/.claude/worktrees/*; do
     [ -d "$wt" ] || continue
+    root_hand_overlap "$wt" && continue
     if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"
     else sweep_worktree "$wt"; fi
   done
@@ -2374,6 +2522,7 @@ if [ "$ONLY_TMP" != 1 ]; then
     [ -n "$root" ] && [ -d "$root" ] || continue
     for wt in "$root"/*; do
       [ -d "$wt" ] || continue
+      root_hand_overlap "$wt" && continue
       if is_protected_worktree "$wt"; then log "KEEP $wt: protected by janitor configuration"
       else sweep_worktree "$wt"; fi
     done
@@ -2382,6 +2531,10 @@ if [ "$ONLY_TMP" != 1 ]; then
   while IFS= read -r checkout; do
     [ -n "$checkout" ] && sweep_live_checkout "$checkout"
   done < <(printf '%s\n' "$LIVE_CHECKOUTS" | tr ':' '\n')
+
+  for wt in ${ROOT_HAND_WORKTREES[@]+"${ROOT_HAND_WORKTREES[@]}"}; do
+    sweep_root_hand_worktree "$wt"
+  done
 
   preserve_then_retire
   dump_housekeeping

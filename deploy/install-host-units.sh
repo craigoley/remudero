@@ -2184,11 +2184,6 @@ if [ -n "$CLEANUP_PATH" ]; then
     TMP_SWEEP_CRON_PATH="/etc/cron.d/rmd-tmp-sweep"
   fi
   require_abs_path "RMD_TMP_SWEEP_PATH" "$TMP_SWEEP_PATH"
-  if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
-    require_abs_path "RMD_TMP_SWEEP_CRON_PATH" "$TMP_SWEEP_CRON_PATH"
-    TMP_SWEEP_CRON_LINE="0 * * * * root RMD_HOST_CLEANUP_SCRIPT=${CLEANUP_PATH} ${TMP_SWEEP_PATH} >> ${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log} 2>&1"
-    TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
-  fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
   # Include the service user's disposable worktree root in the same guarded six-hour janitor.
   # It is separate from /mnt/scratch/worktrees, and omitting it left stale linked trees in rmd-work
@@ -2197,6 +2192,13 @@ if [ -n "$CLEANUP_PATH" ]; then
   # checkout wt-reserve sits there too, so it is a live checkout and never swept.
   CLEANUP_WORKTREE_ROOTS="${RMD_CLEANUP_WORKTREE_ROOTS-/mnt/scratch/worktrees:/home/${SERVICE_USER}/rmd-work:/mnt/scratch/rmd/hand}"
   CLEANUP_LIVE_CHECKOUTS="${RMD_CLEANUP_LIVE_CHECKOUTS-/home/${SERVICE_USER}/rmd-mint:/home/${SERVICE_USER}/rmd-op:/mnt/scratch/rmd/hand/wt-reserve}"
+  CLEANUP_LIVE_CHECKOUTS_CRON="$(printf '%q' "$CLEANUP_LIVE_CHECKOUTS")"
+  CLEANUP_LIVE_CHECKOUTS_CRON="${CLEANUP_LIVE_CHECKOUTS_CRON//%/\\%}"
+  if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+    require_abs_path "RMD_TMP_SWEEP_CRON_PATH" "$TMP_SWEEP_CRON_PATH"
+    TMP_SWEEP_CRON_LINE="0 * * * * root RMD_HOST_CLEANUP_SCRIPT=${CLEANUP_PATH} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS_CRON} ${TMP_SWEEP_PATH} >> ${CLEANUP_LOG} 2>&1"
+    TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
+  fi
   while IFS= read -r live_checkout; do
     [ -n "$live_checkout" ] || continue
     checkout_git "$live_checkout" rev-parse --git-dir >/dev/null 2>&1 || continue
@@ -2231,7 +2233,11 @@ if [ -n "$CLEANUP_PATH" ]; then
       drift=$(( drift + 1 ))
     fi
   done < <(printf '%s\n' "$CLEANUP_LIVE_CHECKOUTS" | tr ':' '\n')
-  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
+  CLEANUP_ROOT_HAND_OPT_IN=""
+  if [ "${RMD_CLEANUP_RECLAIM_ROOT_HAND_WORKTREES:-0}" = 1 ]; then
+    CLEANUP_ROOT_HAND_OPT_IN=' RMD_CLEANUP_RECLAIM_ROOT_HAND_WORKTREES=1'
+  fi
+  CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} RMD_CLEANUP_WORKTREE_ROOTS=${CLEANUP_WORKTREE_ROOTS} RMD_CLEANUP_LIVE_CHECKOUTS=${CLEANUP_LIVE_CHECKOUTS_CRON}${CLEANUP_ROOT_HAND_OPT_IN} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   cron_lines_for_janitor() { printf '%s\n' "$1" | grep -F -- "$CLEANUP_PATH" || true; }
   cron_without_janitor() { printf '%s\n' "$1" | grep -F -v -- "$CLEANUP_PATH" || true; }
 
