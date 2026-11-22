@@ -386,8 +386,10 @@ export function buildSweepEffects(
         delivered_at: delivered.row.ts,
         reviewer_code_sha: deliveredCode.codeSha,
         ...(pr.reviewPendingSince === undefined ? {} : { regression_since: pr.reviewPendingSince }),
+        // W1-T14241 (invariant capped-is-not-green): a delivered capped code pass no override certified restores as pending.
+        ...(restored.cappedHold === undefined ? {} : { capped_hold: restored.cappedHold }),
       });
-      return verdict.state === "success" ? 0 : 1;
+      return (restored.effectiveState ?? verdict.state) === "success" ? 0 : 1;
     }
     if (reviewAttemptId !== undefined) {
       const key = { taskId: reviewLedgerKeyFor(pr.taskId, pr.prNumber), prUrl: pr.prUrl, headSha: pr.headSha };
@@ -486,6 +488,10 @@ export function buildSweepEffects(
               if (discriminationPosted.effectiveVerdict) verdict = { ...discriminationPosted.effectiveVerdict, state: discriminationPosted.effectiveState ?? discriminationPosted.effectiveVerdict.state };
               if (!poster.failed()) onPhase?.("posted");
               if (!discriminationPosted.posted && !discriminationPosted.replayed) {
+                exitCode = 1;
+              } else if (discriminationPosted.cappedHold !== undefined) {
+                // W1-T14241 (invariant capped-is-not-green): the re-judged capped code pass was held as pending, which is
+                // no terminal decision, so no review.posted row is written for it.
                 exitCode = 1;
               } else {
                 appendLedger(deps.ledgerPath, {
@@ -596,6 +602,8 @@ export function buildSweepEffects(
     if (reusedStatus.effectiveVerdict) verdict = { ...reusedStatus.effectiveVerdict, state: reusedStatus.effectiveState ?? reusedStatus.effectiveVerdict.state };
     if (!poster.failed()) onPhase?.("posted");
     if (!reusedStatus.posted && !reusedStatus.replayed) return 1;
+    // W1-T14241 (invariant capped-is-not-green): a reused capped code pass was held as pending — no terminal decision.
+    if (reusedStatus.cappedHold !== undefined) return 1;
     appendLedger(deps.ledgerPath, {
       run_id: reuseRunId,
       ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId }),
