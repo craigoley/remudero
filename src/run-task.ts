@@ -641,7 +641,7 @@ import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProje
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, noteHealedTreeOutcome, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -2473,7 +2473,6 @@ export function buildReviewerHealthRoute(
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
   const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
     (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
-  const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
@@ -2483,18 +2482,14 @@ export function buildReviewerHealthRoute(
     // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
     const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
     const healed = await buildHealedReviewerTree(repoDir, incident.offending!.sha, cut, remove, withPr === undefined ? {} : { withPr });
+    // W1-T13393: the outcome is recorded on the incident, and its first conflict escalated, once per incident.
+    await noteHealedTreeOutcome(statePath, incident, healed, escalation, log, systemClock);
     if (healed.state === "empty") {
       log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
       return normal();
     }
     if (healed.state !== "ready") {
       log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, ...reviewerHealedTreeUnavailableFields(healed) });
-      const key = `${incident.id}:${healed.originMainSha}`;
-      if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
-        escalatedConflicts.add(key);
-        // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
-        await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
-      }
       return normal();
     }
     const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
