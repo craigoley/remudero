@@ -359,9 +359,11 @@ function placementHistory(): { dir: string; code: string; placement: string; mat
     repo.git("commit", "--quiet", "-m", message);
     return repo.git("rev-parse", "HEAD");
   };
+  // These specifiers resolve in the fixture repository. Keep them out of the test import census.
+  const fixtureLib = "./lib";
   const runTask = [
-    'import { judge } from "./lib/review.js";',
-    'import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";',
+    `import { judge } from "${fixtureLib}/review.js";`,
+    `import { withReviewerWorktreeLease } from "${fixtureLib}/reviewer-worktree-lease.js";`,
     "",
     "async function runReview(pr: string): Promise<string> {",
     "  return judge(pr);",
