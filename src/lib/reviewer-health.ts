@@ -29,7 +29,7 @@
  * incident per diverged model and changes no route, verdict or sha judgment.
  */
 import { createHash } from "node:crypto";
-import { closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1024,6 +1024,7 @@ export async function buildHealedReviewerTree(
 export function resetHealedReviewerTrees(): void {
   healedMemo.clear();
   healedConflictMemo.clear();
+  escalatedHealedDeaths.clear();
 }
 
 /** The outcome-mix evidence, as the revert PR body and the issue name it. */
@@ -1070,6 +1071,97 @@ export function reviewerRegressionEscalation(incident: ReviewerIncident, conflic
     consequence: conflict
       ? "Reviews keep running on the regressed reviewer, as before this incident, until a fix merges."
       : "Reviews keep running from the healed tree until the incident closes; nothing merges without review.",
+  };
+}
+
+/** W1-T14283 — the live ledger before a healed review child spawns: its inode, or null when absent, and its size. */
+export type HealedChildLedgerMark = { ino: number | null; size: number };
+
+/** W1-T14283 — PRIMARY CONTROL on how much ledger a healed child's death reads to prove it never started judging. A child that
+ *  dies at module load appends nothing of its own; a tail longer than this reads as started, so it never falls back. */
+export const HEALED_CHILD_TAIL_MAX_BYTES = 8 * 1024 * 1024;
+
+/** W1-T14283 — mark the live ledger before a healed child spawns. Null when it cannot be read: then nothing proves the child
+ *  never started, and {@link healedChildStartedJudging} reads it as started. */
+export function healedChildLedgerMark(ledgerPath: string): HealedChildLedgerMark | null {
+  try {
+    const { ino, size } = statSync(ledgerPath);
+    return { ino, size };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? { ino: null, size: 0 } : null;
+  }
+}
+
+/**
+ * W1-T14283 — the record that a healed review child started judging: the `review.start_phases` row `rmd review` writes for its
+ * pull request before it judges, appended after `mark`. Absence is proved only by a readable, unrotated, bounded tail; an
+ * unknown pull request, an unreadable or rotated ledger or a longer tail reads as started, the answer that never falls back.
+ */
+export function healedChildStartedJudging(ledgerPath: string, mark: HealedChildLedgerMark | null, prNumber: number | undefined): boolean {
+  if (mark === null || prNumber === undefined) return true;
+  let fd: number;
+  try {
+    fd = openSync(ledgerPath, "r");
+  } catch (error) {
+    // Still absent: the child wrote nothing. Gone since the mark (rotated) or unreadable: unknown, so started.
+    return !((error as NodeJS.ErrnoException)?.code === "ENOENT" && mark.ino === null);
+  }
+  try {
+    const { ino, size } = fstatSync(fd);
+    if ((mark.ino !== null && ino !== mark.ino) || size < mark.size || size - mark.size > HEALED_CHILD_TAIL_MAX_BYTES) return true;
+    const tail = Buffer.alloc(size - mark.size);
+    if (readSync(fd, tail, 0, tail.length, mark.size) < tail.length) return true;
+    const runPrefix = `review-PR${prNumber}-`;
+    return tail.toString("utf8").split("\n").some((line) => {
+      if (!line.includes("review.start_phases")) return false;
+      try {
+        const row = JSON.parse(line) as { step?: unknown; run_id?: unknown };
+        return row.step === "review.start_phases" && typeof row.run_id === "string" && row.run_id.startsWith(runPrefix);
+      } catch {
+        return false; // a torn or foreign line is no record of this child
+      }
+    });
+  } catch {
+    return true; // an unreadable tail proves nothing, so the child may have judged
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * W1-T14283 — a healed child died before it could judge, on positive evidence only: a non-zero exit with no signal, an exit
+ * cause the child never reported (it died before `rmd review` could name one: an import crash), and no record that it started
+ * judging. A FAIL verdict, a withheld post and a setup refusal each name their cause, and a signal is its own cause, so
+ * INVARIANT a-judgement-never-falls-back: none of them is ever this.
+ */
+export function healedChildDiedBeforeJudging(code: number, exit: { cause: string; signal?: string } | undefined, started: () => boolean): boolean {
+  return code !== 0 && exit !== undefined && exit.cause === "not-reported" && exit.signal === undefined && !started();
+}
+
+/** W1-T14283 — the incidents and offending shas whose healed child's death was escalated, process-wide: the route is rebuilt every
+ *  poll, and a main advance or a later pull request must not escalate the same death again. */
+const escalatedHealedDeaths = new Set<string>();
+
+/** W1-T14283 — true once for each incident and offending sha: the caller escalates only on true. */
+export function claimHealedDeathEscalation(incident: ReviewerIncident): boolean {
+  const key = `${incident.id}:${incident.offending?.sha ?? ""}`;
+  if (escalatedHealedDeaths.has(key)) return false;
+  escalatedHealedDeaths.add(key);
+  return true;
+}
+
+/** W1-T14283 — the incident as an escalation when its healed child dies before it can judge: reviews then run from today's path. */
+export function reviewerHealedChildDiedEscalation(incident: ReviewerIncident, failure: string): Escalation {
+  const base = reviewerRegressionEscalation(incident, { reason: failure, paths: [] });
+  return {
+    ...base,
+    summary: `Reviewer regression ${incident.id}: the healed reviewer dies before it can judge`,
+    detail: [
+      reviewerRegressionEvidenceText(incident),
+      "",
+      `The healed reviewer (origin/main with the offending merge reverted) exits before it judges, reporting no cause: ${failure}. ` +
+        "Reviews run from today's path, unchanged.",
+    ].join("\n"),
   };
 }
 
