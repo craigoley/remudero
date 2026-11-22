@@ -19,7 +19,7 @@
     - test/the-merge-queue-runs-the-recorded-literal-gates.test.ts
     - test/fast-lane-classifier.test.ts
     - test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main dd829e355 (2026-11-21). Two self-improvement loops were found closed in code and open in effect:

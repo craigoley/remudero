@@ -33,6 +33,7 @@ import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -279,7 +280,8 @@ function testRepoRootViolations({ changed, readHead, readBase }) {
  * the merge base, or null when it does not exist there.
  *
  * @param {{ changed: string[], readHead: (p: string) => string | null, readBase: (p: string) => string | null,
- *   measuredFiles: string[], testFiles: string[], reportHouseLayoutSplit?: (line: string) => void }} input
+ *   measuredFiles: string[], testFiles: string[], reportHouseLayoutSplit?: (line: string) => void,
+ *   runWriteOnlyLedgerStep?: () => { status: number | null, stdout: string } }} input
  */
 export function evaluateCensusPrecheck(input) {
   return [
@@ -290,15 +292,16 @@ export function evaluateCensusPrecheck(input) {
     ...depsInterfaceViolations(input),
     ...scriptRatchetViolations(input),
     ...testRepoRootViolations(input),
+    ...writeOnlyLedgerStepViolations({ changed: input.changed, readHead: input.readHead, runRatchet: input.runWriteOnlyLedgerStep }),
   ];
 }
 
 const CI_YAML_PATH = ".github/workflows/ci.yml";
 
-/** W1-T5737: a push that edits ci.yml or the parity baseline must leave every script gate ci.yml runs with a
- *  verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only the two files. */
+/** W1-T5737: a push that edits ci.yml, package.json or the parity baseline must leave every script gate ci.yml runs
+ *  with a verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only those files. */
 function scriptRatchetViolations({ changed, readHead }) {
-  if (!changed.includes(CI_YAML_PATH) && !changed.includes(PRECHECK_PARITY_BASELINE)) return [];
+  if (![CI_YAML_PATH, PACKAGE_JSON, PRECHECK_PARITY_BASELINE].some((p) => changed.includes(p))) return [];
   const ci = readHead(CI_YAML_PATH);
   const baselineText = readHead(PRECHECK_PARITY_BASELINE);
   if (ci === null || baselineText === null) return [];
@@ -309,7 +312,7 @@ function scriptRatchetViolations({ changed, readHead }) {
     return [];
   }
   if (typeof rows !== "object" || rows === null || Array.isArray(rows)) return [];
-  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci), baseline: rows });
+  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci, readHead(PACKAGE_JSON)), baseline: rows });
   return verdict.unasked.map(
     (key) =>
       `script-ratchet: ${key} runs in ${CI_YAML_PATH} but nothing asks it before the push — model it in ` +
@@ -1008,6 +1011,85 @@ function hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests, pla
   return actual.every((title) => declared.has(title)) && actual.length === declared.size;
 }
 
+const require = createRequire(import.meta.url);
+
+function isLinuxSkipCondition(bytes, node) {
+  if (node?.type !== "BinaryExpression") return false;
+  const scanner = createScanner(true, undefined, bytes.subarray(node.span.start - 1, node.span.end - 1).toString());
+  const tokens = [[SyntaxKind.Identifier, "process"], [SyntaxKind.DotToken], [SyntaxKind.Identifier, "platform"],
+    [SyntaxKind.ExclamationEqualsEqualsToken], [SyntaxKind.StringLiteral, "linux"], [SyntaxKind.EndOfFile]];
+  return tokens.every(([kind, value]) => scanner.scan() === kind && (value === undefined || scanner.getTokenValue() === value));
+}
+
+function hasLinuxBodyGate(bytes, callback) {
+  if (callback?.type !== "ArrowFunctionExpression" && callback?.type !== "FunctionExpression") return false;
+  const parameter = callback.params[0]?.pat ?? callback.params[0];
+  const first = callback.body?.stmts?.[0];
+  if (parameter?.type !== "Identifier" || first?.type !== "IfStatement" || first.alternate ||
+      !isLinuxSkipCondition(bytes, first.test) || first.consequent.type !== "BlockStatement") return false;
+  const [skip, exit, ...rest] = first.consequent.stmts;
+  const call = skip?.type === "ExpressionStatement" ? skip.expression : null;
+  return call?.type === "CallExpression" && call.callee.type === "MemberExpression" &&
+    call.callee.object.type === "Identifier" && call.callee.object.value === parameter.value &&
+    call.callee.property.type === "Identifier" && call.callee.property.value === "skip" &&
+    call.arguments.length === 1 && !call.arguments[0].spread &&
+    exit?.type === "ReturnStatement" && exit.argument === null && rest.length === 0;
+}
+
+function hasLinuxTestGate(bytes, call) {
+  const [, second, third, ...rest] = call.arguments;
+  if (!second || second.spread || third?.spread || rest.length > 0) return false;
+  const options = second.expression;
+  if (options.type !== "ObjectExpression") return !third && hasLinuxBodyGate(bytes, options);
+  if (options.properties.some((property) => property.type === "SpreadElement" || property.key?.type === "Computed")) return false;
+  const skips = options.properties.filter((property) => (property.key?.value ?? property.value) === "skip");
+  if (skips.length === 0) return hasLinuxBodyGate(bytes, third?.expression);
+  return skips.length === 1 && skips[0].type === "KeyValueProperty" && isLinuxSkipCondition(bytes, skips[0].value);
+}
+
+// Node's TAP reporter escapes controls, backslashes and hashes in test names.
+function readerTapTitle(name) {
+  const escapes = { "\b": "b", "\f": "f", "\t": "t", "\n": "n", "\r": "r", "\v": "v" };
+  return name.replace(/[\b\f\t\n\r\v\\#]/g, (char) => char in escapes ? "\\\\" + escapes[char] : "\\" + char);
+}
+
+function classifyReaderPlatformSkips(source, skipped, platform) {
+  if (platform === "linux" || skipped.length === 0) return [];
+  const { parseSync } = require("@swc/core");
+  const tree = parseSync(source, { syntax: "typescript", target: "es2022" });
+  const bytes = Buffer.from(source);
+  const titles = new Map(skipped.map((title) => [title, []]));
+  const topLevel = new Set(tree.body.filter((node) => node.type === "ExpressionStatement")
+    .map(({ expression }) => expression.type === "AwaitExpression" ? expression.argument : expression));
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return;
+    if (node.type === "CallExpression") {
+      const { callee } = node;
+      const first = node.arguments[0];
+      const direct = callee.type === "Identifier" && ["test", "it"].includes(callee.value);
+      const suite = callee.type === "Identifier" && ["describe", "suite"].includes(callee.value);
+      const member = callee.type === "MemberExpression" && ["test", "it", "describe", "suite"].includes(callee.object.value);
+      if ((direct || suite || member) && first?.expression.type === "StringLiteral" && !first.spread) {
+        const title = first.expression.value;
+        titles.get(readerTapTitle(title))?.push({ title, gated: direct && topLevel.has(node) && hasLinuxTestGate(bytes, node) });
+      }
+    }
+    for (const value of Object.values(node)) visit(value);
+  };
+  visit(tree);
+  return skipped.flatMap((name) => {
+    const matches = titles.get(name);
+    return matches.length === 1 && matches[0].gated ? [matches[0].title] : [];
+  });
+}
+
+function readerPlatformGates({ root, file, stdout, skippedCount, platform }) {
+  if (!skippedCount) return [];
+  const skipped = [...stdout.matchAll(/^ok [0-9]+ - (.+?) # SKIP(?:[^\S\r\n]|$).*$/gm)].map((match) => match[1]);
+  if (skipped.length !== skippedCount || new Set(skipped).size !== skipped.length) return [];
+  return classifyReaderPlatformSkips(readFileSync(join(root, file), "utf8"), skipped, platform);
+}
+
 /**
  * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
  * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
@@ -1108,16 +1190,23 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         const matches = [...stdout.matchAll(new RegExp(`^# ${key} (\\d+)$`, "gm"))];
         return [key, matches.length === 1 ? Number(matches[0][1]) : null];
       }));
-      const platformSkipsComplete = hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests: Number(total[1]), platform });
-      const passed = verdict?.complete !== false && summary.pass + summary.skipped === Number(total[1]) &&
-        ["fail", "cancelled", "todo"].every((key) => summary[key] === 0) && platformSkipsComplete;
+      const tests = Number(total[1]);
+      const complete = verdict?.complete !== false && summary.pass + summary.skipped === tests &&
+        ["fail", "cancelled", "todo"].every((key) => summary[key] === 0);
+      const classifySkips = readerRuntimePolicy !== undefined && platform !== "linux";
+      const gated = classifySkips && complete && summary.pass !== null && failing.length === 0
+        ? readerPlatformGates({ root, file: files[0], stdout, skippedCount: summary.skipped, platform }) : [];
+      // Linux readers and non-reader groups retain their existing TAP verdict.
+      const passed = classifySkips
+        ? complete && summary.skipped === gated.length
+        : hasOnlyDeclaredPlatformSkips({ root, files, stdout, summary, tests, platform }) && complete;
       // W1-T13146: only a complete passing run is a runtime the child's next bound may be priced from.
       if (childRecord && passed && failing.length === 0) {
         recordCensusReaderRuntime(childRecord.path, childRecord.key, finishedMs - startedMs, [childRecord.overrunKey]);
       }
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
-      return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
+      return { failing, tests, identities, passed, gated, elapsedMs: finishedMs - startedMs, finishedMs,
         [CENSUS_CAPTURE_DISPOSITION]: (accepted, reason) => dispose(res, accepted, reason) };
     };
     const finish = (sample, accepted, reason) => sample[CENSUS_CAPTURE_DISPOSITION](accepted, reason);
@@ -1132,6 +1221,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) {
       throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
     }
+    const deferToCi = (sample, reason) => {
+      finish(sample, true, reason);
+      throw Object.assign(new Error(`platform-gated on ${platform} - ${files[0]}`), { censusPlatformDeferred: true });
+    };
+    const platformEvidence = ({ gated }) => gated.length === 0 ? {} : { platformGated: { platform, cases: gated } };
     const context = readContext(root, child, options);
     const historyKey = censusReaderHistoryKey(files[0], history?.runtime);
     const known = history?.path ? readCensusReaderHistory(history.path) : { runs: {}, reason: "history off" };
@@ -1162,11 +1256,12 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
           return single.failing;
         }
         if (!single.passed) throw new Error("source-reader runtime is UNKNOWN: the history run has no complete unskipped pass");
+        if (single.gated.length === single.tests) deferToCi(single, "deferred history run");
         finish(single, true, "accepted history run");
         recordCensusReaderRuntime(history.path, historyKey, single.elapsedMs);
-        console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: single.tests, cases: single.identities,
+        console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: single.tests - single.gated.length, cases: single.identities,
           budgetMs: historyBudgetMs, measuredMs: Math.ceil(single.elapsedMs), budgetSource: "history", historyRuns: historyRuns.length,
-          assurance: "fresh-timing-only-no-cached-verdict" })}`);
+          ...platformEvidence(single), assurance: "fresh-timing-only-no-cached-verdict" })}`);
         return single.failing;
       }
       options.timeout = childBound.ms;
@@ -1178,9 +1273,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       return calibration.failing;
     }
     if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
-    console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
-      cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
-    const measurement = { ...calibration, context, complete: true, passed: true };
+    if (calibration.gated.length === calibration.tests) deferToCi(calibration, "deferred calibration");
+    const measurement = { ...calibration, tests: calibration.tests - calibration.gated.length, context, complete: true, passed: true };
+    console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: measurement.tests,
+      cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), ...platformEvidence(calibration),
+      assurance: "observation-not-qualification" })}`);
     // As the fast gate judges a RUNAWAY (ci-parity.ts): a first overrun is re-measured once, against the budget
     // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
     const budgetAtMs = now();
@@ -1217,10 +1314,10 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     }
     if (!measured.passed && measured.failing.length === 0) throw new Error("source-reader runtime is UNKNOWN: qualification has no complete unskipped result");
     finish(measured, measured.passed && measured.failing.length === 0, "failed qualification assertions");
-    console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests,
+    console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: measured.tests - measured.gated.length,
       cases: measured.identities, calibrationMs: Math.ceil(calibration.elapsedMs), budgetMs: options.timeout,
       measuredMs: Math.ceil(measured.elapsedMs), ...(overruns.length > 0 ? { remeasuredAfter: overruns[0] } : {}),
-      assurance: "fresh-timing-only-no-cached-verdict" })}`);
+      ...platformEvidence(measured), assurance: "fresh-timing-only-no-cached-verdict" })}`);
     if (history?.path && measured.passed && measured.failing.length === 0) {
       console.log(`census-reader-history-shadow: ${JSON.stringify(historyBudgetMs === undefined
         ? { file: files[0], historyRuns: 0, reason: known.reason ?? "no history for this reader" }
@@ -1767,6 +1864,7 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
     .filter((group) => group.length > 0);
   const violations = [];
   const unmeasured = [];
+  const deferred = [];
   for (const group of groups) {
     let failing;
     try {
@@ -1774,6 +1872,10 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
       failing = new Set(group[0].readerRuntimePolicy !== undefined ? runSuites(files, { readerRuntimePolicy: group[0].readerRuntimePolicy }) :
         group[0].timeoutMs === undefined ? runSuites(files) : runSuites(files, { timeoutMs: group[0].timeoutMs }));
     } catch (e) {
+      if (e?.censusPlatformDeferred === true) {
+        deferred.push(String(e.message));
+        continue;
+      }
       const reason = String(e?.message ?? e);
       unmeasured.push(!group[0].structural ? reason : `${group[0].testFile}: ${reason}`);
       continue;
@@ -1784,7 +1886,8 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
         .map((m) => `census-suite: ${m.testFile} fails — run ${m.script ? `npm run ${m.script}` : `node --test --import tsx ${m.testFile}`}${m.remedy ? `; ${m.remedy}` : ""}`),
     );
   }
-  return { violations, unmeasured: unmeasured.length === 0 ? null : unmeasured.join("; ") };
+  return { violations, unmeasured: unmeasured.length === 0 ? null : unmeasured.join("; "),
+    ...(deferred.length === 0 ? {} : { deferred }) };
 }
 
 // src/lib/source-text-readers.ts's markers and walk rule, restated: the hook copies this script's import closure.
@@ -2134,24 +2237,71 @@ export function censusParityViolations({ changed, readHead, readBase = () => nul
 }
 
 /** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
- *  SUITE, asked of every ci.yml script: `npm run --silent <script>` or `node scripts/<name>.mjs`, counted when the
- *  enclosing step's id or the script's own name says ratchet, census, budget, monotonic, parity or signal. Each is
- *  keyed `script:<name>` and counted once however many places ci.yml invokes it. Only .github/workflows/ci.yml. */
+ *  SUITE, asked of every ci.yml script: `npm run [--silent] <script>` or `node scripts/<name>.mjs`, counted when the
+ *  enclosing step's id, the script's own name, or (W1-T14250) the scripts/*.mjs file an npm script runs says
+ *  ratchet, census, budget, monotonic, parity or signal. Each is keyed `script:<name>` and counted once however many
+ *  places ci.yml invokes it. Only .github/workflows/ci.yml, read beside package.json's scripts. */
 const SCRIPT_GATE_NAME = /ratchet|census|budget|monotonic|parity|signal/;
+const PACKAGE_JSON = "package.json";
 
-export function ciScriptRatchetPopulation(ciYamlText) {
+/** package.json's `scripts`. A file that cannot be read fails the census: names alone would hide a gate (W1-T14250). */
+export function npmScripts(packageJsonText) {
+  if (typeof packageJsonText !== "string") throw new Error(`${PACKAGE_JSON} cannot be read, so no npm script can be followed to its file`);
+  let doc;
+  try {
+    doc = JSON.parse(packageJsonText);
+  } catch (e) {
+    throw new Error(`${PACKAGE_JSON} is not JSON (${String(e?.message ?? e)}), so no npm script can be followed to its file`);
+  }
+  const scripts = doc?.scripts;
+  if (scripts === null || typeof scripts !== "object" || Array.isArray(scripts)) throw new Error(`${PACKAGE_JSON} has no "scripts" object`);
+  return scripts;
+}
+
+export function ciScriptRatchetPopulation(ciYamlText, packageJsonText) {
+  const scripts = npmScripts(packageJsonText);
   const keys = new Set();
   let stepId = "";
   for (const line of String(ciYamlText).split("\n")) {
     if (/^\s*-\s+\S/.test(line)) stepId = "";
     const id = line.match(/^\s*(?:-\s+)?id:\s*([\w-]+)/);
     if (id) stepId = id[1];
-    for (const m of line.matchAll(/npm run --silent\s+([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
+    for (const m of line.matchAll(/npm run (?:--silent\s+)?([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
       const name = m[1] ?? m[2];
-      if (SCRIPT_GATE_NAME.test(`${stepId} ${name}`)) keys.add(`script:${name}`);
+      const command = m[1] !== undefined && Object.hasOwn(scripts, name) ? String(scripts[name]) : "";
+      const file = /\bscripts\/([\w-]+)\.mjs\b/.exec(command)?.[1] ?? "";
+      if (SCRIPT_GATE_NAME.test(`${stepId} ${name} ${file}`)) keys.add(`script:${name}`);
     }
   }
   return [...keys].sort();
+}
+
+const WRITE_ONLY_LEDGER_STEP_BASELINE = "scripts/write-only-ledger-step-baseline.json";
+const WRITE_ONLY_LEDGER_STEP_SCRIPT = "scripts/write-only-ledger-step-ratchet.mjs";
+const WRITE_ONLY_LEDGER_STEP_CLI = fileURLToPath(new URL("./write-only-ledger-step-ratchet.mjs", import.meta.url));
+// BACKSTOP only: this ends a hung child as not measured. A healthy run took 7.1-7.9 s on a 4-core host at load 0.6
+// (2026-11-22, W1-T14250); 120 s is CENSUS_SUITE_CHILD_TIME_BOUND_MS, the operator's bound for a census child.
+const WRITE_ONLY_LEDGER_STEP_TIME_BOUND_MS = 120_000;
+
+/** W1-T14250: the write-only ledger step ratchet asked before the push, as CI asks it: its own CLI against the merge
+ *  base, when the push can move it (a src/ module, its baseline or its script) and the tree carries its baseline.
+ *  `runRatchet` is the child (`main` supplies it outside the git-free snapshot); with none, it is not asked here. */
+export function writeOnlyLedgerStepViolations({ changed, readHead, runRatchet }) {
+  if (typeof runRatchet !== "function" || readHead(WRITE_ONLY_LEDGER_STEP_BASELINE) === null) return [];
+  if (!changed.some((p) => /^src\/.+\.(?:ts|mts|mjs)$/.test(p) || p === WRITE_ONLY_LEDGER_STEP_BASELINE || p === WRITE_ONLY_LEDGER_STEP_SCRIPT)) return [];
+  const { status, stdout } = runRatchet();
+  if (status === 0) return [];
+  if (status !== 1) throw new Error(`write-only-ledger-step could not measure (exit ${status}): ${String(stdout).trim().split("\n").pop()}`);
+  const lines = String(stdout).split("\n");
+  const headline = lines.find((l) => l.includes("BLOCKED")) ?? "write-only-ledger-step: BLOCKED";
+  return [`${headline.trim()} — run \`npm run write-only-ledger-step\`; steps: ${lines.filter((l) => /^ {2}\S/.test(l)).map((l) => l.trim()).join(", ")}`];
+}
+
+/** The real child: the ratchet's own CLI over `root` against `mergeBase`, bounded by the backstop above. */
+export function runWriteOnlyLedgerStepChild({ root, mergeBase, run = spawnSync }) {
+  const res = run(process.execPath, [WRITE_ONLY_LEDGER_STEP_CLI, "--root", root, "--base", mergeBase],
+    { encoding: "utf8", timeout: WRITE_ONLY_LEDGER_STEP_TIME_BOUND_MS });
+  return { status: res.status, stdout: `${res.stdout ?? ""}${res.error ? `\n${res.error.message}` : ""}` };
 }
 
 /** Every ci.yml script gate this script asks before the push: `modeled` names the check, `run` an npm script
@@ -2160,6 +2310,7 @@ export function ciScriptRatchetPopulation(ciYamlText) {
 export const PRECHECK_SCRIPT_PARITY = {
   "script:comment-load-signal": { modeled: commentLoadViolations },
   "script:cycle-ratchet": { run: "census:cycle-ratchet" },
+  "script:write-only-ledger-step": { modeled: writeOnlyLedgerStepViolations },
 };
 
 /** The verdict for the script gates: `precheckParityVerdict` over `script:<name>` keys. `baseline` and
@@ -2399,7 +2550,7 @@ function decideCensusFullPass({ root, changed, snapshot, readers, loadMembers, c
 }
 
 export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild,
-  suiteHistoryPath = censusReaderHistoryPath() } = {}) {
+  suiteHistoryPath = censusReaderHistoryPath(), platform = process.platform } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
@@ -2446,6 +2597,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       measuredFiles: snapshot ? censusSnapshotPaths(snapshot).filter((p) => MEASURED_ROOTS.some((dir) => p.startsWith(`${dir}/`))) : listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
+      ...(snapshot ? {} : { runWriteOnlyLedgerStep: () => runWriteOnlyLedgerStepChild({ root, mergeBase }) }),
     });
     if (!snapshot) {
       violations = [...violations, ...censusParityViolations({ changed, ...readers,
@@ -2497,9 +2649,10 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
             // W1-T13146: the policy is the one the admission table hands its readers (ci-parity's floor and multiple).
             const policy = loadMembers().find((m) => m.readerRuntimePolicy !== undefined)?.readerRuntimePolicy;
             return runCausedCensusSuites({ root, files, mergeBase, runSuites, ...options,
+              ...(options.readerRuntimePolicy === undefined ? {} : { platform }),
               ...(policy === undefined ? {} : { suiteHistory: { path: suiteHistoryPath, policy } }) });
           } catch (e) {
-            suiteErrors.push(e);
+            if (e?.censusPlatformDeferred !== true) suiteErrors.push(e);
             throw e;
           }
         }
@@ -2510,6 +2663,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       },
     });
     violations.push(...suites.violations);
+    for (const reason of suites.deferred ?? []) console.log(`census-precheck: census suites deferred to CI: ${reason}`);
     const suiteReasons = [...(suites.unmeasured === null ? [] : [suites.unmeasured]), ...snapshotUnmeasured];
     // W1-T9919: time-bound only when every unmeasured cause is a head child stopped on the backstop. A merge-base
     // run's stop is rewrapped without the mark: its head already failed a suite, so that stays a refusal.

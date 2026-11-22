@@ -1,0 +1,66 @@
+- id: W1-T14309
+  title: "The W1-T13830 criterion 6 test pins its own git identity in the environment for its run, so it passes when the runner has an empty GIT_AUTHOR_NAME and no global git identity"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # test-only; production code and the reservation's identity rules stay the same
+  origin: "operator-session#reservation-test-empty-author-2026-11-22"
+  plan_refs:
+    - W1-T13830
+    - W1-T2903
+  files:
+    - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:fixture-owns-its-identity — with GIT_AUTHOR_NAME and GIT_COMMITTER_NAME set to the empty string in process.env and a global git config that sets user.useConfigOnly=true and no user, the W1-T13830 criterion 6 body reserves two task ids and origin holds both reservation refs"
+      kind: guard
+      proof: "grep: W1-T14309 criterion 1: in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+    - claim: "After the test, each of GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME and GIT_COMMITTER_EMAIL in process.env has the value it had before the test, and one that was unset is unset again (not the string \"undefined\")"
+      proof: "grep: W1-T14309 criterion 2: in test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts"
+  rationale: |
+    WHAT FAILS (reproduced on origin/main 8923f5635f, 2026-11-22, Mac agent account). Run
+    `node --test --import tsx --import ./test/setup/tmp-hygiene.ts
+    test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts` with a
+    throwaway GIT_CONFIG_GLOBAL that sets user.useConfigOnly=true, GIT_CONFIG_NOSYSTEM=1, EMAIL unset
+    and GIT_AUTHOR_NAME set to the empty string. 5 tests pass and 1 fails: "W1-T13830 criterion 6:
+    the sweep's parked-PR host reserves the held task id through an awaited reservation". The error
+    is TaskIdReservationError from mintAnchor (src/lib/task-id-reservation.ts:818): "git commit-tree
+    exited 128 ... fatal: empty ident name (for <test@remudero.invalid>) not allowed". With
+    GIT_AUTHOR_NAME unset, all 6 pass. It was first seen on 2026-11-20 in a run with an empty author
+    name.
+    WHY. The test sets user.name and user.email in the clone's config (test file :262-263). The
+    reservation spawns git with the process environment. Git reads GIT_AUTHOR_NAME before config, so
+    an empty value in the environment beats the clone's user.name. The fixture does not own its
+    identity the way the test/helpers/git-repo.ts fixtures do (GIT_ENV, :51-57, sets all four
+    variables).
+    No filed task covers this (grep of plan/tasks.d for GIT_AUTHOR_NAME and for this test file finds
+    only production identity tasks such as W1-T3454 and W1-T6160, and W1-T13830 itself).
+  design: |
+    INVARIANT fixture-owns-its-identity: the test's git commits never depend on the runner's identity variables or global config.
+    1. In the criterion 6 test, set process.env GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME
+       and GIT_COMMITTER_EMAIL to GIT_REPO_FIXTURE_IDENTITY (test/helpers/git-repo.ts) before the
+       first reservation. Save the old values first. Restore them in a finally or t.after: for a
+       value that was unset, delete the key; never assign undefined.
+    2. Move the test body into one function. Criterion 6 calls it as today. The W1-T14309 criterion 1
+       test sets GIT_AUTHOR_NAME and GIT_COMMITTER_NAME to "" (restored the same way) and calls it. The
+       global config comes from the runner (CI and the lanes run with no global identity), so the
+       test does not write a global config.
+    3. Keep the clone's user.name and user.email lines; they cover a runner with no identity variables.
+    4. Do not change src/. A production run with an empty GIT_AUTHOR_NAME still fails with the clear
+       TaskIdReservationError; that is a separate question.
+  falsifier: |
+    On origin/main, criterion 1 fails with "fatal: empty ident name (for <test@remudero.invalid>) not
+    allowed". Remove the environment pin from step 1: criterion 1 fails the same way. Restore an
+    unset key by assignment: criterion 2 fails.
+  note: |
+    Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795352828000. The filer did
+    not push a reservation; the shipper reserves it.
+    Filed by the operator session on 2026-11-22. Filing only; not built.
+    Builders: run the file as the lane does: `node --test --import tsx --import
+    ./test/setup/tmp-hygiene.ts <file>` with GIT_CONFIG_GLOBAL pointing at a file that sets
+    user.useConfigOnly=true, and once more with GIT_AUTHOR_NAME= empty.

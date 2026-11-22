@@ -877,6 +877,56 @@ export interface components {
       requestedAt: string;
       /** The correlated plan pull request */
       proposal?: string;
+      /** An optional, bounded, observational structural report. It is never tested, implemented, exhaustive or semantically reviewed, and no verification, product-case or build admission reads it. Excerpts are untrusted text. Absent on a response from a server that predates it. */
+      requirementCoverage?: {
+        version: "product-plan-requirement-coverage-v1";
+        basis: "structural-unreviewed";
+        reportId: string;
+        binding: {
+          operationId: string;
+          briefDigest: string;
+          objectiveRevision: number;
+          targetHead: string;
+        };
+        source: {
+          state: "available" | "source-unavailable";
+        };
+        inventory: {
+          state: "available" | "inventory-unavailable";
+          exhaustive: false;
+          digest?: string;
+          itemCount: number;
+          items: ({
+            pointer: string;
+            kind: "idea" | "constraint" | "decision";
+            /** Untrusted brief text */
+            excerpt: string;
+            textDigest: string;
+          })[];
+        };
+        mapping: {
+          state: "available" | "mapping-unavailable";
+          reason?: "no-proposal" | "brief-unavailable" | "transport-unreadable" | "report-absent" | "report-invalid" | "report-incompatible" | "snapshot-unresolved";
+          head?: string;
+          snapshotDigest?: string;
+          reportDigest?: string;
+        };
+        entries: ({
+          pointer: string;
+          state: "linked" | "unmapped" | "deferred" | "coverage-unavailable" | "reference-unresolved";
+          taskId?: string;
+          /** Untrusted proof text named by the proposal. */
+          proof?: string;
+          /** Untrusted deferral rationale. */
+          rationale?: string;
+        })[];
+        counts: {
+          linked: number;
+          unmapped: number;
+          deferred: number;
+          unresolved: number;
+        };
+      };
     };
     ProductCaseDeploymentObservation: {
       productId: ProductId;
@@ -3816,8 +3866,10 @@ export interface components {
       /** Records past the pace of about one row a second */
       dropped: number;
     };
-    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
+    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is stored. W1-T13131: `template_id` must name a source-owned catalog template (src/lib/incident-templates.ts) declared for this `kind` and `source`; the fingerprint is that template's, never the message, name, route or frames. An event without one is refused with 422. */
     IncidentEventRequest: {
+      /** A catalog template id. A missing, malformed, unknown or mismatched id is refused (422). */
+      template_id: string;
       source: "console" | "gateway" | "daemon";
       kind: "exception" | "http_5xx" | "latency" | "invariant";
       name: string;
@@ -3832,6 +3884,13 @@ export interface components {
     IncidentEventResult: {
       fingerprint: string;
       accepted: true;
+      sampled: boolean;
+    };
+    /** POST /v1/incidents/events's 422 (W1-T13131) -- the event's template did not resolve, so it was never fingerprinted. One payload-free `incident.refused` row (reason, source, kind) is ledgered per refused input; past 20 per reason/source/kind per minute ONE `incident.refused_sampled` row is written and later refusals in that window answer `sampled: true` and write nothing. */
+    IncidentEventRefused: {
+      error: "template_refused";
+      reason: "missing" | "malformed" | "unknown" | "mismatched";
+      accepted: false;
       sampled: boolean;
     };
     /** POST /v1/incidents/events's 413 -- the raw body exceeded 16 KiB and was not read further. */
@@ -5712,6 +5771,33 @@ export interface components {
         firstTs?: string;
         lastTs?: string;
       };
+      activity?: TaskActivity;
+    };
+    /** One bounded page of one run's activity (src/lib/task-view.ts; W1-T11395), present only when the request named activityRun. Read from the projector's activity_ring, matched on the row's own task_id and run_id and delivered in ring apply order. An empty available page with a cursor is caught up at that position; retentionGap and reset say the cursor could not be continued and the page restarts at the oldest retained event; unavailable says nothing about history. It is an observation feed only: it carries no prompt, credential, transcript body or tool argument, and it never starts, resumes, retries, reassigns or completes a worker. */
+    TaskActivity: {
+      state: "available" | "unavailable";
+      runId: string;
+      events: (TaskActivityEvent)[];
+      /** More events of this run follow in the ring than this page carries. */
+      hasMore: boolean;
+      /** The ring rolled past the cursor, so events between it and the first one here may be lost. */
+      retentionGap: boolean;
+      /** The cursor does not belong to this ring (another corpus, a future position or a rebuilt store). */
+      reset: boolean;
+      /** Pass back as activityCursor. After the last event while hasMore, else the validated ring tail. */
+      cursor?: string;
+      ring?: {
+        rows: number;
+        capacity: number;
+      };
+      reason?: string;
+    };
+    TaskActivityEvent: {
+      seq: number;
+      /** The row's stable identity, its millisecond timestamp and line hash. */
+      id: string;
+      ts: string;
+      step: string;
     };
     /** TaskCardRun extended with optional gateway PR evidence (src/lib/task-view.ts). */
     TaskViewRun: {
@@ -9035,6 +9121,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "413": IncidentIngestBodyTooLarge;
+          "422": IncidentEventRefused;
         };
     };
   };

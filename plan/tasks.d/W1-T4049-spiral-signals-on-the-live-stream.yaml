@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 35.00
+  budget_usd: 4.50
   risk: high
   band_meaning: blast-radius
   origin: "operator-ruling#W1-T360-2026-09-22"

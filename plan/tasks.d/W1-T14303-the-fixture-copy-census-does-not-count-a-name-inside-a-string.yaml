@@ -1,0 +1,81 @@
+- id: W1-T14303
+  title: "The fixture-copy census counts a repo, GitHub or ledger builder name only where it is declared in code, not where its text sits inside a string or template literal, so a test that holds fixture source in a string does not push its builder into a workaround"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # the census is a ratchet the author preflight and the pre-push precheck run; a lexer that loses its place could hide real builder copies, so criterion 2 pins that code after a tricky string still counts
+  origin: "operator-session#fixture-census-counts-string-text-2026-11-22"
+  plan_refs:
+    - W1-T2903
+    - W1-T12322
+    - W1-T14152
+  files:
+    - scripts/fixture-copy-census.mjs
+    - test/fixture-copy-census.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:declarations-only — countFixtureCopiesInTexts over one file whose only text `function inspectFreshReviewerWorktree(path: string) {` sits inside a double-quoted string, a single-quoted string, or the text part of a template literal gives repoBuilderFunctionNames 0. The same line as code in another file gives 1. The same holds for a ledger name (`function appendFakeLedger(`) and a GitHub name (`const fakeGitHub = () =>`) inside a string: ledgerHelperNames and fakeGithubBuilderNames are 0"
+      kind: guard
+      proof: "grep: W1-T14303 criterion 1: in test/fixture-copy-census.test.ts"
+    - claim: "The scan does not lose its place. A real declaration that comes after a string with an escaped quote, after a regex literal that holds a quote character, and after a template literal with a `${...}` expression is still counted, once per name"
+      proof: "grep: W1-T14303 criterion 2: in test/fixture-copy-census.test.ts"
+    - claim: "The other signatures read the raw text as today. A `[\"init\"` call site and a gh PATH shim whose quoted \"gh\" is a string literal are still counted in gitInitSites, gitInitFiles and ghPathShimFiles"
+      proof: "grep: W1-T14303 criterion 3: in test/fixture-copy-census.test.ts"
+    - claim: "On the real tree, each of the three builder-name counts is at most what the old rule counts, the other four counts are equal, and every name the old rule counts but the new rule does not appears in test/ only inside string or template literals"
+      proof: "grep: W1-T14303 criterion 4: in test/fixture-copy-census.test.ts"
+    - claim: "The production counter masks literal text before it matches builder names"
+      proof: "grep: codeOnlyText( in scripts/fixture-copy-census.mjs"
+  rationale: |
+    WHAT HAPPENED (2026-11-22). W1-T14152 (#20113, 5eafab140d) added a test that holds a copy of
+    run-task source as an array of string lines. One line was the text
+    "function inspectFreshReviewerWorktree(path: string, ...". The census counted that text as a new
+    repo builder declaration (its name holds "Worktree"), so the census went over its baseline. The
+    builder had to build the name from a constant: test/a-run-task-advance-is-classified-by-review-path.test.ts
+    now has `const INSPECT_FRESH_REVIEWER_TREE = "inspectFreshReviewerWorktree"` and a template line
+    `function ${INSPECT_FRESH_REVIEWER_TREE}(...`. The second commit of #20113 says this was done "so
+    neither census count rises". The text is fixture data, not a builder copy.
+    WHY IT HAPPENS. builderDeclarationRe (scripts/fixture-copy-census.mjs:41) is a plain regex over
+    the whole file text. countFixtureCopiesInTexts (:105) runs it for repo names (:127), GitHub names
+    (:130) and ledger names (:138). Nothing removes string or template literal text first. Only the
+    census's own test file is kept out of the scan (listFixtureCopyFiles, :79), because its examples
+    hit the same rule.
+    WHY IT MATTERS. Tests that hold source text as data are common for rules that read source (the
+    review-path walk, the spawn census). Each one now risks a census refusal and a workaround that
+    makes the test harder to read. No filed task covers this: W1-T12322 fixed a different false
+    positive (a fixture directory named "gh"). Grep of plan/tasks.d for fixture-copy and string
+    literal, 2026-11-22.
+  design: |
+    INVARIANT declarations-only: a builder name counts only when its declaration is code; text inside a string or template literal never counts.
+    1. scripts/fixture-copy-census.mjs: add codeOnlyText(text). It returns the text with every
+       character inside a string literal and inside the text part of a template literal replaced by a
+       space. Newlines stay, so the length and line numbers stay the same. Code inside a template's
+       `${...}` stays code. Use the scanner of the `typescript` package that the repo already ships
+       (scripts/write-only-ledger-step-ratchet.mjs:29 uses it), so escapes, regex literals and nested
+       templates are handled. Do not write a hand lexer.
+    2. In countFixtureCopiesInTexts, run the repo, GitHub and ledger builder matches over
+       codeOnlyText(text). GIT_INIT_SITE_RE and isGhPathShimFile keep reading the raw text: the
+       quoted "init" and "gh" they look for are string literals.
+    3. Do not change the baseline file. A lower live count passes (live <= baseline); the census
+       header already says a shrink passes and leaves a looser ceiling.
+    4. Tests go in test/fixture-copy-census.test.ts, titled "W1-T14303 criterion N: ...". That file
+       is kept out of the scan, so its example strings do not count. Criterion 4 compares the old and
+       new rule on the real tree the way the W1-T12322 test there does ("the real tree counts the
+       same gh shim files as before").
+    Not in scope: names inside comments, and the gitInitSites and gh shim rules.
+  falsifier: |
+    On origin/main, criterion 1 counts 1 repo builder for the string-only file. Remove the
+    codeOnlyText call from the repo match only: criterion 1's repo case fails and the ledger and
+    GitHub cases pass. Make codeOnlyText blank the whole rest of the file after an escaped quote:
+    criterion 2 fails.
+  note: |
+    Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795352828000. The filer did
+    not push a reservation; the shipper reserves it.
+    Filed by the operator session on 2026-11-22. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    After the build, the workaround in test/a-run-task-advance-is-classified-by-review-path.test.ts
+    may be undone in a later change. This task does not touch that file.

@@ -4,7 +4,7 @@ import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { basename, dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -25,12 +25,14 @@ import {
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { appendLedger } from "./ledger.js";
+import { finishedUtcDays, isSpendPerMergedInput, paidSpendPerMergedDay, SPEND_PER_MERGED_DAILY_STEP } from "./spend-per-merged.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import {
   createIncrementalLedgerUnion,
   createLedgerRotationMemo,
   openLedgerUnion,
   readLedgerUnionRecordsMemoized,
+  readLedgerUnionRecords,
   readLedgerUnionRecordsSync,
   realLedgerFs,
   type LedgerGrepFsDeps,
@@ -2399,6 +2401,33 @@ export function runKnowledgeMeasurement(opts: KnowledgeMeasurementOpts): Knowled
   return { status: "measured", ...base, gaps: foldKnowledgeGaps(rows, taskFiles), outcomes: foldLearningOutcomes(rows) };
 }
 
+const SPEND_PER_MERGED_DAYS = 7;
+
+export async function writeSpendPerMergedDays(opts: MeasurementCadenceReportOpts, now: Date): Promise<string[]> {
+  if (statSync(opts.stateDir, { throwIfNoEntry: false })?.isDirectory() === false) return [];
+  const days = finishedUtcDays(now.getTime(), SPEND_PER_MERGED_DAYS);
+  const sinceTs = `${days.at(-1)!}T00:00:00.000Z`;
+  let unread = 0;
+  const read = await readLedgerUnionRecords(opts.stateDir, { since: sinceTs, where: isSpendPerMergedInput,
+    onUnreadArchive: () => { unread++; }, onUnreadLive: () => { unread++; } });
+  if (unread > 0) return [];
+  const rows = read.filter(row => typeof row.ts === "string" && row.ts >= sinceTs);
+  const recorded = new Set(rows.filter(row => row.step === SPEND_PER_MERGED_DAILY_STEP).map(row => row.day));
+  const written: string[] = [];
+  for (const day of days.filter(candidate => !recorded.has(candidate)).reverse()) {
+    const row = { step: SPEND_PER_MERGED_DAILY_STEP, run_id: "MEASUREMENT-CADENCE", task_id: "measurement-cadence",
+      ...paidSpendPerMergedDay(rows, day) };
+    try {
+      if (opts.writeLedgerLine) opts.writeLedgerLine(row);
+      else appendLedger(join(opts.stateDir, LEDGER_FILENAME), row);
+      written.push(day);
+    } catch (error) {
+      process.stderr.write(`${JSON.stringify({ ...row, ledger_write_error: String(error) })}\n`);
+    }
+  }
+  return written;
+}
+
 /** The `knowledge.measured` row: the rung's whole product, read back by the digest. */
 export function buildKnowledgeMeasuredRow(result: KnowledgeMeasurementResult): Record<string, unknown> {
   return {
@@ -2789,6 +2818,8 @@ export async function runMeasurementCadenceReportAsync(opts: MeasurementCadenceR
     shipDateFor: (c, file, needle) => resolved.get(keyOf(file, needle)) ?? fallback(c, file, needle),
   });
   shipDates?.finish();
+  noteMeasurementCadencePhase("spend_per_merged");
+  await writeSpendPerMergedDays(opts, opts.now ?? systemClock.date());
   return result;
 }
 

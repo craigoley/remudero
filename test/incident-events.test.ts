@@ -12,6 +12,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { INCIDENT_TEMPLATE_CATALOG, type IncidentTemplate } from "../src/lib/incident-templates.js";
 import {
   buildIncidentEventsRoute,
   fingerprintIncidentEvent,
@@ -37,10 +38,20 @@ function ledgerPathFor(root: string): string {
   return p;
 }
 
+// W1-T13131: an accepted event names a catalog template its kind and source are declared for.
+const TEMPLATE_ID = "service.internal-error";
+
+function template(id: string): IncidentTemplate {
+  const found = INCIDENT_TEMPLATE_CATALOG.find((t) => t.id === id);
+  assert.ok(found, `fixture: ${id} is a catalog template`);
+  return found;
+}
+
 function baseInput(overrides: Partial<IncidentEventInput> = {}): IncidentEventInput {
   return {
-    source: "console",
-    kind: "exception",
+    source: "gateway",
+    kind: "http_5xx",
+    template_id: TEMPLATE_ID,
     name: "TypeError",
     message: "Cannot read property 'x' of undefined",
     frames: [{ file: "src/app.ts", fn: "render" }],
@@ -52,18 +63,18 @@ function baseInput(overrides: Partial<IncidentEventInput> = {}): IncidentEventIn
 // ── criterion 1: two errors differing only in line numbers and ids share one fingerprint ───────
 
 test("two errors differing only in line numbers and ids share one fingerprint", () => {
+  // W1-T13131: the fingerprint is the resolved template's, so ids, digits and any other rendered text never split it.
   const a = scrubIncidentEvent(
     baseInput({ message: "boom at line 42, request id a1b2c3d4e5, count 7", frames: [{ file: "src/app.ts", fn: "render" }] }),
   );
   const b = scrubIncidentEvent(
     baseInput({ message: "boom at line 999, request id f0e1d2c3b4, count 3", frames: [{ file: "src/app.ts", fn: "render" }] }),
   );
-  assert.equal(fingerprintIncidentEvent(a), fingerprintIncidentEvent(b));
+  assert.equal(fingerprintIncidentEvent(a, template(TEMPLATE_ID)), fingerprintIncidentEvent(b, template(TEMPLATE_ID)));
 
-  // Calibration: a genuinely different message still fingerprints differently, so the equality
-  // above is proving normalization, not that everything collapses to one hash.
-  const c = scrubIncidentEvent(baseInput({ message: "an entirely different failure", frames: [{ file: "src/app.ts", fn: "render" }] }));
-  assert.notEqual(fingerprintIncidentEvent(a), fingerprintIncidentEvent(c));
+  // Calibration: a different TEMPLATE still fingerprints differently, so the equality above is
+  // proving the template basis, not that everything collapses to one hash.
+  assert.notEqual(fingerprintIncidentEvent(a, template(TEMPLATE_ID)), fingerprintIncidentEvent(a, template("board.status-unavailable")));
 });
 
 // ── criterion 2: a library frame never changes the fingerprint ─────────────────────────────────
@@ -76,16 +87,16 @@ test("a library frame never changes the fingerprint", () => {
   const withLibraryFrameAfter = scrubIncidentEvent(
     baseInput({ frames: [{ file: "src/app.ts", fn: "render" }, { file: "node_modules/react/index.js", fn: "dispatch" }] }),
   );
-  const fp = fingerprintIncidentEvent(withoutLibraryFrame);
-  assert.equal(fingerprintIncidentEvent(withLibraryFrameBefore), fp);
-  assert.equal(fingerprintIncidentEvent(withLibraryFrameAfter), fp);
+  const t = template(TEMPLATE_ID);
+  const fp = fingerprintIncidentEvent(withoutLibraryFrame, t);
+  assert.equal(fingerprintIncidentEvent(withLibraryFrameBefore, t), fp);
+  assert.equal(fingerprintIncidentEvent(withLibraryFrameAfter, t), fp);
 
-  // Calibration: an ADDITIONAL in-app frame (not a library one) DOES change the fingerprint, so
-  // the equalities above are proving the node_modules exclusion, not that frames are ignored.
+  // W1-T13131: a runtime frame is an unchecked string, so no frame is in the basis — an in-app one neither.
   const withExtraAppFrame = scrubIncidentEvent(
     baseInput({ frames: [{ file: "src/other.ts", fn: "call" }, { file: "src/app.ts", fn: "render" }] }),
   );
-  assert.notEqual(fingerprintIncidentEvent(withExtraAppFrame), fp);
+  assert.equal(fingerprintIncidentEvent(withExtraAppFrame, t), fp);
 });
 
 // ── criterion 3: an event carrying a token or a query string is stored scrubbed ────────────────
@@ -438,4 +449,24 @@ test("an empty or unreadable ingest token file is refused with a logged reason",
     buildServeServer({ ...depsFor(tmpRoot()), log }).close();
   });
   assert.ok(!lines.some((l) => l.step === "serve.ingest_token_refused"), "no file configured is shipped-dark, not a refusal");
+});
+
+test("W1-T13131: a burst of refused templates is counted under the same per-minute cap", async () => {
+  const ledgerPath = ledgerPathFor(tmpRoot());
+  const route = buildIncidentEventsRoute({ ledgerPath }, fixedClock(1_700_000_000_000), 2);
+  const sampled: boolean[] = [];
+  await withRoute(route, async (url) => {
+    for (let i = 0; i < 4; i++) {
+      const res = await fetch(url, { method: "POST", headers: { authorization: "Bearer write" }, body: JSON.stringify(baseInput({ template_id: undefined })) });
+      assert.equal(res.status, 422);
+      sampled.push(((await res.json()) as { sampled: boolean }).sampled);
+    }
+  });
+  assert.deepEqual(sampled, [false, false, true, true]);
+  const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.deepEqual(rows.map((r) => [r.step, r.reason, r.source, r.kind]), [
+    ["incident.refused", "missing", "gateway", "http_5xx"],
+    ["incident.refused", "missing", "gateway", "http_5xx"],
+    ["incident.refused_sampled", "missing", "gateway", "http_5xx"],
+  ]);
 });

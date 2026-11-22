@@ -1875,6 +1875,85 @@ components:
         briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
         requestedAt: { type: string, format: date-time }
         proposal: { type: string, maxLength: 2048, description: The correlated plan pull request, only once the native run opened it. }
+        requirementCoverage:
+          type: object
+          additionalProperties: false
+          description: An optional, bounded, observational structural report. It is never tested, implemented, exhaustive or semantically
+            reviewed, and no verification, product-case or build admission reads it. Excerpts are untrusted text. Absent on a response
+            from a server that predates it.
+          required: [version, basis, reportId, binding, source, inventory, mapping, entries, counts]
+          properties:
+            version: { type: string, enum: [product-plan-requirement-coverage-v1] }
+            basis: { type: string, enum: [structural-unreviewed] }
+            reportId: { type: string, pattern: "^[a-f0-9]{64}$" }
+            binding:
+              type: object
+              additionalProperties: false
+              required: [operationId, briefDigest, objectiveRevision, targetHead]
+              properties:
+                operationId: { type: string, pattern: "^[a-f0-9]{64}$" }
+                briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                targetHead: { type: string, pattern: "^[a-f0-9]{40}$" }
+            source:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { type: string, enum: [available, source-unavailable] }
+            inventory:
+              type: object
+              additionalProperties: false
+              required: [state, exhaustive, itemCount, items]
+              properties:
+                state: { type: string, enum: [available, inventory-unavailable] }
+                exhaustive: { type: boolean, enum: [false] }
+                digest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                itemCount: { type: integer, minimum: 0, maximum: 64 }
+                items:
+                  type: array
+                  maxItems: 64
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [pointer, kind, excerpt, textDigest]
+                    properties:
+                      pointer: { type: string, minLength: 1, maxLength: 64 }
+                      kind: { type: string, enum: [idea, constraint, decision] }
+                      excerpt: { type: string, maxLength: 240, description: Untrusted brief text, truncated. }
+                      textDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            mapping:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { type: string, enum: [available, mapping-unavailable] }
+                reason: { type: string, enum: [no-proposal, brief-unavailable, transport-unreadable, report-absent, report-invalid, report-incompatible, snapshot-unresolved] }
+                head: { type: string, pattern: "^[a-f0-9]{40}$" }
+                snapshotDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                reportDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            entries:
+              type: array
+              maxItems: 64
+              items:
+                type: object
+                additionalProperties: false
+                required: [pointer, state]
+                properties:
+                  pointer: { type: string, minLength: 1, maxLength: 64 }
+                  state: { type: string, enum: [linked, unmapped, deferred, coverage-unavailable, reference-unresolved] }
+                  taskId: { type: string, minLength: 1, maxLength: 80 }
+                  proof: { type: string, minLength: 1, maxLength: 500, description: Untrusted proof text named by the proposal. }
+                  rationale: { type: string, minLength: 1, maxLength: 300, description: Untrusted deferral rationale. }
+            counts:
+              type: object
+              additionalProperties: false
+              required: [linked, unmapped, deferred, unresolved]
+              properties:
+                linked: { type: integer, minimum: 0, maximum: 64 }
+                unmapped: { type: integer, minimum: 0, maximum: 64 }
+                deferred: { type: integer, minimum: 0, maximum: 64 }
+                unresolved: { type: integer, minimum: 0, maximum: 64 }
     ProductCaseDeploymentObservation:
       type: object
       additionalProperties: false
@@ -9313,9 +9392,18 @@ components:
         POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`,
         validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message`
         and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps
-        `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored.
-      required: [source, kind, name, message, at]
+        `message` at 500 characters and `frames` at 20 before anything is stored. W1-T13131:
+        `template_id` must name a source-owned catalog template (src/lib/incident-templates.ts)
+        declared for this `kind` and `source`; the fingerprint is that template's, never the
+        message, name, route or frames. An event without one is refused with 422.
+      required: [source, kind, name, message, at, template_id]
       properties:
+        template_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+          description: A catalog template id. A missing, malformed, unknown or mismatched id is refused (422).
         source:
           type: string
           enum: [console, gateway, daemon]
@@ -9351,6 +9439,27 @@ components:
         accepted:
           type: boolean
           enum: [true]
+        sampled:
+          type: boolean
+
+    IncidentEventRefused:
+      type: object
+      description: >
+        POST /v1/incidents/events's 422 (W1-T13131) -- the event's template did not resolve, so it was
+        never fingerprinted. One payload-free `incident.refused` row (reason, source, kind) is ledgered
+        per refused input; past 20 per reason/source/kind per minute ONE `incident.refused_sampled`
+        row is written and later refusals in that window answer `sampled: true` and write nothing.
+      required: [error, reason, accepted, sampled]
+      properties:
+        error:
+          type: string
+          enum: [template_refused]
+        reason:
+          type: string
+          enum: [missing, malformed, unknown, mismatched]
+        accepted:
+          type: boolean
+          enum: [false]
         sampled:
           type: boolean
 
@@ -13271,6 +13380,58 @@ components:
             lastVerdict: {type: string}
             firstTs: {type: string}
             lastTs: {type: string}
+        activity:
+          $ref: "#/components/schemas/TaskActivity"
+
+    TaskActivity:
+      type: object
+      description: >
+        One bounded page of one run's activity (src/lib/task-view.ts; W1-T11395), present only when the request
+        named activityRun. Read from the projector's activity_ring, matched on the row's own task_id and run_id and
+        delivered in ring apply order. An empty available page with a cursor is caught up at that position;
+        retentionGap and reset say the cursor could not be continued and the page restarts at the oldest retained
+        event; unavailable says nothing about history. It is an observation feed only: it carries no prompt,
+        credential, transcript body or tool argument, and it never starts, resumes, retries, reassigns or completes a worker.
+      required: [state, runId, events, hasMore, retentionGap, reset]
+      properties:
+        state: {type: string, enum: [available, unavailable]}
+        runId: {type: string}
+        events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/TaskActivityEvent"
+        hasMore:
+          type: boolean
+          description: More events of this run follow in the ring than this page carries.
+        retentionGap:
+          type: boolean
+          description: The ring rolled past the cursor, so events between it and the first one here may be lost.
+        reset:
+          type: boolean
+          description: The cursor does not belong to this ring (another corpus, a future position or a rebuilt store).
+        cursor:
+          type: string
+          maxLength: 256
+          description: Pass back as activityCursor. After the last event while hasMore, else the validated ring tail.
+        ring:
+          type: object
+          required: [rows, capacity]
+          properties:
+            rows: {type: number}
+            capacity: {type: number}
+        reason: {type: string}
+
+    TaskActivityEvent:
+      type: object
+      required: [seq, id, ts, step]
+      properties:
+        seq: {type: number}
+        id:
+          type: string
+          description: The row's stable identity, its millisecond timestamp and line hash.
+        ts: {type: string, maxLength: 40}
+        step: {type: string, maxLength: 120}
 
     TaskViewRun:
       type: object
@@ -22234,6 +22395,21 @@ paths:
           required: true
           description: The task id to look up in that instance.
           schema: {type: string, minLength: 1}
+        - name: activityRun
+          in: query
+          required: false
+          description: >
+            W1-T11395: one exact run id of the task. Adds data.activity, a bounded page of that run's activity
+            from the activity ring. Each distinct activityRun or activityCursor is its own demand key, held to
+            four per task and sixteen per materialization pass; a key held back answers activity.state=unavailable.
+          schema: {type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"}
+        - name: activityCursor
+          in: query
+          required: false
+          description: >
+            W1-T11395: a cursor from a previous data.activity.cursor, at most 256 bytes, valid only with the same
+            instance, id and activityRun. A malformed, oversized, foreign or other-run cursor answers 400 invalid_request.
+          schema: {type: string, maxLength: 256}
         - name: If-None-Match
           in: header
           required: false
@@ -22918,8 +23094,9 @@ paths:
       summary: Report one error event for grouping into an incident.
       description: >
         src/lib/incident-events.ts's `buildIncidentEventsRoute` (write scope, tier low): validate,
-        scrub, fingerprint (error type plus the first three in-app frames), then ledger one
-        `incident.event` row. Past 20 events per fingerprint per minute a burst collapses to ONE
+        resolve `template_id` against the source-owned catalog, scrub, fingerprint (the resolved
+        template and the kind, W1-T13131), then ledger one `incident.event` row. An unresolved
+        template answers 422 before any fingerprint is computed. Past 20 events per fingerprint per minute a burst collapses to ONE
         `incident.sampled` row and later events in that window answer `sampled: true` and write
         nothing. `message` and `frames` never reach the ledger. Reachable with the write token or
         with the ingest-only token, which grants this one method and path and nothing else.
@@ -22951,6 +23128,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IncidentIngestBodyTooLarge"
+        "422":
+          description: The event's template is missing, malformed, unknown or mismatched; it was refused and counted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentEventRefused"
 
   /v1/console/telemetry:
     post:

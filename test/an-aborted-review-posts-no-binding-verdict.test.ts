@@ -289,8 +289,10 @@ test("W1-T13151 criterion 4: after a review.lane_aborted row the next sweep pass
       run: waitingChild(() => setImmediate(() => controller.abort())) });
     assertLaneAborted(h, first, "RUN-ABORTED");
     const now = Date.now();
+    const pendingStatus = { id: 1, context: "remudero-review", state: "pending",
+      description: "remudero-review: review in progress (owned by run RUN-ABORTED)", created_at: new Date(now - 60_000).toISOString() };
     // The drain precedes the daemon's restart, so the pending status's owner process is gone on the next pass.
-    const [view] = buildOpenPrViews("acme", "remudero", h.ledgerPath, {
+    const readView = () => buildOpenPrViews("acme", "remudero", h.ledgerPath, {
       requiredContexts: () => ["ci-gate"],
       assessPendingOwner: (record) => { assert.equal(record.runId, "RUN-ABORTED"); return "dead"; },
       fetch: (args) => {
@@ -300,12 +302,13 @@ test("W1-T13151 criterion 4: after a review.lane_aborted row the next sweep pass
           updated_at: new Date(now).toISOString(), body: BODY, auto_merge: null, state: "open",
         }];
         if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
-        if (path.includes("/status")) return { statuses: [{ context: "remudero-review", state: "pending",
-          description: "remudero-review: review in progress (owned by run RUN-ABORTED)", created_at: new Date(now - 60_000).toISOString() }] };
+        if (path.endsWith("/status")) return { statuses: [pendingStatus] };
+        if (path.includes("/statuses?")) return [pendingStatus];
         if (path.endsWith(`/pulls/${PR_NUMBER}`)) return { mergeable: true, mergeable_state: "clean" };
         return [];
       },
-    });
+    })[0];
+    const view = readView();
     assert.ok(view);
     assert.equal(view.reviewState, "pending", "the aborted review left its pending status standing");
     assert.equal(deriveDisposition(view, DEFAULT_SWEEP_POLICY, now).disposition, "post-review");
@@ -314,6 +317,7 @@ test("W1-T13151 criterion 4: after a review.lane_aborted row the next sweep pass
       ledgerPath: h.ledgerPath, runId: "sweep-t13151", now: () => Date.now(),
       arm: () => {}, close: () => {}, dispatchFix: () => {},
       escalate: () => { assert.fail("an aborted review needs no escalation"); },
+      rereadPrAtAct: readView,
       postReview: async () => { second = await review(h, { runId: "RUN-AGAIN", lint: CLEAN_LINT }); },
     };
     await runSweep([view], deps, DEFAULT_SWEEP_POLICY);

@@ -36,7 +36,8 @@ function readRows(text: string): Record<string, string> {
 
 function live(): { baseline: Record<string, string>; population: string[] } {
   const ci = readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  return { baseline: readRows(readFileSync(join(ROOT, BASELINE), "utf8")), population: ciScriptRatchetPopulation(ci) };
+  const pkg = readFileSync(join(ROOT, "package.json"), "utf8");
+  return { baseline: readRows(readFileSync(join(ROOT, BASELINE), "utf8")), population: ciScriptRatchetPopulation(ci, pkg) };
 }
 
 const FIXTURE_CI = [
@@ -54,9 +55,11 @@ const FIXTURE_CI = [
   "        id: shiny-ratchet",
   "        run: npm run --silent shiny-ratchet",
 ].join("\n");
+// W1-T14250: the population follows each npm script to its file, so the fixture carries package.json's scripts.
+const FIXTURE_PACKAGE = JSON.stringify({ scripts: { "shiny-ratchet": "node scripts/shiny-ratchet.mjs", lint: "eslint ." } });
 
 test("W1-T5737: the population reads npm-run and node-script ratchet steps out of ci.yml, once each", () => {
-  assert.deepEqual(ciScriptRatchetPopulation(FIXTURE_CI), ["script:fixture-census", "script:shiny-ratchet"]);
+  assert.deepEqual(ciScriptRatchetPopulation(FIXTURE_CI, FIXTURE_PACKAGE), ["script:fixture-census", "script:shiny-ratchet"]);
   const { population } = live();
   for (const known of [
     "script:learnings-budget-ratchet",
@@ -73,7 +76,7 @@ test("W1-T5737: the population reads npm-run and node-script ratchet steps out o
 });
 
 test("W1-T5737: a fixture script step with no verdict fails by name, and passes once baselined or asked", () => {
-  const population = ciScriptRatchetPopulation(FIXTURE_CI);
+  const population = ciScriptRatchetPopulation(FIXTURE_CI, FIXTURE_PACKAGE);
   const none = scriptRatchetParityVerdict({ population, baseline: {}, parity: {} }) as Verdict;
   assert.deepEqual(none.unasked, ["script:fixture-census", "script:shiny-ratchet"]);
 
@@ -128,7 +131,8 @@ test("W1-T5737: the precheck names a script gate a push to ci.yml leaves with no
   const run = (changed: string[]) =>
     evaluate({
       changed,
-      readHead: (p: string) => (p === ".github/workflows/ci.yml" ? FIXTURE_CI : p === BASELINE ? baselineText : null),
+      readHead: (p: string) =>
+        p === ".github/workflows/ci.yml" ? FIXTURE_CI : p === BASELINE ? baselineText : p === "package.json" ? FIXTURE_PACKAGE : null,
       readBase: () => null,
       measuredFiles: [],
       testFiles: [],

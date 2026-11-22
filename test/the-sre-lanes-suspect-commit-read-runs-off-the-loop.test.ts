@@ -90,7 +90,7 @@ test("W1-T9637: an SRE pass names the suspect PRs an awaited reader returns", as
   const pass = await runSreLanePass({
     stateDir: join(root, "state"),
     root,
-    readEvents: () => [{ fingerprint, ts: Date.parse("2026-10-15T06:00:00.000Z"), kind: "exception", name: "TypeError", message: "boom", instance: "core" }],
+    readEvents: () => [{ fingerprint, ts: Date.parse("2026-10-15T06:00:00.000Z"), kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "boom", instance: "core" }],
     hasOpenTask: () => false,
     framesFor: () => [{ file: "src/lib/sre-lane.ts", fn: "runSreLanePass" }],
     mergedPrsSince: async () => [{ url: "https://github.com/o/r/pull/101", files: ["src/lib/sre-lane.ts"] }],
