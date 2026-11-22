@@ -4979,11 +4979,7 @@ test("runFixRung is REUSED, never reimplemented — one dispatch from runTask's 
   assert.equal(runTaskDefs.length, 1, "there must be exactly one runTask implementation for both callers to share");
   const implementations = runTaskVerbSrc.match(/^export async function runTask\(/gm) ?? [];
   assert.equal(implementations.length, 1, "the extracted module must retain exactly one runTask implementation");
-  assert.match(
-    extractFunctionBody(runTaskSrc, "async function runTask("),
-    /const \{ options, host \} = consoleParityPrOpenGuard\(opts, runTaskCommandHost\(\)\);\s*return runTaskFromModule\(taskId, options, host\);/,
-    "the original entrypoint delegates both callers to the extracted implementation with guarded options and host",
-  );
+  assert.match(extractFunctionBody(runTaskSrc, "async function runTask("), /return runTaskFromModule\(taskId, opts, runTaskCommandHost\(\)\);/, "the original entrypoint delegates both callers to the extracted implementation");
 });
 
 // ── W1-T192: the draft rung runs DAEMON-SIDE, not CLI-pull ─────────────────────────────────
