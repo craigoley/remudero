@@ -630,6 +630,7 @@ export async function scoreReviewersAgainstKnownAnswers(deps: ReviewerCalibratio
     reviewed = await deps.readReviewedHeads();
     prior = await deps.readPriorRows();
   } catch (error) {
+    // The refusal row is the record: it names what could not be read, and no case runs on a short history.
     refuse(`the ledger could not be read whole, so no case runs on a short count of earlier cases and spend: ${String((error as Error)?.message ?? error)}`);
     return { epoch: null, ran: 0, refused, scores: [], decisions: [] };
   }
@@ -749,6 +750,8 @@ function parsedRows(lines: readonly string[]): Array<Record<string, unknown>> {
       const row: unknown = JSON.parse(line);
       return row !== null && typeof row === "object" && !Array.isArray(row) ? [row as Record<string, unknown>] : [];
     } catch {
+      // A torn line is no row. A step-filtered read never returns one; the unfiltered liveness read can, and a torn
+      // heartbeat must not read as a measurement.
       return [];
     }
   });
@@ -807,6 +810,7 @@ export async function runCalibrationCase(
   try {
     code = await w.spawnReview(w.checkoutDir, args, (why) => { failure = why; });
   } catch (error) {
+    // A child that could not start gave no verdict: the case row carries this reason and is unmeasured, never right or wrong.
     failure = `the review child could not start: ${String((error as Error)?.message ?? error)}`;
   }
   return calibrationCaseResult(c, model, await w.readAttemptRows(w.attemptId, sinceIso), { code, ...(failure === undefined ? {} : { failure }) });
