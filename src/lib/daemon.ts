@@ -4708,7 +4708,7 @@ export async function runDaemon(
   };
   const emitLog: (step: string, extra?: Record<string, unknown>) => void = deps.log ?? (() => {});
   const timingSink = opts.selectionTiming === false ? undefined : deps.log && emitLog;
-  const selectionTimingClock = clockFromMillisFn(deps.selectionTimingNow ?? (() => performance.now()));
+  const selectionTimingClock = clockFromMillisFn(deps.selectionTimingNow ?? (() => Date.now()));
   type SettlementReporting = {
     report: typeof emitLog;
     faults: Array<{ phase: string; reason: unknown }>;
