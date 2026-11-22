@@ -1429,6 +1429,10 @@
   ],
   "recordOnly": {
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
-    "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate."
+    "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
+    "sweep.fix.admission_release_failed": "A diagnostic for a failed release of a fix round's admission lock; the lock is left to the stale-holder check, and the row makes the leak visible.",
+    "sweep.fix.deferred_to_live_round": "An operator-facing record that a new failure was handed to the live fix round instead of a second round; the hand-off file carries the decision, so nothing re-reads the row.",
+    "sweep.fix.handoff_cleanup_failed": "A diagnostic for a hand-off file that could not be removed after its round ended; it records the error, and the stale file is ignored because its claim and round ids no longer match.",
+    "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error."
   }
 }
