@@ -32,7 +32,7 @@
     - claim: "A bad argument still throws the usage error, and --enable-write without a write token still throws, before any transport starts"
       proof: "grep: W1-T14173 criterion 4: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
     - claim: "operatorMcpCommand waits for the end of its input before it returns"
-      proof: "grep: \"end\" in src/lib/operator-mcp.ts"
+      proof: "grep: const code = await Promise.race in src/lib/operator-mcp.ts"
   rationale: |
     WHY: `rmd mcp` cannot be used. It exits at once and answers nothing.
     MEASURED on the Azure host, 2026-11-21: a JSON-RPC initialize request piped into
@@ -89,3 +89,6 @@
     Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
     Never point a test at the live serve; the write route stays off in every test.
     Not in scope: new MCP tools, the tokens, and the control-server routes.
+    Proof amended 2026-11-21 (operator session): criterion 5's proof wrapped "end" in quotes, which the
+    acceptance-author gate refuses (proof-shape), and a bare end matches main too. It now greps the race
+    line the build adds, which main lacks.

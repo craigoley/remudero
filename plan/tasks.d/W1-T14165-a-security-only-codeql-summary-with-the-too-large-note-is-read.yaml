@@ -13,7 +13,7 @@
   files:
     - src/lib/code-scanning-merge-policy.mjs
     - test/github/a-security-only-codeql-summary-with-the-too-large-note-is-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     #19651 is blocked by security-merge-policy "security-analysis-failed-or-unrecognized". When a Security Alerts

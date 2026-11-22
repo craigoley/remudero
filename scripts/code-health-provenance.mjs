@@ -18,6 +18,15 @@ const timestamp = value => typeof value === "string" && Number.isFinite(Date.par
 const relativePath = value => text(value, 4096) && !/^(?:\/|[a-z]+:)/i.test(value) && !value.includes("\\") &&
   value.split("/").every(part => part !== ".." && part !== "." && part !== "");
 const semanticVersion = value => text(value) && !/\s/.test(value) && /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/.test(value);
+const extractedMethod = "codeql-extracted-files";
+const extractedTag = "successfully-extracted-files";
+const languageFamilies = new Map([["javascript-typescript", "js"], ["python", "py"], ["actions", "actions"]]);
+const inventoryLimit = 100_000;
+const boundedArray = (value, limit) => Array.isArray(value) && value.length <= limit;
+const extractedId = id => typeof id === "string" && id.endsWith(`/diagnostics/${extractedTag}`);
+const extractedDescriptor = descriptor => extractedId(descriptor?.id) ||
+  extractedId(descriptor?.properties?.id) ||
+  Array.isArray(descriptor?.properties?.tags) && descriptor.properties.tags.includes(extractedTag);
 
 function originalToolVersion(driver) {
   if (!driver || !/CodeQL/i.test(driver.name ?? "")) return null;
@@ -27,8 +36,83 @@ function originalToolVersion(driver) {
   return driver.semanticVersion;
 }
 
-// W1-T10889: inspect known structures only; baseline/extraction counts never attest measured scope.
-function originalStructure(input) {
+function sourcePath(location) {
+  const uri = location?.uri;
+  if (location?.uriBaseId !== "%SRCROOT%" || !text(uri, 4096) ||
+      !/^(?:[a-z\d._~!$&'()*+,;=@/-]|%[a-f\d]{2})+$/i.test(uri) || /%2f|%5c/i.test(uri)) return null;
+  let path;
+  try { path = decodeURIComponent(uri); } catch { return null; }
+  return relativePath(path) && !/[:\x00-\x1f\x7f\uFFFD]/.test(path) ? path : null;
+}
+
+function extractedPath(notification, artifacts) {
+  const locations = notification.locations;
+  if (notification.level !== "none" || !Array.isArray(locations) || locations.length !== 1) return null;
+  const physical = locations[0]?.physicalLocation;
+  const location = physical?.artifactLocation;
+  if (!Number.isSafeInteger(location?.index) || location.index < 0 || location.index >= artifacts.length ||
+      Object.keys(physical).length !== 1) return null;
+  const artifact = artifacts[location.index];
+  const original = artifact?.location;
+  const path = sourcePath(location);
+  return path !== null && (artifact?.parentIndex === undefined || artifact.parentIndex === -1) &&
+    original?.index === location.index && sourcePath(original) === path ? path : null;
+}
+
+function matchingOriginalSource(run, input) {
+  const category = `/language:${input.language}`;
+  const provenance = run.versionControlProvenance;
+  const bases = run.originalUriBaseIds;
+  if (run.automationDetails !== undefined && ![category, `${category}/`].includes(run.automationDetails?.id)) return false;
+  if (bases !== undefined && (!bases || typeof bases !== "object" || Array.isArray(bases) || Object.hasOwn(bases, "%SRCROOT%"))) return false;
+  if (provenance === undefined) return true;
+  const repository = `https://github.com/${input.repository.toLowerCase()}`;
+  return boundedArray(provenance, 1) && provenance.length === 1 && provenance.every(entry => typeof entry?.revisionId === "string" &&
+    entry.revisionId.toLowerCase() === input.analyzedSha.toLowerCase() && (entry.repositoryUri === undefined ||
+      typeof entry.repositoryUri === "string" && [repository, `${repository}.git`].includes(entry.repositoryUri.toLowerCase())));
+}
+
+// CodeQL emits one diagnostic location per file with matching descriptor and artifact references.
+function extractedScope(input, completion, toolVersion) {
+  const run = input.sarif.runs[0], { driver, extensions = [] } = run.tool;
+  const absent = { state: "absent" }, unverified = { state: "unverified" };
+  const descriptors = driver.notifications;
+  const invocation = run.invocations?.[0], notifications = invocation?.toolExecutionNotifications;
+  if (descriptors === undefined && notifications === undefined) return absent;
+  if (!Array.isArray(run.invocations) || run.invocations.length !== 1 || !boundedArray(descriptors, 20_000) ||
+      descriptors.some(descriptor => !text(descriptor?.id)) || !boundedArray(notifications, inventoryLimit) ||
+      !boundedArray(extensions, 127) || extensions.some(extension => extension?.notifications !== undefined &&
+        (!boundedArray(extension.notifications, 20_000) || extension.notifications.some(extractedDescriptor)))) return unverified;
+  const family = languageFamilies.get(input.language), id = `${family}/diagnostics/${extractedTag}`;
+  const entries = descriptors.filter(extractedDescriptor);
+  if (!entries.length && !notifications.some(note => extractedId(note?.descriptor?.id))) return absent;
+  const descriptor = entries[0], index = descriptors.indexOf(descriptor);
+  if (!family || driver.name !== "CodeQL" || !semanticVersion(toolVersion) || entries.length !== 1 ||
+      descriptor.id !== id || descriptor.properties?.id !== id || descriptor.properties.kind !== "diagnostic" ||
+      descriptor.defaultConfiguration?.enabled === false || !Array.isArray(descriptor.properties.tags) ||
+      !descriptor.properties.tags.includes(extractedTag) || !boundedArray(run.artifacts, inventoryLimit) ||
+      run.externalPropertyFileReferences !== undefined) return unverified;
+
+  const paths = new Set();
+  for (const note of notifications) {
+    const reference = note?.descriptor;
+    if (!text(reference?.id) || !Number.isSafeInteger(reference.index) || reference.index < 0 ||
+        reference.toolComponent !== undefined || descriptors[reference.index]?.id !== reference.id) return unverified;
+    if (reference.index !== index) continue;
+    const path = extractedPath(note, run.artifacts);
+    if (path === null) return unverified;
+    paths.add(path);
+  }
+  if (!paths.size) return absent;
+  if (!completion || (input.analysisSucceeded !== undefined && input.analysisSucceeded !== true) ||
+      invocation.executionSuccessful !== true || invocation.endTimeUtc !== undefined && !timestamp(invocation.endTimeUtc) ||
+      (invocation.toolConfigurationNotifications !== undefined && !boundedArray(invocation.toolConfigurationNotifications, inventoryLimit)) ||
+      !matchingOriginalSource(run, input)) return unverified;
+  return { state: "verified", scope: { kind: extractedMethod, fileCount: paths.size, hash: hash([extractedMethod, [...paths].sort()]) } };
+}
+
+// W1-T10889: expose known structures and bounded counts without publishing the original contents.
+function originalStructure(input, scopeMethod, extractedFiles) {
   const run = input.sarif.runs[0], driver = run.tool.driver, limit = 20_000;
   const shape = value => value === undefined ? "absent" : Array.isArray(value) ? "array" : "invalid";
   const count = value => Array.isArray(value) ? Math.min(value.length, limit) : 0;
@@ -37,9 +121,9 @@ function originalStructure(input) {
   const expectedFiles = id => typeof id === "string" && /^cli\/expected-extracted-files\/(?:actions|c|cpp|csharp|go|java|javascript|kotlin|python|ruby|rust|swift|typescript)$/.test(id);
   const metrics = run.properties?.metricResults;
   const notificationCount = items(run.invocations).reduce((total, invocation) => Math.min(limit, total +
-    items(invocation.toolExecutionNotifications).filter(notification => expectedFiles(notification?.descriptor?.id)).length), 0);
+    items(invocation?.toolExecutionNotifications).filter(notification => expectedFiles(notification?.descriptor?.id)).length), 0);
   return {
-    version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod: "explicit-analysis-targets", countLimit: limit,
+    version: "code-health-original-structure-v1", sourceFormat: "original-sarif", scopeMethod, countLimit: limit,
     tool: { codeql: /CodeQL/i.test(driver.name), semanticVersion: versionShape("semanticVersion", semanticVersion),
       version: versionShape("version", text), selected: originalToolVersion(driver) === null ? "unsupported" :
         Object.hasOwn(driver, "semanticVersion") ? "semanticVersion" : "version" },
@@ -48,12 +132,12 @@ function originalStructure(input) {
     codeql: { metricResults: shape(metrics), metricCount: count(metrics),
       baselineMetrics: items(metrics).filter(metric => Number.isFinite(metric?.baseline)).length,
       expectedFileDescriptors: items(driver.notifications).filter(notification => expectedFiles(notification?.id)).length,
-      expectedFileNotifications: notificationCount }
+      expectedFileNotifications: notificationCount, extractedFiles }
   };
 }
 
-/** Original SARIF's explicit analysis targets describe the measured subset, never the whole repository. */
-export function codeqlProvenance(input) {
+/** Scopes describe the measured subset of one original SARIF run. */
+function measureCodeqlProvenance(input) {
   if (!input || !/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9_.-]{1,100}$/i.test(input.repository) ||
       !/^[a-f0-9]{40}$/i.test(input.analyzedSha) || input.ref !== "refs/heads/main" ||
       !/^[1-9][0-9]{0,19}$/.test(input.runId) || !/^[1-9][0-9]{0,5}$/.test(input.runAttempt) ||
@@ -63,44 +147,63 @@ export function codeqlProvenance(input) {
       input.sarif?.version !== "2.1.0" || !Array.isArray(input.sarif.runs) || input.sarif.runs.length !== 1) {
     throw new Error("Code health provenance identity, configuration or original SARIF is invalid.");
   }
-  const run = input.sarif.runs[0], driver = run.tool?.driver;
-  const reasons = input.exclusionsKnown === false ? ["The configured exclusions could not be read without ambiguity."] : [], targets = new Set(), components = [driver, ...(run.tool?.extensions ?? [])];
+  const run = input.sarif.runs[0], driver = run?.tool?.driver;
+  const components = [driver, ...(run?.tool?.extensions ?? [])];
+  if (components.length > 128 || components.some(component => !component || !text(component.name) ||
+      component.rules && (!Array.isArray(component.rules) || component.rules.length > 20_000 || component.rules.some(rule => !text(rule?.id))))) {
+    throw new Error("Code health tool or rule inventory is invalid.");
+  }
+  const reasons = input.exclusionsKnown === false ? ["The configured exclusions could not be read without ambiguity."] : [];
   const toolVersion = originalToolVersion(driver);
   if (toolVersion === null) reasons.push("The original analysis has no supported tool version.");
-  if (!Array.isArray(run.artifacts) || run.artifacts.length > 100_000) reasons.push("The original analysis has no bounded measured-file inventory.");
+  const targets = new Set();
+  let unresolvedTarget = false;
+  if (!boundedArray(run.artifacts, inventoryLimit)) reasons.push("The original analysis has no bounded measured-file inventory.");
   else for (const artifact of run.artifacts) {
-    if (!artifact.roles?.includes("analysisTarget")) continue;
+    const roles = artifact?.roles;
+    if (roles !== undefined && !Array.isArray(roles)) {
+      unresolvedTarget = true;
+      continue;
+    }
+    if (!roles?.includes("analysisTarget")) continue;
     let uri;
     try { uri = decodeURIComponent(artifact.location?.uri ?? ""); } catch { uri = ""; }
     if (relativePath(uri)) targets.add(uri);
-    else reasons.push("A measured file cannot be resolved within this repository.");
+    else unresolvedTarget = true;
   }
-  if (!targets.size) reasons.push("Explicit measured files are unavailable; result locations do not establish scan scope.");
+  if (unresolvedTarget) reasons.push("A measured file cannot be resolved within this repository.");
   const invocations = Array.isArray(run.invocations) && run.invocations.length <= 64 ? run.invocations : [];
-  const contradictoryCompletion = invocations.some(invocation => invocation.executionSuccessful === false ||
+  const notificationError = notifications => notifications !== undefined &&
+    (!Array.isArray(notifications) || notifications.some(value => !value || value.level === "error"));
+  const contradictoryCompletion = invocations.some(invocation => !invocation || invocation.executionSuccessful === false ||
     typeof invocation.endTimeUtc === "string" && (!timestamp(invocation.endTimeUtc) || Date.parse(invocation.endTimeUtc) > Date.parse(input.observedAt)) ||
-    [...(invocation.toolExecutionNotifications ?? []), ...(invocation.toolConfigurationNotifications ?? [])].some(value => value.level === "error"));
-  const originalCompletion = invocations.length > 0 && invocations.every(invocation => invocation.executionSuccessful === true && timestamp(invocation.endTimeUtc));
+    notificationError(invocation.toolExecutionNotifications) || notificationError(invocation.toolConfigurationNotifications));
+  const originalCompletion = invocations.length > 0 && invocations.every(invocation => invocation?.executionSuccessful === true && timestamp(invocation.endTimeUtc));
   const completion = contradictoryCompletion ? null : originalCompletion ? { kind: "original-invocations", state: "success",
     at: invocations.map(invocation => invocation.endTimeUtc).sort().at(-1) } : input.analysisSucceeded === true ?
     { kind: "workflow-analysis-step", state: "success", at: input.observedAt } : null;
+  const extracted = targets.size || unresolvedTarget ? { state: "not-checked" } : extractedScope(input, completion, toolVersion);
+  if (!targets.size && !extracted.scope) reasons.push("Explicit measured files are unavailable; result locations do not establish scan scope.");
+  if (extracted.state === "unverified") reasons.push("The original CodeQL extracted-file evidence could not be verified.");
   if (completion === null) reasons.push("Successful analysis completion is not fully attested in the original output or workflow step.");
-  if (components.length > 128 || components.some(component => !component || !text(component.name) ||
-      component.rules && (!Array.isArray(component.rules) || component.rules.length > 20_000 || component.rules.some(rule => !text(rule.id))))) {
-    throw new Error("Code health tool or rule inventory is invalid.");
-  }
   const rules = components.map(component => [component.name, component.semanticVersion ?? component.version ?? null,
     [...(component.rules ?? [])].map(rule => canonical(rule)).sort((a, b) => a.id.localeCompare(b.id))]).sort(([a], [b]) => a.localeCompare(b));
   const ruleCount = components.reduce((count, component) => count + (component.rules ?? []).filter(rule => rule.defaultConfiguration?.enabled !== false).length, 0);
   if (!ruleCount) reasons.push("The original analysis has no enabled-rule inventory.");
-  const hasScope = targets.size > 0 && !reasons.some(reason => reason.includes("resolved"));
-  return { version: "code-health-source-v1", kind: "quality", repository: input.repository.toLowerCase(), analyzedSha: input.analyzedSha.toLowerCase(),
+  const scope = extracted.scope ?? { kind: "explicit-analysis-targets", fileCount: targets.size,
+    hash: targets.size > 0 && !unresolvedTarget ? hash([...targets].sort()) : null };
+  const metadata = { version: "code-health-source-v1", kind: "quality", repository: input.repository.toLowerCase(), analyzedSha: input.analyzedSha.toLowerCase(),
     ref: input.ref, runId: input.runId, runAttempt: input.runAttempt, observedAt: input.observedAt, language: input.language, sarifId: input.sarifId,
     scanId: `codeql:${input.runId}:${input.runAttempt}:${input.language}:${input.sarifId}`, completion,
     state: reasons.length ? "partial" : "complete", reasons: [...new Set(reasons)],
     toolVersion, rulesVersion: ruleCount ? hash(rules) : null, ruleCount,
     configHash: hash([input.config, [...input.exclusions].sort(), methodHash(["./code-health-provenance.mjs"])]), exclusions: [...new Set(input.exclusions)].sort(),
-    scope: { kind: "explicit-analysis-targets", fileCount: targets.size, hash: hasScope ? hash([...targets].sort()) : null } };
+    scope };
+  return { metadata, extractedFiles: extracted.state };
+}
+
+export function codeqlProvenance(input) {
+  return measureCodeqlProvenance(input).metadata;
 }
 
 /** Keep the original LCOV population and the existing policy; never turn a missing denominator into 100%. */
@@ -199,9 +302,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         config: JSON.stringify([config, workflow]), exclusions: exclusions.values, exclusionsKnown: exclusions.known,
         sarif: JSON.parse(boundedRead(join(values["sarif-dir"], files[0]), 64 * 1024 ** 2)) };
     }
-    const serialized = JSON.stringify(result ?? codeqlProvenance(input)) + "\n";
+    const quality = result === undefined ? measureCodeqlProvenance(input) : null;
+    const serialized = JSON.stringify(quality ? quality.metadata : result) + "\n";
     if (!values.output || Buffer.byteLength(serialized) > 32 * 1024) throw new Error("Invalid or oversized evidence publication.");
-    const diagnostic = input ? JSON.stringify(originalStructure(input)) + "\n" : null;
+    const diagnostic = quality ? JSON.stringify(originalStructure(input, quality.metadata.scope.kind, quality.extractedFiles)) + "\n" : null;
     writeFileSync(values.output, serialized, { flag: "wx", mode: 0o600 });
     if (diagnostic) process.stdout.write(diagnostic);
   } catch {

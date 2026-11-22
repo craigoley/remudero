@@ -55,18 +55,29 @@ function fixtureSettings(): unknown {
   };
 }
 
+/** W1-T13857: two runs of two tasks that both ran the type check and then changed a lib file. */
+const MINED = {
+  runs: [
+    { runId: "P1", taskId: "W1-T300", type: "implement", verdict: "merged" },
+    { runId: "P2", taskId: "W1-T301", type: "implement", verdict: "merged" },
+  ],
+  records: ["P1", "P2"].flatMap((runId) => [
+    { run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: "Bash", tool_signature: "Bash:npm run typecheck" },
+    { run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: "Edit", tool_signature: "Edit:src/lib/review.ts" },
+  ]),
+};
+
 // ── (1) renderSkillDraft: the two-run floor, and provenance for each supporting run ───────────
 
 test("renderSkillDraft: a candidate with two or more supporting runs drafts a SKILL.md carrying each run as provenance", () => {
-  const draft = renderSkillDraft(candidate());
+  const draft = renderSkillDraft(candidate(), MINED);
   assert.ok(draft, "a two-run candidate must render a draft");
   assert.match(draft!.markdown, new RegExp(`name: ${draft!.name}`));
   assert.match(draft!.markdown, /^applies-to: implement$/m);
-  assert.match(draft!.name, /^implement-clean-single-strike/);
-  assert.match(draft!.markdown, /## Procedure/);
-  // W1-T4270 design (iii): a mixed candidate drafts ONLY its eligible signal's step —
-  // clean_single_strike names the merge outcome, not a technique, so its step is dropped.
-  assert.match(draft!.markdown, /Execute every acceptance criterion as a real, observed proof/);
+  assert.match(draft!.name, /^npm-run-typecheck-src-lib-ts-/);
+  // W1-T13857: the Procedure is the recurring command sequence; no signal's outcome text is a step.
+  assert.match(draft!.markdown, /## Procedure\n\n- Run `npm run typecheck`\.\n- Change `src\/lib\/\*\.ts`\.\n/);
+  assert.doesNotMatch(draft!.markdown, /Execute every acceptance criterion as a real, observed proof/);
   assert.doesNotMatch(draft!.markdown, /Resolve the task on the first attempt/);
   assert.match(draft!.markdown, /## Evidence/);
   assert.match(draft!.markdown, /\[src: run#P1\]/);
@@ -76,23 +87,23 @@ test("renderSkillDraft: a candidate with two or more supporting runs drafts a SK
 });
 
 test("renderSkillDraft: a single-run candidate renders NOTHING — one success is an anecdote, not a procedure", () => {
-  assert.equal(renderSkillDraft(candidate({ supportingRuns: 1, runIds: ["P1"] })), undefined);
+  assert.equal(renderSkillDraft(candidate({ supportingRuns: 1, runIds: ["P1"] }), MINED), undefined);
 });
 
 test("renderSkillDraft: an unmapped signal key drafts NOTHING (W1-T4270 — an uncatalogued signal is never promoted to an injectable skill)", () => {
-  assert.equal(renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] })), undefined);
+  assert.equal(renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] }), MINED), undefined);
   // Beside an eligible signal, the uncatalogued key is dropped from the steps, never rendered raw.
-  const mixed = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof+novel_shape", signals: ["fully_executed_proof", "novel_shape"] }));
+  const mixed = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof+novel_shape", signals: ["fully_executed_proof", "novel_shape"] }), MINED);
   assert.ok(mixed);
   assert.doesNotMatch(mixed!.markdown, /- novel_shape/);
 });
 
 test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names each draft otherwise", () => {
   assert.match(renderSkillDrafts([]), /No procedural candidate cleared the two-run floor/);
-  const draft = renderSkillDraft(candidate())!;
+  const draft = renderSkillDraft(candidate(), MINED)!;
   const rendered = renderSkillDrafts([draft]);
   assert.match(rendered, new RegExp(draft.name));
-  assert.match(rendered, /proven across 2 merged implement run/);
+  assert.match(rendered, /2 merged implement runs of 2 tasks/);
 });
 
 // ── (2) scanSkillDraft: a tool, host or path outside the allowlist is refused, naming the line ─
@@ -100,7 +111,7 @@ test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names
 test("scanSkillDraft: a well-formed draft against the shipped worker.json shape passes clean", () => {
   // Well-formed = no Procedure step that only restates its mined outcome (W1-T4283 refuses the
   // clean_single_strike step), so the allowlist check is exercised on an actionable-only draft.
-  const draft = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof", signals: ["fully_executed_proof"] }))!;
+  const draft = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof", signals: ["fully_executed_proof"] }), MINED)!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
   assert.deepEqual(scanSkillDraft(draft, allowlist), { ok: true });
 });
@@ -158,7 +169,7 @@ test("scanSkillDraft: a tool IS accepted once permissions.allow names it", () =>
     procedureKey: "proc-deadbeef",
     supportingRuns: 2,
     description: "d",
-    markdown: "## Procedure\n\n- Use the Bash tool to run the test suite\n",
+    markdown: "## Procedure\n\n- Run `npm test` with the Bash tool\n",
   };
   const allowlist: WorkerAllowlist = { allowedHosts: [], deniedPathPatterns: [], allowedTools: ["Bash(npm test:*)"] };
   assert.deepEqual(scanSkillDraft(draft, allowlist), { ok: true });
@@ -184,31 +195,10 @@ test("scanSkillDraft: an instruction-shaped line the untrusted envelope would fe
 
 const REACHABLE_NO = describeWorkerSkillReachability([]);
 
-/** Two clean implement runs that both called `Grep`, and one repaired run that never did, so the
- *  transcript miner (W1-T4668) finds one distinguishing step. */
-function minedTranscripts(tool: string) {
-  const runs = [
-    { runId: "P1", taskId: "W1-T300", type: "implement", verdict: "merged" },
-    { runId: "P2", taskId: "W1-T301", type: "implement", verdict: "merged" },
-    { runId: "D1", taskId: "W1-T302", type: "implement", verdict: "merged" },
-  ];
-  const activity = (runId: string, taskId: string, tools: string[]) => [
-    { ts: `2026-05-01T00:00:00.000Z`, run_id: runId, task_id: taskId, step: "run.start" },
-    ...tools.map((t) => ({ run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing", tool_name: t })),
-  ];
-  const records = [
-    ...activity("P1", "W1-T300", [tool, "Edit"]),
-    ...activity("P2", "W1-T301", [tool, "Edit"]),
-    ...activity("D1", "W1-T302", ["Edit"]),
-    { ts: `2026-05-01T00:00:01.000Z`, run_id: "D1", task_id: "W1-T302", step: "fix.dispatch" },
-  ];
-  return { runs, records };
-}
-const MINED_GREP = minedTranscripts("Grep");
 
 test("stageSkillDraft: a scanned, passing draft is staged as one inbox proposal naming the future .claude/skills write, and a re-run stages nothing twice", () => {
   const registryPath = join(tmpDir("skill-workshop-stage-"), "inbox-proposals.json");
-  const draft = renderSkillDraft(candidate(), MINED_GREP)!;
+  const draft = renderSkillDraft(candidate(), MINED)!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
 
   const first = stageSkillDraft(registryPath, draft, allowlist, REACHABLE_NO);
@@ -265,7 +255,7 @@ test("describeWorkerSkillReachability: settingSources including 'project' makes 
 });
 
 test("a drafted skill whose markdown carries a valid applies-to is reachable through prompt injection after approval", () => {
-  const draft = renderSkillDraft(candidate())!;
+  const draft = renderSkillDraft(candidate(), MINED)!;
   const result = describeSkillInjectionReachability(draft);
   assert.equal(result.reachable, true);
   assert.match(result.reason, /implement/);
@@ -276,7 +266,7 @@ test("a drafted skill whose markdown carries a valid applies-to is reachable thr
 });
 
 test("a drafted skill with no applies-to frontmatter line is not reachable through prompt injection", () => {
-  const draft = renderSkillDraft(candidate({ taskType: "unsupported" }))!;
+  const draft = renderSkillDraft(candidate({ taskType: "unsupported" }), MINED)!;
   const result = describeSkillInjectionReachability(draft);
   assert.equal(result.reachable, false);
   assert.match(result.reason, /no non-empty applies-to/);
@@ -289,7 +279,7 @@ test("describeWorkerSkillReachability s own existing contract false for an empty
 });
 
 test("draft injection reachability reads only frontmatter and normalizes comma-separated task types", () => {
-  const draft = renderSkillDraft(candidate())!;
+  const draft = renderSkillDraft(candidate(), MINED)!;
   for (const markdown of [
     "## Procedure\n\napplies-to: implement\n",
     "---\nname: empty\napplies-to: , ,\n---\n\nprocedure\n",
@@ -342,8 +332,8 @@ test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, whe
     allowedTools: [],
   });
 
-  const inOneSegment = draft("copy /etc/ssh.conf into the report");
-  const acrossSegments = draft("copy /etc/ssh/sshd.conf into the report");
+  const inOneSegment = draft("Copy `/etc/ssh.conf` into the report");
+  const acrossSegments = draft("Copy `/etc/ssh/sshd.conf` into the report");
 
   // A single `*` widens within a segment: it matches here...
   assert.equal(scanSkillDraft(inOneSegment, withPattern("/etc/*.conf")).ok, false);
@@ -362,10 +352,10 @@ test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, whe
 
 test("stageSkillDraft refuses a draft whose every Procedure step only restates its mining signal", () => {
   const registryPath = join(tmpDir("skill-workshop-outcome-only-"), "inbox-proposals.json");
-  // W1-T4270: the renderer drops the outcome label's step, so the outcome-only shape (as staged
-  // before it) is rebuilt by swapping the eligible step back out.
-  const mixed = renderSkillDraft(candidate())!;
-  const draft = { ...mixed, markdown: mixed.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`, `- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`) };
+  // The renderer never drafts a signal's text, so the outcome-only shape (as staged before it) is
+  // rebuilt by swapping the mined steps out for the signal step.
+  const mixed = renderSkillDraft(candidate(), MINED)!;
+  const draft = { ...mixed, markdown: mixed.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, `## Procedure\n\n- ${PROCEDURAL_STEP_TEXT.clean_single_strike}\n\n`) };
   const result = stageSkillDraft(registryPath, draft, workerAllowlistFromSettings(fixtureSettings()), REACHABLE_NO);
   assert.equal(result.refused, true);
   assert.equal(result.staged, false);
@@ -376,10 +366,10 @@ test("stageSkillDraft refuses a draft whose every Procedure step only restates i
 test("stageSkillDraft replaces a staged procedure when the same procedure is mined with more steps and never with fewer", () => {
   const registryPath = join(tmpDir("skill-workshop-refresh-"), "inbox-proposals.json");
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
-  const draft = renderSkillDraft(candidate(), MINED_GREP)!;
+  const draft = renderSkillDraft(candidate(), MINED)!;
   const id = skillDraftProposalId(draft.procedureKey);
-  // The shape every live proposal has today: staged with an outcome-only file before this bar.
-  const outcomeOnly = renderSkillDraft(candidate())!;
+  // The shape every live proposal had: staged with the signal's one outcome line before this bar.
+  const outcomeOnly = { ...draft, markdown: draft.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, `## Procedure\n\n- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}\n\n`) };
   writeFileSync(
     registryPath,
     JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }),
@@ -391,14 +381,14 @@ test("stageSkillDraft replaces a staged procedure when the same procedure is min
   assert.equal(refreshed.alreadyStaged, true);
   assert.equal(refreshed.staged, false);
   const stored = loadProposalRegistry(registryPath).find((p) => p.id === id);
-  assert.match(stored!.skillFile!.markdown, /Call `Grep`/, "approval now writes the procedure with the mined step");
+  assert.match(stored!.skillFile!.markdown, /Run `npm run typecheck`/, "approval now writes the procedure with the mined step");
 
   // A later window mines one step instead of three: it is a procedure, so it is not refused, but
   // it does not downgrade what approval would write.
-  const fewer = { ...draft, markdown: draft.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, "## Procedure\n\n- Call `Glob` once.\n\n") };
+  const fewer = { ...draft, markdown: draft.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, "## Procedure\n\n- Run `git status` once.\n\n") };
   const again = stageSkillDraft(registryPath, fewer, allowlist, REACHABLE_NO);
   assert.equal(again.refused, false);
   assert.equal(again.alreadyStaged, true);
   assert.equal(again.refreshed, undefined, "fewer steps never replace what is staged");
-  assert.match(loadProposalRegistry(registryPath).find((p) => p.id === id)!.skillFile!.markdown, /Call `Grep`/);
+  assert.match(loadProposalRegistry(registryPath).find((p) => p.id === id)!.skillFile!.markdown, /Run `npm run typecheck`/);
 });
