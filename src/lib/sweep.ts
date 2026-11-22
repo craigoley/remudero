@@ -13785,12 +13785,13 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T13470 — a source edit cannot clear GitHub's own "configuration not found" CodeQL state, so a head whose only
-    // red is that policy UNKNOWN waits: no fix round, no strike. runSweep captures and escalates it.
+    // W1-T13470 / W1-T12281 — a policy-only red waits for trusted CodeQL evidence. The configuration warning has its own observer.
     disposition: "wait",
     blocker: "security-unknown-hold",
-    when: codeqlConfigurationWarningWait,
-    reason: () => CODEQL_CONFIGURATION_WAIT_REASON,
+    when: (pr) => codeqlEvidenceWait(pr, CODEQL_RESULT_MISSING) || codeqlConfigurationWarningWait(pr),
+    reason: (pr) => pr.securityMergePolicy?.reason === CODEQL_RESULT_MISSING
+      ? `security-merge-policy unknown at this head: ${CODEQL_RESULT_MISSING} — waiting for trusted CodeQL evidence at this head`
+      : CODEQL_CONFIGURATION_WAIT_REASON,
   },
   {
     // W1-T3078 — a worker can DECLINE a criterion under review.ts's closed grammar, but it may
@@ -19009,6 +19010,7 @@ export function withCodeqlAlertEvidence(pr: Pick<OpenPrView, "headSha" | "codeql
 export const CODE_SCANNING_CONFIGURATION_WARNING_STEP = "security.codeql_configuration_warning_captured";
 export const CODE_SCANNING_CONFIGURATION_WARNING_ESCALATED_STEP = "security.codeql_configuration_warning_escalated";
 const SECURITY_PRODUCER_REDISPATCHED_STEP = "security.producer_redispatched";
+const CODEQL_RESULT_MISSING = "trusted-exact-head-codeql-result-missing";
 const CODEQL_CONFIGURATION_WAIT_REASON = `security-merge-policy unknown at this head: ${CODEQL_CONFIGURATION_NOT_FOUND} — ` +
   "GitHub's CodeQL check reports a missing configuration, a GitHub-side state no source edit clears — " +
   "waiting for GitHub's refresh, no fix round and no strike";
@@ -19025,10 +19027,13 @@ export interface SecurityMergeObservation {
   observation?: { checksComplete?: boolean; latest?: { id?: number }; configurationWarning?: CodeqlConfigurationWarningReceipt };
 }
 
-/** W1-T13470 — the only red is the policy status at this reason (positively named), the review has not failed, and no
- *  open high CodeQL alert was read at this head. Anything else keeps today's route. */
 export function codeqlConfigurationWarningWait(pr: OpenPrView): boolean {
-  if (pr.securityMergePolicy?.state !== "unknown" || pr.securityMergePolicy.reason !== CODEQL_CONFIGURATION_NOT_FOUND) return false;
+  return codeqlEvidenceWait(pr, CODEQL_CONFIGURATION_NOT_FOUND);
+}
+
+/** Hold only a positively named policy-only red with no independent review failure, cancelled check or exact-head alert. */
+function codeqlEvidenceWait(pr: OpenPrView, reason: string): boolean {
+  if (pr.securityMergePolicy?.state !== "unknown" || pr.securityMergePolicy.reason !== reason) return false;
   if (!isBlockedCi(pr) || pr.reviewState === "failure" || (pr.cancelledRequiredChecks?.length ?? 0) > 0) return false;
   const reds = [...(pr.redRequiredChecks ?? []), ...(pr.ciFailures ?? []).map((failure) => failure.name)];
   const highAtHead = pr.codeqlHeadAlerts?.headSha === pr.headSha && pr.codeqlHeadAlerts.alerts.length > 0;
