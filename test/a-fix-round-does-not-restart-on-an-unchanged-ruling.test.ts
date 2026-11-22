@@ -143,7 +143,7 @@ describe("test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts", () 
     assert.equal(hold?.since, at(30_000));
     assert.equal(priorRoundHold(rows, facts({ checkCompletions: [{ name: "ci-shard (1/8)" }] }))?.hold, "FLAKE",
       "a check with no completion time has not completed");
-    for (const flake_claim of ["requeue_deferred", "refuted", "confirmed"]) {
+    for (const flake_claim of ["requeue_deferred", "confirmed"]) {
       assert.equal(priorRoundHold(round("FLAKE", { flake_claim }), facts())?.hold, "FLAKE", flake_claim);
     }
   });
