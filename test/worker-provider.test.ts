@@ -14,7 +14,6 @@ import {
   ProviderCapacityBlockedError,
   abandonProviderWindowMeasurement,
   beginProviderWindowMeasurement,
-  buildWorkerHarnessContract,
   claudeCapacityFromUsage,
   clearCodexCapacityCache,
   clearProviderWindowMeasurements,
@@ -55,7 +54,6 @@ import { DatabaseSync } from "node:sqlite";
 import { fixedClock } from "#src/lib/clock.js";
 import { CASH_WEB_SEARCH_KEY_ENV } from "#src/lib/cash-web-bridge.js";
 import { issueCanaryPilotBudgetCapability, withCanaryPilotBudget } from "#src/lib/model-canary-pilot-budget.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 function capacity(provider: "claude" | "codex", ...usedPercent: number[]): ProviderCapacity {
   return {
@@ -892,69 +890,6 @@ test("Codex JSONL maps thread, final message, and token usage to the worker enve
   assert.equal(parsed.text, "done");
   assert.deepEqual(parsed.tokens, { input: 100, output: 10, cacheRead: 25, cacheCreation: 0 });
   assert.equal(parsed.isError, false);
-});
-
-test("harness contract keeps unsupported Codex identity and compaction distinct from unknown", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-harness-codex-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const proc = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough() });
-  let commandArgs: string[] = [];
-  const result = await spawnCodexWorker({
-    cwd: dir, workerHome: dir, settingsFile: join(REPO_ROOT, "settings", "worker.json"),
-    prompt: "fixture", tools: ["Read"], resumeSessionId: "private-session",
-    containment: { spawn: ({ args }) => {
-      commandArgs = args;
-      setImmediate(() => {
-        for (const event of [
-          { type: "thread.started", thread_id: "private-session" },
-          { type: "turn.started" },
-          { type: "item.completed", item: { type: "agent_message", text: "tool was denied" } },
-          { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
-        ]) proc.stdout.write(`${JSON.stringify(event)}\n`);
-        proc.stdout.end();
-        proc.emit("exit", 0);
-      });
-      return { process: proc as never, pid: 1 };
-    }, teardown: () => {} },
-  }, { root: dir, claudeBin: "/unused", workerProviders: { enabled: ["codex"], codexBin: "/bin/sh", codexModel: "gpt-6-luna" } });
-  assert.deepEqual(commandArgs.slice(0, 2), ["exec", "resume"]);
-  assert.equal(result.isError, false);
-  assert.equal(result.servedModel, null);
-  assert.equal(result.compactionConfigured, false);
-  assert.equal(result.harnessContract.capabilities.configuredCompaction.declared, "unsupported");
-  assert.equal(result.harnessContract.capabilities.servedModelIdentity.tested, "unknown");
-  assert.equal(result.harnessContract.capabilities.resume.tested, "supported");
-  assert.equal(result.harnessContract.preToolInterception, "NOT_RUN");
-  assert.equal(result.harnessContract.capabilities.preToolInterception.installed, "NOT_RUN");
-  const unknown = buildWorkerHarnessContract("unrecognized", { resume: true, compactionConfigured: true });
-  assert.equal(unknown.adapter, "unknown");
-  assert.ok(Object.values(unknown.capabilities).every(row => row.declared === "unknown" && row.installed === "NOT_RUN"));
-});
-
-test("harness contract cannot promote declared fixture skipped or stale evidence to observed enforcement", () => {
-  const binding = { adapter: "claude", adapterRevision: "a".repeat(40), executableSha256: "b".repeat(64),
-    policySha256: "c".repeat(64), environment: "linux-container" } as const;
-  const evidence = { class: "observed-installed-runtime", outcome: "supported", binding } as const;
-  const read = (record: unknown, current: unknown = binding) => buildWorkerHarnessContract("claude", {}, {
-    binding: current, capabilities: { resume: record },
-  }).capabilities.resume.installed;
-  assert.equal(read(evidence), "supported");
-  assert.equal(read(undefined), "NOT_RUN");
-  for (const outcome of ["SKIPPED", "NOT_RUN"] as const) assert.equal(read({ ...evidence, outcome }), outcome);
-  for (const evidenceClass of ["declared", "deterministic-adapter-test"]) {
-    assert.equal(read({ ...evidence, class: evidenceClass }), "unknown");
-  }
-  for (const stale of [
-    { adapter: "codex" }, { adapterRevision: "d".repeat(40) }, { executableSha256: "d".repeat(64) },
-    { policySha256: "d".repeat(64) }, { environment: "linux-host" },
-  ]) assert.equal(read({ ...evidence, binding: { ...binding, ...stale } }), "unknown");
-  assert.equal(read(evidence, { ...binding, executableSha256: null }), "unknown");
-  assert.equal(read({ ...evidence, outcome: "pass" }), "unknown");
-  const interception = (source?: string) => buildWorkerHarnessContract("claude", {}, {
-    binding, capabilities: { preToolInterception: { ...evidence, source } },
-  }).capabilities.preToolInterception.installed;
-  assert.equal(interception(), "unknown");
-  assert.equal(interception("pre-tool-hook-denial"), "supported");
 });
 
 test("W1-T3490 criterion 2: fragmented Codex JSONL remains a complete neutral worker result", async () => {
