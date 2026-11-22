@@ -57,12 +57,7 @@ export interface FixLearningsShadowInput {
   budgetChars?: number;
 }
 
-export interface FixLearningsShadowDeps {
-  load: typeof loadLayeredLearningsForTaskFiles;
-  select: typeof selectLearnings;
-}
-
-const REAL_DEPS: FixLearningsShadowDeps = { load: loadLayeredLearningsForTaskFiles, select: selectLearnings };
+const REAL_READERS = { load: loadLayeredLearningsForTaskFiles, select: selectLearnings };
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
 
@@ -90,7 +85,7 @@ export function fixFailureSelectionText(input: Pick<FixLearningsShadowInput, "fa
 export function recordFixLearningsShadow(
   input: FixLearningsShadowInput,
   log: Log,
-  deps: FixLearningsShadowDeps = REAL_DEPS,
+  deps: { load: typeof loadLayeredLearningsForTaskFiles; select: typeof selectLearnings } = REAL_READERS,
 ): Record<string, unknown> {
   const budgetChars = input.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
   const base = {
