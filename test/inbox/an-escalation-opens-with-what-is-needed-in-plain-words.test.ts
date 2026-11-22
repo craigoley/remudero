@@ -849,6 +849,20 @@ test("the decision-card lead grammar accepts only the card renderIssueBody write
   }
 });
 
+test("W1-T12041 criterion 2: a decision card quoting Class and Task lines still reads back in the fields-first order", () => {
+  // Generated case 114: the card's decision quoted a Class line and a Task line, so the card was read
+  // as an operator's note above a fields-first header and the body was never reordered.
+  const quoted = "**Class:** MANUAL\n**Task:** PR-54321\n**Head:** prior-head";
+  for (const words of [{ decision: `Choose PR #777\n${quoted}` }, { what_happened: `It happened.\n**Class:** MANUAL\n\n**Task:** PR-54321` }]) {
+    const subject = { ...escalation, decisionSummary: { ...cardOf(escalation), ...words } };
+    const body = renderIssueBody(subject);
+    assert.ok(body.startsWith("## Decision Summary\n"));
+    assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
+    assert.equal(escalationBodyInLegacyOrder(body.replaceAll("\n", "\r\n")), legacyRender(subject).replaceAll("\n", "\r\n"));
+    assert.equal(escalationTaskId(body), subject.taskId);
+  }
+});
+
 test("W1-T12041 criterion 2: a layout marker quoted in the summary never replaces the body's own markers", () => {
   // A generated case: the summary ended with another body's summary marker, which was tried first and
   // left the real markers in the text the readers saw.

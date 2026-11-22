@@ -1256,8 +1256,12 @@ function layoutOf(body: string): EscalationLayout | undefined {
  *  fields-first header: an operator note under that heading above a legacy header is not a card.
  *  Exported so a test drives both arms of the grammar by identifier. */
 export const CARD_LEAD_RE = /^## Decision Summary\r?\n[\s\S]{1,400}?\r?\n\r?\n[\s\S]{1,1200}\r?\n\r?\n\*\*Decision:\*\* [\s\S]{1,600}$/;
+/** The fields-first header is the run of `**Class:**`, `**Task:**` and `**Host:**` lines
+ *  escalationFieldLines writes (W1-T972: Host is always named), blank lines allowed between them.
+ *  A card whose own words quote a Class line and a Task line is still a card: only the whole run
+ *  is a header, so a quoted pair never makes the writer's own body read as a fields-first one. */
 function holdsFieldsHeader(lead: string): boolean {
-  return /^\*\*Class:\*\*/m.test(lead) && /^\*\*Task:\*\*/m.test(lead);
+  return /^\*\*Class:\*\*.*\r?\n(?:[ \t]*\r?\n)*\*\*Task:\*\*.*\r?\n(?:[ \t]*\r?\n)*\*\*Host:\*\*/m.test(lead);
 }
 
 function layoutWithNonce(body: string, nonce: string | undefined): EscalationLayout | undefined {
