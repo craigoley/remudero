@@ -31,10 +31,10 @@
  */
 import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
-import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
-import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { basename, delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -781,80 +781,93 @@ function inCensusDirectory(dir, owner, visit) {
   }
 }
 
-function removeCompleteCensusCapture(dir, owner, names, pins) {
-  const backup = mkdtempSync(join(dirname(dir), "rmd-census-cleanup-"));
-  const backupOwner = lstatSync(backup);
-  const staged = [];
-  const removed = [];
-  let recovered = true;
-  const assertFile = (path, pin, beforeLink = false) => {
-    const current = lstatSync(path);
-    if (!current.isFile() || ["dev", "ino", "uid", "size", "mtimeMs"].some(key => current[key] !== pin[key]) ||
-        (beforeLink && current.ctimeMs !== pin.ctimeMs)) throw new Error(`capture ${path} was replaced or changed`);
-  };
+/** Puts `from` back at `to` while nothing else holds `to`; returns why it could not (and retains `from`), else undefined. */
+function returnCensusDirectory(from, to) {
   try {
-    inCensusDirectory(dir, owner, () => {
-      try {
-        // Keep a link to every original file until rmdir commits the removal.
-        for (const [index, name] of names.entries()) {
-          assertFile(name, pins[index], true);
-          assertCensusDirectory(backup, backupOwner);
-          const saved = join(backup, name);
-          linkSync(name, saved);
-          staged.push(name);
-          assertFile(saved, pins[index]);
-        }
-        for (const [index, name] of names.entries()) {
-          assertCensusDirectory(dir, owner);
-          assertFile(name, pins[index]);
-          unlinkSync(name);
-          removed.push(name);
-        }
-        assertCensusDirectory(dir, owner);
-        rmdirSync(dir);
-      } catch (error) {
-        const failures = [];
+    if (lstatSync(to, { throwIfNoEntry: false })) throw new Error(`${to} is occupied`);
+    renameSync(from, to);
+  } catch (error) {
+    const reason = `capture could not be returned to ${to} (${error.message})`;
+    retainFixture(from, `capture custody UNKNOWN (${reason})`);
+    return reason;
+  }
+  return undefined;
+}
+
+/**
+ * W1-T13191 — REMOVING A COMPLETE CAPTURE WITHOUT NAMING A DIRECTORY SOMEONE ELSE MAY HOLD. Node has no
+ * fd-relative unlink or rmdir, so a verified path can be rebound before the call that uses it. Every destructive
+ * step is therefore bound to a directory inode this process has VERIFIED as its own: the capture is first MOVED
+ * (rename: it destroys nothing, and a foreign directory it picks up is moved straight back) to a fresh private name
+ * nothing has seen, its identity is checked there, its files are removed relative to it as the working directory, and
+ * only then is it rmdir'd. Nothing is ever written through a path: a failed removal restores the original bytes
+ * relative to the verified directory, or, when a name is occupied, into a new retained directory.
+ */
+function removeCompleteCensusCapture(dir, owner, names, pins, bytes) {
+  const tomb = join(dirname(dir), `${basename(dir)}-removing-${randomUUID()}`);
+  const removed = [];
+  const assertFile = (path, pin) => {
+    const current = lstatSync(path);
+    if (!current.isFile() || ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].some(key => current[key] !== pin[key])) {
+      throw new Error(`capture ${path} was replaced or changed`);
+    }
+  };
+  renameSync(dir, tomb);
+  try {
+    assertCensusDirectory(tomb, owner);
+  } catch (error) {
+    const unreturned = returnCensusDirectory(tomb, dir);
+    throw unreturned ? new Error(`${error.message}; ${unreturned}`, { cause: error }) : error;
+  }
+  try {
+    inCensusDirectory(tomb, owner, () => {
+      for (const [index, name] of names.entries()) assertFile(name, pins[index]);
+      for (const [index, name] of names.entries()) {
+        assertFile(name, pins[index]);
+        unlinkSync(name);
+        removed.push(name);
+      }
+      assertCensusDirectory(".", owner);
+      rmdirSync(tomb);
+    });
+  } catch (error) {
+    try {
+      assertCensusDirectory(tomb, owner);
+    } catch (locationError) {
+      throw new Error(`${error.message}; the capture is no longer at ${tomb} (${locationError.message})`, { cause: error });
+    }
+    const failures = [];
+    try {
+      inCensusDirectory(tomb, owner, () => {
         for (const name of removed) {
           try {
-            assertCensusDirectory(backup, backupOwner);
-            linkSync(join(backup, name), name);
+            writeFileSync(name, bytes[names.indexOf(name)], { flag: "wx", mode: 0o600 });
           } catch (restoreError) {
             failures.push(`${name}: ${restoreError.message}`);
           }
         }
-        if (removed.length > 0) {
-          try {
-            const retainedPath = realpathSync.native(".");
-            assertCensusDirectory(retainedPath, owner);
-            if (retainedPath !== dir) retainFixture(retainedPath, `capture custody UNKNOWN (${error.message})`);
-          } catch (locationError) {
-            failures.push(`capture location: ${locationError.message}`);
-          }
-        }
-        if (failures.length === 0) throw error;
-        recovered = false;
-        const reason = `${error.message}; original capture files retained at ${backup} (${failures.join(", ")})`;
-        retainFixture(backup, reason);
-        throw new Error(reason, { cause: error });
-      }
-    });
-  } finally {
-    if (recovered) {
+      });
+    } catch (restoreError) {
+      failures.push(`capture directory: ${restoreError.message}`);
+    }
+    let reason = error.message;
+    if (failures.length > 0) {
       try {
+        const backup = mkdtempSync(join(dirname(dir), "rmd-census-cleanup-"));
+        const backupOwner = lstatSync(backup);
+        retainFixture(backup, `${error.message}; original capture files (${failures.join(", ")})`);
         inCensusDirectory(backup, backupOwner, () => {
-          for (const name of staged) {
-            assertFile(name, pins[names.indexOf(name)]);
-            unlinkSync(name);
-          }
-          assertCensusDirectory(backup, backupOwner);
-          rmdirSync(backup);
+          for (const [index, name] of names.entries()) writeFileSync(name, bytes[index], { flag: "wx", mode: 0o600 });
         });
-      } catch (error) {
-        const reason = `census cleanup staging could not be removed: ${error.message}`;
-        retainFixture(backup, reason);
-        console.error(`census-precheck: ${reason}`);
+        reason += `; original capture files retained at ${backup} (${failures.join(", ")})`;
+      } catch (backupError) {
+        reason += `; original capture files could NOT be backed up (${failures.join(", ")}; ${backupError.message})`;
       }
     }
+    const unreturned = returnCensusDirectory(tomb, dir);
+    if (unreturned) reason += `; ${unreturned}`;
+    if (failures.length === 0 && !unreturned) throw error;
+    throw new Error(reason, { cause: error });
   }
 }
 
@@ -876,11 +889,13 @@ function completeCensusCapture(dir, owner, result) {
               [opened, linked].some((stat) => ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].some((key) => stat[key] !== pin[key]))) {
             throw new Error(`capture ${name} was replaced or changed`);
           }
-          return readFileSync(fd, "utf8");
+          // Kept as bytes: a failed removal restores exactly these, never a re-encoding of them.
+          return Buffer.from(readFileSync(fd));
         } finally { closeSync(fd); }
       });
-      const native = JSON.parse(bytes[2]);
-      if (bytes[0] !== result.stdout || bytes[1] !== result.stderr || native.version !== 1 ||
+      const [stdout, stderr, receipt] = bytes.map((raw) => raw.toString("utf8"));
+      const native = JSON.parse(receipt);
+      if (stdout !== result.stdout || stderr !== result.stderr || native.version !== 1 ||
           native.outputComplete !== true || native.status !== result.status || native.signal !== result.signal ||
           !native.finishedAt || native.finishedAt !== result.finishedAt || native.startedAt !== result.startedAt ||
           native.durationMs !== result.durationMs || native.error?.code !== result.error?.code) {
@@ -892,7 +907,7 @@ function completeCensusCapture(dir, owner, result) {
         return;
       }
       if (readdirSync(dir).length !== names.length) throw new Error("capture directory has unexpected entries");
-      removeCompleteCensusCapture(dir, owner, names, pins);
+      removeCompleteCensusCapture(dir, owner, names, pins, bytes);
     } catch (error) {
       const reason = `capture custody UNKNOWN (${error.message})`;
       retainFixture(dir, reason);
@@ -906,7 +921,9 @@ function runCensusChild(file, args, options) {
   if (test >= 0 && (!Number.isFinite(options.timeout) || options.timeout <= 0)) throw new RangeError("census test timeout must be finite and positive");
   const insertion = args[test + 1]?.startsWith("--test-reporter=") ? test + 2 : test + 1;
   const timedArgs = test < 0 ? args : [...args.slice(0, insertion), `--test-timeout=${options.timeout}`, ...args.slice(insertion)];
-  const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
+  // W1-T13191: absolute, so a relative TMPDIR cannot leave the capture's path meaning something else once cleanup
+  // changes the working directory. Every capture path (and the cleanup's sibling names) derives from this one.
+  const dir = mkdtempSync(join(resolve(tmpdir()), "rmd-census-capture-"));
   const owner = lstatSync(dir);
   let result;
   try {

@@ -38,7 +38,7 @@ fs.lstatSync=(path,...args)=>{
   return stat(path,...args);
 };
 fs.rmdirSync=(path,...args)=>{
-  if(mode==="fault-cleanup"&&dirs.includes(String(path))){faulted=true;throw Object.assign(new Error("owned cleanup unwritable"),{code:"EACCES"});}
+  if(mode==="fault-cleanup"&&dirs.some(dir=>String(path).startsWith(dir))){faulted=true;throw Object.assign(new Error("owned cleanup unwritable"),{code:"EACCES"});}
   return remove(path,...args);
 };
 syncBuiltinESMExports();

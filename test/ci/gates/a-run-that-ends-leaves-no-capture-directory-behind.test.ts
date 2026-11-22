@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -227,39 +227,72 @@ for (const change of ["replace stderr", "add an entry"] as const) {
   });
 }
 
-test("W1-T13191 criterion 3: cleanup binds evidence deletion to the owned capture directory", (t) => {
-  withCaptureRoot(t, (root, captures) => {
-    const foreign = join(root, "foreign-capture");
-    const moved = join(root, "moved-capture");
-    mkdirSync(foreign);
-    for (const name of EVIDENCE) writeFileSync(join(foreign, name), name);
-    const foreignEvidence = evidence(foreign);
-    let original: Buffer[] | undefined;
-    const unlink = t.mock.method(fs, "unlinkSync", new Proxy(unlinkSync, {
-      apply(remove, receiver, args) {
-        const path = String(args[0]);
-        if (!original && (path === "stdout" || path === join(captures()[0] ?? root, "stdout"))) {
+// The class: the capture's NAME is rebound after cleanup verified it and before the call that acts on it. Whatever
+// the name then holds (a link to another capture, an empty directory another process made) is moved straight back,
+// never emptied, linked into or removed; the evidence at its real place is untouched.
+for (const rebind of ["a symlink to a foreign capture", "an empty foreign directory"] as const) {
+  test(`W1-T13191 criterion 3: cleanup leaves ${rebind} alone when it takes the capture's name before removal`, (t) => {
+    withCaptureRoot(t, (root, captures) => {
+      const scratch = join(root, "scratch");
+      const foreign = join(root, "foreign-capture");
+      const moved = join(root, "moved-capture");
+      mkdirSync(foreign);
+      for (const name of EVIDENCE) writeFileSync(join(foreign, name), name);
+      const foreignEvidence = evidence(foreign);
+      const realRename = fs.renameSync;
+      let original: Buffer[] | undefined;
+      const rename = t.mock.method(fs, "renameSync", new Proxy(realRename, {
+        apply(move, receiver, args) {
           const [capture] = captures();
-          original = evidence(capture);
-          fs.renameSync(capture, moved);
-          fs.symlinkSync(foreign, capture);
-        }
-        return Reflect.apply(remove, receiver, args);
-      },
-    }));
-    syncBuiltinESMExports();
-    try {
-      assert.throws(() => run(root), /capture custody UNKNOWN/);
-    } finally {
-      unlink.mock.restore();
+          if (!original && capture !== undefined && String(args[0]) === capture) {
+            original = evidence(capture);
+            Reflect.apply(realRename, receiver, [capture, moved]);
+            if (rebind === "an empty foreign directory") mkdirSync(capture);
+            else fs.symlinkSync(foreign, capture);
+          }
+          return Reflect.apply(move, receiver, args);
+        },
+      }));
       syncBuiltinESMExports();
+      try {
+        assert.throws(() => run(root), /capture custody UNKNOWN/);
+      } finally {
+        rename.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.ok(original, "the capture path was rebound immediately before cleanup moved it");
+      assert.deepEqual(evidence(foreign), foreignEvidence);
+      assert.deepEqual(evidence(moved), original);
+      const [taken] = captures();
+      assert.equal(captures().length, 1);
+      assert.deepEqual(readdirSync(scratch), [basename(taken)], "no staging name is left behind");
+      assert.match(fixtureRetentionReason(taken) ?? "", /capture custody UNKNOWN/);
+      if (rebind === "an empty foreign directory") {
+        assert.ok(fs.lstatSync(taken).isDirectory());
+        assert.deepEqual(readdirSync(taken), []);
+      } else {
+        assert.ok(fs.lstatSync(taken).isSymbolicLink());
+      }
+    });
+  });
+}
+
+test("W1-T13191 criterion 1: accepted census child removes its capture when TMPDIR is relative", (t) => {
+  withCaptureRoot(t, (root, captures) => {
+    const previous = process.cwd();
+    process.chdir(root);
+    process.env.TMPDIR = "scratch";
+    try {
+      let ticks = 0;
+      assert.deepEqual(run(root, () => {
+        if (++ticks === 2) assert.equal(captures().length, 1, "the capture is made under the relative TMPDIR");
+        return ticks;
+      }), []);
+      assert.deepEqual(captures(), []);
+      assert.deepEqual(readdirSync(join(root, "scratch")), []);
+    } finally {
+      process.chdir(previous);
     }
-    assert.ok(original, "the capture path was rebound immediately before unlink");
-    assert.deepEqual(evidence(foreign), foreignEvidence);
-    assert.deepEqual(evidence(moved), original);
-    assert.match(fixtureRetentionReason(fs.realpathSync(moved)) ?? "", /capture custody UNKNOWN/);
-    assert.equal(captures().length, 1);
-    assert.ok(fs.lstatSync(captures()[0]).isSymbolicLink());
   });
 });
 
