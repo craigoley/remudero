@@ -1,0 +1,61 @@
+- id: W1-T14307
+  title: rmd hand-worktree claims its task on origin when it cuts the worktree, so the fleet never dispatches a task a hand build already holds
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium # a new push from a local command; a refused or unreachable claim must refuse the worktree, never pass silently
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T5533, W1-T1268, W1-T916]
+  files:
+    - src/lib/hand-worktree.ts
+    - src/run-task.ts
+    - test/a-hand-build-worktree-is-one-command.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 8923f5635 (2026-11-22).
+    - createHandWorktree (src/lib/hand-worktree.ts) refuses a task whose `run-<id>-*` branch is on origin or whose
+      `Remudero-Task:` trailer is on main (duplicateWork). It then cuts `run-<id>-<epochMs>` from origin/main LOCALLY and
+      returns. Nothing on origin says a hand build holds the task until its first code push, which follows the build and
+      its author preflight: tens of minutes to hours.
+    - The drain dispatches a task unless published work exists: an open PR or a pushed run branch (src/lib/drain.ts
+      `hasPushedRunBranch`, one `git ls-remote --heads origin 'run-*'` sweep a pass; src/lib/dispatch-claim.ts module
+      header). A pushed branch with no PR is released only after its grace (drain.ts orphanRunBranchReleased).
+    - duplicateWork does not read `refs/rmd-dispatch/<id>`, the fleet's own dispatch claim (dispatch-claim.ts
+      dispatchClaimRef). The repo's rule for a hand build is to check both
+      (doctrine/plan-and-task-hygiene/run-both-scope-checks.md).
+    - OBSERVED 2026-11-22 in one session: four hand builds (W1-T14141, W1-T14251, W1-T14252, W1-T14253) each pushed
+      main's sha to their run branch by hand the moment the worktree was cut, so the fleet would not dispatch the same
+      task during the build. Before that habit, a hand worktree for W1-T14147 (run-W1-T14147-1795267857156, cut
+      2026-11-21T13:30Z, with a local commit 0795f81f0) was never pushed, and the fleet dispatched the same task at
+      2026-11-22T03:04Z (run-W1-T14147-1795316685831, #20129): two builds of one task.
+    - The web session's proxy cannot push `refs/rmd-id/*` (docs/operator-guide.md "Minting a task id"); a branch push
+      works from every host. So the claim this command makes is the run branch, which every host can push and the
+      drain already reads.
+  design: |
+    1. duplicateWork also refuses when origin holds `refs/rmd-dispatch/<id>`, naming the claim and its holder. A failed
+       read refuses, never reads as free.
+    2. For a filed id, after the worktree is cut, createHandWorktree pushes `run-<id>-<epochMs>` to origin at its base sha:
+       the published claim the drain reads. `unfiled` pushes nothing. A `--no-claim` flag (and request field) skips the
+       push for an offline host and says so.
+    3. After the push it lists origin's `run-<id>-*` heads again. Another branch for the same id, or a failed push or
+       listing, removes the new worktree and branch it just made and refuses with the reason, so two builders never both
+       proceed.
+    4. renderHandWorktree prints the claim line: pushed at <sha>, skipped (--no-claim), or not applicable (unfiled).
+
+    INVARIANT a-hand-build-is-published-before-it-is-built: a filed hand worktree exists only with its run branch on origin, or with the operator's explicit --no-claim.
+  acceptance:
+    - claim: "invariant:a-hand-build-is-published-before-it-is-built — for a filed id, rmd hand-worktree leaves run-<id>-<epochMs> on a bare origin at the worktree's base sha"
+      kind: guard
+      proof: "grep: W1-T14307 criterion 1: in test/a-hand-build-worktree-is-one-command.test.ts"
+    - claim: "A dispatch claim on origin for the id, a second run branch for the id appearing during the push, or a failed push refuses and leaves no new worktree or branch behind"
+      proof: "grep: W1-T14307 criterion 2: in test/a-hand-build-worktree-is-one-command.test.ts"
+    - claim: "--no-claim and unfiled cut the worktree with no push, and the output says which"
+      proof: "grep: W1-T14307 criterion 3: in test/a-hand-build-worktree-is-one-command.test.ts"
+  falsifier: |
+    Drop the claim push and criterion 1 must fail. Drop the refs/rmd-dispatch read or the post-push listing and criterion
+    2 must fail. Restore and require all to pass.

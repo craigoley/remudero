@@ -1,0 +1,58 @@
+- id: W1-T14305
+  title: A randomised mounts winner whose every covered row is a block no exact edit can name logs one finding naming those rows, instead of proposing nothing in silence
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low # a diagnostic row on an existing recorded step; no candidate, edit or routing decision changes
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T12143]
+  files:
+    - src/lib/config-gardener.ts
+    - test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 8923f5635 (2026-11-22). Found in the fleet review of #20120 (W1-T12143).
+    - A randomised winner (a concluded routing.experiment.result or routing.policy.estimate cell) becomes one adopt-mount
+      candidate through randomisedMountCandidate in src/lib/config-gardener.ts (:777). Each covered routes row gets
+      providerEdit (:739): a one-line flow map, or blockRowEdit (:713) for a block-mapping row.
+    - blockRowEdit returns undefined for a block holding a comment, a blank line inside it, a nested value or a quoted
+      value (:709-711, the field regex at :729), so no text is lost. providerEdit then returns "not a row one exact
+      edit can name", and the row is pushed onto `left` (:782, :788).
+    - When at least one covered row is editable, the candidate's reason names the rows left alone. OBSERVED in
+      test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts, "W1-T12143 criterion 2: a
+      block-mapping routes row is edited as one exact edit the loader reads, and one holding a comment is named, never
+      rewritten".
+    - When EVERY covered row is left alone, `if (edits.length === 0) return undefined;` (:805) drops `left`, and
+      mountCandidate (:833-834) moves on. Nothing is logged. A concluded winner the table could express then proposes
+      nothing and records nothing.
+    - The gardener already has the step for a winner it cannot act on: RANDOMISED_FINDING_STEP, `config.randomised_finding`
+      (:583), written once per evidence day through findingKey (:588, :619-622). It has a recordOnly entry in
+      scripts/write-only-ledger-step-baseline.json, so reusing it adds no ledger step.
+    - INFERRED, not run end to end: the all-left-alone case is read from the code path above. The test's own harness is
+      the cheapest place to drive it, with the fixture table's covered rows rewritten as commented blocks.
+  design: |
+    1. The randomised path reports, beside its candidate, each recommendation that produced no edit: its cellKey, its
+       evidence step and id, its evidence day, and every covered row with the reason it was left alone.
+    2. The config gardener logs one `config.randomised_finding` row per such recommendation and evidence day, with
+       `setting` naming the covered rows (`routes.<type>.<risk>.<class>`, comma-joined) and `detail` naming each reason.
+       It goes through the existing findingKey dedupe, so a later pass on the same evidence day writes none.
+    3. A recommendation with at least one editable row is unchanged: one candidate, its reason naming the rows left
+       alone, and no finding.
+
+    INVARIANT no-silent-randomised-winner: a concluded randomised winner either becomes a candidate or leaves a finding naming why each covered row could not take it.
+  acceptance:
+    - claim: "invariant:no-silent-randomised-winner — a concluded winner whose covered rows are all blocks holding a comment, a blank line inside or a quoted value yields no candidate and one config.randomised_finding row naming each row and its reason"
+      kind: guard
+      proof: "grep: W1-T14305 criterion 1: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+    - claim: "A second pass on the same evidence day writes no second finding for that winner"
+      proof: "grep: W1-T14305 criterion 2: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+    - claim: "A winner with at least one editable covered row still yields one candidate whose reason names the rows left alone, and no finding"
+      proof: "grep: W1-T14305 criterion 3: in test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts"
+  falsifier: |
+    Drop the finding for a recommendation with no edit and criterion 1 must fail. Skip the findingKey dedupe and criterion
+    2 must fail. Restore and require all to pass.
