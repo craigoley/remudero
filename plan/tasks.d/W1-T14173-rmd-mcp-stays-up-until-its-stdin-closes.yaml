@@ -17,6 +17,7 @@
     - src/lib/operator-mcp.ts
     - test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts
     - test/fixtures/operator-mcp-cli-entry.ts
+    - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -71,6 +72,9 @@
        a temp root holding state/service-tokens.json ({ "read": "r-token" }), and a node:http fake server on
        127.0.0.1 port 0. Each child read has a 10 s bound, so a hang fails the test and does not stall the run.
        Load test/setup/tmp-hygiene.ts.
+    4. test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts stubs server.connect and awaits operatorMcpCommand on the
+       default process.stdin, which a test runner child may hold open. Once the verb waits for the end of its input that
+       test would hang, so it passes the new io argument with stdin already ended. Its assertions do not change.
     MEASURE AFTER DEPLOY: the same docker exec pipe as above prints an initialize result on stdout and the
     process stays up until stdin closes.
   falsifier: |
