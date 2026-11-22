@@ -83,6 +83,7 @@ export type LintCheck =
   | "rule15-filing"
   | "duplicate-title"
   | "duplicate-surface"
+  | "pinning-tests"
   | "duplicate-learning"
   | "dispatch-priority"
   | "declared-scope"
