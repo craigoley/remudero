@@ -1,8 +1,4 @@
-/**
- * W1-T14326: a board projection stamped each task by hashing the whole parsed object, `sourcePath` included. Serve's
- * plan pin labels every blob `<ref>:<path>` and plan.ts copies that label onto each reused task, so every adopted ref
- * moved every stamp: all 6,220 of core's tasks re-derived on each merge to main, about 20 s of CPU on the Azure host.
- */
+/** W1-T14326: a board stamp covers a task's content, not the label it was read under. */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
