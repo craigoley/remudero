@@ -825,6 +825,7 @@ function* shadowInstanceRefusalSteps(
   try {
     shadow = (yield* step(() => deps.shadowInstance!(prUrl))) === true;
   } catch (e) {
+    // An unreadable shadow reading is said aloud with its reason and then read as live, never silently.
     deps.say(`automerge.shadow_mode_unreadable (W1-T13698): ${String((e as Error)?.message ?? e)} — treated as live: ${prUrl}`);
     return undefined;
   }
