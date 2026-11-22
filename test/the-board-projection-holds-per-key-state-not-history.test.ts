@@ -465,3 +465,39 @@ test("W1-T9436: the intern table holds only the kept rows' values", (t) => {
   assert.ok(board.internedStrings() > 0, "control: the table holds values");
   assert.ok(board.internedStrings() <= values.size, `no value of a dropped row stays interned: ${board.internedStrings()} of ${values.size}`);
 });
+
+/** {@link history} beside 400 more pull requests, each waiting three times: every loaded chunk lets some rows go. */
+function longLoad(): Row[] {
+  const waits: Row[] = [];
+  for (let pr = 0; pr < 400; pr++) {
+    for (let n = 0; n < 3; n++) {
+      waits.push({ ts: at(NOW0 - 60 * 60_000 + pr * 10 + n), step: "sweep.disposed", task_id: "SWEEP", pr_number: 1_000 + pr, pr_url: url(1_000 + pr), head_sha: `w${pr}`, disposition: "waiting", reason: "checks pending" });
+    }
+  }
+  return [...history(), ...waits];
+}
+
+test("W1-T14385 criterion 1: a chunked first load visits each kept row a bounded number of times", (t) => {
+  const rows = longLoad();
+  const w = world(t, rows);
+  const board = w.board({ ingestChunkRows: 10 });
+  const values = t.mock.method(Object, "values");
+  drain(board);
+  const visits = values.mock.callCount();
+  values.mock.restore();
+  assert.ok(visits < rows.length * 6, `${visits} row visits for ${rows.length} rows loaded in chunks of 10`);
+});
+
+test("W1-T14385 criterion 2: invariant:same-board — a chunked first load holds what a one-pass load holds", (t) => {
+  const w = world(t, longLoad());
+  const chunked = w.board({ ingestChunkRows: 10 });
+  const whole = w.board({ ingestChunkRows: 100_000 });
+  drain(chunked);
+  drain(whole);
+  const held = (board: BoardProjection) => ({
+    rows: board.rows(), size: board.size(), strings: board.internedStrings(),
+    projections: [...board.projections()].map(([id, p]) => [id, canonicalProjection(p)]).sort(),
+  });
+  assert.deepEqual(held(chunked), held(whole));
+  assert.ok(chunked.rows().length < longLoad().length, "control: the load let rows go");
+});
