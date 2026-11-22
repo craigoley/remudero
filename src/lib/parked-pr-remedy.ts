@@ -8,6 +8,7 @@ import { isInPlanScope } from "./plan-scope.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
 import type { TaskFileInput, TaskFilesLandingResult } from "./feedback-landing.js";
+import type { PlanDestination } from "./plan-destination.js";
 import type { Task } from "./plan.js";
 import { declaresDesignInvariant, designContractChanged, INVARIANT_CLAIM_RE, INVARIANT_DECL_RE, invariantSlugViolations,
   NO_INVARIANTS_RE } from "./task-linter.js";
@@ -117,6 +118,11 @@ export interface ParkedPrHost {
   planFilingTarget?: ParkedPrTarget;
   /** W1-T13048: the task file from the repository that holds it (readParkedPrShard). */
   readTaskShard(taskId: string): Promise<ParkedPrShardRead>;
+  /**
+   * W1-T14344: `resolvePlanDestination("task", ...)` on this host, read on each call. A NEW held task file follows it; an
+   * edit stays in the repository that holds its file. Absent, a new file is filed beside its parent, as before.
+   */
+  resolveTaskDestination?(): PlanDestination;
   /**
    * R3: an id from reservePlanRepairTaskIdAsync, for the landing branch of `target`. W1-T13830: awaited, off the loop.
    * W1-T13944: `beforePush` runs, synchronously, before each push of a reservation ref, with the id and the anchor it pushes.
@@ -496,13 +502,15 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     if (fromPr && (pr.planFiles ?? []).length === 0) throw new Error("the plan files the pull request adds or changes cannot be read");
     const target = read?.target ?? host.planFilingTarget;
     if (target === undefined) throw new Error("the repository for the held plan rebuild cannot be resolved");
+    // W1-T14344: the held task is a NEW file, so it is filed where the switch sends a new task; the parent's edit stays in `target`.
+    const filingTarget = newTaskFileTarget(host, target);
     // W1-T13944, invariant:one-held-follow-up-per-criterion: the plan and the landing queue, not the ledger, say what was
     // filed, one task and criterion at a time. A criterion a held follow-up already carries is not moved again.
     const split = decision.remedy === "split-follow-up" && read?.outcome === "read";
     const claimRoot = split ? host.heldFollowUpClaimRoot : undefined;
     const checked = new Map(claimRoot === undefined ? [] : asked.map(criterion =>
       [criterion, claimGeneration(heldClaimDir(claimRoot, pr.taskId!, criterion))]));
-    const followUps = split && host.readHeldFollowUps !== undefined ? await host.readHeldFollowUps(target) : [];
+    const followUps = split && host.readHeldFollowUps !== undefined ? await heldFollowUpsIn(host.readHeldFollowUps, target, filingTarget) : [];
     const held = heldFollowUpsByClaim(followUps, pr.taskId!, asked);
     if (claimRoot !== undefined && held.size > 0) {
       // A pass can stop after the file stages but before landing returns its result. Its next observer can finish the handoff.
@@ -555,20 +563,20 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
         // criterion it was for. A push for other criteria too stays for the pass that holds them all (W1-T13944).
         let adopted: string | undefined;
         for (const push of claim?.pending ?? []) {
-          if (adoptablePush(push, claim!) && host.reservationHeld !== undefined && await host.reservationHeld(push.taskId, push.anchor, target)) {
+          if (adoptablePush(push, claim!) && host.reservationHeld !== undefined && await host.reservationHeld(push.taskId, push.anchor, filingTarget)) {
             adopted = push.taskId;
             break;
           }
         }
         const moved = moving.inputCriteria.map(c => c.claim);
-        heldTaskId = adopted ?? await host.reserveTaskId(target, claim === undefined ? undefined : (taskId, anchor) => {
+        heldTaskId = adopted ?? await host.reserveTaskId(filingTarget, claim === undefined ? undefined : (taskId, anchor) => {
           recordPendingPush(claim, pr.taskId!, { taskId, anchor, claims: moved });
         });
         files = read?.outcome === "read" ? heldTaskFiles(read.shard, pr.taskId!, heldTaskId, moving, pr, ctx)
           : heldPlanRebuildFiles(heldTaskId, moving, pr, ctx);
         if (claim !== undefined) writeHeldFollowUpClaims(claim, pr.taskId!, heldTaskId, files);
       }
-      landed = await host.landTaskFiles(files, target);
+      landed = await landHeldTaskFiles(host, files, target, filingTarget);
     } catch (error) {
       if (claim !== undefined) finishHeldFollowUpClaims(claim.slots, pr.taskId!);
       throw error;
@@ -606,6 +614,56 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     return { remedy: decision.remedy, error: reason, ...(refusalChecks === undefined ? {} : { refusalChecks }),
       reason: `the ${decision.remedy} remedy could not act, and the next pass tries it again: ${reason}` };
   }
+}
+
+const sameCatalog = (a: ParkedPrTarget, b: ParkedPrTarget): boolean => a.owner === b.owner && a.repo === b.repo;
+
+/**
+ * W1-T14344 (the W1-T12200 rule): the repository a NEW held task file is filed in. With the task kind switched to the plan
+ * destination it is the destination. With the switch off, or the kind not listed, it is `parent`, the repository of the
+ * parent task, as before. An unreadable switch is a refusal: a new file never falls back to a repository it guessed.
+ */
+function newTaskFileTarget(host: Pick<ParkedPrHost, "resolveTaskDestination">, parent: ParkedPrTarget): ParkedPrTarget {
+  const resolved = host.resolveTaskDestination?.();
+  if (resolved === undefined || resolved.outcome === "off" || resolved.outcome === "not_listed") return parent;
+  if (resolved.outcome === "unreadable") {
+    throw new Error(`the repository for a new task file cannot be resolved (W1-T14344): ${resolved.reason}`);
+  }
+  return { owner: resolved.owner, repo: resolved.repo, checkoutDir: resolved.checkoutDir };
+}
+
+/** W1-T14344: the held follow-ups of both repositories when the new file and the parent's edit are filed apart. */
+async function heldFollowUpsIn(read: NonNullable<ParkedPrHost["readHeldFollowUps"]>, parent: ParkedPrTarget,
+  filingTarget: ParkedPrTarget): Promise<readonly HeldFollowUp[]> {
+  const held = await read(parent);
+  if (sameCatalog(parent, filingTarget)) return held;
+  const ids = new Set(held.map(h => h.id));
+  return [...held, ...(await read(filingTarget)).filter(h => !ids.has(h.id))];
+}
+
+/**
+ * W1-T14344: lands the new held file in `filingTarget` and the parent's edit in `parent`. In one repository it is the one
+ * landing call of before. Apart, the new file lands first, and the edit that moves criteria out of the parent lands only
+ * once the file that carries them is staged; an edit the second landing could not stage is a refusal of that edit.
+ */
+async function landHeldTaskFiles(host: Pick<ParkedPrHost, "landTaskFiles">, files: readonly TaskFileInput[], parent: ParkedPrTarget,
+  filingTarget: ParkedPrTarget): ReturnType<ParkedPrHost["landTaskFiles"]> {
+  if (sameCatalog(parent, filingTarget)) return host.landTaskFiles(files, parent);
+  const fresh = files.filter(f => f.newFile === true), edits = files.filter(f => f.newFile !== true);
+  const filed = await host.landTaskFiles(fresh, filingTarget);
+  const freshRefused = (filed.refused ?? []).some(r => fresh.some(f => f.relPath === r.relPath));
+  const freshWaits = filed.staged === undefined || fresh.every(f => filed.staged!.includes(f.relPath));
+  if (edits.length === 0 || filed.error !== undefined || freshRefused || !freshWaits) return filed;
+  const edited = await host.landTaskFiles(edits, parent);
+  const unstaged = edited.error === undefined ? []
+    : edits.filter(f => !(edited.refused ?? []).some(r => r.relPath === f.relPath)).map(f => ({ relPath: f.relPath, reason: edited.error! }));
+  const checks = [...(filed.refusalChecks ?? []), ...(edited.refusalChecks ?? [])];
+  return {
+    ...(filed.prUrl === undefined ? {} : { prUrl: filed.prUrl }),
+    ...(checks.length === 0 ? {} : { refusalChecks: [...new Set(checks)] }),
+    ...(filed.staged === undefined && edited.staged === undefined ? {} : { staged: [...(filed.staged ?? []), ...(edited.staged ?? [])] }),
+    refused: [...(filed.refused ?? []), ...(edited.refused ?? []), ...unstaged],
+  };
 }
 
 const DRAFT_TASK_ID = "W1-T0";

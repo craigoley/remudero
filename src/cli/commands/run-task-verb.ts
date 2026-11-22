@@ -39,7 +39,7 @@ import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSu
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
-import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
+import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
@@ -113,7 +113,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type WorkerRulePullMeta, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswerWithLedger } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, runLockRecord, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type WorkerRulePullMeta, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswerWithLedger } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -1132,6 +1132,8 @@ export interface RunTaskContext {
   opts: RunTaskBodyOptions;
   owner: string;
   plan: Plan;
+  /** W1-T11396: the canonical merged-task projection the run already prepared (read-only reuse). */
+  projection?: ReadonlyMap<string, StatusProjection>;
   planPath: string;
   recordDecisionFn: typeof recordDecision | typeof recordDecisionAsync;
   repoRoot: string;
@@ -5231,6 +5233,7 @@ export async function runTask(
       opts,
       owner,
       plan,
+      projection,
       planPath,
       recordDecisionFn,
       repoRoot,
@@ -6333,7 +6336,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
     // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
     mkdirSync(worktreePath, { recursive: true });
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    writeRunLock(worktreePath, runLockRecord({ pid: process.pid, run_id: runId, startedAt: new Date().toISOString() }));
     // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
@@ -6500,6 +6503,34 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
     // task exists to stop paying once per dispatch prompt.
     const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, ctx.plan));
+    // W1-T11396: the bounded prerequisite-outcome block for DECLARED depends_on only, built ONCE
+    // from the projection and plan snapshot this run already prepared (no per-dependency read) and
+    // bound to the frozen child base. The projection carries no merge commit SHA, so base
+    // applicability renders unknown rather than inferred. Shared by recon AND implement below.
+    // Awaits the async leaf: the daemon loop must not block on a synchronous worktree git call.
+    const childBaseSha = await (async (): Promise<string | undefined> => {
+      try {
+        return (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim() || undefined;
+      } catch (error) {
+        // An unreadable base renders "child base unavailable" in the block, never a guessed SHA.
+        say(`prerequisite context: child base unreadable (${String((error as Error)?.message ?? error)})`);
+        return undefined;
+      }
+    })();
+    const prerequisiteOutcomeBlock = renderPrerequisiteOutcomeBlock({
+      taskId: task.id,
+      repo: `${owner}/${task.repo}`,
+      dependsOn: task.depends_on,
+      evidenceFor: (id) => {
+        const p = ctx.projection?.get(id);
+        return p === undefined ? undefined : { merged: p.merged, prNumber: p.prNumber, prUrl: p.prUrl, prState: p.prState, source: p.source };
+      },
+      snapshotFor: (id) => {
+        const dep = ctx.plan.byId.get(id);
+        return dep === undefined ? undefined : { repo: `${owner}/${dep.repo}` };
+      },
+      childBaseSha,
+    });
     ctx.releasePlan?.();
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
@@ -6533,7 +6564,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         maxTurns: RECON_MAX_TURNS,
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath),
+        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath) + withPrerequisiteOutcomes("", prerequisiteOutcomeBlock),
       });
 
     let recon: WorkerResult | undefined;
@@ -6831,7 +6862,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
     const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
-      harnessOwnsGit,
+      harnessOwnsGit, "", prerequisiteOutcomeBlock,
     );
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a

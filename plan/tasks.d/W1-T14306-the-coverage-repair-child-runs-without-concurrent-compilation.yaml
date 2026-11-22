@@ -1,0 +1,53 @@
+- id: W1-T14306
+  title: The coverage repair child runs without concurrent Sparkplug or recompilation, so its exit cannot deadlock the way the shard runner's could
+  repo: remudero
+  depends_on: []
+  priority: 1.1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low # two spawn sites gain the shard runner's own workaround flags; no coverage figure changes
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T12415, W1-T14119]
+  files:
+    - scripts/test-with-retry.mjs
+    - test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 8923f5635 (2026-11-22). Left open by #20139.
+    - #20139 added NODE_EXIT_DEADLOCK_WORKAROUND_ARGS (`--no-concurrent-sparkplug --no-concurrent-recompilation`,
+      scripts/test-tier-manifest.mjs:174) to the coverage shard's runner and file children. On Node 24.22.3 a
+      process.exit after allocation-heavy work can deadlock: the main thread joins V8's worker threads while a concurrent
+      Sparkplug or Maglev compile job waits for a GC (nodejs/node#64274, fixed upstream in 77fdeb6, no v24 release). Its
+      local repro: 1 hang in 300 runs and 8 in 400 with default flags, none with the two flags.
+    - scripts/test-with-retry.mjs spawns its repair child at two sites, after dropping empty or truncated coverage files
+      (:522) and after dropping deleted fixtures' source maps (:608), as
+      `node --expose-internals test-with-retry.mjs --rebuild-coverage <rawDir> ...args`. Neither carries the two flags.
+    - The child runs rebuildCoverage (:444): it loads internal/test_runner/coverage and builds the whole summary, the
+      same allocation-heavy work, then main(...).then(process.exit) (:769). That is the deadlock's shape.
+    - INFERRED, not observed: no repair-child hang has been seen. It runs only after a failed first pass, so it is rare,
+      and a hang costs the shard's whole job timeout.
+    - No test drives --rebuild-coverage directly (a sweep of test/ for `--rebuild-coverage` and `rebuildCoverage` finds
+      none). W1-T14119 (queued) also edits the --rebuild-coverage entry, for a Node version check; it touches the same
+      function, not this argv.
+  design: |
+    1. Export rebuildCoverageChildArgs(rawDir, args) from scripts/test-with-retry.mjs, returning
+       [...NODE_EXIT_DEADLOCK_WORKAROUND_ARGS, "--expose-internals", <this script>, "--rebuild-coverage", rawDir, ...args].
+       Both repair spawn sites use it, so the argv is built in one place.
+    2. The comment beside it says to drop the flags with the shard runner's, once the pinned Node carries 77fdeb6.
+
+    3. The proofs live in this task's own suite, named after the shard. No existing suite drives --rebuild-coverage, and
+       test/ci/suites/a-hung-coverage-test-fails-by-name.test.ts (the shard runner's flags) does not change.
+
+    INVARIANT every-coverage-exit-runs-without-concurrent-compilation: each process the coverage shard starts that ends in process.exit after the coverage summary runs with both workaround flags.
+  acceptance:
+    - claim: "invariant:every-coverage-exit-runs-without-concurrent-compilation — the repair child's argv carries both NODE_EXIT_DEADLOCK_WORKAROUND_ARGS flags, and no --rebuild-coverage spawn in test-with-retry.mjs builds its argv outside rebuildCoverageChildArgs"
+      kind: guard
+      proof: "grep: W1-T14306 criterion 1: in test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts"
+    - claim: "The real repair child, spawned with that argv over a raw coverage directory, rebuilds the lcov and exits 0"
+      proof: "grep: W1-T14306 criterion 2: in test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts"
+  falsifier: |
+    Take the flags out of rebuildCoverageChildArgs, or build one spawn site's argv inline again, and criterion 1 must fail.
+    Restore and require all to pass.

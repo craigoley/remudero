@@ -2,14 +2,17 @@
 // Owner-lane release of ONE test-slot reservation, by the exact identity the owner observed (W1-T11808).
 // It adds no release basis: every refusal of releaseTestSlotForOwner (live owner, foreign host/boot/pid
 // namespace/uid, unproven terminal evidence, private records) applies. Run it from the owner's own PID
-// namespace and uid. It never signals a process and never edits any other record.
+// namespace and uid. It never signals a process and never edits any other record. W1-T14253: on a host whose
+// lease records no dedicated cgroup scope, a first quiescent scan prints "deferred"; the same request one
+// recorded heartbeat later releases on the `proc-scan-quiescent` class.
 import { join } from 'node:path';
 import { releaseTestSlotForOwner } from '../src/lib/test-slot.ts';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 
 const HELP = `usage: node --import tsx scripts/test-slot-owner-release.mjs --slot-dir <dir> --slot <n> --nonce <ownerNonce> --pid <pid> --start <processStart>
 All five flags are required; there is no pattern, glob or "latest" form.
-Prints one JSON line {step, outcome, reason, evidence?}; exits 0 only on "released".`;
+Prints one JSON line {step, outcome, reason, evidence?}; exits 0 only on "released".
+"deferred" means one quiescent scan is kept; run the same request again one recorded heartbeat later.`;
 
 const OPTIONS = {
   'slot-dir': { type: 'string' }, slot: { type: 'string' }, nonce: { type: 'string' },
@@ -30,11 +33,12 @@ export function parseOwnerReleaseArgs(argv) {
     request: { ownerNonce: values.nonce, pid: Number(values.pid), processStart: values.start } };
 }
 
-/** Run the release; returns the JSON-line row and the exit status (0 only on "released"). */
-export function runOwnerRelease(argv) {
+/** Run the release; returns the JSON-line row and the exit status (0 only on "released"). `seams` reach
+ *  releaseTestSlotForOwner's own options (probe, clock, identity readers); the CLI passes none. */
+export function runOwnerRelease(argv, seams = {}) {
   const parsed = parseOwnerReleaseArgs(argv);
   if (parsed.reason !== undefined) return { row: { step: 'test_slot.owner_release_cli', outcome: 'refused', reason: parsed.reason }, status: 2 };
-  const result = releaseTestSlotForOwner(parsed.path, parsed.request);
+  const result = releaseTestSlotForOwner(parsed.path, parsed.request, seams);
   const row = { step: 'test_slot.owner_release_cli', ...result };
   if (result.outcome === 'released') row.reason = 'identity matched and covered work proven ended';
   return { row, status: result.outcome === 'released' ? 0 : 1 };

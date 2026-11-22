@@ -30,8 +30,9 @@ export type PlanDestinationKind = typeof PLAN_DESTINATION_KINDS[number];
 export interface PlanDestinationRepository { owner: string; repo: string; checkoutDir: string }
 
 export type PlanDestination =
-  /** `off`: no host file. `not_listed`: the file does not list this kind. Both are the public repository. */
-  | ({ outcome: "off" | "not_listed" } & PlanDestinationRepository)
+  /** `off`: no host file. `not_listed`: the file does not list this kind. Both are the public repository.
+   * `another_repository` (W1-T14320): the target is not the instance's own repository, so the target is returned. */
+  | ({ outcome: "off" | "not_listed" | "another_repository" } & PlanDestinationRepository)
   /** The file names a repository and lists this kind. */
   | ({ outcome: "destination" } & PlanDestinationRepository)
   /** The file is present and cannot be trusted. There is no repository to write to. */
@@ -113,4 +114,34 @@ export function resolvePlanDestination(
   if (named.outcome === "off") return { outcome: "off", ...publicRepository };
   if (!named.kinds.includes(kind)) return { outcome: "not_listed", ...publicRepository };
   return { outcome: "destination", owner: named.owner, repo: named.repo, checkoutDir: named.checkoutDir };
+}
+
+/** W1-T14320: the same repository, compared as GitHub compares names: without regard to case. */
+function sameRepository(a: { owner: string; repo: string }, b: { owner: string; repo: string }): boolean {
+  return a.owner.toLowerCase() === b.owner.toLowerCase() && a.repo.toLowerCase() === b.repo.toLowerCase();
+}
+
+/**
+ * W1-T14320: where a NEW plan file of this kind is filed for a lane whose target is `target`. The host file is for
+ * the instance's own plans only. A target that is another repository (a product plan) is filed in that repository,
+ * as with no host file, also when the host file is unreadable. `ownRepository` reads the instance's own repository;
+ * it is called only when the host file would move the file, so a host with the switch off makes no added read.
+ * An own repository that cannot be read is `unreadable`: the lane is not guessed into either repository.
+ */
+export function resolvePlanDestinationForTarget(
+  kind: PlanDestinationKind,
+  stateDir: string | undefined,
+  target: PlanDestinationRepository,
+  ownRepository: () => { owner: string; repo: string },
+): PlanDestination {
+  const destination = resolvePlanDestination(kind, stateDir, target);
+  if (destination.outcome !== "destination" && destination.outcome !== "unreadable") return destination;
+  let own: { owner: string; repo: string };
+  try {
+    own = ownRepository();
+  } catch (e) {
+    void e; // The failure text can name a checkout path. The reason names the rule only.
+    return { outcome: "unreadable", reason: "the instance's own repository cannot be read, so the plan destination cannot be applied" };
+  }
+  return sameRepository(target, own) ? destination : { outcome: "another_repository", ...target };
 }

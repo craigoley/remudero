@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import {
   inboxDraftPrompt,
@@ -82,20 +83,26 @@ test("the plan projection fits the smallest priced openweight context window", (
   );
 });
 
-test("the plan projection names every task in the plan", () => {
-  // W1-T3621. A projection that dropped rows is WORSE than a large prompt: the worker would invent
-  // an id or silently omit a real dependency edge.
+test("the plan projection names every open task in the plan, and no landed one", () => {
+  // W1-T3621. A projection that dropped an OPEN row is WORSE than a large prompt: the worker would
+  // invent an id or silently omit a real dependency edge. W1-T14296: a merged or done task is left
+  // out, because a depends_on on it is already satisfied.
   const plan = realPlanText();
   const projection = planProjectionForDependsOn(plan);
 
-  const planIds = [...plan.matchAll(/^- id: (\S+)/gm)].map((m) => m[1]!);
+  // A task with no `status:` is open, exactly as the projection reads it.
+  const planTasks = (parseYaml(plan) as Array<{ id: string; status?: string }>).map((task) => ({ id: task.id, status: task.status }));
+  const planIds = planTasks.map((task) => task.id);
+  const openIds = planTasks.filter((task) => task.status !== "merged" && task.status !== "done").map((task) => task.id);
   const projectedIds = [...projection.matchAll(/^- id: (\S+)/gm)].map((m) => m[1]!);
 
   assert.ok(planIds.length > 100, `control: expected a substantial plan, found ${planIds.length} tasks`);
-  assert.deepEqual(projectedIds, planIds, "every task must appear in the projection, in order");
+  assert.deepEqual(planIds, [...plan.matchAll(/^- id: (\S+)/gm)].map((m) => m[1]!), "control: the parse must read every task, in order");
+  assert.ok(openIds.length > 0 && openIds.length < planIds.length, "control: the plan must hold open and landed tasks");
+  assert.deepEqual(projectedIds, openIds, "every open task must appear in the projection, in order, and no landed one");
 
   // Titles reach the worker WHOLE. A clipped title loses the finding a dependency choice reads.
-  const longest = planIds
+  const longest = openIds
     .map((id) => new RegExp(`^- id: ${id}\\n  title: (.*)$`, "m").exec(projection)?.[1] ?? "")
     .reduce((a, b) => (a.length >= b.length ? a : b), "");
   assert.ok(longest.length > 150, `titles must not be clipped (longest projected title was ${longest.length} chars)`);

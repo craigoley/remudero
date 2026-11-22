@@ -184,6 +184,7 @@ test("W1-T5535: a spawn outside the fix lane routes exactly as before", async ()
   assert.equal(selection.allocationWeight, 3025);
 
   const root = fixtureRoot("rmd-fix-learner-");
+  mountWithoutBalancedPreference(root);
   try {
     const row = await spawnFix(root, { taskId: "W1-T9300", effort: "medium" });
     assert.equal(row.assignment.routing.decision?.learner, undefined);
@@ -235,6 +236,7 @@ test("W1-T5535: the fix routing decision row names each arm acceptance and denom
 
 test("W1-T5535: an experiment task keeps its arm for fix rounds", async () => {
   const root = fixtureRoot("rmd-fix-learner-");
+  mountWithoutBalancedPreference(root);
   try {
     const rows = [...armRounds("codex", "gpt-6-sol", 30, 0), ...armRounds("claude", "claude-sonnet-5-5", 0, 30)];
     const plain = await spawnFix(root, { taskId: "W1-T9100", effort: "high" });
@@ -250,6 +252,14 @@ test("W1-T5535: an experiment task keeps its arm for fix rounds", async () => {
 });
 
 // ── helpers: the real spawn path ───────────────────────────────────────────────────────────────
+
+/** W1-T14297: the committed table without only its `balanced: codex` row, so the auction this suite proves still applies. */
+function mountWithoutBalancedPreference(root: string): void {
+  const table = readFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), "utf8");
+  assert.ok(table.includes("    balanced: codex\n"), "the committed table carries the W1-T14297 row stripped here");
+  mkdirSync(join(root, ".remudero"), { recursive: true });
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), table.replace("    balanced: codex\n", ""));
+}
 
 function fixtureRoot(prefix: string): string {
   const parent = [tmpdir(), dirname(REPO_ROOT)].find((candidate) => gitWorkTreeAncestor(candidate) === undefined);
