@@ -12,7 +12,9 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-test-slot-held-by-a-dead-pid-on-the-same-boot-is-reclaimed.test.ts
-  status: queued
+  status: blocked
+  retirement: retired # operator 2026-11-22T16:46:54Z: "Retire W1-T14115"; W1-T14253 (#20250) shipped the dead-owner release with a stricter rule
+  superseded_by: W1-T14253
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 05:27Z on the Azure host: /mnt/scratch/rmd/test-slots/slot-1.json names pid 2438443 (label

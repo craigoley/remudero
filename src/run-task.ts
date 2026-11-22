@@ -142,6 +142,7 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
+import { newPublicTaskRecords, readCatalogNewTasksRow } from "./cli/commands/lint-plan.js";
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { daemonBoot } from "./lib/daemon.js";
 import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
@@ -380,7 +381,7 @@ export {
   mergeDirectViaRest,
 };
 export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidence, DisarmOutcome, ArmLane };
-import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
+import { providerHeadroomTiming, resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
@@ -636,11 +637,11 @@ import {
   resolveReleasedIds,
   type ReleaseReaders,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 import {
   REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
 } from "./lib/reviewer-calibration.js";
@@ -860,7 +861,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { PLAN_DESTINATION_KINDS, resolvePlanDestination, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, resolvePlanDestination, resolvePlanDestinationForTarget, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -1168,7 +1169,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { headroomPolicyFromCurve, parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -1580,7 +1581,6 @@ import {
   type IntakeCadenceRung,
   type IntakeCadenceRungPolicy,
   type Policy,
-  type PolicyHeadroomRung,
 } from "./lib/policy.js";
 import {
   buildRatificationRow,
@@ -2510,13 +2510,25 @@ export function buildReviewerHealthRoute(
         ...(why === undefined ? {} : { failure: why }) });
     }
     let failure: string | undefined;
+    let exit: FreshTreeExit | undefined;
     let code: number;
+    const mark = healedChildLedgerMark(ledgerPath);
     try {
       code = await (tree.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
-        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; }));
+        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; },
+          undefined, undefined, undefined, (ended) => { exit = ended; }));
     } catch (error) {
       // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
       log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
+      return normal();
+    }
+    // W1-T14283: a child that died before it could judge also COULD NOT RUN; one that judged, refused or was signalled never falls back.
+    if (healedChildDiedBeforeJudging(code, exit, () => healedChildStartedJudging(ledgerPath, mark, reviewPrNumber(prArg)))) {
+      const why = freshTreeFailureText(failure ?? "");
+      log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
+        offending_sha: incident.offending!.sha, exit_code: code, exit_cause: "not-reported", failure: why });
+      // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+      if (claimHealedDeathEscalation(incident)) await tryEscalateAsync(reviewerHealedChildDiedEscalation(incident, why), escalation);
       return normal();
     }
     log("review.ran_from_healed_tree", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
@@ -2989,7 +3001,7 @@ export function handedOffHeadRiskJudge(
 import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js";
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
-import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, runLockRecord, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
 import { healedReviewerTreeTools } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
@@ -19822,6 +19834,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // silently does nothing in the mode people run by hand is a check nobody notices is broken.
     console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
   }
+  // W1-T14343: the ids this diff adds that the public catalog never held, while its committed row is closed.
+  const publicCatalog = newTaskIds && scopeBase ? newPublicTaskRecords({ checkoutRoot, planRel, policyFile: join(dirname(planPath), "policy.yaml"), base: scopeBase, addedIds: newTaskIds }) : undefined;
+  if (publicCatalog?.state === "unknown") console.warn(`  ⚠ lint-plan: [new-public-task-record] not checked: ${publicCatalog.reason}`);
 
   // W1-T324: the whole-plan (no --base) scope filter. `--base` mode is untouched — `scope`
   // above already defines its bounds and this block never runs alongside it in a way that
@@ -20059,6 +20074,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // W1-T11746/W1-T12832: only this pass demands INVARIANT/NO-INVARIANTS, and only of a task that is new, re-authored
         // against `oldTask` or already declaring; a metadata-only edit, whole-plan and dispatch leave history valid.
         requireDesignInvariantDeclaration: designContractChanged(oldTask, task) || declaresDesignInvariant(task),
+        ...(publicCatalog?.state === "checked" ? { newPublicTaskRecordIds: publicCatalog.newIds } : {}),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -20225,6 +20241,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   if (existsSync(policyFile)) {
     try {
       loadPolicy(policyFile);
+      readCatalogNewTasksRow(policyFile); // W1-T14343: a malformed catalog row fails here, never reads as open
     } catch (e) {
       failing++;
       const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
@@ -23933,7 +23950,7 @@ function parseRunLockHolder(raw: string): RunLockInfo | null {
 function claimRunLock(worktreePath: string, runId: string): void {
   const target = runLockPath(worktreePath);
   const staged = `${target}.claim-${process.pid}`; // one claim per process at a time: this function never yields
-  writeFileSync(staged, JSON.stringify({ pid: process.pid, run_id: runId, startedAt: systemClock.iso() }, null, 2));
+  writeFileSync(staged, JSON.stringify(runLockRecord({ pid: process.pid, run_id: runId, startedAt: systemClock.iso() }), null, 2));
   try {
     for (;;) {
       try {
@@ -27329,19 +27346,13 @@ async function drainCommand(
  */
 
 /**
- * `plan/policy.yaml`'s `headroom.curve` (its `maxHoursToReset: number | null` catch-all)
- * converted into `daemon.ts`'s {@link HeadroomPolicy} shape (`Infinity` catch-all,
- * `buildDefaultHeadroomPolicy`'s own convention) — W1-T253 (P37 CONSUMERS). `daemon.ts`
- * itself cannot load the policy (its file header: "this pure module never touches the
- * filesystem", Rule 16), so THIS is the one place that does, threaded into
- * `DaemonOpts.headroomPolicy` explicitly on every real `rmd daemon` invocation below.
+ * `plan/policy.yaml`'s `headroom.curve` converted into the `HeadroomPolicy` shape — W1-T253
+ * (P37 CONSUMERS). `daemon.ts` itself cannot load the policy (its file header: "this pure module
+ * never touches the filesystem", Rule 16), so the `rmd daemon` command loads it and threads the
+ * converted curve into `DaemonOpts.headroomPolicy` on every real invocation. W1-T14200 moved the
+ * conversion to headroom.ts so the worker auction converts the same curve the same way.
  */
-export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPolicy {
-  return curve.map((rung) => ({
-    maxHoursToReset: rung.maxHoursToReset === null ? Infinity : rung.maxHoursToReset,
-    limitPct: rung.limitPct,
-  }));
-}
+export { headroomPolicyFromCurve };
 
 /**
  * The boot rung for {@link reapStaleClones} (impl-EK): survey the scratch roots for abandoned
@@ -36900,10 +36911,12 @@ function setTreeWritable(dir: string, writable: boolean): void {
 }
 
 /** W1-T12213: resolve the `task` kind before the lane worktree is cut. `off` and `not_listed` keep today's lane.
- * With the kind on, the public view is a run worktree of the public clone, made read-only for the worker. */
+ * With the kind on, the public view is a run worktree of the public clone, made read-only for the worker.
+ * W1-T14320: only for the instance's own repository. A lane for another repository keeps today's lane in it. */
 async function openArchitectFilingTarget(config: Config, owner: string, repo: string, repoDir: string, runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void): Promise<ArchitectFilingTarget | { refused: string }> {
-  const destination = resolvePlanDestination("task", join(config.root, "state"), { owner, repo, checkoutDir: repoDir });
+  const destination = resolvePlanDestinationForTarget("task", join(config.root, "state"), { owner, repo, checkoutDir: repoDir },
+    () => resolveOwnerRepoAt(PUBLIC_CHECKOUT));
   if (destination.outcome === "unreadable") return { refused: destination.reason };
   if (destination.outcome !== "destination") return { owner, repo, checkoutDir: repoDir };
   if (!existsSync(destination.checkoutDir)) return { refused: "the plan destination checkout is missing" };
@@ -37620,7 +37633,8 @@ export async function spawnEscalatedInboxDraft(
   const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
-  if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
+  // W1-T14200: judged on the same reset curve as the auction, so a final-rung reserve admits the rescue too.
+  if (!providerEligibility(capacity, policy.reservePercent, providerHeadroomTiming(systemClock.now(), args.config.root)).eligible) return undefined;
   const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,

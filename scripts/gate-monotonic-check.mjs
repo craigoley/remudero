@@ -15,7 +15,11 @@
 // THE REMEDY IS SELF-SERVICE, NOT AN OPERATOR. A demotion is legitimate often enough that refusing
 // it outright would stall the queue; what it must not be is SILENT. So a regression passes on a
 // fresh `GATE_RATIONALE` naming the PR/task that reviewed it -- the same escape hatch, with the
-// same staleness rule, that baseline-monotonic-check.mjs already uses for a score floor.
+// same reference rule, that baseline-monotonic-check.mjs uses for a score floor (W1-T14304). A
+// reference counts only as a whole word, compares as a number, and names something real: a PR
+// merged in the base's history or the PR under check, or a task with a plan/tasks.d shard. Before
+// W1-T14304 any `#<n>` or `W1-T<n>` substring counted, so `#999999999999999999999999`,
+// `W1-T2906bogus` and `#0` each reviewed a demotion, and a rationale padded by one space was fresh.
 //
 // EXIT CODES: 0 clean, 1 refused (a demotion with no fresh reviewed rationale), 2 could not
 // measure (unreadable or unparseable ci-gate.yml at either ref, invalid arguments). A run that
@@ -25,18 +29,17 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { parse as parseYaml } from "yaml";
+import { currentPrFromRef, freshReviewReferences, knownPrs, NO_PLAN, NO_PRS, planTasks, rationaleReferences } from "./baseline-monotonic-check.mjs";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 
 export const DEFAULT_BASE_REF = "origin/main";
 export const CI_GATE_REL = ".github/workflows/ci-gate.yml";
 
-const PR_REFERENCE_RE = /(#\d+|W1-T\d+)/;
-
-/** A reviewed demotion names itself: non-empty, and carrying a `#<n>` or `W1-T<n>` reference.
- *  Identical contract to `bumpRationaleNamesAPr` (baseline-monotonic-check.mjs). */
+/** A reviewed demotion names itself: at least one whole-word, non-zero `#<n>` or `W1-T<n>` reference, read by
+ *  baseline-monotonic-check.mjs's `rationaleReferences`, so the two gates share one reference rule. */
 export function gateRationaleNamesAPr(rationale) {
-  return typeof rationale === "string" && rationale.trim().length > 0 && PR_REFERENCE_RE.test(rationale);
+  return rationaleReferences(rationale).size > 0;
 }
 
 /** The `ci-gate` job's REQUIRED set plus its GATE_RATIONALE, from one ci-gate.yml's text.
@@ -54,15 +57,26 @@ export function readGateLists(yamlText) {
   return { required: new Set(required), rationale: typeof env.GATE_RATIONALE === "string" ? env.GATE_RATIONALE : undefined };
 }
 
+/** Why each new reference in a rationale cannot count, in the words baseline-monotonic-check.mjs's
+ *  `evaluateRow` uses; empty when every new reference counts. */
+function uncountedReferences(unknownTasks, unknownPrs, plan, prs) {
+  return (unknownTasks.length === 0 ? "" :
+    ` ${unknownTasks.join(", ")} cannot count: ${plan.unreadable ?? "no plan/tasks.d shard declares it"}.`) +
+    (unknownPrs.length === 0 ? "" :
+      ` ${unknownPrs.join(", ")} cannot count: ${prs.unreadable ?? "neither a merged PR in the base's history nor this PR"}.`);
+}
+
 /**
  * Pure verdict. Every context REQUIRED at the base and not REQUIRED at head is a DEMOTION --
  * whichever list it landed in, or none at all, since the consequence is identical: it stops
  * blocking the merge. ADDING a gate is never a regression and needs no rationale.
  *
- * A demotion passes only when `head.rationale` names a PR/task AND differs from `base.rationale`,
- * so a rationale left over from an earlier reviewed demotion cannot cover a fresh one.
+ * A demotion passes only when `head.rationale` names a PR or task that `base.rationale` did not
+ * ({@link freshReviewReferences}: a task must be in `plan`, a PR in `prs`), so a rationale left over
+ * from an earlier reviewed demotion cannot cover a fresh one, however its text is padded. With no
+ * `plan` or `prs` given, no reference of that kind counts.
  */
-export function evaluateGateMonotonic(base, head) {
+export function evaluateGateMonotonic(base, head, plan = NO_PLAN, prs = NO_PRS) {
   const demoted = [...base.required].filter((name) => !head.required.has(name)).sort();
   if (demoted.length === 0) {
     return { ok: true, demoted, status: "clean", detail: "no context left REQUIRED" };
@@ -75,30 +89,49 @@ export function evaluateGateMonotonic(base, head) {
       detail:
         `${demoted.length} context(s) left REQUIRED with no reviewed GATE_RATIONALE: ${demoted.join(", ")}. ` +
         "Add `GATE_RATIONALE` to ci-gate.yml's `ci-gate` job env naming the PR or task that reviewed " +
-        "this (e.g. \"#1234: <job> is superseded by <x>\"). Demoting a gate is an ordinary reviewed " +
-        "outcome, not a defeat -- what it must not be is silent.",
+        "this (e.g. \"#1234: <job> is superseded by <x>\"), as a \"#<n>\" or \"W1-T<n>\" reference standing as " +
+        "its own word. Demoting a gate is an ordinary reviewed outcome, not a defeat -- what it must not be is silent.",
     };
   }
-  if (head.rationale === base.rationale) {
+  const { fresh, unknownTasks, unknownPrs } = freshReviewReferences(head.rationale, base.rationale, plan, prs);
+  if (fresh.length === 0) {
     return {
       ok: false,
       demoted,
       status: "stale-rationale",
       detail:
-        `${demoted.length} context(s) left REQUIRED (${demoted.join(", ")}) under a GATE_RATIONALE ` +
-        "identical to origin/main's. A rationale carried over from an earlier reviewed demotion does " +
-        "not review this one -- write a fresh one naming THIS change.",
+        `${demoted.length} context(s) left REQUIRED (${demoted.join(", ")}) under a GATE_RATIONALE that names ` +
+        "no PR or task origin/main's did not. A rationale carried over from an earlier reviewed demotion does " +
+        "not review this one, and rewording, padding or zero-padding its references does not count -- write a " +
+        `fresh one naming THIS change: a merged PR, this PR, or a filed task.${uncountedReferences(unknownTasks, unknownPrs, plan, prs)}`,
     };
   }
-  return { ok: true, demoted, status: "reviewed", detail: `${demoted.length} reviewed demotion(s): ${demoted.join(", ")}` };
+  return {
+    ok: true,
+    demoted,
+    status: "reviewed",
+    detail: `${demoted.length} reviewed demotion(s): ${demoted.join(", ")}, under a GATE_RATIONALE naming ${fresh.join(", ")}`,
+  };
 }
 
 export function main(argv) {
   let values;
   try {
-    ({ values } = parseArgs({ args: argv, options: { "base-ref": { type: "string" }, "repo-root": { type: "string" } } }));
+    ({ values } = parseArgs({
+      args: argv,
+      options: {
+        "base-ref": { type: "string" },
+        "repo-root": { type: "string" },
+        // The PR under check, which a rationale may name before it merges. Defaults to GITHUB_REF's.
+        pr: { type: "string" },
+      },
+    }));
   } catch (err) {
     console.error(`gate-monotonic: MEASUREMENT FAILED -- invalid arguments: ${String(err?.message ?? err)}`);
+    return 2;
+  }
+  if (values.pr !== undefined && !/^[1-9][0-9]*$/.test(values.pr)) {
+    console.error(`gate-monotonic: MEASUREMENT FAILED -- invalid arguments: --pr must be a positive PR number, not ${JSON.stringify(values.pr)}`);
     return 2;
   }
   const baseRef = values["base-ref"] ?? DEFAULT_BASE_REF;
@@ -120,7 +153,9 @@ export function main(argv) {
     return 2;
   }
 
-  const verdict = evaluateGateMonotonic(base, head);
+  const plan = planTasks(repoRoot);
+  const prs = knownPrs(repoRoot, baseRef, values.pr ?? currentPrFromRef(process.env.GITHUB_REF));
+  const verdict = evaluateGateMonotonic(base, head, plan, prs);
   if (!verdict.ok) {
     console.error(`gate-monotonic: REFUSED -- ${verdict.detail}`);
     return 1;

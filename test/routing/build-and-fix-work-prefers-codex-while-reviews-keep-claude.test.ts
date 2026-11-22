@@ -63,7 +63,7 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
   return {
     provider,
     readable: true,
-    windows: [{ name: `${provider} weekly`, usedPercent, resetsAt: NOW / 1000 + 3600 }],
+    windows: [{ name: `${provider} weekly`, usedPercent, resetsAt: NOW / 1000 + 30 * 3600 }],
     ...(model ? { model, effort: "high" } : {}),
   };
 }

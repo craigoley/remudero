@@ -604,7 +604,9 @@ export interface GateProbes {
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
   lb: { loadCorpus: (d: string) => unknown[]; loadShardEntries: (p: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
   lf: { learningsSourceFiles: (d: string) => Array<{ filename: string }> };
-  gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown) => { ok: boolean; detail: string } };
+  gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown, plan?: unknown, prs?: unknown) => { ok: boolean; detail: string } };
+  /** The reference rule gate-monotonic-check shares with baseline-monotonic-check (W1-T14304): the tasks and PRs a rationale may name. */
+  bm?: { planTasks: (root: string) => unknown; knownPrs: (root: string, base: string, current?: string) => unknown };
   ef?: { MARGIN_DAYS: number; censusExpiringFixtures: (opts: { files: string[]; readFile: (path: string) => string; now: number; thresholdDays: number; marginDays: number }) => { reported: ExpiringFixture[] } };
 }
 
@@ -616,6 +618,7 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
     lf: await load("scripts/lib/learnings-files.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
+    bm: await load("scripts/baseline-monotonic-check.mjs"),
     ef: await load("scripts/expiring-fixture-census.mjs"),
     fp: await load("scripts/census-precheck.mjs"),
   };
@@ -1132,7 +1135,7 @@ function logSection(heading: string, actions: GateGardenAction[]): string {
   return ["", heading, "", ...actions.map((a) => `- ${a.class} ${a.target}: ${a.reason}`), ""].join("\n");
 }
 
-export function applyGateActions(root: string, actions: GateGardenAction[], heading: string, { gm }: GateProbes): string[] {
+export function applyGateActions(root: string, actions: GateGardenAction[], heading: string, { gm, bm }: GateProbes): string[] {
   const byFile = new Map<string, GateGardenAction[]>();
   for (const a of actions) byFile.set(a.file, [...(byFile.get(a.file) ?? []), a]);
   for (const [file, list] of byFile) {
@@ -1143,7 +1146,13 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
     }
     if (file === CI_GATE_YML) {
       // The gate-monotonic check itself must read the result as a REVIEWED demotion.
-      const verdict = gm.evaluateGateMonotonic(gm.readGateLists(readFileSync(join(root, file), "utf8")), gm.readGateLists(text));
+      // A task its rationale names must have a plan shard and a PR a merged one in this checkout's history (W1-T14304).
+      const verdict = gm.evaluateGateMonotonic(
+        gm.readGateLists(readFileSync(join(root, file), "utf8")),
+        gm.readGateLists(text),
+        bm?.planTasks(root),
+        bm?.knownPrs(root, "HEAD"),
+      );
       if (!verdict.ok) throw new Error(`gate-monotonic would refuse: ${verdict.detail}`);
     }
     writeFileSync(join(root, file), text);

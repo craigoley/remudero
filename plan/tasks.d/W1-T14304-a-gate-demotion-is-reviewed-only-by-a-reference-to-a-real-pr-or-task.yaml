@@ -13,6 +13,8 @@
   files:
     - scripts/gate-monotonic-check.mjs
     - test/a-required-gate-can-be-demoted-in-silence.test.ts
+    - "src/lib/gate-gardener.ts"
+    - test/the-gates-tend-themselves.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -30,6 +32,14 @@
       baseline-monotonic's rationaleReferences reads `W1-T2906bogus` and `#0` as naming nothing.
     - So a required gate can be demoted under a reference that names no review at all. gate-monotonic.yml checks out with
       fetch-depth 0, so the merged-PR history knownPrs reads is present in CI.
+    - SCOPE AMENDED for the gate gardener's demotion (read while building, at origin/main 4bdb2f0c9). #20255 reddened
+      test/the-gates-tend-themselves.test.ts "W1-T4116: a demotion is only proposed for operator review":
+      src/lib/gate-gardener.ts applyGateActions checks its own demotion through evaluateGateMonotonic(base, head), and
+      every gardener rationale names the same task ("W1-T4116 gate gardener: <gate> refused 0 …"). main's GATE_RATIONALE
+      already names W1-T4116 (the gardener's merged demotion, #16171), so under step 2 its next demotion is stale, and the
+      gardener cannot name its own PR number before the PR exists. The suite is in scope so its fixtures can follow the
+      new evaluateGateMonotonic signature. No new pass route is added: how the gardener's own demotion names a review
+      awaits an operator ruling (2026-11-22) and is not part of this amendment.
   design: |
     1. gate-monotonic-check.mjs imports rationaleReferences, freshReviewReferences, knownPrs, planTasks and currentPrFromRef
        from baseline-monotonic-check.mjs, so the two gates share one reference rule. gateRationaleNamesAPr delegates to it.

@@ -43,7 +43,7 @@ import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
-import type { SdkUsageCase, UsageSnapshot, WeeklyWindow } from "./headroom.js";
+import { resolveHeadroomLimitPct, type HeadroomPolicy, type SdkUsageCase, type UsageSnapshot, type WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
 import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
 import { ALLOWED_NETWORK_DOMAINS, validateWorkerSettingsFile } from "./settings.js";
@@ -493,8 +493,37 @@ export interface ProviderEligibility {
   headroomPercent: number | null;
 }
 
+/** W1-T14200: one decision's clock and plan/policy.yaml's reset curve, the dispatch gate's own. */
+export interface ProviderHeadroomTiming {
+  nowMs: number;
+  policy: HeadroomPolicy;
+}
+
+// Human `/usage` reset text is not an instant, so it stays on the strict rung.
+const ISO_RESET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+/** Hours to a reset given as ISO (claude) or epoch seconds (codex), else `null`. */
+export function windowHoursToReset(resetsAt: number | string | undefined, nowMs: number): number | null {
+  const resetMs = typeof resetsAt === "number" ? resetsAt * 1000
+    : typeof resetsAt === "string" && ISO_RESET.test(resetsAt.trim()) ? Date.parse(resetsAt.trim()) : Number.NaN;
+  return Number.isFinite(resetMs) && Number.isFinite(nowMs) ? (resetMs - nowMs) / 3_600_000 : null;
+}
+
+/** A window's admission ceiling: the flat reserve, unless its known future reset is on a rung above the
+ * curve's catch-all (the final day), which then binds when higher. */
+export function windowReserveCeiling(window: Pick<ProviderCapacityWindow, "resetsAt">, reservePercent: number,
+  timing?: ProviderHeadroomTiming): number {
+  const flat = 100 - reservePercent;
+  if (!timing) return flat;
+  const hoursToReset = windowHoursToReset(window.resetsAt, timing.nowMs);
+  if (hoursToReset === null || hoursToReset < 0) return flat;
+  const rung = resolveHeadroomLimitPct(hoursToReset, timing.policy);
+  return rung > resolveHeadroomLimitPct(null, timing.policy) ? Math.max(flat, rung) : flat;
+}
+
 /** The auction's own admission test, exported so a decision record states it rather than re-deriving it. */
-export function providerEligibility(capacity: ProviderCapacity, reservePercent: number): ProviderEligibility {
+export function providerEligibility(capacity: ProviderCapacity, reservePercent: number,
+  timing?: ProviderHeadroomTiming): ProviderEligibility {
   // W1-T10383: an exhausted capacity ANSWERED (every candidate sat below the reserve), so it is
   // `below-reserve` with the tightest window it still carries, not `unreadable`.
   if (capacity.exhausted === true) {
@@ -509,8 +538,8 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   const remaining = tightestRemaining(capacity);
   const headroomPercent = Number.isFinite(remaining) ? remaining : null;
   if (!capacity.readable || capacity.windows.length === 0) return { eligible: false, reason: "unreadable", headroomPercent };
-  const ceiling = 100 - reservePercent;
-  const admitted = capacity.windows.every((window) => validCapacityWindow(window) && window.usedPercent < ceiling);
+  const admitted = capacity.windows.every((window) => validCapacityWindow(window) &&
+    window.usedPercent < windowReserveCeiling(window, reservePercent, timing));
   if (admitted) return { eligible: true, headroomPercent };
   // W1-T10382: past the reserve, Codex credits carry the work ahead of every cash fallback.
   if (capacity.provider === "codex" && capacity.windows.every(validCapacityWindow) && codexCreditsSpendable(capacity.credits)) {
@@ -599,9 +628,10 @@ export function selectWorkerProvider(
   reservePercent = 5,
   draw: number | RoutingDrawSeed = 0,
   mixing?: ProviderMixing,
+  timing?: ProviderHeadroomTiming,
 ): ProviderSelection {
   const admitted = capacities
-    .map((capacity) => ({ capacity, lane: providerEligibility(capacity, reservePercent) }))
+    .map((capacity) => ({ capacity, lane: providerEligibility(capacity, reservePercent, timing) }))
     .filter((entry) => entry.lane.eligible);
   // W1-T10382: subscription headroom wins; a credits lane is drawn only when no subscription has any.
   const headroom = admitted.filter((entry) => entry.lane.lane === undefined);
@@ -1474,7 +1504,8 @@ export function selectCodexModel(
   requestedEffort?: string,
   capabilities?: CapabilityLadder,
   policy: { preferredModel?: CodexModelPreference; reservePercent?: number;
-    switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string } } = {},
+    switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string };
+    headroomTiming?: ProviderHeadroomTiming } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible = [...visibleCodexModels(models).values()];
@@ -1500,9 +1531,11 @@ export function selectCodexModel(
     const { capacity } = codexModelCapacity(reading, model);
     const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
     const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
-    const exhausted = measured && capacity.windows.some((window) => window.usedPercent >= 100 - reserve);
+    const exhausted = measured && capacity.windows.some((window) =>
+      window.usedPercent >= windowReserveCeiling(window, reserve, policy.headroomTiming));
     // Classify the measured subscription before checking whether credits can admit this model.
-    const quota = providerEligibility(exhausted ? { ...capacity, readable: false, exhausted: true } : capacity, reserve);
+    const quota = providerEligibility(exhausted ? { ...capacity, readable: false, exhausted: true } : capacity, reserve,
+      policy.headroomTiming);
     const reason: CodexModelIneligibleReason | undefined = !mapped
       ? "unmapped"
       : !effortSupported
@@ -1666,6 +1699,7 @@ export interface CodexCapacityDeps {
   /** Live model preference and reserve from the provider policy; revalidated against this read. */
   preferredModel?: CodexModelPreference;
   reservePercent?: number;
+  headroomTiming?: ProviderHeadroomTiming;
   /** Explicit task context for an operator-registered version overlap. */
   switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string };
   /**
@@ -2116,6 +2150,7 @@ function selectCodexRuntime(
       preferredModel,
       reservePercent: deps.reservePercent,
       switchback: deps.switchback,
+      ...(deps.headroomTiming ? { headroomTiming: deps.headroomTiming } : {}),
     });
   const capacity: ProviderCapacity = !deps.selectedModel && !read.readable && !read.exhausted
     ? { ...read, probeFailure: "terminal" }
@@ -2273,7 +2308,9 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
       if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
-      if (projected >= 100 - reserve && !creditsSpendable) return "projected burn reaches the reserve";
+      if (projected >= windowReserveCeiling({ resetsAt: reset }, reserve, deps.headroomTiming) && !creditsSpendable) {
+        return "projected burn reaches the reserve";
+      }
       return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
     const bucket = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
@@ -2304,15 +2341,16 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
         const modelBucket = codexBucketForModel(rateLimits, visible.get(option.id)!);
         const { credits, borrowed } = codexCreditsFor(modelBucket, rateLimits);
         return codexCreditsSpendable(credits) && [modelBucket, borrowed ? genericCodexBucket(rateLimits) : undefined]
-          .some((source) => [source?.primary?.usedPercent, source?.secondary?.usedPercent]
-            .some((used) => typeof used === "number" && used >= 100 - reserve));
+          .some((source) => [source?.primary, source?.secondary].some((window) => typeof window?.usedPercent === "number" &&
+            window.usedPercent >= windowReserveCeiling({ resetsAt: typeof window.resetsAt === "number" ? window.resetsAt : undefined },
+              reserve, deps.headroomTiming)));
       });
       if (!carriedByCredits) throw new Error(rejectedWindow);
     }
     if (!selected.readable) {
       throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
     }
-    const onCredits = providerEligibility(selected, reserve).lane === "codex-credits";
+    const onCredits = providerEligibility(selected, reserve, deps.headroomTiming).lane === "codex-credits";
     const rescued = onCredits
       ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
     return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },

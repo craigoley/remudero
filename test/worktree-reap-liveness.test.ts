@@ -191,13 +191,16 @@ test("REGRESSION LOCK: a live pid still outranks everything, and a live branch s
 test("W1-T381 BITES: a lock naming a DEAD pid is not rescued by fresh nested activity — reaped, sibling lock removed too", () => {
   const f = fixture("run-W1-T357-1785973739363");
   try {
-    writeRunLock(f.entry, { pid: 17925, run_id: "W1-T357", startedAt: "2026-08-05T23:40:00Z" });
+    // W1-T14319: a pid is confirmed dead only in the reaper's OWN pid namespace, so both sides name the same one.
+    writeRunLock(f.entry, { pid: 17925, run_id: "W1-T357", startedAt: "2026-08-05T23:40:00Z", pidNs: "pid:[4026531836]" });
     // Same shape as the incident: ancient root, ONE nested file written seconds ago — exactly what
     // `recent-activity` used to rescue.
     backdateAllButDeepFile(f.entry, 90);
     assert.equal(existsSync(runLockPath(f.entry)), true, "the lock exists before the pass");
 
-    const s = reapStaleWorktrees(f.root, { isPidAlive: () => false, branchIsLiveUpstream: () => false });
+    const s = reapStaleWorktrees(f.root, {
+      isPidAlive: () => false, pidNamespace: () => "pid:[4026531836]", branchIsLiveUpstream: () => false,
+    });
 
     assert.deepEqual(s.reaped, [f.entryName], "the dead pid's own lock outranks the fresh nested write");
     assert.deepEqual(s.kept, [], "recent-activity must not fire for a confirmed-dead lock");

@@ -7,6 +7,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { OpenFileProbe } from "./clone-reaper.js";
 import { type Clock, clockFromMillisFn, systemClock } from "./clock.js";
+import { readNamespaceBootMs } from "./dispatch-claim.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -478,33 +479,25 @@ export async function reclaimOwnerGoneLeftovers(repo: string, deps: ObjectReapDe
 
 let ownBootCache: number | undefined;
 
-/** Linux's USER_HZ: the unit `/proc/<pid>/stat` field 22 counts in, fixed by the kernel ABI. */
-const PROC_CLOCK_TICKS_PER_SECOND = 100;
-
-/** This PID namespace's start: PID 1's start tick after the kernel's boot time, both read from /proc (no child process). THROWS when /proc cannot say. */
-function ownBootMs(_now: number): number {
-  if (ownBootCache === undefined) {
-    const stat = readFileSync("/proc/1/stat", "utf8");
-    // field 2 (comm) may hold spaces and parentheses, so count fields from the LAST ")"
-    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    const startTicks = Number(fields[19]); // field 22 overall; fields[0] is field 3
-    const btime = Number(/^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1]);
-    if (!Number.isFinite(startTicks) || !Number.isFinite(btime)) throw new Error("PID 1 start time unreadable from /proc");
-    ownBootCache = btime * 1000 + (startTicks / PROC_CLOCK_TICKS_PER_SECOND) * 1000;
-  }
-  return ownBootCache;
+/** This PID namespace's start, as the shared reader ({@link readNamespaceBootMs}) gives it; this module parses no start time of its own. THROWS when the reader cannot say. */
+function ownBootMs(_now: number, read?: () => number | undefined): number {
+  if (read === undefined && ownBootCache !== undefined) return ownBootCache;
+  const bootMs = (read ?? readNamespaceBootMs)();
+  if (bootMs === undefined) throw new Error("namespace start unreadable: the shared reader could not say when PID 1 started");
+  if (read === undefined) ownBootCache = bootMs;
+  return bootMs;
 }
 
 /** Advertise this instance's start beside the store, so every other instance that mounts it can read it. */
-export function writeBootReceipt(gitDir: string, host: string, now: number): void {
+export function writeBootReceipt(gitDir: string, host: string, now: number, readStart?: () => number | undefined): void {
   const dir = join(gitDir, BOOT_RECEIPT_DIR);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, host), JSON.stringify({ boot: ownBootMs(now) }) + "\n");
+  writeFileSync(join(dir, host), JSON.stringify({ boot: ownBootMs(now, readStart) }) + "\n");
 }
 
 /** The earliest start among this instance and every OTHER instance whose receipt was refreshed within `freshMs`. THROWS when unreadable. */
-export function bootEvidenceFor(gitDir: string, opts: { now: number; host: string; freshMs: number }): number {
-  let earliest = ownBootMs(opts.now);
+export function bootEvidenceFor(gitDir: string, opts: { now: number; host: string; freshMs: number; readStart?: () => number | undefined }): number {
+  let earliest = ownBootMs(opts.now, opts.readStart);
   const dir = join(gitDir, BOOT_RECEIPT_DIR);
   let names: string[] = [];
   try {
@@ -1071,7 +1064,7 @@ const maintenanceInFlight = new Set<string>();
 export async function runRepositoryMaintenance(
   repo: string, statePath: string, policy: MaintenancePolicy,
   log: (step: string, fields: Record<string, unknown>) => void,
-  deps: Pick<ObjectReapDeps, "clock" | "random" | "survey" | "run" | "listProcesses" | "hostname" | "bootMs" | "pruneInputs" | "operator"> &
+  deps: Pick<ObjectReapDeps, "clock" | "random" | "survey" | "run" | "listProcesses" | "hostname" | "bootMs" | "pruneInputs" | "operator"> & { readStart?: () => number | undefined } &
     Required<Pick<ObjectReapDeps, "context">>,
 ): Promise<void> {
   if (maintenanceInFlight.has(repo)) return;
@@ -1155,11 +1148,11 @@ export async function runRepositoryMaintenance(
     const gitDir = maintenanceGitDir(repo);
     const host = (deps.hostname ?? hostname)();
     if (deps.bootMs === undefined && gitDir !== undefined) {
-      try { writeBootReceipt(gitDir, host, started); }
+      try { writeBootReceipt(gitDir, host, started, deps.readStart); }
       catch (error) { receiptError = String((error as Error)?.message ?? error); /* carried on every row as boot_receipt_error */ }
     }
     leftovers = await reclaimOwnerGoneLeftovers(repo, { clock, listProcesses: deps.listProcesses, hostname: () => host,
-      bootMs: deps.bootMs ?? ((dir) => bootEvidenceFor(dir, { now: started, host, freshMs: 2 * policy.intervalMs })) });
+      bootMs: deps.bootMs ?? ((dir) => bootEvidenceFor(dir, { now: started, host, freshMs: 2 * policy.intervalMs, readStart: deps.readStart })) });
     const survey = deps.survey ?? surveyRepositoryMaintenance;
     before = { ...await survey(repo, context.activeLanes, context.disk, Math.min(policy.timeoutMs, 30000)),
       queueBusy: context.queueBusy };

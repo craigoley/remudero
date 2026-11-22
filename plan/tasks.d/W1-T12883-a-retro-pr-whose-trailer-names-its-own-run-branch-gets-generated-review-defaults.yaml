@@ -2,7 +2,7 @@
   title: "A retro PR whose trailer names its own run branch gets the generated review defaults"
   repo: remudero
   depends_on: []
-  priority: 1.5
+  priority: 0.5
   type: implement
   verify: auto
   principles:
@@ -56,4 +56,5 @@
     Remove the new run-${taskId} check: criteria 1 and 3 must fail. Make the check accept any run-RETRO- prefix:
     criterion 2 must fail on run-RETRO-1794737755053. Restore and require all to pass.
   note: |
+    AMENDED 2026-11-22 by the operator session: priority 1.5 to 0.5. Measured: since 11-15 four retro PRs were refused head-task-metadata-unavailable (#18670 142 times, #19077, #19349, #19361); #18670 moved only after a hand trailer edit. In 30 h of dispatch rows this task was never scored, so at 1.5 it does not reach a lane.
     Id reserved for run-unfiled-1794758366667 with ~/rmd-work/bin/reserve-id.sh.

@@ -53,7 +53,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { recordedWorktreeGitDir } from "./worktree-git.js";
 import { engineTreesRoot, isEngineTreeEntryName } from "./engine-paths.js";
-import { resolveTestSlotDir } from "./test-slot.js";
+import { readPidNamespace, resolveTestSlotDir } from "./test-slot.js";
 import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -76,7 +76,7 @@ import { assertModelAllowed } from "./model-gate.js";
 import { cashTrialPinnedDeployment } from "./cash-trial.js";
 import { chooseDraftDeployment, recordDraftRouting, type DraftStats, type DraftChoice, type DraftOutcome } from "./draft-routing.js";
 import { cashAdmission, type CashAdmissionDecision } from "./cash-lane-billing.js";
-import { sdkUsageReadingCase } from "./headroom.js";
+import { sdkUsageReadingCase, type HeadroomPolicy } from "./headroom.js";
 import {
   detectCompactionEvents,
   detectCompactionFailures,
@@ -182,6 +182,7 @@ import {
   providerEligibility,
   readCodexCapacity,
   selectionPropensity,
+  type ProviderHeadroomTiming,
   spawnDecisionPoint,
   type RoutingDrawSeed,
   type RoutingPropensity,
@@ -231,6 +232,7 @@ import {
 import {
   resolveProviderRoutingPolicy,
   policyForCapability,
+  providerHeadroomTiming,
   selectWorkerProviderForPolicy,
   type EffectiveProviderRoutingPolicy,
   type ProviderRoutingPreference,
@@ -479,12 +481,13 @@ function providerExclusionCandidates(
   reservePercent: number,
   excludeProviders: readonly WorkerProviderId[] | undefined,
   routableProviders?: readonly WorkerProviderId[],
+  timing?: ProviderHeadroomTiming,
 ): ProviderExclusionCandidateResult {
   const excluded = [...new Set(excludeProviders ?? [])];
   if (excluded.length === 0) return { capacities, excludeProviders: [] };
   const considered = routableProviders === undefined ? capacities
     : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
-  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent) }))
+  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent, timing) }))
     .filter((candidate) => candidate.eligible);
   // Re-admission may change the provider within the best available tier.
   const subscriptions = eligible.filter((candidate) => candidate.lane === undefined);
@@ -505,9 +508,10 @@ export function selectWorkerProviderWithExclusions(
   policy: EffectiveProviderRoutingPolicy,
   draw: number | RoutingDrawSeed,
   excludeProviders: readonly WorkerProviderId[] = [],
+  timing?: ProviderHeadroomTiming,
 ): ReturnType<typeof selectWorkerProviderForPolicy> & Omit<ProviderExclusionCandidateResult, "capacities"> {
-  const candidates = providerExclusionCandidates(capacities, policy.reservePercent, excludeProviders, policy.routableProviders);
-  return { ...selectWorkerProviderForPolicy(candidates.capacities, policy, draw),
+  const candidates = providerExclusionCandidates(capacities, policy.reservePercent, excludeProviders, policy.routableProviders, timing);
+  return { ...selectWorkerProviderForPolicy(candidates.capacities, policy, draw, timing),
     excludeProviders: candidates.excludeProviders,
     ...(candidates.exclusion_unhonoured ? { exclusion_unhonoured: candidates.exclusion_unhonoured } : {}) };
 }
@@ -1247,7 +1251,9 @@ export interface SpawnWorkerArgs {
   cashSonnetEmergency?: boolean;
   /** Set only by the two blocked-auction fallbacks, so the retried spawn records the rule and the
    *  subscription readings that sent it there rather than claiming plain mount affinity. */
-  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[] };
+  routingFallback?: { rule: "cash-fallback" | "cash-opus-fallback" | "cash-sonnet-fallback" | "overflow-fallback"; capacities: ProviderCapacity[];
+    /** W1-T14200: the blocked auction's own clock and reset curve, so the fallback's record judges as it did. */
+    headroomTiming?: ProviderHeadroomTiming };
   /** W1-T13672: set only on the auction re-entry of a cash-mount spawn whose expected cost missed its allowance share.
    *  A blocked auction then hands the spawn back to its own cash route instead of a squeeze fallback. */
   cashDeferred?: CashAdmissionDecision;
@@ -1292,6 +1298,8 @@ export interface SpawnWorkerArgs {
     /** Best-effort durable projection for the console; never allowed to change spawn outcome. */
     writeStatus?: typeof writeProviderRoutingStatus;
     now?: () => number;
+    /** Test seam (W1-T14200): the reset curve in place of plan/policy.yaml's `headroom.curve`. */
+    loadHeadroomPolicy?: () => HeadroomPolicy;
   };
   /** Restrict built-in tools; `sandboxIntent` marks the exact-head disposable reviewer, and
    * `sandboxReadRoots` is ignored outside that intent. Unselected Claude interprets only `tools`;
@@ -1834,6 +1842,8 @@ export function workerSelectionAssignment(
     /** The capability tier the requested model resolves to; absent when no model was requested. */
     capability?: CodexModelTier;
     capabilities?: CapabilityLadder;
+    /** W1-T14200: the auction's clock and reset curve, so `considered` records the eligibility it used. */
+    headroomTiming?: ProviderHeadroomTiming;
   },
 ): WorkerSelectionAssignment {
   const selected = input.capacity;
@@ -1908,9 +1918,10 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
 function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerSelectionAssignment>[1]): RoutingDecision {
   const model = input.model ?? input.capacity?.model;
   const weighed = args.routingFallback?.capacities ?? input.capacities ?? [];
+  const timing = args.routingFallback?.capacities ? args.routingFallback.headroomTiming : input.headroomTiming;
   const headroomPercent: RoutingDecision["headroomPercent"] = {};
   const considered: RoutingDecision["considered"] = weighed.slice(0, 8).map((capacity) => {
-    const verdict = providerEligibility(capacity, input.policy.reservePercent);
+    const verdict = providerEligibility(capacity, input.policy.reservePercent, timing);
     headroomPercent[capacity.provider] = verdict.headroomPercent;
     const chosen = capacity.provider === input.provider;
     return {
@@ -1984,9 +1995,10 @@ export function auctionDrawSeed(
   policy: { preference: ProviderRoutingPreference; reservePercent: number },
   capacities: readonly ProviderCapacity[],
   capability: CodexModelTier | undefined,
+  timing?: ProviderHeadroomTiming,
 ): RoutingDrawSeed {
   const considered = capacities.map((capacity) => {
-    const verdict = providerEligibility(capacity, policy.reservePercent);
+    const verdict = providerEligibility(capacity, policy.reservePercent, timing);
     return {
       provider: capacity.provider,
       ...(capacity.model ? { model: capacity.model } : {}),
@@ -2038,6 +2050,7 @@ async function applyFixLearner(input: {
   capabilities: CapabilityLadder | undefined;
   codexPreference: unknown;
   reservePercent: number;
+  headroomTiming?: ProviderHeadroomTiming;
   readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
   only?: WorkerProviderId;
 }): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
@@ -2068,7 +2081,8 @@ async function applyFixLearner(input: {
     }
   }
   const candidates = capacities
-    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible && (input.only ?? capacity.provider) === capacity.provider)
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent, input.headroomTiming).eligible
+      && (input.only ?? capacity.provider) === capacity.provider)
     .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
   const weights = learned.weigh(candidates, seed);
   return {
@@ -2750,6 +2764,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // affinity. A pay-per-token provider has no subscription window; inventing one merely to enter
   // the auction would manufacture telemetry and make routine routing depend on a false reading.
   const routingPolicy = resolveProviderRoutingPolicy(config.root, config, { now: args.providerRouting?.now });
+  // W1-T14200: ONE clock and reset curve for this whole decision: the Codex read, the auction, its draw key,
+  // the recorded assignment and the published status. A fallback spawn reuses the blocked auction's.
+  const headroomTiming = args.routingFallback?.headroomTiming ??
+    providerHeadroomTiming((args.providerRouting?.now ?? Date.now)(), config.root, args.providerRouting?.loadHeadroomPolicy);
   if (routingPolicy.fallback) {
     console.error(JSON.stringify({
       event: "worker.provider_routing_policy_fallback",
@@ -2799,6 +2817,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         observedAtMs: (args.providerRouting?.now ?? Date.now)(),
         cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
         policy: routingPolicy,
+        headroomTiming,
         modelHealth: claudeHealthRoute,
         capacities: [capacity],
       });
@@ -2833,6 +2852,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         requestedEffort: args.effort,
         ...(preferred ? { preferredModel: preferred } : {}),
         reservePercent: routingPolicy.reservePercent,
+        headroomTiming,
         ...(args.model && capabilities ? { capabilities } : {}),
       });
     let capacities = await Promise.all(
@@ -2852,6 +2872,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       observedAtMs: (args.providerRouting?.now ?? Date.now)(),
       cacheValidMs: config.workerProviders?.capacityCacheMs ?? 60_000,
       policy: routingPolicy,
+      headroomTiming,
       ...(claudeHealthRoute ? { modelHealth: claudeHealthRoute } : {}),
     };
     const publishProviderRoutingStatus = (input: ProviderRoutingWriteInput): void => {
@@ -2874,17 +2895,17 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       routedCapabilityPreference = auction.capabilityPreference;
       routedRolePreference = auction.rolePreference;
       const initialCandidates = providerExclusionCandidates(
-        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders, headroomTiming,
       );
       // W1-T5535: the draw key is read BEFORE the learner may re-read a Codex model, so a task's experiment enrolment
       // is judged on the arms the auction would have drawn without the learner.
-      const keyed = auctionDrawSeed(args, auction.policy, initialCandidates.capacities, requestedCapability);
+      const keyed = auctionDrawSeed(args, auction.policy, initialCandidates.capacities, requestedCapability, headroomTiming);
       const draw = args.providerRouting?.draw ?? keyed;
       const learned = args.providerRouting?.learnedArms;
       let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
       // W1-T14297: a capability or role preference that is not bypassed names the provider, never the learner's mix.
       const byPreference = (current: ProviderCapacity[]) => auction.policy.preference === "automatic" ? undefined
-        : selectWorkerProviderWithExclusions(current, auction.policy, draw, args.excludeProviders);
+        : selectWorkerProviderWithExclusions(current, auction.policy, draw, args.excludeProviders, headroomTiming);
       if (learned) {
         // W1-T14297: only the OPERATOR's own preference stands the learner aside, never one the committed table produced.
         const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
@@ -2894,7 +2915,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           const preferred = byPreference(capacities);
           const learning = await applyFixLearner({
             args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
-            codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, readCodexFor,
+            codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, headroomTiming, readCodexFor,
             ...(preferred && !preferred.preferenceBypass ? { only: preferred.selection.provider } : {}),
           });
           capacities = learning.capacities;
@@ -2902,13 +2923,14 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         }
       }
       const finalCandidates = providerExclusionCandidates(
-        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
+        capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders, headroomTiming,
       );
       const preferred = fixLearning ? byPreference(capacities) : undefined;
       const routed = fixLearning && preferred && !preferred.preferenceBypass
         // The preference serves: its provider holds the whole share, and the learner shaped only that provider's model.
         ? {
-          selection: selectWorkerProvider([preferred.selection.capacity], auction.policy.reservePercent, draw, fixLearning.mixing),
+          selection: selectWorkerProvider([preferred.selection.capacity], auction.policy.reservePercent, draw, fixLearning.mixing,
+            headroomTiming),
           preferenceBypass: undefined,
           exclusion_unhonoured: preferred.exclusion_unhonoured,
         }
@@ -2916,12 +2938,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         ? {
           selection: selectWorkerProvider(
             finalCandidates.capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
-            auction.policy.reservePercent, draw, fixLearning.mixing,
+            auction.policy.reservePercent, draw, fixLearning.mixing, headroomTiming,
           ),
           preferenceBypass: preferred?.preferenceBypass,
           exclusion_unhonoured: finalCandidates.exclusion_unhonoured,
         }
-        : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders);
+        : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders, headroomTiming);
       selection = routed.selection;
       preferenceBypass = routed.preferenceBypass;
       assignmentExclusionUnhonoured = routed.exclusion_unhonoured;
@@ -2961,6 +2983,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         return spawnWorker({
           ...args,
           ...fallback,
+          ...(fallback.routingFallback ? { routingFallback: { ...fallback.routingFallback, headroomTiming } } : {}),
           mountProvider,
         });
       };
@@ -3140,6 +3163,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         mode: "multi-provider",
         selectionPath: "auction",
         policy: routingPolicy,
+        headroomTiming,
         selection,
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
@@ -3232,6 +3256,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
       policy: routingPolicy,
+      headroomTiming,
       capability: requestedCapability,
     });
     try {
@@ -3360,6 +3385,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       mode: "mount-affinity",
       selectionPath: "mount-affinity",
       policy: routingPolicy,
+      headroomTiming,
       alternatives,
       capability: openWeight.capability,
     });
@@ -3475,7 +3501,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           ...args,
           signal: cashController.signal,
           cashSonnetEmergency: false,
-          routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [] },
+          routingFallback: { rule: "cash-fallback", capacities: args.routingFallback?.capacities ?? [], headroomTiming },
         });
       }
       return result;
@@ -3726,6 +3752,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       mode: args.mountProvider ? "mount-affinity" : routedClaudeSelection ? "multi-provider" : "claude-only",
       selectionPath: args.mountProvider ? "mount-affinity" : "auction",
       policy: routingPolicy,
+      headroomTiming,
       selection: routedClaudeSelection,
       preferenceBypass: routedClaudePreferenceBypass,
       capabilityPreference: routedCapabilityPreference,
@@ -7000,11 +7027,22 @@ export interface RunLockInfo {
   pid: number;
   run_id: string;
   startedAt: string;
+  /** The writer's pid namespace (`/proc/self/ns/pid`), as test slots record it. Optional: a lock written before W1-T14319,
+   * or off Linux, has none. A namespace, never a hostname, so the W1-T406 host-free identity for pid reuse stands. */
+  pidNs?: string;
 }
 
 /** Path of the sibling run.lock for a worktree (outside the working tree). */
 export function runLockPath(worktreePath: string): string {
   return `${worktreePath}.lock`;
+}
+
+/** The record a run lock stores: `info`, stamped with the writer's own pid namespace unless it names one, so a reaper in a
+ * sibling container can tell an unprobeable pid from a dead one (W1-T14319). Every production writer builds its lock
+ * through here; {@link writeRunLock} itself writes what it is given. */
+export function runLockRecord(info: RunLockInfo, pidNamespace: () => string | undefined = readPidNamespace): RunLockInfo {
+  const pidNs = info.pidNs ?? pidNamespace();
+  return pidNs === undefined ? info : { ...info, pidNs };
 }
 
 export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
@@ -7489,6 +7527,9 @@ export type WorktreeKeepReason =
   | "live-branch"
   /** Recent file activity somewhere in the tree — the W1-T378 age gate. */
   | "recent-activity"
+  /** W1-T14319: recent activity, under a run lock written in ANOTHER pid namespace (or one recording none), whose pid is
+   * therefore unprobeable from here — never a confirmed-dead pid. Past the age gate it is reaped like any other tree. */
+  | "foreign-holder"
   /** The activity probe could not complete (unreadable, or past the entry cap), so liveness is UNKNOWN and the entry is kept.
    * An ambiguous signal keeps; it never destroys. */
   | "activity-unknown"
@@ -7578,6 +7619,9 @@ export interface WorktreeReapOpts {
    * argument lets a caller supply a start-time-aware predicate (see {@link worktreeLockIsPidAlive}) without this reaper
    * knowing anything about pid reuse (W1-T406). */
   isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+  /** This reaper's own pid namespace, compared against a lock's `pidNs` (W1-T14319). Defaults to {@link readPidNamespace}
+   * on `/proc/self/ns/pid`; undefined (off Linux) proves no lock same-namespace. */
+  pidNamespace?: () => string | undefined;
   /** Age ceiling (ms) below which a terminal-looking entry is still protected — the same create-before-lock and
    * branch-not-yet-pushed race {@link DEFAULT_PRUNE_GRACE_MS} covers in pruneStaleRuns. Default {@link
    * DEFAULT_WORKTREE_REAP_GRACE_MS}, this reaper's OWN ceiling rather than pruneGraceMs (W1-T378). */
@@ -7817,6 +7861,7 @@ function* worktreeReapPass(
   opts: Omit<WorktreeReapOpts, "onCandidate">,
 ): Generator<string, WorktreeReapSummary> {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const ownPidNs = (opts.pidNamespace ?? readPidNamespace)();
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKTREE_REAP_GRACE_MS;
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
@@ -7870,8 +7915,13 @@ function* worktreeReapPass(
     }
     // The lock's OWN pid, confirmed dead by the predicate the live-pid guard just used, outranks the activity probe: an mtime
     // records THAT a write happened, never WHO made it. Same staleness shape drain-lock.ts's `reclaimStaleLock` uses
-    // (W1-T381).
-    const lockNamesDeadPid = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid, lockRead.info);
+    // (W1-T381). W1-T14319: "confirmed dead" needs the lock's pid to be probeable HERE — written in this reaper's own pid
+    // namespace. A sibling container sharing the worktrees root has its own namespace, so its live pid reads absent from
+    // here; such a lock (or a pre-W1-T14319 lock naming no namespace) is a FOREIGN holder, never a dead one.
+    const lockUnprobed = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid, lockRead.info);
+    const sameNamespace = lockRead.kind === "live" && ownPidNs !== undefined && lockRead.info.pidNs === ownPidNs;
+    const lockNamesDeadPid = lockUnprobed && sameNamespace;
+    const lockIsForeign = lockUnprobed && !sameNamespace;
 
     // Not a live-pid worktree. A registered branch still live upstream — an open, unmerged PR — is fail-closed KEPT
     // regardless of age. The sweep-W1-T154 falsifier: a `sweep-*` dir writes no lock at all, so lock state alone cannot tell
@@ -7907,7 +7957,7 @@ function* worktreeReapPass(
     // already confirmed dead above. This only ever WITHDRAWS a rescue the guard would otherwise grant, so it cannot newly
     // reap a tree whose run is alive (W1-T381).
     if (!lockNamesDeadPid && now() - activity.mtimeMs < maxAgeMs) {
-      keep(name, "recent-activity");
+      keep(name, lockIsForeign ? "foreign-holder" : "recent-activity");
       continue;
     }
     // HOW to remove it, decided BEFORE anything is destroyed: a linked worktree must die through its parent, or its record is
