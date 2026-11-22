@@ -842,19 +842,23 @@ const CRUDE_LITERAL_FORMS = [
 const CRUDE_CONSTANT_FORMS = [/\bstep\s*:\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g, /(?<!console\.)\blog\(\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g];
 const CRUDE_DECLARATION = new RegExp(`\\bconst\\s+([A-Z][A-Z0-9_]*)\\s*(?::[^=\\n]+)?=\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g");
 /**
- * The unexplained difference measured on 2c579dc73 (this branch's merge base; the branch changes no
- * emit in src/), 24 entries, none a ledger emit: run-task.ts's run phase table off any row (12,
- * `{ step: "fix_rung", owner }`), plan-task-move.ts's printed actions (5, `copy` ... `unknown`),
- * review.ts's `view` exit, two type annotations (`commitlint`, `outside`), a reader query for a step
- * src/ never writes (`inbox.thread_replied`), a stderr object taken as a query by its `where` key
- * (`typecheck.cold`), a doc comment's `x.y`, and one template-built constant (REDESIGN_SCORECARD_STEP).
- * The scanner of 5fb4d4746, before it modelled ledger rows, destructured constants, conditionals
- * and step helpers, left 76, dispatch_wip_observed and worker.state among them. A new entry is an
- * emit form the scanner does not model: fix the scanner. Raise this only for a non-emit, listed here.
+ * One production instance of each emit form the scanner of 5fb4d4746 missed and this scanner models:
+ * a ledger row whose step has no dot, a destructured step constant, a step helper's call site, and a
+ * row-shaped object passed to a ledger append. Each is checked only while the crude reading still
+ * finds it, so deleting the step from src/ never fails this test; a scanner that stops modelling the
+ * form does. The remaining unexplained names (24 on 2c579dc73: run-task.ts's phase table, printed
+ * actions, type annotations, a query, a doc comment, a template-built constant) are listed as
+ * diagnostics, not bounded: a count ceiling would fail a healthy PR that adds a non-emit `step:`.
  */
-const UNEXPLAINED_CEILING = 24;
+const MODELLED_FORMS: ReadonlyArray<readonly [step: string, writer: string]> = [
+  ["dispatch_wip_observed", "src/run-task.ts"],
+  ["worker.state", "src/cli/commands/run-task-verb.ts"],
+  ["panel.escalation_marked_handled", "src/lib/panel-actions.ts"],
+  ["plan.reconcile.board_floor", "src/run-task.ts"],
+  ["worker_smoke", "src/lib/containment.ts"],
+];
 
-test("W1-T14149: every step a crude reading of the raw source emits is in the scan, but for a measured remainder", (t) => {
+test("W1-T14149: the scan models each emit form a crude reading of the raw source finds, and lists the rest", (t) => {
   const { sources, scan: result } = live();
   const corpus = sources.filter(({ path }) => !mod.REGISTRY_FILES.has(path));
   const constants = new Map<string, string[]>();
@@ -876,8 +880,10 @@ test("W1-T14149: every step a crude reading of the raw source emits is in the sc
   for (const step of ["dispatch_wip_observed", "worker.state", "github.budget.configured"]) assert.ok(crude.has(step), `positive control: ${step}`);
 
   const unexplained = [...crude].filter(([step]) => !result.emitted.has(step)).sort(([a], [b]) => a.localeCompare(b));
-  t.diagnostic(`crude ${crude.size}, scanned ${result.emitted.size}, unexplained ${unexplained.length} (ceiling ${UNEXPLAINED_CEILING}):`);
+  t.diagnostic(`crude ${crude.size}, scanned ${result.emitted.size}, unexplained ${unexplained.length}:`);
   for (const [step, where] of unexplained) t.diagnostic(`  ${step}  ${where}`);
-  const listing = unexplained.map(([step, where]) => `${step} (${where})`).join(", ");
-  assert.ok(unexplained.length <= UNEXPLAINED_CEILING, `${unexplained.length} unexplained, over the ceiling ${UNEXPLAINED_CEILING}: ${listing}`);
+  for (const [step, writer] of MODELLED_FORMS) {
+    if (!crude.has(step)) continue;
+    assert.ok(result.emitted.get(step)?.includes(writer), `${step} is emitted by ${writer}: ${JSON.stringify(result.emitted.get(step))}`);
+  }
 });
