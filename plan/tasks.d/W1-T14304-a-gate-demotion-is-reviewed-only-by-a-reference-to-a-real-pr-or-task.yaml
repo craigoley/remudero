@@ -25,7 +25,7 @@
       counts a `#<n>` only for a PR merged in the base's history or the PR under check (knownPrs, currentPrFromRef), a
       `W1-T<n>` only for a filed shard (planTasks), and judges staleness by references, not text (freshReviewReferences).
     - REPRODUCED through the real evaluateGateMonotonic at 8923f5635, demoting `head-identity-gate`: each of
-      `#999999999999999999999999`, `W1-T2906bogus`, `#0: nothing`, `see #1 maybe` and `W1-T99999999` reads `reviewed`.
+      `#999999999999999999999999`, `W1-T2906bogus`, `#0: nothing`, `see #1 maybe` and `W1-T` followed by eight nines reads `reviewed`.
       A rationale identical to the base's plus one trailing space also reads `reviewed`, not `stale-rationale`.
       baseline-monotonic's rationaleReferences reads `W1-T2906bogus` and `#0` as naming nothing.
     - So a required gate can be demoted under a reference that names no review at all. gate-monotonic.yml checks out with
