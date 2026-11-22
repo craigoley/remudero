@@ -4,6 +4,7 @@ import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-sour
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
@@ -38,6 +39,69 @@ export type BenchmarkRevisionField = typeof REVISION_FIELDS[number];
 export type BenchmarkRevisionPin = { source: "executing-module-git" | "image-build-stamp" | "resolved-artifact" | "trial-manifest"; revision: string };
 export type BenchmarkStackEvidence = Partial<Record<BenchmarkRevisionField,
   BenchmarkRevisionPin | readonly BenchmarkRevisionPin[] | { state: "unavailable"; reason: string }>>;
+
+type BenchmarkRuntimeObservation = { receipt: unknown; startedAt: number; finishedAt: number };
+
+export const WORKER_HARNESS_CONTRACT_VERSION = "worker-harness-contract-v1" as const;
+const RUNTIME_CONTEXT_FIELDS = ["executableRevision", "adapterRevision", "policyDigest", "settingsDigest", "environmentDigest"] as const;
+export const BENCHMARK_RUNTIME_FIELDS = [...RUNTIME_CONTEXT_FIELDS, "enforcementDigest"] as const;
+export type BenchmarkRuntimeField = typeof BENCHMARK_RUNTIME_FIELDS[number];
+export type BenchmarkRuntimeContext = Record<BenchmarkRuntimeField, string> & {
+  version: typeof WORKER_HARNESS_CONTRACT_VERSION;
+  provider: string;
+  effort: string;
+};
+
+export const BENCHMARK_RUNTIME_EXCLUSIONS = [
+  "runtime-evidence-missing", "runtime-evidence-invalid", "runtime-evidence-not-observed", "runtime-evidence-wrong-run",
+  "runtime-evidence-stale", "runtime-conformance-unresolved", "runtime-conformance-context-mismatch",
+] as const;
+export type BenchmarkRuntimeExclusion = typeof BENCHMARK_RUNTIME_EXCLUSIONS[number];
+const runtimeUnavailable = (reason: BenchmarkRuntimeExclusion) => ({ state: "unavailable" as const, reason });
+
+export function benchmarkRuntimeFingerprint(field: BenchmarkRuntimeField, value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const pattern = field === "executableRevision" || field === "adapterRevision" ? /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i : /^[0-9a-f]{64}$/i;
+  return pattern.test(value) ? value.toLowerCase() : null;
+}
+
+function runtimeRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** A trusted worker boundary supplies the receipt and timestamps from the call consuming it. */
+function runtimeEvidence(runId: string, evidence: BenchmarkRuntimeObservation | undefined) {
+  if (evidence?.receipt === undefined) return runtimeUnavailable("runtime-evidence-missing");
+  const receipt = runtimeRecord(evidence.receipt);
+  if (receipt?.version !== WORKER_HARNESS_CONTRACT_VERSION) return runtimeUnavailable("runtime-evidence-invalid");
+  if (receipt.evidenceClass !== "observed-installed-runtime") return runtimeUnavailable("runtime-evidence-not-observed");
+  if (typeof receipt.runId !== "string" || !runId || receipt.runId !== runId) return runtimeUnavailable("runtime-evidence-wrong-run");
+  const time = typeof receipt.observedAt === "string" ? Date.parse(receipt.observedAt) : NaN;
+  if (!Number.isFinite(time) || fixedClock(time).iso() !== receipt.observedAt)
+    return runtimeUnavailable("runtime-evidence-invalid");
+  if (!(evidence.startedAt <= time && time <= evidence.finishedAt) || !Number.isFinite(evidence.startedAt) || !Number.isFinite(evidence.finishedAt))
+    return runtimeUnavailable("runtime-evidence-stale");
+
+  const { provider, effort } = receipt;
+  if (typeof provider !== "string" || !TASK_SHAPE_TOKEN_RE.test(provider) || typeof effort !== "string" || !TASK_SHAPE_TOKEN_RE.test(effort))
+    return runtimeUnavailable("runtime-evidence-invalid");
+  const rawContext = runtimeRecord(receipt.context);
+  const context = {} as Pick<BenchmarkRuntimeContext, typeof RUNTIME_CONTEXT_FIELDS[number]>;
+  for (const field of RUNTIME_CONTEXT_FIELDS) {
+    const fingerprint = benchmarkRuntimeFingerprint(field, rawContext?.[field]);
+    if (fingerprint === null) return runtimeUnavailable("runtime-evidence-invalid");
+    context[field] = fingerprint;
+  }
+  const conformance = runtimeRecord(receipt.conformance);
+  const enforcementDigest = benchmarkRuntimeFingerprint("enforcementDigest", conformance?.enforcementDigest);
+  if (conformance?.evidenceClass !== "observed-installed-runtime" || conformance.state !== "conformant" || enforcementDigest === null)
+    return runtimeUnavailable("runtime-conformance-unresolved");
+  // The contract hashes the ordered, lowercase fingerprints with the provider and effort.
+  const contextDigest = createHash("sha256").update(JSON.stringify([provider, effort, ...RUNTIME_CONTEXT_FIELDS.map((field) => context[field])])).digest("hex");
+  if (conformance.contextDigest !== contextDigest) return runtimeUnavailable("runtime-conformance-context-mismatch");
+  const value: BenchmarkRuntimeContext = { version: WORKER_HARNESS_CONTRACT_VERSION, provider, effort, ...context, enforcementDigest };
+  return { state: "observed" as const, value };
+}
 
 function pinEvidence(field: BenchmarkRevisionField, input: BenchmarkStackEvidence[BenchmarkRevisionField]): Evidence<string> {
   if (input === undefined) return unavailable("not-pinned-by-harness");
@@ -344,9 +408,11 @@ export function observeBenchmarkWork(work: BenchmarkWorkInput, step: string, ext
     reconSizeEstimate: unavailable(RECON_SIZE_GAPS[recon]) } };
 }
 
-/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap. */
-export function nonDispatchBenchmarkWork(lane: string): BenchmarkWorkInput {
-  return { shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
+/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap, except a class
+ *  its caller knows when the worker is assigned (the review lane's, its PR's plan task: W1-T14146). */
+export function nonDispatchBenchmarkWork(lane: string, known: Pick<BenchmarkWorkInput, "taskClass"> = {}): BenchmarkWorkInput {
+  return { ...(known.taskClass ? { taskClass: known.taskClass } : {}),
+    shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
 }
 
 export interface BenchmarkRunAssignmentInput {
@@ -359,7 +425,7 @@ export interface BenchmarkRunAssignmentInput {
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
   work: BenchmarkWorkInput,
-  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
+  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence; runtime?: BenchmarkRuntimeObservation } = {},
 ) {
   const experiment = assignment.routing?.experiment;
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
@@ -385,6 +451,7 @@ export function benchmarkRunAssignmentReceipt(
       toolRevision: pinEvidence("toolRevision", stackEvidence.toolRevision),
       scorerRevision: pinEvidence("scorerRevision", stackEvidence.scorerRevision),
       environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
+      runtime: runtimeEvidence(assignment.id, stackEvidence.runtime),
     },
     rights: { state: "private" as const, reason: "no-local-consent-receipt" },
     allocation: experiment ? {
@@ -538,6 +605,19 @@ export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity>
   return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: ReceiptIdentity })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
 }
 
+/** W1-T14146: the work a non-dispatch caller knows when its worker is assigned — the review lane's, its PR's plan
+ *  task's class — for {@link benchmarkNonDispatchSpawn}'s assignment receipt. Symbol-keyed like the identity above,
+ *  so it rides the call's args to the receipt wrapper and never reaches the router. */
+export const BENCHMARK_RECEIPT_WORK: unique symbol = Symbol("rmd.benchmarkReceiptWork");
+
+export function withReceiptWork(args: SpawnWorkerArgs, work: Pick<BenchmarkWorkInput, "taskClass">): SpawnWorkerArgs {
+  return { ...args, [BENCHMARK_RECEIPT_WORK]: { ...work } } as SpawnWorkerArgs;
+}
+
+function receiptWork(args: SpawnWorkerArgs): Pick<BenchmarkWorkInput, "taskClass"> {
+  return (args as { [BENCHMARK_RECEIPT_WORK]?: Pick<BenchmarkWorkInput, "taskClass"> })[BENCHMARK_RECEIPT_WORK] ?? {};
+}
+
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
 const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
 
@@ -653,7 +733,8 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
 }
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
- * caller's existing assignment sink remains authoritative when one is supplied. */
+ * caller's existing assignment sink remains authoritative when one is supplied. The assignment receipt
+ * records the work a call carries ({@link withReceiptWork}); a call carrying none records none. */
 export function benchmarkNonDispatchSpawn(
   lane: string, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
@@ -703,7 +784,7 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, receiptWork(args)), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {
