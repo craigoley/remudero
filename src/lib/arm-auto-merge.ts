@@ -708,8 +708,8 @@ export function realArmDeps(
       if (ms <= 0) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
     },
-    // Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
-    // reads per attempt would spend the core budget on a setting that changes almost never.
+    // Cached for MERGE_QUEUE_READ_TTL_MS (see cachedMergeQueueSteps): the sweep re-attempts arms every pass,
+    // and two REST reads per attempt would spend the core budget on a setting that changes almost never.
     mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
@@ -896,24 +896,22 @@ function* ownFilesSteps(prUrl: string, rest: RestReader): Steps<OwnFilesReadings
   return yield* readOwnFilesSteps(target, rest);
 }
 
-const mergeQueueReads = new Map<string, { at: number; value: boolean }>();
-/** How long one PR's merge-queue reading is reused. A queue turned on mid-window reaches an
- *  already-read PR at most this late, and the REST merge it would try is refused by GitHub. */
+/** W1-T14239: each PR's base ref, kept per PR for MERGE_QUEUE_READ_TTL_MS. Only the ref is kept here, never
+ *  the queue answer: that comes from the per-base rules reading, so its age counts from the rules read. */
+const mergeQueueBaseRefs = new Map<string, { at: number; ref: string }>();
+/** How long one merge-queue rules reading is reused, counted from the rules read itself. A queue turned on
+ *  mid-window reaches an already-read PR at most this late, and the REST merge it would try is refused by GitHub. */
 export const MERGE_QUEUE_READ_TTL_MS = 10 * 60_000;
 
 /** A REST reader either driver can run: {@link ghJson} under the sync one, {@link ghJsonAsync} under the async one. */
 type RestReader = (args: string[]) => unknown;
 
-// Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
-// reads per attempt would spend the core budget on a setting that changes almost never.
-// W1-T13970: the per-PR map keeps the PR read; the rules reading is kept per owner, repository and base.
+// Cached for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST reads per attempt
+// would spend the core budget on a setting that changes almost never.
+// W1-T13970: the rules reading is kept per owner, repository and base. W1-T14239: the per-PR map keeps only
+// the PR's base ref. A per-PR copy of the answer, timed from the copy, let a reading answer for almost two TTLs.
 function* cachedMergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
-  const now = systemClock.now();
-  const hit = mergeQueueReads.get(prUrl);
-  if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
-  const value = yield* mergeQueueSteps(prUrl, fetch, rulesReadsOf(fetch));
-  mergeQueueReads.set(prUrl, { at: now, value });
-  return value;
+  return yield* mergeQueueSteps(prUrl, fetch, rulesReadsOf(fetch), mergeQueueBaseRefs);
 }
 
 const planTouchReads = new Map<string, { at: number; value: PlanTouch }>();
@@ -958,13 +956,24 @@ function rulesReadsOf(fetch: RestReader): Map<string, { at: number; value: boole
   return reads;
 }
 
-function* mergeQueueSteps(prUrl: string, fetch: RestReader, rulesReads?: Map<string, { at: number; value: boolean }>): Steps<boolean> {
+function* mergeQueueSteps(
+  prUrl: string,
+  fetch: RestReader,
+  rulesReads?: Map<string, { at: number; value: boolean }>,
+  baseRefs?: Map<string, { at: number; ref: string }>,
+): Steps<boolean> {
   const target = parsePrUrl(prUrl);
   if (!target) return false;
   try {
-    const pr = (yield* step(() => fetch(singlePrRestArgs(target.owner, target.repo, target.number)))) as { base?: { ref?: string } };
-    const branch = pr?.base?.ref;
-    if (!branch) return false;
+    const kept = baseRefs?.get(prUrl);
+    let branch = kept && systemClock.now() - kept.at < MERGE_QUEUE_READ_TTL_MS ? kept.ref : undefined;
+    if (!branch) {
+      const readAt = systemClock.now();
+      const pr = (yield* step(() => fetch(singlePrRestArgs(target.owner, target.repo, target.number)))) as { base?: { ref?: string } };
+      branch = pr?.base?.ref;
+      if (!branch) return false;
+      baseRefs?.set(prUrl, { at: readAt, ref: branch });
+    }
     const key = JSON.stringify([target.owner, target.repo, branch]);
     const now = systemClock.now();
     const hit = rulesReads?.get(key);

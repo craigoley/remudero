@@ -16010,7 +16010,7 @@ async function reviewerCodeRequeue(
   pr: OpenPrView,
   lines: Array<Record<string, unknown>>,
   advance: ReviewerCodeAdvance,
-  at: { ledgerPath: string; runId: string; ts: string; append: (path: string, line: LedgerLine) => void },
+  at: { ledgerPath: string; runId: string; ts: string; append: (path: string, line: LedgerLine) => void; admitting: boolean },
 ): Promise<{ admit: boolean; reason: string } | undefined> {
   const taskId = reviewOutcomeTaskIdFor(pr);
   let delivered: Record<string, unknown> | undefined;
@@ -16043,6 +16043,12 @@ async function reviewerCodeRequeue(
   const judged = isFullReviewerCodeSha(codeSha) ? `reviewer code ${codeSha.slice(0, 12)} is materially behind origin/main`
     : "the delivered verdict names no full reviewer-code sha";
   if (pr.reviewState === "pending") return { admit: true, reason: `${judged} — one fresh review of this head (W1-T11847)` };
+  // W1-T13704: a pending posted on a pass that does not admit the review held the PR for the 60 min ceiling with no
+  // reviewer behind it (2026-11-18 13:00Z). Only a pass that admits the review posts; the requeue row above waits for it.
+  if (!at.admitting) {
+    return { admit: false, reason: `${judged} — the requeue waits for a pass that admits its review; no pending is posted, ` +
+      "so the delivered verdict stays showing (W1-T13704)" };
+  }
   let pending: { posted: boolean; reason?: string };
   try {
     pending = await advance.postPending(pr);
@@ -24916,7 +24922,8 @@ export async function runSweep(
     }
     const codeAdvance = deps.reviewerCodeAdvance && !deps.dryRun && REVIEWER_CODE_REQUEUE_DISPOSITIONS.has(disposition) &&
       (pr.checksState === "green" || pr.checksState === "pending") ? await reviewerCodeRequeue(pr, ledgerLines, deps.reviewerCodeAdvance,
-      { ledgerPath: deps.ledgerPath, runId: deps.runId, ts: clockFromMillisFn(() => now).iso(), append: appendLine }) : undefined;
+      { ledgerPath: deps.ledgerPath, runId: deps.runId, ts: clockFromMillisFn(() => now).iso(), append: appendLine,
+        admitting: deps.actionable?.("post-review") !== false && !deps.dryRun }) : undefined;
     if (codeAdvance !== undefined) {
       if (codeAdvance.admit) prior.reviewDelivered.delete(reviewOutcomeKeyForPr(pr));
       disposition = codeAdvance.admit ? "post-review" : "wait";
