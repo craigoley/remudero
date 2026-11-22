@@ -16,6 +16,7 @@
     - src/lib/ledger-union.ts
     - src/lib/sweep.ts
     - test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts
+    - test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -65,3 +66,4 @@
   note: |
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: the producer suite is in files. test/inbox/an-amended-contract-releases-a-design-or-scope-hold.test.ts injects its history and does not change.

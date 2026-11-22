@@ -19,6 +19,9 @@
     - test/the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts
     - test/sweep-arm-parity.test.ts
     - test/handfiled-arm-handoff.test.ts
+    - test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts
+    - test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts
+    - test/the-plan-queue-tends-itself.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -45,3 +48,4 @@
   note: |
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: the suites that call decideSweepArm or assert the fail-open are in files.

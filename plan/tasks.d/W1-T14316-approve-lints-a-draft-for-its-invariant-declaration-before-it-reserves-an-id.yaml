@@ -15,6 +15,11 @@
     - src/lib/inbox.ts
     - test/inbox/approve-lints-the-invariant-declaration-before-it-reserves.test.ts
     - test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts
+    - test/a-drafted-task-raised-to-risk-high-declares-its-band.test.ts
+    - test/a-drafted-task-is-sized-under-the-shard-slug-its-approve-will-mint.test.ts
+    - test/a-suffixed-draft-placeholder-is-minted-and-an-unminted-id-never-lands.test.ts
+    - test/inbox-approve-mint.test.ts
+    - test/learning/an-eligible-follow-up-is-filed-as-a-plan-shard-during-the-build.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -44,3 +49,4 @@
   note: |
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: their draft fixtures may state no declaration. The build may add one to those fixtures only; every assertion stays.

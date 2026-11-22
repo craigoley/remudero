@@ -15,6 +15,7 @@
     - src/lib/sweep.ts
     - test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts
     - test/a-ready-pr-main-moved-under-is-refreshed-on-the-light-pass.test.ts
+    - test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -45,3 +46,4 @@
   note: |
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: the two suites that drive runLightPassReadyRefresh are in files. Suites that only inject readLiveState do not change.
