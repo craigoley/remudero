@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { age, fixture, git, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -80,8 +80,12 @@ function clone(r: Rig, where: string) {
   git(where, "config", `url.file://${bare}.insteadOf`, GITHUB);
   return where;
 }
+/** A finished build's worktree: a published commit of its own, so its head is not one main already holds (W1-T13216). */
 function worktree(main: string, path: string) {
   git(main, "worktree", "add", "-q", "--detach", path, "main");
+  const name = basename(path);
+  git(path, "commit", "-q", "--allow-empty", "-m", name);
+  git(path, "push", "-q", "origin", `HEAD:refs/heads/${name}`);
   file(join(path, "coverage/lcov.info"));
   return path;
 }
