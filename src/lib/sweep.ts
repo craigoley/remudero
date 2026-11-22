@@ -143,6 +143,7 @@ import { sameHost } from "./host-identity.js";
 import { reclaimStaleLock, realWriteAtomicIo, writeAtomic } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
+import { LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX } from "./ledger-path.js";
 import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
@@ -19096,7 +19097,7 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
     try {
       if (!lines.some(alreadyDispatched)) {
         mkdirSync(dirname(deps.ledgerPath), { recursive: true });
-        const lock = new DatabaseSync(`${deps.ledgerPath}.security-producer.lock.sqlite`, { timeout: 0 });
+        const lock = new DatabaseSync(`${deps.ledgerPath}${LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX}`, { timeout: 0 });
         try {
           // Serialize receipt lookup and append across processes. Closing releases the lock before GitHub I/O.
           lock.exec("BEGIN IMMEDIATE");

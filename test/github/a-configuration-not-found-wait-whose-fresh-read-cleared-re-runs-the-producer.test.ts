@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { MAX_RETAINED_LINES_PER_STEP, rotateLedger } from "#src/lib/ledger.js";
+import { LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX } from "#src/lib/ledger-path.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import * as sweep from "#src/lib/sweep.js";
 import type { OpenPrView, SecurityMergeObservation, SweepDeps } from "#src/lib/sweep.js";
@@ -138,7 +139,7 @@ test("W1-T13787 criterion 2: overlapping full passes share one redispatch receip
 test("W1-T13787 criterion 2: a competing ledger writer defers the dispatch until a later pass", async () => {
   const h = harness([], async () => CLEARED);
   h.deps.ledgerPath = join(ROOT, "locked.ndjson");
-  const lock = new DatabaseSync(`${h.deps.ledgerPath}.security-producer.lock.sqlite`);
+  const lock = new DatabaseSync(`${h.deps.ledgerPath}${LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX}`);
   try {
     lock.exec("BEGIN IMMEDIATE");
     const reason = await sweep.observeCodeqlConfigurationWarning(h.deps, [], view(), "wait");
