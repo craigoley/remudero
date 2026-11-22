@@ -8,6 +8,7 @@ import {
   type JudgeShadowOnlyRole, type JudgeThreshold, type Mounts,
 } from "./mounts.js";
 import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
+import { promotionCeiling } from "./promotion-bars.js";
 import { JUDGE_SHADOW_TRIAL_ID, type spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import {
   cashCapacityReadiness, isFoundryClaudeDeployment, learnedCashLimit, OPENWEIGHT_PRICES, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
@@ -501,8 +502,12 @@ export function judgeShadowSummary(rows: ReadonlyArray<Record<string, unknown>>,
 // ── W1-T12422: the pool of `shadow: auto` ───────────────────────────────────────────────────
 
 /** PRIMARY CONTROL: what a member's newest judge replay for a role must show. Both numbers are the design's:
- *  10% rejected cases, and W1-T12187's measured median judge call of $0.003 on gpt-6-luna as the cost ceiling. */
-export const JUDGE_SHADOW_POOL_BAR = { maxRejectedShare: 0.1, maxMedianCaseUsd: 0.003 } as const;
+ *  10% rejected cases, and W1-T12187's measured median judge call of $0.003 on gpt-6-luna as the cost ceiling. They are
+ *  promotion bars in scripts/promotion-ceilings-baseline.json, read through getters on first use (src/lib/promotion-bars.ts). */
+export const JUDGE_SHADOW_POOL_BAR: Readonly<{ maxRejectedShare: number; maxMedianCaseUsd: number }> = {
+  get maxRejectedShare() { return promotionCeiling("poolMaxRejectedShare"); },
+  get maxMedianCaseUsd() { return promotionCeiling("poolMaxMedianCaseUsd"); },
+};
 /** The replay record under the state directory: role → member key → that member's newest replay figures. */
 export const JUDGE_SHADOW_POOL_FILE = "judge-shadow-pool.json";
 
