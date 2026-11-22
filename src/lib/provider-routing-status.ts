@@ -172,7 +172,9 @@ export function providerRoutingStatusPath(root: string): string {
   return join(root, "state", "provider-routing-status.json");
 }
 
-function policyRefreshPath(root: string): string {
+/** A `not-probed` write publishes only the policy and model health here, apart from the probed
+ *  reading in {@link providerRoutingStatusPath}, so a policy refresh cannot overwrite a selection. */
+export function policyRefreshPath(root: string): string {
   return join(root, "state", "provider-routing-policy-status.json");
 }
 

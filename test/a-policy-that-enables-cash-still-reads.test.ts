@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { resolveProviderRoutingPolicy, writeProviderRoutingPolicyOverride } from "../src/lib/provider-routing-policy.js";
-import { providerRoutingStatusPath, readProviderRoutingStatus, writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
+import { policyRefreshPath, readProviderRoutingStatus, writeProviderRoutingStatus } from "../src/lib/provider-routing-status.js";
 
 const NOW = Date.parse("2026-09-26T14:00:00.000Z");
 
@@ -84,7 +84,8 @@ test("W1-T4562: the openweight alias round-trips as cash, and an unknown provide
 
     // The widening is to the CONFIGURED vocabulary, never to any string: a hand-edited unknown id
     // must still read as malformed rather than be passed through to a console.
-    const path = providerRoutingStatusPath(root);
+    // A `not-probed` write lands in the policy-refresh file, which the reader merges.
+    const path = policyRefreshPath(root);
     const raw = JSON.parse(readFileSync(path, "utf8")) as { policy: { committed: { enabledProviders: string[] } } };
     raw.policy.committed.enabledProviders = ["claude", "bogus"];
     writeFileSync(path, JSON.stringify(raw));
