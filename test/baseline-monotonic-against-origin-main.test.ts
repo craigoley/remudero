@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,7 +22,7 @@ const SCRIPT = join(REPO_ROOT, "scripts", "baseline-monotonic-check.mjs");
 // scripts/**/* sits outside tsconfig's `include` (see tsconfig.json) so a static import is a
 // TS7016 — the same reason test/a-source-file-cannot-outgrow-its-baseline.test.ts reaches its
 // script through a runtime import. A dynamic specifier loads the REAL module, with no shadow copy.
-const { SCORE_TABLE, isRegression, bumpRationaleNamesAPr, evaluateRow } = (await import(
+const { SCORE_TABLE, isRegression, bumpRationaleNamesAPr, evaluateRow, planTasks } = (await import(
   pathToFileURL(SCRIPT).href
 )) as {
   SCORE_TABLE: Array<{ path: string; field: string; direction: "increase" | "decrease" }>;
@@ -32,7 +32,9 @@ const { SCORE_TABLE, isRegression, bumpRationaleNamesAPr, evaluateRow } = (await
     entry: { path: string; field: string; direction: "increase" | "decrease" },
     oldJson: Record<string, unknown> | undefined,
     newJson: Record<string, unknown>,
+    plan?: { has: (ref: string) => boolean; unreadable?: string },
   ) => { status: string; ok: boolean; detail: string };
+  planTasks: (root: string) => { has: (ref: string) => boolean; unreadable?: string };
 };
 
 // ── pure classification: isRegression / bumpRationaleNamesAPr ──────────────────────────────────
@@ -88,6 +90,7 @@ test("evaluateRow: a ceiling moving UP against origin/main WITH a fresh, PR-nami
     CEILING_ENTRY,
     { maxCycles: 13 },
     { maxCycles: 20, bumpRationale: "Raised 13 -> 20 by W1-T9999: a deliberate, reviewed widening." },
+    planTasks(REPO_ROOT), // a W1-T<n> reference counts only when the plan holds that task (PR #20033's review)
   );
   assert.equal(verdict.status, "reviewed-bump");
   assert.equal(verdict.ok, true);
@@ -161,6 +164,9 @@ function ceilingFixture(after: number, bumpRationale?: string): { repo: string; 
   git(repo, "config", "user.name", "RMD Baseline Monotonic Test");
   git(repo, "config", "user.email", "baseline-monotonic@example.invalid");
   writeFileSync(join(repo, "cycle-baseline.json"), JSON.stringify({ maxCycles: 13 }));
+  // The task the rationalised bump below names: a W1-T<n> reference counts only when the plan holds it.
+  mkdirSync(join(repo, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repo, "plan", "tasks.d", "W1-T9999-fixture.yaml"), "- id: W1-T9999\n");
   git(repo, "add", ".");
   git(repo, "commit", "-m", "base");
   git(repo, "remote", "add", "origin", remote);
