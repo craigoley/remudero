@@ -158,11 +158,28 @@ export const COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS = 10 * 60_000;
 /** W1-T12415 — coverage-shard's `timeout-minutes` in ci.yml (the coverage-ratchet job), as milliseconds. */
 export const COVERAGE_SHARD_JOB_CEILING_MS = 49 * 60_000;
 
+/**
+ * A COVERAGE RUNNER THAT PRINTED `# fail 0` CAN STILL HANG IN ITS OWN EXIT. On #20045, coverage-shard
+ * (7/12) (2026-11-21, job 136996675838) and coverage-shard (4/12) (2026-11-22, job 137055015964) printed
+ * every result and the stream end, but the wrapper never saw `node --test` close, and each idled to the
+ * job ceiling. Their surviving processes were the wrapper, its tee and the `node --test` runner itself,
+ * not a test's child. The runner leaves through `process.exit()` (`--test-force-exit`) straight after
+ * the allocation-heavy coverage summary. On Node 24.22.3 that call can deadlock: the main thread joins
+ * the V8 worker threads while a concurrent baseline (Sparkplug) or optimizing compile job waits on it for
+ * a garbage collection (nodejs/node#64274, fixed upstream by 77fdeb6 on 2026-11-20, with no v24 release
+ * carrying it yet). A local repro on 24.22.3 hung 8 of 400 runs with those two stacks, and 0 of 200 with
+ * these flags. They must be on the command line, because NODE_OPTIONS rejects them. Drop them once the
+ * pinned Node carries the fix.
+ */
+export const NODE_EXIT_DEADLOCK_WORKAROUND_ARGS = Object.freeze(["--no-concurrent-sparkplug", "--no-concurrent-recompilation"]);
+
 /** The node flags that bound a coverage-shard run of `files`: a per-test timeout from the fast tier's
- *  duration policy, capped at {@link COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS}, and an exit once every test has finished. */
+ *  duration policy, capped at {@link COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS}, an exit once every test has finished,
+ *  and {@link NODE_EXIT_DEADLOCK_WORKAROUND_ARGS}, so that exit cannot hang. */
 export function coverageShardHangBoundArgs(files, manifest, root = ".") {
   const timeout = Math.min(derivedNodeTestTimeoutMs(files, manifest, root), COVERAGE_SHARD_TEST_TIMEOUT_CAP_MS);
-  return [`--test-timeout=${timeout}`, ...slowTierHangBoundArgs().filter((arg) => !arg.startsWith("--test-timeout="))];
+  return [`--test-timeout=${timeout}`, ...slowTierHangBoundArgs().filter((arg) => !arg.startsWith("--test-timeout=")),
+    ...NODE_EXIT_DEADLOCK_WORKAROUND_ARGS];
 }
 
 /** W1-T12415 — ci.yml's coverage shard sets this on scripts/test-with-retry.mjs to the instrumented

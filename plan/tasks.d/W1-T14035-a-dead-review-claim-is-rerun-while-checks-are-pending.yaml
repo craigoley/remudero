@@ -20,7 +20,7 @@
     - src/lib/review.ts
     - src/cli/commands/review.ts
     - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A head whose checks are pending, whose remudero-review status is pending, and whose pending owner is proven dead (reviewPendingOwnerDead true) is disposed post-review alongside CI, not wait"

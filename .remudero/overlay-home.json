@@ -1,0 +1,7 @@
+{
+  "repo": "craigoley/remudero-ops",
+  "paths": [
+    ".remudero/daemon-instances.yaml",
+    ".remudero/managed-repos.json"
+  ]
+}

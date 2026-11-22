@@ -182,7 +182,7 @@ function sourceSignature(root, version) {
 }
 
 /** One memo entry per root; a concurrent edit refuses the launch rather than caching a hash of a moving tree. */
-export function memoizedSourceHash(root, stats, hash = sourceHash) {
+export function memoizedSourceHash(root, stats, hash = sourceHash, { movingTree = "refuse" } = {}) {
   root = resolve(root);
   const version = loadEsbuild(root).version;
   const signature = sourceSignature(root, version);
@@ -196,7 +196,12 @@ export function memoizedSourceHash(root, stats, hash = sourceHash) {
   stats.computed++;
   try {
     const value = hash(root, version, stats);
-    if (sourceSignature(root, version) !== signature) throw new Error("source changed while hashing child entry");
+    if (sourceSignature(root, version) !== signature) {
+      // A currency check answers what the uncached hash would (the bytes it read), so a metadata-only touch
+      // mid-hash cannot turn a matching bundle into a validation-error; the moving tree is just not memoized.
+      if (movingTree === "uncached") return value;
+      throw new Error("source changed while hashing child entry");
+    }
     sourceHashes.set(root, { signature, hash: value });
     return value;
   } finally {
@@ -369,13 +374,22 @@ const isSafeRelativePath = (p) =>
  * A matching digest is integrity, not authenticity: someone who can replace both the payload and the
  * manifest passes. The store is instance-owned, which is the boundary this relies on.
  */
-export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, hashSource = sourceHash } = {}) {
+export function childEntryIsCurrent(root, name, { outDir = OUT_DIR, treeHash, hashSource = currencySourceHash } = {}) {
   try {
     return judgeChildEntry(resolve(root), name, outDir, treeHash, hashSource);
   } catch (err) {
     return notCurrent(`validation-error: ${String(err?.code ?? err?.message ?? err).slice(0, 80)}`);
   }
 }
+
+/**
+ * W1-T13969: the default `hashSource` of a currency check is {@link memoizedSourceHash}: a tree whose every input has the
+ * stat (size, mtime, ctime, inode, device, mode) it had when last hashed answers with that hash and reads no source
+ * file; any changed stat reruns {@link sourceHash}. MEASURED 2026-11-20: rehashing the whole tree on each check held
+ * the daemon loop 115 s in a day (engine-tree's bundleIsCurrent and spawnRunChild's newestCurrentEngine).
+ */
+const currencyHashStats = { computed: 0, reused: 0, bytes_read: 0, ms: 0 };
+const currencySourceHash = (root) => memoizedSourceHash(root, currencyHashStats, sourceHash, { movingTree: "uncached" });
 
 /** `treeHash`, when given, is `sourceHash(root)` the caller already computed (W1-T8776: one hash per lookup, not per entry). */
 function judgeChildEntry(root, name, outDir, treeHash, hashSource) {
