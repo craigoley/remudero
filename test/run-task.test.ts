@@ -764,8 +764,7 @@ test("renderReconPrompt: a read-time plan index renders a prompt orders of magni
 
 test("wiring: the recon worker's spawn prompt is built via renderReconPrompt(planIndexBlock, ...), not a hardcoded literal", () => {
   const reconIdx = runTaskVerbSrc.indexOf('"recon worker"');
-  // W1-T11396: the recon prompt is wrapped by withPrerequisiteOutcomes(...), so match the render call itself.
-  const promptCallIdx = runTaskVerbSrc.indexOf("renderReconPrompt(planIndexBlock,", reconIdx);
+  const promptCallIdx = runTaskVerbSrc.indexOf("prompt: renderReconPrompt(planIndexBlock,");
   assert.ok(reconIdx >= 0, "the recon worker section must exist");
   assert.ok(promptCallIdx > reconIdx, "the recon spawn must build its prompt via renderReconPrompt, after the recon worker say()");
 });
