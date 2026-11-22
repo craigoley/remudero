@@ -685,6 +685,26 @@ test("W1-T12143 criterion 5: a cell inside a concluded experiment uses the exper
   assert.equal(h2.landed.length, 0);
 });
 
+test("W1-T12143 criterion 4: a routing.policy.estimate cell the producer leaves underpowered or running proposes nothing, refused by its status", async (t) => {
+  const floor = routingPolicyFloor();
+  for (const [label, perProvider, rates, status] of [
+    ["below the floor", Math.max(1, Math.floor(floor / 4)), { claude: 0.5, codex: 0.7 }, "underpowered"],
+    ["over the floor, rates equal", floor + 8, { claude: 0.5, codex: 0.5 }, "running"],
+  ] as const) {
+    const h = harness(t);
+    h.write(auctionRows(perProvider, rates));
+    const estimates = await recordRoutingPolicyEstimates({ stateDir: h.stateDir, today: DAY });
+    const cell = estimates.find((e) => e.cellKey === "balanced/high/src");
+    assert.equal(cell?.status, status, `positive control (${label}): the producer writes a ${status} cell`);
+    const outcomes = randomisedMountRecommendations(h.evidence(), loadMounts(join(h.root, MOUNTS)), [], HOST);
+    assert.deepEqual(outcomes.recommendations, [], `${label}: no candidate`);
+    assert.deepEqual(outcomes.refusals.map((r) => [r.id, r.reason]), [["balanced/high/src", status]], `${label}: refused as ${status}`);
+    const pass = await h.pass([]);
+    assert.deepEqual(pass.plan?.actions ?? [], [], `${label}: the gardener acts on nothing`);
+    assert.equal(h.landed.length, 0);
+  }
+});
+
 // ── Round 1 (review 6010388498): each finding reproduced on the production path ──────────────────────────────
 
 /** The production mounts table, copied into `h`'s repo, and as the loader reads it. */
