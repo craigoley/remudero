@@ -1,7 +1,7 @@
 // test/npm-run-typecheck-is-incremental-and-slotted.test.ts — worker agents call `npm run typecheck` directly, and as
 // plain `tsc -p tsconfig.json --noEmit` that path stayed cold, full and unslotted after #10374/#10487: two such checks
 // held 2.4 and 2.2 GB RSS for 18+ min on a host at load 30 (OBSERVED 2026-10-10). The script now runs
-// scripts/typecheck.mjs → runTypecheck: incremental per worktree, and a cold check waits for a host test slot.
+// scripts/typecheck.mjs → runTypecheck: incremental per worktree, and every check, warm or cold, waits for a host test slot.
 // FIXTURES ONLY: every tree, worktree, slot dir and buildinfo lives under this test's tmp dirs.
 
 import assert from "node:assert/strict";
@@ -74,7 +74,7 @@ test("npm run typecheck's wrapper passes --incremental and the worktree's own bu
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", join(laneGitDir, TYPECHECK_BUILDINFO_NAME), "--pretty", "false"]]);
 });
 
-test("a cold npm run typecheck takes a host test slot while tsc runs, and a warm one takes none", (t) => {
+test("a cold npm run typecheck takes a host test slot while tsc runs, and a warm one takes one too (W1-T14153)", (t) => {
   const slots = slotEnv(t);
   const tree = project(t);
   const observed: string[][] = [];
@@ -87,7 +87,7 @@ test("a cold npm run typecheck takes a host test slot while tsc runs, and a warm
   assert.deepEqual(heldLabels(slots), [], "the cold check released its slot");
   assert.ok(existsSync(join(tree.dir, ".git", TYPECHECK_BUILDINFO_NAME)), "the cold check left a buildinfo behind");
   assert.equal(runTypecheck(tree.dir, [], { spawn: realTsc, log: () => {} }), 0);
-  assert.deepEqual(observed, [[NPM_TYPECHECK_SLOT_LABEL], []]);
+  assert.deepEqual(observed, [[NPM_TYPECHECK_SLOT_LABEL], [NPM_TYPECHECK_SLOT_LABEL]]);
 });
 
 test("the wrapper reports tsc's own diagnostics and exit code, cold and warm", (t) => {

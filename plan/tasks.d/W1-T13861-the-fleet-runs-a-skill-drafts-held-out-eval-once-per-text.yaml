@@ -22,6 +22,8 @@
     - src/lib/ledger-steps.ts
     - src/run-task.ts
     - test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts
+    - "src/lib/fleet-liveness.ts"
+    - "src/lib/instance-gateway.ts"
   status: queued
   attempts: 0
   acceptance:

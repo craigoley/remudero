@@ -40,7 +40,7 @@ import {
   type DecisionSummary,
   type SummarizeDeps,
 } from "../src/lib/feedback.js";
-import { escalate, renderIssueBody, summarizeEscalation, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
+import { escalate, escalationBodyInLegacyOrder, renderIssueBody, summarizeEscalation, type Escalation, type IssueGateway } from "../src/lib/escalate.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { fakeGhRateLimitExec } from "./helpers/fake-gh-rate-limit.js";
 import { shellBootReady } from "./setup/open-shell.js";
@@ -354,7 +354,7 @@ test("W1-T313 criterion 2: the escalation's decision summary carries the escalat
   );
 });
 
-test("W1-T313 criterion 2: renderIssueBody puts the decision summary ABOVE the raw detail, which stays byte-identical", async () => {
+test("W1-T313 criterion 2: renderIssueBody opens with the decision summary and keeps raw detail byte-identical", async () => {
   const e = escalationFixture();
   const deps: SummarizeDeps = {
     summarize: async () => ({
@@ -379,12 +379,43 @@ test("W1-T313 criterion 2: renderIssueBody puts the decision summary ABOVE the r
   const detailIdx = withSummary.indexOf(e.detail);
   assert.ok(headlineIdx >= 0 && headlineIdx < detailIdx, "the summary sits above the raw detail");
 
-  // Without a decisionSummary, the body is EXACTLY what it was before this task (no drift),
-  // aside from the `**Host:**` line W1-T972 now writes unconditionally on every issue, and the
-  // `**To answer:**` trailer W1-T4471 now writes on every QUESTION-type issue (this fixture's
+  // Without a decisionSummary, the producer's summary opens the body as GitHub shows it (its
+  // hidden layout markers removed). Choices and the recommendation come before the unchanged
+  // detail, and machine-readable fields trail it.
+  assert.equal(
+    withoutSummary.replace(/\n(?:\n(?=<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:details -->))?<!-- rmd-escalation-layout:v1:[0-9a-f]{16}:[a-z]+ -->/g, ""),
+    [
+      e.summary,
+      "",
+      "## Options",
+      "- **retry** — resume the run with a fresh worker",
+      "- **abandon** — drop the task and re-plan",
+      "",
+      "## Recommendation",
+      e.recommendation,
+      "",
+      "## Details",
+      e.detail,
+      "",
+      "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_",
+      "_not resolve the underlying block by itself — act on it, then resume via `rmd drain`._",
+      "",
+      "**To answer:** reply on this issue (repository owner only — every other reply is",
+      "counted and ignored) or reply in the console's escalation panel. Either lands in the",
+      "same place the next fix round reads.",
+      "",
+      "## Machine fields",
+      `**Class:** ${e.class}`,
+      `**Task:** ${e.taskId}`,
+      `**Host:** ${hostname()}`,
+    ].join("\n"),
+  );
+  // Every reader reads it as EXACTLY the body this escalation had before W1-T12041 (no drift),
+  // aside from the `**Host:**` line W1-T972 writes unconditionally on every issue, and the
+  // `**To answer:**` trailer W1-T4471 writes on every QUESTION-type issue (this fixture's
   // options name no operator-only act, so it classifies "question" — see classifyAsk).
   assert.equal(
-    withoutSummary,
+    escalationBodyInLegacyOrder(withoutSummary),
     [
       `**Class:** ${e.class}`,
       `**Task:** ${e.taskId}`,

@@ -38,6 +38,10 @@ function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   return { env, path, events, warnings, deps, now: () => now, last: () => last };
 }
 
+/** W1-T14197: a wait-mode read prints a start line before its first sleep and a closing line after. */
+const closing = (warnings: string[]): string[] =>
+  warnings.filter((line) => /^gh read cadence \(wait, W1-T7957\): waited /.test(line));
+
 test("W1-T7957: a wait-mode read waits out the shared floor before reading", async (t) => {
   for (const [asyncRead, elapsedMs] of [
     [false, 120_000], [false, 120_500], [true, 120_000], [true, 120_500],
@@ -53,10 +57,11 @@ test("W1-T7957: a wait-mode read waits out the shared floor before reading", asy
       f.events.push(`read:${f.now()}`);
       assert.deepEqual(f.events, [`sleep:${waitMs}`, `stamp:${admittedAt}`, `read:${admittedAt}`]);
       assert.equal(f.last(), admittedAt);
-      assert.equal(f.warnings.length, 1);
-      assert.ok(f.warnings[0].includes(`waited ${waitMs / 1000}s`));
-      assert.ok(f.warnings[0].includes("180s"));
-      assert.ok(f.warnings[0].includes(f.path));
+      assert.equal(f.warnings.length, 2, "a start line and a closing line");
+      assert.ok(f.warnings[0].includes(`waiting ${waitMs / 1000}s for the 180s floor`));
+      assert.ok(f.warnings[1].includes(`waited ${waitMs / 1000}s`));
+      assert.ok(f.warnings[1].includes("180s"));
+      assert.ok(f.warnings[1].includes(f.path));
       f.events.length = 0;
       applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
       assert.deepEqual(f.events, [`stamp:${admittedAt}`], "the invocation's next read uses its burst");
@@ -110,11 +115,12 @@ test("W1-T7957: a read stamped during the wait extends the remaining floor", asy
       if (asyncRead) await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], deps);
       else applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["sleep:60000", "sleep:150000", "stamp:1210000"]);
-      // W1-T12058: one read prints one line, when its wait ends, with the sum of its sleeps: the stamp
-      // that lands mid-wait extends it to 210 s, which a 60 s line printed up front would understate.
+      // W1-T12058, W1-T14197: the start line states only the first 60 s pause; the closing line states
+      // the sum of the sleeps, 210 s, because the stamp that lands mid-wait extends it.
       const waits = f.warnings.filter((line) => line.startsWith("gh read cadence (wait"));
-      assert.equal(waits.length, 1, `one read prints one wait notice: ${JSON.stringify(waits)}`);
-      assert.match(waits[0]!, /waited 210s for the 180s floor/);
+      assert.equal(waits.length, 2, `one start line and one closing line: ${JSON.stringify(waits)}`);
+      assert.match(waits[0]!, /waiting 60s for the 180s floor/);
+      assert.match(waits[1]!, /waited 210s for the 180s floor/);
       f.events.length = 0;
       applyGhReadCadence(["api", "repos/o/r/pulls"], deps);
       assert.deepEqual(f.events, ["stamp:1210000"], "the completed wait earns the invocation's burst");
@@ -159,7 +165,8 @@ test("W1-T7957: queued async reads share the burst earned after the floor wait",
     ]);
     assert.ok(decisions.every((decision) => decision.allow));
     assert.deepEqual(f.events, ["sleep:60000", "stamp:1060000", "stamp:1060000"]);
-    assert.equal(f.warnings.length, 1, "the queued read uses the completed wait's burst");
+    assert.equal(closing(f.warnings).length, 1, "the queued read uses the completed wait's burst");
+    assert.equal(f.warnings.length, 2, "the one wait's start and closing lines");
   }, f.env);
   assert.equal(existsSync(`${f.path}.lock`), false);
 });
@@ -180,7 +187,8 @@ test("W1-T7957: exhausting the invocation burst waits for the floor again", asyn
       assert.deepEqual(f.events, [
         "sleep:60000", "stamp:1060000", "stamp:1060000", "sleep:180000", "stamp:1240000",
       ]);
-      assert.equal(f.warnings.length, 2, "each floor wait prints one notice");
+      assert.equal(closing(f.warnings).length, 2, "each floor wait prints one closing line");
+      assert.equal(f.warnings.length, 4, "and one start line");
     }, env);
     assert.equal(existsSync(`${f.path}.lock`), false);
   }
@@ -220,7 +228,8 @@ test("W1-T7957: writes and budget probes neither wait nor earn a read burst", as
       if (asyncRead) await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], f.deps);
       else applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
       assert.deepEqual(f.events, ["sleep:60000", "stamp:1060000"], "the first gated read still waits");
-      assert.equal(f.warnings.length, 1);
+      assert.equal(closing(f.warnings).length, 1);
+      assert.equal(f.warnings.length, 2);
     }, f.env);
     assert.equal(existsSync(`${f.path}.lock`), false);
   }

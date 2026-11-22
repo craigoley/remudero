@@ -1,7 +1,7 @@
 /**
  * `npm run typecheck` — the full `tsc -p tsconfig.json --noEmit`, run the way the fleet's own checks run it: incremental
  * against this checkout's per-worktree buildinfo (seeded from the canonical checkout's, src/lib/typecheck-buildinfo.ts),
- * and admitted through a host test slot when it would run cold (W1-T7392).
+ * and admitted through a host test slot sized by its peak, warm or cold (W1-T7392, W1-T14153).
  *
  * WHY. Worker agents call `npm run typecheck` directly. As plain tsc that path stayed cold, full and unslotted after
  * #10374 and #10487 fixed the harness's own calls: two such checks in run-W1-T7615/W1-T7616 worktrees held 2.4 and
@@ -29,15 +29,14 @@ import {
   lowMemoryTypecheckArgs,
   prepareWorktreeTypecheck,
   seedBuildInfo,
-  TYPECHECK_COLD_PEAK_BYTES,
-  TYPECHECK_WARM_PEAK_BYTES,
   typecheckArgs,
   typecheckEnv,
+  typecheckPeakBytes,
   worktreeBuildInfoPath,
   type SeedOutcome,
 } from "./typecheck-buildinfo.js";
 
-/** The slot label a cold `npm run typecheck` holds while tsc runs. */
+/** The slot label an `npm run typecheck` holds while tsc runs. */
 export const NPM_TYPECHECK_SLOT_LABEL = "typecheck:npm";
 
 /** The buildinfo's name in the worktree root when the git dir is not writable. */
@@ -52,7 +51,7 @@ export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
   canWrite?: (dir: string) => boolean;
   acquireSlot?: (label: string) => TestSlotLease;
-  /** Options for the default slot acquisition; a cold check always names {@link TYPECHECK_COLD_PEAK_BYTES}. */
+  /** Options for the default slot acquisition; a check names its peak, {@link typecheckPeakBytes}, unless these do. */
   testSlot?: TestSlotOptions;
   log?: (line: string) => void;
 }
@@ -94,25 +93,25 @@ export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boo
   return { args: typecheckArgs(buildInfo), buildInfo, seed, where: "worktree" };
 }
 
-/** Run the incremental full typecheck of the checkout at `root`, taking a slot only when it would run cold. */
+/** Run the incremental full typecheck of the checkout at `root`, warm or cold, inside a slot sized by its peak. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
   const prepared = prepareTypecheckRun(root, opts.canWrite);
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  const peak = typecheckPeakBytes(!cold);
   let slot: TestSlotLease | undefined;
   try {
-    if (cold) {
-      slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
-        : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...opts.testSlot });
-      if (!testSlotExecutionAllowed(slot)) {
-        log(JSON.stringify({ step: "typecheck.not_run", note: slot.note }));
-        return 75;
-      }
-      log(JSON.stringify({ step: "typecheck.cold", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
+    // W1-T14153: a warm tsc peaks as high as a cold one, so it is admitted the same way.
+    slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
+      : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot });
+    if (!testSlotExecutionAllowed(slot)) {
+      log(JSON.stringify({ step: "typecheck.not_run", note: slot.note }));
+      return 75;
     }
+    log(JSON.stringify({ step: cold ? "typecheck.cold" : "typecheck.warm", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     // Read after any wait for a slot: a tight container runs tsc with fewer checkers, same diagnostics.
     const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
-    const tight = lowMemoryTypecheckArgs(headroom, cold ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+    const tight = lowMemoryTypecheckArgs(headroom, peak);
     if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
     const res = (opts.spawn ?? inheritSpawn)(
       join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),

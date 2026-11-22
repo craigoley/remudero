@@ -20,7 +20,7 @@
     - src/lib/ledger-steps.ts
     - test/sweep/one-held-follow-up-per-task-and-criterion.test.ts
     - test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A split-follow-up for a task and criterion that a task on origin/main already holds (depends_on names the task, the title ends with (held follow-up), and its acceptance carries the criterion's claim) reserves no id, lands no file, and writes one taken parked_pr.remedy row that names that task as held_task_id, with a ledger that holds no earlier parked_pr.remedy row"

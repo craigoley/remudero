@@ -5012,11 +5012,17 @@ export function judgeCriterion(
       const downgrade = classifyDowngrade(semanticClause);
       semanticClause = downgrade.text;
       downgradeClass = downgrade.class;
-      if (downgradeClass === "b") {
+      // W1-T14242: a (b) is a follow-up only over an observed executed_pass. On any other outcome the criterion rests
+      // on the keyword floor, where a misclassified (b) would turn an explained FAIL into a pass: fold it as an (a).
+      if (downgradeClass === "b" && proofExec === "executed_pass") {
         followUp = semanticClause;
       } else {
+        const note = downgradeClass === "b"
+          ? `${downgradeNote}; (b) not honoured: the proof did not execute and pass (${proofExec}), so the FAIL binds as an (a)`
+          : downgradeNote;
+        if (downgradeClass === "b") downgradeClass = "a";
         met = false;
-        reason = semanticClause ? `${reason} — NOTE: ${downgradeNote}: ${semanticClause}` : `${reason} — NOTE: ${downgradeNote}`;
+        reason = semanticClause ? `${reason} — NOTE: ${note}: ${semanticClause}` : `${reason} — NOTE: ${note}`;
       }
     }
   }
