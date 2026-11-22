@@ -359,9 +359,11 @@ function placementHistory(): { dir: string; code: string; placement: string; mat
     repo.git("commit", "--quiet", "-m", message);
     return repo.git("rev-parse", "HEAD");
   };
+  // The fixture's own specifiers are location-relative, but this file's text must not carry one (W1-T9864).
+  const here = ".";
   const runTask = [
-    'import { judge } from "./lib/review.js";',
-    'import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";',
+    `import { judge } from "${here}/lib/review.js";`,
+    `import { withReviewerWorktreeLease } from "${here}/lib/reviewer-worktree-lease.js";`,
     "",
     "async function runReview(pr: string): Promise<string> {",
     "  return judge(pr);",
