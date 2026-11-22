@@ -17,7 +17,7 @@
     - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
     - test/next-task-id-waits-for-the-shared-read-floor.test.ts
     - test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:start-line-before-sleep — a wait-mode read whose stamp is 5 s old prints a line `gh read cadence (wait, W1-T7957): waiting 175s for the 180s floor ...` before its first sleep starts: in one ordered list of warn and sleep events, the start line comes first"
