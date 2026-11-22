@@ -636,6 +636,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   onPhase?: (phase: string) => void;
   /** W1-T10269: judge, then stop before any arm, status or comment — the reviewer-health shadow. */
   shadow?: boolean;
+  /** W1-T12145: a calibration case review. Its shadow judge never starts, so a case spends nothing outside the pass's
+   *  idle gate and evaluator cap. */
+  calibrationCase?: boolean;
   planLintRetryHead?: string;
   reviewReplaySetupInput?: ReviewReplayInput;
   /** W1-T9970 test seam: the reviewer's image; `null` is off-container. Default {@link readRuntimeImageSha}. */
@@ -1307,7 +1310,8 @@ export async function runReview(host: ReviewCommandHost, args: {
             : { assignment_unavailable_reason: "assignment-not-observed" }),
           ...(reviewerFields.routed_model || !reviewerAssignment ? {} : { routed_model: reviewerAssignment.selected.model }),
         });
-        await runShadowJudge({
+        // W1-T12145: a calibration case starts no shadow judge; its spend would skip the pass's idle gate and cap.
+        if (!args.calibrationCase) await runShadowJudge({
           surface: "review", key: `${prUrl}:${headSha}:${decisionDigest}`,
           primaryMount: args.reviewerMount!, primaryDecision: candidateSemantic,
           primaryServedModel: reviewer.servedModel ?? reviewer.routedModel ?? null,
@@ -2348,8 +2352,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
   // W1-T12145: a calibration case is a MERGED pull request reviewed in shadow at its recorded head. It is
   // reviewed although closed only when the head it names is the one the PR merged; a shadow review publishes nothing.
-  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed" &&
-      !isCalibrationCaseOf(rest, raw as RestPullRow)) {
+  const calibrationCase = reviewPrNumber(prArg) !== undefined && isCalibrationCaseOf(rest, raw as RestPullRow);
+  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed" && !calibrationCase) {
     // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
     const closed = raw as RestPullRow;
     appendLedger(ledgerPathFor(loadConfigDep()), {
@@ -2911,6 +2915,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           runId,
           openTaskIds,
           ...(shadow ? { shadow: true } : {}),
+          ...(calibrationCase ? { calibrationCase: true } : {}),
         }), join(config.root, "state", "inflight")),
       ),
     baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,

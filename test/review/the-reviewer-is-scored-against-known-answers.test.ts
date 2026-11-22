@@ -23,8 +23,13 @@ import * as cal from "#src/lib/reviewer-calibration.js";
 import {
   MIN_POPULATION_FLOOR, UNREADABLE_REVIEWER_MODEL, VERDICT_OUTCOME_STEP, mineVerdictRows, verdictCalibrationReport, type VerdictRow,
 } from "#src/lib/verdict-calibration.js";
-import { reviewCommand, type ReviewCommandHost } from "#src/cli/commands/review.js";
-import { spawnWorker } from "#src/lib/worker.js";
+import { reviewCommand, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { requiredSemanticDecisionDigest } from "#src/lib/required-semantic-review.js";
+import { reviewDecisionDigest } from "#src/lib/review.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import { spawnWorker, type WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -391,6 +396,7 @@ test("W1-T12145 criterion 5 invariant calibration-publishes-nothing: a case is a
   const code = await reviewCommand(HOST, "8", argv.slice(1), deps(view("2026-11-01T00:00:00Z")) as never);
   assert.equal(code, 0, "a shadow review ends at its verdict");
   assert.equal(reviewed?.shadow, true);
+  assert.equal(reviewed?.calibrationCase, true, "the review knows it is a case, so it starts no shadow judge");
   assert.equal(reviewed?.spawnReviewer, true);
   assert.equal(reviewed?.reviewerMount?.provider, "codex");
   assert.equal(reviewed?.reviewerMount?.model, "gpt-6.1-sol");
@@ -624,4 +630,55 @@ test("W1-T12145 the production ports run a case as an rmd review child of the ch
   assert.match(args[args.indexOf("--review-attempt-id") + 1]!, /^review-PR8-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.equal(args[args.indexOf("--repo") + 1], "acme/remudero");
   assert.equal(ports.casesPerPass > 0 && ports.cashCaseReserveUsd > 0, true);
+});
+
+test("W1-T12145: a calibration case review starts no shadow judge", async (t) => {
+  const repo = gitRepo({ scope: t, kind: "w1t12145-shadow-judge" });
+  mkdirSync(join(repo.dir, "src"));
+  writeFileSync(join(repo.dir, "src/marker.ts"), "export const READY = true;\n");
+  repo.git("add", "src/marker.ts");
+  repo.git("commit", "-qm", "fixture source");
+  const headSha = repo.git("rev-parse", "HEAD");
+  const prUrl = "https://github.com/acme/remudero/pull/1";
+  const acceptance = [{ claim: "the marker is present", proof: "grep: READY in src/marker.ts" }];
+  const task = { id: "W1-T1", files: ["src/marker.ts"], acceptance, risk: "low" as const, budget_usd: 0.5 };
+  const diff = "diff --git a/src/marker.ts b/src/marker.ts\n--- /dev/null\n+++ b/src/marker.ts\n@@ -0,0 +1 @@\n+export const READY = true;\n";
+  // A report whose decision the 5% sample DOES draw, so the review's shadow judge starts unless the case stops it.
+  let report = "";
+  for (let n = 0; n < 1000 && report === ""; n++) {
+    const candidate = `calibration judge control (${n})`;
+    const digest = reviewDecisionDigest({ headSha, diff, report: candidate, body: candidate, acceptance, declaredFiles: task.files });
+    if (shadowJudgeSampled(`review:${prUrl}:${headSha}:${requiredSemanticDecisionDigest(digest, true)}`)) report = candidate;
+  }
+  assert.ok(report, "a report the shadow judge's sample draws");
+  const shim = ghShim([{ when: "pulls/1", stdout: JSON.stringify({ number: 1, state: "open", body: report, head: { ref: "fixture", sha: headSha }, html_url: prUrl }) },
+    { when: "pr diff", stdout: diff }, { when: "/statuses?", stdout: "[[]]" }, { when: "api", stdout: "{}" }], { kind: "w1t12145-judge" });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${previousPath ?? ""}`;
+  t.after(() => { process.env.PATH = previousPath; });
+  const host: ReviewCommandHost = { ...HOST, readHeadShaRest: () => headSha };
+  const review = async (calibrationCase: boolean) => {
+    const rows: string[] = [];
+    let spawns = 0;
+    await runReview(host, { owner: "acme", repo: "remudero", prUrl, task, report, shadow: true, ...(calibrationCase ? { calibrationCase: true } : {}),
+      settingsFile: join(repo.dir, "settings.json"), config: { root: repo.dir, claudeBin: "/unused" } as never,
+      requireSemanticReview: true, headCheckoutDir: repo.dir, ledgerPath: join(repo.dir, ".git", "ledger.ndjson"),
+      runId: "w1t12145-judge", log: (step: string) => { rows.push(step); }, say: () => {}, account: (result: WorkerResult) => result,
+      reviewerMount: { model: "sonnet", effort: "high", maxTurns: 10, contextBudget: 120000 }, budgetUsd: 0.5,
+      reviewerSpawnWorker: async () => {
+        spawns++;
+        return { sessionId: "w1t12145-judge", text: "REVIEW_VERDICT 1: PASS", blocks: [], stderr: "", exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1,
+          permissionDenials: [], childEnvKeys: [], model: "sonnet", effort: "high", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {}, compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false } as WorkerResult;
+      },
+      readReviewReuseFacts: () => undefined, disarm: () => "not-armed", arm: () => "ledger-refused",
+    } as never);
+    return { rows, spawns };
+  };
+  const control = await review(false);
+  assert.ok(control.rows.some((step) => step.startsWith("shadow_judge.")), "the control: this decision's sample starts the shadow judge");
+  const calibration = await review(true);
+  assert.deepEqual(calibration.rows.filter((step) => step.startsWith("shadow_judge.")), [], "a calibration case starts no shadow judge");
+  assert.equal(calibration.spawns, 1, "only the reviewer under test is spawned");
+  assert.ok(calibration.rows.includes("review.reviewer"), "and the reviewer under test did run");
 });
