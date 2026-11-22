@@ -12,7 +12,9 @@ import { test } from "node:test";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import { maintenanceOperatorChannel, type AsyncIssueGateway, type OpenIssue } from "#src/lib/escalate.js";
 import * as maintenance from "#src/lib/object-reaper.js";
+import { readNamespaceBootMs } from "#src/lib/dispatch-claim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const policy = { intervalMs: 86400000, probeIntervalMs: 60000, timeoutMs: 300000,
   backoffMs: 60000, maxBackoffMs: 3600000, maxFailures: 3, maxActiveLanes: 1 };
@@ -310,6 +312,55 @@ test("W1-T10750: boot evidence takes the earliest FRESH receipt of another insta
 
   plant(join(receipts, "broken-host"), JSON.stringify({ boot: "not a number" }), new Date(wall));
   assert.throws(() => maintenance.bootEvidenceFor(gitDir, opts), /boot receipt broken-host unreadable/);
+});
+
+test("W1-T13211 criterion 1: the reaper's own start is the shared reader's value, finite where /proc cannot answer", () => {
+  const store = gitRepo({ kind: "maintenance-boot-shared-reader" });
+  const gitDir = join(store.dir, ".git");
+  const opts = { now: Date.now(), host: HOST, freshMs: 60000 };
+  // the real reader on the host this runs on: Linux reads /proc, macOS derives the start from the uptime
+  assert.equal(maintenance.bootEvidenceFor(gitDir, opts), readNamespaceBootMs(), "boot evidence is the shared reader's own answer");
+  // the macOS arm of the same reader, driven here on any host: no /proc is consulted and the answer is finite
+  const darwin = () => readNamespaceBootMs({ platform: "darwin", nowMs: () => NOW, uptimeSec: () => 3600 });
+  assert.equal(maintenance.bootEvidenceFor(gitDir, { ...opts, readStart: darwin }), NOW - 3600 * 1000, "a darwin start is boot evidence");
+  maintenance.writeBootReceipt(gitDir, "mac-host", opts.now, darwin);
+  assert.deepEqual(JSON.parse(readFileSync(join(gitDir, maintenance.BOOT_RECEIPT_DIR, "mac-host"), "utf8")), { boot: NOW - 3600 * 1000 });
+});
+
+test("W1-T13211 criterion 2: an unreadable namespace start refuses boot evidence and the receipt, keeping every leftover", async () => {
+  const store = gitRepo({ kind: "maintenance-boot-unreadable-start" });
+  const gitDir = join(store.dir, ".git");
+  const blind = () => readNamespaceBootMs({ platform: "linux", readFile: () => { throw new Error("EACCES: /proc locked down"); } });
+  assert.equal(blind(), undefined, "the shared reader declines");
+  const opts = { now: NOW, host: HOST, freshMs: 60000, readStart: blind };
+  assert.throws(() => maintenance.bootEvidenceFor(gitDir, opts), /namespace start unreadable/);
+  assert.throws(() => maintenance.writeBootReceipt(gitDir, HOST, NOW, blind), /namespace start unreadable/);
+
+  const leftover = join(gitDir, "objects", "maintenance.lock");
+  plant(leftover);
+  const rows: Array<Record<string, unknown>> = [];
+  const calls: string[][] = [];
+  await maintenance.runRepositoryMaintenance(store.dir, join(store.dir, "maintenance.json"), policy, (_s, f) => rows.push(f), {
+    clock: fixedClock(NOW), random: () => 0, context: quiet, hostname: () => HOST, listProcesses: () => [],
+    readStart: blind, survey: markerUntilRun(calls, "marker"), run: okRun(calls),
+  });
+  assert.equal(existsSync(leftover), true, "an unreadable start keeps the leftover");
+  assert.match(String((rows.at(-1)?.leftovers_kept as string[])[0]), /boot evidence unreadable.*namespace start unreadable/);
+  assert.match(String(rows.at(-1)?.boot_receipt_error), /namespace start unreadable/, "the receipt error rides the maintenance row");
+  assert.equal(calls.length, 1, "maintenance itself still ran");
+});
+
+test("W1-T13211 criterion 3: the reaper holds no parse of the init start of its own and its value is stable", () => {
+  // @source-text-subject: src/lib/object-reaper.ts — the invariant one-reading-of-the-namespace-start IS
+  // a claim about that file's text: it must hold no /proc/1/stat parse of its own.
+  const source = readFileSync(join(REPO_ROOT, "src", "lib", "object-reaper.ts"), "utf8");
+  assert.doesNotMatch(source, /\/proc\/1\/stat|\/proc\/stat|PROC_CLOCK_TICKS|USER_HZ/, "no second parse of the namespace start");
+  assert.match(source, /readNamespaceBootMs/, "the start comes from the shared reader");
+  const store = gitRepo({ kind: "maintenance-boot-stable" });
+  const gitDir = join(store.dir, ".git");
+  const first = maintenance.bootEvidenceFor(gitDir, { now: NOW, host: HOST, freshMs: 60000 });
+  const second = maintenance.bootEvidenceFor(gitDir, { now: NOW + 7 * 86400000, host: HOST, freshMs: 60000 });
+  assert.equal(second, first, "the value does not move across a clock step");
 });
 
 test("W1-T10750: a leftover scan that cannot read the pack directory is carried as a failure, never thrown", async () => {
