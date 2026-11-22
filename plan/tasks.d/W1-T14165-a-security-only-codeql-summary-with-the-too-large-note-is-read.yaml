@@ -1,0 +1,37 @@
+- id: W1-T14165
+  title: The security merge policy reads a security-only CodeQL summary that carries the "changes too large" note
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the security merge policy's parser; a wrong accept would grant a merge
+  band_meaning: span
+  origin: operator-session#security-parser-2026-11-21
+  plan_refs: []
+  files:
+    - src/lib/code-scanning-merge-policy.mjs
+    - test/github/a-security-only-codeql-summary-with-the-too-large-note-is-read.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    #19651 is blocked by security-merge-policy "security-analysis-failed-or-unrecognized". When a Security Alerts
+    section has no Other Alerts section after it, GitHub's CodeQL summary has one extra blank line before the
+    "changes too large" note. The SECTIONED regex in src/lib/code-scanning-merge-policy.mjs does not accept that one
+    exact shape. Craig approved recognising that exact wording on 2026-11-21 at 16:12Z.
+  design: |
+    The SECTIONED tail accepts "\n" + TOO_LARGE as one more exact alternative. Nothing else is loosened: a high or
+    critical row, a count that does not match its title, a doubled note, any further blank line, and an unknown
+    paragraph still read as not safe or unknown.
+
+    INVARIANT too-large-shape-grants-nothing-else: only the exact one-extra-blank-line too-large shape is newly accepted; every other unrecognised or unsafe shape still grants nothing.
+  acceptance:
+    - claim: "A security-only CodeQL summary with the too-large note after one extra blank line reads as below the security threshold"
+      proof: "grep: W1-T14165 criterion 1: in test/github/a-security-only-codeql-summary-with-the-too-large-note-is-read.test.ts"
+    - claim: "invariant:too-large-shape-grants-nothing-else — the same shape with a high row, a mismatched title, a doubled note, or a further blank line still grants nothing"
+      kind: guard
+      proof: "grep: W1-T14165 criterion 2: in test/github/a-security-only-codeql-summary-with-the-too-large-note-is-read.test.ts"
+  falsifier: |
+    Drop the new alternative: criterion 1's summary reads unrecognised again. Accept any trailing blank lines:
+    criterion 2's further-blank-line case grants a merge and fails.

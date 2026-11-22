@@ -7,7 +7,8 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # one invariant rule's bad() and its message; the incident row shape and the SRE lane are unchanged
+  risk: high  # Rule 19 span: widened to incident-invariants, loop-stall-profiler, serve by a scope amendment for #19916
+  band_meaning: span
   origin: "operator-session#serve-oom-2026-11-16"
   plan_refs:
     - W1-T10074
@@ -15,7 +16,9 @@
   files:
     - src/lib/incident-invariants.ts
     - test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts
-  status: queued
+    - "src/lib/loop-stall-profiler.ts"
+    - "src/lib/serve.ts"
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With runtime.loop_lag rows whose p99Ms stays at 108 ms and one row with maxMs 887,447, the loop-lag rule's bad() reports bad, and its message names the max stall in ms beside the p99"

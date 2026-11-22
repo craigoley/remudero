@@ -99,6 +99,30 @@ test("W1-T3360: it SEES the corpus — the real tree yields step-keyed union rea
   );
 });
 
+test("the census follows a named raw-pattern slice through the incremental union reader", () => {
+  const source = String.raw`const SAMPLE_SLICE: EscalationTriageSlice = {
+  rawPattern: /"step":"sample.uncreditable"|"step":"sample.escalated"/,
+};
+function readHistory() { return createEscalationTriageHistoryReader({ slice: SAMPLE_SLICE }); }
+`;
+  const findings = censusFindings(["src/lib/slice-reader.ts"], () => source, new Map());
+  assert.deepEqual(findings.map((finding) => finding.steps.map((step) => step.step)), [
+    ["sample.uncreditable", "sample.escalated"],
+  ]);
+});
+
+test("the census reports a runtime raw pattern on a named triage slice as unresolved", () => {
+  const file = "src/lib/slice-reader.ts";
+  const source = `const SAMPLE_SLICE: EscalationTriageSlice = {
+  rawPattern: buildPatternAtRuntime(),
+};
+function readHistory() { return createEscalationTriageHistoryReader({ slice: SAMPLE_SLICE }); }
+`;
+  assert.deepEqual(censusFindings([file], () => source, new Map()), [
+    { file, arg: "SAMPLE_SLICE", unresolved: true, steps: [] },
+  ]);
+});
+
 // ── it refuses a NEW contradiction ──────────────────────────────────────────────────────────────
 
 const FAKE_LEDGER = `

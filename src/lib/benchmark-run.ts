@@ -4,6 +4,7 @@ import { importedModuleOf, type ImportedModuleEvidence } from "./prevention-sour
 import { loadConfig } from "./config.js";
 import { deriveTaskClass } from "./task-class.js";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
@@ -18,7 +19,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import type { Config } from "./config.js";
 import { workerClassOfLane } from "./host-memory-learning.js";
 import { spawnWorker, workerLedgerFields, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment } from "./worker.js";
-import { OPENWEIGHT_TEMPERATURE } from "./worker-provider.js";
+import { OPENWEIGHT_TEMPERATURE, observeServedModelsPerCall, observedServedModelOf, returnedServedModelOf, thrownInCallServedModelOf, unscopedObservedServedModelOf } from "./worker-provider.js";
 import type { ExperimentIntentionToTreat } from "./routing-experiments.js";
 
 export const BENCHMARK_RUN_VERSION = "benchmark-run-v1" as const;
@@ -38,6 +39,69 @@ export type BenchmarkRevisionField = typeof REVISION_FIELDS[number];
 export type BenchmarkRevisionPin = { source: "executing-module-git" | "image-build-stamp" | "resolved-artifact" | "trial-manifest"; revision: string };
 export type BenchmarkStackEvidence = Partial<Record<BenchmarkRevisionField,
   BenchmarkRevisionPin | readonly BenchmarkRevisionPin[] | { state: "unavailable"; reason: string }>>;
+
+type BenchmarkRuntimeObservation = { receipt: unknown; startedAt: number; finishedAt: number };
+
+export const WORKER_HARNESS_CONTRACT_VERSION = "worker-harness-contract-v1" as const;
+const RUNTIME_CONTEXT_FIELDS = ["executableRevision", "adapterRevision", "policyDigest", "settingsDigest", "environmentDigest"] as const;
+export const BENCHMARK_RUNTIME_FIELDS = [...RUNTIME_CONTEXT_FIELDS, "enforcementDigest"] as const;
+export type BenchmarkRuntimeField = typeof BENCHMARK_RUNTIME_FIELDS[number];
+export type BenchmarkRuntimeContext = Record<BenchmarkRuntimeField, string> & {
+  version: typeof WORKER_HARNESS_CONTRACT_VERSION;
+  provider: string;
+  effort: string;
+};
+
+export const BENCHMARK_RUNTIME_EXCLUSIONS = [
+  "runtime-evidence-missing", "runtime-evidence-invalid", "runtime-evidence-not-observed", "runtime-evidence-wrong-run",
+  "runtime-evidence-stale", "runtime-conformance-unresolved", "runtime-conformance-context-mismatch",
+] as const;
+export type BenchmarkRuntimeExclusion = typeof BENCHMARK_RUNTIME_EXCLUSIONS[number];
+const runtimeUnavailable = (reason: BenchmarkRuntimeExclusion) => ({ state: "unavailable" as const, reason });
+
+export function benchmarkRuntimeFingerprint(field: BenchmarkRuntimeField, value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const pattern = field === "executableRevision" || field === "adapterRevision" ? /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i : /^[0-9a-f]{64}$/i;
+  return pattern.test(value) ? value.toLowerCase() : null;
+}
+
+function runtimeRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** A trusted worker boundary supplies the receipt and timestamps from the call consuming it. */
+function runtimeEvidence(runId: string, evidence: BenchmarkRuntimeObservation | undefined) {
+  if (evidence?.receipt === undefined) return runtimeUnavailable("runtime-evidence-missing");
+  const receipt = runtimeRecord(evidence.receipt);
+  if (receipt?.version !== WORKER_HARNESS_CONTRACT_VERSION) return runtimeUnavailable("runtime-evidence-invalid");
+  if (receipt.evidenceClass !== "observed-installed-runtime") return runtimeUnavailable("runtime-evidence-not-observed");
+  if (typeof receipt.runId !== "string" || !runId || receipt.runId !== runId) return runtimeUnavailable("runtime-evidence-wrong-run");
+  const time = typeof receipt.observedAt === "string" ? Date.parse(receipt.observedAt) : NaN;
+  if (!Number.isFinite(time) || fixedClock(time).iso() !== receipt.observedAt)
+    return runtimeUnavailable("runtime-evidence-invalid");
+  if (!(evidence.startedAt <= time && time <= evidence.finishedAt) || !Number.isFinite(evidence.startedAt) || !Number.isFinite(evidence.finishedAt))
+    return runtimeUnavailable("runtime-evidence-stale");
+
+  const { provider, effort } = receipt;
+  if (typeof provider !== "string" || !TASK_SHAPE_TOKEN_RE.test(provider) || typeof effort !== "string" || !TASK_SHAPE_TOKEN_RE.test(effort))
+    return runtimeUnavailable("runtime-evidence-invalid");
+  const rawContext = runtimeRecord(receipt.context);
+  const context = {} as Pick<BenchmarkRuntimeContext, typeof RUNTIME_CONTEXT_FIELDS[number]>;
+  for (const field of RUNTIME_CONTEXT_FIELDS) {
+    const fingerprint = benchmarkRuntimeFingerprint(field, rawContext?.[field]);
+    if (fingerprint === null) return runtimeUnavailable("runtime-evidence-invalid");
+    context[field] = fingerprint;
+  }
+  const conformance = runtimeRecord(receipt.conformance);
+  const enforcementDigest = benchmarkRuntimeFingerprint("enforcementDigest", conformance?.enforcementDigest);
+  if (conformance?.evidenceClass !== "observed-installed-runtime" || conformance.state !== "conformant" || enforcementDigest === null)
+    return runtimeUnavailable("runtime-conformance-unresolved");
+  // The contract hashes the ordered, lowercase fingerprints with the provider and effort.
+  const contextDigest = createHash("sha256").update(JSON.stringify([provider, effort, ...RUNTIME_CONTEXT_FIELDS.map((field) => context[field])])).digest("hex");
+  if (conformance.contextDigest !== contextDigest) return runtimeUnavailable("runtime-conformance-context-mismatch");
+  const value: BenchmarkRuntimeContext = { version: WORKER_HARNESS_CONTRACT_VERSION, provider, effort, ...context, enforcementDigest };
+  return { state: "observed" as const, value };
+}
 
 function pinEvidence(field: BenchmarkRevisionField, input: BenchmarkStackEvidence[BenchmarkRevisionField]): Evidence<string> {
   if (input === undefined) return unavailable("not-pinned-by-harness");
@@ -344,9 +408,11 @@ export function observeBenchmarkWork(work: BenchmarkWorkInput, step: string, ext
     reconSizeEstimate: unavailable(RECON_SIZE_GAPS[recon]) } };
 }
 
-/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap. */
-export function nonDispatchBenchmarkWork(lane: string): BenchmarkWorkInput {
-  return { shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
+/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap, except a class
+ *  its caller knows when the worker is assigned (the review lane's, its PR's plan task: W1-T14146). */
+export function nonDispatchBenchmarkWork(lane: string, known: Pick<BenchmarkWorkInput, "taskClass"> = {}): BenchmarkWorkInput {
+  return { ...(known.taskClass ? { taskClass: known.taskClass } : {}),
+    shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
 }
 
 export interface BenchmarkRunAssignmentInput {
@@ -359,7 +425,7 @@ export interface BenchmarkRunAssignmentInput {
 export function benchmarkRunAssignmentReceipt(
   assignment: BenchmarkRunAssignmentInput,
   work: BenchmarkWorkInput,
-  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence } = {},
+  stackEvidence: BenchmarkStackEvidence & { loadedModule?: ImportedModuleEvidence; runtime?: BenchmarkRuntimeObservation } = {},
 ) {
   const experiment = assignment.routing?.experiment;
   // No inference from checkout HEAD, route, or site-level consent: none of those pins the
@@ -385,6 +451,7 @@ export function benchmarkRunAssignmentReceipt(
       toolRevision: pinEvidence("toolRevision", stackEvidence.toolRevision),
       scorerRevision: pinEvidence("scorerRevision", stackEvidence.scorerRevision),
       environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
+      runtime: runtimeEvidence(assignment.id, stackEvidence.runtime),
     },
     rights: { state: "private" as const, reason: "no-local-consent-receipt" },
     allocation: experiment ? {
@@ -538,6 +605,19 @@ export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity>
   return (args as { [BENCHMARK_RECEIPT_IDENTITY]?: ReceiptIdentity })[BENCHMARK_RECEIPT_IDENTITY] ?? {};
 }
 
+/** W1-T14146: the work a non-dispatch caller knows when its worker is assigned — the review lane's, its PR's plan
+ *  task's class — for {@link benchmarkNonDispatchSpawn}'s assignment receipt. Symbol-keyed like the identity above,
+ *  so it rides the call's args to the receipt wrapper and never reaches the router. */
+export const BENCHMARK_RECEIPT_WORK: unique symbol = Symbol("rmd.benchmarkReceiptWork");
+
+export function withReceiptWork(args: SpawnWorkerArgs, work: Pick<BenchmarkWorkInput, "taskClass">): SpawnWorkerArgs {
+  return { ...args, [BENCHMARK_RECEIPT_WORK]: { ...work } } as SpawnWorkerArgs;
+}
+
+function receiptWork(args: SpawnWorkerArgs): Pick<BenchmarkWorkInput, "taskClass"> {
+  return (args as { [BENCHMARK_RECEIPT_WORK]?: Pick<BenchmarkWorkInput, "taskClass"> })[BENCHMARK_RECEIPT_WORK] ?? {};
+}
+
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
 const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
 
@@ -564,7 +644,8 @@ export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
  *  with paths, credentials and long tokens redacted — and whether it failed before any model was
  *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
-export function spawnFailureDetail(error: unknown, assignmentObserved: boolean): Record<string, unknown> {
+export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
+  observations?: WeakMap<object, { servedModel: string | null; servedModelReason?: string }>): Record<string, unknown> {
   const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
   const code = error !== null && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code : undefined;
@@ -574,7 +655,49 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean):
     .replace(/(?:~|\.{1,2})?(?:\/[^\s/:'"`]+){2,}\/?/g, "<path>")
     .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
     .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
-  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message };
+  return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message,
+    ...thrownServedModelEvidence(error, observations) };
+}
+
+/** W1-T13868: named when a getter on the thrown error or its `cause` chain throws while its served model is read. */
+export const THROWN_SERVED_MODEL_UNREADABLE = "the thrown error's served-model evidence could not be read";
+
+/** Reading evidence never replaces the rejection or drops the row: a throwing getter is named, not propagated. */
+function thrownServedModelEvidence(error: unknown,
+  observations: WeakMap<object, { servedModel: string | null; servedModelReason?: string }> | undefined): Record<string, string | null> {
+  try {
+    const thrown = thrownServedModel(error, observations);
+    if (Object.keys(thrown).length > 0 || observations === undefined) return thrown;
+    // A wrapper's error (the quiet-worker watchdog's round end) replaced a result the worker had returned, or replaced
+    // an error the adapter threw after its stream named a model.
+    return servedModelEvidence(returnedServedModelOf(observations) ?? thrownInCallServedModelOf(observations));
+  } catch { const reason = THROWN_SERVED_MODEL_UNREADABLE; return { served_model: null, served_model_reason: reason }; }
+}
+
+/** W1-T13868: the served model (or its named reason) a provider attached to an error thrown after its
+ *  response named one (`withObservedServedModel` in worker-provider.ts), on the error or its `cause` chain.
+ *  Absent when none carries either. */
+function thrownServedModel(error: unknown,
+  observations: WeakMap<object, { servedModel: string | null; servedModelReason?: string }> | undefined, depth = 0): Record<string, string | null> {
+  if (error === null || typeof error !== "object" || depth > 4) return {};
+  // A wrapper such as WorkerAbandonedError keeps the provider's own error as its `cause`.
+  // The side table holds the observation even for a frozen error; an own property is the older shape.
+  // With a call's own table, that table speaks first; a record made outside every call's scope is the fallback (the
+  // fix lane's receipt scope can open after the observation was made). A property is never read there: on a shared
+  // error it may be another call's evidence.
+  const observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined = observations !== undefined
+    ? observedServedModelOf(error, observations) ?? unscopedObservedServedModelOf(error)
+    : observedServedModelOf(error) ?? ("servedModel" in error ? error as { servedModel?: unknown; servedModelReason?: unknown } : undefined);
+  if (observed === undefined) return thrownServedModel((error as { cause?: unknown }).cause, observations, depth + 1);
+  return servedModelEvidence(observed);
+}
+
+function servedModelEvidence(observed: { servedModel?: unknown; servedModelReason?: unknown } | undefined): Record<string, string | null> {
+  if (observed === undefined) return {};
+  const { servedModel, servedModelReason } = observed;
+  if (typeof servedModel === "string" && servedModel.trim().length > 0 && servedModel.length <= 128) return { served_model: servedModel };
+  return typeof servedModelReason === "string" && servedModelReason.length > 0
+    ? { served_model: null, served_model_reason: servedModelReason.slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS) } : {};
 }
 
 /** W1-T4639: the join half of a `worker.attempt` receipt — the assignment id it answers, or a named
@@ -610,7 +733,8 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
 }
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
- * caller's existing assignment sink remains authoritative when one is supplied. */
+ * caller's existing assignment sink remains authoritative when one is supplied. The assignment receipt
+ * records the work a call carries ({@link withReceiptWork}); a call carrying none records none. */
 export function benchmarkNonDispatchSpawn(
   lane: string, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
@@ -653,12 +777,14 @@ export function benchmarkNonDispatchSpawn(
       }
     };
     let result: WorkerResult;
+    // W1-T13868: this call's own served-model observations, never another call's that threw the same shared error.
+    const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
     try {
-      result = await raw({ ...args, onSelectionAssignment: (assignment) => {
+      result = await observeServedModelsPerCall(servedModelObservations, () => raw({ ...args, onSelectionAssignment: (assignment) => {
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, receiptWork(args)), nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {
@@ -683,11 +809,11 @@ export function benchmarkNonDispatchSpawn(
         if (observedAssignmentId === attempt.selectionAssignmentId) observedAssignmentId = undefined;
         try { args.onModelFallbackAttempt?.(attempt); }
         catch { console.error(JSON.stringify({ event: "benchmark.non_dispatch_fallback_hook_unavailable", lane })); }
-      } });
+      } }));
     } catch (error) {
       recordAttempt({ ...attemptAssignmentJoin(observedAssignmentId, true),
         success: false, worker_failure: "spawn-threw-before-result",
-        ...spawnFailureDetail(error, observedAssignmentId !== undefined) });
+        ...spawnFailureDetail(error, observedAssignmentId !== undefined, servedModelObservations) });
       throw error;
     }
     const assignmentId = result.selectionAssignmentId ?? observedAssignmentId;
@@ -833,4 +959,109 @@ function reportSilentHostLocks(locks: Array<{ taskId: string; holder: InflightLo
     const reason = `host-lock-report-failed: ${String((error as Error)?.message ?? error)}`;
     return { written, reason };
   }
+}
+
+/** Owns the one worker-attempt receipt on every dispatch path through the shared spawn wrapper.
+ * The call/result/error is authoritative; evidence collection cannot change any of them. */
+export function recordBenchmarkWorkerAttempt(
+  call: () => Promise<WorkerResult>,
+  log: (step: string, fields: Record<string, unknown>) => void,
+  selected: () => { id: string } | undefined,
+  stopPolling: () => void,
+): Promise<WorkerResult> {
+  // W1-T13868: this call's own served-model observations. Two calls cancelled by one signal throw ONE error, so
+  // an error-keyed record shared by every call would let the second overwrite the first's model.
+  const servedModelObservations = new WeakMap<object, { servedModel: string | null; servedModelReason?: string }>();
+  const failed = (error: unknown): void => {
+    try {
+      const assignment = selected();
+      log("worker.attempt", {
+        ...attemptAssignmentJoin(assignment?.id, true),
+        success: false,
+        worker_failure: "spawn-threw-before-result",
+        ...spawnFailureDetail(error, assignment !== undefined, servedModelObservations),
+      });
+    } catch { /* preserve the original worker error */ }
+  };
+  let workerCall: Promise<WorkerResult>;
+  try {
+    workerCall = observeServedModelsPerCall(servedModelObservations, call);
+  } catch (error) {
+    failed(error);
+    stopPolling();
+    throw error;
+  }
+  return workerCall.then((result) => {
+    try {
+      const resultId = result.selectionAssignmentId;
+      const selection = selected();
+      const assignmentId = resultId ?? selection?.id;
+      const resultEnvelopeObserved = typeof result.subtype === "string" && result.subtype.length > 0;
+      log("worker.attempt", {
+        ...attemptAssignmentJoin(assignmentId, false),
+        ...(resultId && selection && resultId !== selection.id ? { assignment_observed: false } : {}),
+        ...(result.isError || result.apiError || result.usageRefusal
+          ? { success: false }
+          : resultEnvelopeObserved ? { success: true } : {}),
+        ...benchmarkWorkerAttemptResources(result),
+      });
+    } catch { /* telemetry cannot alter the returned worker result */ }
+    return result;
+  }, (error: unknown) => {
+    failed(error);
+    throw error;
+  }).finally(stopPolling);
+}
+
+/**
+ * The routing receipt fields for a terminal `verdict` row — the ONE helper every terminal
+ * `verdict` writer in `runTaskBody` spreads. The assignment ID joins the pre-execution policy
+ * decision to this terminal receipt; the receipt then names the worker result's served model,
+ * token envelope, duration, cost, and worker-level success separately from the run verdict.
+ * `routed_model` rides along only when present, the same "absent when unset" discipline
+ * {@link workerLedgerFields} already keeps.
+ *
+ * `r === null` names a PRE-SPAWN refusal (e.g. a containment/isolation preflight failure, or a
+ * worker abandoned before its completion envelope arrived) — no worker outcome exists to read a
+ * model off, so `model`/`served_model` are written `null` explicitly rather than omitted:
+ * absent means "not written"; `null` means "checked, no worker ran" (P48).
+ */
+export function terminalVerdictFields(r: WorkerResult | null): {
+  provider?: WorkerResult["provider"];
+  model: string | null;
+  served_model: string | null;
+  /** W1-T13868: beside a null served model, the provider's own reason, as the worker row carries it. */
+  served_model_reason?: string;
+  routed_model?: string;
+  selection_assignment_id?: string;
+  tokens?: WorkerResult["tokens"];
+  worker_duration_ms?: number;
+  total_cost_usd?: number;
+  notional_cost_usd?: number;
+  /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
+  spend_role?: "restated";
+  success?: boolean;
+} {
+  if (!r) return { model: null, served_model: null };
+  // A successful result envelope can be followed by an SDK iterator error. The existing terminal
+  // verdict classifier treats that exact `{ isError: true, subtype: "success", apiError: false }`
+  // shape as clean success; routing telemetry must use the same outcome rather than reporting a
+  // completed call as a model failure. API errors and usage refusals remain unsuccessful even when
+  // their envelope subtype says `success`.
+  const success = !r.usageRefusal && (!r.isError || (r.subtype === "success" && !r.apiError));
+  return {
+    model: r.model,
+    served_model: r.servedModel ?? null,
+    ...(r.servedModel == null
+      ? { served_model_reason: r.servedModelReason ?? "the provider reported no served model for this call" } : {}),
+    ...(r.provider ? { provider: r.provider } : {}),
+    ...(r.routedModel ? { routed_model: r.routedModel } : {}),
+    ...(r.selectionAssignmentId ? { selection_assignment_id: r.selectionAssignmentId } : {}),
+    tokens: r.tokens,
+    ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
+    total_cost_usd: r.costUsd,
+    ...(r.provider === "codex" && r.notionalCostUsd !== undefined ? { notional_cost_usd: r.notionalCostUsd } : {}),
+    spend_role: "restated",
+    success,
+  };
 }

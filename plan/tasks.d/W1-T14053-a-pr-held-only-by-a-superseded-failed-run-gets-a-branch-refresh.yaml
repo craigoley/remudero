@@ -1,0 +1,44 @@
+- id: W1-T14053
+  title: A PR held only by a superseded failed run of a check that later passed on the same head gets a branch refresh
+  repo: remudero
+  depends_on: []
+  priority: 1.2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: medium
+  origin: operator-session#red-prs-2026-11-20
+  plan_refs: [W1-T10067]
+  files:
+    - src/lib/sweep.ts
+    - test/a-pr-held-only-by-a-superseded-failed-run-gets-a-branch-refresh.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-20: GitHub kept three PRs BLOCKED after every required check had passed at its newest run on
+    the PR's current head. #19730: proof-discrimination run 44708786743 (attempt 2) FAILURE at 12:29Z, then runs
+    44731057534, 44734481145 and 44743656252 SUCCESS on the same head 272aed01c. #19889: acceptance-author-gate runs
+    44765104585 and 44765127628 FAILURE, then 44767410775 and 44768882299 SUCCESS on head fb2e2e85d. Re-running the
+    failed run replays its old event payload and fails again (both reruns on #19889 did). The fleet reads these
+    checks as green (dedupeRollupByLatestAttempt, redQualityGateNames), so it neither fixes nor merges, and the PR
+    waits for a person. Each time an operator cleared it with PUT /pulls/<n>/update-branch: a new head re-ran every
+    check, and the fleet merged the PR within the hour.
+  design: |
+    RECON first: find where the sweep reads a PR as all-green but GitHub reports mergeStateStatus BLOCKED, and
+    which path (if any) acts on that today. Then add one pure decision next to dedupeRollupByLatestAttempt. It
+    answers refresh when (a) GitHub reports BLOCKED, (b) every required check's newest run on the current head
+    concluded SUCCESS, and (c) an older run of one of those checks on that same head concluded FAILURE or
+    CANCELLED. The sweep then requests one update-branch through the existing writer, which records
+    branch.update_requested (src/lib/branch-update.ts) with a via naming this path. At most one refresh per
+    head; a head that stays BLOCKED after its refresh escalates as today.
+
+    INVARIANT superseded-red-refreshes-once: a head held only by superseded failed runs gets exactly one branch refresh; any other BLOCKED head gets none from this path.
+  acceptance:
+    - claim: invariant:superseded-red-refreshes-once — a head held only by superseded failed runs gets exactly one branch refresh, and a head whose newest required run is red, pending, or missing gets none
+      proof: 'unit test: test/a-pr-held-only-by-a-superseded-failed-run-gets-a-branch-refresh.test.ts'
+    - claim: the test pins the #19730 shape for W1-T14053
+      proof: 'grep: W1-T14053 superseded failed run in test/a-pr-held-only-by-a-superseded-failed-run-gets-a-branch-refresh.test.ts'
+  falsifier: |
+    Drop the decision, or let it fire when the newest run of a required check is red: the #19730-shaped case gets
+    no refresh, or the red case gets one, and the test fails.

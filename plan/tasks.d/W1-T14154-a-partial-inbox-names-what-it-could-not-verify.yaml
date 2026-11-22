@@ -1,0 +1,49 @@
+- id: W1-T14154
+  title: A partial core Inbox names each proposal and task row it could not verify, and why
+  repo: remudero
+  depends_on: []
+  priority: 0.5
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high # Rule 19 sizing: inbox and panel-graph
+  band_meaning: span
+  origin: operator-request#console-update-failed-2026-11-20
+  plan_refs: [W1-T14114, W1-T13957, W1-T12211]
+  files:
+    - src/lib/inbox.ts
+    - src/lib/panel-graph.ts
+    - test/inbox/a-partial-inbox-names-what-it-could-not-verify.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    Live 2026-11-20 to 2026-11-21: the core Inbox read partial for over 9 hours. Its only explanation was the fixed
+    sentence "the GitHub projection or a proposal referent is indeterminate" (panel-graph.ts
+    inboxClassificationEvidence). Finding which proposals were unverified (board-review:escalation:#19691, #19728,
+    #19721) and why took a hand-written read-only probe on the host. That probe found the cause that W1-T14114 fixes.
+    inbox.ts resolveBoardReferent has three distinct unreadable outcomes: (a) the board referent read is absent or
+    unreadable, (b) the referent id is missing from the read's states, (c) an open escalation PR has no verified
+    escalation count. classifyProposal collapses all three into referentUnverified: true, and
+    inboxClassificationEvidence collapses that, plus any indeterminate projection row, into one sentence.
+  design: |
+    1. inbox.ts: resolveBoardReferent's unreadable lookup carries a reason, one of "board-unreadable",
+    "referent-missing" or "escalation-count-unverified". The classification keeps referentUnverified: true (every
+    existing reader is unchanged) and adds referentUnverifiedReason with that value.
+    2. panel-graph.ts inboxClassificationEvidence: when partial, incompleteReason keeps today's sentence as its
+    prefix, then names the items. Unverified proposals are listed by proposal id with their reason. Indeterminate
+    projection rows are listed by task id. Both lists are sorted, so the reason is deterministic (it feeds
+    threadListKey). Show at most 10 names in all, then "and N more". The whole string is at most 1,000 characters.
+    3. Privacy (W1-T12211): name only proposal ids and task ids that are already in the public projection. Never
+    name a title, body or other field of an ops-catalog task.
+    No change to what counts as complete. No gate or threshold changes.
+
+    INVARIANT partial-inbox-names-items: a partial core Inbox classification's incompleteReason names each unverified proposal with its reason, sorted and bounded, and a complete one carries no reason.
+  acceptance:
+    - claim: invariant:partial-inbox-names-items — each of the three unreadable referent outcomes is named with its reason, indeterminate projection rows are named by task id, the list is sorted and capped at 10 names with an overflow count, the string stays at most 1,000 characters, and a complete classification has no reason
+      proof: 'unit test: test/inbox/a-partial-inbox-names-what-it-could-not-verify.test.ts'
+    - claim: the test names each case for this task
+      proof: 'grep: W1-T14154 partial inbox names in test/inbox/a-partial-inbox-names-what-it-could-not-verify.test.ts'
+  falsifier: |
+    Restore the fixed sentence in inboxClassificationEvidence: the naming cases must fail. Drop the reason from
+    resolveBoardReferent: the per-reason cases must fail.

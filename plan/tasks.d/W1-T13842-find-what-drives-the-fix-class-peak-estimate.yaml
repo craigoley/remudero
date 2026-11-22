@@ -17,7 +17,7 @@
   # refusal-amendment (W1-T13842, run work-fix-dispatch-W1-T13842-1795182583240-3bf4@52721a1d99ec5e151f8368d48b08d6ebe88fe151, 2026-11-20T15:51:12.297Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
   #   worker evidence: The shared store no longer contains the fleet inputs needed to enumerate and replay the 13:07 UTC row at 7,154 MiB p90 and 2,048 MiB p50.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The report lists the fix-class peak samples behind a learned estimate it reproduces: their count, each sample's time, basis and value, the five largest with their task, PR and time, and the p50 and p90 the learner computes from them"

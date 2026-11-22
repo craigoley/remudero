@@ -7,16 +7,20 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 10.00
-  risk: medium # widens one sweep disposition row to a dead pending claim; the one-review-per-input rule is unchanged
+  budget_usd: 4.50
+  risk: high # Rule 19 sizing: the sweep's alongside-CI row and the tick-read-worker view producer that carries the run ids
+  band_meaning: span
   origin: "operator-session#pr-backlog-round5-2026-11-20"
   plan_refs:
     - W1-T12994
     - W1-T13951
   files:
     - src/lib/sweep.ts
+    - src/lib/tick-read-worker.ts
+    - src/lib/review.ts
+    - src/cli/commands/review.ts
     - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A head whose checks are pending, whose remudero-review status is pending, and whose pending owner is proven dead (reviewPendingOwnerDead true) is disposed post-review alongside CI, not wait"
@@ -57,3 +61,13 @@
     Remove the new match and criterion 1's fixture is disposed wait, as #19791 was at 15:38:37Z.
   note: |
     Id reserved for run-unfiled-1795192209733 with rmd next-task-id on the host.
+    Scope amendment 2026-11-21 for PR 19922 (review round 2): telling a dead pending claim from a live
+    replacement needs run identity, not timestamps. Counterexample 1 (an undated status, or one stamped after the
+    dead run's row) and counterexample 3 (a live run posting in the same second) need opposite answers on the same
+    timestamp evidence. The view producer in tick-read-worker.ts must carry the pending ledger row's runId and the
+    live remudero-review status's 'owned by run <id>' id onto OpenPrView, so the sweep can compare the two ids.
+    Scope amendment 2026-11-21 for PR 19922 (review round 4): a pending hold (a promise-harvest or cannot-evaluate
+    verdict) is posted with its summary as the description, and the ops publisher catalogReviewPoster in
+    src/cli/commands/review.ts replaces it with redacted text that names no run and is recorded on no ledger row.
+    So the live status cannot be tied to the dead run. Every pending post must carry its own 'owned by run <id>'
+    marker: publishReviewStatusLocked in src/lib/review.ts for holds, and catalogReviewPoster for the ops text.

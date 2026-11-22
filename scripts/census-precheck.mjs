@@ -31,10 +31,10 @@
  */
 import { spawnSync } from "node:child_process";
 import { parse, parseExpressionAt } from "acorn";
-import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, tmpdir } from "node:os";
-import { delimiter, dirname, join, posix, resolve } from "node:path";
+import { basename, delimiter, dirname, join, posix, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -47,7 +47,7 @@ import { analyzeSource } from "./test-repo-root-codemod.mjs";
 import { scanSource as scanChildCoverage } from "./coverage-session-blanking-check.mjs";
 import { captureStepSync } from "./lib/author-step-capture.mjs";
 import { describeJudgedRun, judgedNodeTestArgs, judgeRun, prepareJudgedRun } from "./pure-test-pool.mjs";
-import { retainFixture } from "./lib/retained-fixtures.mjs";
+import { fixtureRetentionReason, retainFixture } from "./lib/retained-fixtures.mjs";
 import { measureTree } from "./lib/instrument-surface-census.mjs";
 import {
   DEFAULT_BASELINE_RELATIVE_PATH as CLOCK_BASELINE,
@@ -763,6 +763,114 @@ function suiteChildRecord(files, suiteHistory) {
 
 const CENSUS_CAPTURE_DISPOSITION = Symbol("census capture disposition");
 
+function assertCensusDirectory(path, owner) {
+  const current = lstatSync(path);
+  if (!current.isDirectory() || current.dev !== owner.dev || current.ino !== owner.ino ||
+      current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+}
+
+function inCensusDirectory(dir, owner, visit) {
+  const previous = process.cwd();
+  process.chdir(dir);
+  try {
+    // On both POSIX hosts, relative operations now use the verified directory even if its name is rebound.
+    assertCensusDirectory(".", owner);
+    visit();
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+/** Puts `from` back at `to` while nothing else holds `to`; returns why it could not (and retains `from`), else undefined. */
+function returnCensusDirectory(from, to) {
+  try {
+    if (lstatSync(to, { throwIfNoEntry: false })) throw new Error(`${to} is occupied`);
+    renameSync(from, to);
+  } catch (error) {
+    const reason = `capture could not be returned to ${to} (${error.message})`;
+    retainFixture(from, `capture custody UNKNOWN (${reason})`);
+    return reason;
+  }
+  return undefined;
+}
+
+/**
+ * W1-T13191 — REMOVING A COMPLETE CAPTURE WITHOUT NAMING A DIRECTORY SOMEONE ELSE MAY HOLD. Node has no
+ * fd-relative unlink or rmdir, so a verified path can be rebound before the call that uses it. Every destructive
+ * step is therefore bound to a directory inode this process has VERIFIED as its own: the capture is first MOVED
+ * (rename: it destroys nothing, and a foreign directory it picks up is moved straight back) to a fresh private name
+ * nothing has seen, its identity is checked there, its files are removed relative to it as the working directory, and
+ * only then is it rmdir'd. Nothing is ever written through a path: a failed removal restores the original bytes
+ * relative to the verified directory, or, when a name is occupied, into a new retained directory.
+ */
+function removeCompleteCensusCapture(dir, owner, names, pins, bytes) {
+  const tomb = join(dirname(dir), `${basename(dir)}-removing-${randomUUID()}`);
+  const removed = [];
+  const assertFile = (path, pin) => {
+    const current = lstatSync(path);
+    if (!current.isFile() || ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].some(key => current[key] !== pin[key])) {
+      throw new Error(`capture ${path} was replaced or changed`);
+    }
+  };
+  renameSync(dir, tomb);
+  try {
+    assertCensusDirectory(tomb, owner);
+  } catch (error) {
+    const unreturned = returnCensusDirectory(tomb, dir);
+    throw unreturned ? new Error(`${error.message}; ${unreturned}`, { cause: error }) : error;
+  }
+  try {
+    inCensusDirectory(tomb, owner, () => {
+      for (const [index, name] of names.entries()) assertFile(name, pins[index]);
+      for (const [index, name] of names.entries()) {
+        assertFile(name, pins[index]);
+        unlinkSync(name);
+        removed.push(name);
+      }
+      assertCensusDirectory(".", owner);
+      rmdirSync(tomb);
+    });
+  } catch (error) {
+    try {
+      assertCensusDirectory(tomb, owner);
+    } catch (locationError) {
+      throw new Error(`${error.message}; the capture is no longer at ${tomb} (${locationError.message})`, { cause: error });
+    }
+    const failures = [];
+    try {
+      inCensusDirectory(tomb, owner, () => {
+        for (const name of removed) {
+          try {
+            writeFileSync(name, bytes[names.indexOf(name)], { flag: "wx", mode: 0o600 });
+          } catch (restoreError) {
+            failures.push(`${name}: ${restoreError.message}`);
+          }
+        }
+      });
+    } catch (restoreError) {
+      failures.push(`capture directory: ${restoreError.message}`);
+    }
+    let reason = error.message;
+    if (failures.length > 0) {
+      try {
+        const backup = mkdtempSync(join(dirname(dir), "rmd-census-cleanup-"));
+        const backupOwner = lstatSync(backup);
+        retainFixture(backup, `${error.message}; original capture files (${failures.join(", ")})`);
+        inCensusDirectory(backup, backupOwner, () => {
+          for (const [index, name] of names.entries()) writeFileSync(name, bytes[index], { flag: "wx", mode: 0o600 });
+        });
+        reason += `; original capture files retained at ${backup} (${failures.join(", ")})`;
+      } catch (backupError) {
+        reason += `; original capture files could NOT be backed up (${failures.join(", ")}; ${backupError.message})`;
+      }
+    }
+    const unreturned = returnCensusDirectory(tomb, dir);
+    if (unreturned) reason += `; ${unreturned}`;
+    if (failures.length === 0 && !unreturned) throw error;
+    throw new Error(reason, { cause: error });
+  }
+}
+
 function completeCensusCapture(dir, owner, result) {
   const names = ["stdout", "stderr", "native.json"];
   let pins, pinError;
@@ -771,9 +879,7 @@ function completeCensusCapture(dir, owner, result) {
   return (accepted, reason) => {
     try {
       if (pinError) throw pinError;
-      const current = lstatSync(dir);
-      if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== owner.dev ||
-          current.ino !== owner.ino || current.uid !== owner.uid) throw new Error("capture directory ownership changed");
+      assertCensusDirectory(dir, owner);
       const bytes = names.map((name, index) => {
         const path = join(dir, name), pin = pins[index];
         const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -783,18 +889,25 @@ function completeCensusCapture(dir, owner, result) {
               [opened, linked].some((stat) => ["dev", "ino", "uid", "size", "mtimeMs", "ctimeMs"].some((key) => stat[key] !== pin[key]))) {
             throw new Error(`capture ${name} was replaced or changed`);
           }
-          return readFileSync(fd, "utf8");
+          // Kept as bytes: a failed removal restores exactly these, never a re-encoding of them.
+          return Buffer.from(readFileSync(fd));
         } finally { closeSync(fd); }
       });
-      const native = JSON.parse(bytes[2]);
-      if (bytes[0] !== result.stdout || bytes[1] !== result.stderr || native.version !== 1 ||
+      const [stdout, stderr, receipt] = bytes.map((raw) => raw.toString("utf8"));
+      const native = JSON.parse(receipt);
+      if (stdout !== result.stdout || stderr !== result.stderr || native.version !== 1 ||
           native.outputComplete !== true || native.status !== result.status || native.signal !== result.signal ||
           !native.finishedAt || native.finishedAt !== result.finishedAt || native.startedAt !== result.startedAt ||
           native.durationMs !== result.durationMs || native.error?.code !== result.error?.code) {
         throw new Error("native receipt does not bind this closed complete capture");
       }
-      if (accepted) rmSync(dir, { recursive: true, force: true });
-      else retainFixture(dir, `rejected complete census measurement: ${reason}`);
+      if (fixtureRetentionReason(dir) !== undefined) return;
+      if (!accepted) {
+        retainFixture(dir, `rejected complete census measurement: ${reason}`);
+        return;
+      }
+      if (readdirSync(dir).length !== names.length) throw new Error("capture directory has unexpected entries");
+      removeCompleteCensusCapture(dir, owner, names, pins, bytes);
     } catch (error) {
       const reason = `capture custody UNKNOWN (${error.message})`;
       retainFixture(dir, reason);
@@ -808,7 +921,9 @@ function runCensusChild(file, args, options) {
   if (test >= 0 && (!Number.isFinite(options.timeout) || options.timeout <= 0)) throw new RangeError("census test timeout must be finite and positive");
   const insertion = args[test + 1]?.startsWith("--test-reporter=") ? test + 2 : test + 1;
   const timedArgs = test < 0 ? args : [...args.slice(0, insertion), `--test-timeout=${options.timeout}`, ...args.slice(insertion)];
-  const dir = mkdtempSync(join(tmpdir(), "rmd-census-capture-"));
+  // W1-T13191: absolute, so a relative TMPDIR cannot leave the capture's path meaning something else once cleanup
+  // changes the working directory. Every capture path (and the cleanup's sibling names) derives from this one.
+  const dir = mkdtempSync(join(resolve(tmpdir()), "rmd-census-capture-"));
   const owner = lstatSync(dir);
   let result;
   try {
@@ -841,9 +956,10 @@ function runCensusChild(file, args, options) {
       // Keeping partial bytes is not evidence that the native receipt remains readable or valid.
       custody = `capture custody UNKNOWN (${error.message}); partial diagnostics retained at`;
     }
-    retainFixture(dir, `${custody} ${dir}`);
+    const reason = result.error?.message ?? (result.signal ? `child ended by ${result.signal}` : "incomplete census capture");
+    retainFixture(dir, `${custody} ${dir}: ${reason}`);
     // Custody changes neither the original native outcome nor W1-T9919's timeout disposition.
-    result.error = Object.assign(new Error(`${result.error?.message ?? "incomplete census capture"}; ${custody} ${dir}`), { code: result.error?.code });
+    result.error = Object.assign(new Error(`${reason}; ${custody} ${dir}`), { code: result.error?.code });
   }
   return result;
 }
@@ -917,6 +1033,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     if (!pending.delete(sample)) return;
     sample[CENSUS_CAPTURE_DISPOSITION]?.(accepted, reason);
   };
+  const reject = (sample, error) => {
+    try { dispose(sample, false, error.message); }
+    catch (custody) { error.message += `; ${custody.message}`; }
+    return error;
+  };
   try {
     const once = () => {
       // W1-T8379: a run of this module's own child is JUDGED (scripts/pure-test-pool.mjs): a suite that exits 0
@@ -951,14 +1072,14 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         const sizedBy = childBound.source === "history" ? `a bound from its history (${childBound.historyRuns} recorded run(s))`
           : `the fixed backstop (${childBound.overruns > 0 ? `${childBound.overruns} recorded overrun(s)`
             : childBound.historyRuns === 0 ? "no recorded run" : "no usable history"})`;
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - ` +
+        throw reject(res, Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage} - ` +
           `${files.join(", ")} under ${sizedBy} - time bound: ` +
           `${Math.round(finishedMs - startedMs)} ms elapsed of the ${childBound.ms} ms bound, ${files.length} suite(s), ` +
-          `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true });
+          `1-minute load ${loads[0]} at start and ${loads[1]} at end`), { censusTimeBound: true }));
       }
       if (timeBound) {
         // Below the child's bound the bound is a reader's measured budget: an overrun its qualification re-measures once.
-        throw Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true });
+        throw reject(res, Object.assign(new Error(`the census suite child could not run to completion: ${timeoutMessage}`), { readerBudgetOverrun: true }));
       }
       assertChildFinished(res, "census suite");
       const stdout = String(res.stdout ?? "");
@@ -1109,10 +1230,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
     }
     return measured.failing;
   } catch (error) {
-    for (const sample of pending) {
-      try { dispose(sample, false, error.message); }
-      catch (custody) { error.message += `; ${custody.message}`; }
-    }
+    for (const sample of pending) reject(sample, error);
     throw error;
   }
 }

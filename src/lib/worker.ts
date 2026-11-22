@@ -1,5 +1,5 @@
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
-import { newestTaskAnswer, type Task } from "./plan.js";
+import { answerHeld, answerRecords, newestLedgerTaskAnswer, newestTaskAnswer, publishAnswers, sharedAnswerEvidence, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
 import { BoundedOutput, readBoundedFileTail, type FileTail } from "./bounded-file-tail.js";
 import type { CashRequestEffortCount } from "./cash-request-effort.js";
@@ -216,12 +216,18 @@ import {
   type ProviderWindowConsumption,
   type ProviderWindowMeasurement,
   OpenWeightUnsupportedResponseFormatError,
+  CashDraftSkippedError,
+  CashDraftResumeBlockedError,
+  type CashDraftFit,
+  type CashDraftFitInput,
   markOpenWeightDeploymentAbsent,
   type OpenWeightModelSelection,
   codexCapabilityForRequestedModel,
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
+  buildWorkerHarnessContract, type WorkerHarnessContract,
+  withObservedServedModel, forgetReturnedServedModel, observeReturnedServedModel,
 } from "./worker-provider.js";
 import {
   resolveProviderRoutingPolicy,
@@ -282,6 +288,9 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
+  harnessContract?: WorkerHarnessContract;
+  /** Characters in the rendered prompt supplied to the provider adapter. */
+  promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
   providerExchange?: ProviderExchangeReceiptV1;
   outputRetention?: {
@@ -672,6 +681,7 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
  * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
+  harness_contract?: WorkerHarnessContract;
   output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
   execution_evidence?: WorkerExecutionEvidenceV1;
@@ -733,6 +743,7 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
+    ...(r.harnessContract ? { harness_contract: r.harnessContract } : {}),
     ...(r.outputRetention && Object.values(r.outputRetention)
       .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
@@ -1252,7 +1263,7 @@ export interface SpawnWorkerArgs {
       // The Codex spawn REQUIRES the redirected per-spawn worker home, threaded explicitly rather than inferred from
       // `process.env.HOME` or `args.env` ordering, so a test double is held to the contract the real `spawnCodexWorker` is
       // (W1-T2800).
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string; fixtureSpawn?: boolean },
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
@@ -1338,6 +1349,10 @@ export interface SpawnWorkerArgs {
     /** W1-T13185: the lane's stats, read off the daemon loop: a batch's loaded snapshot, or an awaited slice read. */
     readStats: () => DraftStats | Promise<DraftStats>;
     random?: () => number;
+    cashFit?: (input: Omit<CashDraftFitInput, "expectedRequests">) => CashDraftFit;
+    paidCashDeployments?: readonly string[];
+    cashAvoidModels?: readonly string[];
+    subscriptionRetry?: boolean;
   };
   /** A departing cash-ladder rung or outer fallback selection, before its successor. A routing
    * refusal does not establish invocation; the result retains the actual terminal evidence.
@@ -1345,7 +1360,7 @@ export interface SpawnWorkerArgs {
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "cash-sonnet-refused" | "capacity_shortfall" | "cash-draft-fit";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -2358,7 +2373,7 @@ const WORKER_SPAWN_ISOLATION: { settingSources: SettingSource[] } = {
 export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.settingSources;
 
 /** Walk the context-filtered ladder on DEPLOYMENT CAPABILITY REFUSAL; draft callers also walk
- * on failed output contracts (W1-T4067). `OpenWeightUnsupportedResponseFormatError` names the remedy.
+ * on failed output contracts (W1-T4067) or a draft's whole-run fit refusal.
  * Historical trigger: 21,942 of 22,356 openweight errors hit one deployment while alternatives sat idle.
  * Never walk timeouts/truncation (a second charge), oversized requests (already fit-gated), or
  * auth/cap refusals (shared across rungs). BOUNDED BY THE LADDER: one attempt per remaining
@@ -2367,7 +2382,7 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract" | "capacity_shortfall" | "cash-draft-fit"; result?: WorkerResult }) => void,
   contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
   const rungs = [...new Set([selection.model, ...selection.alternatives])];
@@ -2399,13 +2414,15 @@ export async function runOpenWeightWalkingLadder(
       }
       return result;
     } catch (err) {
-      if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
+      const skippedDraft = err instanceof CashDraftSkippedError;
+      if (skippedDraft && err.fit.reason === "allowance" && err.fit.leftUsd === null) throw err;
+      if (!skippedDraft && !(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
       lastRefusal = err;
       const next = rungs[index + 1];
       // NAME THE FALL-THROUGH. A silent downgrade would make a run that landed on rung 3
       // indistinguishable from one that led there, and the point of this walk is that the record
       // can say which deployments were unusable and why.
-      console.error(JSON.stringify({
+      if (!skippedDraft) console.error(JSON.stringify({
         event: "worker.openweight.rung_refused",
         deployment: model,
         reason: err.message.slice(0, 200),
@@ -2414,7 +2431,7 @@ export async function runOpenWeightWalkingLadder(
         of: rungs.length,
       }));
       if (next) {
-        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "unsupported-response-format" }); }
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: skippedDraft ? "cash-draft-fit" : "unsupported-response-format" }); }
         catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
       }
       if (!next) break;
@@ -2504,6 +2521,14 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 }
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
+  // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
+  forgetReturnedServedModel();
+  const result = await spawnWorkerUnobserved(args);
+  observeReturnedServedModel(result);
+  return result;
+}
+
+async function spawnWorkerUnobserved(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const attemptId = randomUUID();
   let assignment: WorkerSelectionAssignment | undefined;
   const onSelectionAssignment = args.onSelectionAssignment;
@@ -2621,6 +2646,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // one worker's advisory status read must not switch another's home.
   const realHome = selectedRealHome ?? process.env.HOME ?? homedir();
   const config = args.config ?? loadConfig();
+  const paidCashDeployments = args.draftRouting?.paidCashDeployments ?? [];
+  const cashAvoidModels = args.draftRouting?.cashAvoidModels ?? args.avoidModels ?? [];
+  const subscriptionRetry = args.draftRouting?.subscriptionRetry === true;
   // W1-T7094: the COUNTERFACTUAL host-memory verdict, taken once the start is committed (slot claimed, reservation open,
   // settings validated). Synchronous, bounded and non-throwing, and its outcome is deliberately unread: admit, defer and
   // error start identically. SHADOW ONLY: there is no enforce, block or defer path.
@@ -2717,9 +2745,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     throw new ProviderCapacityBlockedError([capacity]);
   }
+  const claudeOnlyWithoutAuction = providers.length === 1 && providers[0] === "claude" && !subscriptionRetry;
   if (
-    providers.length === 1 &&
-    providers[0] === "claude" &&
+    claudeOnlyWithoutAuction &&
     (args.model !== undefined || routingPolicy.provenance === "overridden" || routingPolicy.fallback)
   ) {
     try {
@@ -2736,7 +2764,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       console.error(JSON.stringify({ event: "worker.provider_routing_status_write_failed", reason: "write-failed" }));
     }
   }
-  if (!args.mountProvider && !(providers.length === 1 && providers[0] === "claude")) {
+  if (!args.mountProvider && !claudeOnlyWithoutAuction) {
     const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
       (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
         requestedModel: args.model,
@@ -2837,8 +2865,11 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       // `args.mountProvider === undefined` BOUNDS THE RECURSION STRUCTURALLY. The retry below sets
       // it, and a spawn that already carries one never reached this auction in the first place --
       // so the fallback can fire at most once per spawn, by construction rather than by a counter.
-      const allowanceRefusal = (models: readonly string[]) => cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
-        fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
+      // Inbox drafts use the stronger whole-run gate on the actual ladder and log its refusals there.
+      const checkDraftFit = args.draftRouting?.cashFit;
+      const allowanceRefusal = (models: readonly string[]) => checkDraftFit ? undefined
+        : cashAllowanceFallbackRefusal(config, executionFor("cash").prompt, models,
+          fixedClock((args.providerRouting?.now ?? Date.now)()).iso());
       const plainCashModels = () => {
         const choice = selectOpenWeightModel(capabilities, args.model, args.effort, Buffer.byteLength(executionFor("cash").prompt, "utf8"),
           { config, runId: args.runId, taskId: args.taskId, cashSqueezed: true, modelApprovals: config.modelApprovals,
@@ -2846,7 +2877,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         return [choice.model, ...choice.alternatives];
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
-      const deferred = args.cashDeferred !== undefined;
+      const deferred = args.cashDeferred !== undefined || subscriptionRetry;
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2880,7 +2911,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         const sonnetEnv = args.env ?? process.env;
         const canTrySonnet = requestedCapability === "balanced" &&
           !!sonnetEnv[FOUNDRY_CLAUDE_API_KEY_ENV] && !!sonnetEnv[FOUNDRY_CLAUDE_ENDPOINT_ENV];
-        if (refusal === undefined) {
+        const avoided = cashAvoidModels;
+        if (refusal === undefined && (!checkDraftFit || avoided.length > 0 || paidCashDeployments.length > 0)) {
           let models: string[];
           try { models = plainCashModels(); }
           catch (selectionError) {
@@ -2889,10 +2921,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             models = [];
           }
           if (canTrySonnet) models.push("claude-sonnet-5-5", ...cashSonnetAlternatives(executionFor("cash").prompt, config, args));
-          const held = allowanceRefusal([...new Set(models)].filter(model => !(args.avoidModels ?? []).includes(model)));
+          const candidates = models.filter(model => !avoided.includes(model));
+          const eligible = candidates.filter(model => !paidCashDeployments.includes(model));
+          const held = checkDraftFit
+            ? (eligible.length === 0 ? "no eligible cash deployment" : undefined)
+            : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
             publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
             error.message += `; ${held}`;
             throw error;
           }
@@ -3007,7 +3044,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3038,6 +3076,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
+        result.promptChars = execution.prompt.length;
         result.continuation = execution.receipt;
         result.routedModel = selection.capacity.model ?? result.model;
         result.selectionAssignmentId = selectionAssignmentId;
@@ -3099,7 +3138,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3119,6 +3159,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     try {
       materializeWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
@@ -3131,6 +3172,17 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   if (args.mountProvider === "cash") {
     if (subscriptionOnly && !(args.cashOpusEmergency === true && args.cashSqueezed === true && args.routingFallback?.rule === "cash-opus-fallback")) {
       throw new SubscriptionOnlyRefusedError(args.model!);
+    }
+    // A draft refused on the previous poll can use subscription headroom before retrying its cash mount.
+    if (subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders)) {
+      try {
+        return await spawnWorker({
+          ...args,
+          mountProvider: undefined,
+        });
+      } catch (error) {
+        if (!(error instanceof ProviderCapacityBlockedError)) throw error;
+      }
     }
     const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     const execution = executionFor("cash");
@@ -3171,10 +3223,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
-    const remaining = [openWeight.model, ...openWeight.alternatives]
-      .filter((model) => !(args.avoidModels ?? []).includes(model));
+    const unpaid = [openWeight.model, ...openWeight.alternatives]
+      .filter(model => !paidCashDeployments.includes(model));
+    const remaining = unpaid.filter(model => !cashAvoidModels.includes(model));
     const avoidExhausted = remaining.length === 0;
-    if (!avoidExhausted) openWeight = { ...openWeight, model: remaining[0]!, alternatives: remaining.slice(1) };
+    const eligible = avoidExhausted ? unpaid : remaining;
+    if (eligible.length > 0) openWeight = { ...openWeight, model: eligible[0]!, alternatives: eligible.slice(1) };
     let draftChoice: DraftChoice | undefined;
     let draftReadError: string | undefined;
     let stats: DraftStats | undefined;
@@ -3190,7 +3244,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     // W1-T13672: ordinary mount work runs on cash first only while its measured cost fits its share of the day; otherwise
     // the Claude and Codex auction runs it, and a blocked auction hands it back to this route unchanged.
-    if (cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
+    if (!subscriptionRetry && cashAdmissionApplies(args, routingPolicy.routableProviders) && !(args.draftRouting && stats === undefined)) {
       const deferral = cashDeferral(config, args, [openWeight.model, ...openWeight.alternatives], executionPrompt, stats);
       if (deferral) {
         console.error(JSON.stringify({ event: "worker.provider.cash_deferred", ...deferral }));
@@ -3207,6 +3261,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         }
       }
     }
+    if (eligible.length === 0) throw new CashDraftResumeBlockedError();
     if (args.draftRouting) {
       if (stats) {
         draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
@@ -3267,10 +3322,23 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             },
           });
           cashController.signal.throwIfAborted();
+          const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: executionPrompt.length,
+            promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
+            atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
+          if (fit && !fit.fits) throw new CashDraftSkippedError(fit);
           const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
             signal: cashController.signal, streamObserver: cashObserver,
             resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
-          cashController.signal.throwIfAborted();
+          // W1-T13868: a rung the abort cut short still names the model its responses reported, on the error that replaces it.
+          if (cashController.signal.aborted) {
+            const reason: unknown = cashController.signal.reason;
+            // The caller's own reason is thrown unchanged, as throwIfAborted would. A primitive cannot carry the record, so
+            // the call's table keeps it as the rung's returned result, which the failed attempt's reader falls back to.
+            if (reason === null || typeof reason !== "object") { observeReturnedServedModel(rung); throw reason; }
+            throw withObservedServedModel(reason as Error,
+              { servedModel: rung.servedModel ?? null, ...(rung.servedModelReason ? { servedModelReason: rung.servedModelReason } : {}) });
+          }
+          rung.promptChars = executionPrompt.length;
           rung.continuation = execution.receipt;
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
@@ -3478,6 +3546,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       env: childEnv,
       settings: (privateSettings as Options["settings"]) ?? args.settingsFile,
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
+      includeHookEvents: true,
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrOutput` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
@@ -3638,6 +3707,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
+            harness: { fixture: args.queryFn !== undefined || args.containment?.spawn !== undefined, resume: options.resume !== undefined },
             stderrOutput,
             stderrFailure: () => stderrFailure,
             settleOutput: async () => {
@@ -3677,6 +3747,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         teardownOnce,
       );
       result.provider = "claude";
+      result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
       if (args.mcpIsolation) {
         result.mcpIsolation = workerMcpIsolationEvidence(result.initSummary, !!args.ruleLookup);
@@ -4149,6 +4220,7 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
+    harness?: { fixture: boolean; resume: boolean };
     providerExchangeBinding?: ProviderExchangeBindingV1;
     root?: string;
     runId?: string;
@@ -4225,6 +4297,7 @@ export async function collectWorkerResult(
   let servedModel: string | undefined;
   let providerExchangeDetail: Omit<ProviderExchangeReceiptV1, "version" | keyof ProviderExchangeBindingV1> | undefined;
   let initSummary: WorkerInitSummary | undefined;
+  let preToolInterception: WorkerHarnessContract["preToolInterception"] = "NOT_RUN";
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
@@ -4234,6 +4307,16 @@ export async function collectWorkerResult(
       observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
+        const hook = raw as { subtype?: string; hook_event?: string; exit_code?: number; outcome?: string; stdout?: string };
+        if (opts.harness && (hook.subtype === "hook_started" || hook.subtype === "hook_progress" || hook.subtype === "hook_response")
+          && hook.hook_event !== "SessionStart" && hook.hook_event !== "Setup") {
+          if (hook.subtype === "hook_response" && hook.hook_event === "PreToolUse" && preToolInterception !== "denied") {
+            if (hook.exit_code === 2) preToolInterception = "denied";
+            else if (hook.exit_code === 0 && hook.outcome === "success" && hook.stdout === "") preToolInterception = "nonblocking";
+            else if (preToolInterception === "NOT_RUN") preToolInterception = "unknown";
+          }
+          continue;
+        }
         // First init wins: later system/status events cannot erase the original inventory or make unknown become empty.
         initSummary ??= workerInitSummaryFromMessage(raw);
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -4490,6 +4573,16 @@ export async function collectWorkerResult(
   };
   if (sawResult && providerExchangeDetail && opts.providerExchangeBinding)
     result.providerExchange = sealProviderExchange(opts.providerExchangeBinding, providerExchangeDetail);
+  if (opts.harness) result.harnessContract = buildWorkerHarnessContract("claude", {
+    resume: true, compactionConfigured: result.compactionConfigured, preToolInterception,
+    tested: opts.harness.fixture ? {
+      preToolInterception: preToolInterception === "NOT_RUN" ? undefined : preToolInterception === "unknown" ? "unknown" : "supported",
+      resume: !result.isError && opts.harness.resume ? "supported" : undefined,
+      configuredCompaction: result.compactionConfigured ? "supported" : "unsupported",
+      servedModelIdentity: servedModel === undefined ? "unknown" : "supported",
+      billingProvenance: sdkReportedUsageRatedUsd === undefined ? "unknown" : "supported",
+    } : undefined,
+  });
   return result;
 }
 
@@ -4993,6 +5086,10 @@ export interface QuestionAnswerEntry {
    * `bearerTokenId`). */
   origin: string;
   contribution?: unknown;
+  answer_id?: string;
+  author_login?: string;
+  authority?: string;
+  source?: "ledger" | "store";
 }
 
 /** Append an operator's ANSWER to the same store `appendQuestion` writes to; the panel's write action is the only caller
@@ -5012,21 +5109,48 @@ export function appendQuestionAnswer(repoRoot: string, entry: QuestionAnswerEntr
 /** W1-T12715: the newest ANSWER text the question store holds for `taskId`, or undefined. An unreadable store
  * answers nothing, so a task with needs_input stays held. */
 export function taskInputAnswer(repoRoot: string, taskId: string): string | undefined {
+  return newestTaskAnswer(questionStoreLines(repoRoot) ?? [], taskId);
+}
+
+/** The store's parsed lines; [] when it is absent, undefined when it exists but cannot be read. */
+function questionStoreLines(repoRoot: string): unknown[] | undefined {
   let text: string;
   try {
     text = fs.readFileSync(join(repoRoot, "plan", "questions.ndjson"), "utf8");
-  } catch {
-    return undefined; // deliberate: an absent or unreadable store holds the task, the safe side.
+  } catch (error) {
+    // deliberate: an absent or unreadable store answers nothing, the safe side; an unreadable one also takes no copy.
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
   }
   const lines: unknown[] = [];
   for (const raw of text.split("\n")) {
     try {
-      lines.push(JSON.parse(raw));
+      if (raw.trim() !== "") lines.push(JSON.parse(raw));
     } catch {
       continue; // deliberate: a torn or blank line is skipped, as every other reader of this store does.
     }
   }
-  return newestTaskAnswer(lines, taskId);
+  return lines;
+}
+
+/** W1-T13940: the answer reader every needs_input check uses: the newest nonblank answer among this checkout's store, the
+ * live answer rows and the answers published beside the ledger. It copies each row the store lacks into the store, and
+ * publishes each store answer no row carries, so serve counts it too; neither write ever decides the answer. */
+export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const lines = questionStoreLines(repoRoot);
+    const store = answerRecords(lines ?? [], taskId);
+    const rows = answerRecords(read.rows(taskId), taskId);
+    for (const row of lines === undefined ? [] : rows) {
+      // Skipped when the store has its answer_id, or its origin and text (the daemon's own GitHub reply).
+      if (!answerHeld(store, row) && appendQuestionAnswer(repoRoot, { ...row, source: "ledger" })) store.push({ ...row, source: "ledger" });
+    }
+    const published = answerRecords(read.lines, taskId);
+    if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
 }
 
 /** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */

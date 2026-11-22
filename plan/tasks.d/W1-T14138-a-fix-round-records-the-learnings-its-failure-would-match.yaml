@@ -1,0 +1,71 @@
+- id: W1-T14138
+  title: Each fix round records which learnings its failing checks would match, with a task-keyed withheld arm, and injects nothing
+  repo: remudero
+  depends_on: [W1-T14137]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # a new row on every fix round and a new read of the learnings corpus in the fix lane
+  band_meaning: span
+  origin: operator-session#decision-quality-2026-11-21
+  plan_refs: [W1-T4241, W1-T4093, W1-T14137, W1-T14139]
+  files:
+    - src/lib/fix-learnings-shadow.ts
+    - src/cli/commands/fix.ts
+    - src/lib/learnings.ts
+    - src/lib/ledger-steps.ts
+    - src/lib/ledger.ts
+    - test/learning/a-fix-round-records-the-learnings-its-failure-would-match.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main dd829e355 (2026-11-21).
+    - The fix lane retrieves no learnings. src/cli/commands/fix.ts:49 imports only DEFAULT_KNOWLEDGE_BUDGET_CHARS from
+      src/lib/learnings.ts, and renderFixPrompt (called at fix.ts:4446-4462) receives a skills part and no learnings. The implement
+      lane retrieves them (src/cli/commands/run-task-verb.ts:6668-6727, computeMatchedLearningsForArm in src/lib/wipe-test.ts:114).
+    - At prompt time a fix round holds the failure text: the failing checks' name, title and log tail
+      (ciFailurePromptEvidence, fix.ts:1830-1836; CiFailure in src/lib/sweep.ts:7114), the review's unmet criteria and findings,
+      and the PR's diff files (fix.ts:2581-2584).
+    - Only 7 of the 128 learnings carry `symbols:` or `error_signatures:`. A file-only match is generic, and irrelevant context
+      lowers model accuracy (Shi et al., "Large Language Models Can Be Easily Distracted by Irrelevant Context", ICML 2023;
+      Chroma, "Context Rot", 2025). So the fix lane measures before it injects, and counts only symbol or error matches.
+    - The fleet's learning outcome credit (src/lib/knowledge-outcome.ts:133: clean = merged with zero fix.dispatch) can never be
+      clean for a fix run, so the fix lane needs its own outcome.
+    - selectLearnings (src/lib/learnings.ts:1839) returns aggregate match counts only; per-entry counts (matchCounts, :1766) are
+      module-private.
+  design: |
+    1. src/lib/fix-learnings-shadow.ts builds a round's selection text from its failing check names, titles and bounded log tails,
+       the review's unmet claims and findings, and calls the same loader and selectLearnings the implement lane uses with
+       taskFiles undefined, so only symbol and error matches are admitted (learnings.ts:1835, 1851). Export per-entry match kinds
+       from learnings.ts instead of recomputing them.
+    2. The arm is taskArmWithheld({ taskId, unit: "fix-learnings", share: 0.25, epoch: "fix-learnings-shadow-v1" }) from
+       W1-T14137.
+    3. fix.ts writes one `fix.learnings_shadow` row per round at its first prompt assembly: run_id, task_id, pr, attempt, round,
+       arm (offered or withheld), matched ids with each one's match kind, budget chars, and the failing check names. Neither arm
+       injects anything.
+    4. The round's outcome is written once known on `fix.learnings_outcome`: the conclusion of CI on the head the round pushed
+       (green, red, or no push) and, per task, rounds to green, joined from the existing fix.dispatch and fix.done rows.
+    5. Register both steps in src/lib/ledger-steps.ts, and add them to the decision-relevant retention set in src/lib/ledger.ts if
+       a reader resolves them through resolveLedgerUnion.
+    6. A pure summary returns, per arm, the rounds with at least one match, the match rate by kind and the outcome rates. It is
+       what W1-T14139 reads to decide when to inject.
+
+    INVARIANT shadow-injects-nothing: the fix prompt is byte-identical to origin/main's in both arms.
+  acceptance:
+    - claim: "A fix round writes one fix.learnings_shadow row naming the learnings its failing check names would match, each with its match kind, and its task-keyed arm"
+      proof: "grep: W1-T14138 criterion 1: in test/learning/a-fix-round-records-the-learnings-its-failure-would-match.test.ts"
+    - claim: "A learning that would match only by file path is not recorded as a match"
+      proof: "grep: W1-T14138 criterion 2: in test/learning/a-fix-round-records-the-learnings-its-failure-would-match.test.ts"
+    - claim: "invariant:shadow-injects-nothing — the fix prompt is byte-identical with and without this change in both arms"
+      kind: guard
+      proof: "grep: W1-T14138 criterion 3: in test/learning/a-fix-round-records-the-learnings-its-failure-would-match.test.ts"
+    - claim: "A round's outcome row records the CI conclusion on the head it pushed, or that it pushed nothing"
+      proof: "grep: W1-T14138 criterion 4: in test/learning/a-fix-round-records-the-learnings-its-failure-would-match.test.ts"
+    - claim: "The fix lane writes the shadow row"
+      proof: "grep: fix\\.learnings_shadow in src/cli/commands/fix.ts"
+    - claim: "The fix lane calls the shadow recorder"
+      proof: "grep: recordFixLearningsShadow( in src/cli/commands/fix.ts"
+  falsifier: |
+    Inject the matched learnings into the prompt and criterion 3 must fail. Count file-only matches and criterion 2 must fail.
+    Restore and require all to pass.

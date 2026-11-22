@@ -1,11 +1,12 @@
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins } from "./operator-release.js";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
+import { readFileIfExists } from "./fs-race-safe.js";
 import { sameTestFile } from "./test-path-resolver.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
@@ -279,16 +280,149 @@ function readNeedsInput(value: unknown): TaskNeedsInput | undefined {
     ...(typeof e.source_pr === "string" || typeof e.source_pr === "number" ? { source_pr: String(e.source_pr) } : {}) };
 }
 
+/** W1-T13940: the one answer rule every reader shares: a string with a non-space character, else no answer. */
+export function answerText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
 /** W1-T12715: the newest answer among question-store lines for `taskId`, or undefined. */
 export function newestTaskAnswer(lines: Iterable<unknown>, taskId: string): string | undefined {
   let newest: { ts: string; answer: string } | undefined;
   for (const value of lines) {
     const line = typeof value === "object" && value !== null ? value as { task?: unknown; answer?: unknown; ts?: unknown } : {};
-    if (line.task !== taskId || typeof line.answer !== "string" || line.answer.trim() === "") continue;
+    const answer = answerText(line.answer);
+    if (line.task !== taskId || answer === undefined) continue;
     const ts = typeof line.ts === "string" ? line.ts : "";
-    if (newest === undefined || ts >= newest.ts) newest = { ts, answer: line.answer };
+    if (newest === undefined || ts >= newest.ts) newest = { ts, answer };
   }
   return newest?.answer;
+}
+
+/** W1-T13940: the newest nonblank panel.question_answered ledger row for `taskId`, or undefined. */
+export function newestLedgerTaskAnswer(rows: Iterable<unknown>, taskId: string): LedgerTaskAnswer | undefined {
+  let newest: LedgerTaskAnswer | undefined;
+  for (const value of rows) {
+    const row = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const answer = answerText(row.answer);
+    if (row.step !== "panel.question_answered" || row.task_id !== taskId || answer === undefined) continue;
+    const ts = typeof row.ts === "string" ? row.ts : "";
+    if (newest === undefined || ts >= newest.ts) newest = { ...row, ts, answer };
+  }
+  return newest;
+}
+
+type LedgerTaskAnswer = Readonly<Record<string, unknown>> & { readonly ts: string; readonly answer: string };
+
+/** W1-T13940: the answers a needs_input reader published, beside the ledger in the state folder serve and the daemon both mount. */
+export function sharedAnswersPath(ledgerPath: string): string {
+  return join(dirname(ledgerPath), "question-answers.ndjson");
+}
+
+export interface SharedAnswerEvidence {
+  lines: readonly unknown[];
+  rows: (taskId: string) => readonly unknown[];
+  /** Set when the answers file, or the ledger, could not be read; a reader must then publish nothing. */
+  answersUnreadable?: string;
+  ledgerUnreadable?: string;
+  partial?: string;
+}
+
+/** W1-T13940: the evidence every needs_input reader decides from, read from where the last read stopped. A checkout
+ * path names different folders in serve and the daemon, so no checkout's store is in it. */
+export function sharedAnswerEvidence(ledgerPath: string): () => SharedAnswerEvidence {
+  let tail: { dev: number; ino: number; head: string; offset: number; rows: Map<string, unknown[]> } | undefined;
+  return () => {
+    const reasons: string[] = [];
+    let fd: number | undefined;
+    let ledgerUnreadable: string | undefined;
+    try {
+      fd = openSync(ledgerPath, "r");
+      const stat = fstatSync(fd);
+      const headBytes = Buffer.alloc(Math.min(256, stat.size));
+      readSync(fd, headBytes, 0, headBytes.length, 0);
+      const head = headBytes.toString("latin1");
+      if (!tail || tail.dev !== stat.dev || tail.ino !== stat.ino || stat.size < tail.offset || !head.startsWith(tail.head)) {
+        tail = { dev: stat.dev, ino: stat.ino, head, offset: 0, rows: new Map() };
+      }
+      const fresh = Buffer.alloc(stat.size - tail.offset);
+      readSync(fd, fresh, 0, fresh.length, tail.offset);
+      const end = fresh.lastIndexOf(10);
+      for (const raw of end < 0 ? [] : fresh.subarray(0, end).toString("utf8").split("\n")) {
+        if (!raw.includes('"panel.question_answered"')) continue;
+        try {
+          const row = JSON.parse(raw) as { task_id?: unknown };
+          if (typeof row.task_id === "string") tail.rows.set(row.task_id, [...(tail.rows.get(row.task_id) ?? []), row]);
+        } catch {
+          continue; // deliberate: a torn line is skipped, as every ledger reader does.
+        }
+      }
+      if (end >= 0) tail.offset += end + 1;
+      if (tail.head.length < 256) tail.head = head;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") tail = undefined;
+      else reasons.push(ledgerUnreadable = `the ledger ${ledgerPath} is unreadable: ${(error as Error).message}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const lines: unknown[] = [];
+    let answersUnreadable: string | undefined;
+    try {
+      let skipped = 0;
+      for (const raw of (readFileIfExists(sharedAnswersPath(ledgerPath)) ?? "").split("\n")) {
+        if (raw.trim() === "") continue;
+        try {
+          lines.push(JSON.parse(raw));
+        } catch {
+          // Collapses only JSON.parse's SyntaxError: a line torn by a concurrent append, or a malformed one. Not erased:
+          // the count makes the evidence `partial`, so the Inbox source reads partial, and the line releases no task.
+          skipped++;
+        }
+      }
+      if (skipped > 0) reasons.push(`the answers file has ${skipped} malformed line(s)`);
+    } catch (error) {
+      answersUnreadable = `the answers file ${sharedAnswersPath(ledgerPath)} is unreadable: ${(error as Error).message}`;
+      reasons.push(answersUnreadable);
+    }
+    const known = tail;
+    return { lines, rows: (taskId) => known?.rows.get(taskId) ?? [], ...(answersUnreadable ? { answersUnreadable } : {}), ...(ledgerUnreadable ? { ledgerUnreadable } : {}),
+      ...(reasons.length > 0 ? { partial: reasons.join("; ") } : {}) };
+  };
+}
+
+/** W1-T13940: one answer for a task, from a question-store line (`task`), an answer row (`task_id`) or a published line. */
+export interface AnswerRecord { task: string; answer: string; ts: string; origin: string; answer_id?: string; author_login?: string; authority?: string; source?: "ledger" | "store" }
+
+/** W1-T13940: the nonblank answers for `taskId` among store lines, published lines and panel.question_answered rows. */
+export function answerRecords(values: Iterable<unknown>, taskId: string): AnswerRecord[] {
+  const out: AnswerRecord[] = [];
+  for (const value of values) {
+    const v = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const answer = answerText(v.answer);
+    if ((v.step === undefined ? v.task : v.step === "panel.question_answered" ? v.task_id : undefined) !== taskId || answer === undefined) continue;
+    const text = (key: string): Record<string, string> => typeof v[key] === "string" ? { [key]: v[key] as string } : {};
+    out.push({ task: taskId, answer, ts: typeof v.ts === "string" ? v.ts : "", origin: typeof v.origin === "string" ? v.origin : "",
+      ...text("answer_id"), ...text("author_login"), ...text("authority"), ...(v.source === "ledger" || v.source === "store" ? { source: v.source } : {}) });
+  }
+  return out;
+}
+
+/** W1-T13940: `known` holds `record` already: the same answer_id, or the same origin and text. */
+export function answerHeld(known: readonly AnswerRecord[], record: AnswerRecord): boolean {
+  return known.some((other) => (record.answer_id !== undefined && other.answer_id === record.answer_id) || (other.origin === record.origin && other.answer === record.answer));
+}
+
+/** W1-T13940: append each of `candidates` that `known` lacks to the answers file beside the ledger, so the reader that cannot
+ * see the store it came from counts it too. Best effort: it never decides an answer, and a failed append is retried next read. */
+export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): void {
+  for (const record of candidates) {
+    if (answerHeld(known, record)) continue;
+    try {
+      appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(record) + "\n");
+      known.push(record);
+    } catch {
+      return; // deliberate: the answer still counts where it is held; an unpublished one is published on a later read.
+    }
+  }
 }
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
@@ -1001,6 +1135,8 @@ type CachedPlanBlob = {
 /** One path's current pin only. A merge replaces the entries after validation succeeds. */
 export class PlanBlobCache {
   entries = new Map<string, CachedPlanBlob>();
+  /** W1-T13969: {@link loadPlanAtRefAsync}'s parses by content hash, kept across ref changes (see {@link retainParsedBlobs}). */
+  retained = new Map<string, CachedPlanBlob>();
   parsedBlobs = 0;
   reusedBlobs = 0;
 }
@@ -1011,11 +1147,14 @@ function cachedBlobParser(
   counts: { parsedBlobs: number; reusedBlobs: number },
   // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
   pathForLabel = (label: string) => label.slice(label.indexOf(":") + 1),
+  /** W1-T13969: answer a blob this path no longer pins from any parse of the same content kept by `retained`. */
+  acrossRefs = false,
 ): typeof parseTasksFromYaml {
   return (text, label, onDuplicate) => {
     const path = pathForLabel(label);
     const hash = createHash("sha256").update(text, "utf8").digest("hex");
     let entry = cache.entries.get(path);
+    if (entry?.hash !== hash && acrossRefs) entry = cache.retained.get(hash);
     if (entry?.hash === hash) {
       counts.reusedBlobs++;
       if (entry.label !== label) entry = { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
@@ -1204,8 +1343,8 @@ export function loadPlanAtRef(
   repoRoot: string,
   planRelPath: string,
   ref = "HEAD",
-  runGit: GitBlobRunner = (args, stdin) =>
-    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin }),
+  runGit: GitBlobRunner = (args, stdin, opts) =>
+    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: opts?.maxBuffer ?? 1 << 26, input: stdin }),
 ): Plan {
   let monolithBlob: string;
   try {
@@ -1257,11 +1396,11 @@ function withShardBlobs(
   return blobs;
 }
 
-/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the sync default's 64 MiB buffer. */
-export function defaultGitRunnerAsync(repoRoot: string): (args: string[], stdin?: string) => Promise<string> {
-  return (args, stdin) =>
+/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the given bound or 64 MiB. */
+export function defaultGitRunnerAsync(repoRoot: string): AsyncGitBlobRunner {
+  return (args, stdin, opts) =>
     new Promise((resolve, reject) => {
-      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: opts?.maxBuffer ?? 1 << 26 }, (err, stdout) => {
         if (err) reject(err);
         else resolve(stdout);
       });
@@ -1280,8 +1419,9 @@ export async function loadPlanAtRefAsync(
   repoRoot: string,
   planRelPath: string,
   ref = "HEAD",
-  runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
+  runGit: AsyncGitBlobRunner = defaultGitRunnerAsync(repoRoot),
   keepsUnseenDependency?: KeepsUnseenDependency,
+  parseCache: PlanBlobCache = planAtRefParseCache(planRelPath),
 ): Promise<Plan> {
   let monolithBlob: string;
   try {
@@ -1304,11 +1444,55 @@ export async function loadPlanAtRefAsync(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
-  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), {}, { keepsUnseenDependency });
+  return mergePlanBlobsReusingParses(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), parseCache, keepsUnseenDependency);
 }
 
-/** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
-export type GitBlobRunner = (args: string[], stdin?: string) => string;
+const planAtRefParseCaches = new Map<string, PlanBlobCache>();
+
+/** W1-T13969: {@link loadPlanAtRefAsync}'s parses for one plan path, kept for the process's lifetime. Each shard's entry
+ *  is keyed by its content hash, so an unchanged blob is parsed once and a changed one again; one plan's shards at most. */
+function planAtRefParseCache(planRelPath: string): PlanBlobCache {
+  let cache = planAtRefParseCaches.get(planRelPath);
+  if (cache === undefined) planAtRefParseCaches.set(planRelPath, cache = new PlanBlobCache());
+  return cache;
+}
+
+/** W1-T13969: {@link mergePlanBlobs} under its default parse, answering each blob whose content `cache` holds from that
+ *  parse. MEASURED 2026-11-20: re-parsing every shard on each load held the daemon loop 85.5 s in a day. */
+function mergePlanBlobsReusingParses(blobs: Array<{ label: string; text: string }>, cache: PlanBlobCache,
+  keepsUnseenDependency?: KeepsUnseenDependency): Plan {
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
+  try {
+    const plan = validatedPlan(mergeBlobTasks(blobs, undefined, undefined,
+      cachedBlobParser(cache, next, counts, undefined, true)), undefined, keepsUnseenDependency);
+    cache.entries = next;
+    Object.assign(cache, counts);
+    return plan;
+  } finally {
+    // A parse is a function of the blob's text alone, so a refused tree's parses are as reusable as an accepted tree's.
+    retainParsedBlobs(cache, next, blobs.length);
+  }
+}
+
+/** The parses a load used, newest last, bounded to twice the load's own blob count plus a margin: the sweep reads each
+ *  PR's head in turn, so a tree seen before (A, B, then A) finds its shards, and a daemon's plan history cannot grow
+ *  without limit, only keep the neighbouring trees' differing blobs. */
+function retainParsedBlobs(cache: PlanBlobCache, used: Map<string, CachedPlanBlob>, blobCount: number): void {
+  for (const entry of used.values()) {
+    cache.retained.delete(entry.hash);
+    cache.retained.set(entry.hash, entry);
+  }
+  const capacity = 2 * blobCount + 256;
+  for (const hash of cache.retained.keys()) {
+    if (cache.retained.size <= capacity) break;
+    cache.retained.delete(hash);
+  }
+}
+
+/** Git invoker with optional stdin and output bound for `cat-file --batch`; old `(args) => string` fakes still work. */
+export type GitBlobRunner = (args: string[], stdin?: string, opts?: { maxBuffer?: number }) => string;
+type AsyncGitBlobRunner = (...args: Parameters<GitBlobRunner>) => Promise<string>;
 
 /** Read blobs in `relPaths` order through one `git cat-file --batch`.
  *  Measured 2026-09-05: 1,079 per-shard spawns took 4,258 ms versus 208 ms batched, on every
@@ -1319,49 +1503,63 @@ export type GitBlobRunner = (args: string[], stdin?: string) => string;
  *  retain their PlanError/GitFetchError wrappers. */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const request = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
-  return parseBlobBatch(runGit(["cat-file", "--batch"], request), ref, relPaths);
+  const { request, maxBuffer } = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
+  return parseBlobBatch(runGit(["cat-file", "--batch"], request, { maxBuffer }), ref, relPaths);
 }
 
 /** {@link readBlobsAtRef} through an AWAITED runner: the same listing, one `cat-file --batch`, request and framing. */
 export async function readBlobsAtRefAsync(
-  runGit: (args: string[], stdin?: string) => Promise<string>,
+  runGit: AsyncGitBlobRunner,
   ref: string,
   relPaths: string[],
 ): Promise<string[]> {
   if (relPaths.length === 0) return [];
-  const request = await blobBatchRequestAsync(runGit, ref, relPaths);
-  return parseBlobBatch(await runGit(["cat-file", "--batch"], request), ref, relPaths);
+  const { request, maxBuffer } = await blobBatchRequestAsync(runGit, ref, relPaths);
+  return parseBlobBatch(await runGit(["cat-file", "--batch"], request, { maxBuffer }), ref, relPaths);
 }
 
 /**
  * The `cat-file --batch` request for `relPaths` at `ref`, each path asked by its blob id. A `<ref>:<path>` line makes
  * git resolve the path through its directory's tree once per line: over plan/tasks.d's 4,577 entries that cost about
  * 2 ms a shard, 9.86 s for the plan against 0.36 s by id (measured 2026-10-28; #15230). One `git ls-tree` over the
- * paths' directories names every id; a path it does not list as a blob is still asked by path, so git itself
- * answers `missing` for it.
+ * paths' directories names every id and size; a path it does not list as a blob is still asked by path, so git
+ * itself answers `missing` for it, and that batch has no bound of its own.
  */
 export async function blobBatchRequestAsync(
-  runGit: (args: string[], stdin?: string) => Promise<string>,
+  runGit: AsyncGitBlobRunner,
   ref: string,
   relPaths: string[],
-): Promise<string> {
+): Promise<{ request: string; maxBuffer: number | undefined }> {
   return blobBatchRequest(ref, relPaths, await runGit(blobIdListingArgs(ref, relPaths)));
 }
 
-/** `git ls-tree <ref> -- <dir>/...`: every entry in each directory that holds one of `relPaths`. */
+/** `git ls-tree -l --full-tree <ref> -- <dir>/...`: every entry, with its size, in each directory that holds one of
+ *  `relPaths`, named from the repository root wherever git runs. */
 function blobIdListingArgs(ref: string, relPaths: string[]): string[] {
-  const dirs = new Set(relPaths.map((p) => (dirname(p) === "." ? p : `${dirname(p)}/`)));
-  return ["ls-tree", ref, "--", ...[...dirs].sort()];
+  const dirs = new Set(relPaths.map((p) => posix.normalize(p)).map((p) => (dirname(p) === "." ? p : `${dirname(p)}/`)));
+  return ["ls-tree", "-l", "--full-tree", ref, "--", ...[...dirs].sort()];
 }
 
-function blobBatchRequest(ref: string, relPaths: string[], listing: string): string {
-  const ids = new Map<string, string>();
+function blobBatchRequest(ref: string, relPaths: string[], listing: string): { request: string; maxBuffer: number | undefined } {
+  const blobs = new Map<string, { oid: string; size: number | undefined }>();
   for (const line of listing.split("\n")) {
-    const entry = /^\d{6} blob ([0-9a-f]{40,64})\t(.+)$/.exec(line);
-    if (entry) ids.set(entry[2]!, entry[1]!);
+    const entry = /^\d{6} blob ([0-9a-f]{40,64})(?: +(\d+))?\t(.+)$/.exec(line);
+    if (entry) blobs.set(entry[3]!, { oid: entry[1]!, size: entry[2] === undefined ? undefined : Number(entry[2]) });
   }
-  return relPaths.map((p) => ids.get(p) ?? `${ref}:${p}`).join("\n") + "\n";
+  const asked = relPaths.map((p) => blobs.get(posix.normalize(p)));
+  const request = relPaths.map((p, i) => asked[i]?.oid ?? `${ref}:${p}`).join("\n") + "\n";
+  return { request, maxBuffer: blobBatchMaxBuffer(asked) };
+}
+
+/** The bytes `cat-file --batch` writes for blobs asked by id: `<oid> blob <size>\n<contents>\n` each. Undefined when a
+ *  path was asked by path or listed without a size, so the runner keeps its present bound. */
+function blobBatchMaxBuffer(asked: ReadonlyArray<{ oid: string; size: number | undefined } | undefined>): number | undefined {
+  let bytes = 0;
+  for (const blob of asked) {
+    if (blob?.size === undefined) return undefined;
+    bytes += blob.oid.length + " blob ".length + String(blob.size).length + 1 + blob.size + 1;
+  }
+  return bytes;
 }
 
 /** Frame the bytes one `cat-file --batch` printed for `relPaths`, in order; the contract {@link readBlobsAtRef} states. */

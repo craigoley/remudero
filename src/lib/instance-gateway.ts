@@ -44,6 +44,7 @@ import {
   type RatifyCliGateway,
 } from "./panel-graph.js";
 import {
+  buildAnswerQuestionRoute,
   buildApproveManualRoute,
   buildControlStatusRoute,
   buildEscalationMarkHandledRoute,
@@ -249,6 +250,8 @@ export function instanceRouteSet(
     // The answer routes `now` names for this instance's own escalations (now-decisions.ts).
     buildApproveManualRoute(panel),
     buildEscalationMarkHandledRoute(panel),
+    // W1-T13940: a held task's answer lands in this instance's ledger and its checkout's store, which its daemon reads.
+    buildAnswerQuestionRoute({ ...panel, root: join(root.root, "repos", name ?? repository) }),
     ...instanceEscalationConversationRoutes(root, repository, panel),
     ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl),
       buildAssistantControlReceiptRoute(assistantControl), buildAssistantActionDiscoveryRoute(assistantControl)] : []),
