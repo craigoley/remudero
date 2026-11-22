@@ -16,7 +16,7 @@
     - src/lib/read-model-slow-lane.ts
     - src/lib/read-model-worker.ts
     - test/inbox/an-ops-filed-tasks-escalation-counts-on-its-own-task-row.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Live 2026-11-21 04:04Z, after W1-T13957 (#19888) reached serve: the core Inbox still reads partial, with
