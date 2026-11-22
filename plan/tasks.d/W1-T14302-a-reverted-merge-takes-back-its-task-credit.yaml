@@ -30,6 +30,8 @@
     - src/lib/feedback-landing.ts
     - src/run-task.ts
     - src/lib/ledger-steps.ts
+    - src/lib/tick-read-worker.ts
+    - src/cli/commands/daemon.ts
     - scripts/write-only-ledger-step-baseline.json
     - test/a-reverted-merge-takes-back-its-task-credit.test.ts
     - test/a-credited-merge-never-reaches-the-shard-that-asked-for-it.test.ts
@@ -47,6 +49,8 @@
     - test/plan/merge-credit-and-status-reconcile-cover-both-catalogs.test.ts
     - test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts
     - test/plan-reconcile-truncated-read-is-coverage-aware.test.ts
+    - test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts
+    - test/the-tick-reads-run-off-the-event-loop.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -66,12 +70,25 @@
       proof: "grep: W1-T14302 criterion 6: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
     - claim: "Each re-queue writes one ledger row plan.reconcile.reverted_requeue with task, pr, revert_sha and file. The step is declared in LEDGER_STEPS and in the recordOnly map of scripts/write-only-ledger-step-baseline.json with a reason"
       proof: "grep: W1-T14302 criterion 7: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "An override re-queues too. requeueRevertedShard also turns '  status: merged' into '  status: queued' for a shard whose projection carries creditOverride, is not merged and is not indeterminate: a plan/credit-overrides.yaml remove-credit row took away the task's only standing credit. The landing writes one plan.reconcile.reverted_requeue row with cause override, task, pr and file, and no revert_sha; a revert row carries cause revert. A missing or unreadable credit-overrides.yaml, a row for a task that another PR still credits, and a projection with neither creditOverride nor revertedCredit re-queue nothing. The test lives in test/a-reverted-merge-takes-back-its-task-credit.test.ts with W1-T14302 criterion 8 in its title"
+      proof: "grep: W1-T14302 criterion 8: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "invariant:an-override-reaches-the-fleet-projection — the projections that feed dispatch, the tick claim sweep and the reconcile read remove-credit rows from the plan directory of the checkout whose plan they project, not from <config.root>/plan. In a fixture where config.root holds state/ but no plan/, and the target checkout's plan/credit-overrides.yaml removes PR 101 for W1-T1, the tick read producer's projection (createTickReadProducer) and creditProjectionWithReadState both give W1-T1 merged false with creditOverride pr 101. The test lives in test/a-reverted-merge-takes-back-its-task-credit.test.ts with W1-T14302 criterion 9 in its title"
+      kind: guard
+      proof: "grep: W1-T14302 criterion 9: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "The tick claim sweep keeps a claim whose standing credit is gone. releaseLandedDispatchClaims, given the isMerged of a projectPlan over a fixture whose shard text still reads status: merged, leaves refs/rmd-dispatch/W1-T1 held and writes no dispatch.claim_released row when the only credit is reverted on main, and when a credit-overrides.yaml row removes it. With neither, the same claim is released as today. isMerged reads the projection's merged field only; the shard's status text is never read. The test lives in test/a-reverted-merge-takes-back-its-task-credit.test.ts with W1-T14302 criterion 10 in its title"
+      proof: "grep: W1-T14302 criterion 10: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
     - claim: "The step is declared in the ledger step registry"
       proof: "grep: step: \"plan\\.reconcile\\.reverted_requeue\" in src/lib/ledger-steps.ts"
     - claim: "Production projection calls the revert index"
       proof: "grep: revertedMergesFromLog( in src/lib/status.ts"
     - claim: "Production reconcile calls the re-queue"
       proof: "grep: requeueRevertedShard( in src/lib/measurement-cadence.ts"
+    - claim: "The tick read producer reads the target checkout's override rows"
+      proof: "grep: planCreditOverridePath( in src/lib/tick-read-worker.ts"
+    - claim: "The daemon's own projection reads the target checkout's override rows"
+      proof: "grep: planCreditOverridePath( in src/cli/commands/daemon.ts"
+    - claim: "The reconcile credit read reads the checkout's override rows"
+      proof: "grep: planCreditOverridePath( in src/run-task.ts"
   rationale: |
     WHAT HAPPENED (2026-11-22). W1-T11112 merged as #20049 (3a6fe5dd57). With #20077 it broke main's
     typecheck at test/a-paired-dispatch-trial-shares-one-grader.test.ts:836 (TS2739). The fleet's
@@ -114,8 +131,38 @@
     PRIOR ART: src/lib/learnings.ts:1746 and src/lib/verdict-calibration.ts:383 already match
     /This reverts commit\s+([0-9a-f]{7,40})/i. No filed task covers revert and credit (grep of
     plan/tasks.d for revert with credit or reconcile, 2026-11-22).
+    AMENDMENT 2026-11-22 (an override does not reach the fleet). After the filing, the operator merged
+    a remove-credit row for (W1-T11112, PR 20049) in plan/credit-overrides.yaml (#20236, 622c10f738,
+    14:01Z). At 16:47:47Z the daemon tick sweep still released a hand `rmd claim` on W1-T11112:
+    ledger row dispatch.claim_released, surface tick-sweep, pr_url #20049, arm evidence. The fleet's
+    state/status.json still read W1-T11112 as source trailer, merged true, PR 20049, with no
+    creditOverride field, and no task in that file carried creditOverride at all. Code facts at
+    origin/main 5001dc528f:
+    - The sweep's isMerged (src/cli/commands/daemon.ts:2479, releaseLandedClaims) is the tick's own
+      isMerged (src/lib/daemon.ts:7636 and 7669): the merged field of the projectPlan projection
+      (refreshMerged, daemon.ts:1657-1674, or the tick read producer, src/lib/tick-read-worker.ts:363).
+      releaseLandedDispatchClaims (src/lib/dispatch-claim.ts:1117) skips a claim only when isMerged
+      is false (dispatch-claim.ts:1130). Dispatch reads the same isMerged (isDispatchEligible,
+      src/lib/drain.ts:682; its comment says t.status is never read there).
+    - planTaskLanded (src/run-task.ts:39443) does read status: merged, but only for depends_on
+      checks and the parked verify-human sweep (run-task.ts:38907, 39476, 39487), not for dispatch.
+      A stale merged shard still marks its dependents' prerequisite as met, so the re-queue matters.
+    - Every one of those projections finds the override file at
+      defaultCreditOverridePath(ledgerPath) (src/lib/status.ts:581), which is
+      dirname(dirname(ledgerPath))/plan/credit-overrides.yaml, so <config.root>/plan. On the fleet
+      host config.root is /home/node/Remudero, and that file does not exist. The plan lives in the
+      target checkout /home/node/Remudero/repos/remudero/plan, which does hold the W1-T11112 row.
+      loadCreditOverrides (status.ts:587) reads a missing file as no rows, so in the fleet every
+      remove-credit row subtracts nothing (status.ts:2572 and 4181 read it; tick-read-worker.ts and
+      creditProjectionWithReadState, run-task.ts:19052, pass no creditOverridePath).
+    - The shard's status: merged line cannot be edited by hand: any shard edit re-lints its unit
+      test: proofs, whose tests were reverted, and fails with proof-unit-test-unresolvable.
+    So an override row today neither stops the claim sweep nor re-queues the shard. Design steps 8
+    to 10 fix the read at the projection, which is the predicate the sweep and dispatch share, and
+    let the same bounded re-queue act on an override.
   design: |
     INVARIANT a-revert-takes-back-its-credit: a (task, PR) credit whose squash commit a later commit on main reverts does not stand, unless the work was merged again or the revert was itself reverted or restored.
+    INVARIANT an-override-reaches-the-fleet-projection: every projection that feeds dispatch, the tick claim sweep or the plan reconcile reads the remove-credit rows of the checkout whose plan it projects; a missing or unreadable override file still subtracts nothing and re-queues nothing.
     INVARIANT a-dark-revert-read-changes-nothing: an unreadable or foreign history adds no exclusion; only a positive revert record on the read ref takes credit back or re-queues a shard.
     1. src/lib/reverted-merges.ts (new, pure):
        - revertedMergesFromLog(records): records are { sha, subject, body } from a main history walk.
@@ -161,8 +208,29 @@
        records. Load test/setup/tmp-hygiene.ts. No test reads the real repository's history or calls
        GitHub. Change the listed existing tests only where a shape they pin changes (for example the
        cadence result or the batch proof).
+    8. src/lib/status.ts: add planCreditOverridePath(checkoutRoot), which returns
+       join(resolveRepoLayout(checkoutRoot).planDir, "credit-overrides.yaml"). Pass it as
+       creditOverridePath from the target checkout in: createTickReadProducer's derive and its
+       buildCreditCandidates call (tick-read-worker.ts, from options.checkoutRoot);
+       buildCreditCandidates' creditIo, widened to Pick<DeriveDeps, "readCreditStore" |
+       "writeCreditStore" | "creditOverridePath">; refreshMerged in src/cli/commands/daemon.ts (from
+       targetCheckoutRoot); and creditProjectionWithReadState in src/run-task.ts (from its
+       checkoutRoot). defaultCreditOverridePath stays for the board and console readers
+       (board-projection.ts:850, workstreams-view.ts:363, run-task.ts:19905) and for
+       createNativeTargetRepository (daemon.ts:649); they are not in scope here.
+    9. requeueRevertedShard also acts on a projection that carries creditOverride, with the same
+       guards: not merged, not indeterminate, no retirement, shard text "  status: merged". The
+       ledger row is the same plan.reconcile.reverted_requeue step with a cause field: revert (with
+       revert_sha) or override (without it). Declare cause in the step's fields. No new step.
+    10. The claim sweep needs no special case. Its isMerged is the projection's merged field, so
+       steps 2 and 8 make it false for a reverted or overridden pairing. Do not read shard status
+       in releaseLandedDispatchClaims or in releaseLandedClaims, and do not add a per-task list.
     AFTER THE BUILD MERGES: the first reconcile pass re-queues W1-T11112 and writes one
-    plan.reconcile.reverted_requeue row for it. W1-T11459 and W1-T5113 stay merged. Check both on the
+    plan.reconcile.reverted_requeue row for it (the revert and the override name the same pairing;
+    one row, either cause). The other override rows (PORTAL-T19 107, W1-T5016 8212, W1-T5017 8213,
+    W1-T380 1437) now reach the fleet projection for the first time; their tasks are credited by
+    other PRs (state/status.json: W1-T5016 by 8683, W1-T5017 by 8455, W1-T380 by 1392), so they
+    stay merged. W1-T11459 and W1-T5113 stay merged. Check both on the
     host with `rmd ledger-grep plan.reconcile.reverted_requeue` and the next reconcile PR's file list.
   falsifier: |
     On origin/main, criterion 1 reads W1-T1 as merged after the revert. Remove the exclusion from the
@@ -172,8 +240,24 @@
     changes projections. Let requeueRevertedShard act on missing credit instead of revertedCredit:
     criterion 5's no-revertedCredit shard is rewritten. Leave the landing's carry-forward as it is:
     criterion 6's earlier re-queue is dropped. Wire the re-queue only in tests: the
-    requeueRevertedShard( grep in src/lib/measurement-cadence.ts finds nothing.
+    requeueRevertedShard( grep in src/lib/measurement-cadence.ts finds nothing. Let
+    requeueRevertedShard ignore creditOverride: criterion 8's overridden shard stays merged. Keep
+    defaultCreditOverridePath in the tick read producer: criterion 9's projection reads merged true
+    with no creditOverride, because <config.root>/plan does not exist in the fixture. Release a claim
+    whenever the shard text says merged: criterion 10's reverted and overridden claims are released.
   note: |
+    Amendment pinning tests (lint-plan pinning-tests advisory, 2026-11-22): files: gains
+    test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts (the sweep's wiring)
+    and test/the-tick-reads-run-off-the-event-loop.test.ts (the tick read producer). Checked and
+    not changed by steps 8 to 10: test/credit-candidates-ride-the-plan-projection.test.ts,
+    test/escalation-reconcile-reuses-its-merge-log-scan.test.ts,
+    test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts,
+    test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts and
+    test/the-read-plane-worker-starts-from-a-narrow-entry.test.ts. They pass their own builder or
+    isMerged, or put config.root and the checkout in one directory, so the override path does not
+    change what they assert. test/workstreams-view.test.ts and test/board-projection.test.ts cover
+    readers that keep defaultCreditOverridePath, and test/the-offline-plan-lint-names-its-omissions.test.ts
+    names defaultCreditOverridePath, which steps 8 to 10 do not change.
     Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795351998000. The filer did
     not push a reservation; the shipper reserves it.
     Filed by the operator session on 2026-11-22. Filing only; not built.

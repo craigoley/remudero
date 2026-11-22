@@ -1,12 +1,15 @@
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
 import type { SelectedModeSettings } from "./config-schema.js";
 export type { SelectedModeSettings } from "./config-schema.js";
 
-import { daemonInstanceRegistryPath } from "./deployer.js";
+import { DAEMON_INSTANCE_REGISTRY_BASENAME, daemonInstanceRegistryPath } from "./deployer.js";
+import { readFileIfExists } from "./fs-race-safe.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
-import { readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
+import { InstanceRegistryRuntimeError, readSelectedInstanceRegistry, registryFileIO, type RegistryFileIO,
   runtimeInstanceRegistryText, runtimeInstanceRegistryMode, assertInstanceRegistryRuntimeCurrent,
   type RegistrySelectionInput, type SelectedRegistryBinding } from "./instance-registry-selection.js";
+import { parseOverlayHome } from "./overlay-home.js";
 
 /** A missing or malformed registry never invents a shadow declaration. */
 export function instanceMode(ownerRepo: string, registryText: string | undefined): "shadow" | "live" {
@@ -23,14 +26,48 @@ export function instanceMode(ownerRepo: string, registryText: string | undefined
   }
 }
 
-/** A missing or unreadable registry is unknown text, which resolves to live above. */
-export function readInstanceRegistryText(repoRoot: string): string | undefined {
+/** W1-T13763: the two reads of the overlay pointer, a seam so a test can stage an EACCES on any uid, root included. */
+export interface OverlayPointerIO {
+  readIfExists(path: string): string | undefined;
+  lstat(path: string): unknown;
+}
+
+const OVERLAY_POINTER_FS: OverlayPointerIO = { readIfExists: readFileIfExists, lstat: lstatSync };
+
+function overlayRegistryDeclared(repoRoot: string, io: OverlayPointerIO): boolean {
+  try {
+    const text = io.readIfExists(join(repoRoot, ".remudero", "overlay-home.json"));
+    return text !== undefined
+      && parseOverlayHome(text).paths.includes(posix.join(".remudero", DAEMON_INSTANCE_REGISTRY_BASENAME));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOTDIR") return false;
+    if ((code === "EACCES" || code === "EPERM") && !overlayPointerPresent(repoRoot, io)) return false;
+    // The pointer's contents and host path can appear in the underlying error.
+    throw new InstanceRegistryRuntimeError("overlay_pointer_unreadable");
+  }
+}
+
+/** True only when the pointer is demonstrably there: a denied search of `.remudero` proves nothing exists to honour. */
+function overlayPointerPresent(repoRoot: string, io: OverlayPointerIO): boolean {
+  try {
+    io.lstat(join(repoRoot, ".remudero", "overlay-home.json"));
+    return true;
+  } catch {
+    // ENOENT/ENOTDIR/EACCES/EPERM on the stat: no pointer can be shown, so the legacy live default stands.
+    return false;
+  }
+}
+
+/** A selected registry takes precedence, with the core copy in use until cutover. */
+export function readInstanceRegistryText(repoRoot: string, io: OverlayPointerIO = OVERLAY_POINTER_FS): string | undefined {
   const selected = runtimeInstanceRegistryText();
   if (selected !== undefined) return selected;
   try {
     return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
   } catch {
-    // A missing/unreadable registry cannot establish shadow mode; legacy installs remain live.
+    // A typed refusal stops callers that interpret every mode other than shadow as live.
+    if (overlayRegistryDeclared(repoRoot, io)) throw new InstanceRegistryRuntimeError("overlay_registry_unreadable");
     return undefined;
   }
 }

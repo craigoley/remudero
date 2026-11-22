@@ -8,6 +8,9 @@ export const LEDGER_FILENAME = "ledger.ndjson";
 export const LEDGER_CARRIED_PREFIX_SUFFIX = ".carried.json";
 export const LEDGER_RETAINED_STEPS_SUFFIX = ".retained-steps.json";
 export const LEDGER_ROTATION_LOCK_SUFFIX = ".rotate.lock";
+// W1-T14314: the security producer's SQLite lock beside the ledger (sweep.ts). SQLite leaves it in place, so the
+// corpus classifier (ledger-union.ts listedLedgerFiles) names exactly it, and its `-journal`, as the ledger's own file.
+export const LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX = ".security-producer.lock.sqlite";
 export const LEDGER_ROTATE_STAGE_TAG = "rotate-tmp";
 export const LEDGER_COMPACT_STAGE_TAG = "ledger-compact-tmp";
 export const LEDGER_STAGE_TAGS: readonly string[] = [LEDGER_ROTATE_STAGE_TAG, LEDGER_COMPACT_STAGE_TAG];
