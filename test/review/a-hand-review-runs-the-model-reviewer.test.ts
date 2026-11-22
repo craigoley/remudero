@@ -182,14 +182,16 @@ test("W1-T14156 criterion 3: an explicit deterministic run says not_attempted_de
   const { lines, ledger } = await handReview(PASSING_BODY, operatorReviewArgs([...REPO_ARGS, "--execution-mode", "deterministic"]),
     async (args) => { seen.args = { spawnReviewer: args.spawnReviewer }; return real(args); });
   assert.equal(seen.args?.spawnReviewer, false);
-  const posted = ledger.find((row) => row.step === "review.posted");
-  assert.ok(posted, `a review.posted row is written; steps: ${ledger.map((row) => row.step).join(",")}`);
-  assert.equal(posted.state, "success", "the passing grep proof gives a deterministic PASS");
-  assert.equal(posted.reviewer_outcome, "not_attempted_deterministic_mode");
-  const line = lines.find((text) => text.includes("reviewer_outcome:"));
+  // W1-T14235: the passing grep proof gives a deterministic PASS, which a code PR may not publish; the hold names the
+  // outcome instead of a review.posted row.
+  assert.ok(!ledger.some((row) => row.step === "review.posted" && row.state === "success"), "no deterministic PASS is recorded");
+  const held = ledger.find((row) => row.step === "review.semantic_pass_refused");
+  assert.ok(held, `the hold is ledgered; steps: ${ledger.map((row) => row.step).join(",")}`);
+  assert.equal(held.reviewer_outcome, "not_attempted_deterministic_mode");
+  const line = lines.find((text) => text.includes("semantic-review-not-run:"));
   assert.ok(line, "the console line names the reviewer outcome");
-  assert.match(line, /reviewer_outcome: not_attempted_deterministic_mode;/);
-  assert.ok(!lines.some((text) => /reviewer_outcome: not_attempted;/.test(text)));
+  assert.match(line, /semantic-review-not-run: not_attempted_deterministic_mode/);
+  assert.ok(!lines.some((text) => /semantic-review-not-run: not_attempted;|reviewer_outcome: not_attempted;/.test(text)));
 });
 
 test("W1-T14156 criterion 3: a deterministic run with no criteria keeps the bare not_attempted outcome", async () => {

@@ -94,7 +94,7 @@ test("test/every-lane-records-how-its-worker-ended.test.ts", async (t) => {
     [{ kind: "signal", signal: "SIGTERM" }, "error_exit_null", "signal_terminated"],
     [{ kind: "exit", code: 1 }, "error_exit_1", "error_exit_1"],
   ] as [WorkerExit, string, string][]) {
-    await t.test(`review lane posts the floor verdict after ${outcome}`, async () => {
+    await t.test(`review lane holds the floor's pass as pending after ${outcome}`, async () => {
       const repo = gitRepo({ kind: "worker-end-review" });
       const oldPath = process.env.PATH;
       try {
@@ -143,7 +143,8 @@ test("test/every-lane-records-how-its-worker-ended.test.ts", async (t) => {
           readReviewReuseFacts: () => undefined, disarm: () => "not-armed", arm: () => "ledger-refused",
         });
         assert.equal(calls, exit.kind === "signal" ? 2 : 1);
-        assert.equal(verdict.state, "success");
+        // W1-T14235: on a code diff the floor's pass after a failed reviewer is held as pending, naming the outcome.
+        assert.equal(verdict.state, "pending");
         assert.equal(verdict.reviewerOutcome, outcome);
         const reruns = rows.filter((row) => row.step === "review.reviewer.rerun");
         const twiceSignaled = rows.filter((row) => row.step === "review.reviewer.signal_ended_twice");
@@ -161,11 +162,9 @@ test("test/every-lane-records-how-its-worker-ended.test.ts", async (t) => {
         assert.deepEqual(exitFields(reviewerRow.fields), exit.kind === "signal"
           ? { worker_exit: "signal", worker_exit_signal: "SIGTERM" }
           : { worker_exit: "exit", worker_exit_code: 1 });
-        const posted = rows.find((row) => row.step === "review.posted");
-        assert.ok(posted, JSON.stringify({ messages, rows }));
-        assert.equal(posted.fields.reviewer_outcome, outcome);
-        assert.equal(posted.fields.state, "success");
-        assert.ok(shim.calls().some((call) => call.includes(`/statuses/${headSha}`) && call.includes("state=success")));
+        assert.equal(rows.some((row) => row.step === "review.posted"), false, JSON.stringify({ messages, rows }));
+        assert.match(verdict.verdictWithheld ?? "", new RegExp(`semantic-review-not-run: ${outcome}`));
+        assert.equal(shim.calls().some((call) => call.includes(`/statuses/${headSha}`) && call.includes("state=success")), false);
       } finally {
         process.env.PATH = oldPath;
         repo.cleanup();

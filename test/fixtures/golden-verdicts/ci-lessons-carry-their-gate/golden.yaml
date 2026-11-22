@@ -1,0 +1,21 @@
+violation: none
+rule: >
+  W1-T14140 / W1-T3077: the backfill adds error_signatures: [<check name>] to every active
+  ci-learning entry in learnings/ci.yaml whose signatures did not hold its gate, keeps every
+  existing signature and changes no fact text. It is a learnings data change, so a prompt-surface
+  change that needs a golden verdict. Each cited signature executes against the checkout on one
+  physical line, including the leak-grep entry's added bare name and a check name holding commas,
+  and a correct backfill whose proofs execute must arm.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass

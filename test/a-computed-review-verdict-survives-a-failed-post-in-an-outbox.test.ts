@@ -64,6 +64,8 @@ function fixture(name: string) {
     reviewerCodeFreshness: { status: "fresh", codeSha: CODE, originMainSha: CODE, advance: "none" },
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
+    // W1-T14235: the outboxed pass came from a semantic review that ran.
+    semanticJudgement: { reviewerOutcome: "success" },
   });
   const failThePost = () => postReviewStatusGuarded(terminal(() => {
     throw new Error(`gh: no credential in this process (GH_TOKEN=${SECRET})`);
@@ -98,7 +100,7 @@ test("W1-T11928 criterion 1: a verdict whose post failed is in an outbox entry w
     assert.equal(raw.includes(SECRET), false, "no credential reaches the outbox");
     assert.deepEqual(Object.keys(entry).sort(), [
       "comment_body", "decision_verdict", "description", "evidence", "head_sha", "input_key", "owner", "pr_url", "repo",
-      "review_decision_digest", "reviewer_code_sha", "run_id", "state", "task_id", "version", "written_at",
+      "review_decision_digest", "reviewer_code_sha", "reviewer_outcome", "run_id", "state", "task_id", "version", "written_at",
     ]);
     assert.equal(f.steps("review.post_failed")[0]?.outboxed, true, "the failure row says the verdict was kept");
   } finally {

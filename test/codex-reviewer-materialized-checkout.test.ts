@@ -319,7 +319,9 @@ test("W1-T2868: reviewer mutation invalidates its semantic FAIL while the determ
       },
     });
 
-    assert.equal(verdict.state, "success", "an integrity failure cannot manufacture a semantic downgrade");
+    // W1-T14235: the floor's pass is held as pending on a code diff, never posted as success and never downgraded to a FAIL.
+    assert.equal(verdict.state, "pending", "an integrity failure cannot manufacture a semantic downgrade");
+    assert.match(verdict.verdictWithheld ?? "", /semantic-review-not-run: spawn_error/);
     assert.equal(verdict.criteria[0]?.met, true, "the deterministic proof floor remains binding");
     assert.equal(verdict.reviewerOutcome, "spawn_error");
     const failure = logs.find((row) => row.step === "review.reviewer.integrity_error");

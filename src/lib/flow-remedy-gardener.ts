@@ -22,11 +22,12 @@ import { ADMISSION_FLOW_STEP, observeAdmissionFlow, type AdmissionFlowInput, typ
 import { feedbackContentDigest } from "./contributor-admission.js";
 
 export interface PrOutcome { state: "open" | "closed" | "merged"; at?: string; mergedBy?: string }
-export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string }
+export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string; handedOff?: boolean }
 export interface Episode {
   pr: number; key: string; owner: string; start: number; end: number;
   outcome: "open" | "cleared" | "failed" | "unknown"; eligible: boolean;
   charges: Charge[];
+  handedOff?: boolean;
 }
 export interface Price { key: string; hours: number; prs: number; owners: string[]; thresholdHours?: number }
 export interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
@@ -186,6 +187,10 @@ const parseOrigin = (kind: LadderKind, origin: string) =>
 export const reasonClass = (reason: string) => reason.split(" — ")[0]!
   .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
   .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
+/** The `origin:` a ladder's remedy for `key` carries at `rung`, for a rung that hands a cause to the ladder. */
+export const ladderOrigin = (kind: LadderKind, key: string, rung = 1): string => originOf(kind, key, rung);
+/** A recurring check and its observed red heads, read beside the sweep's disposition rows. */
+export const CI_LESSON_HANDOFF_STEP = "ci_learning.ladder_handoff";
 /** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
  *  `readOutcomes` asks GraphQL, so the bare login is the one a fleet merge actually carries (sweep's isFleetAppAuthor). */
 export const isFleet = (actor: string | undefined) =>
@@ -262,8 +267,33 @@ export function readOutcomes(prs: readonly number[], sources: FlowGardenSources)
   return result;
 }
 
+/** W1-T14140: the checks a `sweep.disposed` row names red — its `red_checks` when it carries them (written only on a pass
+ *  that dispatched a fix, W1-T4459), else the `<check> failed on <sha>` clauses describeCiFailures writes. `required checks
+ *  red`, the reason for every PR whose rollup reads red, names none, so such a row joins a hand-off by its head alone. */
+export function redChecksOf(row: LedgerRecord): string[] {
+  if (Array.isArray(row.red_checks)) return row.red_checks.filter((check): check is string => typeof check === "string");
+  return String(row.reason ?? "").split("; ")
+    .flatMap((clause) => /^(.+?) failed on [0-9a-f]{7,40}(?= — |$)/i.exec(clause)?.[1] ?? []);
+}
+
+/** A hand-off's checks by PR, one entry per red head ({@link CI_LESSON_HANDOFF_STEP}'s `red_heads`). */
+function handedOffChecks(records: readonly LedgerRecord[]): Map<number, { gate: string; sha: string }[]> {
+  const byPr = new Map<number, { gate: string; sha: string }[]>();
+  for (const { step, gate, red_heads: heads } of records) {
+    if (step !== CI_LESSON_HANDOFF_STEP || typeof gate !== "string" || !Array.isArray(heads)) continue;
+    for (const head of heads) {
+      if (!head || !Number.isSafeInteger(head.pr) || head.pr <= 0 || typeof head.sha !== "string" || !head.sha) continue;
+      const checks = byPr.get(head.pr) ?? [];
+      checks.push({ gate, sha: head.sha });
+      byPr.set(head.pr, checks);
+    }
+  }
+  return byPr;
+}
+
 export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyMap<number, PrOutcome>, now: number): Episode[] {
   const byPr = new Map<number, LedgerRecord[]>();
+  const handoffs = handedOffChecks(records);
   for (const r of records) {
     if (r.step !== "sweep.disposed" || !Number.isSafeInteger(r.pr_number) || Number(r.pr_number) <= 0 ||
         !PR_BLOCKERS.includes(r.blocker as PrBlocker) || typeof r.ts !== "string" || !Number.isFinite(Date.parse(r.ts)) ||
@@ -286,11 +316,17 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
         episode = { pr, key, owner: String(r.blocker_owner), start, end: start, outcome: "open", eligible: false, charges: [] };
         episodes.push(episode);
       }
+      // Join the evidence on the PR: the row is the handed check's when it names that check, or when it was written at a
+      // head where the check read red. Sweep gives one aggregate reason for most red rollups and names no check in it.
+      const named = redChecksOf(r);
+      const handed = r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) => named.includes(gate) || r.head_sha === sha) === true;
+      if (handed) episode.handedOff = true;
       const next = rows[i + 1];
       if (next) {
         const end = Date.parse(next.ts!);
         episode.end = end;
-        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner });
+        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner,
+          ...(handed ? { handedOff: true } : {}) });
       }
     }
     if (!episode) continue;
@@ -345,6 +381,14 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
 
+/** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
+ *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
+function eligibleSlice(e: Episode): Episode[] {
+  if (e.eligible) return [e];
+  const handed = e.charges.filter(c => c.handedOff);
+  return handed.length ? [{ ...e, charges: handed }] : [];
+}
+
 /**
  * The shared rung logic: price the episodes' cause keys, find each cause's remedy among the plan's tasks, measure the
  * effect of a merged one, and name the next draft or escalation. A cause with a remedy still open drafts nothing.
@@ -356,7 +400,8 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   now: number, thresholds: ReadonlyMap<string, number> = new Map(), fileable?: LadderFileable): Inventory {
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
-  const candidates = priceEpisodes(episodes.filter(e => e.eligible), now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
+  const eligible = episodes.flatMap(eligibleSlice);
+  const candidates = priceEpisodes(eligible, now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
   const ladder: Inventory["ladder"] = [];
   let next: FlowAction | undefined;
   // A filing PR the sweep recorded closed unmerged (`pr.terminal`, W1-T5318) holds nothing: its cause drafts again.
@@ -403,7 +448,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
     const action: FlowAction | undefined = !next && (state === "draft" || state === "escalate") ? {
       class: "draft", target: origin, origin, rung, price, prior,
-      charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
+      charges: eligible.filter(e => e.key === price.key).flatMap(e => e.charges),
       population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
       ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) } : undefined;
     const skipped = action && state === "draft" ? fileable?.(action) : undefined;
@@ -591,7 +636,7 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   const inventory = (fileable?: LadderFileable): Inventory => {
-    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER);
+    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER, ["sweep.disposed", CI_LESSON_HANDOFF_STEP]);
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);

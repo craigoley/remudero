@@ -9,6 +9,7 @@ import {
   loadLayeredLearningsForTaskFiles,
   observeLearningSourceChanges,
   renderMatchedLearnings,
+  selectedLearningHandle,
   selectLearnings,
   type LearningSourceChangeInput,
   type LearningSourceChangeSummary,
@@ -17,7 +18,7 @@ import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
 import type { Config } from "./config.js";
-import type { LayeredLearningsHomes, LearningsIndex, LearningsSelectionContext, LearningMatchCounts } from "./learnings.js";
+import type { LayeredLearningsHomes, SelectedLearningHandle, LearningsIndex, LearningsSelectionContext, LearningMatchCounts } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
@@ -101,6 +102,8 @@ export interface MatchedLearningsInput {
 export interface MatchedLearningsResult {
   matchedLearnings: string;
   selectedIds: string[];
+  /** W1-T11159: one frozen store+slug+payload handle per selected record, in `selectedIds` order. The rule tool serves from these, never from the bare ids. */
+  selectedLearnings: readonly SelectedLearningHandle[];
   droppedIds: string[];
   matchedBy: LearningMatchCounts;
   globalRefusedReason?: string;
@@ -111,6 +114,7 @@ export interface MatchedLearningsResult {
 const MASKED_RESULT: MatchedLearningsResult = {
   matchedLearnings: "",
   selectedIds: [],
+  selectedLearnings: Object.freeze([]),
   droppedIds: [],
   matchedBy: { file: 0, symbol: 0, error: 0 },
 };
@@ -125,7 +129,7 @@ export async function computeMatchedLearningsForArm(
   deps: LearningsInjectionDeps = REAL_LEARNINGS_INJECTION_DEPS,
 ): Promise<MatchedLearningsResult> {
   if (arm === "B") return MASKED_RESULT;
-  const { entries, globalRefusedReason, projectEntries } = deps.loadLayeredLearningsForTaskFiles(
+  const { entries, globalRefusedReason, sources, projectEntries } = deps.loadLayeredLearningsForTaskFiles(
     input.homes,
     input.taskFiles,
     input.selectionContext,
@@ -140,6 +144,7 @@ export async function computeMatchedLearningsForArm(
   const result: MatchedLearningsResult = {
     matchedLearnings: baseText,
     selectedIds: selected.map((e) => e.id),
+    selectedLearnings: Object.freeze(selected.map((e) => selectedLearningHandle(e, sources))),
     droppedIds: dropped.map((e) => e.id),
     matchedBy,
     globalRefusedReason,

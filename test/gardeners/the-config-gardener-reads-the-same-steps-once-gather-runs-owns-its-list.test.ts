@@ -25,7 +25,7 @@ const CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE = [
 
 test("the config gardener reads the same step set after GATHER_RUNS_LEDGER_STEPS moved to retro.ts", () => {
   assert.deepEqual(new Set(CONFIG_GARDEN_LEDGER_STEPS), new Set([
-    ...CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE, "review.history_guarded", "followup.filed",
+    ...CONFIG_GARDEN_STEPS_BEFORE_THE_MOVE, "review.history_guarded", "followup.filed", "review.semantic_pass_refused",
     // W1-T12187: the judges' cash shadow rows.
     "judge_shadow.compared", "judge_shadow.skipped", "judge_shadow.paired", "judge_shadow.refused", "judge_shadow.unavailable",
   ]));

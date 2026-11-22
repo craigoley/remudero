@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { test } from "node:test";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
+import { ledgerKeyManifestDirectory, readLedgerKeyManifest } from "#src/lib/ledger-key-manifest.js";
 import {
   auditLedgerUnion,
   openLedgerUnion,
@@ -97,6 +98,48 @@ function tmpStateDir(): string {
 function row(marker: string, step = "run.start", ts = "2026-01-01T00:00:00.000Z"): string {
   return JSON.stringify({ ts, step, marker, task_id: `W1-${marker}` });
 }
+
+// W1-T13875: a closed (request-to-refusal) window answers only rows inside it, and opens no more than it must.
+test("a closed-window read returns only rows inside it and builds no manifest for an archive it must read", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const window = { sinceTs: "2026-01-01T10:00:00.000Z", untilTs: "2026-01-01T11:00:00.000Z" };
+  const at = (time: string) => `2026-01-01T${time}.000Z`;
+  writeFileSync(join(dir, "ledger.2026-01-01T09-00-00-000Z.ndjson"), `${row("before-cut", "run.start", at("09:30:00"))}\n`);
+  writeFileSync(join(dir, "ledger.2026-01-01T10-30-00-000Z.ndjson"), `${row("inside", "run.start", at("10:30:00"))}\n`);
+  // Compaction moved an in-window row into an archive stamped after the refusal, beside a post-refusal row; it has no manifest.
+  writeFileSync(join(dir, "ledger.2026-01-01T12-00-00-000Z.ndjson"),
+    `${row("moved", "run.start", at("10:45:00"))}\n${row("after-in-archive", "run.start", at("11:30:00"))}\n{torn\n`);
+  writeFileSync(join(dir, LEDGER_FILENAME), `${row("after-live", "run.start", at("12:30:00"))}\n`);
+  const read = await readLedgerUnionRawLinesAsync(dir, { ...window, refuseIncomplete: true });
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.rawLines.map((line) => JSON.parse(line).marker).sort(), ["inside", "moved"]);
+  assert.equal(read.liveFileRead, true, "the live file exists");
+  assert.equal(read.filesRead, 2, "the pre-window cut and the live file that opens after the window are never opened");
+  assert.equal(existsSync(ledgerKeyManifestDirectory(dir)), false, "no archive was streamed whole to build a manifest first");
+
+  // A live file that opens inside the window is read, and its rows are still cut at the window's end.
+  writeFileSync(join(dir, LEDGER_FILENAME), `${row("live-inside", "run.start", at("10:50:00"))}\n${row("after-live", "run.start", at("12:30:00"))}\n`);
+  const withLive = await readLedgerUnionRawLinesAsync(dir, { ...window, refuseIncomplete: true });
+  assert.deepEqual(withLive.rawLines.map((line) => JSON.parse(line).marker).sort(), ["inside", "live-inside", "moved"]);
+  assert.equal(withLive.filesRead, 3);
+});
+
+test("a closed-window read skips an archive whose stored coverage lies after the window", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const window = { sinceTs: "2026-01-01T10:00:00.000Z", untilTs: "2026-01-01T11:00:00.000Z" };
+  const late = join(dir, "ledger.2026-01-01T12-00-00-000Z.ndjson");
+  writeFileSync(late, `${row("late", "run.start", "2026-01-01T11:30:00.000Z")}\n`);
+  writeFileSync(join(dir, "ledger.2026-01-01T10-30-00-000Z.ndjson"), `${row("inside", "run.start", "2026-01-01T10:30:00.000Z")}\n`);
+  const unmanifested = await readLedgerUnionRawLinesAsync(dir, window);
+  assert.equal(unmanifested.filesRead, 2, "with no manifest the archive is read once");
+  assert.deepEqual(unmanifested.rawLines.map((line) => JSON.parse(line).marker), ["inside"]);
+  assert.equal((await readLedgerKeyManifest(dir, { path: late, form: "plain" })).kind, "built");
+  const manifested = await readLedgerUnionRawLinesAsync(dir, window);
+  assert.equal(manifested.filesRead, 1, "its stored coverage lies after the window: it is not opened");
+  assert.deepEqual(manifested.rawLines.map((line) => JSON.parse(line).marker), ["inside"]);
+});
 
 test("openLedgerUnion yields gzip rotation, plain rotation and live rows exactly once, oldest first", async () => {
   const dir = tmpStateDir();
