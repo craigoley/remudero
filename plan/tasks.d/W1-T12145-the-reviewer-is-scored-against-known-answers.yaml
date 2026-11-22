@@ -24,6 +24,8 @@
     - src/run-task.ts
     - src/cli/commands/review.ts
     - test/review/the-reviewer-is-scored-against-known-answers.test.ts
+    - src/lib/producer-identity.ts
+    - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -67,6 +69,16 @@
     re-run on a sample to measure its own run-to-run noise.
     Operator decisions for this pass (2026-11-21): unattended; idle subscription capacity only, below 80% of every measured usage
     window; a $25 a week evaluator cash cap for cash-backed reviewers.
+    SCOPE AMENDED for two census rows the build cannot avoid (read while building, at origin/main 2d5f85997):
+    - The calibration rows are written under task_id REVIEWER-CALIBRATION, which is not a declared producer, so
+      test/every-message-names-one-declared-sender.test.ts refuses them. src/lib/producer-identity.ts gains that one entry.
+      Reusing an existing producer such as REVIEWER-HEALTH would mix a new lane into readers that filter on that id.
+    - review.calibration.case and review.calibration.result carry cost_usd, which criterion 3 requires on the result row,
+      so test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts refuses them unless read or exempted. They are
+      written under a lane run id (REVIEWER-CALIBRATION-<ts>) with no run.start, so gatherRuns skips them; the census names
+      that case A_LANE_RUN_ID, as for W1-T10269 review.shadow_verdict (#13384). Operator ruling 2026-11-22, asked in the
+      building session: exempt both steps with the A_LANE_RUN_ID reason. Renaming the field to slip past the census was
+      rejected. No criterion, proof or falsifier changes.
   design: |
     Add src/lib/reviewer-calibration.ts.
     1. Cases: read verdict_calibration.outcome rows (W1-T12425). reverted and followup_fixed heads are escaped defects (right
