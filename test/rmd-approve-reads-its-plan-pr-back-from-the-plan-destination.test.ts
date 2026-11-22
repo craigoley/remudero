@@ -4,17 +4,16 @@
  * The read is the review command's first fetch: given a PR URL it kept only the number and resolved the owner and
  * repository from this checkout. These tests drive the REAL review command (review.ts) with the arguments approve's
  * exported seam `planPrReviewInvocation` produces, over a GitHub that 404s every read outside the repository the
- * PR lives in. The run-task.ts call sites are proved by a source grep (no new importer of run-task.ts).
+ * PR lives in. The run-task.ts call sites are pinned by test/arm-outcome-five-sites.test.ts (no new importer of run-task.ts).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { reviewCommand, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { planPrReviewInvocation } from "#src/lib/plan-pr-emitter.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const PUBLIC = { owner: "acme", repo: "public-repo" };
 const OPS = { owner: "acme", repo: "ops-repo" };
@@ -75,19 +74,7 @@ test("W1-T14311 criterion 1: a plan PR opened in the plan destination is read ba
   await assert.rejects(readBack(t, { prArg: OPS_URL, rest: [] }, OPS), /404.*public-repo\/pulls\/297/);
 });
 
-test("W1-T14311 criterion 1: both approve call sites hand the review command the seam's arguments", () => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  assert.equal(src.split("planPrReviewInvocation(filing, result.prUrl, prNum)").length - 1, 2, "single and batch approve");
-  assert.equal(src.includes("reviewCommand(filing.destination ? result.prUrl : prNum)"), false, "the unqualified read is gone");
-  assert.equal(src.split("reviewCommand(reviewAs.prArg, reviewAs.rest)").length - 1, 4, "triage, plan, approve and batch");
-});
-
 test("W1-T14311 criterion 1: the triage and plan gates route a destination PR through the same seam", async (t) => {
-  const src = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
-  assert.ok(src.includes("{ ...prTarget, destination: true } : { owner, repo, destination: false }, prUrl, prNum)"), "triage: a destination PR reads from its own URL's repository");
-  assert.ok(src.includes("planPrReviewInvocation({ owner: prOwner, repo: prRepo, destination: !isPublic }, prUrl, prNum)"), "plan: a destination side reads from its own repository");
-  assert.equal(src.includes("reviewCommand(view === undefined ? prNum : prUrl)"), false);
-  assert.equal(src.includes("reviewCommand(isPublic ? prNum : prUrl)"), false);
   // Triage: the destination PR (target parsed from its URL) and plan: the destination side (side.owner/repo).
   const triage = planPrReviewInvocation({ ...OPS, destination: true }, OPS_URL, String(NUMBER));
   assert.deepEqual((await readBack(t, triage, OPS)).reads, [`repos/${OPS.owner}/${OPS.repo}/pulls/${NUMBER}`]);
