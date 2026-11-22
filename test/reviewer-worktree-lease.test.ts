@@ -160,6 +160,8 @@ function spawnGit(args: string[]): string {
   assert.equal(child.status, 0, child.stderr); return child.stdout;
 }
 
-test("reviewer lease changes are material to the loaded reviewer code", () => {
-  assert.equal(reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts"]), true);
+test("reviewer lease changes alone are not material to the loaded reviewer code (W1-T14152)", () => {
+  // The lease decides whether this process may use a tree path; the review child in that tree computes the verdict.
+  assert.equal(reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts"]), false);
+  assert.equal(reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts", "src/lib/review.ts"]), true);
 });

@@ -51,3 +51,23 @@ export function skillEvalApprovalRefusal(proposalId: string, markdown: string, r
   }
   return undefined;
 }
+
+/** The fields of inbox.ts's `SkillEvalAutoRecord` the Inbox line reads. */
+export interface RecordedSkillEvalAuto {
+  draftSha256: string;
+  state: string;
+  reason?: string;
+  at: string;
+}
+
+/**
+ * W1-T13861: the one line `rmd inbox` prints under a skill draft's READY entry and the panel's ready item carries.
+ * Only a record for the CURRENT text counts: an eval or a claim of an earlier text reads as not run yet.
+ */
+export function skillEvalInboxStatus(markdown: string, record: RecordedSkillEval | undefined, auto: RecordedSkillEvalAuto | undefined): string {
+  const sha = createHash("sha256").update(markdown).digest("hex");
+  if (record?.draftSha256 === sha) return record.verdict === "pass" ? "eval passed — ready to approve" : `eval failed: ${record.reason}`;
+  if (auto?.draftSha256 === sha && auto.state === "claimed") return `eval running or stopped since ${auto.at}`;
+  if (auto?.draftSha256 === sha && auto.state === "waiting") return `eval waiting: ${auto.reason ?? "a gate is closed"}`;
+  return "eval not run yet";
+}

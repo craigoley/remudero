@@ -1032,7 +1032,9 @@ function* guardedReviewerAfterFetchSteps(repoDir: string, git: ReviewerGitRead, 
 export const REVIEW_MATERIAL_ADVANCE_PATHS = [
   // the verdict itself: rubric, keyword floor, proof parsing and execution
   "src/lib/review.ts",
-  "src/lib/reviewer-worktree-lease.ts",
+  // W1-T14152: not src/lib/reviewer-worktree-lease.ts. Only src/run-task.ts imports it; it decides whether this
+  // process may use a tree path and never computes a verdict. src/lib/affected-suites.ts still reaches it through
+  // src/run-task.ts's imports, so a change to it still runs the review replay suite in CI.
   // runReview's call path; a reviewer only counts the hunks REVIEW_PATH_SYMBOLS_IN_RUN_TASK reaches
   "src/run-task.ts",
   // criteria come from the plan; a loader change can change what is judged
@@ -1057,12 +1059,38 @@ export function reviewAdvanceIsMaterial(changedPaths: readonly string[] | undefi
 }
 
 /** W1-T4469: the ROOTS of run-task.ts's review path. Everything they reference is walked, so a new
- *  helper they call needs no entry. Whole-file matching withheld 17 of 23 verdicts in a day. */
+ *  helper they call needs no entry. Whole-file matching withheld 17 of 23 verdicts in a day.
+ *  W1-T14152: buildFreshTreeReviewRunner stays a root, where a stale-code review enters, but it is also a tree-placement
+ *  unit (below): the walk passes through it, so its own lines never count and the code it calls still does. */
 export const REVIEW_PATH_SYMBOLS_IN_RUN_TASK = [
   "runReview",
   "reviewCommand",
   "buildFreshTreeReviewRunner",
   "spawnRmdReviewForFreshTree",
+] as const;
+
+/**
+ * W1-T14152: the run-task.ts units that only find, cut, inspect, lease or remove the tree a stale-code review runs
+ * in. The walk never enters them. They never compute a verdict: the child `rmd review` in that tree does, and it
+ * records its own HEAD as the reviewer code, so a wrong tree is caught by the same freshness judge. The parent
+ * hands the child only the tree path and `[prArg, ...rest]` (pinned by
+ * test/a-run-task-advance-is-classified-by-review-path.test.ts criterion 4). #19940 changed only these units and
+ * requeued 22 delivered verdicts. A unit that also builds the child's arguments, environment or install is not
+ * listed (makeTreeRunnable, spawnRmdReviewForFreshTree), and the walk still reaches it through the units listed here.
+ * A name here that the source lacks is ignored; a unit under any other name is walked as before.
+ */
+export const REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK = [
+  "buildFreshTreeReviewRunner",
+  "FreshTreeReviewSeams",
+  "FreshTreeTools",
+  "freshTreeInspector",
+  "inspectFreshReviewerWorktree",
+  "perAttemptTreePath",
+  "prepareFreshOriginMainTree",
+  "inPerAttemptTree",
+  "removePerAttemptTree",
+  "freshOriginMainTreeRunner",
+  "UnprovenFreshTreeError",
 ] as const;
 
 const RUN_TASK_PATH = "src/run-task.ts";
@@ -1072,7 +1100,7 @@ const UNIT_NAME = new RegExp(String.raw`${DECLARATION}\s*([A-Za-z_$][\w$]*)`);
 const WORD = /[A-Za-z_$][\w$]*/y;
 const REGEX_AFTER_WORD = new Set(["return", "typeof", "case", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
 
-interface TopLevelUnit { start: number; end: number; names: string[] | undefined; refs: Set<string>; imports: boolean }
+export interface TopLevelUnit { start: number; end: number; names: string[] | undefined; refs: Set<string>; imports: boolean }
 
 function skipQuoted(text: string, from: number, quote: string): number {
   for (let i = from; i < text.length; i++) {
@@ -1109,7 +1137,7 @@ function unitNames(text: string): string[] | undefined {
 
 /** A unit runs from a column-0 declaration met in code at depth 0 to the next; refs are the words its
  *  code names, less comments, string text and `.property`. `undefined`: the scan could not finish. */
-function topLevelUnits(source: string): TopLevelUnit[] | undefined {
+export function topLevelUnits(source: string): TopLevelUnit[] | undefined {
   const units: TopLevelUnit[] = [];
   const templateDepths: number[] = [];
   let refs = new Set<string>();
@@ -1315,10 +1343,14 @@ function scanReviewPath(source: string): ReviewPathScan | { unreadable: string }
   const missing = REVIEW_PATH_SYMBOLS_IN_RUN_TASK.find((root) => !byName.has(root));
   if (missing) return { unreadable: `review path symbol ${missing} not found` };
   const reached = new Set<TopLevelUnit>();
+  // W1-T14152: the walk passes through a tree-placement unit. Its own lines and the names it uses never count, but
+  // the code it calls is still walked, so a helper such as makeTreeRunnable stays on the review path.
+  const placement = new Set<string>(REVIEW_TREE_PLACEMENT_SYMBOLS_IN_RUN_TASK);
+  const passed = new Set<TopLevelUnit>();
   const queue = REVIEW_PATH_SYMBOLS_IN_RUN_TASK.flatMap((root) => byName.get(root)!);
   for (let unit = queue.pop(); unit; unit = queue.pop()) {
-    if (reached.has(unit)) continue;
-    reached.add(unit);
+    if (reached.has(unit) || passed.has(unit)) continue;
+    (!unit.imports && unit.names!.some((name) => placement.has(name)) ? passed : reached).add(unit);
     if (!unit.imports) for (const ref of unit.refs) queue.push(...(byName.get(ref) ?? []));
   }
   // An import line counts if reached code uses a name it binds, or it binds none (the specifier).

@@ -1399,7 +1399,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
@@ -1548,6 +1549,7 @@ import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./l
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
+import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -24422,6 +24424,12 @@ async function retroCommand(
     log,
     say,
   );
+  // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
+  // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
+  const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
+    { loadConfig: () => config });
+  await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
+    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -46445,6 +46453,10 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
+function runFixSelfCheck(args: FixSelfCheckRunArgs) {
+  return runFixSelfCheckWith(ledgeredNonDispatchSpawn("review"), args);
+}
+
 export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
@@ -46505,6 +46517,7 @@ export function fixCommandHost(): FixCommandHost {
     get workerChangedPaths() { return workerChangedPaths; },
     get workerCreatedCurrentHead() { return workerCreatedCurrentHead; },
     get worktreeHasUncommittedChanges() { return worktreeHasUncommittedChanges; },
+    get runFixSelfCheck() { return isTestRunner() ? undefined : runFixSelfCheck; },
   };
 }
 
