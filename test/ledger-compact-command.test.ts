@@ -195,6 +195,8 @@ test("ledger-compact previews and applies a copied fixture through real gzip and
   assert.deepEqual(dryCounts, applyCounts);
   assert.equal(applyCounts.sourceCount, 3);
   assert.equal(applyCounts.archiveNames.length, 2);
+  // W1-T13859: the colliding source is replaced in place, and its own bytes are kept in cold storage.
+  assert.deepEqual(gunzipSync(readFileSync(join(stateDir, LEDGER_COLD_STORE_DIRNAME, second))), Buffer.from(`${a}\n${b}\n`));
   const replacement = [compactedArchiveName("2026-08-01T00:00:00.000Z"), second].flatMap((name) =>
     gunzipSync(readFileSync(join(stateDir, name))).toString("utf8").trim().split("\n"));
   assert.deepEqual(new Set(replacement), new Set([a, b]));
@@ -473,6 +475,64 @@ test("ledger-compact moves a merged source into cold storage instead of deleting
   assert.ok(memory.files.has(join(COLD, compactedArchiveName("2026-08-01T06:00:00.000Z"))), "the merged source is in cold storage");
   assert.ok(!memory.files.has(older), "and gone from the scanned directory");
   assert.deepEqual(topLevelRows(memory.files), before, "the scanned corpus keeps every distinct row");
+});
+
+test("ledger-compact keeps both cold copies when a source name is reused", () => {
+  const stamp = compactedArchiveName("2026-08-01T00:00:00.000Z");
+  const original = join(COLD, stamp);
+  const earlier = gzipRows([row("2026-08-01T00:00:00.000Z", "EARLIER")]);
+  const source = gzipRows([row("2026-08-01T00:00:00.000Z", "SOURCE")]);
+  const memory = coldMemoryFs({
+    [original]: earlier,
+    [join(STATE_DIR, stamp)]: source,
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T01:00:00.000Z"))]: source,
+  }, { [original]: NOW.getTime() - 24 * 60 * 60 * 1000 });
+  const before = topLevelRows(memory.files);
+
+  assert.equal(command([], memory).code, 0);
+  assert.deepEqual(memory.files.get(original), earlier);
+  assert.deepEqual(memory.files.get(`${original}.1`), source);
+  assert.deepEqual(topLevelRows(memory.files), before);
+});
+
+test("W1-T13859: a source an output replaces is published after the outputs holding its other rows", () => {
+  const day1 = row("2026-08-01T00:00:00.000Z", "D1");
+  const day2 = row("2026-08-02T05:00:00.000Z", "D2");
+  const first = join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"));
+  const second = join(STATE_DIR, compactedArchiveName("2026-08-02T05:00:00.000Z"));
+  // The first source holds a later day's row too, so its own day's output may replace it only after day 2's.
+  const memory = memoryFs({
+    [first]: gzipRows([day1, day2]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-01T12:00:00.000Z"))]: gzipRows([day1]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-02T03:00:00.000Z"))]: gzipRows([day2]),
+  });
+  const before = corpusRows(memory.files);
+  const result = command(["--max-sources", "3"], memory);
+  assert.equal(result.code, 0, result.errors.join("\n"));
+  assert.deepEqual(memory.writes, [second, first], "the new name first, then the replacement of the first source");
+  assert.deepEqual(corpusRows(memory.files), before);
+});
+
+test("W1-T13859: replacements that wait on each other give one a later unused name", () => {
+  const day1 = row("2026-08-01T00:00:00.000Z", "D1");
+  const day1b = row("2026-08-01T00:00:00.000Z", "D1B");
+  const day2 = row("2026-08-02T05:00:00.000Z", "D2");
+  const day2b = row("2026-08-02T01:00:00.000Z", "D2B");
+  const first = join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.000Z"));
+  const second = join(STATE_DIR, compactedArchiveName("2026-08-02T05:00:00.000Z"));
+  // Each colliding source holds a row of the other's day, so neither replacement can go first.
+  const memory = memoryFs({
+    [first]: gzipRows([day1, day2b]),
+    [second]: gzipRows([day1b, day2]),
+    [join(STATE_DIR, compactedArchiveName("2026-08-02T03:00:00.000Z"))]: gzipRows([day2b]),
+  });
+  const before = corpusRows(memory.files);
+  const result = command(["--max-sources", "3"], memory);
+  assert.equal(result.code, 0, result.errors.join("\n"));
+  const later = join(STATE_DIR, compactedArchiveName("2026-08-01T00:00:00.001Z"));
+  assert.deepEqual(memory.writes, [later, second]);
+  assert.deepEqual(JSON.parse(result.out[0]!).archiveNames, [compactedArchiveName("2026-08-01T00:00:00.001Z"), compactedArchiveName("2026-08-02T05:00:00.000Z")]);
+  assert.deepEqual(corpusRows(memory.files), before);
 });
 
 test("ledger-compact deletes a cold-stored source only after its retention lapses", () => {

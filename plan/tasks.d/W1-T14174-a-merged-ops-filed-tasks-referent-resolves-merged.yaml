@@ -1,0 +1,45 @@
+- id: W1-T14174
+  title: A merged core PR whose task is filed only in the ops catalog resolves as merged on its board referent
+  repo: remudero
+  depends_on: [W1-T14114]
+  priority: 0.4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: operator-request#console-update-failed-2026-11-20
+  plan_refs: [W1-T14114, W1-T13957, W1-T130, W1-T12211]
+  files:
+    - src/lib/panel-graph.ts
+    - test/inbox/a-merged-ops-filed-tasks-referent-resolves-merged.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The W1-T14114 review on #20026 (2026-11-21) reported a follow-up finding: a board proposal whose referent is a
+    MERGED core PR, built for a task filed only in the private ops catalog, stays referentUnverified. Core's public
+    projection has no row for that task, and W1-T14114 only adds ops rows for OPEN PRs (withOpsOwnTaskReferents in
+    panel-graph.ts). The reviewer saw that projecting the full combined plan gives the merged referent.
+    UNVERIFIED: whether any live board proposal is in this state today. W1-T14114's open-PR cases were observed live
+    (#19691, #19728, #19721). This merged-PR case has not been observed yet.
+  design: |
+    0. Observe first. Before building, run a read-only probe on the host over serve's own inputs (board snapshot,
+    core plan, ops catalog, ledger). Count board referents that are merged core PRs with no public projection row
+    whose Remudero-Task trailer names an ops-only task. If the count is 0, record it in the PR or ledger and withdraw
+    this task (the doctrine for a bound on an unobserved population).
+    1. panel-graph.ts: extend withOpsOwnTaskReferents. For each board referent "#N" that has no state after the
+    public and open-PR passes, a merged PR whose anchored Remudero-Task trailers name exactly one task that is
+    ops-only lends that task one projected row. Use the same unambiguity rules as the open-PR path. A row that
+    verifies merged for exactly that PR sets { status: "merged" }. Anything else stays unverified (W1-T130).
+    2. Read only data the projection already fetched (the merged list projectPlan reads). Add no new GitHub call
+    and no second ops read. Name no private task field outside the referent status (W1-T12211).
+
+    INVARIANT merged-ops-referent: a merged core PR whose only claimed task is ops-only resolves merged on its board referent when the catalog is ok, and stays unverified when the catalog is not ok or the claim is ambiguous.
+  acceptance:
+    - claim: invariant:merged-ops-referent — a merged PR with one ops-only task claim resolves merged with an ok catalog; an unreadable catalog, an ambiguous claim or a row naming another PR leaves it unverified
+      proof: 'unit test: test/inbox/a-merged-ops-filed-tasks-referent-resolves-merged.test.ts'
+    - claim: the test names each case for this task
+      proof: 'grep: W1-T14174 merged ops referent in test/inbox/a-merged-ops-filed-tasks-referent-resolves-merged.test.ts'
+  falsifier: |
+    Drop the merged pass from withOpsOwnTaskReferents: the ok-catalog merged case must fail.

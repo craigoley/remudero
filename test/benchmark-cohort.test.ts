@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import { runBenchmarkCohortIdlePass, runBenchmarkCohortPass } from "../src/lib/benchmark-cohort.js";
+import type { BenchmarkCohort } from "#src/lib/benchmark-cohort.js";
+import type { TaskCaseFile } from "#src/lib/task-case-file.js";
 
 const row = (value: Record<string, unknown>) => JSON.stringify(value) + "\n";
 
@@ -713,5 +715,167 @@ test("benchmark cohort repairs a quarantined source without raw deletion", async
       "repair releases a formerly excluded clean assignment in the affected partition");
     assert.equal(readFileSync(bad).equals(gzipSync(corrected)), true);
     assert.equal(repaired.snapshot.quarantine, undefined);
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("W1-T13867 criterion 1: every cohort row carries its calls' verified task outcomes, or the named reason no join exists", async () => {
+  const cutoff = "2026-09-27T23:00:00.000Z";
+  const sha = "a".repeat(40);
+  const observed = <T>(value: T) => ({ state: "observed" as const, value, source: "fixture", asOf: cutoff });
+  const notCollected = { state: "unavailable" as const, reason: "not-collected", source: "fixture", asOf: cutoff };
+  const at = (i: number, seconds = 0) => `2026-09-27T10:${String(i).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.000Z`;
+  // Model and PR state per assignment; no `pr` = no case file for that task.
+  // `noCall`: the assignment was written but no worker call followed it.
+  const cases: { model: string; pr?: "MERGED" | "CLOSED" | "OPEN"; noCall?: true }[] = [
+    { model: "gpt-luna", pr: "MERGED" }, { model: "gpt-luna", pr: "CLOSED" }, { model: "gpt-luna", pr: "OPEN" },
+    { model: "gpt-luna" }, { model: "claude-opus", pr: "MERGED" }, { model: "claude-opus", pr: "MERGED" },
+    { model: "claude-opus", pr: "MERGED", noCall: true },
+  ];
+  const caseFiles: TaskCaseFile[] = cases.flatMap(({ model, pr }, i) => pr === undefined ? [] : [{
+    version: "task-case-file-v1", taskId: `W1-T${9000 + i}`, asOf: cutoff,
+    plan: observed({ title: "example", dependsOn: [], verify: "auto", risk: "low" }),
+    ledger: observed({ windowStart: "2026-08-28T12:10:00.000Z", forms: { gzip: 0, plain: 0, live: 1 }, matchingRows: 2 }),
+    runs: [{ runId: `run-${i}`, startedAt: at(i), assignmentId: `assign-${i}`, selectedProvider: "codex", selectedModel: model,
+      servedModel: null, billingMode: "api", costUsd: 0.02, verdict: "passed", prNumber: 2000 + i }],
+    pr: observed({ number: 2000 + i, url: `https://github.com/craigoley/remudero/pull/${2000 + i}`, headSha: sha, state: pr, taskCredit: pr === "MERGED" }),
+    review: observed({ headSha: sha, status: "success" }), acceptance: observed({ headSha: sha, status: "success" }),
+    ci: observed({ headSha: sha, status: "success" }),
+    mergedSource: pr === "MERGED" ? observed({ prNumber: 2000 + i, mergedAt: "2026-09-27T22:00:00Z" }) : notCollected,
+    deployment: notCollected, runtime: notCollected, next: null,
+  } as TaskCaseFile]);
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-benchmark-call-outcome-"));
+  try {
+    writeFileSync(join(stateDir, "ledger.ndjson"), cases.map(({ model, noCall }, i) => row({ ts: at(i), host: "core-host",
+      task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.assignment",
+      worker_assignment: { id: `assign-${i}`, requested: { model }, selected: { provider: "codex", model } },
+      benchmark_run: { work: { taskClass: { state: "observed", value: "fix" } } } })
+      + (noCall ? "" : row({ ts: at(i, 30), host: "core-host", task_id: `W1-T${9000 + i}`, run_id: `run-${i}`, step: "worker.attempt",
+        selection_assignment_id: `assign-${i}`, success: true, billing_mode: "api", total_cost_usd: 0.02 }))).join(""));
+    // Each pass's rows come from the same join as that pass's own cohort-level total: both joined, or both unavailable.
+    const agrees = (snapshot: Awaited<ReturnType<typeof runBenchmarkCohortPass>>["snapshot"], label: string): void => {
+      for (const cohort of snapshot.cohorts) assert.equal(typeof cohort.verifiedOutcome === "string",
+        typeof snapshot.verifiedTaskOutcome === "string", `${label}: a row and its snapshot's total agree on whether a join exists`);
+    };
+    const joined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles })).snapshot;
+    const byModel = Object.fromEntries(joined.cohorts.map((cohort) => [cohort.dimensions.model, cohort]));
+    assert.deepEqual(Object.keys(byModel).sort(), ["claude-opus", "gpt-luna"]);
+    for (const cohort of joined.cohorts) {
+      assert.notEqual(typeof cohort.verifiedOutcome, "string", "case files were joined, so no row may name the no-join reason");
+      const outcome = cohort.verifiedOutcome as Exclude<typeof cohort.verifiedOutcome, string>;
+      assert.equal(outcome.assignments, cohort.joinedAttempts, "every call in the row is accounted for, and only calls");
+      assert.equal(outcome.completed + outcome.endedWithoutCompletion + outcome.censored + outcome.unavailable, outcome.assignments);
+    }
+    const luna = byModel["gpt-luna"]!.verifiedOutcome as Exclude<BenchmarkCohort["verifiedOutcome"], string>;
+    assert.equal(luna.completed, 1); assert.equal(luna.censored, 1); assert.equal(luna.unavailable, 2);
+    assert.equal(Object.values(luna.reasons).reduce((sum, count) => sum + count, 0), luna.endedWithoutCompletion + luna.unavailable + luna.censored,
+      "each call not completed names why");
+    assert.ok(luna.reasons["closed-unmerged-unadjudicated"] === 1, "a closed PR names its reason");
+    assert.equal(luna.reasons["open-at-cutoff"], 1, "a censored call names why it is not completed");
+    assert.equal(byModel["claude-opus"]!.assignments, 3, "positive control: the row holds the assignment that made no call");
+    assert.deepEqual(byModel["claude-opus"]!.verifiedOutcome, { assignments: 2, completed: 2, endedWithoutCompletion: 0,
+      censored: 0, unavailable: 0, reasons: {} }, "an assignment with no worker call is not a call, so no outcome counts it");
+    agrees(joined, "joined");
+    const totals = joined.verifiedTaskOutcome as Exclude<typeof joined.verifiedTaskOutcome, string>;
+    assert.equal(totals.coverage.completed, 4, "the cohort-level join is unchanged: it counts assignments, the no-call one included");
+    // The joined pass left its rows in the index on disk. A later pass reads that index (scannedSources 0).
+    const indexPath = join(stateDir, "benchmark-cohort-index.json");
+    const onDisk = (): unknown => (JSON.parse(readFileSync(indexPath, "utf8")) as { lastGood: { cohorts: BenchmarkCohort[] } })
+      .lastGood.cohorts.map((cohort) => cohort.verifiedOutcome);
+    assert.deepEqual(onDisk(), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    // A cached pass reports what a fresh pass with the same case files and cutoff reports, rows and totals alike.
+    // Without case files that is the unavailable reason: the earlier join is never reported as this pass's own.
+    const cached = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff });
+    assert.equal(cached.scannedSources, 0, "positive control: this pass is a cache hit");
+    rmSync(indexPath, { force: true }); // a fresh pass, with no cached snapshot
+    const unjoined = (await runBenchmarkCohortPass(stateDir, { nowIso: cutoff })).snapshot;
+    assert.equal(unjoined.cohorts.length, 2);
+    for (const cohort of unjoined.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal(unjoined.verifiedTaskOutcome, "unavailable-no-github-verification-join", "a fresh pass with no case files joins nothing");
+    agrees(unjoined, "fresh without case files");
+    assert.deepEqual(cached.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), unjoined.cohorts.map((cohort) => cohort.verifiedOutcome),
+      "cached and fresh rows agree without case files");
+    assert.deepEqual(cached.snapshot.verifiedTaskOutcome, unjoined.verifiedTaskOutcome, "cached and fresh totals agree without case files");
+    agrees(cached.snapshot, "cached without case files");
+    // A cached pass WITH case files over an index written without them reports what the fresh joined pass did, and
+    // publishes those rows to the index on disk.
+    const rejoined = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(rejoined.scannedSources, 0, "positive control: this pass is a cache hit");
+    assert.deepEqual(rejoined.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), joined.cohorts.map((cohort) => cohort.verifiedOutcome));
+    assert.deepEqual(rejoined.snapshot.verifiedTaskOutcome, joined.verifiedTaskOutcome);
+    assert.deepEqual(onDisk(), joined.cohorts.map((cohort) => cohort.verifiedOutcome), "the cache hit publishes its rows");
+    agrees(rejoined.snapshot, "cached with case files");
+    const again = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(again.checkpointBytes, undefined, "an unchanged cache hit writes nothing");
+    // A cache hit's rewrite yields to a newer index another pass published after this one read: it neither
+    // replaces that index nor retires the segment it names.
+    const joinedOnDisk = onDisk();
+    const concurrentSegment = join(stateDir, "benchmark-cohort-segment-concurrent-0.ndjson");
+    const yielded = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, onBeforeLiveCacheVerify: () => {
+      writeFileSync(concurrentSegment, "");
+      const newer = { ...(JSON.parse(readFileSync(indexPath, "utf8")) as object), concurrentRebuild: true };
+      writeFileSync(`${indexPath}.concurrent.tmp`, JSON.stringify(newer));
+      renameSync(`${indexPath}.concurrent.tmp`, indexPath);
+    } });
+    assert.equal(yielded.scannedSources, 0, "positive control: this pass is a cache hit");
+    for (const cohort of yielded.snapshot.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal((JSON.parse(readFileSync(indexPath, "utf8")) as { concurrentRebuild?: boolean }).concurrentRebuild, true,
+      "the newer index stays published");
+    assert.equal(existsSync(concurrentSegment), true, "the newer index's segment is not retired");
+    assert.equal(yielded.checkpointBytes, undefined, "no write is claimed for a rewrite that yielded");
+    // A writer mid-publication holds the index lock; a rewrite yields to it rather than racing its rename.
+    const lockPath = `${indexPath}.lock`;
+    const atLock = readFileSync(indexPath, "utf8");
+    const locked = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, onBeforeLiveCacheVerify: () => writeFileSync(lockPath, "") });
+    assert.equal(locked.scannedSources, 0, "positive control: this pass is a cache hit");
+    assert.equal(locked.checkpointBytes, undefined, "a rewrite that met a held lock publishes nothing");
+    assert.equal(readFileSync(indexPath, "utf8"), atLock, "the index is untouched");
+    assert.equal(existsSync(lockPath), true, "a held lock is never taken from its writer");
+    unlinkSync(lockPath);
+    // A v1 index migrates during the read; the cache hit after it still publishes its rows to the migrated index.
+    const current = JSON.parse(readFileSync(indexPath, "utf8")) as { sources: { segment: string; segmentBytes: number }[];
+      lastGood: { version: string; cohorts: BenchmarkCohort[] } };
+    const expand = ({ segment, segmentBytes, segmentSha256: _hash, rowCount: _count, ...metadata }:
+      { segment: string; segmentBytes: number; segmentSha256?: string; rowCount?: number }) => {
+      const encoded = readFileSync(join(stateDir, segment)).subarray(0, segmentBytes).toString();
+      return { ...metadata, rows: encoded.trim() ? encoded.trimEnd().split("\n").map((line) => JSON.parse(line) as unknown) : [] };
+    };
+    const v1 = { version: current.lastGood.version, sources: current.sources.map(expand),
+      lastGood: { ...current.lastGood, cohorts: current.lastGood.cohorts.map(({ verifiedOutcome: _outcome, ...cohort }) => cohort) } };
+    for (const name of readdirSync(stateDir).filter((entry) => entry.startsWith("benchmark-cohort-"))) unlinkSync(join(stateDir, name));
+    writeFileSync(join(stateDir, "benchmark-cohort-v1.json"), JSON.stringify(v1));
+    const migrated = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(migrated.scannedSources, 0, "positive control: the migration rescans nothing");
+    assert.equal(existsSync(join(stateDir, "benchmark-cohort-v1.json")), false, "positive control: the v1 index migrated");
+    assert.deepEqual(migrated.snapshot.cohorts.map((cohort) => cohort.verifiedOutcome), joinedOnDisk);
+    assert.deepEqual(onDisk(), joinedOnDisk, "the migrated index holds the rows the pass reported");
+    // A rebuild that meets a held lock never blocks the pass: it publishes nothing, and the lock stays its writer's.
+    writeFileSync(lockPath, "");
+    rmSync(indexPath);
+    const blocked = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.ok(blocked.scannedSources > 0, "positive control: this pass rebuilds");
+    assert.equal(blocked.checkpointBytes, undefined, "a rebuild that met a held lock publishes nothing");
+    assert.equal(existsSync(indexPath), false);
+    assert.equal(existsSync(lockPath), true);
+    // A lock left by a writer that died holding it is broken once stale.
+    const stale = (Date.now() - 60_000) / 1000;
+    utimesSync(lockPath, stale, stale);
+    const rebuilt = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff, caseFiles });
+    assert.equal(rebuilt.state, "complete");
+    assert.ok(rebuilt.scannedSources > 0, "positive control: this pass rebuilds");
+    assert.equal(existsSync(lockPath), false, "the stale lock was broken and this writer released its own");
+    assert.deepEqual(onDisk(), joinedOnDisk);
+    // A pass that stops before joining, here because the live ledger vanished, names the unavailable reason in its
+    // rows and total, and leaves no earlier join on disk.
+    assert.deepEqual(onDisk(), joinedOnDisk, "positive control: the index on disk still holds the earlier join");
+    const stopped = await runBenchmarkCohortPass(stateDir, { nowIso: cutoff,
+      onBeforeLiveCacheVerify: () => rmSync(join(stateDir, "ledger.ndjson")) });
+    assert.equal(stopped.state, "unavailable");
+    assert.equal(stopped.snapshot.reason, "ledger-live-missing-before-scan");
+    assert.equal(stopped.snapshot.cohorts.length, 2, "the carried rows are still reported");
+    for (const cohort of stopped.snapshot.cohorts) assert.equal(cohort.verifiedOutcome, "unavailable-no-github-verification-join");
+    assert.equal(stopped.snapshot.verifiedTaskOutcome, "unavailable-no-github-verification-join");
+    agrees(stopped.snapshot, "stopped before joining");
+    assert.deepEqual(onDisk(), stopped.snapshot.cohorts.map(() => "unavailable-no-github-verification-join"),
+      "the index on disk no longer holds the earlier join");
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
