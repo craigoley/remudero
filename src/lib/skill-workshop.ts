@@ -29,12 +29,7 @@ import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcq
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { TASK_ARM_UNIT } from "./task-arm.js";
-import {
-  mineTranscriptWorkflows,
-  renderTranscriptWorkflowSteps,
-  type TranscriptLedgerRow,
-  type TranscriptRun,
-} from "./workflow-mining.js";
+import { mineRecurringProcedures, type TranscriptLedgerRow, type TranscriptRun } from "./workflow-mining.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
  *  header for why this duplicates retro.ts's `ProceduralCandidate` rather than importing it. */
@@ -123,61 +118,54 @@ export function proceduralCandidateHash(candidate: ProceduralCandidateLike): str
     .slice(0, 16);
 }
 
-/** The transcript corpus {@link renderSkillDraft} mines a distinguishing workflow from (W1-T4668,
- *  design clause ii) — optional so the existing call site (retro.ts's `buildGather`, unchanged by
- *  this task) keeps drafting off signals alone until a future caller wires the ledger through. */
+/** The transcript corpus {@link renderSkillDraft} mines the candidate's recurring procedure from (W1-T13857). */
 export interface TranscriptContext {
   runs: readonly TranscriptRun[];
   records: readonly TranscriptLedgerRow[];
 }
 
+const PROCEDURE_STEP_VERBS = new Map([
+  ["Bash", "Run"], ["Edit", "Change"], ["MultiEdit", "Change"], ["NotebookEdit", "Change"], ["Write", "Create"],
+]);
+const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([...PROCEDURE_STEP_VERBS.keys(), "Read", "WebFetch", "WebSearch"]);
+const CAPABILITY_TOOL_NAMES: ReadonlySet<string> = new Set([...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"]);
+
+function toolNamesIn(text: string, toolNames: ReadonlySet<string>): string[] {
+  return text.match(/\w+/g)?.filter((word) => toolNames.has(word)) ?? [];
+}
+
+/** Writes a census step as an action line, or `undefined` when no action verb fits it. No line names a tool. */
+function procedureStepLine(step: string): string | undefined {
+  const colon = step.indexOf(":");
+  if (colon < 0) return undefined;
+  const target = step.slice(colon + 1).trim();
+  const verb = PROCEDURE_STEP_VERBS.get(step.slice(0, colon));
+  if (!verb || !target || /[`\r\n]/.test(target) || toolNamesIn(target, CAPABILITY_TOOL_NAMES).length > 0) return undefined;
+  return `- ${verb} \`${target}\`.`;
+}
+
 /**
- * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
- * a candidate with no eligible signal or under the two-run floor. Mining already enforces this
- * threshold, but a caller handing this function a single-run candidate
- * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
- * anecdote dressed as a proven procedure.
- *
- * `transcripts`, when supplied, mines the SAME candidate's task type for a {@link
- * TranscriptWorkflow} (workflow-mining.ts, W1-T4668) and appends its distinguishing steps —
- * actual tool-call steps every first-attempt-success run of this shape took that no repaired run
- * ever needed — after the signal-derived steps, so the Procedure section stops restating the
- * outcome ("resolve on the first attempt") and starts naming what a successful worker actually
- * DID. A shape with no transcript workflow (none mined, or none matching this candidate's task
- * type) leaves the Procedure section exactly as before.
+ * Render one procedural candidate as a Claude Code skill draft. `undefined` for a candidate with no eligible signal,
+ * under the two-run floor, or whose runs hold no recurring action procedure the renderer can write (W1-T13857): the
+ * signal's outcome text is never drafted as a step. The Procedure is the highest-scored {@link
+ * mineRecurringProcedures} sequence over the candidate's own runs whose every step is a Run, Change or Create line.
  */
-export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
+export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
-  const eligibleSignals = candidate.signals.filter(skillEligibleSignal);
-  if (eligibleSignals.length === 0) return undefined;
-  const hash = proceduralCandidateHash(candidate);
-  const procedureKey = procedureKeyFor(candidate);
-  // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
-  // evidence accrues rather than minting a new directory per cadence pass.
-  const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
-  const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
+  if (!candidate.signals.some(skillEligibleSignal)) return undefined;
+  const own = new Set(candidate.runIds);
+  const procedure = mineRecurringProcedures(transcripts.runs.filter((r) => own.has(r.runId)), transcripts.records)
+    .find((p) => p.steps.every((step) => procedureStepLine(step) !== undefined));
+  if (!procedure) return undefined;
+  const procedureKey = procedureKeyFor({ taskType: candidate.taskType, steps: procedure.steps });
+  const firstTwo = procedure.steps.slice(0, 2).map((step) => step.slice(step.indexOf(":") + 1)).join(" ");
+  const name = `${kebabSlug(firstTwo)}-${procedureKey.slice(0, 8)}`;
+  const description = `Take the ${procedure.steps.length} actions that ${procedure.recurrence} merged ${candidate.taskType} ` +
+    `runs of ${procedure.taskIds.length} tasks repeated, in the order they took them.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const outcomeFor = (key: string): string =>
-    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key;
   // Every mined outcome reaches the scanner's vocabulary, eligible or not (W1-T4283).
-  const outcomeDescriptions = candidate.signals.map(outcomeFor);
-  const workflow = transcripts
-    ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
-    : undefined;
-  const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
-  // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
-  // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
-  // draft; with no mined steps it stays, so stageSkillDraft refuses the outcome-only procedure.
-  // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
-  const steps = eligibleSignals
-    .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
-    .filter(({ line, outcome }) => workflowSteps.length === 0 || !restatesOutcome(line, outcome))
-    .map(({ line }) => line);
-  const evidence = [
-    ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
-    `- Filed under: ${candidate.taskIds.join(", ")}`,
-    ...(workflow ? workflow.runIds.map((runId) => `- [src: transcript#${runId}]`) : []),
-  ];
+  const outcomeDescriptions = candidate.signals.map((key) => candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key);
+  const round = (n: number): string => String(Math.round(n));
   const markdown = [
     "---",
     `name: ${name}`,
@@ -185,19 +173,22 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
     ...(appliesTo ? [`applies-to: ${appliesTo}`] : []),
     "---",
     "",
-    "<!-- DRAFTED by skill-workshop.ts (W1-T2766) from a mined procedural candidate — a Rule 15",
+    "<!-- DRAFTED by skill-workshop.ts (W1-T13857) from a command sequence that recurs across runs — a Rule 15",
     "     plan write the Architect proposes and the operator ratifies, not yet ratified. -->",
     "",
     "## Procedure",
     "",
-    ...steps,
-    ...workflowSteps,
+    ...procedure.steps.map((step) => procedureStepLine(step)!),
     "",
     "## Evidence",
     "",
-    ...evidence,
+    `- Recurs in ${procedure.recurrence} runs of ${procedure.taskIds.length} tasks: ${procedure.taskIds.join(", ")}.`,
+    `- Median tool calls from the first step to the last: ${procedure.medianSpannedCalls}.`,
+    procedure.estimatedTokensPerRun === null ? "- tokens: not measured" : `- Estimated output tokens per run: ${round(procedure.estimatedTokensPerRun)}.`,
+    `- Score: ${round(procedure.score)}.`,
+    ...procedure.runIds.map((runId) => `- [src: run#${runId}]`),
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns, outcomeDescriptions };
+  return { name, description, markdown, candidateHash: proceduralCandidateHash(candidate), procedureKey, supportingRuns: procedure.recurrence, outcomeDescriptions };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -312,8 +303,6 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(out);
 }
 
-const KNOWN_TOOL_NAMES = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"] as const;
-
 /** Phrasings the untrusted envelope (W1-T2700) would fence as an instruction aimed at the reader
  *  rather than data describing a procedure — a small, curated set of classic injection shapes,
  *  deliberately narrower than "any imperative sentence" (a SKILL.md's whole body is imperative). */
@@ -332,6 +321,60 @@ export interface SkillDraftScanResult {
   ok: boolean;
   offendingLine?: string;
   reason?: string;
+}
+
+/** The verbs a Procedure step may start with (W1-T13857). A new action verb is a new row here. */
+const SKILL_ACTION_VERBS: ReadonlySet<string> = new Set([
+  "Run", "Rerun", "Change", "Create", "Add", "Delete", "Commit", "Push", "Fetch", "Merge", "Open", "Reserve", "Claim", "Copy",
+]);
+
+const PROCEDURE_BULLET = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)(.*)$/;
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/** Comments and fences are opaque to section tracking. The scanner still checks the raw lines. */
+function* skillDraftLines(markdown: string): Generator<{ line: string; bullet: string | undefined }> {
+  let procedureLevel: number | undefined;
+  let fence: string | undefined;
+  let inComment = false;
+  let paragraph: string | undefined;
+  for (const line of markdown.split(/\r?\n/)) {
+    let bullet: string | undefined;
+    let nextParagraph: string | undefined;
+    if (fence) {
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (close && close[0] === fence[0] && close.length >= fence.length) fence = undefined;
+    } else if (inComment || /^ {0,3}<!--/.test(line)) {
+      inComment = !line.includes("-->");
+    } else {
+      fence = FENCE_OPEN.exec(line)?.[1];
+      if (!fence) {
+        const atx = /^ {0,3}(#{1,6})(?:[ \t]+|$)(.*)$/.exec(line);
+        const setext = paragraph === undefined ? null : /^ {0,3}(=+|-+)[ \t]*$/.exec(line);
+        if (atx || setext) {
+          const level = atx ? atx[1]!.length : (setext?.[1]?.startsWith("=") ? 1 : 2);
+          const title = atx ? atx[2]!.replace(/[ \t]+#+[ \t]*$/, "").trim() : paragraph;
+          if (title === "Procedure") procedureLevel = level;
+          else if (procedureLevel !== undefined && level <= Math.max(2, procedureLevel)) procedureLevel = undefined;
+        } else if (!/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)) {
+          const item = PROCEDURE_BULLET.exec(line)?.[1];
+          if (procedureLevel !== undefined) bullet = item;
+          if (item === undefined && /^ {0,3}(?!>)\S/.test(line)) {
+            nextParagraph = paragraph === undefined ? line.trim() : "";
+          }
+        }
+      }
+    }
+    paragraph = nextParagraph;
+    yield { line, bullet };
+  }
+}
+
+function hasNonblankCodeSpan(text: string): boolean {
+  for (const span of text.matchAll(/(?<![`\\])(`+)(?!`)(.*?)(?<!`)\1(?!`)/g)) {
+    if (span[2]!.trim()) return true;
+  }
+  return false;
 }
 
 const STEP_FILLER_WORDS = new Set("a an the and or are as at be been being by for from has have had in is it of on that to was were with".split(" "));
@@ -360,9 +403,8 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
   const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
   const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
-  let inProcedure = false;
-  for (const line of draft.markdown.split("\n")) {
-    if (line.startsWith("## ")) inProcedure = line === "## Procedure";
+  const knownTools = allowlist.capabilityContext ? CAPABILITY_TOOL_NAMES : KNOWN_TOOL_NAMES;
+  for (const { line, bullet } of skillDraftLines(draft.markdown)) {
     const hostMatch = line.match(/https?:\/\/([a-zA-Z0-9.-]+)/);
     if (hostMatch && !allowlist.allowedHosts.includes(hostMatch[1])) {
       return { ok: false, offendingLine: line, reason: `names host '${hostMatch[1]}' outside the worker allowlist` };
@@ -372,11 +414,9 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         return { ok: false, offendingLine: line, reason: `names a path the worker's deny-floor already refuses ('${pattern.source}')` };
       }
     }
-    const toolNames = allowlist.capabilityContext ? [...KNOWN_TOOL_NAMES, "Grep", "Glob", "RunCheck"] : KNOWN_TOOL_NAMES;
-    const toolMatches = line.matchAll(new RegExp(`\\b(${toolNames.join("|")})\\b`, "g"));
-    for (const toolMatch of toolMatches) {
-      if (!allowlist.allowedTools.some(t => t === toolMatch[1] || (!allowlist.capabilityContext && t.startsWith(`${toolMatch[1]}(`)))) {
-        return { ok: false, offendingLine: line, reason: `names tool '${toolMatch[1]}' outside the worker allowlist` };
+    for (const toolName of toolNamesIn(line, knownTools)) {
+      if (!allowlist.allowedTools.some(t => t === toolName || (!allowlist.capabilityContext && t.startsWith(`${toolName}(`)))) {
+        return { ok: false, offendingLine: line, reason: `names tool '${toolName}' outside the worker allowlist` };
       }
     }
     for (const pattern of INSTRUCTION_INJECTION_PATTERNS) {
@@ -388,10 +428,14 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
         };
       }
     }
-    if (inProcedure && line.startsWith("- ")) {
-      const tokens = stepContentTokens(line);
-      if (outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
+    if (bullet !== undefined) {
+      const tokens = stepContentTokens(bullet);
+      if (tokens.length > 0 && outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
         return { ok: false, offendingLine: line, reason: "outcome-only: step restates its mined outcome without adding behavioral content" };
+      }
+      const verb = bullet.split(/\s+/, 1)[0]!;
+      if (!SKILL_ACTION_VERBS.has(verb) || !hasNonblankCodeSpan(bullet)) {
+        return { ok: false, offendingLine: line, reason: "not-an-action: a Procedure step starts with an action verb and names a backticked command or path" };
       }
     }
   }
@@ -425,10 +469,10 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
 
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
-/** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
- *  run set. Hashed so the id stays the same shape as before. */
-export function procedureKeyFor(candidate: Pick<ProceduralCandidateLike, "shapeKey" | "taskType">): string {
-  return createHash("sha256").update(`${candidate.taskType}|${candidate.shapeKey}`).digest("hex").slice(0, 16);
+/** W1-T3385c, W1-T13857 — the PROCEDURE's identity: the task type and its ordered steps, and NOT its run set, so
+ *  one procedure keeps one proposal id as its runs grow. */
+export function procedureKeyFor(procedure: { taskType: string; steps: readonly string[] }): string {
+  return createHash("sha256").update([procedure.taskType, ...procedure.steps].join("|")).digest("hex").slice(0, 16);
 }
 
 /**
@@ -481,8 +525,11 @@ export function skillFileStagedAtMs(value: string | undefined): number | null {
 }
 
 function procedureStepLines(markdown: string): string[] {
-  const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) => line.startsWith("- "));
+  const steps: string[] = [];
+  for (const { bullet } of skillDraftLines(markdown)) {
+    if (bullet !== undefined) steps.push(bullet);
+  }
+  return steps;
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
@@ -490,7 +537,7 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
   return procedureStepLines(markdown).filter((line) => !descriptions.some((description) => restatesOutcome(line, description)));
 }
 
-const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
+const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT));
 
 /** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
 function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
@@ -521,7 +568,7 @@ type SkillDraftLog = (step: string, extra?: Record<string, unknown>, expectedLiv
 function closeSkillDraft(
   registryPath: string,
   proposalId: string,
-  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion: string } | undefined),
+  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion?: string } | undefined),
   log: SkillDraftLog,
   clock: Pick<Clock, "iso">,
 ): boolean {
@@ -1680,7 +1727,7 @@ export function stageSkillDrafts(
   drafts: readonly SkillDraft[],
   allowlist: WorkerAllowlist | ((draft: SkillDraft) => WorkerAllowlist),
   reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
-  log: (step: string, extra?: Record<string, unknown>) => void,
+  log: SkillDraftLog,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
@@ -1694,6 +1741,51 @@ export function stageSkillDrafts(
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, closed, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });
+    }
+  }
+  withdrawLegacyOutcomeOnlyDrafts(registryPath, new Set(drafts.map((draft) => skillDraftProposalId(draft.procedureKey))), log);
+}
+
+/** Legacy signal-only text no longer comes back through renderSkillDraft. Recheck the stored payload in place. */
+function withdrawLegacyOutcomeOnlyDrafts(registryPath: string, incomingIds: ReadonlySet<string>, log: SkillDraftLog): void {
+  let proposals: Proposal[];
+  try {
+    proposals = loadProposalRegistry(registryPath);
+  } catch (error) {
+    log("skill.stage_failed", { error: String(error) });
+    return;
+  }
+  const stateDir = dirname(registryPath);
+  const livePath = ledgerLivePath(stateDir);
+  for (const proposal of proposals) {
+    const { id, skillFile } = proposal;
+    if (!id.startsWith(SKILL_DRAFT_ID_PREFIX) || incomingIds.has(id) || !skillFile ||
+      workshopClosedSkillDraft(proposal) || !outcomeOnlyDraftRefusal(skillFile.markdown)) continue;
+    try {
+      let refusal: string | undefined;
+      const closed = withSkillDraftVerdictLock(stateDir, id, () => withLedgerRotationLock(stateDir, () =>
+        closeSkillDraft(registryPath, id, (entry) => {
+          refusal = entry.skillFile && outcomeOnlyDraftRefusal(entry.skillFile.markdown);
+          if (!refusal) return undefined;
+          const liveVersion = archiveVersion(livePath);
+          const pattern = new RegExp(JSON.stringify(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+          const union = readLedgerUnionRecordsSync(stateDir, {
+            step: SKILL_DRAFT_VERDICT_STEPS, pattern, where: (row) => row.task_id === id, refuseIncomplete: true,
+          });
+          if (!union.ok || union.torn > 0 || liveVersion !== archiveVersion(livePath)) {
+            throw new Error(`could not verify the ledger verdict for ${id}`);
+          }
+          const verdicts = ledgerProposalVerdicts(union.rows);
+          if (verdicts.isRatified(id) || verdicts.isDeclined(id) !== undefined) return undefined;
+          return { reason: `withdrawn: ${refusal}`, liveVersion };
+        }, log, systemClock)));
+      if (typeof closed === "object") throw new Error(closed.unmeasured);
+      if (closed) {
+        log("skill.staged", { name: skillFile.name, staged: false, already: false, backfilled: false, refreshed: false,
+          refused: true, closed, reason: refusal });
+      }
+    } catch (error) {
+      log("skill.stage_failed", { name: skillFile.name, error: String(error) });
     }
   }
 }

@@ -19,12 +19,18 @@ function candidate(taskType: string): ProceduralCandidateLike {
   };
 }
 
+const MINED = {
+  runs: ["RUN-1", "RUN-2"].map((runId, i) => ({ runId, taskId: `W1-T${i + 1}`, type: "implement", verdict: "merged" })),
+  records: ["RUN-1", "RUN-2"].flatMap((runId) => ["Bash:npm run typecheck", "Edit:src/lib/plan.ts"].map((tool_signature) =>
+    ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: tool_signature.split(":")[0], tool_signature }))),
+};
+
 function loadDraft(markdown: string, name: string) {
   return loadInjectableSkills("approved-tree", () => [name], () => markdown);
 }
 
 test("a drafted skill round-trips through the approved-tree loader and selects for its own task type", () => {
-  const draft = renderSkillDraft(candidate("implement"));
+  const draft = renderSkillDraft(candidate("implement"), MINED);
   assert.ok(draft);
   assert.match(draft.markdown, /^applies-to: implement$/m);
 
@@ -35,7 +41,7 @@ test("a drafted skill round-trips through the approved-tree loader and selects f
 });
 
 test("an unrecognised candidate task type stays unselectable instead of defaulting to implement", () => {
-  const draft = renderSkillDraft(candidate("novel-task-type"));
+  const draft = renderSkillDraft(candidate("novel-task-type"), MINED);
   assert.ok(draft);
   assert.doesNotMatch(draft.markdown, /^applies-to:/m);
   assert.deepEqual(loadDraft(draft.markdown, draft.name), []);

@@ -14,19 +14,20 @@
  */
 
 import type { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exactBinomialHalfPValue } from "./benchmark-aa.js";
 import { activePaidPilotProtocols, PAIRED_TRIAL_STEPS, pairedSampleDraw, paidPilotArmAdmission, paidPilotArmFor,
   readPaidPilotControls, readPaidPilotEvidence, summarizePaidPilotSpend, type PaidPilotArm, type PaidPilotControlState,
   type PaidPilotEvidence, type PaidPilotProtocol, type PaidPilotRow, type PaidPilotSpend, type PairedPilotReportView } from "./benchmark-paid-pilot.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, type BenchmarkStackEvidence } from "./benchmark-run.js";
+import { BENCHMARK_RUNTIME_EXCLUSIONS, BENCHMARK_RUNTIME_FIELDS, benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt,
+  benchmarkRuntimeFingerprint, type BenchmarkRuntimeContext, type BenchmarkRuntimeField, type BenchmarkStackEvidence } from "./benchmark-run.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import type { WorkerProviderId } from "./config-schema.js";
 import { billingMode } from "./env.js";
-import { buildEvalCard, normalQuantile, type EvalCard, type EvalCardEvidence } from "./eval-card.js";
+import { buildEvalCard, canonicalProtocolText, normalQuantile, type EvalCard, type EvalCardEvidence } from "./eval-card.js";
 import { scoreCorpusReplay, type CorpusProofOutcome } from "./golden-corpus.js";
 import { resolveInstallRoot } from "./install-root.js";
 import type { AcceptanceCriterion, Task } from "./plan.js";
@@ -38,6 +39,63 @@ import { hostWorktreeGit } from "./worktree-git.js";
 
 export const PAIRED_PILOT_REPORT_VERSION = "benchmark-paired-pilot-v1" as const;
 const PAIRED_ALPHA = 0.05;
+const RUNTIME_DIRECTIVE = "paired-runtime-cohort-v1:";
+const ARM_TREATMENTS = ["model", "provider", "effort"] as const;
+type RuntimeTreatments = Partial<Record<typeof ARM_TREATMENTS[number], true> & Record<BenchmarkRuntimeField, Record<PaidPilotArm, string>>>;
+const RUNTIME_EXCLUSIONS = new Set([
+  ...BENCHMARK_RUNTIME_EXCLUSIONS, "legacy-runtime-evidence", "runtime-protocol-unregistered", "runtime-protocol-invalid",
+  "runtime-stack-unpinned", "runtime-stack-off-pin", "runtime-arm-unresolved", "runtime-arm-off-pin", "runtime-evidence-not-recorded",
+  ...ARM_TREATMENTS.map((field) => `runtime-difference:${field}`),
+  ...BENCHMARK_RUNTIME_FIELDS.flatMap((field) => [`runtime-difference:${field}`, `runtime-treatment-off-pin:${field}`]),
+]);
+
+/** The operator's immutable protocol text may include one versioned JSON line. Arm-level
+ *  treatments use the registered arm pins. Runtime treatments name exact fingerprints per arm. */
+function runtimeTreatments(protocol: PaidPilotProtocol): RuntimeTreatments | "runtime-protocol-unregistered" | "runtime-protocol-invalid" {
+  const lines = canonicalProtocolText(protocol.protocolText).split("\n").map((line) => line.trimStart())
+    .filter((line) => line.startsWith("paired-runtime-cohort-"));
+  if (lines.length === 0) return "runtime-protocol-unregistered";
+  if (lines.length !== 1 || !lines[0]!.startsWith(RUNTIME_DIRECTIVE)) return "runtime-protocol-invalid";
+  let declaration: unknown;
+  try {
+    declaration = JSON.parse(lines[0]!.slice(RUNTIME_DIRECTIVE.length));
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return "runtime-protocol-invalid";
+  }
+  if (declaration === null || typeof declaration !== "object" || Array.isArray(declaration)) return "runtime-protocol-invalid";
+  const treatments: RuntimeTreatments = {};
+  for (const [key, value] of Object.entries(declaration)) {
+    const armField = ARM_TREATMENTS.find((field) => field === key);
+    if (armField !== undefined && value === true) { treatments[armField] = true; continue; }
+    const runtimeField = BENCHMARK_RUNTIME_FIELDS.find((field) => field === key);
+    if (runtimeField === undefined || value === null || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).length !== 2 || !Object.hasOwn(value, "paid") || !Object.hasOwn(value, "control"))
+      return "runtime-protocol-invalid";
+    const paid = benchmarkRuntimeFingerprint(runtimeField, value.paid);
+    const control = benchmarkRuntimeFingerprint(runtimeField, value.control);
+    if (paid === null || control === null) return "runtime-protocol-invalid";
+    treatments[runtimeField] = { paid, control };
+  }
+  return treatments;
+}
+
+function runtimeDifferences(protocol: PaidPilotProtocol, treatments: RuntimeTreatments, paid: BenchmarkRuntimeContext, control: BenchmarkRuntimeContext) {
+  const exclusions: string[] = ARM_TREATMENTS
+    .filter((field) => !treatments[field] && protocol.arms.paid[field] !== protocol.arms.control[field])
+    .map((field) => `runtime-difference:${field}`);
+  for (const field of BENCHMARK_RUNTIME_FIELDS) {
+    const planned = treatments[field];
+    if (planned !== undefined) {
+      if (paid[field] !== planned.paid || control[field] !== planned.control) exclusions.push(`runtime-treatment-off-pin:${field}`);
+    } else if (paid[field] !== control[field]) exclusions.push(`runtime-difference:${field}`);
+  }
+  return exclusions;
+}
+
+function runtimeProtocolMarker(protocol: PaidPilotProtocol): string {
+  return `${RUNTIME_DIRECTIVE}${protocol.digest}`;
+}
 
 /** The seeded attempt order: the W1-T4603 draw names the arm that runs first, so it is stable per task. */
 export function pairedAttemptOrder(protocol: Pick<PaidPilotProtocol, "assignment">, taskId: string): [PaidPilotArm, PaidPilotArm] {
@@ -72,6 +130,8 @@ export interface PairedAttemptRequest<Arm extends string = PaidPilotArm> {
   isolation: { worktree: "fresh-detached"; push: false; openPr: false; merge: false };
   /** The pins the dispatcher passes into the attempt's own worker assignment receipt. */
   stackEvidence: BenchmarkStackEvidence;
+  /** Per-invocation identity for joining the worker's own observed runtime receipt. */
+  runtimeRun?: { id: string; startedAt: number };
   /** Optional cancellation of this sealed side attempt; absent keeps ordinary trials unchanged. */
   signal?: AbortSignal;
 }
@@ -83,6 +143,8 @@ export interface PairedAttemptResult {
   servedModel: string | null;
   billingMode: "api" | "subscription" | null;
   costUsd: number | null;
+  /** Optional metadata returned by the executing worker adapter. */
+  harnessContract?: unknown;
   /** Any value here is an isolation breach: the attempt left the sandbox, so the pair is unmeasurable. */
   pushedRef?: string | null;
   prUrl?: string | null;
@@ -160,7 +222,9 @@ export type PairedTrialResult =
   | { state: "not-eligible"; pilotId: string }
   | { state: "not-sampled" | "shadow" | "refused"; pilotId: string; pairId: string; order: PaidPilotArm[]; reasons: string[] }
   | { state: "measured" | "unmeasurable"; pilotId: string; pairId: string; order: PaidPilotArm[]; reasons: string[];
-    outcomes: Record<PaidPilotArm, CorpusProofOutcome | "not-run">; merged: false };
+    outcomes: Record<PaidPilotArm, CorpusProofOutcome | "not-run">; merged: false;
+    /** The grades describe the heads. Cohort eligibility also requires observations of both runtimes. */
+    runtimeCohort: { state: "comparable" | "unmeasurable"; exclusions: string[] } };
 
 /** A live protocol wins over a shadow one; an unpaired protocol never pairs. */
 function selectPairedProtocol(protocols: readonly PaidPilotProtocol[]): PaidPilotProtocol | null {
@@ -219,13 +283,18 @@ function harnessDeviations(protocol: PaidPilotProtocol, executing: { state: stri
   return executing.value === protocol.revisions.harnessRevision ? [] : [`harnessRevision:executing-${executing.value}-pinned-${protocol.revisions.harnessRevision}`];
 }
 
+type RuntimeEvidence = ReturnType<typeof benchmarkRunAssignmentReceipt>["stack"]["runtime"];
+type TrialAttempt = { outcome: CorpusProofOutcome; reasons: string[]; deviations: string[]; runtime?: RuntimeEvidence; runtimeExclusion?: string };
+
 async function runAttempt(context: TrialContext, arm: PaidPilotArm, position: 0 | 1,
-  dispatch: PairedAttemptDispatch): Promise<{ outcome: CorpusProofOutcome; reasons: string[]; deviations: string[] }> {
+  dispatch: PairedAttemptDispatch): Promise<TrialAttempt> {
   const { input, protocol, pairId } = context;
   const pin = protocol.arms[arm];
   const stackEvidence = pairedStackEvidence(protocol, input.harnessRevision);
-  const receipt = benchmarkRunAssignmentReceipt({ id: `${pairId}:${arm}`, requested: { model: pin.model, effort: pin.effort },
-    selected: { provider: pin.provider, model: pin.model, effort: pin.effort } }, pinnedWork(protocol, input.task.id), stackEvidence);
+  const clock = input.clock ?? systemClock;
+  const assignment = { id: `paired-${pairId}-${arm}-${randomUUID()}`, requested: { model: pin.model, effort: pin.effort }, selected: pin };
+  const work = pinnedWork(protocol, input.task.id);
+  const receipt = benchmarkRunAssignmentReceipt(assignment, work, stackEvidence);
   const deviations = harnessDeviations(protocol, receipt.stack.harnessRevision);
   const base = { pilot_id: protocol.pilotId, pair_id: pairId, arm, position, stack_deviations: deviations };
   if (!safeLog(input.log, PAIRED_TRIAL_STEPS.spawn, { paired_trial: base, benchmark_run: { ...receipt,
@@ -233,13 +302,18 @@ async function runAttempt(context: TrialContext, arm: PaidPilotArm, position: 0 
     return { outcome: "unmeasurable", reasons: [`spawn-marker-not-recorded:${arm}`], deviations };
   const reasons: string[] = [];
   let attempt: PairedAttemptResult | null = null;
+  const startedAt = clock.now();
   try {
     attempt = await dispatch({ pilotId: protocol.pilotId, pairId, taskId: input.task.id, arm, position, pin: protocol.arms[arm],
-      revisions: protocol.revisions, isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false }, stackEvidence });
+      revisions: protocol.revisions, isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false },
+      stackEvidence, runtimeRun: { id: assignment.id, startedAt } });
   } catch {
     const reason = `attempt-failed:${arm}`;
     reasons.push(reason);
   }
+  const observation = benchmarkRunAssignmentReceipt(assignment, work, { ...stackEvidence,
+    runtime: { receipt: attempt?.harnessContract, startedAt, finishedAt: clock.now() } });
+  const runtime = observation.stack.runtime;
   let grade: PairedGrade | null = null;
   if (attempt !== null && (attempt.pushedRef || attempt.prUrl || attempt.breach)) reasons.push(`isolation-breach:${arm}`);
   else if (attempt !== null && attempt.headDir !== null) {
@@ -252,16 +326,23 @@ async function runAttempt(context: TrialContext, arm: PaidPilotArm, position: 0 
   } else if (attempt !== null) reasons.push(`no-head:${arm}`);
   const outcome: CorpusProofOutcome = reasons.length === 0 && grade !== null ? grade.verdict : "unmeasurable";
   if (outcome === "unmeasurable" && grade !== null) reasons.push(`ungradeable:${arm}`);
-  safeLog(input.log, PAIRED_TRIAL_STEPS.attempt, { paired_trial: { ...base, outcome, reasons, head_sha: attempt?.headSha ?? null,
+  const servedModel = attempt?.servedModel ?? null;
+  const recorded = safeLog(input.log, PAIRED_TRIAL_STEPS.attempt, { paired_trial: { ...base, outcome, reasons, head_sha: attempt?.headSha ?? null,
     isolation_breach: attempt?.pushedRef || attempt?.prUrl || attempt?.breach || null,
     grade: grade === null ? null : { passed: grade.passed, failed: grade.failed, unmeasurable: grade.unmeasurable, holdouts: grade.holdouts } },
-    served_model: attempt?.servedModel ?? null, billing_mode: attempt?.billingMode ?? null, total_cost_usd: attempt?.costUsd ?? null });
+    benchmark_run: observation, served_model: servedModel,
+    billing_mode: attempt?.billingMode ?? null, total_cost_usd: attempt?.costUsd ?? null });
   try { attempt?.cleanup?.(); }
   catch {
     const reason = `cleanup-failed:${arm}`;
     reasons.push(reason);
   }
-  return { outcome, reasons, deviations };
+  const runtimeExclusion = !recorded ? "runtime-evidence-not-recorded"
+    : runtime.state === "unavailable" ? runtime.reason
+      : servedModel === null || servedModel.length === 0 ? "runtime-arm-unresolved"
+        : servedModel !== pin.model || runtime.value.provider !== pin.provider || runtime.value.effort !== pin.effort
+          ? "runtime-arm-off-pin" : undefined;
+  return { outcome, reasons, deviations, runtime, runtimeExclusion };
 }
 
 async function runPair(context: TrialContext, dispatch: PairedAttemptDispatch): Promise<PairedTrialResult> {
@@ -269,6 +350,8 @@ async function runPair(context: TrialContext, dispatch: PairedAttemptDispatch): 
   const outcomes: Record<PaidPilotArm, CorpusProofOutcome | "not-run"> = { paid: "not-run", control: "not-run" };
   const reasons: string[] = [];
   const deviations = new Set<string>();
+  const exclusions = new Set<string>();
+  const runtimes: Partial<Record<PaidPilotArm, BenchmarkRuntimeContext>> = {};
   for (const [position, arm] of order.entries()) {
     if (arm === "paid") {
       const held = await paidAdmissionReasons(context);
@@ -278,13 +361,24 @@ async function runPair(context: TrialContext, dispatch: PairedAttemptDispatch): 
     outcomes[arm] = attempt.outcome;
     reasons.push(...attempt.reasons);
     for (const deviation of attempt.deviations) deviations.add(deviation);
+    if (attempt.runtimeExclusion !== undefined) exclusions.add(attempt.runtimeExclusion);
+    if (attempt.runtime?.state === "observed") runtimes[arm] = attempt.runtime.value;
     if (attempt.outcome === "unmeasurable") { reasons.push("stopped-after-an-unmeasurable-attempt"); break; }
   }
   const measured = outcomes.paid !== "not-run" && outcomes.paid !== "unmeasurable" && outcomes.control !== "not-run" && outcomes.control !== "unmeasurable";
   const state = measured ? "measured" as const : "unmeasurable" as const;
+  const treatments = runtimeTreatments(protocol);
+  if (typeof treatments === "string") exclusions.add(treatments);
+  else if (runtimes.paid && runtimes.control) {
+    for (const reason of runtimeDifferences(protocol, treatments, runtimes.paid, runtimes.control)) exclusions.add(reason);
+  }
+  for (const deviation of deviations) exclusions.add(deviation === "harnessRevision:unpinned" ? "runtime-stack-unpinned" : "runtime-stack-off-pin");
+  const comparable = measured && exclusions.size === 0;
+  const runtimeCohort = { state: comparable ? "comparable" as const : "unmeasurable" as const, exclusions: [...exclusions].sort() };
   safeLog(input.log, PAIRED_TRIAL_STEPS.pair, { paired_trial: { pilot_id: protocol.pilotId, pair_id: pairId, order, outcomes,
-    status: state, reasons, stack_deviations: [...deviations], merged: false, pr_opened: false } });
-  return { state, pilotId: protocol.pilotId, pairId, order, reasons, outcomes, merged: false };
+    status: comparable ? "measured" : "unmeasurable", reasons: [...reasons, ...runtimeCohort.exclusions, runtimeProtocolMarker(protocol)],
+    stack_deviations: [...deviations], merged: false, pr_opened: false } });
+  return { state, pilotId: protocol.pilotId, pairId, order, reasons, outcomes, merged: false, runtimeCohort };
 }
 
 async function pairedTrial(input: PairedTrialInput, claim: () => boolean): Promise<PairedTrialResult> {
@@ -492,7 +586,7 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
         prompt: `${renderImplementPrompt(options.task, "", attemptId, "", "", "", options.skillsPartFor?.(request) ?? "")}\n${SEALED_ATTEMPT_CONTRACT_LINES.join("\n")}`,
         model: request.pin.model, effort: request.pin.effort, mountProvider: request.pin.provider as WorkerProviderId,
         maxBudgetUsd: Math.min(options.maxBudgetUsd ?? PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_ATTEMPT_MAX_BUDGET_USD),
-        runId: `paired-${attemptId}`, taskId: `${request.pairId}:${request.arm}`,
+        runId: request.runtimeRun?.id ?? `paired-${attemptId}`, taskId: `${request.pairId}:${request.arm}`,
         env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.pushurl", GIT_CONFIG_VALUE_0: "sealed-paired-attempt://push-refused" },
         ...(options.clockBoundMs === undefined ? {} : { clockBound: { boundMs: options.clockBoundMs } }),
         ...(request.signal === undefined ? {} : { signal: request.signal }),
@@ -504,6 +598,7 @@ export function sealedPairedAttemptDispatcher(options: SealedPairedAttemptOption
       const measurable = sealed && !result.apiError && result.usageRefusal === undefined;
       if (measurable) commitSealedEdits(dir);
       return { headDir: measurable ? dir : null, headSha: gitProbe(dir, ["rev-parse", "HEAD"]), servedModel: result.servedModel ?? null,
+        ...("harnessContract" in result ? { harnessContract: result.harnessContract } : {}),
         billingMode: result.provider === "cash" ? "api" : billingMode(result.childEnvKeys), costUsd: result.costUsd, ...reading, cleanup };
     } catch (error) {
       cleanup();
@@ -553,8 +648,10 @@ export interface PairedPilotReport {
   decisions: { eligible: number; sampled: number; admitted: number; refusedBy: Record<string, number>;
     order: { paidFirst: number; controlFirst: number; exactBinomialPValue: number | null } };
   pairs: { pairId: string; order: PaidPilotArm[] | null; status: string; outcomes: Record<PaidPilotArm, string> | null;
+    runtimeExclusions: string[];
     attempts: { arm: PaidPilotArm | null; servedModel: string | null; billingMode: string | null; costUsd: number | null }[] }[];
   counts: { measured: number; unmeasurable: number };
+  runtimeCohort: { comparable: number; completed: number; exclusions: Record<string, number> };
   stack: { revisions: PaidPilotProtocol["revisions"]; deviatingPairs: number; deviations: string[]; offPinAttempts: number; unpinnedAttempts: number };
   mcnemar: ReturnType<typeof mcnemarExact>;
   difference: PairedDifference;
@@ -593,10 +690,19 @@ export function buildPairedPilotReport(input: { protocol: PaidPilotProtocol; evi
   const pairRows = onePerPair(rows, PAIRED_TRIAL_STEPS.pair);
   const attempts = rows.filter((row) => row.step === PAIRED_TRIAL_STEPS.attempt);
   const spawns = rows.filter((row) => row.step === PAIRED_TRIAL_STEPS.spawn);
-  const pairs = [...pairRows.values()].map((row) => ({ pairId: row.paired!.pairId, order: row.paired!.order, status: row.paired!.status ?? "unknown",
-    outcomes: row.paired!.outcomes, attempts: attempts.filter((attempt) => attempt.paired!.pairId === row.paired!.pairId).map((attempt) => ({
-      arm: attempt.paired!.arm, servedModel: attempt.servedModel, billingMode: attempt.billingMode,
-      costUsd: attempt.cost.state === "observed" ? attempt.cost.usd : null })) }));
+  const exclusions: Record<string, number> = {};
+  const marker = runtimeProtocolMarker(protocol);
+  const pairs = [...pairRows.values()].map((row) => {
+    const pair = row.paired!;
+    const runtimeExclusions = pair.reasons.includes(marker)
+      ? [...new Set(pair.reasons.filter((reason) => RUNTIME_EXCLUSIONS.has(reason)))] : ["legacy-runtime-evidence"];
+    for (const reason of runtimeExclusions) exclusions[reason] = (exclusions[reason] ?? 0) + 1;
+    const status = pair.status === "measured" && runtimeExclusions.length === 0 && gradedPair(pair.outcomes) !== null ? "measured" : "unmeasurable";
+    return { pairId: pair.pairId, order: pair.order, status, outcomes: pair.outcomes, runtimeExclusions,
+      attempts: attempts.filter((attempt) => attempt.paired!.pairId === pair.pairId).map((attempt) => ({
+        arm: attempt.paired!.arm, servedModel: attempt.servedModel, billingMode: attempt.billingMode,
+        costUsd: attempt.cost.state === "observed" ? attempt.cost.usd : null })) };
+  });
   const graded = pairs.flatMap((pair) => {
     const outcome = pair.status === "measured" ? gradedPair(pair.outcomes) : null;
     return outcome === null ? [] : [outcome];
@@ -610,7 +716,7 @@ export function buildPairedPilotReport(input: { protocol: PaidPilotProtocol; evi
     const decision = decisions.find((row) => row.paired!.pairId === pair.pairId);
     if (decision !== undefined && pair.order !== null) card.assignments.push({ unitId: pair.pairId, arm: pair.order[0]!, assignedAt: decision.ts, taskId: pair.pairId });
     for (const arm of ["paid", "control"] as const) {
-      const outcome = pair.outcomes?.[arm];
+      const outcome = pair.status === "measured" ? pair.outcomes?.[arm] : undefined;
       card.outcomes.push({ unitId: pair.pairId, arm, stratum: "paired", success: outcome === "pass" ? true : outcome === "fail" ? false : null });
     }
   }
@@ -623,6 +729,7 @@ export function buildPairedPilotReport(input: { protocol: PaidPilotProtocol; evi
       refusedBy, order: { paidFirst, controlFirst: sampled.length - paidFirst,
         exactBinomialPValue: sampled.length > 0 ? exactBinomialHalfPValue(paidFirst, sampled.length) : null } },
     pairs, counts: { measured: graded.length, unmeasurable: pairs.length - graded.length },
+    runtimeCohort: { comparable: graded.length, completed: pairs.length, exclusions },
     stack: { revisions: protocol.revisions, deviatingPairs: [...pairRows.values()].filter((row) => row.paired!.deviations.length > 0).length,
       deviations: [...new Set(rows.flatMap((row) => row.paired!.deviations))].sort(),
       offPinAttempts: spawns.filter((row) => row.revisionsOffPin > 0).length, unpinnedAttempts: spawns.filter((row) => row.revisionsUnpinned > 0).length },
@@ -652,6 +759,8 @@ export function pairedPilotReportView(input: { protocol: PaidPilotProtocol; evid
       + `${report.decisions.order.paidFirst} paid-first / ${report.decisions.order.controlFirst} control-first`,
     `  pairs ${report.counts.measured} measured, ${report.counts.unmeasurable} unmeasurable; discordant ${report.mcnemar.paidOnly} paid-only / `
       + `${report.mcnemar.controlOnly} control-only, exact McNemar p ${report.mcnemar.pValue.toFixed(4)}`,
+    `  runtime cohort ${report.runtimeCohort.comparable}/${report.runtimeCohort.completed} completed pairs comparable; exclusions `
+      + (Object.entries(report.runtimeCohort.exclusions).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none"),
     `  stack ${report.stack.deviatingPairs} deviating pair(s), ${report.stack.unpinnedAttempts} unpinned and ${report.stack.offPinAttempts} off-pin attempt(s)`,
     `  cash estimate ${spent} of $${report.cash.ceilingUsd.toFixed(2)} (paired paid attempts only); conclusion ${report.conclusion.state}; no public export`,
   ] };

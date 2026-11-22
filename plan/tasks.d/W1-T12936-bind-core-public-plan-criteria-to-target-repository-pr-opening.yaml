@@ -14,7 +14,7 @@
     - src/lib/pr-open.ts
     - src/cli/commands/run-task-verb.ts
     - test/github/a-run-for-an-ops-task-writes-its-acceptance-block-from-the-ops-catalog.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A Core task can legitimately target another repository, but the target repository's PR opener
