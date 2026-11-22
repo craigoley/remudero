@@ -433,6 +433,7 @@ import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type Bina
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { readPreopenGateRows } from "./lib/preopen-gate-health.js";
 import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -10941,7 +10942,44 @@ async function runTask(
   taskId: string,
   opts: Parameters<typeof runTaskFromModule>[1] = {},
 ): Promise<RunResult> {
-  return runTaskFromModule(taskId, opts, runTaskCommandHost());
+  const { options, host } = consoleParityPrOpenGuard(opts, runTaskCommandHost());
+  return runTaskFromModule(taskId, options, host);
+}
+
+function consoleParityPrOpenGuard(opts: NonNullable<Parameters<typeof runTaskFromModule>[1]>, host: RunTaskCommandHost) {
+  if (opts.spawn !== undefined && opts.preopenGate === undefined) {
+    return { options: opts, host };
+  }
+
+  const gate = opts.preopenGate ?? ((cwd: string) => {
+    const stateDir = dirname(ledgerPathFor(opts.config ?? loadConfig()));
+    return runPreopenGate(cwd, { history: { stateDir, readRows: () => readPreopenGateRows(stateDir) } });
+  });
+  let parityRefusal: { cwd: string; detail: string } | undefined;
+  const options: typeof opts = {
+    ...opts,
+    preopenGate: async cwd => {
+      const result = await gate(cwd);
+      const detail = result.kind === "fail" && result.failedSteps.includes("ci-checks:console-parity")
+        ? result.failedDetail?.["ci-checks:console-parity"] : undefined;
+      parityRefusal = detail && /^UNMAPPED — neither a console route nor a CLI_ONLY reason /m.test(detail)
+        ? { cwd, detail } : undefined;
+      return result;
+    },
+  };
+  const guardedHost: RunTaskCommandHost = {
+    ...host,
+    runGhPrCreate: (create, branch, log, say, ...ports) => {
+      // The implementation retry has already run. A measured parity red would send this PR to the fix lane.
+      if (parityRefusal?.cwd === create.options.cwd) {
+        log("pr.open_refused", { branch, refusal_class: "console-parity-unmapped", reason: parityRefusal.detail });
+        say(`PR open refused for ${branch} because console parity still reports unmapped commands`);
+        return {};
+      }
+      return host.runGhPrCreate(create, branch, log, say, ...ports);
+    },
+  };
+  return { options, host: guardedHost };
 }
 
 /** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
