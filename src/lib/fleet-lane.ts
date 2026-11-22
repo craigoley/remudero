@@ -74,7 +74,7 @@ export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   /** Awaited replay I/O; default held by this deps object, which the daemon resolves once for its lifetime. */
   replayRegistryReader?: BandMeaningReplayRegistryReader;
   /** W1-T9103: whether the later follow-up's text restates the earlier's (both with the minted affix stripped). Absent,
-   *  only the shared-path rule merges follow-ups; an answer of "unavailable" merges nothing and is never stored. */
+   *  only the shared-path rule merges follow-ups. An unavailable answer delays the next attempt for that pair. */
   sameFinding?: (earlier: string, later: string) => Sameness | Promise<Sameness>;
 }
 
@@ -364,6 +364,12 @@ export function readFleetLaneStore(stateDir: string): DecisionStore {
 const SAMENESS_KEY = "fleet-lane:sameness";
 type PairVerdicts = Record<string, "same" | "distinct">;
 
+const FIRST_SAMENESS_RETRY_MS = 5 * 60 * 1000;
+const MAX_SAMENESS_RETRY_MS = 60 * 60 * 1000;
+type SamenessRetry = { at: number; delayMs: number };
+// The daemon reuses its deps across passes. Retain retries only for pairs still awaiting a verdict.
+const samenessRetries = new WeakMap<FleetLaneDeps<number | Promise<number>>, Map<string, SamenessRetry>>();
+
 function readRawStore(stateDir: string): Record<string, unknown> {
   const raw = readJson(fleetLaneStorePath(stateDir));
   return raw === undefined ? {} : (JSON.parse(raw) as Record<string, unknown>);
@@ -526,14 +532,19 @@ function followupFacts(p: Proposal): FollowupFacts {
  * W1-T9103 — A FOLLOW-UP RESTATED BY A LATER ROUND OF ITS RUN IS ONE FINDING. Two open follow-ups are candidates when
  * they come from different report rows and share a source run and PR or name one task. A candidate pair merges when its
  * texts name the same first repo path, or the `sameFinding` port says the later restates the earlier; the LATER report's
- * finding is kept and the earlier declined. Each pair is judged once (its verdict is stored); an unavailable judge
- * stores nothing, merges nothing and writes `fleet_lane.sameness_unavailable`. Entries of one row are never compared.
+ * finding is kept and the earlier declined. Definitive verdicts are stored. An unavailable judge writes
+ * `fleet_lane.sameness_unavailable` and defers another attempt for that pair.
+ * Entries of one row are never compared.
  */
 function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, survivors: Proposal[]): Steps<{ merged: string[]; survivors: Proposal[] }> {
   const merged: string[] = [];
   const gone = new Set<string>();
   const facts = survivors.filter((p) => inboxKind(p.id) === "followup").map(followupFacts);
   const verdicts = ((store as Record<string, unknown>)[SAMENESS_KEY] ?? {}) as PairVerdicts;
+  const clock = deps.clock ?? systemClock;
+  const previousRetries = samenessRetries.get(deps);
+  const pendingRetries = new Map<string, SamenessRetry>();
+  const ask = deps.sameFinding;
   for (let j = 1; j < facts.length; j++) {
     const later = facts[j]!;
     for (let i = 0; i < j; i++) {
@@ -543,8 +554,12 @@ function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>
       const pair = `${earlier.proposal.id} ${later.proposal.id}`;
       const path = REPO_PATH.exec(earlier.text)?.[0];
       let verdict: Sameness | undefined = path !== undefined && path === REPO_PATH.exec(later.text)?.[0] ? "same" : verdicts[pair];
-      if (verdict === undefined && deps.sameFinding) {
-        const ask = deps.sameFinding;
+      if (verdict === undefined && ask) {
+        const retry = previousRetries?.get(pair);
+        if (retry && clock.now() < retry.at) {
+          pendingRetries.set(pair, retry);
+          continue;
+        }
         verdict = yield* step(async (): Promise<Sameness> => {
           try {
             return await ask(earlier.text, later.text);
@@ -554,6 +569,8 @@ function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>
           }
         });
         if (verdict === "unavailable") {
+          const delayMs = retry ? Math.min(retry.delayMs * 2, MAX_SAMENESS_RETRY_MS) : FIRST_SAMENESS_RETRY_MS;
+          pendingRetries.set(pair, { at: clock.now() + delayMs, delayMs });
           appendPanelLedger(deps.ledgerPath, "fleet_lane.sameness_unavailable", later.proposal.id, ORIGIN, { earlier: earlier.proposal.id });
         } else {
           verdicts[pair] = verdict;
@@ -568,6 +585,7 @@ function* mergeFollowupRestatements(deps: FleetLaneDeps<number | Promise<number>
       gone.add(earlier.proposal.id);
     }
   }
+  samenessRetries.set(deps, pendingRetries);
   return { merged, survivors: survivors.filter((p) => !gone.has(p.id)) };
 }
 
