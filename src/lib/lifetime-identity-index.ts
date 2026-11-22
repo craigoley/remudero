@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import type { LifetimeDispatchTally } from "./status.js";
+import { orphanedRunIds, type LedgerIndex, type LifetimeDispatchTally } from "./status.js";
 
 // Proposed private policy: 32 MiB of main-database pages; rollback journal stays in memory.
 export const LIFETIME_INDEX_PAGE_BYTES = 4_096;
@@ -198,4 +198,19 @@ export function createIndexedLifetimeAccounting(
       }
     },
   };
+}
+
+/** Reuse the selection pass's clock and task rows when its index belongs to these live rows. */
+export function tallyAuditedLifetimeDispatches(
+  accounting: ReturnType<typeof createIndexedLifetimeAccounting>,
+  taskId: string,
+  rows: ReadonlyArray<Record<string, unknown>>,
+  index?: LedgerIndex,
+): LifetimeDispatchTally | undefined {
+  if (accounting.unavailableReason() !== undefined) return undefined;
+  const liveIndex = index?.rows === rows ? index : undefined;
+  const orphans = orphanedRunIds(rows, taskId, liveIndex);
+  const taskRows = liveIndex === undefined ? rows : liveIndex.byTask.get(taskId) ?? [];
+  const visible = new Set(taskRows.filter((row) => row.task_id === taskId).map((row) => row.run_id));
+  return accounting.tallyFor(taskId, visible, orphans);
 }
