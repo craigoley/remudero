@@ -1,94 +1,75 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { Config } from "#src/lib/config.js";
-import { appendLedger } from "#src/lib/ledger.js";
-import { readLedgerLines } from "#src/lib/status.js";
-import type { WorkerResult } from "#src/lib/worker.js";
-import * as runTask from "#src/run-task.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
+import { armIfVerdictPermitsAsync } from "#src/lib/arm-auto-merge.js";
+import { instanceMode, readInstanceRegistryText } from "#src/lib/instance-mode.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
-// W1-T13698. A shadow instance reviews and posts exactly as a live one does, but it arms and merges
-// nothing on ANY lane: the review lane's post-verdict arm is refused like the sweep's.
+// W1-T13698. The review lane resolves its instance mode from the repository's own daemon instance
+// registry, the same `instanceMode(owner/repo, readInstanceRegistryText(root))` read the sweep makes,
+// and hands it to the arm. A registry that declares the repository shadow refuses the review lane's
+// arm before any effector runs. The end-to-end `runReview` drive of this lane lives beside the review
+// arm's other drives in test/a-reviews-status-post-and-pass-arm-await-their-transport.test.ts.
 
 const HEAD_SHA = "13698aaabbbbccccddddeeeeffff000011112222";
 const PR_URL = "https://github.com/acme/remudero/pull/13698";
 const TASK_ID = "W1-T13698";
-const DIFF = [
-  "diff --git a/plan/tasks.d/W1-T13698.yaml b/plan/tasks.d/W1-T13698.yaml",
-  "--- a/plan/tasks.d/W1-T13698.yaml",
-  "+++ b/plan/tasks.d/W1-T13698.yaml",
-  "@@ -1 +1 @@",
-  "-status: queued",
-  "+status: queued # noted",
-].join("\n");
-const CRITERION = { claim: "the shard carries its note", proof: "grep: noted plan/tasks.d/W1-T13698.yaml" };
-const BODY = `Acceptance: ${CRITERION.claim} — ${CRITERION.proof} matched`;
+const PASS = { state: "success", capped: false, planOnly: false } as const;
 
-async function driveReview(repoMode: "shadow" | "live"): Promise<{ ledger: Array<Record<string, unknown>>; armCalls: string[] }> {
-  const root = mkdtempSync(join(tmpdir(), "rmd-t13698-"));
-  mkdirSync(join(root, "state"), { recursive: true });
-  const ledgerPath = join(root, "state", "ledger.ndjson");
-  const gh = ghShim([
-    { when: "/statuses?", stdout: "[[]]" },
-    { when: "headRefOid", stdout: JSON.stringify({ headRefOid: HEAD_SHA }) },
-    { when: "pr diff", stdout: DIFF },
-    {
-      when: "pulls/",
-      stdout: JSON.stringify({ number: 13698, html_url: PR_URL, updated_at: "t", body: BODY, state: "open", head: { ref: `run-${TASK_ID}-1`, sha: HEAD_SHA } }),
-    },
-    { when: "/status", stdout: JSON.stringify({ state: "success", statuses: [] }) },
-  ]);
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${gh.dir}:${oldPath ?? ""}`;
-  const armCalls: string[] = [];
+type Row = [string, Record<string, unknown>];
+
+/** The review lane's arm, under the mode a registry with `body` resolves to for acme/remudero. */
+async function reviewArmUnderRegistry(body: string | undefined) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13698-registry-`));
   try {
-    await runTask.runReview({
-      owner: "acme",
-      repo: "remudero",
+    if (body !== undefined) {
+      mkdirSync(join(root, ".remudero"), { recursive: true });
+      writeFileSync(join(root, ".remudero", "daemon-instances.yaml"), body);
+    }
+    const repoMode = instanceMode("acme/remudero", readInstanceRegistryText(root));
+    const rows: Row[] = [];
+    const calls: string[] = [];
+    const outcome = await armIfVerdictPermitsAsync(PASS, {
       prUrl: PR_URL,
-      task: { id: TASK_ID, acceptance: [CRITERION] },
-      report: BODY,
-      settingsFile: join(root, "settings.json"),
-      config: { claudeBin: "/bin/true", root } as Config,
-      log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: "r-13698", task_id: TASK_ID, step, lane: "review", ...extra }),
-      say: () => {},
-      account: (r: WorkerResult) => r,
-      spawnReviewer: false,
-      lintPlanForReviewFn: async () => ({ ran: true as const, label: "fixture", checked: 1, violations: [] }),
-      disarm: () => "not-armed" as const,
+      taskId: TASK_ID,
+      headSha: HEAD_SHA,
+      ledgerPath: join(root, "unused-ledger.ndjson"),
+      log: (step: string, extra: Record<string, unknown> = {}) => void rows.push([step, extra]),
+      repoMode,
+    }, {
       arm: (prUrl) => {
-        armCalls.push(prUrl);
+        calls.push(prUrl);
         return "armed" as const;
       },
-      repoMode,
-      ledgerPath,
-      runId: "r-13698",
     });
-    return { ledger: readLedgerLines(ledgerPath), armCalls };
+    return { repoMode, outcome, rows, calls };
   } finally {
-    process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
-    rmSync(gh.dir, { recursive: true, force: true });
   }
 }
 
-test("a shadow instance's review lane posts its review but never arms: automerge.shadow_refused is ledgered", async () => {
-  const run = await driveReview("shadow");
-  assert.ok(run.ledger.some((l) => l.step === "review.posted"), "the review is still posted under shadow");
-  assert.deepEqual(run.armCalls, [], "the review lane's arm is never invoked under shadow");
-  const refused = run.ledger.filter((l) => l.step === "automerge.shadow_refused");
+const registry = (repo: string, mode: string) =>
+  ["instances:", "  worker:", `    github_repo: ${repo}`, `    mode: ${mode}`, ""].join("\n");
+
+test("a registry declaring the repository shadow refuses the review lane's arm: automerge.shadow_refused, no effector", async () => {
+  const run = await reviewArmUnderRegistry(registry("acme/remudero", "shadow"));
+  assert.equal(run.repoMode, "shadow", "the registry's declaration is what the review lane reads");
+  assert.equal(run.outcome, "shadow-refused");
+  assert.deepEqual(run.calls, [], "the arm effector is never reached under shadow");
+  const refused = run.rows.filter(([step]) => step === "automerge.shadow_refused");
   assert.equal(refused.length, 1);
-  assert.equal(refused[0]?.pr_url, PR_URL);
-  const skipped = run.ledger.find((l) => l.step === "automerge.arm_skipped");
-  assert.equal(skipped?.outcome, "shadow-refused");
-  assert.ok(!run.ledger.some((l) => l.step === "automerge.armed"));
+  assert.equal(refused[0]?.[1].pr_url, PR_URL);
+  assert.ok(!run.rows.some(([step]) => step === "automerge.armed"));
 });
 
-test("a live instance's review lane still arms after a passing verdict", async () => {
-  const run = await driveReview("live");
-  assert.deepEqual(run.armCalls, [PR_URL]);
-  assert.ok(!run.ledger.some((l) => l.step === "automerge.shadow_refused"));
+test("a live, foreign or absent registry declaration leaves the review lane's arm armed", async () => {
+  for (const body of [registry("acme/remudero", "live"), registry("acme/other", "shadow"), undefined]) {
+    const run = await reviewArmUnderRegistry(body);
+    assert.equal(run.repoMode, "live", `registry ${JSON.stringify(body)} resolves live`);
+    assert.equal(run.outcome, "armed");
+    assert.deepEqual(run.calls, [PR_URL]);
+    assert.ok(!run.rows.some(([step]) => step === "automerge.shadow_refused"));
+  }
 });

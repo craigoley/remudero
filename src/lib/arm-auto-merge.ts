@@ -2542,7 +2542,15 @@ type VerdictArmCtx = {
   log: (step: string, extra?: Record<string, unknown>) => void;
   /** W1-T11163: the review's fresh read of its own head, handed to the default arm as {@link ArmDeps.readChecksGreenReviewed}. */
   readChecksGreenReviewed?: (prUrl: string, headSha: string) => boolean | Promise<boolean>;
+  /** W1-T13698: the repository's instance mode. `shadow` refuses the arm (`automerge.shadow_refused`) before any effector runs. */
+  repoMode?: "shadow" | "live";
 };
+
+/** W1-T13698: the sweep's shadow refusal, on the review lane's arm too — the row, then the `shadow-refused` outcome. */
+function shadowArmRefusal(ctx: VerdictArmCtx): ArmOutcome {
+  ctx.log("automerge.shadow_refused", { pr_url: ctx.prUrl, task_id: ctx.taskId, reason: "shadow instance cannot arm or merge" });
+  return "shadow-refused";
+}
 
 /** The injectable effector and ledger read of a review arm, parameterised by what the effector returns. Named
  *  without a `Deps`/`Seams` suffix and used instead of a second inline object-literal parameter type, which the
@@ -2635,6 +2643,7 @@ export function armIfVerdictPermits(
   if (gate === "skipped") return "skipped";
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
+  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal(ctx));
   return logVerdictArmResult(ctx, gate.reason, (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId));
 }
 
@@ -2648,6 +2657,7 @@ export async function armIfVerdictPermitsAsync(
 ): Promise<ArmOutcome | "skipped"> {
   const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
+  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal(ctx));
   const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId, verdictArmDeps(ctx)));
   return logVerdictArmResult(ctx, gate.reason, await arm(ctx.prUrl, ctx.taskId));
 }

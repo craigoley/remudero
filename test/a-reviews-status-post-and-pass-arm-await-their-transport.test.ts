@@ -268,7 +268,82 @@ test("W1-T9549: the awaited review arm keeps the sync gate order and rows", asyn
     }
   }
 });
+// W1-T13698. A shadow instance reviews and posts exactly as a live one does, but it arms and merges
+// nothing on ANY lane: the review lane's post-verdict arm is refused like the sweep's. These cases
+// live here, beside the review arm's other runReview drives, because the suite already imports the
+// run-task wrapper: a new suite importing it would grow the affected-reach ceiling.
+const SHADOW_HEAD_SHA = "13698aaabbbbccccddddeeeeffff000011112222";
+const SHADOW_PR_URL = "https://github.com/acme/remudero/pull/13698";
+const SHADOW_TASK_ID = "W1-T13698";
+const SHADOW_DIFF = DIFF.split("W1-T9549").join(SHADOW_TASK_ID);
+const SHADOW_CRITERION = { claim: "the shard carries its note", proof: `grep: noted plan/tasks.d/${SHADOW_TASK_ID}.yaml` };
+const SHADOW_BODY = `Acceptance: ${SHADOW_CRITERION.claim} — ${SHADOW_CRITERION.proof} matched`;
 
+async function driveReviewInMode(repoMode: "shadow" | "live"): Promise<{ ledger: Array<Record<string, unknown>>; armCalls: string[] }> {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t13698-`));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const shim = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
+    { when: "headRefOid", stdout: JSON.stringify({ headRefOid: SHADOW_HEAD_SHA }) },
+    { when: "pr diff", stdout: SHADOW_DIFF },
+    {
+      when: "pulls/",
+      stdout: JSON.stringify({ number: 13698, html_url: SHADOW_PR_URL, updated_at: "t", body: SHADOW_BODY, state: "open",
+        head: { ref: `run-${SHADOW_TASK_ID}-1`, sha: SHADOW_HEAD_SHA } }),
+    },
+    { when: "/status", stdout: JSON.stringify({ state: "success", statuses: [] }) },
+  ], { kind: `t13698-${repoMode}` });
+  const armCalls: string[] = [];
+  try {
+    // `repoMode` is a review.ts seam the run-task wrapper's own args type does not name; it forwards the whole object.
+    const args: Parameters<typeof runReview>[0] & { repoMode: "shadow" | "live" } = {
+      owner: "acme",
+      repo: "remudero",
+      prUrl: SHADOW_PR_URL,
+      task: { id: SHADOW_TASK_ID, acceptance: [SHADOW_CRITERION] },
+      report: SHADOW_BODY,
+      settingsFile: join(root, "settings.json"),
+      config: { claudeBin: "/bin/true", root } as Config,
+      log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: "r-13698", task_id: SHADOW_TASK_ID, step, lane: "review", ...extra }),
+      say: () => {},
+      account: (r: WorkerResult) => r,
+      spawnReviewer: false,
+      lintPlanForReviewFn: async () => ({ ran: true as const, label: "fixture", checked: 1, violations: [] }),
+      disarm: () => "not-armed" as const,
+      arm: (prUrl) => {
+        armCalls.push(prUrl);
+        return "armed" as const;
+      },
+      repoMode,
+      ledgerPath,
+      runId: "r-13698",
+    };
+    await onShim(shim, () => runReview(args));
+    return { ledger: readLedgerLines(ledgerPath), armCalls };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(shim.dir, { recursive: true, force: true });
+  }
+}
+
+test("W1-T13698: a shadow instance's review lane posts its review but never arms: automerge.shadow_refused is ledgered", async () => {
+  const run = await driveReviewInMode("shadow");
+  assert.ok(run.ledger.some((l) => l.step === "review.posted"), "the review is still posted under shadow");
+  assert.deepEqual(run.armCalls, [], "the review lane's arm is never invoked under shadow");
+  const refused = run.ledger.filter((l) => l.step === "automerge.shadow_refused");
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0]?.pr_url, SHADOW_PR_URL);
+  const skipped = run.ledger.find((l) => l.step === "automerge.arm_skipped");
+  assert.equal(skipped?.outcome, "shadow-refused");
+  assert.ok(!run.ledger.some((l) => l.step === "automerge.armed"));
+});
+
+test("W1-T13698: a live instance's review lane still arms after a passing verdict", async () => {
+  const run = await driveReviewInMode("live");
+  assert.deepEqual(run.armCalls, [SHADOW_PR_URL]);
+  assert.ok(!run.ledger.some((l) => l.step === "automerge.shadow_refused"));
+});
 
 const sharedFailureHead = "90be1a69eaea5510184cf6eec69f7c72afd13c39";
 // W1-T11847: a reused verdict posts only while the reviewer code that judged it is current at origin/main.

@@ -1767,17 +1767,13 @@ export async function runReview(host: ReviewCommandHost, args: {
   phases.armStart = systemClock.now();
   reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
     row: reviewPostedRow, log, say });
-  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log,
+  // W1-T13698: a shadow instance reviews and posts exactly as live does, but arms and merges nothing —
+  // the arm refuses it (`automerge.shadow_refused`), as the sweep's does.
+  const repoMode = args.repoMode ?? instanceMode(`${owner}/${repo}`, readInstanceRegistryText(repoRoot));
+  const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log, repoMode,
     readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
-  // W1-T13698: a shadow instance reviews and posts exactly as live does, but arms and merges nothing —
-  // the sweep's refusal (`automerge.shadow_refused`), now on the review lane's arm as well.
-  const repoMode = args.repoMode ?? instanceMode(`${owner}/${repo}`, readInstanceRegistryText(repoRoot));
-  const shadowRefusal = (): ArmOutcome => {
-    log("automerge.shadow_refused", { pr_url: prUrl, task_id: task.id, reason: "shadow instance cannot arm or merge" });
-    return "shadow-refused";
-  };
-  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: repoMode === "shadow" ? shadowRefusal : args.arm });
+  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
