@@ -29230,8 +29230,9 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
           const sweep = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-          // W1-T12143: a concluded randomised winner is read first; the observational sweep's recommendations follow it.
-          const randomised = randomisedRecommendationSource({ stateDir, mountsFile: mountsPath(repoRoot), log });
+          // W1-T12143: a concluded randomised winner is the only adopt-mount evidence (configCandidates drops the
+          // sweep's); a `provider: codex` row it writes runs this host's workerProviders.codexModel.
+          const randomised = randomisedRecommendationSource({ stateDir, mountsFile: mountsPath(repoRoot), log, codexModel: config.workerProviders?.codexModel });
           const mountRecommendations = async () => (await Promise.all([randomised(), sweep()])).flat();
           return withDue(async () => {
             try {

@@ -609,10 +609,9 @@ export function mountRecommendationProposalCandidate(rec: MountRecommendation): 
  *
  * A candidate covers the auctioned routes rows (no `provider:`) whose model resolves to the capability and whose
  * effort matches (and, for a cell, whose class matches). A routes row's schema takes a `provider` (mounts.ts
- * `parseMount`), so the winner is written there. A routes row cannot pick a provider's model; the candidate lists
- * `capabilities.claude_candidates` and `capabilities.codex` do. A result whose arm is not the model the table
- * serves first is a finding naming that list, and a winner with no routes row is a finding naming
- * `capabilities.provider_preference`.
+ * `parseMount`), so the winner is written there. A pinned row runs one model ({@link RandomisedHost}); a winner
+ * whose pin would not run its measured model, or whose loser the table no longer offers, is a finding naming the
+ * setting that holds it, and a winner with no routes row is a finding naming `capabilities.provider_preference`.
  *
  * The recommender's Tier Invariant gate ({@link tierInvariantViolation}) runs on every row a candidate edits.
  * Falsifier: test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts.
@@ -744,11 +743,27 @@ function newestEvidence(rows: readonly EvidenceRow[], step: RandomisedStep, keyF
   return new Map([...best].sort(([a], [b]) => codeUnitOrder(a, b)).map(([key, { day, payload }]) => [key, { day, payload }]));
 }
 
-/** The model the table serves FIRST for `provider` at `capability`/`effort`, and the setting that lists it. */
-function servedFirst(mounts: Mounts, provider: RandomisedProvider, capability: string, effort: string): { setting: string; model: string | undefined } {
+/** What a routes row's `provider:` pin runs on this host. The pin takes worker.ts's mount-affinity path, which skips
+ *  model selection: a `provider: codex` row runs `workerProviders.codexModel`, and with none set its spawn refuses
+ *  (worker-provider.ts `codexExecArgs`); a `provider: claude` row runs the first healthy `claude_candidates` entry. */
+export interface RandomisedHost {
+  codexModel: string | undefined;
+}
+
+const CODEX_PIN_SETTING = "workerProviders.codexModel";
+
+/** The models the table offers `provider` at `capability`/`effort`, in order, and the setting that lists them. Which
+ *  one serves depends on the account's own model list (a listed model the account cannot run is skipped). */
+function offered(mounts: Mounts, provider: RandomisedProvider, capability: string, effort: string): { setting: string; models: readonly string[] } {
   return provider === "claude"
-    ? { setting: `capabilities.claude_candidates.${capability}`, model: ownEntry(mounts.capabilities?.claudeCandidates, capability)?.[0] }
-    : { setting: `capabilities.codex.${capability}.${effort}`, model: ownEntry(ownEntry(mounts.capabilities?.codex, capability), effort)?.[0] };
+    ? { setting: `capabilities.claude_candidates.${capability}`, models: ownEntry(mounts.capabilities?.claudeCandidates, capability) ?? [] }
+    : { setting: `capabilities.codex.${capability}.${effort}`, models: ownEntry(ownEntry(mounts.capabilities?.codex, capability), effort) ?? [] };
+}
+
+/** The model a routes row pinned to `provider` runs, and the setting that holds it ({@link RandomisedHost}). */
+function pinnedModel(mounts: Mounts, host: RandomisedHost, provider: RandomisedProvider, capability: string, effort: string): { setting: string; model: string | undefined } {
+  return provider === "claude" ? { setting: offered(mounts, "claude", capability, effort).setting, model: offered(mounts, "claude", capability, effort).models[0] }
+    : { setting: CODEX_PIN_SETTING, model: host.codexModel };
 }
 
 /** The result's two arms mapped to their providers through the experiment's own `arms`, in the result's order
@@ -761,21 +776,29 @@ function experimentArms(experiment: RoutingExperiment, result: Partial<RoutingEx
   return arms as [RandomisedEvidence["winner"], RandomisedEvidence["winner"]];
 }
 
-/** The first arm whose treatment is not the model the table serves first: the measured comparison is not the
- *  one the table now makes, and a routes row cannot pick a provider's model. */
-function staleTreatment(mounts: Mounts, experiment: RoutingExperiment, arms: readonly RandomisedEvidence["winner"][]): { setting: string; detail: string } | undefined {
-  for (const arm of arms) {
-    const served = servedFirst(mounts, arm.provider, experiment.capability, experiment.effort);
-    const treatment = arm.provider === "claude" ? experiment.claudeModel : experiment.codexModel;
-    if (served.model !== undefined && treatment.test(served.model)) continue;
-    return {
-      setting: served.setting,
-      detail: `${experiment.id} measured its ${arm.label} arm on ${arm.provider} as /${treatment.source}/, but ${served.setting} ` +
-        `serves ${served.model ?? "no model"} first; a routes row can name a provider, not its model, so it cannot carry the ` +
-        `measured choice — ${served.setting} is the setting that holds it.`,
-    };
+/** One concluded arm as {@link inexpressible} reads it: `measured` tests a model id against what the arm measured. */
+interface MeasuredArm {
+  label: string;
+  provider: RandomisedProvider;
+  measured: (model: string) => boolean;
+  shape: string;
+}
+
+/** Why pinning the winner's provider cannot carry a concluded result, as the setting that holds the choice; undefined
+ *  when it can. The pinned row must run the measured winner, and the table must still offer the measured loser, or
+ *  the comparison is not one the table now makes. */
+function inexpressible(mounts: Mounts, host: RandomisedHost, at: { id: string; capability: string; effort: string },
+  winner: MeasuredArm, loser: MeasuredArm): { setting: string; detail: string } | undefined {
+  const pinned = pinnedModel(mounts, host, winner.provider, at.capability, at.effort);
+  if (pinned.model === undefined || !winner.measured(pinned.model)) {
+    const refused = pinned.model === undefined && winner.provider === "codex" ? `, so its spawn refuses: this host sets no ${CODEX_PIN_SETTING}` : "";
+    return { setting: pinned.setting, detail: `${at.id} concluded ${winner.label} on ${winner.provider} as ${winner.shape}, but a routes row ` +
+      `pinned to ${winner.provider} runs ${pinned.model ?? "no model"}${refused}; ${pinned.setting} is the setting that holds the choice.` };
   }
-  return undefined;
+  const listed = offered(mounts, loser.provider, at.capability, at.effort);
+  if (listed.models.some(loser.measured)) return undefined;
+  return { setting: listed.setting, detail: `${at.id} measured its ${loser.label} arm on ${loser.provider} as ${loser.shape}, and ${listed.setting} ` +
+    `no longer offers it (${listed.models.join(", ") || "no model"}): the comparison is not one the table makes, and ${listed.setting} holds it.` };
 }
 
 function experimentPipelines(result: Partial<RoutingExperimentResult>, arms: readonly RandomisedEvidence["winner"][]): RandomisedPipeline[] {
@@ -873,9 +896,11 @@ function proposeRandomised(out: RandomisedOutcomes, mounts: Mounts, e: Omit<Rand
 /**
  * The newest `routing.experiment.result` row of each experiment and the newest `routing.policy.estimate` row of
  * each cell, as candidates, findings and refusals (see this section's header). `experiments` maps a result's arm
- * labels to providers; a result naming no listed experiment is refused. PURE, like {@link recommendMounts}.
+ * labels to providers; a result naming no listed experiment is refused. `host` says what a pinned row runs there.
+ * PURE, like {@link recommendMounts}.
  */
-export function randomisedMountRecommendations(rows: Iterable<Record<string, unknown>>, mounts: Mounts, experiments: readonly RoutingExperiment[]): RandomisedOutcomes {
+export function randomisedMountRecommendations(rows: Iterable<Record<string, unknown>>, mounts: Mounts, experiments: readonly RoutingExperiment[],
+  host: RandomisedHost): RandomisedOutcomes {
   const all = [...rows];
   const out: RandomisedOutcomes = { recommendations: [], findings: [], refusals: [] };
   const decided = new Set<string>();
@@ -892,17 +917,22 @@ export function randomisedMountRecommendations(rows: Iterable<Record<string, unk
       refuse(result.status === "underpowered" ? "underpowered" : "running", `${id} is ${evidenceText(result.status) || "unreadable"} on ${day}`);
       continue;
     }
-    const stale = staleTreatment(mounts, experiment, arms);
-    if (stale !== undefined) {
-      out.findings.push({ step: RANDOMISED_EXPERIMENT_STEP, id, day, ...stale });
-      continue;
-    }
+    // Concluded, it decides its cell: winner or not, and whether or not the table can carry it.
     decided.add(`${experiment.capability}/${experiment.effort}`);
     const pipelines = experimentPipelines(result, arms);
     const winner = arms.find((arm) => arm.label === result.winner);
     const loser = arms.find((arm) => arm.label !== result.winner)!;
     if (result.conclusion !== "winner" || winner === undefined || pipelines.length === 0) {
       refuse("no-difference", `${id} concluded with no difference on ${day}`);
+      continue;
+    }
+    const measured = (arm: RandomisedEvidence["winner"]): MeasuredArm => {
+      const treatment = arm.provider === "claude" ? experiment.claudeModel : experiment.codexModel;
+      return { ...arm, measured: (model) => treatment.test(model), shape: `/${treatment.source}/` };
+    };
+    const blocked = inexpressible(mounts, host, { id, capability: experiment.capability, effort: experiment.effort }, measured(winner), measured(loser));
+    if (blocked !== undefined) {
+      out.findings.push({ step: RANDOMISED_EXPERIMENT_STEP, id, day, ...blocked });
       continue;
     }
     proposeRandomised(out, mounts, { kind: "randomised", step: RANDOMISED_EXPERIMENT_STEP, id, day, capability: experiment.capability,
@@ -925,6 +955,16 @@ export function randomisedMountRecommendations(rows: Iterable<Record<string, unk
       continue;
     }
     const loser = winner === "claude" ? "codex" : "claude";
+    // The auction served each provider from the table's own list at this cell: that list is what each policy measured.
+    const policy = (provider: RandomisedProvider): MeasuredArm => {
+      const listed = offered(mounts, provider, cell.capability, cell.effort);
+      return { label: `always-${provider}`, provider, measured: (model) => listed.models.includes(model), shape: `a model ${listed.setting} offers` };
+    };
+    const blocked = inexpressible(mounts, host, { id, capability: cell.capability, effort: cell.effort }, policy(winner), policy(loser));
+    if (blocked !== undefined) {
+      out.findings.push({ step: RANDOMISED_ESTIMATE_STEP, id, day, ...blocked });
+      continue;
+    }
     proposeRandomised(out, mounts, { kind: "randomised-by-auction", step: RANDOMISED_ESTIMATE_STEP, id, day, capability: cell.capability,
       effort: cell.effort, taskClass: cell.taskClass, winner: { label: `always-${winner}`, provider: winner },
       loser: { label: `always-${loser}`, provider: loser }, pipelines });
