@@ -39,7 +39,7 @@ import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSu
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
-import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
+import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
@@ -6564,7 +6564,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         maxTurns: RECON_MAX_TURNS,
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath, prerequisiteOutcomeBlock),
+        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath) + withPrerequisiteOutcomes("", prerequisiteOutcomeBlock),
       });
 
     let recon: WorkerResult | undefined;

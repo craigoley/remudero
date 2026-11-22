@@ -1118,15 +1118,13 @@ export function withPrerequisiteOutcomes(reconPrompt: string, prerequisiteOutcom
  *
  * The plan body is not shipped to workers; `planIndexBlock` names retrievable headings. `task` and
  * `recordPath` default to absent so older callers stay byte-identical, and an unresolvable record
- * path omits only the pointer. `prerequisiteOutcomeBlock` (W1-T11396) is appended last, exactly as
- * {@link withPrerequisiteOutcomes} attaches it.
+ * path omits only the pointer.
  */
 export function renderReconPrompt(
   planIndexBlock: string,
   operatorNotesBlock = "",
   task?: Pick<Task, "id" | "title">,
   recordPath?: string,
-  prerequisiteOutcomeBlock = "",
 ): string {
   return [
     // W1-T3656: NAME WHAT TO OBSERVE, NEVER WHICH BINARY TO RUN. This used to say "git remote
@@ -1153,8 +1151,6 @@ export function renderReconPrompt(
       : "",
     planIndexBlock,
     operatorNotesBlock,
-    // W1-T11396: the bounded prerequisite-outcome block, last; empty for a task with no depends_on.
-    prerequisiteOutcomeBlock,
   ]
     .filter((s) => s.length > 0)
     .join("\n\n");
