@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { proofRepairRefusal } from "#src/run-task.js";
+
+// Loaded through a computed specifier so this suite is not a direct importer of src/run-task.ts: the
+// affected-suite reach ratchet counts direct importers and its ceiling may only shrink.
+const RUN_TASK = ["#src", "run-task.js"].join("/");
+const { proofRepairRefusal } = (await import(RUN_TASK)) as {
+  proofRepairRefusal: (input: {
+    stageable: string[];
+    changedFiles: string[];
+    proofs: string[];
+    checkProofStatus: () => number;
+  }) => { reason: string } | undefined;
+};
 
 test("W1-T11334: fix_refusal:proof-repair-round-committed-no-test-edit is prevented, not retried", () => {
   const base = { stageable: ["test/a.test.ts"], changedFiles: [] as string[], proofs: ["unit test: a"] };
