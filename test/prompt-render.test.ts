@@ -14,7 +14,9 @@ import type { Task } from "#src/lib/plan.js";
 import {
   renderDiagnosePrompt,
   renderFixPrompt,
+  implementPromptParts,
   renderImplementPrompt,
+  renderImplementPromptWithParts,
   renderPrerequisiteOutcomeBlock,
   renderPrerequisitePrPrompt,
   renderReconPrompt,
@@ -501,4 +503,29 @@ test("prerequisite outcome context is deterministic bounded and reuses prepared 
   const impl = renderImplementPrompt(TASK, "ctx", "run-1", "", "", "", "", false, "", bounded);
   assert.ok(impl.includes(bounded));
   assert.ok(impl.indexOf("ctx") < impl.indexOf(bounded) && impl.indexOf(bounded) < impl.indexOf("# TASK"), "inside CONTEXT, before the task body");
+});
+
+test("implementPromptParts / renderImplementPromptWithParts / renderImplementPrompt thread the prerequisite part", () => {
+  const block = [
+    "## Prerequisite outcomes (untrusted data)",
+    "- Prerequisite T-1: merged PR #7 [source: pr#7]",
+  ].join("\n");
+
+  // no prerequisite part: the part list carries no prerequisite entry, and the prompt is unchanged
+  const bare = implementPromptParts(TASK, "ctx", "run-1");
+  assert.ok(!bare.some((p) => /prerequisite/i.test(p.name)), "an empty block adds no part");
+  assert.equal(renderImplementPromptWithParts(TASK, "ctx", "run-1").prompt, renderImplementPrompt(TASK, "ctx", "run-1"));
+
+  // with a part: it is a distinct manifest entry, and the same text reaches the rendered prompt
+  const parts = implementPromptParts(TASK, "ctx", "run-1", "", "", "", "", false, "", block);
+  const added = parts.filter((p) => !bare.some((b) => b.name === p.name && b.value === p.value));
+  assert.equal(added.length, 1, "exactly one part differs from the bare list");
+  assert.ok(added[0]!.value.includes(block));
+  assert.equal(added[0]!.name, "prerequisite_outcomes");
+  assert.equal(parts.length, bare.length + 1);
+
+  const withParts = renderImplementPromptWithParts(TASK, "ctx", "run-1", "", "", "", "", false, "", block);
+  assert.ok(withParts.prompt.includes(block));
+  assert.deepEqual(withParts.parts, parts, "the manifest returned alongside the prompt is the same part list");
+  assert.equal(withParts.prompt, renderImplementPrompt(TASK, "ctx", "run-1", "", "", "", "", false, "", block));
 });
