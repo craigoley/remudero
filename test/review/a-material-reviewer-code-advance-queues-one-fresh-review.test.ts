@@ -102,7 +102,7 @@ function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView>
   };
   const deliver = (row: Record<string, unknown> = {}) => appendLedger(ledgerPath, {
     run_id: "review-original", task_id: TASK, step: "review.posted", state: "success", pr_url: URL, head_sha: HEAD,
-    review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: HISTORY.code, ...row,
+    review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: HISTORY.code, reviewer_outcome: "success", ...row,
   });
   const run = async (view: OpenPrView = pr) => {
     await withLiveWritesAllowed(() => runSweep([view], deps, DEFAULT_SWEEP_POLICY));
@@ -264,7 +264,7 @@ function adapterFixture(t: TestContext, row: Record<string, unknown>, mainSha: s
   const ledgerPath = join(root, "ledger.ndjson");
   const gh = shim(t);
   appendLedger(ledgerPath, { run_id: "review-original", task_id: TASK, step: "review.posted", state: "success", pr_url: URL,
-    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), ...row });
+    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_outcome: "success", ...row });
   const calls: string[] = [];
   const unexpected = (): never => { throw new Error("the adapter made an unexpected host call"); };
   const host = {
@@ -297,6 +297,7 @@ function outboxEntry(ledgerPath: string, codeSha: string | undefined): void {
     run_id: "review-outboxed", evidence: "executed", review_decision_digest: "decision", decision_verdict: verdict(),
     description: codeSha === undefined ? "remudero-review: PASS" : reviewDescriptionWithCodeProvenance("remudero-review: PASS", codeSha),
     ...(codeSha === undefined ? {} : { reviewer_code_sha: codeSha }), written_at: "2026-11-11T12:00:00.000Z",
+    reviewer_outcome: "success", // W1-T14235: a settled code pass records the semantic judgement it came from
   })}\n`);
 }
 

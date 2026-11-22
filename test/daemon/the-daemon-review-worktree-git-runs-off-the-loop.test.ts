@@ -315,7 +315,8 @@ test("W1-T11459 criterion 2: command review reuse awaits readiness and teardown 
         report: claim, headCheckoutDir: tree, execProof: () => "pass" });
       // W1-T11847: the prior verdict names the reviewer code that judged it, current at origin/main below.
       appendLedger(ledgerPath, { run_id: "prior", task_id: taskId, step: "review.posted",
-        state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior, reviewer_code_sha: "c".repeat(40) });
+        state: prior.state, head_sha: priorHead, pr_url: url, decision_verdict: prior, reviewer_code_sha: "c".repeat(40),
+        reviewer_outcome: "success" }); // W1-T14235: the semantic judgement the reused pass came from
       let entered!: () => void, ready!: (value: unknown) => void, removing!: () => void, finish!: () => void;
       const called = new Promise<void>(resolve => { entered = resolve; });
       const materialized = new Promise<unknown>(resolve => { ready = resolve; });

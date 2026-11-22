@@ -37,7 +37,7 @@ import type { FullPassServe } from "../../lib/read-plane.js";
 import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createOpenPrStageReuse, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
-import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
+import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, semanticJudgementRefusal, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
 import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.js";
@@ -334,6 +334,14 @@ export function buildSweepEffects(
         mode.regressionKey.slice(0, mode.regressionKey.lastIndexOf("|")));
       if (!("row" in delivered) || delivered.regressionKey !== mode.regressionKey) return 1;
       const verdict = delivered.row.decision_verdict as ReviewVerdict;
+      // W1-T14235 (invariant no-semantic-no-code-pass): a delivered code pass no recorded semantic judgement certified is
+      // never restored; the head gets a full semantic review instead.
+      const restoreHold = verdict.state === "success"
+        ? semanticJudgementRefusal({ planOnly: verdict.planOnly, reviewerOutcome: delivered.row.reviewer_outcome }) : undefined;
+      if (restoreHold !== undefined) {
+        deps.log("sweep.review_restore_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: restoreHold });
+        return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
+      }
       const deliveredCode = await judgeReviewerCode(delivered.row.reviewer_code_sha);
       if (deliveredCode.status !== "fresh") {
         deps.log("sweep.review_restore_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, reviewer_code_freshness: deliveredCode.status });
@@ -406,6 +414,9 @@ export function buildSweepEffects(
       const prior = priorRow?.decision_verdict as ReviewVerdict | undefined;
       const missing = missingReviewReuseFact(prior, reuseInputs);
       if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
+      // W1-T14235: a proof-only re-judgement carries the prior semantic judgement, so it needs one that ran.
+      const discriminateHold = semanticJudgementRefusal({ planOnly: prior.planOnly, reviewerOutcome: priorRow?.reviewer_outcome });
+      if (discriminateHold !== undefined) return fallbackToFullReview(discriminateHold);
       const priorCode = await judgeReviewerCode(priorRow?.reviewer_code_sha);
       if (priorCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${priorCode.status}`);
 
@@ -495,6 +506,7 @@ export function buildSweepEffects(
                   discriminated_from_head_sha: mode.judgedHeadSha,
                   discrimination_result: verdict.state,
                   reviewer_code_sha: priorCode.codeSha,
+                  reviewer_outcome: priorRow?.reviewer_outcome,
                   ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
                   proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
                   ...reviewLedgerLegibilityFields(verdict),
@@ -554,6 +566,10 @@ export function buildSweepEffects(
       const lintReason = priorLint === undefined ? "no plan lint recorded" : !priorLint.ran ? priorLint.reason : "plan lint unreadable";
       return fallbackToFullReview(`prior-plan-lint-did-not-run: ${lintReason}`);
     }
+    // W1-T14235: a reused code pass needs the semantic judgement it was published on.
+    const reuseHold = verdict.state === "success"
+      ? semanticJudgementRefusal({ planOnly: verdict.planOnly, reviewerOutcome: reusedRow?.reviewer_outcome }) : undefined;
+    if (reuseHold !== undefined) return fallbackToFullReview(reuseHold);
     const reusedCode = await judgeReviewerCode(reusedRow?.reviewer_code_sha);
     if (reusedCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${reusedCode.status}`);
     const poster = failureRecordingPoster();
@@ -595,6 +611,7 @@ export function buildSweepEffects(
       effective_review_mode: "verdict-reuse",
       reused_from_head_sha: mode.judgedHeadSha,
       reviewer_code_sha: reusedCode.codeSha,
+      reviewer_outcome: reusedRow?.reviewer_outcome,
       ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
       ...reviewLedgerLegibilityFields(verdict),
