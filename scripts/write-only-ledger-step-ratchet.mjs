@@ -6,10 +6,14 @@
 // nothing reads is how a loop silently stops: `routing.experiment.result` was written daily and
 // read only by its own writer.
 //
-// EMITTED: `log("a.b"` or a `step:` property holding a literal or a lexically bound constant.
-// READ: equality and switch cases on a step, step membership checks, read-step collections,
-// step prefixes and suffixes, and raw JSON step patterns. Read evidence must be in a different
-// file from the emission. Comments, console output and incidental literals do not read a step.
+// EMITTED: `log("a.b"`, a `step:` property holding a dotted literal or a bound constant, and the `step` of
+// any object handed to a ledger append call (`appendLedger`, `appendLine`, `ledger(...)`), dotted or not.
+// A constant resolves through its declaration, an import, or a destructured binding of the host object
+// that carries it (`const { X_STEP } = host`).
+// READ: equality and switch cases on a step, step membership and Map lookups (`.has` / `.includes` /
+// `.get`, the step possibly behind a `?? ""` or `|| ""` fallback), read-step collections, step prefixes
+// and suffixes, and raw JSON step patterns. Read evidence must be in a different file from the emission.
+// Comments, console output and incidental literals do not read a step.
 //
 // THE RATCHET: the baseline's `writeOnly` list is today's debt and only shrinks against the merge
 // base; an entry that gained a reader must leave it. A new write-only step needs a reader, or a
@@ -42,6 +46,14 @@ const REGEX_PREFIX_RE = /^\^((?:[a-z0-9_:-]|\\\.)+)(\$)?$/;
 const READ_STEPS_NAME_RE = /(?:^|_)READ_STEPS?$/;
 const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
 const EQUALITY = new Set(["===", "!==", "==", "!="]);
+/** `row.step ?? ""` and `row.step || ""` still hand the step to whatever consumes the expression. */
+const FALLBACK = new Set(["??", "||"]);
+/**
+ * A ledger append site: `appendLedger(path, { step })`, `appendLine(...)`, `append(...)`, `opts.ledger?.({ step })`.
+ * An object handed to one is a ledger row, so its `step` is written whether or not the name carries a dot;
+ * a helper such as `queueGovernorGateFor` writes through the append call inside it.
+ */
+const APPEND_CALLEE_RE = /^(?:append[A-Za-z]*|ledger)$/;
 const MATCH_METHODS = new Set(["includes", "startsWith", "endsWith", "indexOf", "match", "matchAll", "search"]);
 const PREDICATE_METHODS = new Set(["some", "every", "find", "findIndex", "filter"]);
 const READER_QUERY_KEYS = new Set([
@@ -102,8 +114,9 @@ function memberName(node) {
 function isStep(node) {
   node = unwrap(node);
   if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
-    node = unwrap(node.arguments[0]?.expression);
+    return isStep(node.arguments[0]?.expression);
   }
+  if (node?.type === "BinaryExpression" && FALLBACK.has(node.operator)) return isStep(node.left) || isStep(node.right);
   return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
 }
 
@@ -115,6 +128,15 @@ function collection(node) {
   if (node.type === "ArrayExpression") return node.elements;
   if (node.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.value === "Set") {
     return node.arguments?.slice(0, 1) ?? [];
+  }
+  if (node.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.value === "Map") {
+    // A Map's members are its keys: the first element of each `[key, value]` entry.
+    const entries = unwrap(node.arguments?.[0]?.expression);
+    if (entries?.type !== "ArrayExpression") return [];
+    return entries.elements.flatMap((entry) => {
+      const tuple = unwrap(entry?.expression);
+      return tuple?.type === "ArrayExpression" && tuple.elements[0] ? [tuple.elements[0]] : [];
+    });
   }
   if (node.type === "CallExpression" && memberName(node.callee) === "freeze" && node.callee.object.value === "Object") {
     return node.arguments.slice(0, 1);
@@ -148,6 +170,16 @@ function collectEvidence(node, rec) {
   } else if (type === "CallExpression") {
     const callee = unwrap(node.callee);
     const method = memberName(callee);
+    const calleeName = callee.type === "Identifier" ? callee.value : method;
+    if (calleeName !== undefined && APPEND_CALLEE_RE.test(calleeName)) {
+      for (const { expression } of node.arguments) {
+        const row = unwrap(expression);
+        if (row?.type !== "ObjectExpression") continue;
+        for (const prop of row.properties) {
+          if (prop.type === "KeyValueProperty" && propertyName(prop.key) === "step") rec.emits.push([STEP_RE, prop.value]);
+        }
+      }
+    }
     const arg = node.arguments[0];
     if (!arg || arg.spread) return;
     const value = arg.expression;
@@ -155,7 +187,7 @@ function collectEvidence(node, rec) {
     if (!method) return;
     const receiver = unwrap(callee.object);
     if (method === "log" && receiver.value !== "console" && memberName(receiver) !== "console") rec.emits.push([STEP_RE, value]);
-    if ((method === "has" || method === "includes") && isStep(value)) rec.reads.push(["exact", receiver]);
+    if ((method === "has" || method === "includes" || method === "get") && isStep(value)) rec.reads.push(["exact", receiver]);
     if (node.arguments.length === 1 && isStep(receiver)) {
       if (method === "startsWith") rec.reads.push(["prefix", value]);
       if (method === "endsWith") rec.reads.push(["suffix", value]);
@@ -188,6 +220,31 @@ function readPredicate(receiver, predicate, rec) {
   });
 }
 
+/**
+ * `const { WORKER_STATE_LEDGER_STEP } = host` and `({ X_STEP: local }) =>` bind a local to a property of a host
+ * object. The property name is the constant's name, so the local resolves as that exported constant would.
+ * Recorded by binding and by bare name: the name alone resolves the binding when its syntax context differs.
+ */
+function collectDestructured(pattern, rec) {
+  for (const prop of pattern.properties) {
+    let local;
+    let source;
+    if (prop.type === "AssignmentPatternProperty") {
+      local = prop.key;
+      source = prop.key.value;
+    } else if (prop.type === "KeyValuePatternProperty") {
+      const target = prop.value.type === "AssignmentPattern" ? prop.value.left : prop.value;
+      if (target.type === "Identifier") {
+        local = target;
+        source = propertyName(prop.key);
+      }
+    }
+    if (local === undefined || typeof source !== "string") continue;
+    rec.destructured.set(bindingKey(local), source);
+    rec.destructuredNames.set(local.value, source);
+  }
+}
+
 /** A module specifier resolved to a source path, or undefined for a package or an unknown file. */
 function resolveSpecifier(from, specifier, known) {
   const base = specifier.startsWith("#src/") ? `src/${specifier.slice(5)}` :
@@ -200,6 +257,7 @@ function analyzeFile({ path, text }) {
   const tree = parseSource(path, text);
   const rec = {
     path, bindings: new Map(), exports: new Map(), imports: new Map(), emits: [], reads: [],
+    destructured: new Map(), destructuredNames: new Map(),
     lits: new Set(), prefixes: new Set(), suffixes: new Set(),
   };
   for (const stmt of tree.body) {
@@ -223,6 +281,7 @@ function analyzeFile({ path, text }) {
         if (READ_STEPS_NAME_RE.test(id.value) && collection(unwrap(init))) rec.reads.push(["exact", init]);
       }
     }
+    if (node.type === "ObjectPattern") collectDestructured(node, rec);
     collectEvidence(node, rec);
   });
   rec.reads = rec.reads.filter(([, expr]) => isStatic(expr));
@@ -280,6 +339,10 @@ export function scanLedgerSteps(sources) {
     if (imported) {
       const target = byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
       return target ? values(target, target.exports.get(imported.name), emit, next) : [];
+    }
+    const source = rec.destructured.get(key) ?? rec.destructuredNames.get(node.value);
+    if (source !== undefined && CONSTANT_NAME_RE.test(source)) {
+      return (declarers.get(source) ?? []).flatMap(([other, id]) => values(other, id, emit, next));
     }
     if (emit && node.ctxt === 1 && CONSTANT_NAME_RE.test(node.value)) {
       return (declarers.get(node.value) ?? []).flatMap(([other, id]) => values(other, id, true, next));

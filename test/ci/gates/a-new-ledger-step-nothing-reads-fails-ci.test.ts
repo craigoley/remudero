@@ -377,6 +377,127 @@ test("W1-T14149: a record-only step that gained a reader is reported, and a clea
   for (const needle of [/BLOCKED/, /s\.one/, /g\.one/, /e\.one/, /merge base f00/]) assert.match(blocked, needle);
 });
 
+// ── reviewer repros: the rule each probe broke, not only the probe ─────────────────────────────
+
+test("W1-T14149 criterion 1: a ledger append writes its step dotted or not (dispatch_wip_observed)", () => {
+  const result = scan({
+    // The production shape: a gate factory whose append call is the writer, the step a bare word.
+    "src/lib/governor.ts": [
+      "export function queueGovernorGateFor(appendLedger: (path: string, row: object) => void, ledgerPath: string, runId: string) {",
+      "  return () => {",
+      '    appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_wip_observed", observed_open_count: 1 });',
+      '    appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_read_back" });',
+      "  };",
+      "}",
+    ].join("\n"),
+    "src/lib/forms.ts": [
+      "export function forms(appendLine: (path: string, row: object) => void, deps: { appendLedger: (p: string, r: object) => void }, opts: { ledger?: (row: object) => void }) {",
+      '  appendLine("p", { ...{}, step: "line_form" });',
+      '  deps.appendLedger("p", { step: "member_form" });',
+      '  opts.ledger?.({ run_id: "r", task_id: "DEPLOY", step: "optional_call_form" });',
+      "}",
+    ].join("\n"),
+    "src/lib/not-ledger.ts": [
+      "declare const readRows: (dir: string, query: object) => void;",
+      'readRows("d", { step: "query_only", refuseIncomplete: true });',
+      'export const plan = { step: "rollback", id: "x" };',
+      'export const logFields = () => ({ step: "worker_home_reap", reaped: true });',
+      'export const push = (rows: object[]) => rows.push({ step: "pushed_row" });',
+    ].join("\n"),
+    "src/lib/reader.ts": 'export const read = (row: { step: string }) => row.step === "dispatch_read_back";',
+  });
+  assert.deepEqual(
+    [...result.emitted.keys()].sort(),
+    ["dispatch_read_back", "dispatch_wip_observed", "line_form", "member_form", "optional_call_form"],
+  );
+  assert.deepEqual(result.emitted.get("dispatch_wip_observed"), ["src/lib/governor.ts"]);
+  assert.deepEqual(result.readers.get("dispatch_read_back"), ["src/lib/reader.ts"]);
+  assert.deepEqual(result.writeOnly, ["dispatch_wip_observed", "line_form", "member_form", "optional_call_form"]);
+
+  const verdict = mod.ratchetVerdict({ writeOnly: result.writeOnly, baseline: EMPTY, baseBaseline: EMPTY });
+  assert.equal(verdict.ok, false, "a new unread step written through an append call needs a baseline row or a record-only reason");
+  assert.deepEqual(verdict.unrecorded, ["dispatch_wip_observed", "line_form", "member_form", "optional_call_form"]);
+});
+
+test("W1-T14149 criterion 2: a step behind a nullish or logical-or fallback is read (github.budget.configured)", () => {
+  const result = scan({
+    "src/lib/budget-start.ts": [
+      'const GITHUB_BUDGET_CONFIGURED_STEP = "github.budget.configured";',
+      "export const start = (append: (row: object) => void) => append({ run_id: \"r\", task_id: \"t\", step: GITHUB_BUDGET_CONFIGURED_STEP });",
+    ].join("\n"),
+    "src/lib/writers.ts": [
+      "export function w(log: (s: string) => void): void {",
+      '  log("fallback.includes"); log("fallback.or"); log("fallback.string"); log("fallback.equal"); log("fallback.prefix.done"); log("fallback.unread");',
+      "}",
+    ].join("\n"),
+    "src/lib/ledger.ts": [
+      'const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set(["daemon.memory", "github.budget.configured"]);',
+      'export const keep = (p: { step?: string }) => BOOT_LIFETIME_EVIDENCE_STEPS.has(p.step ?? "");',
+      'export const exits = (p: { step?: string }) => ["fallback.includes"].includes(p.step ?? "");',
+      'export const or = (p: { step?: string }) => new Set(["fallback.or"]).has(p.step || "");',
+      'export const str = (p: { step?: string }) => ["fallback.string"].includes(String(p.step ?? ""));',
+      'export const eq = (p: { step?: string }) => (p.step ?? "") === "fallback.equal";',
+      'export const pre = (p: { step?: string }) => (p.step ?? "").startsWith("fallback.prefix.");',
+      'export const notAStep = (p: { kind?: string }) => ["fallback.unread"].includes(p.kind ?? "");',
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("github.budget.configured"), ["src/lib/ledger.ts"]);
+  for (const step of ["fallback.includes", "fallback.or", "fallback.string", "fallback.equal", "fallback.prefix.done"]) {
+    assert.deepEqual(result.readers.get(step), ["src/lib/ledger.ts"], `${step} is read through a fallback`);
+  }
+  assert.deepEqual(result.writeOnly, ["fallback.unread"], "a fallback on a field that is not the step reads no step");
+
+  // Criterion 4 on the same probe: the debt row for a step that gained that reader must go.
+  const stale = mod.ratchetVerdict({
+    writeOnly: result.writeOnly,
+    baseline: { writeOnly: ["fallback.unread", "github.budget.configured"], recordOnly: {} },
+    baseBaseline: { writeOnly: ["fallback.unread", "github.budget.configured"], recordOnly: {} },
+  });
+  assert.equal(stale.ok, false);
+  assert.deepEqual(stale.stale, ["github.budget.configured"]);
+});
+
+test("W1-T14149 criterion 5: a step constant destructured from a host object resolves to its declaration (worker.state)", () => {
+  const result = scan({
+    "src/run-task.ts": [
+      'export const WORKER_STATE_LEDGER_STEP = "worker.state";',
+      'export const HOST_OTHER_STEP = "host.other";',
+      'export const HOST_PARAM_STEP = "host.param";',
+    ].join("\n"),
+    "src/cli/verb.ts": [
+      "type Host = { WORKER_STATE_LEDGER_STEP: string; HOST_OTHER_STEP: string };",
+      "export function buildSensor(helperHost: Host, append: (row: object) => void): void {",
+      "  const { WORKER_STATE_LEDGER_STEP, HOST_OTHER_STEP: renamed } = helperHost;",
+      '  append({ run_id: "r", task_id: "t", step: WORKER_STATE_LEDGER_STEP });',
+      "  append({ step: renamed });",
+      "}",
+      "export const viaParam = ({ HOST_PARAM_STEP }: { HOST_PARAM_STEP: string }, log: (s: string) => void) => log(HOST_PARAM_STEP);",
+      "export const lowered = ({ notAConstant }: { notAConstant: string }, log: (s: string) => void) => log(notAConstant);",
+      "export const absent = ({ MISSING_STEP }: { MISSING_STEP: string }, log: (s: string) => void) => log(MISSING_STEP);",
+    ].join("\n"),
+    "src/lib/status.ts": 'export const isState = (row: { step: string }) => row.step === "worker.state";',
+  });
+  assert.deepEqual([...result.emitted.keys()].sort(), ["host.other", "host.param", "worker.state"]);
+  assert.deepEqual(result.emitted.get("worker.state"), ["src/cli/verb.ts"]);
+  assert.deepEqual(result.readers.get("worker.state"), ["src/lib/status.ts"]);
+  assert.deepEqual(result.writeOnly, ["host.other", "host.param"], "a destructured emission with no reader is still write-only");
+});
+
+test("W1-T14149 criterion 2: a Map keyed by steps is read where it is looked up", () => {
+  const result = scan({
+    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => { log("map.listed"); log("map.fallback"); log("map.unlisted"); };',
+    "src/lib/reader.ts": [
+      'const DECISIONS = new Map<string, string>([["map.listed", "approved"]]);',
+      'const LATER = new Map([["map.fallback", () => ""]]);',
+      "export const decide = (row: { step: string }) => DECISIONS.get(row.step);",
+      'export const later = (row: { step?: string }) => LATER.get(row.step ?? "");',
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("map.listed"), ["src/lib/reader.ts"]);
+  assert.deepEqual(result.readers.get("map.fallback"), ["src/lib/reader.ts"]);
+  assert.deepEqual(result.writeOnly, ["map.unlisted"]);
+});
+
 // ── the CLI over a real git repository ─────────────────────────────────────────────────────────
 
 function put(repo: GitRepo, files: Record<string, string>): void {
