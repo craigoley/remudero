@@ -39,6 +39,8 @@ const fragment = `- id: NEW-1
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the draft adds a new path guard only; no prior behavior changes.
   acceptance:
     - claim: the declared path guard refuses missing paths
       proof: "unit test: the declared path guard refuses missing paths"
@@ -79,7 +81,8 @@ test("W1-T9062: a draft naming a src file the tree does not hold is not READY", 
 });
 
 test("W1-T9062: a slug-named new test and a CREATES path keep a draft READY", () => {
-  const allowed = fragment.replace("files: [src/lib/plan.ts]", "files: [src/lib/plan.ts, test/plan/check-declared-paths.test.ts, src/lib/new-path.ts]\n  design: |\n    CREATES: src/lib/new-path.ts");
+  const allowed = fragment.replace("files: [src/lib/plan.ts]", "files: [src/lib/plan.ts, test/plan/check-declared-paths.test.ts, src/lib/new-path.ts]")
+    .replace("  design: |\n", "  design: |\n    CREATES: src/lib/new-path.ts\n");
   const withCaller = allowed.replace("risk: medium", "risk: high\n  band_meaning: span") + '    - claim: the existing caller reaches the new module\n      proof: "grep: newPath( in src/lib/plan.ts"\n';
   const classified = classifyProposal(proposal, draft(withCaller), context());
   assert.equal(classified.state, "ready", JSON.stringify(classified.reasons));

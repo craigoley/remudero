@@ -18,7 +18,7 @@ import type { Config } from "#src/lib/config-schema.js";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_OFFER_BYTES, OPS_CATALOG_MAX_TOTAL_BYTES, OpsCatalogAuthMissingError,
+  OPS_CATALOG_BASELINE_BYTES, OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_OFFER_BYTES, OpsCatalogAuthMissingError,
   acceptOfferedOpsCatalogBlobs, keptOpsCatalogBlobsForChild, readOpsCatalogSnapshotAsync,
   type OpsCatalogApi, type OpsCatalogSnapshot,
 } from "#src/lib/ops-catalog-source.js";
@@ -286,8 +286,8 @@ test("W1-T13691 criterion 2: an offered blob is kept only after the checks a Git
   const big = Buffer.alloc(OPS_CATALOG_MAX_BLOB_BYTES + 1, 0x61);
   const bigSha = createHash("sha1").update(`blob ${big.length}\0`).update(big).digest("hex");
   assert.deepEqual(acceptOfferedOpsCatalogBlobs(offer(REPO_ID, [[bigSha, big]]), cold(r)), { offered: 1, kept: 0, refused: 1 });
-  // The total bound: an offer past the snapshot bound keeps nothing.
-  const many = Array.from({ length: OPS_CATALOG_MAX_TOTAL_BYTES / OPS_CATALOG_MAX_BLOB_BYTES + 1 }, (_, i) => {
+  // The total bound: an offer past the baseline keeps nothing (W1-T14368: the child reads a larger catalog from GitHub).
+  const many = Array.from({ length: OPS_CATALOG_BASELINE_BYTES / OPS_CATALOG_MAX_BLOB_BYTES + 1 }, (_, i) => {
     const bytes = Buffer.alloc(i === 0 ? 1024 : OPS_CATALOG_MAX_BLOB_BYTES, 0x61 + (i % 20));
     return [createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"), bytes] as [string, Buffer];
   });
