@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isSafeTaskId } from "./fleet-control.js";
 import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, loadPlanQuarantiningDuplicates, MOVED_FROM_VALUE, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
@@ -23,17 +24,25 @@ export function opsPlanForLookup(result: TaskLookupResult): Plan | undefined {
   return result.outcome === "found" && result.catalog === "ops" ? opsLookupPlans.get(result) : undefined;
 }
 
-function isParsedPlanTask(value: unknown): value is Task {
-  if (value === null || typeof value !== "object") return false;
-  const task = value as Task;
-  return typeof task.id === "string" && task.id.length > 0 &&
-    typeof task.title === "string" && task.title.length > 0 &&
-    typeof task.repo === "string" && task.repo.length > 0 &&
-    Array.isArray(task.depends_on) && task.depends_on.every((dependency) => typeof dependency === "string") &&
-    TASK_TYPES.includes(task.type) && TASK_RISKS.includes(task.risk) && TASK_STATUSES.includes(task.status) &&
-    (task.verify === "auto" || task.verify === "human") &&
-    (task.dispatch_hold === undefined || typeof task.dispatch_hold === "boolean") &&
-    (task.priority === undefined || typeof task.priority === "number");
+type CompositionRecordField = "id" | "title" | "repo" | "depends_on" | "type" | "risk" | "status" | "verify" | "dispatch_hold" | "priority";
+export interface CompositionRecordFailure {
+  taskId?: string;
+  field: CompositionRecordField;
+  side: "primary" | "secondary";
+}
+
+function invalidParsedTaskField(task: Task): CompositionRecordField | undefined {
+  if (typeof task.id !== "string" || task.id.length === 0) return "id";
+  if (typeof task.title !== "string" || task.title.length === 0) return "title";
+  if (typeof task.repo !== "string" || task.repo.length === 0) return "repo";
+  if (!Array.isArray(task.depends_on) || !task.depends_on.every(dependency => typeof dependency === "string")) return "depends_on";
+  if (!TASK_TYPES.includes(task.type)) return "type";
+  if (!TASK_RISKS.includes(task.risk)) return "risk";
+  if (!TASK_STATUSES.includes(task.status)) return "status";
+  if (task.verify !== "auto" && task.verify !== "human") return "verify";
+  if (task.dispatch_hold !== undefined && typeof task.dispatch_hold !== "boolean") return "dispatch_hold";
+  if (task.priority !== undefined && typeof task.priority !== "number") return "priority";
+  return undefined;
 }
 
 /** W1-T13610: the canonical parser's verdict per serialized tasks text, so an unchanged plan is parsed once. Keyed on
@@ -70,30 +79,41 @@ function canonicalParseVerdict(serializedTasks: string, taskCount: number): bool
   return verdict;
 }
 
-function isParsedPlanSnapshot(value: unknown): value is Plan {
+type MalformedComposition = { outcome: "malformed" } & (CompositionRecordFailure | { field?: undefined });
+
+function malformedSnapshot(value: unknown, side: CompositionRecordFailure["side"]): MalformedComposition | undefined {
+  const structural = { outcome: "malformed" } as const;
   try {
-    if (value === null || typeof value !== "object") return false;
+    if (value === null || typeof value !== "object") return structural;
     const plan = value as Plan;
-    if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return false;
+    if (!Array.isArray(plan.tasks) || !(plan.byId instanceof Map) || plan.byId.size !== plan.tasks.length) return structural;
     // A manually constructed snapshot can bypass parse-time constraints such as not_before and precondition.
     // Revalidate a detached serialization through the canonical plan parser before trusting any task.
     const serializedTasks = JSON.stringify(plan.tasks);
-    if (typeof serializedTasks !== "string" || !canonicalParseVerdict(serializedTasks, plan.tasks.length)) return false;
+    if (typeof serializedTasks !== "string") return structural;
+    const canonical = canonicalParseVerdict(serializedTasks, plan.tasks.length);
     const seen = new Set<string>();
-    for (const value of plan.tasks) {
-      if (!isParsedPlanTask(value)) return false;
-      const task = value;
-      if (seen.has(task.id) || plan.byId.get(task.id) !== task) return false;
+    for (const task of plan.tasks) {
+      if (task === null || typeof task !== "object") return structural;
+      const field = invalidParsedTaskField(task);
+      if (field === "id") {
+        const indexedId = [...plan.byId].find(([, record]) => record === task)?.[0];
+        return { outcome: "malformed", field, side, ...(isSafeTaskId(indexedId) ? { taskId: indexedId } : {}) };
+      }
+      if (seen.has(task.id) || plan.byId.get(task.id) !== task) return structural;
+      if (field !== undefined) {
+        return { outcome: "malformed", field, side, ...(isSafeTaskId(task.id) ? { taskId: task.id } : {}) };
+      }
       seen.add(task.id);
     }
     for (const [id, task] of plan.byId) {
-      if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return false;
+      if (typeof id !== "string" || !seen.has(id) || task?.id !== id) return structural;
     }
-    return true;
+    return canonical ? undefined : structural;
   } catch (error: unknown) {
     // A hostile snapshot getter/proxy is malformed; never expose its value or partially trust it.
     void error;
-    return false;
+    return structural;
   }
 }
 
@@ -115,7 +135,7 @@ export function compositionHoldEdge(hold: CompositionHold): string {
 type SecondaryComposition =
   | { outcome: "ok"; plan: Plan; secondaryIds: ReadonlySet<string>; pendingMoveIds: ReadonlySet<string>;
     held: ReadonlyMap<string, CompositionHold> }
-  | { outcome: "malformed" };
+  | MalformedComposition;
 
 /** One atomic graph rule shared by observation and explicit live selection.
  *  W1-T13680: an id both catalogs hold whose ops copy carries a valid moved_from is a PENDING MOVE: it is in neither
@@ -127,7 +147,8 @@ type SecondaryComposition =
  *  held by the same edge. A held id is in neither the composed tasks nor secondaryIds; every other task composes as
  *  before. Only a snapshot failing the canonical check still refuses the whole composition, as malformed. */
 export function composeSecondaryPlan(primary: Plan, secondary: Plan): SecondaryComposition {
-  if (!isParsedPlanSnapshot(primary) || !isParsedPlanSnapshot(secondary)) return { outcome: "malformed" };
+  const malformed = malformedSnapshot(primary, "primary") ?? malformedSnapshot(secondary, "secondary");
+  if (malformed !== undefined) return malformed;
   const primaryIds = new Set(primary.tasks.map(task => task.id));
   const held = new Map<string, CompositionHold>();
   const pendingMoveIds = new Set<string>();
