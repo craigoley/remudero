@@ -11659,6 +11659,13 @@ export interface SemanticJudgementFact {
   reviewerOutcome?: unknown;
 }
 
+/** W1-T14235 design 5: the newest terminal (success or failure) `review.posted` row for this head, read only. */
+function newestTerminalReviewPostedRow(ledgerPath: string, sha: string, prUrl?: string): Record<string, unknown> | undefined {
+  return readLiveLedgerRecords(ledgerPath).filter((line) => line.step === "review.posted" &&
+    line.head_sha === sha && (prUrl === undefined || line.pr_url === prUrl) &&
+    (line.state === "success" || line.state === "failure")).at(-1);
+}
+
 /** W1-T14235 (invariant no-semantic-no-code-pass): why a remudero-review success may not be published or re-published.
  *  Only a plan-only diff keeps the deterministic path; any other diff passes only on a recorded successful semantic
  *  judgement (`reviewer_outcome: success`). A missing, malformed or unknown fact is not success, so it refuses too. */
@@ -12663,9 +12670,7 @@ async function publishSemanticHold(opts: PostReviewStatusGuardedOpts, verdict: R
   }
   // W1-T14235 design 5: a semantic pass this head already has stands. A later deterministic caller (the landing review)
   // posts nothing over it; restoring a status its own claim replaced is the sweep's restore, which reads the same row.
-  const standing = readLiveLedgerRecords(opts.ledgerPath).filter((line) => line.step === "review.posted" &&
-    line.head_sha === opts.sha && (opts.prUrl === undefined || line.pr_url === opts.prUrl) &&
-    (line.state === "success" || line.state === "failure")).at(-1);
+  const standing = newestTerminalReviewPostedRow(opts.ledgerPath, opts.sha, opts.prUrl);
   if (standing?.state === "success" && standing.reviewer_outcome === "success") {
     appendLedger(opts.ledgerPath, { ...row, live_state: live ?? "absent", outcome: "semantic_success_stands",
       ...(typeof standing.run_id === "string" ? { standing_run_id: standing.run_id } : {}) });
