@@ -241,13 +241,14 @@ test("reapStaleWorktrees: REAPS a git-invisible, dead-pid directory even freshly
   try {
     const entryPath = join(root, "sweep-fresh-1");
     mkdirSync(entryPath, { recursive: true });
-    writeRunLock(entryPath, { pid: 97514, run_id: "X", startedAt: new Date().toISOString() });
+    writeRunLock(entryPath, { pid: 97514, run_id: "X", startedAt: new Date().toISOString(), pidNs: "pid:[1]" });
     // Dead pid, freshly created (real clock/mtime). Before W1-T381 this fell through to the
     // recent-activity age gate and was KEPT — see the incident that this closed, replayed in
     // worktree-reap-liveness.test.ts's "W1-T381 BITES" test. A dead pid is stronger evidence
     // that the run is over than an mtime can ever be (an mtime records THAT a write happened,
     // never WHO made it), so the age gate no longer protects a confirmed-dead lock at all.
-    const summary = reapStaleWorktrees(root, { isPidAlive: () => false });
+    // W1-T14319: a dead pid is confirmed dead only when the lock names the reaper's own pid namespace.
+    const summary = reapStaleWorktrees(root, { isPidAlive: () => false, pidNamespace: () => "pid:[1]" });
     assert.ok(!existsSync(entryPath), "a dead pid's own lock outranks freshness — no age gate protects it");
     assert.ok(summary.reaped.includes("sweep-fresh-1"));
   } finally {
