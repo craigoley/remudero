@@ -604,14 +604,13 @@ test("W1-T14146: the measurement cadence writes one routing.policy.estimate row 
 });
 
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-const REVIEWER_MOUNT = { model: "sonnet", provider: "claude", effort: "high", maxTurns: 10, contextBudget: 120000 } as const;
 function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
 
 /** The review lane run for real (`runReview`, src/cli/commands/review.ts) through to its reviewer. The reviewer's
  *  spawn is the production receipt writer, `benchmarkNonDispatchSpawn("review")` (all run-task.ts's
  *  `ledgeredNonDispatchSpawn` does, and importing run-task.ts would widen the reach ratchet), called with whatever
  *  work `runReview` puts on the call; only the provider call under it is a fixture, routed by the production auction and
- *  returning a passing verdict. Returns the rows the writer ledgered, each `ts` pinned to `at(n)`. */
+ *  returning a passing verdict. Returns the reviewer's assignment rows with `ts` pinned to `at(n)`. */
 async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">,
   n: number): Promise<Row[]> {
   const root = mkdtempSync(join(tmpdir(), "rmd-routing-policy-review-lane-"));
@@ -628,9 +627,10 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
   try {
     process.env.PATH = `${shim.dir}:${oldPath}`;
     writeFileSync(join(root, "settings.json"), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false } }));
+    let assignmentCount = 0;
     const provider = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
       const routed = auction({ claude: 30, codex: 30 }, { unit: "spawn", taskId: args.taskId!, attempt: args.runId!, point: spawnDecisionPoint(args) });
-      const id = `${args.runId}-reviewer`;
+      const id = `${args.runId}-assignment-${++assignmentCount}`;
       args.onSelectionAssignment?.({
         version: 1, id, phase: "pre-execution", requested: { model: args.model!, effort: args.effort!, maxTurns: args.maxTurns ?? null },
         selected: { provider: routed.served, model: `${routed.served}-model`, effort: args.effort! },
@@ -654,7 +654,7 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
       reviewPostedDescription: (verdict) => verdict.summary, reviewWorkerLockId: (runId) => runId,
       reviewerClockBoundMs: () => 60_000, reviewSubjectGit: unexpected,
     };
-    await runReview(host, {
+    const { evaluatorProvenance } = await runReview(host, {
       owner: "acme", repo: "remudero", prUrl: "https://github.com/acme/remudero/pull/1",
       task: { ...task, acceptance: [{ claim: "a claim the report never substantiates", proof: "unit test: no-such-test-title-w1-t14146" }] },
       report: "This report deliberately substantiates nothing.", reviewInputBody: "body",
@@ -662,14 +662,14 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
         budget_present: false, own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [], ...setup },
       settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as never,
       log: () => {}, say: () => {}, account: (r: never) => r, spawnReviewer: true, disarm: () => {},
-      reviewerMount: REVIEWER_MOUNT,
+      reviewerMount: { model: "sonnet", provider: "claude", effort: "high", maxTurns: 10, contextBudget: 120000 },
       headCheckoutDir: REPO_ROOT, ledgerPath: join(root, "review-ledger.ndjson"), runId: `review-PR1-${1795000000000 + n}`,
     } as never);
-    // The lane's advisory shadow judge (runShadowJudge) samples 1 head in 20, here this checkout's HEAD, and always spawns
-    // a model other than the reviewer's (shadowJudgeMount): keep the reviewer's own assignments.
+    // A sampled shadow judge shares the review's run ID. Use the assignment named by the verdict.
+    const reviewerAssignmentId = evaluatorProvenance?.selectionAssignmentId;
+    assert.ok(reviewerAssignmentId, "the review verdict identifies its reviewer assignment");
     return readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
-      .filter((row) => row.step === "worker.assignment"
-        && (row.worker_assignment as { requested?: { model?: unknown } } | undefined)?.requested?.model === REVIEWER_MOUNT.model)
+      .filter((row) => row.step === "worker.assignment" && (row.worker_assignment as Row).id === reviewerAssignmentId)
       .map((row) => ({ ...row, ts: at(n) }));
   } finally {
     process.env.PATH = oldPath;

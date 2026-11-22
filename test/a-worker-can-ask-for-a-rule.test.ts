@@ -246,7 +246,7 @@ function selectFor(stores: Stores) {
   return computeMatchedLearningsForArm("A", { homes: stores.homes, taskFiles: ["src/lib/worker.ts"] });
 }
 
-function toolFor(stores: Stores, selection: ReturnType<typeof selectFor>) {
+function toolFor(stores: Stores, selection: Awaited<ReturnType<typeof selectFor>>) {
   const pulls: Array<{ id: string; status: string; meta?: WorkerRulePullMeta }> = [];
   const rule = createWorkerRuleTool(stores.root, (id, status, meta) => pulls.push({ id, status, meta }), {
     homes: stores.homes,
@@ -263,7 +263,7 @@ const ask = async (rule: ReturnType<typeof createWorkerRuleTool>, query: string)
 
 test("selected learning lookup preserves the exact selected source and payload revision", async (t) => {
   const stores = layeredStores(t, { a: false, b: true });
-  const selection = selectFor(stores);
+  const selection = await selectFor(stores);
   assert.deepEqual(selection.selectedIds, [SHARED_SLUG]);
   assert.equal(selection.selectedLearnings.length, 1);
   const [handle] = selection.selectedLearnings;
@@ -281,7 +281,7 @@ test("selected learning lookup preserves the exact selected source and payload r
     meta: { outcome: "delivered", source: "user-overall", revision: handle.payloadRevision.slice(0, 16) },
   }]);
 
-  const projectSelected = selectFor(layeredStores(t, { a: true, b: false }));
+  const projectSelected = await selectFor(layeredStores(t, { a: true, b: false }));
   assert.equal(projectSelected.selectedLearnings[0].source, "project");
   assert.notEqual(projectSelected.selectedLearnings[0].payloadRevision, handle.payloadRevision);
 });
@@ -289,7 +289,7 @@ test("selected learning lookup preserves the exact selected source and payload r
 test("selected learning lookup refuses cross-layer substitution and evidence-only drift", async (t) => {
   // Selected user-overall B must never resolve to the nonselected project A that shares its slug.
   const crossLayer = layeredStores(t, { a: false, b: true });
-  const crossSelection = selectFor(crossLayer);
+  const crossSelection = await selectFor(crossLayer);
   rmSync(join(crossLayer.overall, "fixture.yaml"));
   const afterRemoval = await ask(toolFor(crossLayer, crossSelection).rule, `learnings#${SHARED_SLUG}`);
   assert.equal(afterRemoval.isError, true, "B is gone; A must not be served in its place");
@@ -298,7 +298,7 @@ test("selected learning lookup refuses cross-layer substitution and evidence-onl
 
   // Both same-slug records selected: a bare slug cannot say which, so it is ambiguous rather than first-match.
   const both = layeredStores(t, { a: true, b: true });
-  const bothSelection = selectFor(both);
+  const bothSelection = await selectFor(both);
   assert.equal(bothSelection.selectedLearnings.length, 2);
   const ambiguous = await ask(toolFor(both, bothSelection).rule, `learnings#${SHARED_SLUG}`);
   assert.equal(ambiguous.isError, true);
@@ -311,7 +311,7 @@ test("selected learning lookup refuses cross-layer substitution and evidence-onl
     [{ fact: "EDITED fact sentinel", evidence: EVIDENCE_A }, "fact-only"],
   ] as const) {
     const stores = layeredStores(t, { a: true, b: false });
-    const selection = selectFor(stores);
+    const selection = await selectFor(stores);
     const { rule, pulls } = toolFor(stores, selection);
     assert.equal((await ask(rule, `learnings#${SHARED_SLUG}`)).isError, false, `${label}: unchanged A is readable`);
     writeFileSync(join(stores.project, "fixture.yaml"), entryYaml(SHARED_SLUG, edit));
@@ -327,7 +327,7 @@ test("selected learning lookup refuses cross-layer substitution and evidence-onl
 test("selected learning lookup separates live eligibility from content identity", async (t) => {
   // Quarantine after selection: a frozen snapshot would still serve it; current eligibility must not.
   const quarantined = layeredStores(t, { a: true, b: false });
-  const quarantinedSelection = selectFor(quarantined);
+  const quarantinedSelection = await selectFor(quarantined);
   const q = toolFor(quarantined, quarantinedSelection);
   writeFileSync(join(quarantined.project, "fixture.yaml"), entryYaml(SHARED_SLUG, {
     fact: FACT_A, evidence: EVIDENCE_A, lifecycle: "quarantined",
@@ -339,7 +339,7 @@ test("selected learning lookup separates live eligibility from content identity"
 
   // Changing an UNRELATED record in the same store must not invalidate the healthy read.
   const healthy = layeredStores(t, { a: true, b: false });
-  const healthySelection = selectFor(healthy);
+  const healthySelection = await selectFor(healthy);
   const h = toolFor(healthy, healthySelection);
   writeFileSync(join(healthy.project, "fixture.yaml"), entryYaml(SHARED_SLUG, { fact: FACT_A, evidence: EVIDENCE_A })
     + entryYaml("unrelated-c", { files: "docs/elsewhere.md", fact: "C fact CHANGED", evidence: "C evidence CHANGED" }));
@@ -359,7 +359,7 @@ test("selected learning lookup separates live eligibility from content identity"
 
 test("selected learning lookup preserves masking privacy and observational authority", async (t) => {
   const stores = layeredStores(t, { a: false, b: true });
-  const selection = selectFor(stores);
+  const selection = await selectFor(stores);
   const { rule, pulls } = toolFor(stores, selection);
 
   // An unselected id stays refused even though it exists in the project store.
@@ -370,7 +370,7 @@ test("selected learning lookup preserves masking privacy and observational autho
 
   // Masked arm B selects nothing, so nothing is reachable through the tool.
   let loads = 0;
-  const masked = computeMatchedLearningsForArm("B", { homes: stores.homes, taskFiles: ["src/lib/worker.ts"] }, {
+  const masked = await computeMatchedLearningsForArm("B", { homes: stores.homes, taskFiles: ["src/lib/worker.ts"] }, {
     loadLayeredLearningsForTaskFiles: () => { loads++; return { entries: [] }; },
     selectLearnings: () => { throw new Error("masked arm must not select"); },
     renderMatchedLearnings: () => { throw new Error("masked arm must not render"); },

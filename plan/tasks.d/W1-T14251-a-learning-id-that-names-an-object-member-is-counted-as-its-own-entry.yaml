@@ -1,0 +1,56 @@
+- id: W1-T14251
+  title: A learning id that names an object member, such as __proto__ or constructor, is counted as its own entry and never touches Object.prototype
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low # one module's fold and read; the stored JSON shape is unchanged
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T11115]
+  files:
+    - src/lib/knowledge-value.ts
+    - test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 86455aa29 (2026-11-22). Found in the review of #20041 (W1-T11115), where knowledge-value.ts was
+    out of scope.
+    - foldLearningUsage in src/lib/knowledge-value.ts folds `learnings.used` rows into a plain object, `{}` by default,
+      with `into[id] ??= { offered: 0, used: 0 }`. For the id `__proto__`, `into[id]` is Object.prototype, so the
+      counters are written onto it. For `constructor` they are written onto the Object function.
+    - REPRODUCED: one row offering `__proto__`, `constructor` and `real` leaves `Object.prototype.offered` as NaN, so
+      every fresh `{}` then reads `offered: NaN`. Only `real` becomes an own key, so the other two ids' counts are lost.
+    - learningValue reads `usage?.[id]` with no own-property check: learningValue("constructor", {}) returns a NaN
+      posterior.
+    - Callers on the default: digest.ts summarizeLearningUsefulness. recordLearningUsage folds into the object
+      readLearningUsage returns from JSON.parse, which also has Object.prototype.
+    - #20041 (open) passes Object.create(null) at one digest.ts call, summarizeLearningOutcomes. That narrows one call
+      site, not the module. This task fixes the module, and that call stays correct.
+    Learning ids come from learnings/ entries and worker reports. A worker's LEARNINGS_USED line is model output, so the
+    fold must not trust an id's spelling.
+  design: |
+    1. foldLearningUsage reads an entry only when it is an own property (Object.hasOwn), and creates one with
+       Object.defineProperty, so an id named `__proto__` or `constructor` becomes an own key and no setter or inherited
+       member is reached.
+    2. learningValue and leastUsefulLearnings read only own entries, so any id with no own entry reads the no-history
+       prior.
+    3. Stores stay plain objects, so the written JSON is unchanged. test/a-learning-that-never-helps-sinks.test.ts
+       strictly deep-equals fold and read results against object literals; a null-prototype store would fail it.
+
+    INVARIANT no-prototype-write: folding or reading learning usage never writes or reads a member of Object.prototype or of Object.
+  acceptance:
+    - claim: "invariant:no-prototype-write — folding learnings.used rows that offer and use __proto__, constructor and toString leaves Object.prototype and Object unchanged, and counts each id as its own entry"
+      kind: guard
+      proof: "grep: W1-T14251 criterion 1: in test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts"
+    - claim: "With an empty store, learningValue reads __proto__, constructor and toString as the no-history prior, alpha 1 and beta 1"
+      proof: "grep: W1-T14251 criterion 2: in test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts"
+    - claim: "recordLearningUsage through a real store file keeps those ids as keys with their counts, and a second record adds to them"
+      proof: "grep: W1-T14251 criterion 3: in test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts"
+    - claim: "summarizeLearningUsefulness over ledger lines naming those ids lists them with their counts and no NaN mean"
+      proof: "grep: W1-T14251 criterion 4: in test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts"
+  falsifier: |
+    Create entries by assignment again and criterion 1 must fail. Drop the own-property read in learningValue and criterion 2
+    must fail. Restore and require all to pass.

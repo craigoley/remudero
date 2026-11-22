@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { LearningEntry } from "#src/lib/learnings.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, renderMatchedLearnings, selectLearnings, type LearningEntry } from "#src/lib/learnings.js";
 import type { Config } from "#src/lib/config.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { SELF_SYNC_GUARD_ENV } from "#src/lib/self-sync.js";
-import { main, wipeTestCommand } from "#src/run-task.js";
+import { main, runTask, wipeTestCommand } from "#src/run-task.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   aggregateWipeTestPairs,
   computeMatchedLearningsForArm,
@@ -38,7 +42,7 @@ function tmpLedgerDir(): string {
 
 // ── acceptance criterion 1: arm B masks injection, store untouched; arm A carries facts ──
 
-test("computeMatchedLearningsForArm: arm B NEVER calls the load/select/render chain — the store is never touched — and renders zero learning blocks", () => {
+test("computeMatchedLearningsForArm: arm B NEVER calls the load/select/render chain — the store is never touched — and renders zero learning blocks", async () => {
   let loadCalls = 0;
   let selectCalls = 0;
   let renderCalls = 0;
@@ -57,7 +61,7 @@ test("computeMatchedLearningsForArm: arm B NEVER calls the load/select/render ch
     },
   };
 
-  const result = computeMatchedLearningsForArm(
+  const result = await computeMatchedLearningsForArm(
     "B",
     { homes: { projectDir: "/nonexistent" }, taskFiles: ["src/lib/wipe-test.ts"] },
     spyDeps,
@@ -71,7 +75,7 @@ test("computeMatchedLearningsForArm: arm B NEVER calls the load/select/render ch
   assert.deepEqual(result.droppedIds, []);
 });
 
-test("computeMatchedLearningsForArm: arm A carries the matched learnings via the real chain", () => {
+test("computeMatchedLearningsForArm: arm A carries the matched learnings via the real chain", async () => {
   const facts = [entry("e1", "fact one"), entry("e2", "fact two")];
   let loadCalls = 0;
   const spyDeps: LearningsInjectionDeps = {
@@ -83,7 +87,7 @@ test("computeMatchedLearningsForArm: arm A carries the matched learnings via the
     renderMatchedLearnings: (selected) => selected.map((e) => `- ${e.fact}`).join("\n"),
   };
 
-  const result = computeMatchedLearningsForArm(
+  const result = await computeMatchedLearningsForArm(
     "A",
     { homes: { projectDir: "/nonexistent" }, taskFiles: ["src/lib/wipe-test.ts"] },
     spyDeps,
@@ -95,9 +99,9 @@ test("computeMatchedLearningsForArm: arm A carries the matched learnings via the
   assert.deepEqual(result.selectedIds, ["e1", "e2"]);
 });
 
-test("computeMatchedLearningsForArm: arm A hands back one frozen handle per selected record; a load without sources is unbound", () => {
+test("computeMatchedLearningsForArm: arm A hands back one frozen handle per selected record; a load without sources is unbound", async () => {
   const facts = [entry("e1", "fact one")];
-  const result = computeMatchedLearningsForArm(
+  const result = await computeMatchedLearningsForArm(
     "A",
     { homes: { projectDir: "/nonexistent" }, taskFiles: ["src/lib/wipe-test.ts"] },
     {
@@ -111,6 +115,133 @@ test("computeMatchedLearningsForArm: arm A hands back one frozen handle per sele
   assert.equal(result.selectedLearnings[0].source, "unbound", "no store identity is invented when the loader gave none");
   assert.match(result.selectedLearnings[0].payloadRevision, /^[0-9a-f]{64}$/);
   assert.ok(Object.isFrozen(result.selectedLearnings[0]));
+});
+
+test("learning preparation consumes bounded source-change observations in delivered context", async (t) => {
+  const root = tmpLedgerDir();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const seed = gitRepo({ seedCommit: false, kind: "learning-preparation" });
+  const origin = gitRepo({ bare: true, kind: "learning-preparation-origin" });
+  t.after(() => { seed.cleanup(); origin.cleanup(); });
+  const planPath = join(root, "tasks.yaml");
+  const taskId = "TST-LEARNING-PREPARATION";
+  writeFileSync(planPath, [
+    `- id: ${taskId}`, "  title: learning preparation probe", "  repo: remudero",
+    "  type: implement", "  verify: auto", "  risk: medium",
+    "  files: [src/lib/a.ts]", "  origin: architect", "  status: queued", "",
+  ].join("\n"));
+  mkdirSync(join(seed.dir, "learnings"));
+  mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed.dir, "learnings", "testing.yaml"), ["a", "b"].map((id) => [
+    `- id: ${id}`, "  subsystem: testing", `  files: [src/lib/${id}.ts]`, "  symbols: [preparation]",
+    `  fact: advisory fact ${id}`, "  src: fixture", "  cited: '2026-01-02'", "",
+  ].join("\n")).join(""));
+  seed.git("config", "user.name", "Source change fixture");
+  seed.git("config", "user.email", "fixture@example.invalid");
+  const commit = (date: string) => {
+    seed.git("add", "-A");
+    execFileSync("git", ["-C", seed.dir, "commit", "-qm", date], {
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    });
+  };
+  writeFileSync(join(seed.dir, "src/lib/a.ts"), "old a\n");
+  writeFileSync(join(seed.dir, "src/lib/b.ts"), "old b\n");
+  commit("2026-01-01T12:00:00Z");
+  writeFileSync(join(seed.dir, "src/lib/a.ts"), "new a\n");
+  commit("2026-01-03T12:00:00Z");
+  seed.addRemote("origin", origin.dir);
+  seed.git("push", "-q", "origin", "main");
+  mkdirSync(join(root, "repos"));
+  execFileSync("git", ["clone", "-q", origin.dir, join(root, "repos", "remudero")]);
+
+  let prompt = "";
+  const result = await runTask(taskId, {
+    config: { claudeBin: "/bin/true", root, installRoot: REPO_ROOT },
+    planPath, skipGitSync: true, maskRecon: true,
+    github: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
+    containmentExec: async (token) => ({
+      transcript: `touch ../${token}.txt: Operation not permitted`,
+      outsideWriteCreated: false, insideWriteCreated: true,
+    }),
+    isolationExec: async () => ({
+      transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -",
+      aliasCount: 0, functionCount: 0, aliasNames: "-", functionNames: "-",
+    }),
+    spawn: async (args): Promise<WorkerResult> => {
+      prompt = args.prompt;
+      return {
+        sessionId: "fixture", costUsd: 0, numTurns: 1, text: "REPORT\nno PR opened\n", blocks: [], stderr: "",
+        subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+        model: "sonnet", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+        modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+      };
+    },
+  });
+
+  assert.equal(result.verdict, "no_pr");
+  assert.match(prompt, /advisory fact a \(verify first: .*1 commit since last citation.*\) \[src: learnings#a\]/);
+  assert.match(prompt, /advisory fact b \[src: learnings#b\]/);
+  const ledger = readLedgerLines(join(root, "state", "ledger.ndjson"));
+  const injected = ledger.find((row) => row.step === "learnings.injected");
+  const manifest = ledger.find((row) => row.step === "prompt.manifest");
+  assert.ok(injected?.source_changes);
+  const observation = injected.source_changes as {
+    measured: number; measuredZero: number; deliveredNotes: number; deliveredBytes: number;
+  };
+  assert.equal(observation.measured, 2);
+  assert.equal(observation.measuredZero, 1);
+  assert.equal(observation.deliveredNotes, 1);
+  assert.ok(observation.deliveredBytes <= DEFAULT_KNOWLEDGE_BUDGET_CHARS);
+  assert.deepEqual(manifest?.learning_source_changes, observation);
+});
+
+test("learning source-change notes preserve selection budget masking and observational authority", async (t) => {
+  const repo = gitRepo({ seedCommit: false, kind: "learning-annotation-budget" });
+  t.after(() => repo.cleanup());
+  const fact = { ...entry("active", "évidence"), files: ["fixture.ts"], cited: "2026-01-02" };
+  const excluded = { ...fact, id: "quarantined", lifecycle: "quarantined" as const };
+  writeFileSync(join(repo.dir, "fixture.ts"), "source\n");
+  repo.git("add", "fixture.ts");
+  repo.git("config", "user.name", "Source change fixture");
+  repo.git("config", "user.email", "fixture@example.invalid");
+  execFileSync("git", ["-C", repo.dir, "commit", "-qm", "source"], {
+    env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-03T12:00:00Z", GIT_COMMITTER_DATE: "2026-01-03T12:00:00Z" },
+  });
+  const facts = [fact, excluded, { ...fact, id: "runner-up", fact: "also relevant" }];
+  let memoryCalls = 0;
+  const deps: LearningsInjectionDeps = {
+    loadLayeredLearningsForTaskFiles: () => { memoryCalls++; return { entries: facts }; },
+    selectLearnings,
+    renderMatchedLearnings,
+  };
+  const input = {
+    homes: { projectDir: join(repo.dir, "learnings") },
+    taskFiles: ["fixture.ts"],
+    budgetChars: Buffer.byteLength(renderMatchedLearnings([fact])),
+    selectionContext: { seed: 7, propensityDraws: 8 },
+  };
+  const source = { repoDir: repo.dir, nowMs: Date.parse("2026-01-04T00:00:00Z") };
+  const baseline = await computeMatchedLearningsForArm("A", input, deps);
+  const annotated = await computeMatchedLearningsForArm("A", { ...input, source }, deps);
+  assert.equal(annotated.matchedLearnings, baseline.matchedLearnings);
+  assert.deepEqual(annotated.selectedIds, baseline.selectedIds);
+  assert.deepEqual(annotated.droppedIds, baseline.droppedIds);
+  assert.deepEqual(annotated.propensity, baseline.propensity);
+  assert.equal(annotated.selectedIds.includes("quarantined"), false);
+  assert.equal(annotated.sourceChangeSummary?.measured, 1);
+  assert.equal(annotated.sourceChangeSummary?.deliveredNotes, 0);
+  assert.equal(annotated.sourceChangeSummary?.omittedNotes, 1);
+  assert.equal(annotated.sourceChangeSummary?.omissionReason, "knowledge-budget");
+  assert.equal(annotated.sourceChangeSummary?.deliveredBytes, Buffer.byteLength(annotated.matchedLearnings));
+  assert.ok(Buffer.byteLength(annotated.matchedLearnings) <= input.budgetChars);
+  const summary = JSON.stringify(annotated.sourceChangeSummary);
+  for (const content of [repo.dir, "fixture.ts", "évidence"]) assert.equal(summary.includes(content), false);
+  const masked = await computeMatchedLearningsForArm("B", {
+    ...input, source: { ...source, readGit: () => assert.fail("masked arm read source") },
+  }, deps);
+  assert.equal(memoryCalls, 2);
+  assert.equal(masked.matchedLearnings, "");
+  assert.equal(masked.sourceChangeSummary, undefined);
 });
 
 // ── acceptance criterion 2: paired deltas are computed and ledgered ──

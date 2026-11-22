@@ -11,6 +11,9 @@ import { citation } from "./provenance.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildStandingBrief, type StandingBrief } from "./standing-briefs.js";
 import { EXTERNAL_SOURCE_CLASSES, type ExternalSourceClass } from "./untrusted-envelope.js";
+import { LoopBoundedChildTimeout } from "./loop-bounded-child.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
+import { systemClock } from "./clock.js";
 
 /**
  * Promptsmith injects doctrine and budgeted, cited facts (WS-8, W1-T19, W1-T33; Standing rule 1).
@@ -793,43 +796,251 @@ export function attestLearningOrigin(
   return { status: actual === entry.origin.lineSha256 ? "match" : "mismatch" };
 }
 
-export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number; // W1-T4681: commits on `files` since `sinceIso`
+export type ChurnCommitReader = (repoDir: string, files: string[], sinceIso: string) => number | null;
 
-function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number {
-  let output: string;
+function defaultChurnCommitReader(repoDir: string, files: string[], sinceIso: string): number | null {
   try {
-    output = execFileSync(
-      "git",
-      ["-C", repoDir, "log", "--oneline", `--since=${sinceIso}`, "--", ...files],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const output = execFileSync("git", ["-C", repoDir, "log", "--format=%H", `--since=${sinceIso}`, "--", ...files], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 2000, maxBuffer: 1024 * 1024,
+    });
+    return output.split("\n").filter(Boolean).length;
   } catch (error) {
-    void error; // absence and failure coincide: unreadable repo means unknowable churn, and 0 already means "no note"
-    return 0;
+    void error; // The standalone counting API uses null for an unavailable read.
+    return null;
   }
-  return output.split("\n").filter((line) => line.trim().length > 0).length;
 }
 
+/** Standalone counting API for a managed checkout. Worker preparation uses the shared observation below. */
 export function computeEntryChurn(
-  entry: LearningEntry,
-  repoDir: string,
-  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
-): number {
-  if (!entry.cited || entry.files.length === 0) return 0;
+  entry: LearningEntry, repoDir: string, readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
+): number | null {
+  if (!entry.cited || entry.files.length === 0) return null;
   return readChurnCommits(repoDir, entry.files, entry.cited);
 }
 
 export function computeCorpusChurn(
-  entries: LearningEntry[],
-  repoDir: string,
-  readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
-): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const entry of entries) out[entry.id] = computeEntryChurn(entry, repoDir, readChurnCommits);
-  return out;
+  entries: LearningEntry[], repoDir: string, readChurnCommits: ChurnCommitReader = defaultChurnCommitReader,
+): Record<string, number | null> {
+  return Object.fromEntries(entries.map((entry) => [entry.id, computeEntryChurn(entry, repoDir, readChurnCommits)]));
 }
 
-export const VERIFY_FIRST_NOTE = "verify first: files changed since this fact was earned";
+const SOURCE_CHANGE_VERSION = "learning-source-change-v1";
+const SOURCE_CHANGE_LIMITS = {
+  facts: 64, patterns: 128, commits: 4096, paths: 32_768, bytes: 4 * 1024 * 1024, timeoutMs: 2000, cache: 8,
+};
+const SOURCE_CHANGE_OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+
+type SourceChangeUnknown = "missing-anchor" | "invalid-anchor" | "unresolved-source" | "dirty-source"
+  | "stale-source" | "incomplete-history" | "unreadable-history" | "history-limit" | "output-limit" | "timeout" | "busy";
+
+type FactSourceChange = Readonly<{ kind: "measured"; commits: number } | { kind: "unknown"; reason: SourceChangeUnknown }>;
+
+export interface LearningSourceChanges {
+  version: typeof SOURCE_CHANGE_VERSION;
+  captureId?: string;
+  facts: ReadonlyMap<string, FactSourceChange>;
+}
+
+export interface LearningSourceChangeInput {
+  repoDir: string;
+  applicability?: string;
+  projectEntries?: ReadonlySet<LearningEntry>;
+  nowMs?: number;
+  readGit?: typeof hostWorktreeGitAsync;
+  commitLimit?: number;
+}
+
+interface SourceChangeCandidate {
+  id: string;
+  files: RegExp[];
+  since: number;
+}
+
+const sourceChangeCache = new Map<string, ReadonlyMap<string, FactSourceChange>>();
+let sourceChangeCaptureActive = false;
+
+function sourceChangeFailure(error: unknown): SourceChangeUnknown {
+  if (error instanceof LoopBoundedChildTimeout) return "timeout";
+  if ((error as NodeJS.ErrnoException)?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "output-limit";
+  return "unreadable-history";
+}
+
+/** `YYYY-MM-DD` names a day that exists (Date.parse alone rolls 02-30 over into March). */
+function isRealCalendarDay(cited: string): boolean {
+  const [year, month, day] = cited.split("-").map(Number) as [number, number, number];
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= lengths[month - 1]!;
+}
+
+function sourceChangeAnchor(cited: string | undefined, nowMs: number): number | SourceChangeUnknown {
+  if (!cited) return "missing-anchor";
+  const time = Date.parse(cited);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cited) || !Number.isFinite(time)
+      || !isRealCalendarDay(cited) || time > nowMs) return "invalid-anchor";
+  return time / 1000;
+}
+
+/** One NUL-delimited log for all candidates. The timestamp is the only commit metadata read. */
+function countSourceChanges(
+  raw: string, candidates: SourceChangeCandidate[], commitLimit: number,
+): number[] | SourceChangeUnknown {
+  const parts = raw.split("\0");
+  if (parts.pop() !== "" || raw.includes("\uFFFD")) return "incomplete-history";
+  if (parts.length > SOURCE_CHANGE_LIMITS.paths) return "history-limit";
+  const counts = candidates.map(() => 0);
+  let visited = 0;
+  for (let i = 0; i < parts.length;) {
+    if (visited++ >= commitLimit) return "history-limit";
+    if (parts[i++] !== "" || !/^\d+$/.test(parts[i] ?? "")) return "incomplete-history";
+    const seconds = Number(parts[i++]);
+    const paths: string[] = [];
+    if (parts[i]?.startsWith("\n")) {
+      paths.push(parts[i++].slice(1));
+      while (i < parts.length && parts[i] !== "") paths.push(parts[i++]);
+    }
+    candidates.forEach((candidate, index) => {
+      if (seconds >= candidate.since && paths.some((path) => candidate.files.some((file) => file.test(path)))) counts[index]++;
+    });
+  }
+  return counts;
+}
+
+function dirtySourcePaths(records: string[]): string[] | undefined {
+  const paths: string[] = [];
+  for (const record of records) {
+    if (record.startsWith("# ")) continue;
+    const path = /^(?:\? |1 (?:[^ ]+ ){7}|u (?:[^ ]+ ){9})([\s\S]+)$/.exec(record)?.[1];
+    if (path === undefined) return undefined;
+    paths.push(path);
+  }
+  return paths;
+}
+
+/** Committer-time window from UTC midnight on the last-cited date through the pinned HEAD.
+ *  Merge changes are relative to the first parent. Reuse rechecks the repository and working tree. */
+export async function observeLearningSourceChanges(
+  entries: readonly LearningEntry[], input: LearningSourceChangeInput,
+): Promise<LearningSourceChanges> {
+  const facts = new Map<string, FactSourceChange>();
+  const candidates: SourceChangeCandidate[] = [];
+  const unknown = (id: string, reason: SourceChangeUnknown) => facts.set(id, { kind: "unknown", reason });
+  const unavailable = (reason: SourceChangeUnknown): LearningSourceChanges => {
+    for (const candidate of candidates) unknown(candidate.id, reason);
+    return { version: SOURCE_CHANGE_VERSION, facts };
+  };
+  const nowMs = input.nowMs ?? systemClock.now();
+  let patternCount = 0;
+  let populationExceeded = entries.length > SOURCE_CHANGE_LIMITS.facts;
+  for (const entry of entries) {
+    const since = sourceChangeAnchor(entry.cited, nowMs);
+    const project = (input.projectEntries?.has(entry) ?? true) && entryLayer(entry) === "project";
+    if (typeof since === "string") unknown(entry.id, since);
+    else if (!project || entry.files.length === 0) unknown(entry.id, "unresolved-source");
+    else if (populationExceeded || (patternCount += entry.files.length) > SOURCE_CHANGE_LIMITS.patterns
+        || entry.files.some((file) => file.length > 256)) {
+      populationExceeded = true;
+      unknown(entry.id, "history-limit");
+    } else {
+      candidates.push({ id: entry.id, files: entry.files.map(globToRegExp), since });
+    }
+  }
+  if (populationExceeded) return unavailable("history-limit");
+  if (candidates.length === 0) return { version: SOURCE_CHANGE_VERSION, facts };
+  if (sourceChangeCaptureActive) return unavailable("busy");
+
+  const commitLimit = input.commitLimit ?? SOURCE_CHANGE_LIMITS.commits;
+  if (!Number.isSafeInteger(commitLimit) || commitLimit < 1 || commitLimit > SOURCE_CHANGE_LIMITS.commits) {
+    return unavailable("history-limit");
+  }
+  const read = (args: string[]) => (input.readGit ?? hostWorktreeGitAsync)(input.repoDir, args, {
+    timeout: SOURCE_CHANGE_LIMITS.timeoutMs,
+    configReadTimeoutMs: SOURCE_CHANGE_LIMITS.timeoutMs,
+    killSignal: "SIGKILL",
+    maxBuffer: SOURCE_CHANGE_LIMITS.bytes,
+    env: {
+      GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null", GIT_SHALLOW_FILE: undefined,
+      GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "", GIT_OPTIONAL_LOCKS: "0",
+    },
+    log: () => { /* The observation exposes a bounded reason instead of Git diagnostics. */ },
+  });
+  sourceChangeCaptureActive = true;
+  try {
+    const config = await read(["config", "--null", "--name-only", "--list"]);
+    if (config.split("\0").some((key) => /^(?:remote\.[\s\S]+\.promisor|extensions\.partialclone)$/i.test(key))) {
+      return unavailable("incomplete-history");
+    }
+    const [shallow, repository, head, end] = (await read([
+      "rev-parse", "--is-shallow-repository", "--path-format=absolute", "--git-common-dir", "HEAD^{commit}",
+    ])).split("\n");
+    if (shallow === "true") return unavailable("incomplete-history");
+    if (shallow !== "false" || !repository || !SOURCE_CHANGE_OID.test(head) || end !== "") {
+      return unavailable("unreadable-history");
+    }
+
+    const captureId = createHash("sha256").update(JSON.stringify([
+      SOURCE_CHANGE_VERSION, repository, head, input.applicability, commitLimit, entries,
+      candidates.map(({ id, since }) => [id, since]),
+    ])).digest("hex");
+    let batch = sourceChangeCache.get(captureId);
+    if (!batch) {
+      const tree = await read(["ls-tree", "--full-tree", "-r", "-z", head, "--"]);
+      const records = tree.split("\0");
+      if (records.pop() !== "" || tree.includes("\uFFFD")) return unavailable("incomplete-history");
+      if (records.length > SOURCE_CHANGE_LIMITS.paths) return unavailable("history-limit");
+      const tracked = records.filter((record) => /^100(?:644|755) blob /.test(record))
+        .map((record) => record.slice(record.indexOf("\t") + 1));
+      const resolved = candidates.filter(({ files }) => files.every((file) => tracked.some((path) => file.test(path))));
+      const measured = new Map<string, FactSourceChange>();
+      for (const candidate of candidates) measured.set(candidate.id, { kind: "unknown", reason: "unresolved-source" });
+      if (resolved.length > 0) {
+        const since = Math.min(...resolved.map((candidate) => candidate.since));
+        const raw = await read([
+          "log", `--max-count=${commitLimit + 1}`, `--since-as-filter=@${since}`, "--format=%x00%ct",
+          "--name-only", "-z", "--no-color", "--no-renames", "--no-notes", "--no-show-signature",
+          "--diff-merges=first-parent", head, "--",
+        ]);
+        const counts = countSourceChanges(raw, resolved, commitLimit);
+        if (typeof counts === "string") return unavailable(counts);
+        resolved.forEach(({ id }, index) => measured.set(id, { kind: "measured", commits: counts[index] }));
+      }
+      batch = measured;
+    }
+
+    // Status ignores entries marked skip-worktree or assume-unchanged.
+    const index = await read(["ls-files", "-v", "-z"]);
+    const indexed = index.split("\0");
+    if (indexed.pop() !== "" || index.includes("\uFFFD")) return unavailable("incomplete-history");
+    if (indexed.length > SOURCE_CHANGE_LIMITS.paths) return unavailable("history-limit");
+    const unchecked = indexed.filter((record) => /^[Sa-z] /.test(record)).map((record) => record.slice(2));
+    const rawStatus = await read(["status", "--porcelain=v2", "--branch", "-z", "--no-renames", "--no-ahead-behind",
+      "--untracked-files=all", "--ignore-submodules=all"]);
+    const status = rawStatus.split("\0");
+    if (status.pop() !== "" || rawStatus.includes("\uFFFD")) return unavailable("incomplete-history");
+    if (status.length > SOURCE_CHANGE_LIMITS.paths) return unavailable("history-limit");
+    if (status.shift() !== `# branch.oid ${head}`) return unavailable("stale-source");
+    const dirty = dirtySourcePaths(status);
+    if (!dirty) return unavailable("incomplete-history");
+    for (const { id, files } of candidates) {
+      if (dirty.some((path) => files.some((file) => file.test(path)))) unknown(id, "dirty-source");
+      else if (unchecked.some((path) => files.some((file) => file.test(path)))) unknown(id, "unresolved-source");
+      else facts.set(id, batch.get(id)!);
+    }
+    if (sourceChangeCache.size >= SOURCE_CHANGE_LIMITS.cache && !sourceChangeCache.has(captureId)) {
+      const oldest = sourceChangeCache.keys().next().value!;
+      sourceChangeCache.delete(oldest);
+    }
+    sourceChangeCache.set(captureId, batch);
+    return { version: SOURCE_CHANGE_VERSION, captureId, facts };
+  } catch (error) {
+    const reason = sourceChangeFailure(error);
+    return unavailable(reason);
+  } finally {
+    sourceChangeCaptureActive = false;
+  }
+}
+
+export const VERIFY_FIRST_NOTE = "verify first: source files changed since last citation";
 
 export function renderFreshnessNote(entryId: string, corpusChurn: Record<string, number>): string {
   const churn = corpusChurn[entryId] ?? 0;
@@ -839,7 +1050,7 @@ export function renderFreshnessNote(entryId: string, corpusChurn: Record<string,
     .map(([, n]) => n)
     .filter((n) => n > 0);
   const outranks = otherChurned.filter((n) => n < churn).length;
-  return ` (${VERIFY_FIRST_NOTE} — ${churn} commit${churn === 1 ? "" : "s"} since earned, higher churn than ${outranks}/${otherChurned.length} other changed facts)`;
+  return ` (${VERIFY_FIRST_NOTE} — ${churn} commit${churn === 1 ? "" : "s"} since last citation, higher churn than ${outranks}/${otherChurned.length} other changed facts)`;
 }
 
 /** Shared missing-artifact prefix; callers use startsWith, avoiding regex drift and tolerating
@@ -948,6 +1159,8 @@ export interface LayeredLearningsResult {
   entries: LearningEntry[];
   /** Which store each returned entry object was read from (W1-T11159); absent for a result not built by this loader. */
   sources?: ReadonlyMap<LearningEntry, LearningSource>;
+  /** Actual store membership, independently of an entry's declared/defaulted layer. */
+  projectEntries?: ReadonlySet<LearningEntry>;
   /** Set iff a `globalArtifactPath` was given but {@link loadGlobalArtifact} refused it (missing/malformed/hash mismatch). */
   globalRefusedReason?: string;
 }
@@ -973,7 +1186,8 @@ export function loadLayeredLearningsForTaskFiles(
   taskFiles: string[] | undefined,
   context?: LearningsSelectionContext,
 ): LayeredLearningsResult {
-  return mergeLayers(loadLearningsForTaskFiles(homes.projectDir, taskFiles, context), homes);
+  const projectEntries = loadLearningsForTaskFiles(homes.projectDir, taskFiles, context);
+  return { ...mergeLayers(projectEntries, homes), projectEntries: new Set(projectEntries) };
 }
 
 /** Shared merge step behind {@link loadLayeredLearnings}/{@link loadLayeredLearningsForTaskFiles}: append user-overall then verified-global onto an already-loaded project corpus, in PRECEDENCE ORDER. */
@@ -2127,10 +2341,9 @@ export function assessLexicalShadowLabels(report: LexicalShadowReport, review: L
   return counts;
 }
 
-/** One entry as a provenance-tagged CONTEXT bullet; `corpusChurn` (W1-T4681) adds a verify-first note ranked vs. peers, never a threshold. */
-function renderLearningLine(entry: LearningEntry, corpusChurn?: Record<string, number>): string {
-  const freshness = corpusChurn ? renderFreshnessNote(entry.id, corpusChurn) : "";
-  return `- ${entry.fact}${freshness} ${citation(`learnings#${entry.id}`)}`;
+/** One entry as a provenance-tagged context bullet. */
+function renderLearningLine(entry: LearningEntry, note = ""): string {
+  return `- ${entry.fact}${note} ${citation(`learnings#${entry.id}`)}`;
 }
 
 /** Render only the two mandatory doctrine lines (Tier 0, MASTER-PLAN §8A); always non-empty.
@@ -2147,8 +2360,61 @@ export function renderDoctrinePreamble(): string {
 /** Render only the task-matched facts (Tier 1, W1-T19/W1-T33), with no doctrine lines. VOLATILE:
  *  the corpus grows every retro, so callers place this LAST in a rendered prompt (cache-aware
  *  ordering, W1-T35), never ahead of {@link renderDoctrinePreamble}. "" when nothing matched. */
-export function renderMatchedLearnings(selected: LearningEntry[], corpusChurn?: Record<string, number>): string {
-  return selected.map((entry) => renderLearningLine(entry, corpusChurn)).join("\n");
+export function renderMatchedLearnings(selected: LearningEntry[], notes?: ReadonlyMap<string, string>): string {
+  return selected.map((entry) => renderLearningLine(entry, notes?.get(entry.id))).join("\n");
+}
+
+export interface LearningSourceChangeSummary {
+  version: LearningSourceChanges["version"];
+  captureId?: string;
+  measured: number;
+  measuredZero: number;
+  unknown: number;
+  unknownReasons: Partial<Record<SourceChangeUnknown, number>>;
+  deliveredNotes: number;
+  omittedNotes: number;
+  omissionReason?: "knowledge-budget";
+  deliveredBytes: number;
+}
+
+export function budgetLearningSourceChangeNotes(
+  selected: LearningEntry[], observation: LearningSourceChanges, baseBytes: number, budgetChars: number,
+): { notes: ReadonlyMap<string, string>; summary: LearningSourceChangeSummary } {
+  const counts: Record<string, number> = Object.create(null);
+  const unknownReasons: LearningSourceChangeSummary["unknownReasons"] = {};
+  let unknown = 0;
+  let measuredZero = 0;
+  for (const [id, fact] of observation.facts) {
+    if (fact.kind === "measured") {
+      counts[id] = fact.commits;
+      if (fact.commits === 0) measuredZero++;
+    } else {
+      unknown++;
+      unknownReasons[fact.reason] = (unknownReasons[fact.reason] ?? 0) + 1;
+    }
+  }
+  const notes = new Map<string, string>();
+  let deliveredBytes = baseBytes;
+  let omittedNotes = 0;
+  for (const { id } of selected) {
+    const note = renderFreshnessNote(id, counts);
+    if (!note) continue;
+    const bytes = Buffer.byteLength(note);
+    if (deliveredBytes + bytes > budgetChars) omittedNotes++;
+    else {
+      deliveredBytes += bytes;
+      notes.set(id, note);
+    }
+  }
+  return {
+    notes,
+    summary: {
+      version: observation.version, captureId: observation.captureId,
+      measured: observation.facts.size - unknown, measuredZero, unknown, unknownReasons,
+      deliveredNotes: notes.size, omittedNotes, ...(omittedNotes ? { omissionReason: "knowledge-budget" } : {}),
+      deliveredBytes,
+    },
+  };
 }
 
 /**

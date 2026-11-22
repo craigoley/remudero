@@ -94,7 +94,8 @@ import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
 import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_WITHHOLDING_SHARE, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
@@ -5322,16 +5323,20 @@ async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetReposit
   }
 }
 
-/** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
- *  with a staged retirement offered only on that share. */
-export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "type" | "files">, runId: string): ObservedSkillSelection {
+/** The implement lane's skill selection: each eligible skill withheld on its seeded share of tasks, and a skill
+ *  with a staged retirement offered only on that share. W1-T14137: drawn per task, so every run of the task, and
+ *  its fix rounds, land in one arm. */
+export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "id" | "type" | "files">): ObservedSkillSelection {
   const staged = stagedSkillRetirements(join(stateRoot, "state", "inbox-proposals.json"));
   return observeSkillSelection(
     loadInjectableSkills(join(repoRoot, ".claude", "skills")),
     task.type,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     task.files,
-    (skillName) => skillWithheldUnderRetirement(runId, skillName, staged),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: task.id, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, staged),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
 }
 
@@ -6717,10 +6722,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
-    // resulting text is forced empty. A normal (non-wipe-test) run always passes
-    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
-    // block ran before W1-T86.
-    const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
+    // resulting text is forced empty. Source-change notes are prepared against
+    // the same worktree the implement worker will read.
+    const learningUsage = opts.maskLearnings ? {} : readLearningUsage(learningUsagePath(join(config.root, "state")));
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
       homes: {
         projectDir: learningsDir,
@@ -6735,7 +6739,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         propensityDraws: LEARNING_PROPENSITY_DRAWS,
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      source: { repoDir: worktreePath },
     });
+    const preparedLearnings = await learningsResult;
     // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
     const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
       ? {
@@ -6743,8 +6749,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
             log("knowledge.pulled", { id, status, ...(meta === undefined ? {} : meta) }),
           learningLookup: {
             homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
-            allowedIds: learningsResult.selectedIds,
-            selected: learningsResult.selectedLearnings,
+            allowedIds: preparedLearnings.selectedIds,
+            selected: preparedLearnings.selectedLearnings,
           },
         }
       : undefined;
@@ -6752,7 +6758,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = learningsResult.matchedLearnings;
+    const { matchedLearnings, sourceChangeSummary } = preparedLearnings;
     // W1-T419: `matched_ids` sits beside the pre-existing `matched` count — `dropped` already
     // logged ids, so a count-only `matched` was asymmetric and made per-entry injection
     // frequency unrecoverable from the ledger. This row is deliberately NOT added to
@@ -6761,17 +6767,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
     // next reader should know which side of that line this row sits on before "fixing" it.
     log("learnings.injected", {
-      matched: learningsResult.selectedIds.length,
-      matched_ids: learningsResult.selectedIds,
-      dropped: learningsResult.droppedIds,
+      matched: preparedLearnings.selectedIds.length,
+      matched_ids: preparedLearnings.selectedIds,
+      dropped: preparedLearnings.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      matched_by: learningsResult.matchedBy,
-      global_refused_reason: learningsResult.globalRefusedReason,
+      matched_by: preparedLearnings.matchedBy,
+      global_refused_reason: preparedLearnings.globalRefusedReason,
       masked: !!opts.maskLearnings,
       // W1-T4241: the budget cut, not match strength, decided these entries (0 < p < 1), so injected
       // vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
-      propensity: contestedPropensities(learningsResult.propensity),
-      usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
+      propensity: contestedPropensities(preparedLearnings.propensity),
+      source_changes: sourceChangeSummary,
+      usage_sha: opts.maskLearnings ? undefined : createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
     });
 
     // ── Render + provenance-lint the prompt.
@@ -6790,9 +6797,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       "CLAUDE.md",
     );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
-    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = selectImplementSkills(config.root, repoRoot, task, runId);
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of tasks
+    // (taskArmWithheld, W1-T14137), so buildSkillEffectivenessReport has a randomized control cohort.
+    const skillSelection = selectImplementSkills(config.root, repoRoot, task);
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
     // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the
@@ -6838,7 +6845,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
-    log("prompt.manifest", { parts: buildPromptManifest(implementParts) });
+    log("prompt.manifest", { parts: buildPromptManifest(implementParts), learning_source_changes: sourceChangeSummary });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
     // criteria + hard constraints, built ONCE and ledgered here so the anchor
@@ -7362,7 +7369,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       });
     }
 
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logLearningsUsed(log, fullText(impl), preparedLearnings.selectedIds,
+      opts.maskLearnings ? undefined : learningUsagePath(join(config.root, "state")));
     logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);

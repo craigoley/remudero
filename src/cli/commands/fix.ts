@@ -45,7 +45,8 @@ import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
@@ -2771,8 +2772,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       standInEscalates = false;
     }
   };
-  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-run withholding, so a
-  // fix-lane effectiveness report has a randomized control. One assignment per run: every strike agrees.
+  // `applies-to: fix` skills, on the implement lane's tree, budget and seeded per-task withholding, so a
+  // fix-lane effectiveness report has a randomized control. W1-T14137: one assignment per TASK, keyed on
+  // opts.taskId and never the run id (a sweep's run id is pass-wide), so every strike, every run of the task
+  // and its implement run agree, and two tasks of one sweep pass draw independently.
   const stagedRetirements = typeof opts.config.root === "string"
     ? stagedSkillRetirements(join(opts.config.root, "state", "inbox-proposals.json")) : new Set<string>();
   const fixSkillSelection = observeSkillSelection(
@@ -2780,7 +2783,10 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     SKILL_FIX_TASK_TYPE,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     opts.task.files,
-    (skillName) => skillWithheldUnderRetirement(opts.runId, skillName, stagedRetirements),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: opts.taskId, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, stagedRetirements),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
   let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
