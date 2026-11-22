@@ -6717,10 +6717,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T86 (P12 wipe-test harness): arm B of a wipe-test pair MASKS injection —
     // computeMatchedLearningsForArm("B", ...) returns "" WITHOUT calling any of the
     // load/select/render chain below, so the store is never touched, only the
-    // resulting text is forced empty. A normal (non-wipe-test) run always passes
-    // opts.maskLearnings undefined, i.e. arm "A" — byte-identical to the chain this
-    // block ran before W1-T86.
-    const learningUsage = readLearningUsage(learningUsagePath(join(config.root, "state")));
+    // resulting text is forced empty. Source-change notes are prepared against
+    // the same worktree the implement worker will read.
+    const learningUsage = opts.maskLearnings ? {} : readLearningUsage(learningUsagePath(join(config.root, "state")));
     const learningsResult = computeMatchedLearningsForArm(opts.maskLearnings ? "B" : "A", {
       homes: {
         projectDir: learningsDir,
@@ -6735,14 +6734,16 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         propensityDraws: LEARNING_PROPENSITY_DRAWS,
       },
       budgetChars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+      source: { repoDir: worktreePath },
     });
+    const preparedLearnings = await learningsResult;
     // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
     const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
       ? {
           onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
           learningLookup: {
             homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
-            allowedIds: learningsResult.selectedIds,
+            allowedIds: preparedLearnings.selectedIds,
           },
         }
       : undefined;
@@ -6750,7 +6751,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // preamble here: renderImplementPrompt places this LAST in the CONTEXT
     // block (cache-aware ordering, W1-T35) so a growing corpus can never bust
     // the cache for the stable/per-task bytes that precede it.
-    const matchedLearnings = learningsResult.matchedLearnings;
+    const { matchedLearnings, sourceChangeSummary } = preparedLearnings;
     // W1-T419: `matched_ids` sits beside the pre-existing `matched` count — `dropped` already
     // logged ids, so a count-only `matched` was asymmetric and made per-entry injection
     // frequency unrecoverable from the ledger. This row is deliberately NOT added to
@@ -6759,17 +6760,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // correctness — the inverse of the #977 trap (a DECISION reading a rotated step), and the
     // next reader should know which side of that line this row sits on before "fixing" it.
     log("learnings.injected", {
-      matched: learningsResult.selectedIds.length,
-      matched_ids: learningsResult.selectedIds,
-      dropped: learningsResult.droppedIds,
+      matched: preparedLearnings.selectedIds.length,
+      matched_ids: preparedLearnings.selectedIds,
+      dropped: preparedLearnings.droppedIds,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      matched_by: learningsResult.matchedBy,
-      global_refused_reason: learningsResult.globalRefusedReason,
+      matched_by: preparedLearnings.matchedBy,
+      global_refused_reason: preparedLearnings.globalRefusedReason,
       masked: !!opts.maskLearnings,
       // W1-T4241: the budget cut, not match strength, decided these entries (0 < p < 1), so injected
       // vs dropped is a seeded randomization the outcome fold (knowledge-outcome.ts) can read.
-      propensity: contestedPropensities(learningsResult.propensity),
-      usage_sha: createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
+      propensity: contestedPropensities(preparedLearnings.propensity),
+      source_changes: sourceChangeSummary,
+      usage_sha: opts.maskLearnings ? undefined : createHash("sha256").update(JSON.stringify(learningUsage)).digest("hex").slice(0, 16),
     });
 
     // ── Render + provenance-lint the prompt.
@@ -6836,7 +6838,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // `present: false` rather than a hash of the empty string standing in for "nothing here" — see
     // `buildPromptManifest`'s own doc. A RECORD, never a gate: nothing reads this to decide
     // anything, so it is deliberately NOT added to DECISION_RELEVANT_LEDGER_STEPS (lib/ledger.ts).
-    log("prompt.manifest", { parts: buildPromptManifest(implementParts) });
+    log("prompt.manifest", { parts: buildPromptManifest(implementParts), learning_source_changes: sourceChangeSummary });
 
     // ── COMPACTION ANCHOR (MASTER-PLAN §8B / W1-T36): the goal + acceptance
     // criteria + hard constraints, built ONCE and ledgered here so the anchor
@@ -7360,7 +7362,8 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       });
     }
 
-    logLearningsUsed(log, fullText(impl), learningsResult.selectedIds, learningUsagePath(join(config.root, "state")));
+    logLearningsUsed(log, fullText(impl), preparedLearnings.selectedIds,
+      opts.maskLearnings ? undefined : learningUsagePath(join(config.root, "state")));
     logSkillsUsed(log, fullText(impl), injectableSkills.map((s) => s.name), skillUsagePath(join(config.root, "state")));
 
     const workerHeadCreatedLocally = workerCreatedCurrentHead(worktreePath, workerHeadReflogBefore);
