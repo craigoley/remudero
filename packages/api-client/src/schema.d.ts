@@ -3866,8 +3866,10 @@ export interface components {
       /** Records past the pace of about one row a second */
       dropped: number;
     };
-    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
+    /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is stored. W1-T13131: `template_id` must name a source-owned catalog template (src/lib/incident-templates.ts) declared for this `kind` and `source`; the fingerprint is that template's, never the message, name, route or frames. An event without one is refused with 422. */
     IncidentEventRequest: {
+      /** A catalog template id. A missing, malformed, unknown or mismatched id is refused (422). */
+      template_id: string;
       source: "console" | "gateway" | "daemon";
       kind: "exception" | "http_5xx" | "latency" | "invariant";
       name: string;
@@ -3882,6 +3884,13 @@ export interface components {
     IncidentEventResult: {
       fingerprint: string;
       accepted: true;
+      sampled: boolean;
+    };
+    /** POST /v1/incidents/events's 422 (W1-T13131) -- the event's template did not resolve, so it was never fingerprinted. One payload-free `incident.refused` row (reason, source, kind) is ledgered per refused input; past 20 per reason/source/kind per minute ONE `incident.refused_sampled` row is written and later refusals in that window answer `sampled: true` and write nothing. */
+    IncidentEventRefused: {
+      error: "template_refused";
+      reason: "missing" | "malformed" | "unknown" | "mismatched";
+      accepted: false;
       sampled: boolean;
     };
     /** POST /v1/incidents/events's 413 -- the raw body exceeded 16 KiB and was not read further. */
@@ -9085,6 +9094,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "413": IncidentIngestBodyTooLarge;
+          "422": IncidentEventRefused;
         };
     };
   };

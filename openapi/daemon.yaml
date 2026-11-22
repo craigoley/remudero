@@ -9392,9 +9392,18 @@ components:
         POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`,
         validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message`
         and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps
-        `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored.
-      required: [source, kind, name, message, at]
+        `message` at 500 characters and `frames` at 20 before anything is stored. W1-T13131:
+        `template_id` must name a source-owned catalog template (src/lib/incident-templates.ts)
+        declared for this `kind` and `source`; the fingerprint is that template's, never the
+        message, name, route or frames. An event without one is refused with 422.
+      required: [source, kind, name, message, at, template_id]
       properties:
+        template_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+          description: A catalog template id. A missing, malformed, unknown or mismatched id is refused (422).
         source:
           type: string
           enum: [console, gateway, daemon]
@@ -9430,6 +9439,27 @@ components:
         accepted:
           type: boolean
           enum: [true]
+        sampled:
+          type: boolean
+
+    IncidentEventRefused:
+      type: object
+      description: >
+        POST /v1/incidents/events's 422 (W1-T13131) -- the event's template did not resolve, so it was
+        never fingerprinted. One payload-free `incident.refused` row (reason, source, kind) is ledgered
+        per refused input; past 20 per reason/source/kind per minute ONE `incident.refused_sampled`
+        row is written and later refusals in that window answer `sampled: true` and write nothing.
+      required: [error, reason, accepted, sampled]
+      properties:
+        error:
+          type: string
+          enum: [template_refused]
+        reason:
+          type: string
+          enum: [missing, malformed, unknown, mismatched]
+        accepted:
+          type: boolean
+          enum: [false]
         sampled:
           type: boolean
 
@@ -22997,8 +23027,9 @@ paths:
       summary: Report one error event for grouping into an incident.
       description: >
         src/lib/incident-events.ts's `buildIncidentEventsRoute` (write scope, tier low): validate,
-        scrub, fingerprint (error type plus the first three in-app frames), then ledger one
-        `incident.event` row. Past 20 events per fingerprint per minute a burst collapses to ONE
+        resolve `template_id` against the source-owned catalog, scrub, fingerprint (the resolved
+        template and the kind, W1-T13131), then ledger one `incident.event` row. An unresolved
+        template answers 422 before any fingerprint is computed. Past 20 events per fingerprint per minute a burst collapses to ONE
         `incident.sampled` row and later events in that window answer `sampled: true` and write
         nothing. `message` and `frames` never reach the ledger. Reachable with the write token or
         with the ingest-only token, which grants this one method and path and nothing else.
@@ -23030,6 +23061,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IncidentIngestBodyTooLarge"
+        "422":
+          description: The event's template is missing, malformed, unknown or mismatched; it was refused and counted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentEventRefused"
 
   /v1/console/telemetry:
     post:
