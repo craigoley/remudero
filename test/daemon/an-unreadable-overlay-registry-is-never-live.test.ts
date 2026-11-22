@@ -46,10 +46,14 @@ test("W1-T13763 criterion 2: a denied search of .remudero with no pointer still 
     const { root } = fixture(t);
     const stateDir = join(root, ".remudero");
     chmodSync(stateDir, 0o000);
-    t.after(() => chmodSync(stateDir, 0o700));
-    const text = readInstanceRegistryText(root);
-    assert.equal(text, undefined);
-    assert.equal(instanceMode(ownerRepo, text), "live");
+    // Restore inside the body: the fixture's rmSync hook is registered first and would run first.
+    try {
+      const text = readInstanceRegistryText(root);
+      assert.equal(text, undefined);
+      assert.equal(instanceMode(ownerRepo, text), "live");
+    } finally {
+      chmodSync(stateDir, 0o700);
+    }
   });
 
 test("an unreadable pointer file that is present still refuses even though its directory is searchable",
@@ -57,8 +61,11 @@ test("an unreadable pointer file that is present still refuses even though its d
     const { root, pointer: pointerPath } = fixture(t);
     writeFileSync(pointerPath, pointer([registryPath]));
     chmodSync(pointerPath, 0o000);
-    t.after(() => chmodSync(pointerPath, 0o600));
-    assert.throws(() => readInstanceRegistryText(root), new InstanceRegistryRuntimeError("overlay_pointer_unreadable"));
+    try {
+      assert.throws(() => readInstanceRegistryText(root), new InstanceRegistryRuntimeError("overlay_pointer_unreadable"));
+    } finally {
+      chmodSync(pointerPath, 0o600);
+    }
   });
 
 test("a pointer for other files leaves the missing registry on the legacy path", (t) => {
