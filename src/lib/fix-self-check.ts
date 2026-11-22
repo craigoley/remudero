@@ -16,7 +16,8 @@ import {
 import { SPECIALIST_TOOLS } from "./specialist-panel.js";
 import { cashDivertSpawnFields, workerTranscript, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 
-/** Above the posted review's p90 of about 13 minutes, so a normal review finishes inside it. */
+/** BACKSTOP: fires only once a self-check has hung; a normal review finishes inside it, and the push proceeds
+ *  either way. Above the posted review's p90 of about 13 minutes. */
 export const FIX_SELF_CHECK_TIMEOUT_MS = 15 * 60_000;
 /** At most one extra worker turn per strike: a criterion that keeps failing is W1-T13886's to escalate. */
 export const FIX_SELF_CHECK_EXTRA_TURNS = 1;
