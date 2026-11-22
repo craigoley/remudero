@@ -26,7 +26,7 @@ import { callSiteCandidates, MAX_RELINT_ATTEMPTS, relintGuidanceLines, type Reli
 import { appendLedger } from "./ledger.js";
 import { appendThreadEvent, captureInboxInput, verifiedInboxInput, type InboxCausalScope, type InboxInputReference, type ThreadEvent, type ThreadEventKind, type ThreadMessageExtra, type ThreadStoreDeps } from "./inbox-thread.js";
 import { inboxKind, isAgeOnlyInboxInformation } from "./inbox-owner.js";
-import { skillEvalApprovalRefusal } from "./skill-eval-gate.js";
+import { skillEvalApprovalRefusal, skillEvalInboxStatus } from "./skill-eval-gate.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { defaultGetProcessStartTime, isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { GIT_FETCH_KILL_GRACE_MS } from "./git-fetch-retry.js";
@@ -110,7 +110,21 @@ export interface Proposal {
   skillFile?: SkillFilePayload;
   skillFileStagedAt?: string;
   skillEval?: SkillEvalRecord;
+  /** W1-T13861: the fleet's own eval of the text with this sha256: claimed (running, or stopped with no verdict) or
+   *  waiting on a gate. Written only by skill-eval-auto.ts. */
+  skillEvalAuto?: SkillEvalAutoRecord;
   skillDraftClose?: { at: string; reason: string; skillSha256: string };
+}
+
+/** W1-T13861: one auto-eval state for one stored text. A claim is never released once an attempt was dispatched. */
+export interface SkillEvalAutoRecord {
+  draftSha256: string;
+  state: "claimed" | "waiting";
+  /** The eval's run id; present on a claim. */
+  runId?: string;
+  /** Why the pass waited; present while waiting. */
+  reason?: string;
+  at: string;
 }
 
 export interface SkillEvalRecord {
@@ -839,6 +853,7 @@ export interface InboxClassification {
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
   skillFile?: SkillFilePayload;
   skillEval?: SkillEvalRecord;
+  skillEvalAuto?: SkillEvalAutoRecord;
   /** Present iff state === "drafting" — when the in-flight Architect worker for this proposal's draft was spawned
    *  (W1-T193's "never renders nothing during a legitimate multi-minute mid-draft window" bar). */
   draftSpawnedAt?: string;
@@ -1574,7 +1589,8 @@ export function classifyProposal(
   // W1-T4338: a skill draft needs no Architect-drafted task — the staged SKILL.md IS the artifact approval writes.
   if (proposal.skillFile) {
     return { proposalId: proposal.id, state: "ready", reasons: [], skillFile: proposal.skillFile,
-      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}), ...referentUnverified };
+      ...(proposal.skillEval ? { skillEval: proposal.skillEval } : {}),
+      ...(proposal.skillEvalAuto ? { skillEvalAuto: proposal.skillEvalAuto } : {}), ...referentUnverified };
   }
 
   const reasons: PredicateFailure[] = [];
@@ -3256,6 +3272,8 @@ export function renderInbox(classifications: InboxClassification[]): string {
     } else {
       lines.push(`  draft: not cached`);
     }
+    // W1-T13861: a skill draft's held-out eval state, the line the panel's ready item carries too.
+    if (c.skillFile) lines.push(`  ${skillEvalInboxStatus(c.skillFile.markdown, c.skillEval, c.skillEvalAuto)}`);
   }
   // W1-T193: a proposal currently mid-draft is named, with its spawn time — the same
   // never-render-nothing-during-a-legitimate-window bar the console's card carries.

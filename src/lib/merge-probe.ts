@@ -7,8 +7,8 @@ import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
 import {
-  canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES,
-  typecheckEnv,
+  canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, typecheckEnv,
+  typecheckPeakBytes,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
@@ -299,13 +299,13 @@ function harnessTypecheck(
     mkdirSync(home);
     const config = join(dir, WRAPPER_CONFIG);
     writeFileSync(config, JSON.stringify({ extends: "./tsconfig.json", compilerOptions: WRAPPER_COMPILER_OPTIONS }));
-    // W1-T5658's check at about half the cold peak memory: tsc reuses only the results whose file hashes still match.
+    // W1-T5658's check runs warm: tsc reuses only the results whose file hashes still match.
     const self = { root: dir, buildInfo: join(scratch, `typecheck-${n}.tsbuildinfo`) };
     if (previous !== undefined) seedBuildInfo(previous, self, state.tsVersion);
-    const slot = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion)
-      ? undefined : await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
+    const warm = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion);
+    const slot = await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: typecheckPeakBytes(warm), ...testSlot });
     try {
-      if (slot && !testSlotExecutionAllowed(slot)) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
+      if (!testSlotExecutionAllowed(slot)) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
       return await new Promise<TypecheckRun>((resolveRun) => {
         let output = "";
         let timedOut = false;
@@ -325,7 +325,7 @@ function harnessTypecheck(
           resolveRun({ status, output: output + extra, timedOut });
         };
         try {
-          const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+          const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), typecheckPeakBytes(warm));
           // The proof env is an allowlist that drops an inherited GOMEMLIMIT, so the daemon's own limit is passed on.
           const child = spawnChild(process.execPath, [...mergedTypecheckArgv(tsc, self.buildInfo, config), ...tight], {
             cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: typecheckEnv(proofChildEnv(home), process.env.GOMEMLIMIT),
@@ -341,7 +341,7 @@ function harnessTypecheck(
         }
       });
     } finally {
-      slot?.release();
+      slot.release();
     }
   };
 }
