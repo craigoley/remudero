@@ -654,6 +654,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runDraftRung"],
     outcomes: ["window", "allowance"],
   },
+  {
+    // W1-T13904: the measurement cadence's daily paid spend per merged PR.
+    step: "spend.per_merged_daily",
+    meaning:
+      "The paid model spend of one finished UTC day divided by the PRs merged that day. Fields: `day`, `paid_usd` " +
+      "(produced api or cash rows, plus worker.attempt api rows whose selection_assignment_id has no produced row), " +
+      "`merged_prs` (pr.terminal merged rows), `paid_usd_per_merged_pr` (null when no PR merged), `lanes` (the paid " +
+      "sum by lane), `unpriced_rows` (cash rows with partial or unavailable token usage, never priced) and " +
+      "`attempt_only_usd`. One row per day; a day that already has a row gets no second one.",
+    writer: ["writeSpendPerMergedDays"],
+    outcomes: ["recorded"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
