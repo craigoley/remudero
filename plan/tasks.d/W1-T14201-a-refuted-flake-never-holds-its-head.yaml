@@ -32,7 +32,7 @@
       kind: guard
       proof: "grep: W1-T14201 criterion 4: in test/a-refuted-flake-never-holds-its-head.test.ts"
     - claim: "The W1-T13865 test no longer expects a refuted FLAKE ruling to hold"
-      proof: "grep: for (const flake_claim of [\"requeue_deferred\", \"confirmed\"]) in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts"
+      proof: "grep: for (const flake_claim of \\[\"requeue_deferred\", \"confirmed\"]) in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts"
   rationale: |
     WHY: since W1-T13865 (#19767, merged 2026-11-21 03:06Z), a FLAKE round whose rerun comes back red stops
     every later fix round at that head. The PR stays red and nothing works on it until someone pushes.
