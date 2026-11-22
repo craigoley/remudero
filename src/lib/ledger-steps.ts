@@ -439,6 +439,34 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["reverted", "followup_fixed", "clean"],
   },
   {
+    // W1-T12145: the store of a calibration case across passes; the measurement cadence reads it back.
+    step: "review.calibration.case",
+    meaning:
+      "One known-answer case reviewed by one reviewer model under test, in shadow mode at the case's " +
+      "recorded head with the model pinned: the epoch, the case (an escaped defect whose right verdict is " +
+      "FAIL, or a control whose right verdict is PASS), the provider and model, the verdict it gave (null " +
+      "when it gave none, with the reason), its cost, duration and start, and whether the model was the " +
+      "head's live incumbent. The next pass reads these rows to score the epoch and pick the next cases.",
+    writer: ["scoreReviewersAgainstKnownAnswers"],
+    outcomes: ["PASS", "FAIL", "unmeasured"],
+  },
+  {
+    // W1-T12145: one model's score per pass, or a refusal; the next pass reads the decided pairs back.
+    step: "review.calibration.result",
+    meaning:
+      "scored: one reviewer model's score over its epoch's cases after a calibration pass: the false-FAIL rate " +
+      "on controls and the detection rate on escaped defects, each with a 95% Wilson interval and its case " +
+      "count; runs that gave no verdict; cost and duration per case; the incumbent's re-run agreement as the " +
+      "noise floor; and every model pair the always-valid sequential test read decided, with the metric, " +
+      "decision, p-value and cases spent. A decided pair gets no more cases of that metric this epoch, and the " +
+      "next pass reads these pairs back. refused: a case refused before any request, with the reason: the " +
+      "fleet was not idle or a measured usage window was at or above 80% (subscription), the $25 per 7 days " +
+      "evaluator cap would be exceeded (cash), no epoch had 20 escaped defects, or the frozen epoch could not " +
+      "be read. W1-T14043 reads the scored rows to choose the live reviewer.",
+    writer: ["scoreReviewersAgainstKnownAnswers"],
+    outcomes: ["scored", "refused"],
+  },
+  {
     // W1-T12546: a fix dispatch whose head moved before the checkout claim.
     step: "sweep.fix.head_adopted",
     meaning:

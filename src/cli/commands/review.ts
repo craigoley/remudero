@@ -19,6 +19,7 @@ import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/compo
 import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
+import { isCalibrationCaseOf, reviewerModelPin } from "../../lib/reviewer-calibration.js";
 import { withTempDir } from "../../lib/tmp.js";
 import { systemClock } from "../../lib/clock.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
@@ -2345,7 +2346,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
   // fetched the live REST row, so decline a closed PR before fetching its head or building a
   // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
-  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed") {
+  // W1-T12145: a calibration case is a MERGED pull request reviewed in shadow at its recorded head. It is
+  // reviewed although closed only when the head it names is the one the PR merged; a shadow review publishes nothing.
+  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed" &&
+      !isCalibrationCaseOf(rest, raw as RestPullRow)) {
     // The decline is a review outcome too: ledger it so a skipped closed PR is not a silent gap.
     const closed = raw as RestPullRow;
     appendLedger(ledgerPathFor(loadConfigDep()), {
@@ -2662,6 +2666,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     } else {
       try {
         reviewerMount = resolveMount(loadMounts(mountsPath(repoRoot)), "reviewer", taskRisk);
+        // W1-T12145: a calibration case pins the reviewer model under test; reviewerModelPin is undefined outside shadow.
+        const pin = reviewerModelPin(rest);
+        if (pin !== undefined) reviewerMount = { ...reviewerMount, provider: pin.provider, model: pin.model };
         settingsFile = renderWorkerSettings({
           templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
           hooksDir: join(resolveInstallRoot(config), "hooks"),
