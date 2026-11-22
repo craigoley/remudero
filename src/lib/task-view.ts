@@ -234,7 +234,7 @@ function readTaskActivity(
       let bytes = 0;
       let hasMore = found.length > TASK_ACTIVITY_PAGE_EVENTS;
       for (const row of found.slice(0, TASK_ACTIVITY_PAGE_EVENTS)) {
-        const ts = typeof row.ts === "string" ? row.ts.slice(0, 40) : new Date(Number(row.ts_ms)).toISOString();
+        const ts = typeof row.ts === "string" ? row.ts.slice(0, 40) : fixedClock(Number(row.ts_ms)).iso();
         const step = typeof row.step === "string" ? row.step.slice(0, ACTIVITY_STEP_CHARS) : "unknown";
         const event: TaskActivityEvent = { seq: Number(row.seq), id: `${String(row.ts_ms)}:${String(row.h)}`, ts, step };
         bytes += Buffer.byteLength(JSON.stringify(event)) + 1;
