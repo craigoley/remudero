@@ -15,7 +15,7 @@ import {
   PROMOTION_BARS_ROOT, PROMOTION_CEILING_FIELDS, PROMOTION_CEILINGS_PATH, PROMOTION_FLOOR_FIELDS, PROMOTION_FLOORS_PATH, readPromotionBars,
 } from "#src/lib/promotion-bars.js";
 import { localPrDiffAsync } from "#src/lib/pr-diff.js";
-import { INSTRUMENT_ALIGN_CELLS, classifyInstrumentChange } from "#src/lib/review.js";
+import { INSTRUMENT_ALIGN_CELLS, JSON_NUMBER_RE, classifyInstrumentChange } from "#src/lib/review.js";
 import { SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_MIN_MEAN_GAIN, SKILL_EVAL_TRIALS_PER_ARM } from "#src/lib/skill-eval.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -295,6 +295,15 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   assert.equal(classify(PROMOTION_CEILINGS_PATH, '-  "judgeMaxBrier": 0.1,\n+  "judgeMaxBrier": 5e-2,\n'), "tightening");
   // A token that is not a whole JSON number is never read as its prefix: the file stays undetermined.
   assert.equal(classify(PROMOTION_FLOORS_PATH, '-  "judgeMinAgreeShare": 0.98,\n+  "judgeMinAgreeShare": 0.99.5,\n'), "undetermined");
+  // The unkeyed reading's number token, at the cursor: a JSON number matches, a letter or a bare sign does not.
+  for (const [text, at] of [["9e-1", 0], ["x: -1.5E+2", 3]] as const) {
+    JSON_NUMBER_RE.lastIndex = at;
+    assert.equal(JSON_NUMBER_RE.test(text), true, text);
+  }
+  for (const [text, at] of [["abc", 0], ["- 1", 0], ['"0.98"', 0]] as const) {
+    JSON_NUMBER_RE.lastIndex = at;
+    assert.equal(JSON_NUMBER_RE.test(text), false, text);
+  }
 
   // A key and its value on different lines are one pair (PR #20033's second review: both moves read `undetermined`).
   const below = (from: string, to: string) => ` {\n   "judgeMinAgreeShare":\n-    ${from},\n+    ${to},\n   "skillEvalHeldOutTasks": 3,\n`;

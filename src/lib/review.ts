@@ -10999,7 +10999,8 @@ function instrumentDiffPairs(diff: string, file: string): {
   return { lines, removed, added, events, dropped };
 }
 
-const JSON_NUMBER_RE = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+/** A JSON number at the cursor (sticky): `numberSkeleton` sets `lastIndex` before each read. */
+export const JSON_NUMBER_RE = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 
 /** One diff line as its JSON numbers and the text around them, whitespace dropped. A string stays whole in the
  *  skeleton, so a digit inside it is text. `undefined` for a line holding an unterminated string. */
