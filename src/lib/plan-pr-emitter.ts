@@ -608,6 +608,22 @@ export function createPlanPrRest(fetch: GhApiFetcher, owner: string, repo: strin
   return { prUrl: row.html_url, prNumber: row.number };
 }
 
+/**
+ * W1-T14311: the arguments `rmd approve` hands the review command for the plan PR it just opened. A PR URL
+ * names its number only: the review command reads `repos/<owner>/<repo>/pulls/<n>` in the repository it
+ * resolves for itself (this checkout's, the public one) unless `--repo` names another. A ratification filed in
+ * the plan destination therefore carries `--repo`, so the read-back addresses the repository the PR opened in
+ * (2026-11-22: PRs 297..313 of remudero-ops were read from the public repository and 404ed). A public filing
+ * keeps the bare PR number and no flags, exactly as before.
+ */
+export function planPrReviewInvocation(
+  filing: { owner: string; repo: string; destination: boolean },
+  prUrl: string,
+  prNum: string,
+): { prArg: string; rest: string[] } {
+  return filing.destination ? { prArg: prUrl, rest: ["--repo", `${filing.owner}/${filing.repo}`] } : { prArg: prNum, rest: [] };
+}
+
 /** `gh api repos/{owner}/{repo}/pulls?head=...` argv, filtered to one head branch — the same REST surface
  *  {@link "./open-prs-rest.js".fetchOpenPrsRest} reads, never `gh pr list` (GraphQL). `state=open`: a
  *  stranded prior attempt's PR, if any, is still open moments later. */

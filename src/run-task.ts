@@ -1275,6 +1275,7 @@ import {
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   planPrAcceptanceCriteria,
+  planPrReviewInvocation,
   probeExistingPlanPr,
   ratifyPrCreateRestArgs,
   ratifyPrProbeRestArgs,
@@ -36798,7 +36799,10 @@ async function triageCommandLocked(
       }
 
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
-      const reviewCode = await reviewCommand(view === undefined ? prNum : prUrl);
+      // W1-T14311: a PR URL names its number only, so a destination PR carries its own repository to the review.
+      const prTarget = prUrlTarget(prUrl);
+      const reviewAs = planPrReviewInvocation(view !== undefined && prTarget !== undefined ? { ...prTarget, destination: true } : { owner, repo, destination: false }, prUrl, prNum);
+      const reviewCode = await reviewCommand(reviewAs.prArg, reviewAs.rest);
       if (await mergedBeforeGate(prUrl, reviewCode, log)) {
         say(`triage PR merged by its repository before review — nothing to arm: ${prUrl}`);
         continue;
@@ -37384,7 +37388,7 @@ export async function planCommand(
     // W1-T12213: a changed file is committed in the repository that holds it, so a proposal can open one pull
     // request in each repository. With no host file there is one side: today's lane in the public repository.
     const sides = await architectFilingSides({ worktreePath, branch, owner: filingTarget.owner, repo: filingTarget.repo }, view, changedFiles, { owner, repo });
-    const opened: Array<{ prUrl: string; isPublic: boolean }> = [];
+    const opened: Array<{ prUrl: string; isPublic: boolean; owner: string; repo: string }> = [];
     for (const side of sides) {
       const { worktreePath, branch, owner, repo } = side;
       if (view === undefined) applyPlanProposalCommit(worktreePath, commitMessage, log);
@@ -37472,11 +37476,11 @@ export async function planCommand(
       }
       log("pr.opened", { pr_url: prUrl, plan_only: true, mode });
       say(`plan PR (plan-only, --mode=${mode}): ${prUrl}`);
-      opened.push({ prUrl, isPublic: side.isPublic });
+      opened.push({ prUrl, isPublic: side.isPublic, owner: side.owner, repo: side.repo });
     }
 
     let gatedCode = 0;
-    for (const { prUrl, isPublic } of opened) {
+    for (const { prUrl, isPublic, owner: prOwner, repo: prRepo } of opened) {
       // Gate: ci green -> post remudero-review -> arm auto-merge (identical shape to every other
       // Architect skill's output — "PROPOSES anything, MERGES nothing" until the gate clears it).
       const ci = ciGateState(await waitForCiGreen(prUrl, (s, extra) => log(s, extra)));
@@ -37486,7 +37490,8 @@ export async function planCommand(
         return 1;
       }
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
-      const reviewCode = await reviewCommand(isPublic ? prNum : prUrl);
+      const reviewAs = planPrReviewInvocation({ owner: prOwner, repo: prRepo, destination: !isPublic }, prUrl, prNum);
+      const reviewCode = await reviewCommand(reviewAs.prArg, reviewAs.rest);
       if (await mergedBeforeGate(prUrl, reviewCode, log)) {
         say(`plan PR merged by its repository before review — nothing to arm: ${prUrl}`);
         continue;
@@ -40703,7 +40708,8 @@ export async function approveCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    const reviewAs = planPrReviewInvocation(filing, result.prUrl, prNum);
+    const reviewCode = await reviewCommand(reviewAs.prArg, reviewAs.rest);
     if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
       removeApproveWorktree();
       console.log(`rmd approve: ${proposalId} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
@@ -41106,7 +41112,8 @@ async function approveBatchCommand(
     const notGreenExit = approveCiNotGreenExit(ci, result.prUrl, removeApproveWorktree);
     if (notGreenExit !== undefined) return notGreenExit;
     const prNum = result.prUrl.match(/\/pull\/(\d+)/)?.[1] ?? result.prUrl;
-    const reviewCode = await reviewCommand(filing.destination ? result.prUrl : prNum);
+    const reviewAs = planPrReviewInvocation(filing, result.prUrl, prNum);
+    const reviewCode = await reviewCommand(reviewAs.prArg, reviewAs.rest);
     if (await mergedBeforeGate(result.prUrl, reviewCode, log)) {
       removeApproveWorktree();
       console.log(`rmd approve: batch of ${result.accepted.length} — plan PR merged by its repository before review, nothing to arm: ${result.prUrl}`);
