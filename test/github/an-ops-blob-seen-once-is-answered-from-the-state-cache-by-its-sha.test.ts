@@ -291,6 +291,10 @@ test("W1-T13970 criterion 3: the arm path's cached reading makes one rules read 
   assert.equal(await deps.mergeQueue!(url(13972)), true);
   assert.equal(shim.calls().filter((call) => call.includes("/pulls/")).length, 2, "positive control: each PR was read");
   assert.equal(shim.calls().filter((call) => call.includes("rules/branches/main")).length, 1, "one rules read for both PRs");
+  // W1-T14239: the per-PR map keeps the base ref, so a PR read again inside the TTL makes no read at all.
+  const before = shim.calls().length;
+  assert.equal(await deps.mergeQueue!(url(13971)), true);
+  assert.equal(shim.calls().length, before, "a PR read again inside the TTL reads neither its base ref nor the rules");
 });
 
 test("W1-T13970 criterion 4: a cached file whose bytes do not hash to its sha is discarded and the blob is fetched", async (t) => {
