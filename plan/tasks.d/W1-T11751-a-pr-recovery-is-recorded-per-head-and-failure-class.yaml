@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 12.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern (the recovery record and its reconcile); a new module plus one sweep write site; shadow, no decision reads it
   band_meaning: span
   origin: architect

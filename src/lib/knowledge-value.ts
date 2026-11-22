@@ -20,6 +20,14 @@ import { writeAtomic } from "./fs-race-safe.js";
  *
  * A worker's report is a claim, not proof; the ablation harness (W1-T4092) is the causal check.
  * Silent reports (no LEARNINGS_USED line) count as neither offered nor used.
+ *
+ * W1-T14251 — AN ID IS DATA, NEVER A MEMBER NAME. A learning id is corpus text, and a worker's
+ * LEARNINGS_USED line is model output, so `__proto__`, `constructor` and `toString` are possible ids.
+ * On a plain object, `into["__proto__"] ??= …` writes the counters onto Object.prototype and
+ * `usage["constructor"]` reads the Object function. Every id-keyed read here is an own-property read
+ * ({@link ownUsage}) and every new entry is defined, never assigned, so each id is its own key. A store
+ * stays a plain object, so the JSON it writes is unchanged, and `JSON.parse` reads an own
+ * `__proto__` key back as an own key.
  */
 
 export interface LearningUsageCounts {
@@ -36,6 +44,11 @@ export interface LearningValue {
   mean: number;
 }
 
+/** W1-T14251: `usage`'s OWN entry for `id`, or `undefined`. An inherited member is never an entry. */
+function ownUsage(usage: LearningUsage | undefined, id: string): LearningUsageCounts | undefined {
+  return usage !== undefined && Object.hasOwn(usage, id) ? usage[id] : undefined;
+}
+
 /** Fold `learnings.used` ledger rows into per-learning counts. */
 export function foldLearningUsage(rows: Iterable<Record<string, unknown>>, into: LearningUsage = {}): LearningUsage {
   for (const row of rows) {
@@ -43,7 +56,12 @@ export function foldLearningUsage(rows: Iterable<Record<string, unknown>>, into:
     const injected = Array.isArray(row.injected_ids) ? row.injected_ids.filter((x): x is string => typeof x === "string") : [];
     const used = new Set(Array.isArray(row.used_ids) ? row.used_ids.filter((x): x is string => typeof x === "string") : []);
     for (const id of injected) {
-      const c = (into[id] ??= { offered: 0, used: 0 });
+      let c = ownUsage(into, id);
+      if (c === undefined) {
+        // Defined, not assigned: assigning `into["__proto__"]` would call Object.prototype's setter.
+        c = { offered: 0, used: 0 };
+        Object.defineProperty(into, id, { value: c, writable: true, enumerable: true, configurable: true });
+      }
       c.offered += 1;
       if (used.has(id)) c.used += 1;
     }
@@ -52,7 +70,7 @@ export function foldLearningUsage(rows: Iterable<Record<string, unknown>>, into:
 }
 
 export function learningValue(id: string, usage: LearningUsage | undefined): LearningValue {
-  const c = usage?.[id] ?? { offered: 0, used: 0 };
+  const c = ownUsage(usage, id) ?? { offered: 0, used: 0 };
   const alpha = c.used + 1;
   const beta = Math.max(0, c.offered - c.used) + 1;
   return { alpha, beta, mean: alpha / (alpha + beta) };

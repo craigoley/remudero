@@ -15,7 +15,7 @@
     - src/lib/worker-provider.ts
     - test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts
     - test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts # amended 2026-11-22: pins the old rule (design step 5)
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:reclaimed-blocks-not-incomplete — the W1-T13951 fixture (a 400 KiB earlier agent message, a 2 MiB command item, then an 800 KiB final message, then turn.completed, exit 0) returns outputRetention.text complete, outputRetention.blocks truncated, subtype success and isError false, and the review's reviewerOutcome for that subtype is success. On origin/main the same stream returns error_incomplete_output"

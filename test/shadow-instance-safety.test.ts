@@ -6,7 +6,7 @@ import { applyOperatorMergeHold } from "#src/lib/operator-merge-hold.js";
 import { automergeHoldFromLedger } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -1665,7 +1665,77 @@ test("private registry selection preserves owner holds and private-safe boundari
 });
 
 
-test("private registry selection preserves owner holds and private-safe boundaries: real owner CLI", async () => {
+/** W1-T14252: what one supervised child returned, and how long it ran. */
+interface SupervisedChild { status: number | null; stdout: string; stderr: string; ms: number }
+
+/** W1-T14252 — INVARIANT no-peer-ratio-kill: a child is waited out, never killed for being slower than an
+ *  earlier child. Each child is a cold start whose wall time is the host's load, so a peer's time is no hang
+ *  signal. Only `signal` aborting, at the test's own timeout or cancellation, kills it: every live child is
+ *  SIGKILLed then, and its run fails naming the verb and how long it ran, so a hung child never outlives its
+ *  test. A child that some other signal ended fails by name too. */
+function childSupervisor(signal: AbortSignal): (verb: string, proc: ChildProcess) => Promise<SupervisedChild> {
+  return async (verb, proc) => {
+    const started = process.hrtime.bigint();
+    let stdout = "", stderr = "", abortedAtMs: number | undefined;
+    proc.stdout?.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    proc.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    const elapsedMs = () => Number(process.hrtime.bigint() - started) / 1e6;
+    const kill = () => { abortedAtMs = elapsedMs(); proc.kill("SIGKILL"); };
+    if (signal.aborted) kill(); else signal.addEventListener("abort", kill, { once: true });
+    const [status, killedBy] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+      proc.once("error", reject);
+      proc.once("close", (code, sig) => resolve([code, sig]));
+    }).finally(() => signal.removeEventListener("abort", kill));
+    const ms = elapsedMs();
+    if (abortedAtMs !== undefined) throw new Error(`rmd ${verb} was still running when its test ended, after ${Math.round(abortedAtMs)}ms; killed\n${stderr}`);
+    assert.equal(killedBy, null, `rmd ${verb} was killed: ${killedBy} after ${Math.round(ms)}ms\n${stderr}`);
+    return { status, stdout, stderr, ms };
+  };
+}
+
+test("W1-T14252 criterion 1: a child slower than the slowest earlier child times the owner test's spawns after the first is waited out, not killed", async (t) => {
+  const run = childSupervisor(t.signal);
+  const first = await run("stop", spawn(process.execPath, ["-e", ""], { stdio: ["ignore", "pipe", "pipe"] }));
+  // The bound this test replaces killed any later child at the slowest earlier time times the owner test's
+  // spawns after the first (3 stop paths, 2 refused paths spawned twice, 2 more). This child sleeps past it.
+  const oldBoundMs = first.ms * (3 + 2 * 2 + 2);
+  const sleepMs = Math.ceil(oldBoundMs) + 250;
+  const slow = await run("pause", spawn(process.execPath, ["-e", `setTimeout(() => { console.log("done"); process.exit(0); }, ${sleepMs})`], { stdio: ["ignore", "pipe", "pipe"] }));
+  assert.ok(slow.ms > oldBoundMs, `the child ran ${Math.round(slow.ms)}ms, past the old ${Math.round(oldBoundMs)}ms bound`);
+  assert.equal(slow.status, 0, slow.stderr);
+  assert.equal(slow.stdout.trim(), "done", "its result is read and asserted, not discarded by a kill");
+});
+
+test("W1-T14252 criterion 2: when the test's signal aborts, every child it spawned is killed and the failure names the verb", async () => {
+  const ended = new AbortController();
+  const run = childSupervisor(ended.signal);
+  const procs: ChildProcess[] = [];
+  const hang = () => {
+    const proc = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "pipe"] });
+    procs.push(proc);
+    return proc;
+  };
+  const failureOf = (p: Promise<SupervisedChild>) => p.then(() => "exited", (error: Error) => error.message);
+  try {
+    const runs = [failureOf(run("stop", hang())), failureOf(run("resume", hang()))];
+    await Promise.all(procs.map((proc) => new Promise((resolve) => proc.once("spawn", resolve))));
+    ended.abort();
+    for (const proc of procs) assert.equal(proc.killed, true, "the abort kills every live child at once");
+    const [stop, resume] = await Promise.all(runs);
+    assert.match(stop!, /^rmd stop was still running when its test ended, after \d+ms; killed/);
+    assert.match(resume!, /^rmd resume was still running when its test ended, after \d+ms; killed/);
+    for (const proc of procs) {
+      assert.equal(proc.signalCode, "SIGKILL", "the child was killed, not left behind");
+      assert.throws(() => process.kill(proc.pid!, 0), /ESRCH/, "no hung child outlives its test");
+    }
+    // A child started after the test ended is killed at once, by the same rule.
+    assert.match(await failureOf(run("pause", hang())), /^rmd pause was still running when its test ended/);
+  } finally {
+    for (const proc of procs) if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+  }
+});
+
+test("private registry selection preserves owner holds and private-safe boundaries: real owner CLI", async (t) => {
   await withTempDir("selected-owner-cli", async root => {
     const home = join(root, "home"), state = join(root, "instance");
     mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -1674,35 +1744,18 @@ test("private registry selection preserves owner holds and private-safe boundari
     const selected = join(root, "private.yaml");
     writeFileSync(selected, `instances:\n  fixture:\n    github_repo: owner/repo\n    state_dir: ${state}\n    mode: shadow\n`);
     // Each child is a cold tsx start of the whole CLI graph, so its wall time is the host's load, not the verb's.
-    // The first child is the measurement; every later one may take the slowest seen times the spawns after the first.
+    // W1-T14252: no child is killed for being slower than another; only this test's own end kills one.
     const stopPaths = ["", join(root, "missing-private.yaml"), selected], refusedPaths = ["", join(root, "missing-private.yaml")];
-    const spawnsAfterFirst = stopPaths.length + refusedPaths.length * 2 + 2;
-    let slowestMs: number | undefined;
-    const child = async (verb: string, path: string | undefined, activeSelection?: string) => {
-      const bound = slowestMs === undefined ? undefined : slowestMs * spawnsAfterFirst;
-      const started = process.hrtime.bigint();
-      const proc = spawn(process.execPath,
+    const run = childSupervisor(t.signal);
+    const child = (verb: string, path: string | undefined, activeSelection?: string) =>
+      run(verb, spawn(process.execPath,
         ["--import", "tsx", "--input-type=module", "-e",
           `import { main } from "#src/run-task.js"; process.argv = [process.execPath, "rmd", ...${JSON.stringify(verb === "pause" ? [verb, "--reason", "fixture hold"] : [verb])}];
            await main({ checkFreshness: () => ({ status: "guarded" }) }).catch(error => { console.error(error.message); process.exitCode = 2; });`],
         { cwd: REPO_ROOT, env: { ...withoutRegistrySelection(process.env), HOME: home, GH_TOKEN: "fixture-not-a-credential",
           ...(path === undefined ? {} : { RMD_INSTANCE_REGISTRY: path }),
           ...(activeSelection === undefined ? {} : { RMD_SELECTED_INSTANCE_REGISTRY: activeSelection }),
-          GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
-      let stdout = "", stderr = "";
-      proc.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
-      proc.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
-      const timer = bound === undefined ? undefined : setTimeout(() => proc.kill("SIGKILL"), bound);
-      const [status, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
-        proc.once("error", reject);
-        proc.once("close", (code, sig) => resolve([code, sig]));
-      }).finally(() => clearTimeout(timer));
-      const ms = Number(process.hrtime.bigint() - started) / 1e6;
-      slowestMs = Math.max(slowestMs ?? 0, ms);
-      const cause = bound !== undefined && ms >= bound ? `timed out against ${Math.round(bound)}ms derived from the slowest spawn` : "was killed";
-      assert.equal(signal, null, `rmd ${verb} ${cause}: ${signal} after ${Math.round(ms)}ms\n${stderr}`);
-      return { status, stdout, stderr };
-    };
+          GH_CONFIG_DIR: join(home, "gh"), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] }));
     for (const path of stopPaths) {
       const stopped = await child("stop", path);
       assert.equal(stopped.status, 0, stopped.stderr);

@@ -31,7 +31,7 @@
     - test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts
     - test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts
     - "src/lib/test-slot.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A warm `npm run typecheck` (usable buildinfo) asks the admission for TYPECHECK_WARM_PEAK_BYTES once before tsc starts, and starts tsc only after the admission allows it"

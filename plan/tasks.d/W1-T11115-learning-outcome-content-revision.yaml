@@ -23,7 +23,7 @@
     - src/lib/digest.ts
     - src/cli/commands/run-task-verb.ts
     - test/a-learning-is-credited-by-the-outcome-of-the-runs-it-reached.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: "OBSERVED: foldLearningOutcomes in knowledge-outcome.ts groups by learning ID; the learnings.injected producer in src/cli/commands/run-task-verb.ts emits selected/dropped IDs and propensities. usage_sha identifies usage metadata, not the learning content. Editing a learning under the same ID can therefore pool outcomes from different interventions. Omnigent separates effective harness/policy configuration from declarations and records evaluation context; the Remudero innovation is to apply exact intervention identity to its existing randomized learning exposure. No present live harm rate is measured. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/harness_capabilities.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md ."
   design: |-

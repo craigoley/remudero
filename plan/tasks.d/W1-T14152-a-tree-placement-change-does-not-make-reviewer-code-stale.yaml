@@ -23,7 +23,7 @@
     - test/a-reviewer-verdict-survives-unrelated-main-churn.test.ts
     - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
     - test/reviewer-worktree-lease.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:verdict-code-only — the #19940 shape is immaterial. In a real git repository, reviewer code at a base commit and origin/main at a commit that changes only (a) hunks inside buildFreshTreeReviewRunner, prepareFreshOriginMainTree, inspectFreshReviewerWorktree, removePerAttemptTree, perAttemptTreePath, freshOriginMainTreeRunner and the FreshTreeReviewSeams type, (b) a new class declared beside them and referenced only by them, (c) an import line of src/run-task.ts that adds a binding used only inside those units, and (d) src/lib/reviewer-worktree-lease.ts: reviewerCodeFreshnessAt returns status fresh with advance immaterial"

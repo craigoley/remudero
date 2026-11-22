@@ -23,7 +23,7 @@
     - src/lib/task-linter.ts
     - src/run-task.ts
     - test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:pinning-tests-never-blocks — for a fixture checkout where src/lib/a.ts defines FOO_LIMIT, test/x.test.ts imports ../src/lib/a.ts and names FOO_LIMIT, and a new implement task declares src/lib/a.ts and test/new.test.ts and its design names FOO_LIMIT, pinningTestViolations returns one violation with check pinning-tests and severity warn. Its message names test/x.test.ts and FOO_LIMIT, and the task's lint result stays ok"

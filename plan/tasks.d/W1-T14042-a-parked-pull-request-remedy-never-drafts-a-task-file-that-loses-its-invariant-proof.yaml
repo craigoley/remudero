@@ -22,7 +22,7 @@
     - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
     - test/sweep/a-held-rebuild-task-file-lands-as-a-new-file.test.ts
     - test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:invariant-proof-stays — parkedPrRemedy never names split-follow-up when an input criterion's claim maps an invariant (INVARIANT_CLAIM_RE); with the stall ladder spent it names close-and-rebuild. remedyStalledCriterion on a fixture shaped like W1-T13865 (an implement task with one INVARIANT line whose invariant: criterion stalled) lands one held rebuild whose design and acceptance equal the parent's, edits no parent task file, closes the pull request and writes one taken row"
