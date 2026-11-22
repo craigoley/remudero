@@ -47,7 +47,7 @@ const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
 const args = process.argv.slice(2);
 const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
 const fail = (code, message) => { save(); process.stderr.write("gh: " + message + " (HTTP " + code + ")\\n"); process.exit(1); };
-const ok = (value) => { save(); process.stdout.write(JSON.stringify(value)); process.exit(0); };
+const ok = (value) => { save(); fs.writeSync(1, JSON.stringify(value)); process.exit(0); };
 if (args[0] !== "api") fail(400, "unexpected command");
 let method = "GET"; let path; const fields = {};
 for (let i = 1; i < args.length; i++) {

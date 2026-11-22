@@ -219,6 +219,13 @@ test("W1-T13450 criterion 3: mountedFixArms keeps only the evidence arms ahead o
 
 test("W1-T13450 criterion 3: a trailing arm is named on the decision row with no draw, and the provider weighting is unchanged", async (t) => {
   const root = checkoutMounting(t, ROW);
+  // W1-T14297: strip only the balanced provider preference, so this round is still the learner's mixed auction alone.
+  const table = parseYaml(readFileSync(join(root, ".remudero", "mounts.yaml"), "utf8")) as {
+    capabilities: { provider_preference: Record<string, string> };
+  };
+  assert.equal(table.capabilities.provider_preference.balanced, "codex", "the committed table carries the row stripped here");
+  delete table.capabilities.provider_preference.balanced;
+  writeFileSync(join(root, ".remudero", "mounts.yaml"), stringifyYaml(table));
   const rows = [...arm("claude", "claude-sonnet-5", 500, 500), ...arm("codex", SECOND, 990, 10), ...arm("codex", THIRD, 990, 10)];
   // Claude has headroom here, so the round is a Claude-versus-Codex auction over each provider's served arm.
   const { decision, asked, weighed } = await spawnFix(root, "W1-T9455", { served: LEAD, rows, claudeUsed: 10 });
