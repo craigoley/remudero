@@ -62,21 +62,22 @@ test("a skill's harm p-value is the one-sided exact chance of its selected arm's
 });
 
 test("a skill whose selected runs fail less often than its controls is not a harm retire candidate", () => {
-  const fewer = report(runs({ merged: 8, failed: 2 }), runs({ merged: 3, failed: 4, no_diff: 3 }));
+  const fewer = report(runs({ merged: 28, failed: 2 }), runs({ merged: 3, failed: 4, no_diff: 23 }));
   assert.equal(fewer.selected.harmful_terminal_runs, 2, "the selected arm did fail");
   assert.notEqual(fewer.basis, "named-harm-signal");
   assert.equal(fewer.status, "REVIEW-CANDIDATE", "it falls through to the merge comparison, which favors it");
   assert.equal(fewer.basis, "favorable-comparison");
 
-  // The production shape: 10.4% selected failures against 16.1% control failures, merge rates a hair apart.
+  // Keep the production rates, and spread the outcome groups across the enrollment order.
+  const spread = (outcomes: string[]) => outcomes.map((_, i) => outcomes[(i * 37) % outcomes.length]!);
   const production = report(
-    runs({ merged: 200, failed: 44, no_diff: 178 }),
-    runs({ merged: 56, failed: 19, no_diff: 43 }),
+    spread(runs({ merged: 200, failed: 44, no_diff: 178 })),
+    spread(runs({ merged: 56, failed: 19, no_diff: 43 })),
   );
   assert.equal(production.selected.harmful_terminal_runs, 44);
   assert.equal(production.control.harmful_terminal_runs, 19);
   assert.notEqual(production.basis, "named-harm-signal");
-  assert.equal(production.basis, "not-better-than-control", "the merge comparison, not harm, decides");
+  assert.equal(production.basis, "undecided", "the small merge deficit leaves the comparison open");
 });
 
 test("a selected arm that fails significantly more often than its controls is a harm retire candidate", () => {
@@ -88,7 +89,7 @@ test("a selected arm that fails significantly more often than its controls is a 
   const borderline = report(runs({ merged: 7, failed: 3 }), runs({ merged: 3, no_diff: 7 }));
   assert.ok(harmExcessPValue(borderline.selected, borderline.control) >= SKILL_EFFECTIVENESS_HARM_ALPHA);
   assert.notEqual(borderline.basis, "named-harm-signal");
-  assert.equal(borderline.basis, "favorable-comparison");
+  assert.equal(borderline.basis, "undecided");
 });
 
 test("the effectiveness report and a retirement proposal both show the harm comparison", () => {

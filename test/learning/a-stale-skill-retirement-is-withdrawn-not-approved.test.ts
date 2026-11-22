@@ -51,8 +51,8 @@ const runRows = (arm: "selected" | "control", verdicts: readonly string[]): Row[
 const QUALIFYING = runRows("control", Array<string>(10).fill("no_diff"));
 /** The selected arm merges far more often than the control: a review candidate, not a retirement. */
 const FAVORABLE = [
-  ...runRows("selected", [...Array<string>(8).fill("merged"), ...Array<string>(2).fill("no_diff")]),
-  ...runRows("control", [...Array<string>(3).fill("merged"), ...Array<string>(7).fill("no_diff")]),
+  ...runRows("selected", [...Array<string>(27).fill("merged"), ...Array<string>(3).fill("no_diff")]),
+  ...runRows("control", [...Array<string>(3).fill("merged"), ...Array<string>(27).fill("no_diff")]),
 ];
 
 const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${prefix}`));
