@@ -1399,7 +1399,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
@@ -24422,6 +24423,12 @@ async function retroCommand(
     log,
     say,
   );
+  // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
+  // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
+  const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
+    { loadConfig: () => config });
+  await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
+    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,

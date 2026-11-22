@@ -8,7 +8,8 @@
  * A sealed, never-pushed attempt of an unapproved draft is not a release.
  *
  * The selector is pure. The draft is frozen first, because its sha256 seeds the draw. The runner
- * spends, so it refuses unless the operator passed --confirm-spend and the fleet is idle, and it
+ * spends, so it refuses unless the operator passed --confirm-spend (or the fleet passed the operator's standing
+ * approval, W1-T13861) and the fleet is idle, and it
  * dispatches only through an injected sealed dispatcher. Every refusal is a value the caller sees,
  * never an empty success. The drafter (skill-workshop.ts, workflow-mining.ts) must never import this
  * module or golden-corpus.ts; the dependency-cruiser rule `drafter-never-sees-held-out-set` refuses that edge.
@@ -220,6 +221,13 @@ export function skillEvalVerdict(attempts: readonly Pick<SkillEvalAttempt, "task
   return { verdict: "pass", reason: "held-out-benefit", detail: `mean pass-rate gain ${delta} with no task regressed`, ...base };
 }
 
+/**
+ * W1-T13861: the operator's standing approval (2026-11-19) for the fleet to run a held-out eval by itself, inside the
+ * spend limits that already exist. It is a value in code only: {@link runSkillEval} accepts exactly this object, by
+ * identity, so no argv, environment variable or config file can produce it, not even a copy with the same text.
+ */
+export const SKILL_EVAL_STANDING_APPROVAL: Readonly<{ ref: string }> = Object.freeze({ ref: "operator-session#skill-eval-runs-itself-2026-11-19" });
+
 export interface SkillEvalRunInput {
   selection: HeldOutSelected;
   draftMarkdown: string;
@@ -230,8 +238,11 @@ export interface SkillEvalRunInput {
   stack: Pick<PairedAttemptRequest<SkillEvalArm>, "pin" | "revisions" | "stackEvidence">;
   /** Absent: the item's proofs through the reviewer's own executor. */
   grade?: PairedGrader;
-  /** The invocation's argv: the run spends only with `--confirm-spend` (`replayOptIn`). */
+  /** The invocation's argv: the run spends only with `--confirm-spend` (`replayOptIn`), or with the standing approval. */
   argv: readonly string[];
+  /** W1-T13861: in place of `--confirm-spend`, only when it is {@link SKILL_EVAL_STANDING_APPROVAL} itself. Every other
+   *  check (the quiet fleet, the draft, the held-out task count, the spend ceiling) still applies unchanged. */
+  standingApproval?: Readonly<{ ref: string }>;
   idle: ReplayIdleSignal;
   log: (step: string, row: Record<string, unknown>) => void;
   /** Default OFF. A fixed whole-loop cancellation control, never capacity-release authority. */
@@ -309,7 +320,7 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
     input.log(SKILL_EVAL_STEPS.refused, { ...tag, reason, detail });
     return { state: "refused", reason, detail, dispatched: 0 };
   };
-  const optIn = replayOptIn(input.argv);
+  const optIn = spendApproval(input);
   if (!optIn.enabled) return refuse("spend-not-confirmed", optIn.reason);
   const idle = replayIdleGate(input.idle);
   if (!idle.enabled) return refuse("fleet-not-idle", idle.reason);
@@ -357,11 +368,17 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
   return { state: "evaluated", verdict, attempts };
 }
 
+/** Consent to spend: `--confirm-spend` in argv, or the standing approval passed as the code value itself. */
+function spendApproval(input: Pick<SkillEvalRunInput, "argv" | "standingApproval">): { enabled: boolean; reason: string } {
+  if (input.standingApproval === SKILL_EVAL_STANDING_APPROVAL) return { enabled: true, reason: `standing approval ${SKILL_EVAL_STANDING_APPROVAL.ref}` };
+  return replayOptIn(input.argv);
+}
+
 /** Optional fixed whole-loop control is inert when absent and cannot bypass quiet/spend gates.
  * Synchronous setup/grading and escaped descendants still require an independently qualified
  * whole-process boundary. No successful or cancelled return here releases a capacity lease. */
 export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalRun> {
-  if (!replayOptIn(input.argv).enabled) return skillEvalRun(input);
+  if (!spendApproval(input).enabled) return skillEvalRun(input);
   let control: SkillEvalControl | undefined;
   try { control = createSkillEvalControl(input.control); }
   catch (error) {
