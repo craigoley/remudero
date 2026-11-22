@@ -19,7 +19,7 @@
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
   status: blocked
   retirement: withdrawn  # duplicate held follow-up; W1-T13919 holds the same question
-  superseded_by: W1-T13919
+  superseded_by: W1-T13865
   attempts: 0
   acceptance:
     - claim: invariant:no-round-at-an-unchanged-ruling — priorRoundHold returns no hold for a new head, for a check completed red after a FLAKE round, for a merged scope amendment after a NEEDS_SCOPE round, and for FIXED or NOT_LANDED rounds
@@ -54,6 +54,10 @@
     Remove the priorRoundHold call from the sweep: criterion 4's fixture spawns a second fix worker at the same head
     after a FLAKE round and the test fails.
   note: |
+    SUCCESSOR CHANGED 2026-11-21 (operator session): superseded_by now names W1-T13865, not W1-T13919. W1-T13919
+    is itself withdrawn and superseded by W1-T13865, which merged as https://github.com/craigoley/remudero/pull/19767.
+    A withdrawn record that names an unlanded task still holds its origin, so this record names the merged task
+    straight. W1-T13933 stays withdrawn; nothing else changes.
     WITHDRAWN 2026-11-20 (operator session): W1-T13933 is a duplicate of W1-T13919. The sweep filed the same held
     follow-up of W1-T13865 for the same criterion of https://github.com/craigoley/remudero/pull/19767 at the same
     head, 004f62a8fa, eleven times. Its split landed the held task file while the edit of W1-T13865 failed
