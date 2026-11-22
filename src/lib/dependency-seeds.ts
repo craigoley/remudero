@@ -1,9 +1,9 @@
 /** Account-owned dependency generations. Checkout workspaces and caches stay private. */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, hostname } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
 
 export const DEPENDENCY_SEED_MIN_IDLE_MS = 6 * 60 * 60 * 1000;
@@ -24,26 +24,162 @@ export interface DependencySeedOptions {
   runInstall?: (stage: string, args: string[], env: NodeJS.ProcessEnv) => void;
   lockWaitMs?: number;
 }
-export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; replaced?: true };
+export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; replaced?: true; lockReclaimed?: true };
+
+/** Legacy owner records remain readable. New record names identify a particular lock owner. */
+const LOCK_OWNER = "owner.json";
+const LOCK_OWNER_TOKEN = /^owner\.(\d+)\.([a-f0-9]{64})\.(\d+|-)\.[a-f0-9-]{36}$/;
+type LockOwner = { pid: number; hostname: string; started_at_ms: number; process_start?: string; pid_namespace?: string };
+/** The reason a prime gives up on a held lock, and the marker of a prime that reclaimed a dead owner's lock. */
+const SEED_LOCK_HELD = "seed-lock-held";
+export const SEED_LOCK_RECLAIMED = "seed-lock-reclaimed";
+
+/** W1-T13974: a proof prime's failure after its key is known names that key, so the reviewer's npm ci fallback row can
+ * carry it (the prime child reports only its error's message). First, so a truncated message keeps it. */
+function withSeedKey(error: unknown, key: string, proof: boolean | undefined): unknown {
+  if (proof && error instanceof Error) error.message = `[seed ${key}] ${error.message}`;
+  return error;
+}
+
+/** W1-T13974: `npm --version` per npm binary, so a later prime launches no npm. The key is the binary the spawn's own
+ * PATH lookup would run, by real path and stat: npm's packed files share one fixed mtime, so the inode, size and ctime
+ * stand beside it. A store prime reads and writes the memo in its root (each prime is its own process); anything else
+ * memoises per process. */
+const npmVersions = new Map<string, string>();
+const NPM_VERSION_MEMO = ".rmd-npm-version.json";
+
+function npmBinaryKey(env: NodeJS.ProcessEnv): string | undefined {
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    const candidate = join(dir, "npm");
+    if (!existsSync(candidate)) continue;
+    const stat = statSync(candidate);
+    if (!stat.isFile() || (stat.mode & 0o111) === 0) continue;
+    return JSON.stringify([realpathSync(candidate), stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+  return undefined;
+}
+
+function storedNpmVersion(root: string, key: string): string | undefined {
+  const file = join(root, NPM_VERSION_MEMO);
+  if (!existsSync(file)) return undefined;
+  try {
+    const memo = JSON.parse(readFileSync(file, "utf8")) as { key?: unknown; version?: unknown };
+    return memo.key === key && typeof memo.version === "string" && memo.version !== "" ? memo.version : undefined;
+  } catch (error) {
+    // Deliberate: a memo that cannot be parsed is not trusted; npm is asked again and the memo rewritten.
+    void error;
+    return undefined;
+  }
+}
+
+function npmVersion(env: NodeJS.ProcessEnv, root?: string): string {
+  const key = npmBinaryKey(env);
+  const known = key === undefined ? undefined : root === undefined ? npmVersions.get(key) : storedNpmVersion(root, key);
+  if (known !== undefined) return known;
+  const version = execFileSync("npm", ["--version"], { encoding: "utf8", env, timeout: 10_000 }).trim();
+  if (key !== undefined) {
+    npmVersions.set(key, version);
+    if (root !== undefined) writeJsonAtomic(join(root, NPM_VERSION_MEMO), { key, version });
+  }
+  return version;
+}
+
+/** Linux /proc/<pid>/stat field 22, the process start time in clock ticks; undefined where there is no procfs. */
+function processStart(pid: number): string | undefined {
+  const stat = process.platform === "linux" && existsSync(`/proc/${pid}/stat`) ? readFileSync(`/proc/${pid}/stat`, "utf8") : undefined;
+  return stat?.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+}
+
+function pidNamespace(): string | undefined {
+  return process.platform === "linux" ? readlinkSync("/proc/self/ns/pid") : undefined;
+}
+
+function lockOwner(): LockOwner {
+  const start = processStart(process.pid), namespace = pidNamespace();
+  return { pid: process.pid, hostname: hostname(), started_at_ms: systemClock.now(), ...(start ? { process_start: start } : {}), ...(namespace ? { pid_namespace: namespace } : {}) };
+}
+
+function lockScope(host = hostname(), namespace = pidNamespace()): string {
+  return createHash("sha256").update(JSON.stringify([host, namespace])).digest("hex");
+}
+
+function lockOwnerToken(owner: LockOwner): string {
+  return `owner.${owner.pid}.${lockScope(owner.hostname, owner.pid_namespace)}.${owner.process_start ?? "-"}.${randomUUID()}`;
+}
+
+/** The owner record's path when its owner provably died, else undefined. Provably dead means: this host
+ * (and, on Linux, this pid namespace) wrote it, and its pid is gone (ESRCH) or now names a different process (its start
+ * time changed). Never by age, never on EPERM, never on a missing or unreadable owner: it may still be mid-write. */
+function deadLockOwner(lock: string): string | undefined {
+  try {
+    const name = readdirSync(lock).find((name) => name === LOCK_OWNER || LOCK_OWNER_TOKEN.test(name));
+    if (name === undefined) return undefined;
+    const record = join(lock, name);
+    const token = LOCK_OWNER_TOKEN.exec(name);
+    const legacy = token ? undefined : JSON.parse(readFileSync(record, "utf8")) as Partial<LockOwner>;
+    const pid = token ? Number(token[1]) : legacy?.pid;
+    const start = token ? token[3] : legacy?.process_start;
+    if (token ? token[2] !== lockScope() : legacy?.hostname !== hostname() || legacy?.pid_namespace !== pidNamespace()) return undefined;
+    if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return undefined;
+    try { process.kill(pid, 0); }
+    catch (error) {
+      // ESRCH: the owner is gone, so its lock is reclaimable. EPERM (alive, another account's) or anything else proves
+      // nothing, and the lock is left alone.
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? record : undefined;
+    }
+    const live = processStart(pid);
+    return start !== undefined && start !== "-" && live !== undefined && live !== start ? record : undefined;
+  } catch (error) {
+    // Deliberate: a lock or owner that cannot be read (absent, mid-write, malformed, unreadable) proves nothing,
+    // so the lock is waited on exactly as before.
+    void error;
+    return undefined;
+  }
+}
+
+/** Rename the dead owner's record to claim the existing lock before moving it. A competing waiter can only
+ * rename the old record, and the new name identifies the reclaimer if it dies before moving the lock. */
+function reclaimLock(lock: string, deadOwner: string, ownerToken: string): boolean {
+  const claimed = join(lock, ownerToken);
+  try { renameSync(deadOwner, claimed); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const tomb = `${lock}.reclaimed-${randomUUID()}`;
+  try { renameSync(lock, tomb); }
+  catch (error) { renameSync(claimed, deadOwner); throw error; }
+  rmSync(tomb, { recursive: true, force: true });
+  return true;
+}
 
 export function dependencySeedConfigPath(home = homedir()): string {
   return join(home, ".config", "remudero", "dependency-seeds.json");
 }
 
-/** Configuration is opt-in, so rollout never rewires an existing service or checkout. */
-export function configuredDependencySeedRoot(home = homedir(), env = process.env): string | undefined {
+/** W1-T13974: the account's seed choice. "disabled" (an empty RMD_DEPENDENCY_SEED_ROOT, or a config file that is
+ * not enabled) is an explicit no; "unconfigured" means nobody chose, which only a reviewer's own proof tree reads. */
+export type DependencySeedRootChoice = { kind: "configured"; root: string } | { kind: "disabled" } | { kind: "unconfigured" };
+
+export function dependencySeedRootChoice(home = homedir(), env = process.env): DependencySeedRootChoice {
   const override = env.RMD_DEPENDENCY_SEED_ROOT;
-  if (override === "") return undefined; // Explicitly disable account preferences for isolated test fixtures.
+  if (override === "") return { kind: "disabled" }; // Explicitly disable account preferences for isolated test fixtures.
   if (override) {
     if (!isAbsolute(override)) throw new Error("RMD_DEPENDENCY_SEED_ROOT must be absolute");
-    return plainSeedRoot(override);
+    return { kind: "configured", root: plainSeedRoot(override) };
   }
   const file = dependencySeedConfigPath(home);
-  if (!existsSync(file)) return undefined;
+  if (!existsSync(file)) return { kind: "unconfigured" };
   const config = JSON.parse(readFileSync(file, "utf8")) as { enabled?: boolean; root?: string };
-  if (!config.enabled) return undefined;
+  if (!config.enabled) return { kind: "disabled" };
   if (!config.root || !isAbsolute(config.root)) throw new Error("dependency seed config requires an absolute root");
-  return plainSeedRoot(config.root);
+  return { kind: "configured", root: plainSeedRoot(config.root) };
+}
+
+/** Configuration is opt-in, so rollout never rewires an existing service or checkout. */
+export function configuredDependencySeedRoot(home = homedir(), env = process.env): string | undefined {
+  const choice = dependencySeedRootChoice(home, env);
+  return choice.kind === "configured" ? choice.root : undefined;
 }
 
 /** A URL-encoded root ("Application%20Support") silently starts a second store nothing sweeps. */
@@ -86,7 +222,7 @@ export function dependencySeedIdentity(checkout: string, opts: DependencySeedOpt
   const env = opts.env ?? process.env;
   // Environment options which change npm's dependency graph or lifecycle behavior cannot borrow another generation.
   const npmConfig = Object.fromEntries(Object.entries(env).filter(([key]) => /^npm_config_(omit|include|legacy_peer_deps|install_links|install_strategy|ignore_scripts|optional|production|arch|platform|libc)$/i.test(key)).sort());
-  const npm = opts.npmVersion ?? execFileSync("npm", ["--version"], { encoding: "utf8", env, timeout: 10_000 }).trim();
+  const npm = opts.npmVersion ?? npmVersion(env);
   const identity = { version: VERSION, files, policy: opts.proof ? "proof-ignore-scripts" : "development-ignore-scripts", platform: opts.platform ?? process.platform, arch: process.arch, node: process.version, abi: process.versions.modules, npm, npmConfig, nodeEnv: env.NODE_ENV ?? "" };
   const key = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
   return { ...identity, key, lastUsed: opts.now ?? systemClock.now() };
@@ -472,22 +608,42 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   if (occupied && !replacing) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
-  const meta = dependencySeedIdentity(checkout, opts);
+  const meta = dependencySeedIdentity(checkout, { ...opts, npmVersion: opts.npmVersion ?? npmVersion(opts.env ?? process.env, root) });
+  // The reviewer can still recover the key if this process dies while holding or waiting for the lock.
+  if (opts.proof) writeSync(2, `[seed ${meta.key}]\n`);
   const seed = join(root, meta.key);
   const lock = join(root, `${meta.key}.lock`);
+  const owner = lockOwner();
+  const ownerToken = lockOwnerToken(owner);
   let installed = false;
-  // Serialize builders and GC. Never reclaim another installer's lock by timestamp.
+  // Serialize builders and GC. Never reclaim a lock by its age: only one whose recorded owner provably died
+  // (deadLockOwner), at most once per prime. A proof prime waits the same lockWaitMs as any other (W1-T13974).
   const started = systemClock.now();
+  const lockWaitMs = opts.lockWaitMs ?? 120_000;
+  let lockReclaimed = false;
+  let triedOwner: string | undefined;
   while (true) {
     try { mkdirSync(lock, { mode: 0o700 }); break; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || systemClock.now() - started >= (opts.lockWaitMs ?? 120_000)) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw withSeedKey(error, meta.key, opts.proof);
+      const dead = lockReclaimed ? undefined : deadLockOwner(lock);
+      if (dead !== undefined && dead !== triedOwner) {
+        triedOwner = dead;
+        try { lockReclaimed = reclaimLock(lock, dead, ownerToken); }
+        catch (error) { throw withSeedKey(error, meta.key, opts.proof); }
+        continue;
+      }
+      if (systemClock.now() - started >= lockWaitMs) {
+        throw withSeedKey(Object.assign(new Error(`${SEED_LOCK_HELD}: ${lock} is held by an owner this prime cannot prove dead (EEXIST)`), { code: "EEXIST" }), meta.key, opts.proof);
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     }
   }
   const stage = join(root, `.stage-${randomUUID()}`);
   const targetStage = join(checkout, `.rmd-dependency-stage-${randomUUID()}`);
+  const reclaimed = lockReclaimed ? { lockReclaimed: true as const } : {};
   try {
+    writeJsonAtomic(join(lock, ownerToken), owner);
     if (!existsSync(join(seed, "ready.json"))) {
       mkdirSync(stage, { mode: 0o700 });
       for (const [name, content] of Object.entries(meta.files)) {
@@ -566,11 +722,13 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     writeJsonAtomic(join(seed, "ready.json"), { ...ready, lastUsed: opts.now ?? systemClock.now() });
     if (replacing) {
       replaceMaterialization(targetStage, dest);
-      return { status: "materialized", key: meta.key, seed, method, installed, replaced: true };
+      return { status: "materialized", key: meta.key, seed, method, installed, replaced: true, ...reclaimed };
     }
     if (existsSync(dest)) throw new Error("dependency destination was occupied during provisioning");
     renameSync(targetStage, dest);
-    return { status: "materialized", key: meta.key, seed, method, installed };
+    return { status: "materialized", key: meta.key, seed, method, installed, ...reclaimed };
+  } catch (error) {
+    throw withSeedKey(error, meta.key, opts.proof);
   } finally {
     for (const path of [stage, targetStage]) if (existsSync(path)) { setWritable(path, true); rmSync(path, { recursive: true, force: true }); }
     rmSync(lock, { recursive: true });

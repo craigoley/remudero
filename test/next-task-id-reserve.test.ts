@@ -22,8 +22,8 @@
  * is proven in test/mint-open-pr-surface-is-rest.test.ts, against `nextTaskIdCommand` directly.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -32,9 +32,9 @@ import {
   gitRunAdapter,
   describeContestedId,
   describeReservationRefusal,
+  mintNextTaskIdWithHistoryAsync,
   nextTaskIdCommand as runNextTaskIdCommand,
   readReservationHolder,
-  TASK_ID_DESTINATION_MAX_BUFFER,
   taskIdDestinationSnapshot,
   validateReserveArgs,
 } from "../src/run-task.js";
@@ -399,26 +399,48 @@ test("W1-T9683: a partial next-task-id --count prints only the ids it holds and 
   assert.match(r.err, /REFUSED — origin is unreachable/, "fail-closed on the id it could not reach");
 });
 
-// A plan destination whose plan is bigger than Node's 1 MiB child stdout default. Before the bound, the batched blob
-// read failed with "stdout maxBuffer length exceeded" and the mint refused as "plan destination is unreadable at plan".
-test("a plan destination larger than one mebibyte still yields its task id population", async t => {
+// A plan destination whose plan is bigger than the 128 MiB constant the batch read once had (#19534). Before the derived
+// bound, the batched blob read failed with "stdout maxBuffer length exceeded" and the mint refused as "plan destination
+// is unreadable at plan".
+test("W1-T13824 criterion 4: the destination batch gets the bound readBlobsAtRefAsync derives, and a plan above the old constant mints", async t => {
   const origin = gitRepo({ bare: true, scope: t }), seed = gitRepo({ scope: t }), root = gitRepo({ scope: t });
   mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "[]\n");
-  const filler = "x".repeat(400_000), ids = ["OPS-T1", "OPS-T2", "OPS-T3"];
+  const filler = "x".repeat(32 * 1024 * 1024), ids = ["W1-T6000", "W1-T6001", "W1-T6002", "W1-T6003"];
+  let shardBytes = 0;
   for (const id of ids) {
-    writeFileSync(join(seed.dir, "plan", "tasks.d", `${id}-fixture.yaml`),
-      `- id: ${id}\n  title: Fixture ${id}\n  repo: ops\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  rationale: ${filler}\n  status: queued\n  acceptance:\n    - claim: fixture\n      proof: "grep: fixture in README.md"\n`);
+    const path = join(seed.dir, "plan", "tasks.d", `${id}-fixture.yaml`);
+    writeFileSync(path,
+      `- id: ${id}\n  title: Fixture ${id}\n  repo: ops\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: queued\n  acceptance:\n    - claim: fixture\n      proof: "grep: fixture in README.md"\n# ${filler}\n`);
+    shardBytes += statSync(path).size;
   }
+  const oldConstant = 1 << 27;
+  assert.ok(shardBytes > oldConstant, "the shard contents alone exceed the old 128 MiB constant");
   seed.git("add", "plan"); seed.git("commit", "--quiet", "-m", "test: a large ops plan");
   seed.addRemote("origin", origin.dir); seed.git("push", "--quiet", "origin", "main");
   const stateDir = join(root.dir, "state"); mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: "fixture-owner/ops", kinds: [] }));
   mkdirSync(join(root.dir, "repos"), { recursive: true });
-  root.git("clone", "--quiet", origin.dir, join(root.dir, "repos", "ops"));
-  assert.ok(TASK_ID_DESTINATION_MAX_BUFFER > 3 * filler.length, "the bound holds the whole fixture plan");
-  const snapshot = await taskIdDestinationSnapshot({ destinationStateDir: () => stateDir, destinationPrFetch: async () => [] });
-  assert.ok(snapshot, "a named destination answers");
-  assert.deepEqual([...snapshot.ids].sort(), ids);
-  assert.ok(snapshot.planTexts.reduce((n, text) => n + text.length, 0) > 1024 * 1024, "the fixture really exceeds 1 MiB");
+  root.git("clone", "--quiet", "--no-checkout", origin.dir, join(root.dir, "repos", "ops"));
+
+  // The default destination git (hostWorktreeGitAsync, nothing injected) mints above the old constant.
+  const minted = await mintNextTaskIdWithHistoryAsync({ planPath: join(mintRepo.dir, "plan", "tasks.yaml"), repoRoot: mintRepo.dir,
+    openPrTexts: NO_OPEN_PRS, destination: { destinationStateDir: () => stateDir, destinationPrFetch: async () => [] } });
+  assert.equal(minted.id, "W1-T6004");
+
+  // The batch call alone carries the derived bound: exactly the bytes git writes. The other calls carry none.
+  const calls: Array<{ args: string[]; maxBuffer: number | undefined; bytes: number }> = [];
+  const snapshot = await taskIdDestinationSnapshot({ destinationStateDir: () => stateDir, destinationPrFetch: async () => [],
+    destinationGit: (cwd, args, input, opts) => {
+      const out = execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", input, maxBuffer: opts?.maxBuffer ?? 1 << 20 });
+      calls.push({ args, maxBuffer: opts?.maxBuffer, bytes: Buffer.byteLength(out) });
+      return out;
+    } });
+  assert.deepEqual([...snapshot!.ids].sort(), ids);
+  assert.deepEqual(calls.map(call => call.args[0]), ["fetch", "rev-parse", "ls-tree", "ls-tree", "cat-file"]);
+  const batch = calls.pop()!;
+  assert.equal(batch.args[1], "--batch");
+  assert.ok(batch.bytes > oldConstant, "the real batch exceeded the old constant");
+  assert.equal(batch.maxBuffer, batch.bytes, "the batch bound is exactly the bytes git wrote");
+  assert.deepEqual(calls.map(call => call.maxBuffer), [undefined, undefined, undefined, undefined]);
 });

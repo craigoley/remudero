@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -28,6 +28,7 @@ import {
   parseFollowups,
   parseQuestion,
   parseReport,
+  renderWorkerSettings,
   resolveClaudeExecutable,
   spawnWorker,
   workerKeychainGrantApps,
@@ -1472,6 +1473,91 @@ function e2eSpawnWorkerArgs(dir: string, extra: Record<string, unknown> = {}) {
     ...extra,
   };
 }
+
+test("harness contract denial evidence requires the tool interception path", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-harness-interception-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const args = e2eSpawnWorkerArgs(dir);
+  const root = repoRoot();
+  renderWorkerSettings({ templatePath: join(root, "settings", "worker.json"), hooksDir: join(root, "hooks"), outPath: args.settingsFile });
+  const settings = JSON.parse(readFileSync(args.settingsFile, "utf8")) as {
+    hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] };
+  };
+  const command = settings.hooks.PreToolUse.find(({ matcher }) => new RegExp(`^(?:${matcher})$`).test("Read"))?.hooks[0]?.command;
+  assert.ok(command);
+  const response = { type: "system", subtype: "hook_response", hook_event: "PreToolUse", hook_id: "interception-1",
+    exit_code: 2, outcome: "error" };
+  const run = (events: unknown[], attemptedRead?: string) => {
+    const queryFn = (({ options }: { options: { includeHookEvents?: boolean } }) => (async function* () {
+      if (options.includeHookEvents) yield* events;
+      if (options.includeHookEvents && attemptedRead) {
+        const input = { file_path: attemptedRead };
+        yield { type: "assistant", message: { id: "turn-1", content: [{ type: "tool_use", id: "tool-1", name: "Read", input }] } };
+        yield { ...response, subtype: "hook_started" };
+        const hook = spawnSync("bash", ["-c", command], { cwd: dir, encoding: "utf8",
+          env: { ...process.env, HOME: dir, TMPDIR: dir, CLAUDE_PROJECT_DIR: dir, XDG_CACHE_HOME: dir },
+          input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: dir, tool_name: "Read", tool_use_id: "tool-1", tool_input: input }),
+        });
+        assert.ifError(hook.error);
+        assert.equal(hook.status, attemptedRead === args.settingsFile ? 0 : 2, hook.stderr);
+        yield { ...response, exit_code: hook.status, outcome: hook.status === 0 ? "success" : "error", stderr: hook.stderr, stdout: hook.stdout };
+        yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool-1", is_error: hook.status !== 0 }] } };
+      }
+      yield { type: "result", subtype: "success", session_id: "fixture", result: "The policy denied my tool call.",
+        permission_denials: [{ tool_name: "Read", tool_use_id: "tool-1", tool_input: {} }], total_cost_usd: 0, num_turns: 1 };
+    })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+    return spawnWorker({ ...args, queryFn, egress: { mode: "off" } });
+  };
+  for (const events of [[], [{ ...response, hook_event: "PostToolUse" }]]) {
+    const result = await run(events);
+    assert.equal(result.harnessContract?.preToolInterception, "NOT_RUN");
+    assert.equal(result.harnessContract?.capabilities.preToolInterception.tested, "NOT_RUN");
+  }
+  const hookFailure = await run([{ ...response, exit_code: 1 }]);
+  assert.equal(hookFailure.harnessContract?.preToolInterception, "unknown");
+  const allowed = await run([], args.settingsFile);
+  assert.equal(allowed.harnessContract?.preToolInterception, "nonblocking");
+  const result = await run([], join(root, "package.json"));
+  assert.equal(result.harnessContract?.preToolInterception, "denied");
+  assert.equal(result.harnessContract?.capabilities.preToolInterception.tested, "supported");
+  assert.equal(result.harnessContract?.capabilities.preToolInterception.installed, "NOT_RUN");
+});
+
+test("harness contract metadata cannot widen worker authority or disclose runtime contents", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-harness-redaction-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const marker = "private-fixture-value".repeat(200);
+  const args = e2eSpawnWorkerArgs(dir);
+  const queryFn = ((request: { prompt: string; options: import("@anthropic-ai/claude-agent-sdk").Options }) => (async function* () {
+    assert.ok(request.prompt.startsWith(`${marker}\n`));
+    assert.deepEqual(request.options.tools, ["Read"]);
+    assert.equal(request.options.permissionMode, "plan");
+    assert.equal(request.options.settings, args.settingsFile);
+    assert.equal(request.options.resume, undefined);
+    assert.equal(request.options.maxBudgetUsd, 0.25);
+    assert.equal(request.options.env?.RMD_HARNESS_FIXTURE_VALUE, marker);
+    yield { type: "system", subtype: "init", tools: ["Read"], plugins: [], mcp_servers: [] };
+    yield { type: "assistant", message: { model: marker, content: [{ type: "text", text: marker }] } };
+    yield { type: "result", subtype: "success", session_id: marker, result: marker, total_cost_usd: 0.25, num_turns: 1 };
+  })()) as unknown as Parameters<typeof spawnWorker>[0]["queryFn"];
+  const inputs = { ...args, queryFn, model: "claude-sonnet-4-6", tools: ["Read"], permissionMode: "plan" as const,
+    prompt: marker, maxBudgetUsd: 0.25, env: { RMD_HARNESS_FIXTURE_VALUE: marker }, egress: { mode: "off" as const },
+    harnessContract: { tools: ["Bash"], resumeSessionId: marker, maxBudgetUsd: 100, raw: marker } };
+  const result = await spawnWorker(inputs);
+  const receipt = workerLedgerFields(result).harness_contract;
+  assert.ok(receipt);
+  assert.deepEqual(receipt, result.harnessContract);
+  assert.equal(receipt.version, 1);
+  assert.equal(receipt.binding, null);
+  assert.equal(receipt.capabilities.billingProvenance.tested, "supported");
+  assert.ok(Object.values(receipt.capabilities).every(({ installed }) => installed === "NOT_RUN"));
+  const encoded = JSON.stringify(receipt);
+  assert.ok(encoded.length < 2048);
+  for (const value of [dir, marker.slice(0, 21), args.settingsFile, "/fake/claude", "RMD_HARNESS_FIXTURE_VALUE", "Bash"]) {
+    assert.equal(encoded.includes(value), false);
+  }
+  assert.equal(result.text, marker);
+});
 
 /**
  * Wait for a pid to disappear, POLLING TO A DEADLINE rather than sleeping a fixed

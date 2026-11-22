@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { benchmarkRunAssignmentReceipt, benchmarkRunTerminalReceipt, compareBenchmarkStacks,
   executingHarnessRevision, type BenchmarkStackEvidence } from "../src/lib/benchmark-run.js";
@@ -90,6 +91,33 @@ test("benchmark stack comparability requires matching observed revisions", () =>
   assert.deepEqual(compareBenchmarkStacks(left, unpinned), {
     state: "unavailable", different: [], missing: ["scorerRevision"],
   });
+});
+
+test("benchmark assignment records only run-bound and redacted harness contract metadata", () => {
+  const sha256 = "a".repeat(64);
+  const context = { executableRevision: sha256, adapterRevision: revision, policyDigest: sha256,
+    settingsDigest: sha256, environmentDigest: sha256 };
+  const { provider, effort } = assignment.selected;
+  const contextDigest = createHash("sha256").update(JSON.stringify([provider, effort, ...Object.values(context)])).digest("hex");
+  const observedAt = "2026-11-21T12:00:00.000Z";
+  const now = Date.parse(observedAt);
+  const evidence = { runId: assignment.id, observedAt, provider, effort, context,
+    version: "worker-harness-contract-v1", evidenceClass: "observed-installed-runtime",
+    conformance: { state: "conformant", evidenceClass: "observed-installed-runtime", contextDigest, enforcementDigest: sha256 },
+    rawPath: "/private/runtime", rawPolicy: "secret settings" };
+  const receiptFor = (receipt: unknown, startedAt = now, finishedAt = now) =>
+    benchmarkRunAssignmentReceipt(assignment, {}, { ...completeStack, runtime: { receipt, startedAt, finishedAt } });
+  const receipt = receiptFor(evidence);
+  assert.deepEqual(receipt.stack.runtime, { state: "observed", value: {
+    version: "worker-harness-contract-v1", provider, effort, ...context, enforcementDigest: sha256,
+  } });
+  assert.doesNotMatch(JSON.stringify(receipt), /private-assignment-id|private\/runtime|secret settings/);
+  assert.deepEqual(receiptFor(evidence, now + 1, now + 2).stack.runtime, { state: "unavailable", reason: "runtime-evidence-stale" });
+  assert.deepEqual(receiptFor(evidence, now - 2, now - 1).stack.runtime, { state: "unavailable", reason: "runtime-evidence-stale" });
+  assert.deepEqual(receiptFor({ ...evidence, version: "worker-harness-contract-v0" }).stack.runtime,
+    { state: "unavailable", reason: "runtime-evidence-invalid" });
+  assert.deepEqual(receiptFor({ ...evidence, conformance: { ...evidence.conformance, enforcementDigest: "raw-policy" } }).stack.runtime,
+    { state: "unavailable", reason: "runtime-conformance-unresolved" });
 });
 
 test("benchmark run terminal preserves missingness and separate accounting modes", () => {

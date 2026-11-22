@@ -41,7 +41,7 @@
     - test/the-needs-you-view-is-a-view-of-views.test.ts
     - test/the-operator-reaches-the-fleet-over-mcp.test.ts
     - "src/lib/instance-gateway.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:route-answer-releases — a needs_input task is refused by the daemon's dispatch check; an answer posted through the real buildAnswerQuestionRoute handler, with serve's question root a different folder from the daemon's checkout and one shared ledger, makes the daemon's next dispatch pass admit the task; the daemon's taskInputAnswer is the production taskInputAnswerWithLedger(daemonRepoRoot, ledgerPath), with nothing injected in its place"
