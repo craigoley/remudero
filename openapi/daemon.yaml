@@ -1875,6 +1875,85 @@ components:
         briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
         requestedAt: { type: string, format: date-time }
         proposal: { type: string, maxLength: 2048, description: The correlated plan pull request, only once the native run opened it. }
+        requirementCoverage:
+          type: object
+          additionalProperties: false
+          description: An optional, bounded, observational structural report. It is never tested, implemented, exhaustive or semantically
+            reviewed, and no verification, product-case or build admission reads it. Excerpts are untrusted text. Absent on a response
+            from a server that predates it.
+          required: [version, basis, reportId, binding, source, inventory, mapping, entries, counts]
+          properties:
+            version: { type: string, enum: [product-plan-requirement-coverage-v1] }
+            basis: { type: string, enum: [structural-unreviewed] }
+            reportId: { type: string, pattern: "^[a-f0-9]{64}$" }
+            binding:
+              type: object
+              additionalProperties: false
+              required: [operationId, briefDigest, objectiveRevision, targetHead]
+              properties:
+                operationId: { type: string, pattern: "^[a-f0-9]{64}$" }
+                briefDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                objectiveRevision: { type: integer, minimum: 1, maximum: 9007199254740991 }
+                targetHead: { type: string, pattern: "^[a-f0-9]{40}$" }
+            source:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { type: string, enum: [available, source-unavailable] }
+            inventory:
+              type: object
+              additionalProperties: false
+              required: [state, exhaustive, itemCount, items]
+              properties:
+                state: { type: string, enum: [available, inventory-unavailable] }
+                exhaustive: { type: boolean, enum: [false] }
+                digest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                itemCount: { type: integer, minimum: 0, maximum: 64 }
+                items:
+                  type: array
+                  maxItems: 64
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [pointer, kind, excerpt, textDigest]
+                    properties:
+                      pointer: { type: string, minLength: 1, maxLength: 64 }
+                      kind: { type: string, enum: [idea, constraint, decision] }
+                      excerpt: { type: string, maxLength: 240, description: Untrusted brief text, truncated. }
+                      textDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            mapping:
+              type: object
+              additionalProperties: false
+              required: [state]
+              properties:
+                state: { type: string, enum: [available, mapping-unavailable] }
+                reason: { type: string, enum: [no-proposal, brief-unavailable, transport-unreadable, report-absent, report-invalid, report-incompatible, snapshot-unresolved] }
+                head: { type: string, pattern: "^[a-f0-9]{40}$" }
+                snapshotDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+                reportDigest: { type: string, pattern: "^[a-f0-9]{64}$" }
+            entries:
+              type: array
+              maxItems: 64
+              items:
+                type: object
+                additionalProperties: false
+                required: [pointer, state]
+                properties:
+                  pointer: { type: string, minLength: 1, maxLength: 64 }
+                  state: { type: string, enum: [linked, unmapped, deferred, coverage-unavailable, reference-unresolved] }
+                  taskId: { type: string, minLength: 1, maxLength: 80 }
+                  proof: { type: string, minLength: 1, maxLength: 500, description: Untrusted proof text named by the proposal. }
+                  rationale: { type: string, minLength: 1, maxLength: 300, description: Untrusted deferral rationale. }
+            counts:
+              type: object
+              additionalProperties: false
+              required: [linked, unmapped, deferred, unresolved]
+              properties:
+                linked: { type: integer, minimum: 0, maximum: 64 }
+                unmapped: { type: integer, minimum: 0, maximum: 64 }
+                deferred: { type: integer, minimum: 0, maximum: 64 }
+                unresolved: { type: integer, minimum: 0, maximum: 64 }
     ProductCaseDeploymentObservation:
       type: object
       additionalProperties: false
