@@ -17,6 +17,9 @@ import {
 } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 import {
+  LEDGER_KEY_MANIFEST_HOLDER,
+  LEDGER_KEY_MANIFEST_VERSION,
+  ledgerKeyManifestDirectory,
   ledgerManifestMayHold,
   ledgerRowMatchesKeys,
   pruneLedgerKeyManifests,
@@ -69,10 +72,8 @@ export function createSizedMemo<K, V>(measure: (key: K, value: V) => MemoSize = 
 const gunzipAsync = promisify(nodeGunzip);
 
 /**
- * NDJSON rows from a byte stream, split on LF only (a CR before it is dropped). `node:readline` was
- * the splitter here, but from Node 24 it also breaks lines on U+2028 and U+2029, which JSON leaves
- * unescaped, so a valid row carrying either character read as two damaged ones and was dropped from
- * every union read. The decoder keeps a multi-byte character whole across a chunk boundary.
+ * NDJSON rows from a byte stream, split on LF only (a CR before it is dropped): `node:readline` also
+ * breaks on U+2028/U+2029 (Node 24), splitting a valid row into two damaged ones.
  */
 export async function* ndjsonLines(input: AsyncIterable<Buffer | string>, maxRowBytes = Infinity,
   rowLimitError: () => Error = () => new RangeError("ledger-row-byte-bound")): AsyncGenerator<string> {
@@ -170,16 +171,14 @@ export interface LedgerMalformedRowFinding {
   /** The damaged row's first readable `task_id`/`run_id` values: bounded id tokens, never raw text. */
   taskId?: string;
   runId?: string;
-  /** Every distinct plan-task id (`W<n>-T<n>`) the damaged text names, so a per-task reader can
-   * tell a row that could be its own from an unrelated one without seeing the text. */
+  /** Every distinct plan-task id (`W<n>-T<n>`) the damaged text names. */
   namedTaskIds?: string[];
 }
 
 export const ledgerRunBelongsToTask = (taskId: string, runId: unknown): runId is string =>
   typeof runId === "string" && (runId === taskId || runId.startsWith(`${taskId}-`));
 
-/** A damaged row could be this task's only when it names the task or one of its runs, or when it
- * names no identity at all and its time cannot be read or falls inside the task's window. */
+/** A damaged row could be this task's when it names the task or a run of it, or names no identity and its time is unreadable or in the window. */
 export function malformedRowCouldBelong(finding: LedgerMalformedRowFinding, taskId: string, windowStart: string): boolean {
   if (finding.taskId === taskId || ledgerRunBelongsToTask(taskId, finding.runId) || (finding.namedTaskIds ?? []).includes(taskId)) return true;
   if (finding.taskId !== undefined || finding.runId !== undefined) return false;
@@ -455,12 +454,10 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   onSourceRead?: (source: { path: string; form: LedgerFileForm | "live" }) => void;
   /** Controls replay Sets; an explicit exact index owns dedupe independently. */
   dedupe?: boolean;
-  /** Excludes the mutable live ledger from this scan. Archive-only audit readers use this so
-   * callers can overlay the current live file at decision time instead of freezing it at boot. */
+  /** Excludes the mutable live ledger from this scan, so archive-only callers can overlay it later. */
   includeLive?: boolean;
-  /** Reports an unread ARCHIVE to an audit caller. The ordinary stream remains best-effort: it
-   * yields every later readable source, while the caller decides whether partial history is safe
-   * for its decision. A missing or unreadable live file is deliberately not reported here. */
+  /** Reports an unread ARCHIVE to an audit caller; the stream stays best-effort and the caller decides
+   * whether partial history is safe. An unreadable live file is not reported here. */
   onUnreadArchive?: (path: string) => void;
   /** A live read failure is not an empty corpus to an audited projection. Ordinary readers may omit this. */
   onUnreadLive?: (path: string) => void;
@@ -468,22 +465,14 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
   onUnreadDirectory?: (path: string, error: unknown) => void;
   /** Metadata only: never pass the offending NDJSON text to an audit or public projection. */
   onMalformedRow?: (finding: LedgerMalformedRowFinding) => void;
-  /** Called only for a row that survived the union's exact replay dedupe. The normalized raw
-   * line lets a bounded audit projection seed a later live-file overlay without reserializing
-   * JSON and changing its identity. Under a per-step window, `fingerprint` is the line's
-   * {@link fingerprintLedgerLine}, the one the window kept: a caller that keeps lines past the row
-   * keeps that, because the line pins the whole decoded chunk it was sliced from. */
+  /** Called only for a row that survived the exact replay dedupe, with its normalized raw line. Under a
+   * per-step window `fingerprint` is the line's {@link fingerprintLedgerLine}: keep that, not the line,
+   * which pins the whole decoded chunk it was sliced from. */
   onAcceptedRecord?: (row: Record<string, unknown>, raw: string, fingerprint?: string) => void;
-  /** Cancels the active source and refuses to open a later rotation. An abort is never swallowed
-   * by the best-effort corrupt-file boundary below. */
+  /** Cancels the active source and refuses a later rotation; never swallowed by the corrupt-file boundary. */
   signal?: AbortSignal;
-  /**
-   * Bound exact-line replay dedupe to the newest N distinct rows per `step`. This is the streaming
-   * counterpart to `rotateLedger` retaining its newest N rows per step: an archived row can only
-   * reappear in a later rotation while it remains inside that producer-side window. Callers must
-   * pass the producer's exact retention width; this is not a general replacement for whole-corpus
-   * dedupe over an arbitrary collection of files.
-   */
+  /** Bound exact-line replay dedupe to the newest N distinct rows per `step`, mirroring `rotateLedger`'s
+   * per-step retention: callers must pass the producer's exact retention width. */
   dedupeWindowPerStep?: number;
   /** Resume after an immutable rotation already represented by a checkpoint. */
   afterRotation?: string;
@@ -1018,6 +1007,57 @@ export function readLedgerUnionRawLinesSync(
   };
 }
 
+/** Whether a ledger row is stamped inside [minimumTs, maximumTs]; a row with no readable stamp is outside any window. */
+function lineStampedWithin(line: string, minimumTs: number | undefined, maximumTs: number): boolean {
+  let ts: unknown;
+  try { ts = (JSON.parse(line) as { ts?: unknown } | null)?.ts; } catch { return false; /* deliberate: a torn line is no evidence */ }
+  const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+  return !Number.isNaN(at) && at <= maximumTs && (minimumTs === undefined || at >= minimumTs);
+}
+
+/**
+ * The time range of one rotated archive from a manifest already stored and current for it, or undefined when there is
+ * none: unlike {@link readLedgerKeyManifest} this never builds one, so a window read streams no archive it will not read.
+ */
+async function cachedArchiveCoverage(stateDir: string, entry: LedgerCorpusEntry): Promise<{ minTs?: string; maxTs?: string } | undefined> {
+  try {
+    const archive = basename(entry.path);
+    const stat = nodeStatSync(entry.path);
+    const stored = JSON.parse(await nodeReadFile(join(ledgerKeyManifestDirectory(stateDir), `${archive}.json`), "utf8")) as Record<string, unknown> | null;
+    if (stored === null || typeof stored !== "object" || stored.schema !== 1 || stored.holder !== LEDGER_KEY_MANIFEST_HOLDER ||
+      stored.archive !== archive || stored.reducerVersion !== LEDGER_KEY_MANIFEST_VERSION || stored.key !== `${stat.size}:${stat.mtimeMs}`) return undefined;
+    const manifest = stored.manifest as { minTs?: unknown; maxTs?: unknown } | null;
+    if (manifest === null || typeof manifest !== "object" ||
+      (manifest.minTs !== undefined && typeof manifest.minTs !== "string") || (manifest.maxTs !== undefined && typeof manifest.maxTs !== "string")) return undefined;
+    return { minTs: manifest.minTs, maxTs: manifest.maxTs };
+  } catch {
+    // deliberate: no current manifest (or an unreadable one) means the archive is read, never skipped.
+    return undefined;
+  }
+}
+
+/** Whether the live ledger's first row is stamped after `maximumTs`; false whenever that cannot be told. */
+function liveOpensAfter(livePath: string, maximumTs: number): boolean {
+  let fd: number | undefined;
+  try {
+    fd = nodeOpenSync(livePath, "r");
+    const head = Buffer.alloc(65_536);
+    const length = nodeReadSync(fd, head, 0, head.length, 0);
+    const end = head.indexOf(0x0a);
+    if (end === -1 && length === head.length) return false;
+    const first = head.toString("utf8", 0, end === -1 ? length : end).trim();
+    if (first === "") return false;
+    const ts = (JSON.parse(first) as { ts?: unknown } | null)?.ts;
+    const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    return !Number.isNaN(at) && at > maximumTs;
+  } catch {
+    // deliberate: an unreadable or unparsable first row cannot place the file after the window, so it is read.
+    return false;
+  } finally {
+    if (fd !== undefined) try { nodeCloseSync(fd); } catch { /* deliberate: nothing further to release */ }
+  }
+}
+
 /** Yields the event loop between slices of one file's lines. */
 const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -1026,8 +1066,11 @@ const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmedia
  * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
  * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
+ * `untilTs` selects archives by verified row coverage for a closed window. Callers still filter individual rows.
  */
-export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: LedgerUnionRawReadOptions = {}): Promise<LedgerUnionRawRead> {
+export async function readLedgerUnionRawLinesAsync(
+  stateDir: string, opts: LedgerUnionRawReadOptions & { untilTs?: string } = {},
+): Promise<LedgerUnionRawRead> {
   const unread: string[] = [];
   const { rotations, unclassified, auxiliary } = listedLedgerFiles(stateDir, realLedgerFs, (path) => {
     if (opts.refuseIncomplete) unread.push(path);
@@ -1036,7 +1079,15 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   const livePath = ledgerLivePath(stateDir);
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
-  const { rawLines, scan } = rawLineCollector(opts);
+  const maximumTs = opts.untilTs === undefined ? undefined : Date.parse(opts.untilTs);
+  // A closed window answers rows inside it and nothing else, whichever file they came from: a row stamped outside
+  // the window (or with no readable stamp) is dropped here, so a post-window row in the live file or in an archive
+  // read for want of a manifest never reaches the caller.
+  const keepInWindow = opts.keep;
+  const { rawLines, scan } = rawLineCollector(maximumTs === undefined ? opts : {
+    ...opts,
+    keep: (line: string) => (keepInWindow?.(line) ?? true) && lineStampedWithin(line, minimumTs, maximumTs),
+  });
   let filesRead = 0;
 
   const scanInSlices = async (buf: Buffer): Promise<void> => {
@@ -1047,7 +1098,20 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
   };
 
   const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
-    if (rotationBeforeWindow(entry, minimumTs)) return;
+    if (maximumTs === undefined) {
+      if (rotationBeforeWindow(entry, minimumTs)) return;
+    } else {
+      // A rotation cut before the window opened holds no row of it (the name is the cut's time, as for the open read).
+      if (rotationBeforeWindow(entry, minimumTs)) return;
+      // Compaction combines nonadjacent rotations, so a later-stamped archive can hold earlier rows: only verified row
+      // coverage can exclude one from the window's far side. Coverage already built is used; none is built here.
+      // An archive with no current manifest is read once (rows filtered above), never streamed whole to build one first.
+      const coverage = await cachedArchiveCoverage(stateDir, entry);
+      if (coverage !== undefined) {
+        const { minTs, maxTs } = coverage;
+        if (Date.parse(minTs ?? "") > maximumTs || (minimumTs !== undefined && Date.parse(maxTs ?? "") < minimumTs)) return;
+      }
+    }
     let buf: Buffer;
     try {
       const raw = await nodeReadFile(entry.path);
@@ -1063,6 +1127,8 @@ export async function readLedgerUnionRawLinesAsync(stateDir: string, opts: Ledge
 
   const readLive = async (): Promise<void> => {
     if (!liveFileRead) return;
+    // The live file is append-ordered: one that opens after the window closed holds nothing of it.
+    if (maximumTs !== undefined && liveOpensAfter(livePath, maximumTs)) return;
     let buf: Buffer;
     try {
       filesRead += 1;
