@@ -24,6 +24,7 @@
 
 import { normalQuantile } from "./eval-card.js";
 import { seedOf, seededRandom } from "./knowledge-value.js";
+import { promotionCeiling } from "./promotion-bars.js";
 import {
   paretoFront,
   proposePromptCandidates,
@@ -618,15 +619,18 @@ export interface CohortOutcome {
 export const CANARY_MERGE_RATE_DROP = "merge_rate_drop";
 export const CANARY_COST_PER_MERGED_RATIO = "cost_per_merged_ratio";
 
-/** PRIMARY CONTROL: a cohort breaches when its merge rate falls this far below the rest's… */
-export const DEFAULT_CANARY_MAX_MERGE_RATE_DROP = 0.15;
-/** PRIMARY CONTROL: …or when a merged task costs this many times what one costs in the rest. */
-export const DEFAULT_CANARY_MAX_COST_RATIO = 1.25;
+/** PRIMARY CONTROL: a cohort breaches when its merge rate falls `maxMergeRateDrop` below the rest's, or when a merged
+ *  task costs `maxCostRatio` times what one costs in the rest. Promotion bars in scripts/promotion-ceilings-baseline.json,
+ *  read through getters on first use (src/lib/promotion-bars.ts says why never at import). */
+export const CANARY_GUARD_BAR: Readonly<{ maxMergeRateDrop: number; maxCostRatio: number }> = {
+  get maxMergeRateDrop() { return promotionCeiling("canaryMaxMergeRateDrop"); },
+  get maxCostRatio() { return promotionCeiling("canaryMaxCostRatio"); },
+};
 
 export function cohortGuardMetrics(opts: { maxMergeRateDrop?: number; maxCostRatio?: number } = {}): PromotionGuardMetric[] {
   return [
-    { metricName: CANARY_MERGE_RATE_DROP, unit: "fraction", direction: "max", abortThreshold: opts.maxMergeRateDrop ?? DEFAULT_CANARY_MAX_MERGE_RATE_DROP },
-    { metricName: CANARY_COST_PER_MERGED_RATIO, unit: "ratio", direction: "max", abortThreshold: opts.maxCostRatio ?? DEFAULT_CANARY_MAX_COST_RATIO },
+    { metricName: CANARY_MERGE_RATE_DROP, unit: "fraction", direction: "max", abortThreshold: opts.maxMergeRateDrop ?? CANARY_GUARD_BAR.maxMergeRateDrop },
+    { metricName: CANARY_COST_PER_MERGED_RATIO, unit: "ratio", direction: "max", abortThreshold: opts.maxCostRatio ?? CANARY_GUARD_BAR.maxCostRatio },
   ];
 }
 

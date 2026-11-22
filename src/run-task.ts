@@ -402,7 +402,7 @@ import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } f
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, randomisedRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { CI_FRICTION_HALF_LIFE_MS, ciFrictionCauseKey, ciFrictionRoundMatchesCause, ciFrictionRoundsFromLedger, ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
@@ -915,6 +915,7 @@ import {
   type AffectedSelection,
   type AffectedSuitesInput,
 } from "./lib/affected-suites.js";
+import { pinningTestsApply, pinningTestViolations, runPinningTests } from "./lib/pinning-tests.js";
 // W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
 // @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
 import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
@@ -1398,7 +1399,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
@@ -1446,7 +1448,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1456,7 +1458,9 @@ import {
 } from "./lib/model-availability.js";
 import {
   judgeCiLessonEfficacy,
-  readFiledCiLessons,
+  readCheckoutCiLessons,
+  readMergedCiLessons,
+  readMergedCiLessonsAsync,
   summarizeCiLessonRecurrences,
   type FiledCiLessonsRead,
 } from "./lib/ci-lesson-recurrence.js";
@@ -1547,6 +1551,7 @@ import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./l
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
+import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -15916,6 +15921,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    /** The plan's filed lessons, including fetched main in production. */
+    loadLessons?: () => FiledCiLessonsRead;
     destinationSnapshot?: TaskIdDestinationSnapshot | null;
     destinationFailure?: string;
   } = {},
@@ -15999,7 +16006,13 @@ export function ciLearningCommand(
   // carries its finding id as its `origin:`, which is what makes the plan answerable here.
   // W1-T4190: unioned with what fetched origin/main holds — the checkout's plan can lag it.
   const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
-  const result = mintCiLearningShards(corpus, planOrigins);
+  const { result } = mintCiLearningFromPlan({
+    corpus, window: input, alreadyFiledFindingIds: planOrigins, stateRoot: root, runId: `CI-LEARNING-${process.pid}`,
+    readLessons: deps.loadLessons ?? (() => readCheckoutCiLessons(checkoutRoot, readMergedCiLessons(checkoutRoot))),
+  });
+  for (const h of result.ladder) {
+    console.log(`  HANDED TO THE FLOW LADDER ${h.gate}: lesson ${h.findingId} recurred on ${h.recurredPrs.map((n) => `#${n}`).join(", ")}`);
+  }
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
   if (result.unreadableShas.length > 0) {
@@ -20138,7 +20151,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
     const violations = scope
-      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts),
+        // W1-T14230: warn-only, appended after the plan-only promotion above, so it never blocks.
+        ...(pinningTestsApply(task, oldById?.get(task.id))
+          ? pinningTestViolations(task, runPinningTests(task, codeRoot, systemClock)) : [])]
       : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
@@ -24418,6 +24434,12 @@ async function retroCommand(
     log,
     say,
   );
+  // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
+  // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
+  const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
+    { loadConfig: () => config });
+  await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
+    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -27892,7 +27914,7 @@ export function buildCiLearningCadenceRunner(deps: {
   root: string;
   checkoutRoot: string;
   loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
-  loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
+  loadLessons?: () => FiledCiLessonsRead;
   fileShards?: typeof fileCiLearningShards;
   /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
   landShards?: CiLearningShardLander;
@@ -27931,8 +27953,11 @@ export function buildCiLearningCadenceRunner(deps: {
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
-    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix);
-    const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
+    const lessonRead = deps.loadLessons?.() ?? readCheckoutCiLessons(deps.checkoutRoot, await readMergedCiLessonsAsync(deps.checkoutRoot));
+    const { result, filedLessons } = mintCiLearningFromPlan({
+      corpus, window, alreadyFiledFindingIds: idempotencyOrigins, handFix, stateRoot: deps.root, runId: `CI-LEARNING-${at.getTime()}`,
+      readLessons: () => lessonRead,
+    });
     const lessonRecurrences =
       filedLessons.status === "measured"
         ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING, {
@@ -29229,7 +29254,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
-          const mountRecommendations = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          const sweep = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          // W1-T12143: a concluded randomised winner is the only adopt-mount evidence (configCandidates drops the
+          // sweep's); a `provider: codex` row it writes runs this host's workerProviders.codexModel.
+          const randomised = randomisedRecommendationSource({ stateDir, mountsFile: mountsPath(repoRoot), log, codexModel: config.workerProviders?.codexModel });
+          const mountRecommendations = async () => (await Promise.all([randomised(), sweep()])).flat();
           return withDue(async () => {
             try {
               await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
@@ -46441,6 +46470,10 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
+function runFixSelfCheck(args: FixSelfCheckRunArgs) {
+  return runFixSelfCheckWith(ledgeredNonDispatchSpawn("review"), args);
+}
+
 export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
@@ -46501,6 +46534,7 @@ export function fixCommandHost(): FixCommandHost {
     get workerChangedPaths() { return workerChangedPaths; },
     get workerCreatedCurrentHead() { return workerCreatedCurrentHead; },
     get worktreeHasUncommittedChanges() { return worktreeHasUncommittedChanges; },
+    get runFixSelfCheck() { return isTestRunner() ? undefined : runFixSelfCheck; },
   };
 }
 

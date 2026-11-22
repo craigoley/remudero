@@ -31,7 +31,8 @@ import type { Config } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages, type AsyncIssueGateway,
+  escalationBodyInLegacyOrder, escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages,
+  type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
 import { overseerStatePath } from "./gardener-overseer.js";
@@ -166,19 +167,24 @@ export type IssueClass =
   | "referent" | "liveness" | "read-model" | "memory-capacity" | "main-repair" | "live-edits" | "triage"
   | "clock-sweep" | "escalation" | "hand-filed";
 
+/** The body in the fields-first order every reader here was written for (W1-T12041). */
+function fieldsFirstBody(issue: Pick<RevalidationIssue, "body">): string {
+  return escalationBodyInLegacyOrder(issue.body);
+}
+
 /** The `**Task:**` an escalation body names ({@link "./escalate.js".renderIssueBody}), if any. */
 export function issueTaskId(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return /^\*\*Task:\*\*\s*(\S+)\s*$/m.exec(fieldsFirstBody(issue))?.[1];
 }
 
 /** The `**Class:**` an escalation body names: MANUAL, GRILL, BLOCKED, HARD_STOP... */
 export function issueEscalationClass(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Class:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return /^\*\*Class:\*\*\s*(\S+)\s*$/m.exec(fieldsFirstBody(issue))?.[1];
 }
 
 /** The `**Cause:**` an escalation body names: stage-stall, review, ci, conflict... */
 export function issueEscalationCause(issue: Pick<RevalidationIssue, "body">): string | undefined {
-  return /^\*\*Cause:\*\*\s*(\S+)\s*$/m.exec(issue.body)?.[1];
+  return /^\*\*Cause:\*\*\s*(\S+)\s*$/m.exec(fieldsFirstBody(issue))?.[1];
 }
 
 /** Classify one issue. Producer classes are named by the task id their producer mints; an escalation
@@ -286,7 +292,7 @@ export function escalationClassFamily(escalationClass: string): string {
 export function duplicateEscalationKey(issue: Pick<RevalidationIssue, "url" | "body">): string | undefined {
   const taskId = issueTaskId(issue);
   const escalationClass = issueEscalationClass(issue);
-  if (!taskId || !escalationClass || !issue.body.includes(FLEET_OPENED_FOOTER)) return undefined;
+  if (!taskId || !escalationClass || !fieldsFirstBody(issue).includes(FLEET_OPENED_FOOTER)) return undefined;
   if (escalationClassFamily(escalationClass) === "GRILL") return undefined;
   if (SHARED_LANE_TASK_KEYS.has(taskId) || taskId.startsWith("MODEL-CATALOG")) return undefined;
   const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase() ?? "";
@@ -497,13 +503,14 @@ const TERMINAL_RULE_CLASSES = new Set(["BLOCKED", "MANUAL"]);
  *  shape, is `undefined`. */
 export function terminalRulePr(issue: Pick<RevalidationIssue, "url" | "title" | "body">): number | undefined {
   const cls = issueEscalationClass(issue);
-  const strike = [...new Set([...issue.body.matchAll(STRIKE_LADDER_PR_RE)].map((m) => Number(m[1])))];
+  const body = fieldsFirstBody(issue);
+  const strike = [...new Set([...body.matchAll(STRIKE_LADDER_PR_RE)].map((m) => Number(m[1])))];
   if (cls === undefined) return strike.length === 1 ? strike[0] : undefined;
   if (!TERMINAL_RULE_CLASSES.has(cls)) return undefined;
   const task = /^PR-(\d+)$/.exec(issueTaskId(issue) ?? "");
   if (task) return Number(task[1]);
   const repo = /github\.com\/([^/]+\/[^/]+)\/issues\//i.exec(issue.url)?.[1]?.toLowerCase();
-  const text = `${issue.title}\n${issue.body}`;
+  const text = `${issue.title}\n${body}`;
   const asked = CLARIFICATION_PR_RE.exec(text);
   if (asked && `${asked[1]}/${asked[2]}`.toLowerCase() === repo) {
     if (pullRefsIn(text).size === 1) return Number(asked[3]);
@@ -587,11 +594,11 @@ export function stageStallResolution(
       citation: `PR #${pr} head is now ${openPrHead.sha}; this stall was reported at ${head}`,
     };
   }
-  const identity = stalledStageIssueIdentity(issue);
+  const identity = stalledStageIssueIdentity({ title: issue.title, body: fieldsFirstBody(issue) });
   if (identity === undefined) return undefined;
   const newer = open
     .filter((o) => o.number > issue.number && issueEscalationCause(o) === STAGE_STALL_CAUSE &&
-      escalationHeadSha(o.body) === head && stalledStageIssueIdentity(o) === identity)
+      escalationHeadSha(o.body) === head && stalledStageIssueIdentity({ title: o.title, body: fieldsFirstBody(o) }) === identity)
     .sort((a, b) => b.number - a.number)[0];
   if (newer === undefined) return undefined;
   return {
@@ -1041,7 +1048,7 @@ function parseIssueRevalidationJudgment(text: string): { verdict: RevalidationVe
 /** The names an issue's text points at: backticked tokens, then path-like and dotted ledger-step words.
  *  Bounded, so one long issue cannot make the evidence pack unbounded. */
 export function evidenceNames(issue: Pick<RevalidationIssue, "title" | "body">, limit = 8): string[] {
-  const text = `${issue.title}\n${issue.body}`;
+  const text = `${issue.title}\n${fieldsFirstBody(issue)}`;
   const names = new Set<string>();
   for (const m of text.matchAll(/`([^`\n]{3,80})`/g)) names.add(m[1]!.trim());
   for (const m of text.matchAll(/\b((?:src|test|scripts|deploy|docs)\/[\w./-]+\.\w+)\b/g)) names.add(m[1]!);

@@ -36,7 +36,7 @@ import { readEscalationAnswers } from "../../lib/escalation-answers.js";
 import type { FullPassServe } from "../../lib/read-plane.js";
 import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createOpenPrStageReuse, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
-import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, orderPendingReviews, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, lightPassEarlyReviewBatch, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
 import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
@@ -1478,13 +1478,11 @@ export function buildSweepLightHook(
       const reviewCandidates = ordinaryPrs.filter((pr) => isReviewLaneDisposition(deriveDisposition(pr).disposition));
       const earlyCandidates = reviewCandidates.filter((pr) => !pr.autoMergeArmed &&
         !admissionWaiters.has(`${pr.prNumber}@${pr.headSha}`));
-      const earlyCandidateNumbers = new Set(earlyCandidates.map((pr) => pr.prNumber));
-      const oldestDelayedReview = orderPendingReviews(reviewCandidates
-        .filter((pr) => !earlyCandidateNumbers.has(pr.prNumber)).map((pr) => ({ pr })))[0]?.pr;
-      // An older guarded head keeps its place. Younger candidates join the same post-refresh
-      // batch instead of taking all review capacity before that batch can enter admission.
-      const earlyReviewPrs = earlyCandidates.filter((pr) => oldestDelayedReview === undefined ||
-        orderPendingReviews([{ pr }, { pr: oldestDelayedReview }])[0]!.pr === pr);
+      // A guarded head that became eligible first keeps its place. Later inputs join the same post-refresh
+      // batch instead of taking all review capacity before that batch can enter admission. W1-T14243: the
+      // split ranks on admission's queued-at key, read after this pass's eligibility rows.
+      const earlyReviewPrs = timing.run(() => lightPassEarlyReviewBatch(reviewCandidates, earlyCandidates,
+        { ...effects, ledgerPath }));
       const earlyNumbers = new Set(earlyReviewPrs.map((pr) => pr.prNumber));
       const laterOrdinaryPrs = ordinaryPrs.filter((pr) => !earlyNumbers.has(pr.prNumber));
       const reviewCandidateNumbers = new Set(reviewCandidates.map((pr) => pr.prNumber));

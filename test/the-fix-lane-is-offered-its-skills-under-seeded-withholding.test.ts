@@ -12,24 +12,29 @@ import {
   buildSkillEffectivenessReport,
   renderSkillsPart,
   SKILL_EFFECTIVENESS_TASK_TYPE,
-  skillWithheldForRun,
+  SKILL_WITHHOLDING_SHARE,
 } from "../src/lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 // The fix lane (review findings, CI failures) used to receive no skills at all. A skill declaring
-// `applies-to: fix` is now eligible there, withheld on the same seeded share of runs as the implement
+// `applies-to: fix` is now eligible there, withheld on the same seeded share of tasks as the implement
 // lane, and its `skills.selection` row carries `task_type: "fix"` so the report can read that lane alone.
+// W1-T14137: the draw is keyed on the task, so these fixtures choose a task id, not a run id, per arm.
 
 const FIX_SKILL = "answer-findings";
 const FIX_SKILL_BODY = "Restate each finding in your own words before you touch the code.";
-const NOT_WITHHELD_RUN = "fix-run-0";
-const WITHHELD_RUN = "fix-run-1";
+const NOT_WITHHELD_TASK = "W1-T9002";
+const WITHHELD_TASK = "W1-T9001";
+const skillDraw = (taskId: string): boolean =>
+  taskArmWithheld({ taskId, unit: FIX_SKILL, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH });
 
 const criteria: CriterionVerdict[] = [
   { claim: "wire producer", proof: "unit test: wires it", met: false, reason: "consumer disconnected", proof_exec: "executed_fail" },
 ];
-const task = { id: "W1-T9001", title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria };
+const taskFor = (id: string) => ({ id, title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria });
+const task = taskFor("W1-T9001");
 const mount = { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 };
 
 const skillTree = (skills: Array<{ name: string; appliesTo: string; body: string }>): string => {
@@ -43,8 +48,10 @@ const skillTree = (skills: Array<{ name: string; appliesTo: string; body: string
 
 type Row = Record<string, unknown> & { step: string };
 
-/** One fix round on a blocked review; returns the prompt the worker was spawned with and every ledger row. */
-async function fixRound(runId: string, approvedSkillsDir?: string): Promise<{ prompt: string; rows: Row[] }> {
+/** One fix round of `taskId` on a blocked review; returns the prompt the worker was spawned with and every ledger row. */
+async function fixRound(taskId: string, approvedSkillsDir?: string): Promise<{ prompt: string; rows: Row[] }> {
+  const task = taskFor(taskId);
+  const runId = `${taskId}-1791151948510`;
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-skills-run-`));
   const initialReview = {
     state: "failure" as const, criteria, testTheater: false, summary: "one visible gap",
@@ -56,7 +63,7 @@ async function fixRound(runId: string, approvedSkillsDir?: string): Promise<{ pr
   try {
     await runFixRung({
       task, taskId: task.id, runId, prUrl: "https://github.com/acme/remudero/pull/1",
-      branch: "run-W1-T9001-1791151948510", worktreePath: root, initialSessionId: "", initialReview,
+      branch: `run-${runId}`, worktreePath: root, initialSessionId: "", initialReview,
       mount, settingsFile: join(root, "settings.json"), config: {} as Config, budgetUsd: 1, strikeCap: 1,
       reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: mount },
       deps: {
@@ -87,14 +94,14 @@ async function fixRound(runId: string, approvedSkillsDir?: string): Promise<{ pr
 
 const selectionRows = (rows: Row[]): Row[] => rows.filter((row) => row.step === "skills.selection");
 
-test("a fix-eligible skill reaches the fix prompt on a run that does not withhold it", async () => {
-  assert.equal(skillWithheldForRun(NOT_WITHHELD_RUN, FIX_SKILL), false, "precondition: this run's draw keeps the skill");
+test("a fix-eligible skill reaches the fix prompt on a task that does not withhold it", async () => {
+  assert.equal(skillDraw(NOT_WITHHELD_TASK), false, "precondition: this task's draw keeps the skill");
   const dir = skillTree([
     { name: FIX_SKILL, appliesTo: "implement, fix", body: FIX_SKILL_BODY },
     { name: "implement-only", appliesTo: "implement", body: "An implement-only procedure." },
   ]);
   try {
-    const { prompt, rows } = await fixRound(NOT_WITHHELD_RUN, dir);
+    const { prompt, rows } = await fixRound(NOT_WITHHELD_TASK, dir);
     assert.ok(prompt.includes(`## skill: ${FIX_SKILL}\n\n${FIX_SKILL_BODY}`), "the selected skill is rendered by renderSkillsPart");
     assert.ok(!prompt.includes("An implement-only procedure."), "an implement-only skill never reaches a fix round");
     assert.ok(prompt.indexOf(FIX_SKILL_BODY) < prompt.indexOf("The review gate is FAILING"), "the skill precedes the evidence");
@@ -110,11 +117,11 @@ test("a fix-eligible skill reaches the fix prompt on a run that does not withhol
   }
 });
 
-test("a fix-eligible skill is absent from the fix prompt on a run that withholds it, and the row names it", async () => {
-  assert.equal(skillWithheldForRun(WITHHELD_RUN, FIX_SKILL), true, "precondition: this run's draw withholds the skill");
+test("a fix-eligible skill is absent from the fix prompt on a task that withholds it, and the row names it", async () => {
+  assert.equal(skillDraw(WITHHELD_TASK), true, "precondition: this task's draw withholds the skill");
   const dir = skillTree([{ name: FIX_SKILL, appliesTo: "fix", body: FIX_SKILL_BODY }]);
   try {
-    const { prompt, rows } = await fixRound(WITHHELD_RUN, dir);
+    const { prompt, rows } = await fixRound(WITHHELD_TASK, dir);
     assert.ok(!prompt.includes(FIX_SKILL_BODY));
     assert.ok(!prompt.includes("## skill:"));
     const selection = selectionRows(rows);
@@ -134,8 +141,8 @@ test("with no fix-eligible skill the fix prompt is byte-identical and the select
   const implementOnly = skillTree([{ name: "implement-only", appliesTo: "implement", body: "An implement-only procedure." }]);
   const empty = skillTree([]);
   try {
-    const { prompt: onImplementOnly, rows } = await fixRound(NOT_WITHHELD_RUN, implementOnly);
-    const { prompt: onEmptyTree } = await fixRound(NOT_WITHHELD_RUN, empty);
+    const { prompt: onImplementOnly, rows } = await fixRound(NOT_WITHHELD_TASK, implementOnly);
+    const { prompt: onEmptyTree } = await fixRound(NOT_WITHHELD_TASK, empty);
     assert.equal(onImplementOnly, onEmptyTree);
     assert.ok(!onImplementOnly.includes("## skill:"));
     const selection = selectionRows(rows);

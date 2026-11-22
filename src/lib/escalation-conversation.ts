@@ -9,6 +9,7 @@ import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { escalationReplySubmissionKey, readEscalationQuestionFeedback } from "./escalation-correspondence.js";
 import type { FeedbackEntry } from "./feedback.js";
 import { CONSOLE_CORRECTION_KIND, CONSOLE_CORRECTION_VERSION } from "./console-feedback.js";
+import { escalationBodyInLegacyOrder } from "./escalate.js";
 
 const MAX_SOURCE_BYTES = 65_536;
 const MAX_HISTORY_MESSAGES = 100;
@@ -94,6 +95,8 @@ export function parseEscalationConversationSource(source: EscalationIssueSource)
   identity: ThreadIdentity; headline: string; detail: string; recommendation: string | null;
   options: EscalationConversation["options"];
 } | undefined {
+  // W1-T12041: read a machine-fields-last body in the fields-first order these rules were written for.
+  source = { ...source, body: escalationBodyInLegacyOrder(source.body) };
   const [header = ""] = source.body.split(/\r?\n\r?\n/, 1);
   const field = (name: string): string | undefined => {
     const matches = [...header.matchAll(new RegExp(`^\\*\\*${name}:\\*\\* (.+)$`, "gm"))];
@@ -239,6 +242,7 @@ export function createEscalationConversationReader(opts: {
     const { evidence, stale } = loaded;
     const source = evidence.source;
     const parsed = parseEscalationConversationSource(source);
+    const legacyBody = escalationBodyInLegacyOrder(source.body);
     if (!parsed) return { state: "unavailable", reason: "invalid_source", detail: "This issue has no supported native escalation identity. It cannot be used as a reply destination." };
     const receiptKey = `${issueUrl}|${parsed.identity.taskId}|${parsed.identity.class}`;
     let known = nativeReceipts.has(receiptKey);
@@ -264,9 +268,9 @@ export function createEscalationConversationReader(opts: {
     const candidates = stored?.status === "ok" ? [...stored.threads].filter(([id, messages]) => typeof id === "string"
       && id.startsWith(prefix) && /^(?:-|[1-9][0-9]*)$/.test(id.slice(prefix.length))
       && messages.some(m => m?.role === "escalation" && typeof m.body === "string"
-        && m.body.startsWith(`${parsed.headline}\n\n`) && source.body.includes(m.body.slice(parsed.headline.length + 2)))) : [];
+        && m.body.startsWith(`${parsed.headline}\n\n`) && legacyBody.includes(m.body.slice(parsed.headline.length + 2)))) : [];
     const selected = candidates.length === 1 ? candidates[0] : undefined;
-    if (!selected && /^## Decision Summary\r?$/m.test(source.body)) {
+    if (!selected && /^## Decision Summary\r?$/m.test(legacyBody)) {
       return { state: "unavailable", reason: "invalid_source", detail: "The source includes generated context, but no saved native identity could distinguish it from the original escalation. No reply destination is confirmed." };
     }
     const identity: ThreadIdentity = selected ? { taskId: parsed.identity.taskId, class: parsed.identity.class,
@@ -325,7 +329,7 @@ export function createEscalationConversationReader(opts: {
     // and generated summaries cannot supply an unstored native PR referent.
     const canStartConversation = !stale && source.state === "open" && history === "absent"
       && Boolean(opts.threadStorePath && existsSync(opts.threadStorePath))
-      && !/^## Decision Summary\r?$/m.test(source.body);
+      && !/^## Decision Summary\r?$/m.test(legacyBody);
     const sourceRevision = digest([source.html_url, source.body, source.title, source.updated_at, source.state]);
     const acceptedText = parsed.recommendation ? `I accept this recommendation: ${parsed.recommendation}` : undefined;
     const recommendationReplies = (canReply && attention === "needs_input" || canStartConversation) && (messages === undefined || messages.every(message => message.from !== "operator")) && acceptedText ? {
