@@ -1,4 +1,3 @@
-/** W1-T14326: a board stamp covers a task's content, not the label it was read under. */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -59,7 +58,7 @@ function world(t: { after: (fn: () => void) => void }) {
   };
 }
 
-test("W1-T14326 criterion 1: a plan adopted at a new ref with the same content re-derives no task", (t) => {
+test("W1-T14326 criterion 1: a stamp ignores the read label, so a plan adopted at a new ref with the same content re-derives no task", (t) => {
   const w = world(t);
   const board = w.board();
   assert.equal(board.update({ force: true }).full, true, "control: the first derive derives every task");
