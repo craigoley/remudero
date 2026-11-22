@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 40.00
+  budget_usd: 4.50
   rationale: "MEASURED on main 247f574. src/lib/report-commands.ts assembleCaseFile (:1110-1136) derives each task's
     projection through the default buildBatchedGithub gateway (built at :1170-1171 with only a snapshotCache — no
     exec, no pacer) and then reads the projected PR through default ghJson (:1127). Both inherit the per-call
