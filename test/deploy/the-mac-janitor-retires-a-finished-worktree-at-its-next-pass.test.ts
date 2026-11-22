@@ -85,7 +85,9 @@ function worktree(main: string, path: string) {
   git(main, "worktree", "add", "-q", "--detach", path, "main");
   const name = basename(path);
   git(path, "commit", "-q", "--allow-empty", "-m", name);
-  git(path, "push", "-q", "origin", `HEAD:refs/heads/${name}`);
+  // Push to the bare origin by path: the suite preload's dead push URL (W1-T4805) blocks the GitHub-named remote.
+  const bare = /^url\.file:\/\/(.+)\.insteadof /m.exec(git(main, "config", "--get-regexp", "^url\\..*\\.insteadof$"))![1]!;
+  git(path, "push", "-q", bare, `HEAD:refs/heads/${name}`);
   file(join(path, "coverage/lcov.info"));
   return path;
 }
