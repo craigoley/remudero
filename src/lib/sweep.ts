@@ -3,7 +3,7 @@ import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
-import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
+import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -5753,6 +5753,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // ops catalog, so it is refused as destination-unreadable; nothing falls back to the public repository.
     parkedPr: {
       planFilingTarget: publicTaskRepository,
+      // W1-T14344 (the W1-T12200 rule): a NEW held task file follows the switch for kind task, read on each call; an edit
+      // stays in the repository that holds its file (readTaskShard).
+      resolveTaskDestination: () => resolvePlanDestination("task", join(config.root, "state"), publicTaskRepository),
       readTaskShard: async (taskId) => {
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&

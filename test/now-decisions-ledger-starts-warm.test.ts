@@ -92,9 +92,10 @@ test("W1-T7391: a fresh now view reads the gate rows from durable rotation diges
   assert.deepEqual(archiveReads, []);
   appendFileSync(f.live, ndjson([row("daemon.image_drift", { ts: new Date(T0).toISOString(), build_sha: "b3", baked_sha: "b4" })]));
   f.ctx.now += NOW_REFRESH_MS;
+  const logged = f.counts.length;
   const updated = f.build(fresh);
   assert.ok(updated.humanGates?.gates.some((g) => g.key === "operator_item:core:image-drift%3Ab3"), "each build reads the live file");
-  assert.deepEqual(f.counts.at(-1), { instance: "core", hits: 0, parsed: 0, writeFailed: 0, pruned: 0 }, "steady builds use the in-memory memo");
+  assert.equal(f.counts.length, logged, "steady builds use the in-memory memo, so they report no digest work");
   assert.deepEqual(archiveReads, []);
 });
 
@@ -145,4 +146,29 @@ test("an incomplete now gate read retains the last complete rows", (t) => {
   assert.equal(body.humanGates?.sources.find((s) => s.name === "reviewer-freshness")?.state, "partial");
   assert.ok(body.humanGates?.gates.some((g) => g.key === "operator_item:core:image-drift%3Ab1"));
   assert.ok(!body.humanGates?.gates.some((g) => g.key === "operator_item:core:image-drift%3Anew"));
+});
+
+test("W1-T14341 criterion 1: a build the memo answers writes no digest row", (t) => {
+  const f = fixture(t);
+  const view = createNowView(f.options);
+  f.build(view);
+  assert.equal(f.counts.length, 1, "control: the cold build reported its parses");
+  for (let i = 0; i < 3; i++) {
+    f.ctx.now += NOW_REFRESH_MS;
+    f.build(view);
+  }
+  assert.equal(f.counts.length, 1);
+});
+
+test("W1-T14341 criterion 2: invariant:work-is-reported — parses, restart hits and a new rotation each still write their row", (t) => {
+  const f = fixture(t);
+  f.build();
+  assert.deepEqual(f.counts.at(-1), { instance: "core", hits: 0, parsed: 3, writeFailed: 0, pruned: 0 }, "cold parses");
+  const view = createNowView(f.options);
+  f.build(view);
+  assert.deepEqual(f.counts.at(-1), { instance: "core", hits: 3, parsed: 0, writeFailed: 0, pruned: 0 }, "a restart's hits");
+  writeFileSync(join(f.ledgerDir, "ledger.2026-10-09T07-30-00-000Z.ndjson"), ndjson([row("daemon.boot", { head_sha: "def5678" })]));
+  f.ctx.now += NOW_REFRESH_MS;
+  f.build(view);
+  assert.deepEqual(f.counts.at(-1), { instance: "core", hits: 0, parsed: 1, writeFailed: 0, pruned: 0 }, "a new rotation's parse");
 });

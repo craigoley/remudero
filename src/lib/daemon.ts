@@ -105,8 +105,8 @@ import { DEPLOY_IDLE_DEFER_CEILING_MS, deriveDrainWait, readDrainWaitLanes, read
 import { predictRecycleWaitRuns, recycleWaitAdmits, soonestRecycleWaitRun, type RecycleWaitInput } from "./recycle-wait-admission.js";
 import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { createFleetAccountEpisode, redactedAccountLabel, type FleetAccountDivergence, type FleetAccountPair } from "./account-usage.js";
-import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
-import type { UsageSnapshot } from "./headroom.js";
+import { buildDefaultHeadroomPolicy, resolveHeadroomLimitPct, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
+import type { HeadroomPolicy, UsageSnapshot } from "./headroom.js";
 // Type-only: daemon-health.ts imports a value from here; a value edge would cycle (W1-T372).
 // This module never shells GitHub itself.
 import type { GhRateLimitBuckets } from "./daemon-health.js";
@@ -745,41 +745,9 @@ export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReaso
   return daemonExitCode(summary.stopReason);
 }
 
-/** One rung of the headroom ceiling's time-to-reset curve — policy data rather than a code
- *  constant (operator ruling, 2026-07-21, rule 2). Ordered narrowest bound first;
- *  {@link resolveHeadroomLimitPct} picks the first rung covering a window's hours-to-reset. */
-export interface HeadroomPolicyRule {
-  /** This rung applies when hours-to-reset is <= this bound. */
-  maxHoursToReset: number;
-  /** The ceiling (percent used) that binds under this rung. */
-  limitPct: number;
-}
-
-/** A time-to-reset → ceiling curve, DATA rather than a single constant. */
-export type HeadroomPolicy = HeadroomPolicyRule[];
-
-/** Final-day headroom expires at reset, so allow 100% then; otherwise hold the operator reserve.
- * This is plan/policy.yaml's filesystem-free fallback (W1-T253; operator 2026-07-21).
- * Expiring reserves once parked the fleet: docs/forensics/daemon.md (2026-07-20). */
-export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT_PCT): HeadroomPolicy {
-  return [
-    { maxHoursToReset: 24, limitPct: 100 },
-    { maxHoursToReset: Infinity, limitPct: holdLimitPct },
-  ];
-}
-
-/** Resolve the ceiling that binds for a window `hoursToReset` away. A null or non-finite
- *  hours-to-reset resolves to the last, widest rung: uncertainty is never read as "we must be in
- *  the final day", so the ceiling only relaxes on a confirmed close reset. */
-export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: HeadroomPolicy = buildDefaultHeadroomPolicy()): number {
-  // Past resets indicate upstream lag; use the strict unknown fallback, never the relaxed rung.
-  // Hardening: the production caller rolls forward. Forensics: docs/forensics/daemon.md.
-  if (hoursToReset === null || !Number.isFinite(hoursToReset) || hoursToReset < 0) {
-    return policy[policy.length - 1]?.limitPct ?? HEADROOM_LIMIT_PCT;
-  }
-  const rule = policy.find((r) => hoursToReset <= r.maxHoursToReset);
-  return rule?.limitPct ?? HEADROOM_LIMIT_PCT;
-}
+// W1-T14200: the time-to-reset curve moved to headroom.ts so the provider auction reads it without a
+// daemon.ts edge; re-exported here so every existing caller is unchanged.
+export { buildDefaultHeadroomPolicy, resolveHeadroomLimitPct, type HeadroomPolicy, type HeadroomPolicyRule } from "./headroom.js";
 
 const MONTH_ABBRS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 const WEEKDAY_ABBRS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
