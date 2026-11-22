@@ -915,6 +915,7 @@ import {
   type AffectedSelection,
   type AffectedSuitesInput,
 } from "./lib/affected-suites.js";
+import { pinningTestsApply, pinningTestViolations, runPinningTests } from "./lib/pinning-tests.js";
 // W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
 // @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
 import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
@@ -1398,7 +1399,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
@@ -20138,7 +20140,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
     const violations = scope
-      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts),
+        // W1-T14230: warn-only, appended after the plan-only promotion above, so it never blocks.
+        ...(pinningTestsApply(task, oldById?.get(task.id))
+          ? pinningTestViolations(task, runPinningTests(task, codeRoot, systemClock)) : [])]
       : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
@@ -24418,6 +24423,12 @@ async function retroCommand(
     log,
     say,
   );
+  // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
+  // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
+  const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
+    { loadConfig: () => config });
+  await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
+    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,

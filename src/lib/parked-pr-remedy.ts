@@ -8,6 +8,9 @@ import { isInPlanScope } from "./plan-scope.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import type { PrBlocker } from "./pr-blocker.js";
 import type { TaskFileInput, TaskFilesLandingResult } from "./feedback-landing.js";
+import type { Task } from "./plan.js";
+import { declaresDesignInvariant, designContractChanged, INVARIANT_CLAIM_RE, INVARIANT_DECL_RE, invariantSlugViolations,
+  NO_INVARIANTS_RE } from "./task-linter.js";
 
 /**
  * W1-T12709: an open pull request is never left with "a person must answer" as its only next action. Where the
@@ -64,7 +67,10 @@ export function parkedPrRemedy(facts: ParkedPrFacts, spent: readonly ParkedPrRem
         `${facts.redChecks.length} red checks on the pull request`;
     return { remedy: "fix-on-pr", reason, inputCriteria: [] };
   }
-  if (!facts.isPlanFiling && facts.taskCriteria !== undefined && input.length < facts.taskCriteria && left("split-follow-up")) {
+  // W1-T14042, invariant:invariant-proof-stays: a criterion that maps an invariant never leaves its task.
+  const mapsInvariant = input.some(c => INVARIANT_CLAIM_RE.test(c.claim));
+  if (!facts.isPlanFiling && facts.taskCriteria !== undefined && input.length < facts.taskCriteria && !mapsInvariant &&
+      left("split-follow-up")) {
     return { remedy: "split-follow-up", inputCriteria: input,
       reason: `${input.length} of the task's ${facts.taskCriteria} criteria need operator input; they move to a held ` +
         "follow-up task and the pull request merges on the rest" };
@@ -408,7 +414,9 @@ export function parkedPrUnchanged(ledger: readonly Record<string, unknown>[], pr
  * W1-T13830: `unchanged` is set when a split or rebuild was refused by the plan preflight at this same input, so the
  * remedy reserved nothing, landed nothing and wrote no row. actOnParkedPr takes the ladder's next remedy.
  */
-export interface ParkedPrOutcome { remedy: ParkedPrRemedy; reason: string; heldTaskId?: string; error?: string; unchanged?: true }
+export interface ParkedPrOutcome { remedy: ParkedPrRemedy; reason: string; heldTaskId?: string; error?: string; unchanged?: true;
+  /** W1-T14042: the plan preflight checks whose verdict on the draft refused this landing; the remedy is spent for the call. */
+  refusalChecks?: readonly string[] }
 
 /**
  * W1-T13830, invariant:retry-on-transient: the sorted check names of the first refused or set-aside entry's plan
@@ -520,6 +528,15 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
       return { remedy: decision.remedy, unchanged: true, reason: `the ${decision.remedy} remedy was refused by the plan preflight ` +
         `(${last.refusal_checks.map(String).join(", ")}) at this head, task file and criteria, so it is not tried again (W1-T13830)` };
     }
+    // W1-T14042, invariant:no-refused-draft: the drafts meet the plan linter's invariant rule before an id is reserved.
+    const violations = read?.outcome === "read" ? draftInvariantViolations(read.shard, pr.taskId!, moving, pr, ctx, target.owner) : [];
+    if (violations.length > 0) {
+      const checks = [...new Set(violations.map(v => v.check))].sort();
+      const reason = `the ${decision.remedy} draft fails the plan linter's ${checks.join(", ")} rule, so no id is reserved ` +
+        `and nothing lands (W1-T14042): ${violations[0]!.message}`;
+      ctx.append({ ...row, outcome: "refused", reason, input_digest: inputDigest, refusal_checks: checks });
+      return { remedy: decision.remedy, unchanged: true, reason };
+    }
     const claim = claimRoot === undefined ? undefined
       : takeHeldFollowUpClaims(claimRoot, pr.taskId!, moving.inputCriteria.map(c => c.claim), checked);
     if (claim !== undefined && "busy" in claim) {
@@ -586,8 +603,27 @@ export async function takeParkedPrRemedy(pr: ParkedPrSubject, decision: ParkedPr
     const reason = String((error as Error)?.message ?? error);
     ctx.append({ ...row, outcome: "refused", reason, ...(inputDigest === undefined ? {} : { input_digest: inputDigest }),
       ...(refusalChecks === undefined ? {} : { refusal_checks: refusalChecks }) });
-    return { remedy: decision.remedy, error: reason, reason: `the ${decision.remedy} remedy could not act, and the next pass tries it again: ${reason}` };
+    return { remedy: decision.remedy, error: reason, ...(refusalChecks === undefined ? {} : { refusalChecks }),
+      reason: `the ${decision.remedy} remedy could not act, and the next pass tries it again: ${reason}` };
   }
+}
+
+const DRAFT_TASK_ID = "W1-T0";
+
+function taskOfText(text: string, taskId: string): Task | undefined {
+  const seq = parseDocument(text).toJSON() as unknown;
+  return Array.isArray(seq) ? seq.find(t => (t as { id?: unknown } | null)?.id === taskId) as Task | undefined : undefined;
+}
+
+/** W1-T14042: the plan linter's invariant rule on each file the remedy would draft, as the changed-task pass applies it. */
+function draftInvariantViolations(shard: ParkedPrShard, taskId: string, decision: ParkedPrDecision, pr: ParkedPrSubject,
+  ctx: ParkedPrContext, owner: string): ReturnType<typeof invariantSlugViolations> {
+  const base = taskOfText(shard.text, taskId);
+  return heldTaskFiles(shard, taskId, DRAFT_TASK_ID, decision, pr, ctx).flatMap(file => {
+    const draft = taskOfText(file.content, file.newFile === true ? DRAFT_TASK_ID : taskId)!;
+    const require = designContractChanged(file.newFile === true ? undefined : base, draft) || declaresDesignInvariant(draft);
+    return invariantSlugViolations(draft, { requireDesignInvariantDeclaration: require, taskRepoOwner: owner });
+  });
 }
 
 /** W1-T13045: the cause a stand-down hold's remedy row names, `stand-down:<site>`. */
@@ -614,6 +650,11 @@ export function standDownHoldRemedy(pr: ParkedPrSubject, hold: { site: string; r
   return takeParkedPrRemedy(pr, decision, ledger, host, { ...ctx, cause: standDownHoldCause(hold.site), text: hold.reason });
 }
 
+function withDesignLine(design: string, line: string): string {
+  const kept = design.replace(/\s+$/, "");
+  return kept === "" ? `${line}\n` : `${kept}\n${line}\n`;
+}
+
 function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80).replace(/-+$/, "");
 }
@@ -637,7 +678,16 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
   const findings = pr.unmetCriteria.map(c => `- ${c.claim}: ${c.reason ?? "unmet"}`).join("\n");
   const { pr: _pr, note: _note, ...rest } = task;
   const dependsOn = Array.isArray(task.depends_on) ? task.depends_on : [];
-  const held = { ...rest, id: heldTaskId, title: `${String(task.title)} (${split ? "held follow-up" : "held rebuild"})`,
+  // W1-T14042: the parent keeps its invariants; a parent filed before W1-T11746 gains the one line the rule asks for.
+  const design = typeof task.design === "string" ? task.design : "";
+  const declares = declaresDesignInvariant({ design });
+  const filedBefore = `NO-INVARIANTS: ${taskId} was filed before declared invariants (W1-T11746) and declares none; ` +
+    "this edit only moves criteria.";
+  const heldDesign = !declares ? withDesignLine(design, filedBefore) : !split ? design
+    : withDesignLine(design.split("\n").filter(line => !INVARIANT_DECL_RE.test(line) && !NO_INVARIANTS_RE.test(line)).join("\n"),
+      `NO-INVARIANTS: this held follow-up of ${taskId} carries only criteria that map no invariant; ${taskId} keeps its ` +
+      "invariants and their proofs.");
+  const held = { ...rest, id: heldTaskId, design: heldDesign, title: `${String(task.title)} (${split ? "held follow-up" : "held rebuild"})`,
     depends_on: split ? [taskId, ...dependsOn.filter(d => d !== taskId)] : dependsOn, status: "queued", attempts: 0,
     acceptance: moved, needs_input: { question, source_pr: pr.prUrl, asked_at: ctx.nowIso },
     rationale: `${split ? `FOLLOW-UP of ${taskId}` : `REBUILD of ${taskId}`}, filed by the sweep (W1-T12709) from ${pr.prUrl} at ` +
@@ -650,6 +700,7 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
   if (split) {
     const node = item.get("acceptance", true);
     if (isSeq(node)) node.items = node.items.filter(c => !(isMap(c) && claims.has(String((c.toJSON() as { claim?: unknown }).claim))));
+    if (!declares) doc.setIn([index, "design"], withDesignLine(design, filedBefore));
     doc.setIn([index, "rationale"], `${typeof task.rationale === "string" ? task.rationale : ""}\nMOVED to ${heldTaskId} by the sweep ` +
       `(W1-T12709): ${moved.length} criteria that need operator input, so ${pr.prUrl} merges on the rest.\n`);
     files.push({ relPath: shard.relPath, content: doc.toString({ lineWidth: 0 }),
@@ -762,7 +813,8 @@ export async function actOnParkedPr(pr: ParkedPrSubject, decision: ParkedPrDecis
   }
   const outcome = await takeParkedPrRemedy(pr, decision, ledger, host, ctx);
   // W1-T13830, invariant:never-parked: a split or rebuild refused at this same input is spent for this pass.
-  if (outcome.unchanged === true) {
+  // W1-T14042, invariant:a-verdict-moves-the-ladder: so is one whose landing the plan preflight refused on the draft.
+  if (outcome.unchanged === true || (outcome.refusalChecks?.length ?? 0) > 0) {
     const nowSpent = [...spent, decision.remedy];
     const next = parkedPrRemedy(facts, nowSpent);
     // No remedy left means fix-on-pr is spent too: parkedPrRemedy names fix-on-pr whenever it is left.
@@ -829,10 +881,11 @@ export async function remedyStalledCriterion(pr: ParkedPrSubject, criterion: str
   ledger: readonly Record<string, unknown>[], host: ParkedPrHost, ctx: Omit<ParkedPrContext, "cause" | "text">): Promise<ParkedPrOutcome> {
   const claim = criterion.startsWith("review:") ? criterion.slice("review:".length) : undefined;
   const known = claim === undefined ? undefined : pr.unmetCriteria.find(c => c.claim === claim);
-  const decision = parkedPrRemedy({ redChecks: [], isPlanFiling: false,
+  const facts: ParkedPrFacts = { redChecks: [], isPlanFiling: false,
     unmetCriteria: [{ claim: claim ?? criterion, ...(known?.reason === undefined ? {} : { reason: known.reason }), needsInput: true, ladderSpent: true }],
-    ...(claim === undefined ? {} : { taskCriteria: await taskCriteriaCount(host, pr.taskId) }) });
-  return takeParkedPrRemedy(pr, decision, ledger, host, { ...ctx, cause: `stall:${criterion}`, text: stalledOn });
+    ...(claim === undefined ? {} : { taskCriteria: await taskCriteriaCount(host, pr.taskId) }) };
+  // W1-T14042: through actOnParkedPr, so a split refused on its own draft moves the ladder on in the same call.
+  return actOnParkedPr(pr, parkedPrRemedy(facts), facts, ledger, host, { ...ctx, cause: `stall:${criterion}`, text: stalledOn });
 }
 
 /** W1-T13047: the cause of the remedy for a plan filing whose plan-scoped round is exhausted. */
