@@ -119,7 +119,7 @@ import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
-import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
+import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, resolveSelectedLearning, type LayeredLearningsHomes, type SelectedLearningHandle, type SelectedLearningUnavailable } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
   GH_RATE_LIMIT_BUCKET_UNKNOWN,
@@ -1198,8 +1198,8 @@ export interface SpawnWorkerArgs {
   logWorkerSpawnWithheld?: (row: Record<string, unknown>) => void;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
-    onPulled: (id: string, status: "found" | "missing" | "error") => void;
-    learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] };
+    onPulled: WorkerRulePulledSink;
+    learningLookup?: WorkerLearningLookup;
   };
   /** Tool names this spawn is never offered, threaded to the SDK's `Options.disallowedTools`. Deliberately NOT the settings
    * `deny` list: that floor is hook-enforced, and {@link DenyFloorVerdict} exists because the block can LEAK under
@@ -1510,17 +1510,60 @@ export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit
 /** W1-T4094: the in-process rule tool, added to a declared bound only when a spawn carries `ruleLookup`. */
 export const WORKER_RULE_TOOL_NAME = "mcp__knowledge__rule";
 
+/** W1-T11159: how one `learnings#` request ended. Fixed vocabulary; `unselected` is a request outside the run's selection. */
+export type WorkerRulePullOutcome = "delivered" | "unselected" | SelectedLearningUnavailable;
+
+/** Nonsecret metadata beside a pull: the outcome and, for a selected learning, its store and a digest prefix. Never content. */
+export interface WorkerRulePullMeta {
+  outcome: WorkerRulePullOutcome;
+  source?: string;
+  revision?: string;
+}
+
+export type WorkerRulePulledSink = (id: string, status: "found" | "missing" | "error", meta?: WorkerRulePullMeta) => void;
+
+/** `selected`, when present, is the run-bound contract: only those handles are served, each from its own store. Without it,
+ *  `allowedIds` gates a lookup against the merged layered corpus (the legacy/ad-hoc shape, unchanged). */
+export interface WorkerLearningLookup {
+  homes: LayeredLearningsHomes;
+  allowedIds: readonly string[];
+  selected?: readonly SelectedLearningHandle[];
+}
+
+function pulledStatusOf(outcome: WorkerRulePullOutcome): "found" | "missing" | "error" {
+  return outcome === "delivered" ? "found" : outcome === "unreadable" ? "error" : "missing";
+}
+
 /** The tool's only checkout operations are reads; its ledger sink is supplied by the run. */
 export function createWorkerRuleTool(
   cwd: string,
-  onPulled: (id: string, status: "found" | "missing" | "error") => void,
-  learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] },
+  onPulled: WorkerRulePulledSink,
+  learningLookup?: WorkerLearningLookup,
 ) {
+  const homes = learningLookup === undefined ? undefined : Object.freeze({ ...learningLookup.homes });
+  const selected = learningLookup?.selected === undefined ? undefined : Object.freeze([...learningLookup.selected]);
   return tool(
     "rule",
     "Read a repository doctrine rule by stable id or headline phrase, or a learning's fact and evidence by learnings#id.",
     { query: z.string().trim().min(1).max(200) },
     async ({ query: requested }) => {
+      if (selected !== undefined && homes !== undefined && requested.startsWith("learnings#")) {
+        const slug = requested.slice("learnings#".length);
+        const bound = selected.filter((handle) => handle.id === slug);
+        if (bound.length === 0) {
+          onPulled(requested, "missing", { outcome: "unselected" });
+          return { isError: true, content: [{ type: "text" as const, text: `No rule matches "${requested}".` }] };
+        }
+        const handle = bound[0];
+        const resolution = bound.length > 1 ? { status: "ambiguous" as const } : resolveSelectedLearning(handle, homes);
+        const meta = { source: handle.source, revision: handle.payloadRevision.slice(0, 16) };
+        if (resolution.status !== "delivered") {
+          onPulled(requested, pulledStatusOf(resolution.status), { outcome: resolution.status, ...meta });
+          return { isError: true, content: [{ type: "text" as const, text: `Learning "${requested}" is unavailable (${resolution.status}).` }] };
+        }
+        onPulled(`learnings#${slug}`, "found", { outcome: "delivered", ...meta });
+        return { content: [{ type: "text" as const, text: [resolution.entry.fact, resolution.entry.evidence].filter(Boolean).join("\n\n") }] };
+      }
       let found: ReturnType<typeof lookupWorkerRule>;
       try {
         found = lookupWorkerRule(

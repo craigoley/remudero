@@ -95,6 +95,24 @@ test("computeMatchedLearningsForArm: arm A carries the matched learnings via the
   assert.deepEqual(result.selectedIds, ["e1", "e2"]);
 });
 
+test("computeMatchedLearningsForArm: arm A hands back one frozen handle per selected record; a load without sources is unbound", () => {
+  const facts = [entry("e1", "fact one")];
+  const result = computeMatchedLearningsForArm(
+    "A",
+    { homes: { projectDir: "/nonexistent" }, taskFiles: ["src/lib/wipe-test.ts"] },
+    {
+      loadLayeredLearningsForTaskFiles: () => ({ entries: facts }),
+      selectLearnings: (entries) => ({ selected: entries, dropped: [], matchedBy: { file: 1, symbol: 0, error: 0 } }),
+      renderMatchedLearnings: () => "",
+    },
+  );
+  assert.equal(result.selectedLearnings.length, 1);
+  assert.equal(result.selectedLearnings[0].id, "e1");
+  assert.equal(result.selectedLearnings[0].source, "unbound", "no store identity is invented when the loader gave none");
+  assert.match(result.selectedLearnings[0].payloadRevision, /^[0-9a-f]{64}$/);
+  assert.ok(Object.isFrozen(result.selectedLearnings[0]));
+});
+
 // ── acceptance criterion 2: paired deltas are computed and ledgered ──
 
 function runResult(over: Partial<WipeTestRunResult>): WipeTestRunResult {

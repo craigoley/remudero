@@ -946,6 +946,8 @@ export interface LayeredLearningsHomes {
 /** The result of one layered read: the merged corpus, plus why the global layer was excluded (if it was). */
 export interface LayeredLearningsResult {
   entries: LearningEntry[];
+  /** Which store each returned entry object was read from (W1-T11159); absent for a result not built by this loader. */
+  sources?: ReadonlyMap<LearningEntry, LearningSource>;
   /** Set iff a `globalArtifactPath` was given but {@link loadGlobalArtifact} refused it (missing/malformed/hash mismatch). */
   globalRefusedReason?: string;
 }
@@ -977,19 +979,98 @@ export function loadLayeredLearningsForTaskFiles(
 /** Shared merge step behind {@link loadLayeredLearnings}/{@link loadLayeredLearningsForTaskFiles}: append user-overall then verified-global onto an already-loaded project corpus, in PRECEDENCE ORDER. */
 function mergeLayers(projectEntries: LearningEntry[], homes: LayeredLearningsHomes): LayeredLearningsResult {
   const entries: LearningEntry[] = [...projectEntries];
+  const sources = new Map<LearningEntry, LearningSource>();
+  for (const entry of projectEntries) sources.set(entry, "project");
   if (homes.userOverallDir) {
-    entries.push(...loadLearningsCorpus(homes.userOverallDir));
+    const own = loadLearningsCorpus(homes.userOverallDir);
+    entries.push(...own);
+    for (const entry of own) sources.set(entry, "user-overall");
   }
   let globalRefusedReason: string | undefined;
   if (homes.globalArtifactPath) {
     const result = loadGlobalArtifact(homes.globalArtifactPath);
     if (result.ok) {
       entries.push(...result.entries);
+      for (const entry of result.entries) sources.set(entry, "global");
     } else {
       globalRefusedReason = result.reason;
     }
   }
-  return { entries, globalRefusedReason };
+  return { entries, sources, globalRefusedReason };
+}
+
+/** The store a selected learning was read from. Distinct from {@link Layer}, which an entry's own YAML may omit or misstate. */
+export type LearningSource = Layer;
+
+/**
+ * W1-T11159: the immutable run-local identity of ONE selected learning — its store, slug and the exact
+ * fact+evidence payload revision. Holds a digest, never the fact or evidence, so it is safe to log.
+ * `source: "unbound"` marks a selection whose store could not be established; it is never served.
+ */
+export interface SelectedLearningHandle {
+  readonly id: string;
+  readonly source: LearningSource | "unbound";
+  readonly payloadRevision: string;
+}
+
+/** Digest of the fields a lookup RETURNS (fact and evidence), length-framed by JSON so they cannot trade bytes. */
+export function learningPayloadRevision(entry: Pick<LearningEntry, "fact" | "evidence">): string {
+  return createHash("sha256").update(JSON.stringify([entry.fact, entry.evidence ?? null])).digest("hex");
+}
+
+/** Freeze the handle for a just-selected entry. `sources` comes from the same load that produced `entry`. */
+export function selectedLearningHandle(
+  entry: LearningEntry,
+  sources: ReadonlyMap<LearningEntry, LearningSource> | undefined,
+): SelectedLearningHandle {
+  return Object.freeze({
+    id: entry.id,
+    source: sources?.get(entry) ?? "unbound",
+    payloadRevision: learningPayloadRevision(entry),
+  });
+}
+
+/** Why a selected learning could not be served; a fixed vocabulary, so telemetry never carries content. */
+export type SelectedLearningUnavailable = "drift" | "ineligible" | "ambiguous" | "missing" | "unreadable" | "unbound";
+
+export type SelectedLearningResolution =
+  | { status: "delivered"; entry: LearningEntry }
+  | { status: SelectedLearningUnavailable };
+
+/**
+ * Resolve a handle against ITS OWN store only, re-reading it now. Current eligibility (lifecycle, a valid
+ * global artifact, a readable source) is judged on the fresh read; content identity is judged separately
+ * by payload revision. Other entries changing in the same store never affect the result.
+ */
+export function resolveSelectedLearning(
+  handle: SelectedLearningHandle,
+  homes: LayeredLearningsHomes,
+): SelectedLearningResolution {
+  if (handle.source === "unbound") return { status: "unbound" };
+  let pool: readonly LearningEntry[];
+  try {
+    if (handle.source === "project") {
+      pool = loadLearningsCorpus(homes.projectDir);
+    } else if (handle.source === "user-overall") {
+      if (!homes.userOverallDir) return { status: "missing" };
+      pool = loadLearningsCorpus(homes.userOverallDir);
+    } else {
+      if (!homes.globalArtifactPath) return { status: "missing" };
+      const artifact = loadGlobalArtifact(homes.globalArtifactPath);
+      if (!artifact.ok) return { status: artifact.kind === "absent" ? "missing" : "unreadable" };
+      pool = artifact.entries;
+    }
+  } catch (error) {
+    const duplicate = error instanceof LearningsError && error.message.startsWith(`duplicate learnings id '${handle.id}'`);
+    return { status: duplicate ? "ambiguous" : "unreadable" };
+  }
+  const same = pool.filter((entry) => entry.id === handle.id);
+  if (same.length > 1) return { status: "ambiguous" };
+  const current = same[0];
+  if (current === undefined) return { status: "missing" };
+  if (current.lifecycle !== "active") return { status: "ineligible" };
+  if (learningPayloadRevision(current) !== handle.payloadRevision) return { status: "drift" };
+  return { status: "delivered", entry: current };
 }
 
 // ── PROMOTION (P32/W1-T146): SCRUB THEN JUDGE ──────────────────────────────
