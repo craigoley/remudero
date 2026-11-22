@@ -458,6 +458,27 @@ test("W1-T1079: a successful arm is unchanged and records no error", () => {
   assert.ok(!("error" in (r.steps[0].extra ?? {})), "no error key at all, not merely an undefined one");
 });
 
+// ── W1-T13698 — a shadow instance arms and merges nothing through the real armAndLogOutcome ──
+test("W1-T13698: armAndLogOutcome over a shadow instance ledgers shadow_refused with its lane and reaches no effector", () => {
+  const HEAD = "13698aaabbbbccccddddeeeeffff000011112222";
+  const TASK_ID = "W1-T13698";
+  const PR = "https://github.com/craigoley/remudero/pull/13698";
+  for (const lane of ["operator", "review", "sweep"] as const) {
+    const deps = permittingArmDeps(HEAD, TASK_ID, {
+      armAuto: () => assert.fail("a shadow instance never arms"),
+      mergeDirect: () => assert.fail("a shadow instance never merges"),
+      shadowInstance: () => true,
+    });
+    const r = recorder();
+    const outcome = armAndLogOutcome(PR, TASK_ID, r.log, (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, deps), lane, HEAD);
+    assert.equal(outcome, "shadow-refused");
+    assert.deepEqual(r.steps.map((s) => s.step), ["automerge.shadow_refused", "automerge.arm_skipped"]);
+    assert.equal(r.steps[0].extra?.lane, lane);
+    assert.equal(r.steps[0].extra?.pr_url, PR);
+    assert.equal(r.steps[1].extra?.outcome, "shadow-refused");
+  }
+});
+
 // ── 11: the console string ──────────────────────────────────────────────────────────
 test("the console phrase on a refusal never claims the PR was armed", () => {
   for (const outcome of NON_ARMING) {

@@ -147,6 +147,9 @@ test("W1-T12534 criterion 3: production selection uses mint fallback, then creat
     ]));
     assert.deepEqual((await admissionOrder(prs, [], 1, undefined, realLedger)).order,
       [733, 732, 731], "positive control: both receipts change selection before rotation");
+    // W1-T14203 keeps a PR's first eligibility row while a sweep.disposed row of it is kept. Drop the rows
+    // the control pass wrote, so this case still pins the fallback when neither row is live.
+    writeFileSync(ledgerPath, lines(readLedgerLines(ledgerPath).filter((row) => row.step !== "sweep.disposed")));
     const rotated = rotateLedger(ledgerPath, {
       ceilingBytes: statSync(ledgerPath).size - 1, smoothingWindowMs: 0, now: () => new Date(NOW),
     });
