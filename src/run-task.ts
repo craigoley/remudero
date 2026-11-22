@@ -642,6 +642,9 @@ export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import {
+  REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
+} from "./lib/reviewer-calibration.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -22794,6 +22797,33 @@ export function buildCoverageNightlyDaemonHook(opts: Omit<Parameters<typeof read
   };
 }
 
+/** W1-T12145: pacing, not a bound on the result — the most case reviews one cadence fire starts. An epoch completes over fires. */
+export const REVIEWER_CALIBRATION_CASES_PER_PASS = 2;
+/** W1-T12145: what a cash-backed case reserves against the evaluator cap before its request; its read cost then replaces it. */
+export const REVIEWER_CALIBRATION_CASH_RESERVE_USD = 1;
+
+/** W1-T12145: earlier calibration passes' rows, split by step. The case rows score the epoch and pick the next cases;
+ *  the result rows carry the pairs an earlier pass decided, which spend nothing more this epoch. */
+export function splitReviewerCalibrationRows(rows: ReadonlyArray<Record<string, unknown>>): Awaited<ReturnType<ReviewerCalibrationPorts["readPriorRows"]>> {
+  return {
+    cases: rows.filter((row) => row.step === REVIEW_CALIBRATION_CASE_STEP),
+    results: rows.filter((row) => row.step === REVIEW_CALIBRATION_RESULT_STEP),
+  };
+}
+
+/** W1-T12145: the measurement cadence's calibration ports. Every leaf is asynchronous, because the cadence is reached
+ *  from the daemon loop: a case is an `rmd review` child of this checkout, with no tree cut and no git on the loop. */
+export function buildReviewerCalibrationPorts(config: Config, clock: Clock): ReviewerCalibrationPorts {
+  const runId = `REVIEWER-CALIBRATION-${clock.now()}`;
+  return calibrationPorts({
+    stateDir: join(config.root, "state"), clock, config, checkoutDir: repoRoot,
+    spawnReview: spawnRmdReviewForFreshTree, ownStartFlag: JUDGE_AT_OWN_START_FLAG, optionFlags: reviewOptionFlags,
+    readUsage: readUsageSnapshotPreferSdk, splitPriorRows: splitReviewerCalibrationRows,
+    log: (row) => appendLedger(ledgerPathFor(config), { run_id: runId, task_id: "REVIEWER-CALIBRATION", lane: "measurement-cadence", ...row, step: String(row.step) }),
+    cashCaseReserveUsd: REVIEWER_CALIBRATION_CASH_RESERVE_USD, casesPerPass: REVIEWER_CALIBRATION_CASES_PER_PASS,
+  });
+}
+
 export function buildMeasurementCadenceDaemonHooks(deps: {
   check?: () => MeasurementCadenceDecision;
   run?: () => Promise<MeasurementCadenceRunResult>;
@@ -22826,6 +22856,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   successorEscalate?: typeof tryEscalate;
   handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
   measurementReport?: typeof runMeasurementCadenceReportAsync;
+  /** W1-T12145: the calibration pass's ports. Production builds the live ones; a fixture injects fakes and starts no reviewer. */
+  reviewerCalibration?: (config: Config, clock: Clock) => ReviewerCalibrationPorts;
   /** False on a restarted child attempt: its run already recorded this fire. */
   recordFire?: boolean;
 } = {}): {
@@ -22984,6 +23016,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       // W1-T9695: the plan-reconcile landing the report started; a refused one throws and the cadence records it.
       await planReconcile?.settled();
+      // W1-T12145: the reviewer scored against known answers, after the report wrote this fire's outcome rows. It refuses
+      // with a row rather than spend outside the idle gate or the evaluator cap; a shadow case review publishes nothing.
+      await scoreReviewersAgainstKnownAnswers((deps.reviewerCalibration ?? buildReviewerCalibrationPorts)(config, cadenceClock));
       return { ...report, successorWatch: successorWatchReading };
     });
   return { checkMeasurementCadence: check, runMeasurementCadence: run };
