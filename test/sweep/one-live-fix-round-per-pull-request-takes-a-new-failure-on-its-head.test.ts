@@ -15,6 +15,7 @@ import {
   drainDetachedSweepActions,
   fixAdmissionLockPath,
   fixRoundBranchClaim,
+  type FixRoundBranchClaim,
   fixAdmissionHolderStale,
   fixRoundClaimEnded,
   fixRoundHandoffPath,
@@ -274,6 +275,118 @@ test("W1-T13991 criterion 1: a merge into main that conflicts the live round's o
   assert.equal(moved.deps.deferToLiveFixRound!(conflicted("f00dfeed"), moved.rows), undefined);
   const dead = sweepHarness(t, { live: true, isPidAlive: () => false });
   assert.equal(dead.deps.deferToLiveFixRound!(conflicted(), dead.rows), undefined);
+});
+
+/** A round DISPATCHED for a merge conflict, through the sweep's real dispatchFix and its real claim wiring: it pushes a
+ *  resolution (PUSHED), ends its fix.done keeping its claim into its CI wait, and a sweep pass then finds a new failure
+ *  on that head. The fix rung is the one seam replaced: it stands in for the round's own `fix.done` and wait rows. */
+async function conflictRoundWaitingOnCi(t: TestContext) {
+  const root = scratch(t, "conflict-round");
+  for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
+  const inflightDir = join(root, "state", "inflight");
+  const ledger = join(root, "state", "ledger.ndjson");
+  const claimKey = fixBranchClaimKey("o", "fixture", BRANCH);
+  const rows: Row[] = [];
+  const dispatched: number[] = [];
+  const conflict = { files: [{ path: "src/lib/sweep.ts", oursDeleted: 0, theirsDeleted: 0 }], oursLog: "ours", theirsLog: "theirs" };
+  const view = (headSha: string, over: Partial<OpenPrView> = {}): OpenPrView => ({ ...redPr(headSha), prUrl: `https://github.com/o/r/pull/${PR}`,
+    checksState: "green", redRequiredChecks: [], ciFailures: [], reviewState: "pending", mergeState: "dirty", mergeConflict: conflict,
+    ...over }) as OpenPrView;
+  const seen: { kept?: unknown; heldAfterFixDone?: boolean; claimId?: string; racerRefused?: boolean; secondPass?: string; reviewPass?: string;
+    marker?: ReturnType<typeof readFixRoundHandoff>; reviewMarker?: ReturnType<typeof readFixRoundHandoff> } = {};
+  const task = { id: TASK, title: "repair", files: [], acceptance: [], verify: "auto", status: "queued", risk: "low" };
+  const effects = buildSweepEffects({
+    owner: "o", repo: "fixture", localRepoName: "remudero", repoRoot: process.cwd(), config: { root, claudeBin: "/bin/true" } as Config,
+    ledgerPath: ledger, runId: "SWEEP-W1T13991-CONFLICT",
+    plan: { tasks: [task], byId: new Map([[task.id, task]]) }, policy: DEFAULT_SWEEP_POLICY,
+    log: () => {}, say: () => {}, reviewRunner: async () => 0, issuesImpl: { create: () => assert.fail("no issue") },
+    stallNotice: () => {}, armImpl: () => "armed", armSessionPrsOverride: false, updateBranchImpl: async () => "updated",
+    captureRepairFeedbackImpl: () => {}, ghRunImpl: () => {}, disarmImpl: () => undefined,
+    readJsonImpl: async () => ({}), updatePrBodyImpl: async () => {}, registeredWorktreeOwnerImpl: () => undefined,
+    registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },
+    dispatchFixPreflightStandDownImpl: async () => undefined, fixBranchClaimKeyImpl: fixBranchClaimKey,
+    createFixRungWorktreeImpl: () => undefined, captureWorktreeSnapshotImpl: () => ({ headSha: "3179eb03" }),
+    buildFixRungDispatchArgsImpl: () => ({}), openTaskIdsFromPlanImpl: () => new Set([task.id]),
+    readPackageScriptsImpl: () => ({}), worktreeRemoveImpl: () => {},
+    ghJsonImpl: () => ({ headRefName: BRANCH, headRefOid: "3179eb03", body: "", files: [] }),
+    runFixRungImpl: async (args: { deps: { branchClaim: FixRoundBranchClaim } }) => {
+      const claim = args.deps.branchClaim;
+      const claimId = claim.id()!;
+      seen.claimId = claimId;
+      // The round's fix.done: the keep the sweep wired for this conflict round, before the row that names the wait.
+      seen.kept = claim.keepForWait?.();
+      const processStart = (seen.kept as { process_start?: string } | undefined)?.process_start;
+      const nowMs = Date.now();
+      rows.push(
+        { ts: new Date(nowMs - 2_000).toISOString(), run_id: ROUND, task_id: TASK, step: "fix.done", pr_number: PR, round_id: ROUND_ID,
+          branch_claim_run_id: claimId, head_sha: "3179eb03", pushed_head_sha: PUSHED, ci_wait_holds_claim: true,
+          round_started_at_ms: nowMs - 5_000, process_start: processStart },
+        { ts: new Date(nowMs - 1_000).toISOString(), run_id: ROUND, task_id: TASK, step: "run.awaiting_external", waiting_on: "ci",
+          pr_number: PR, round_id: ROUND_ID, branch_claim_run_id: claimId, head_sha: PUSHED, process_start: processStart,
+          round_started_at_ms: nowMs - 5_000 });
+      writeFileSync(ledger, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+      seen.heldAfterFixDone = readInflightLock(inflightDir, claimKey)?.run_id === claimId;
+      try {
+        acquireFixRoundClaim(inflightDir, claimKey, "RACER", (id, held) =>
+          fixRoundClaimEnded(ledger, id, held && probeFor(held, Date.now(), { headSha: PUSHED, processStart: undefined })));
+        seen.racerRefused = false;
+      } catch (error) {
+        seen.racerRefused = error instanceof InflightLockError;
+      }
+      const sweepDeps = (runId: string): SweepDeps => ({
+        ledgerPath: ledger, runId, now: () => Date.now(), readLedger: () => rows,
+        appendLine: (_path, row) => { rows.push({ ts: new Date().toISOString(), ...row }); },
+        log: (step, extra) => { rows.push({ ts: new Date().toISOString(), step, ...(extra ?? {}) }); },
+        claimFixAdmission: () => ({ admitted: true }),
+        dispatchFix: (dispatchedView) => { dispatched.push(dispatchedView.prNumber); return false; },
+        arm: () => assert.fail("a red PR must not arm"), close: () => assert.fail("no close is due"),
+        escalate: () => assert.fail("nothing is escalated"),
+        deferToLiveFixRound: (effects as unknown as Required<Pick<SweepDeps, "deferToLiveFixRound">>).deferToLiveFixRound,
+      });
+      const policy = { ...DEFAULT_SWEEP_POLICY, mergeConflictAdmissionEnabled: true };
+      // Main moves under the round's own pushed head while it waits.
+      const second = await runSweep([view(PUSHED)], sweepDeps("SWEEP-PEER"), policy);
+      seen.secondPass = second.actions.find((a) => a.prNumber === PR)?.reason;
+      seen.marker = readFixRoundHandoff(fixRoundHandoffPath(root, claimId));
+      // A failing review on that same head, after the conflict is taken, is the same live round's to take.
+      rmSync(dirname(fixRoundHandoffPath(root, claimId)), { recursive: true, force: true });
+      mkdirSync(dirname(fixRoundHandoffPath(root, claimId)), { recursive: true });
+      const review = await runSweep([reviewGatePr(PUSHED)], sweepDeps("SWEEP-PEER-2"), policy);
+      seen.reviewPass = review.actions.find((a) => a.prNumber === PR)?.reason;
+      seen.reviewMarker = readFixRoundHandoff(fixRoundHandoffPath(root, claimId));
+      return { outcome: "stood_down", strikes: 0, retriggers: 0 };
+    },
+  } as unknown as BuildSweepEffectsDeps);
+  await effects.dispatchFix!(view("3179eb03", { prUrl: `https://github.com/o/r/pull/${PR}` }), { unmetCriteria: [], mergeConflict: conflict } as never);
+  return { root, inflightDir, claimKey, rows, dispatched, seen,
+    deferred: () => rows.filter((row) => row.step === "sweep.fix.deferred_to_live_round") };
+}
+
+test("W1-T13991 criterion 1: a round dispatched for a merge conflict keeps its claim through fix.done, and the next pass defers to it", async (t) => {
+  const h = await conflictRoundWaitingOnCi(t);
+  assert.equal(typeof h.seen.kept, "object", `a conflict round's claim is kept for its wait, not released: ${JSON.stringify(h.seen.kept)}`);
+  assert.equal(h.seen.heldAfterFixDone, true, "the claim fix.done names is still held when the wait begins");
+  assert.equal(h.seen.racerRefused, true, "a racing sweep cannot take the conflict round's claim while it waits");
+  assert.deepEqual(h.dispatched, [], "no second round is dispatched on the conflict round's head");
+  assert.match(String(h.seen.secondPass), /deferred to the live fix round/);
+  assert.equal(h.deferred().length, 2, "one sweep.fix.deferred_to_live_round row per hand-off");
+  assert.equal(h.deferred()[0].live_round_run_id, ROUND);
+  assert.equal(h.deferred()[0].claim_run_id, h.seen.claimId);
+  // The round's end releases the claim it kept, on this path too.
+  assert.equal(readInflightLock(h.inflightDir, h.claimKey), null);
+});
+
+test("W1-T13991 criterion 2: a new failure on a conflict round's own head is handed to that round, never a second round", async (t) => {
+  const h = await conflictRoundWaitingOnCi(t);
+  assert.equal(h.seen.marker?.failure, "conflict", "main moving under the round's head hands it the conflict");
+  assert.equal(h.seen.marker?.head_sha, PUSHED);
+  assert.equal(h.seen.marker?.claim_run_id, h.seen.claimId);
+  assert.equal(h.seen.reviewMarker?.failure, "review", "a failing review on that head is handed to the same round");
+  assert.equal(h.seen.reviewMarker?.claim_run_id, h.seen.claimId);
+  assert.deepEqual(h.deferred().map((row) => row.failure), ["conflict", "review"]);
+  assert.deepEqual(h.dispatched, []);
+  assert.match(String(h.seen.reviewPass), /deferred to the live fix round/);
+  assert.equal(existsSync(fixRoundHandoffPath(h.root, h.seen.claimId!)), false, "the round retired its hand-off when it ended");
 });
 
 test("W1-T13991 criterion 3: independent sweep processes charge at most one fix round per PR", async (t) => {

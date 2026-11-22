@@ -5293,8 +5293,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
           });
           // The claim is never free between fix.done and the wait: the round keeps it, and its fix.done names the wait.
-          // A conflict round's claim ends at its fix.done, as before.
-          const keepForWait = evidence.mergeConflict !== undefined ? undefined : (held: InflightLockHandle) => {
+          // A conflict round too: it waits on CI for the resolution it pushed, so a new failure on that head is its own.
+          const keepForWait = (held: InflightLockHandle) => {
             const processStart = fixRoundProcessStart(process.pid);
             if (processStart === undefined) return "this round's process start is unreadable";
             const path = fixRoundHandoffPath(config.root, held.info.run_id);
