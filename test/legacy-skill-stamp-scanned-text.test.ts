@@ -11,7 +11,7 @@ const now = "2026-10-13T14:04:00.000Z";
 const reachability = { reachable: false, reason: "unapproved proposals are not injected" };
 const markdown = (first: string, second: string) => `---\nname: legacy-proc\napplies-to: implement\n---\n\n## Procedure\n- ${first}\n- ${second}\n`;
 const draft: SkillDraft = { name: "legacy-proc", description: "a bounded procedure", candidateHash: "candidate", procedureKey: "same-procedure", supportingRuns: 2,
-  markdown: markdown("Inspect the current inputs.", "Verify the bounded result.") };
+  markdown: markdown("Run `npm test` on the current inputs.", "Run `npm run typecheck` on the bounded result.") };
 
 function fixture(text: string, stamp?: string) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}legacy-skill-stamp-`));

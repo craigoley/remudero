@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
@@ -51,7 +52,8 @@ import {
   reservationHandoffNoteLine, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, taskIdReservationRef,
   type RemoteReserveAsyncInput, type RemoteReserveDeps,
 } from "./task-id-reservation.js";
-import { basename, dirname, join } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
@@ -147,9 +149,9 @@ import {
 import { buildRiskJudgeSpawnArgs, JUDGE_SHADOW_COMPARED_KEY, resolveFixProgressJudgeMount, resolveRiskJudgeMount, runJudgeShadow, scrubRiskJudgeText, runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import {
   createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, incrementalLedgerDigestVersion, ledgerLivePath, ledgerRawLineProjection,
-  ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines, readLedgerUnionRecordsSync, realLedgerFs,
+  ledgerRotationDigests, ledgerRotationEntries, ledgerRowsFor, ndjsonLines, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, realLedgerFs,
   resolveLedgerUnion, rotationStatKey,
-  type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationRecords, type LedgerUnionRecordRead,
+  type IncrementalUnionPass, type LedgerCorpusEntry, type LedgerGrepFsDeps, type LedgerRotationMemo, type LedgerRotationRecords, type LedgerUnionRecordRead,
 } from "./ledger-union.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
@@ -184,7 +186,9 @@ import {
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
+  defaultGitRunnerAsync,
   loadPlanReusingParses,
+  readBlobsAtRefAsync,
   PlanBlobCache,
   transitiveDependents,
   unmetDependencies,
@@ -414,7 +418,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -1751,7 +1755,8 @@ export interface BuildSweepEffectsDeps {
   /** W1-T3721 — isolates the author-time body proof gate in sweep tests that use synthetic worktrees. */
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
-  planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
+  planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string,
+    beforePush?: (taskId: string, anchor: string) => void) => string;
   /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push; W1-T5521 awaits it. */
   planPrPreflightImpl?: (...args: Parameters<typeof planPrPreflightAtCommitAsync>) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
@@ -5753,18 +5758,59 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
       // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
-      reserveTaskId: (target) => {
+      // W1-T13944: `beforePush` records each reservation push in the split's claim before it is made.
+      reserveTaskId: (target, beforePush) => {
         const branch = landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
           sourceRepository: { owner, repo } }).branch;
-        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch)
-          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log);
+        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch, beforePush)
+          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log, beforePush);
+      },
+      // W1-T13944: the id is minted in the public repository, so its reservation ref is read there.
+      reservationHeld: async (taskId, anchor) => {
+        const listed = await planRepairGitRunAsync(repoDir)(["ls-remote", "origin", taskIdReservationRef(taskId)]);
+        // A failed listing says nothing about the ref: the split is refused and keeps the pending push for the next pass,
+        // rather than reserve a second id beside one that may be held.
+        if (listed.status !== 0) {
+          throw new Error(`the reservation ref of ${taskId} cannot be read from origin (git ls-remote exited ${String(listed.status)}); ` +
+            "the pending push is kept for the next pass (W1-T13944)");
+        }
+        return listed.stdout.trim().split(/\s+/)[0] === anchor;
       },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
-        const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        const setAside = landed.setAside.filter(r => files.some(f => f.relPath === r.path));
+        const refusalChecks = planPreflightRefusalChecks({ refused: landed.refused, setAside });
+        // W1-T13944: `staged` names an input that waits with its own bytes; another edit waiting at its path is a refusal.
+        const refused = [
+          ...landed.refused.map(r => ({ relPath: r.path, reason: r.reason,
+            ...(r.id_release === "released" || r.id_release === "already_absent" ? { reservationReleased: true as const } : {}) })),
+          ...setAside.map(r => ({ relPath: r.path, reason: r.reason, setAside: true as const })),
+        ];
+        const staged = [...landed.landed, ...landed.waiting].filter((p) => !refused.some((r) => r.relPath === p));
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
-          ...(refusalChecks === undefined ? {} : { refusalChecks }) };
+          ...(refusalChecks === undefined ? {} : { refusalChecks }), staged, refused };
+      },
+      // W1-T13944: a held follow-up on the plan of origin/main or in the landing queue (staged, or carried by an open landing
+      // PR). origin/main is read file by file, so one task file the plan loader would refuse, such as an ops task that
+      // depends on a public one, hides no other. The daemon's plans can lag origin/main, so they add a held follow-up only
+      // for a task and criterion neither origin/main nor the queue holds.
+      heldFollowUpClaimRoot: config.root,
+      readHeldFollowUps: async (target) => {
+        // Read the queue before fetching main so a file that merges out of the queue is visible in one of the reads.
+        const queue = stagedTaskFiles(config.root).flatMap(({ relPath }) => {
+          const abs = join(config.root, "state", "task-files-landing-pending", relPath);
+          return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
+        });
+        let main: HeldFollowUp[];
+        try {
+          main = await readMainHeldFollowUps(target.checkoutDir);
+        } catch (error) {
+          log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
+          throw new Error(`held follow-ups on origin/main could not be read: ${String(error)}`, { cause: error });
+        }
+        const daemon = (reloadPlanForFix() ?? plan).tasks.flatMap(task => heldFollowUpOf(task) ?? []);
+        return withLaggingHeldFollowUps([...main, ...queue], daemon);
       },
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
@@ -12474,10 +12520,66 @@ export async function reservePlanRepairTaskIdAsync(
   filingBranch: string,
   run: RemoteReserveAsyncInput["run"] = planRepairGitRunAsync(worktreePath),
   log?: (step: string, fields: Record<string, unknown>) => void,
+  beforePush?: (taskId: string, anchor: string) => void,
 ): Promise<string> {
   const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
-  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log }));
+  const reserver = gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log });
+  // W1-T13944: the caller records the id and anchor before the push, so a restart after the push can find the id. A
+  // takeover of another holder's ref pushes an anchor made inside the reserver, which the caller never sees, so with
+  // `beforePush` the reservation takes over no ref: a held id makes it ask the next one.
+  const attempt = reserver.attempt;
+  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, beforePush === undefined ? reserver
+    : { ...reserver, reclaim: undefined, attempt: (taskId, anchor) => { beforePush(taskId, anchor); return attempt(taskId, anchor); } });
   return block.taskIds[0]!;
+}
+
+/**
+ * W1-T13944: the held follow-ups current origin/main declares, each file parsed alone, so a file the plan loader
+ * would refuse (a dependency in another catalog, a duplicate id) hides no held follow-up in another file.
+ */
+async function readMainHeldFollowUps(checkoutDir: string): Promise<HeldFollowUp[]> {
+  const runGit = defaultGitRunnerAsync(checkoutDir);
+  const tracking = "refs/remotes/origin/main";
+  await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
+  const ref = (await runGit(["rev-parse", tracking])).trim();
+  // The target's own layout override places its plan: the one at `ref`, else the one in the working tree.
+  const rel = (path: string) => relative(checkoutDir, path).split(sep).join("/");
+  const overrideRel = rel(join(resolveRepoLayout(checkoutDir, () => undefined).stateDir, "layout.json"));
+  const overrideEntry = await runGit(["ls-tree", "--name-only", ref, "--", overrideRel]);
+  const layoutAtRef = overrideEntry.length === 0 ? undefined : await runGit(["show", `${ref}:${overrideRel}`]);
+  const layout = resolveRepoLayout(checkoutDir, (path) => layoutAtRef ?? (existsSync(path) ? readFileSync(path, "utf8") : undefined));
+  const monolith = rel(layout.planMonolith);
+  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", monolith, `${rel(join(layout.planDir, "tasks.d"))}/`]);
+  const paths = listing.split("\n").map(l => l.trim()).filter(l => l === monolith || /\.ya?ml$/.test(l));
+  const texts = await readBlobsAtRefAsync(runGit, ref, paths);
+  // Every file is parsed: a folded or escaped title shows "(held follow-up)" only once parsed. A parse is kept by the
+  // file's bytes, so a later pass parses only the files that changed.
+  const seen = new Map<string, HeldFollowUp[]>();
+  const held = texts.flatMap((text) => {
+    const key = createHash("sha256").update(text).digest("hex");
+    const parsed = heldFollowUpParses.get(key) ?? heldFollowUpsOfTaskText(text);
+    seen.set(key, parsed);
+    return parsed;
+  });
+  heldFollowUpParses = seen;
+  return held;
+}
+
+/** W1-T13944: the held follow-ups of each task file read at the last {@link readMainHeldFollowUps}, by the file's hash. */
+let heldFollowUpParses = new Map<string, HeldFollowUp[]>();
+
+/**
+ * W1-T13944: `current` (origin/main and the landing queue) and the held follow-ups of `lagging` (the daemon's plans) for
+ * the criteria no held follow-up of the same task in `current` carries, so a lagging plan never names a task in place of
+ * the one origin/main holds. PURE.
+ */
+function withLaggingHeldFollowUps(current: readonly HeldFollowUp[], lagging: readonly HeldFollowUp[]): HeldFollowUp[] {
+  const carried = (parents: readonly string[], claim: string) =>
+    current.some(h => h.claims.includes(claim) && heldFollowUpParents(h).some(d => parents.includes(d)));
+  return [...current, ...lagging.flatMap((h) => {
+    const claims = h.claims.filter(claim => !carried(heldFollowUpParents(h), claim));
+    return claims.length === 0 ? [] : [{ ...h, claims }];
+  })];
 }
 
 export interface StaleBaseReleaseTarget {
@@ -19127,6 +19229,123 @@ export function openEscalationStandDownSince(
   return since;
 }
 
+const OPEN_ESCALATION_HISTORY_STEPS: readonly string[] = ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"];
+const OPEN_ESCALATION_STEP_LINE = new RegExp(OPEN_ESCALATION_HISTORY_STEPS.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+/** One state directory's open-escalation memo and the rotations each of the last two sweep passes reached. */
+interface OpenEscalationHistoryState {
+  memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string>;
+  /** Rotations whose inline read failed on their own content (a truncated or foreign gzip), by file identity. */
+  failed: Map<string, { signature: string; error: unknown }>;
+}
+const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>();
+
+/** Every stat field a rotation's readability or content can change under: size, mtime, ctime (a chmod or a restore), inode, device. */
+function rotationIdentity(path: string): string | undefined {
+  try {
+    const stat = fs.statSync(path, { bigint: true });
+    return [stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino, stat.dev].join(":");
+  } catch {
+    // deliberate: an unstattable rotation has no identity, so its read is never answered from a remembered failure.
+    return undefined;
+  }
+}
+
+/** A failure of the rotation's bytes themselves (zlib's `Z_*` codes), which the same bytes repeat; an I/O failure is read again. */
+const isContentFailure = (error: unknown): boolean => typeof (error as { code?: unknown } | null)?.code === "string" &&
+  ((error as { code: string }).code).startsWith("Z_");
+
+/** The memo as one read sees it: each rotation the read reaches is recorded for this pass, and completing the read
+ *  keeps every rotation this pass or the one before reached. The union of one pass's windows is what the next pass
+ *  needs, so an older window's rotations are kept one pass and no longer. A rotation's own size and mtime still
+ *  decide every hit. */
+function retainingTheLastTwoPasses(state: OpenEscalationHistoryState): LedgerRotationMemo {
+  return { ...state.memo, pass: (opts) => {
+    const pass = state.memo.pass(opts);
+    return { ...pass,
+      rotationRecords: (entry, parse) => {
+        state.reached.add(entry.path);
+        // origin/main reads every rotation it lists, so one the process can no longer read refuses the strict read
+        // however its rows are held. (A vanished file is left to the memo's own stat, which reads it uncached.)
+        try { fs.accessSync(entry.path, fs.constants.R_OK); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        // A rotation whose load failed is read inline by the memo on EVERY pass. When its bytes are unchanged that read
+        // fails the same way, so the failure is remembered by file identity and replayed, never read on the loop again.
+        const signature = rotationIdentity(entry.path);
+        const failed = state.failed.get(entry.path);
+        if (failed !== undefined && failed.signature === signature) throw failed.error;
+        return pass.rotationRecords(entry, () => {
+          try {
+            const read = parse();
+            state.failed.delete(entry.path);
+            return read;
+          } catch (error) {
+            if (signature !== undefined && isContentFailure(error)) state.failed.set(entry.path, { signature, error });
+            throw error;
+          }
+        });
+      },
+      complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous]) };
+  } };
+}
+
+/**
+ * W1-T13969: runSweep's pass boundary for {@link readOpenEscalationHistory}. The pass that ended becomes the previous
+ * one, and every rotation neither it nor this new pass has reached leaves the memo now, so a days-old window one PR
+ * once asked for is held for one pass beyond its last read, never for the process's lifetime. MEASURED 2026-11-20 on
+ * the fleet host: 241 rotations back to 2026-09-15, each ~25-minute rotation holding ~117 rows (173 KB) of the steps.
+ */
+export function beginOpenEscalationHistoryPass(ledgerPath: string): void {
+  const state = openEscalationHistoryStates.get(dirname(ledgerPath));
+  if (state === undefined) return;
+  state.previous = state.reached;
+  state.reached = new Set();
+  for (const path of state.failed.keys()) if (!state.previous.has(path)) state.failed.delete(path);
+  state.memo.pass().complete([...state.previous]);
+}
+
+/** W1-T13969: the summary row's fields for {@link openEscalationHistoryHeld}; none before any history read. */
+function openEscalationHistoryHeldFields(ledgerPath: string): Record<string, number> {
+  const held = openEscalationHistoryHeld(ledgerPath);
+  return held ? { open_escalation_memo_rotations: held.rotations, open_escalation_memo_rows: held.rows } : {};
+}
+
+/** What the open-escalation memo holds for `ledgerPath`'s state directory, for the pass's own summary row. */
+export function openEscalationHistoryHeld(ledgerPath: string): { rotations: number; rows: number } | undefined {
+  const state = openEscalationHistoryStates.get(dirname(ledgerPath));
+  if (state === undefined) return undefined;
+  const { archives, rows } = state.memo.retention();
+  return { rotations: archives, rows };
+}
+
+/**
+ * W1-T13969 — the open-escalation history of `taskId` since `since`: origin/main's strict union read of the four steps,
+ * answered from a rotation memo the sweep keeps across passes, so a repeated pass over unchanged rotations reads
+ * no archive bytes on the loop (a rotation is loaded off the loop once, and again only when its size or mtime changes,
+ * or after a pass that no read reached it; see {@link beginOpenEscalationHistoryPass}). MEASURED 2026-11-20: this read, then synchronous per PR and per pass, held the daemon loop 97.5 s in a day.
+ * The rows equal readLedgerUnionRecordsSync's with the task's JSON-quoted id as `pattern`: a ledger line is
+ * JSON.stringify's output, so that pattern matches the line exactly when it matches the row's own serialisation.
+ */
+export async function readOpenEscalationHistory(ledgerPath: string, taskId: string, since: string | undefined,
+  fsDeps: LedgerGrepFsDeps = realLedgerFs): Promise<LedgerUnionRecordRead> {
+  const stateDir = dirname(ledgerPath);
+  let state = openEscalationHistoryStates.get(stateDir);
+  if (state === undefined) {
+    const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
+      { holder: "sweep.open-escalation-history", pattern: OPEN_ESCALATION_STEP_LINE });
+    openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set(), failed: new Map() });
+  }
+  const needle = JSON.stringify(taskId);
+  return readLedgerUnionRecordsMemoized(stateDir, retainingTheLastTwoPasses(state), {
+    step: [...OPEN_ESCALATION_HISTORY_STEPS],
+    since,
+    // The memo is shared by every task, so its rows carry no task filter: the task is matched on each row instead.
+    pattern: OPEN_ESCALATION_STEP_LINE,
+    where: (row) => row.task_id === taskId || JSON.stringify(row).includes(needle),
+    refuseIncomplete: true,
+  }, fsDeps);
+}
+
 /** Operator ruling 2026-10-30: how long a PR may wait on an unanswered fix-lane escalation before the ladder acts. */
 export const HELD_ESCALATION_SLO_MS = 6 * 60 * 60_000;
 
@@ -20627,6 +20846,38 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+// W1-T13990: FIX_CLAIM_YIELDED_STEP is the step a fix claim refused BEFORE the capacity controller was consulted writes,
+// one row per refusal: the controller's own `fixes_refused` never counts it, and the focus gate's reader does.
+export { FIX_CLAIM_YIELDED_STEP };
+
+/** W1-T13990: {@link yieldingFixClaim}, with each refusal review precedence makes before the controller is consulted
+ *  ledgered as {@link FIX_CLAIM_YIELDED_STEP}, its cause named. A refusal the controller makes is its own row's. */
+export function countedYieldingFixClaim<P extends { prNumber: number; headSha?: string }>(
+  ...args: Parameters<typeof yieldingFixClaim<P>>
+): ReturnType<typeof yieldingFixClaim<P>> {
+  const [surface, inner, lines, nowMs, log, waiting, admitted] = args;
+  if (inner === undefined) return undefined;
+  let consulted = false;
+  const yielded = yieldingFixClaim<P>(surface, (pr) => { consulted = true; return inner(pr); }, lines, nowMs, log, waiting, admitted);
+  return (pr) => {
+    consulted = false;
+    const grant = yielded(pr);
+    if (!grant.admitted && !consulted) {
+      log?.(FIX_CLAIM_YIELDED_STEP, { surface, pr_number: pr.prNumber, head_sha: pr.headSha, cause: "review_precedence", reason: grant.reason });
+    }
+    return grant;
+  };
+}
+
+/** W1-T13990: the fix rounds this process admitted that have not ended: waiting for the work host to start their run child,
+ *  running in process (their memory admission included), or running as a run child. A claim the capacity controller refuses
+ *  releases its key before it reaches any of these; a round leaves them when its dispatch settles, done, refused or lost. */
+export function fixRoundsInFlight(): number {
+  let n = queuedHostFixes.size + childWorkCount("fix-dispatch");
+  for (const action of detachedSweepActions.values()) if (action.actionKind === "fix-dispatch") n++;
+  return n;
+}
+
 export type SweepRepairSurface = "full" | "light";
 
 /**
@@ -20952,6 +21203,8 @@ export function createSweepFixAdmissionController(input: {
   readResidents?: () => FixAdmissionResidents;
   readActiveWorkers?: () => number;
   readPressure?: () => FixHostPressure;
+  /** W1-T13990: names this controller on its `sweep.fix_capacity` rows. Production passes mint one per controller. */
+  controllerId?: string;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   reviewQueue?: readonly FixAdmissionWaiter[]; // W1-T9582: the planned reviews, each with when its PR began waiting.
   waitSinceMs?: (pr: OpenPrView) => number; // W1-T9582: when a claiming PR began waiting.
@@ -21077,6 +21330,9 @@ export function createSweepFixAdmissionController(input: {
   refresh();
   let fixesAdmitted = 0;
   let fixesRefused = 0;
+  // W1-T13990: the caller's id for this controller, so a reader keys each running count to the controller that wrote it,
+  // never to a run and surface that many passes share. Absent, the rows carry none and read as before.
+  const controllerId = input.controllerId;
   const snapshot = (): SweepFixCapacitySnapshot => ({
     surface: input.surface,
     queueDepth: input.queueDepth,
@@ -21092,6 +21348,7 @@ export function createSweepFixAdmissionController(input: {
   const emit = (order?: Record<string, unknown>): void => {
     const state = snapshot();
     input.log?.("sweep.fix_capacity", {
+      ...(controllerId === undefined ? {} : { controller_id: controllerId }),
       surface: state.surface,
       queue_depth: state.queueDepth,
       host_worker_budget: state.hostWorkerBudget,
@@ -22303,7 +22560,8 @@ export async function runSweep(
   const ledgerLines = [...readLedger(deps.ledgerPath)];
   const dependabotRoutes = dependabotReviewRoutes(ledgerLines);
   const openEscalationHistory = new Map<string, ReadonlyArray<Record<string, unknown>>>();
-  const openEscalationSince = (pr: OpenPrView): string | undefined => {
+  beginOpenEscalationHistoryPass(deps.ledgerPath);
+  const openEscalationSince = async (pr: OpenPrView): Promise<string | undefined> => {
     const taskId = fixLedgerTaskIdFor(pr);
     const key = `${pr.prNumber}@${pr.headSha}`;
     let history = openEscalationHistory.get(key);
@@ -22314,12 +22572,8 @@ export async function runSweep(
       const checkpoint = ledgerLines.findLast(row => row.step === "sweep.disposed" && row.acted === true &&
         row.pr_number === pr.prNumber && row.head_sha === pr.headSha && row.task_id === taskId);
       if (taskId !== undefined && checkpoint !== undefined && !deps.readLedger && !deps.dryRun) {
-        const union = readLedgerUnionRecordsSync(dirname(deps.ledgerPath), {
-          step: ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"],
-          since: typeof checkpoint.ts === "string" ? checkpoint.ts : undefined,
-          pattern: new RegExp(JSON.stringify(taskId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-          refuseIncomplete: true,
-        });
+        // W1-T13969: off the loop after the first load of each rotation; the same rows as the strict sync read.
+        const union = await readOpenEscalationHistory(deps.ledgerPath, taskId, typeof checkpoint.ts === "string" ? checkpoint.ts : undefined);
         if (union.ok) history = [...union.rows, ...ledgerLines.filter(row => row.task_id === taskId)].sort((a, b) =>
           String(a.ts ?? "").localeCompare(String(b.ts ?? "")));
       }
@@ -22900,6 +23154,7 @@ export async function runSweep(
       ? undefined
       : createSweepFixAdmissionController({
           surface: "full",
+          controllerId: randomUUID(),
           queueDepth: fullReviewQueueDepth,
           ...sweepFixAdmissionReaders(deps, policy),
           activeWorkers: fullRepairActiveWorkers,
@@ -22921,7 +23176,7 @@ export async function runSweep(
     }
   }
   const fixCapacityReleases = new Map<number, () => void>();
-  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
+  const capacityClaim = deps.claimFixAdmission ?? countedYieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     const claim = capacityClaim(pr);
     if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
@@ -25412,7 +25667,7 @@ export async function runSweep(
     // W1-T10653: an already-open-escalation stand-down is not a hold, so it never reached the SLO below; once it has aged past
     // the SLO it is read as one, so the ladder's rebuild clears it instead of the fix lane standing down for good.
     if (heldEscalationAt === undefined && disposition === "blocked-fixable" && !deps.dryRun) {
-      const openSince = openEscalationSince(pr);
+      const openSince = await openEscalationSince(pr);
       if (openSince !== undefined && now - Date.parse(openSince) >= HELD_ESCALATION_SLO_MS) {
         const issues = await readOpenEscalations();
         const key = fixEscalationDedupKey(escalationTaskIdFor(pr), pr.prUrl, pr.headSha,
@@ -26368,7 +26623,7 @@ export async function runSweep(
                   spent = false;
                   standDownReason = openHold.reason;
                   extraDisposedFields = { ...extraDisposedFields,
-                    open_escalation_hold_since: openEscalationSince(pr) ?? clockFromMillisFn(() => now).iso() };
+                    open_escalation_hold_since: (await openEscalationSince(pr)) ?? clockFromMillisFn(() => now).iso() };
                   break;
                 }
               }
@@ -28596,6 +28851,7 @@ export async function runSweep(
     total: summary.total,
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
+    ...openEscalationHistoryHeldFields(deps.ledgerPath),
     // W1-T11171: only a gated (light) pass has conflict shares to report.
     ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });
@@ -29859,6 +30115,7 @@ async function runSweepLightPassCore(
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
+    controllerId: randomUUID(),
     queueDepth,
     ...sweepFixAdmissionReaders(deps, policy),
     activeWorkers,
@@ -29866,7 +30123,7 @@ async function runSweepLightPassCore(
     readReviewReservations: () => unsettledSpawning,
     log: deps.log,
   });
-  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
+  const claimFixAdmission = countedYieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -30737,6 +30994,8 @@ export interface QueueGovernorFlow {
   /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
   trailingOpenedCount?: number;
   stuckOwnedCount?: number;
+  /** W1-T13990: the stuck owned PRs a fix lane can move (adaptive-wip.ts); carried for focus, never subtracted. */
+  movableStuckOwnedCount?: number;
   adaptiveBound?: number;
   headroomFraction?: number;
 }
@@ -30773,6 +31032,7 @@ export interface QueueGovernorResult {
   trailingOpenedCount?: number;
   baseWipLimit?: number;
   stuckOwnedCount?: number;
+  movableStuckOwnedCount?: number;
   headroomFraction?: number;
 }
 
@@ -30814,9 +31074,11 @@ export function checkQueueGovernor(
   // #10510's adaptive bound wins when wired; W1-T7243's measured bound otherwise; the old bound is the stand-in.
   const limit = flow.adaptiveBound ?? measuredBound ?? policy.wipLimit;
   const stuckOwnedCount = Math.min(openPrCount, Math.max(0, flow.stuckOwnedCount ?? 0));
+  const movable = flow.movableStuckOwnedCount;
   const common = {
     observedOpenCount: openPrCount, wipLimit: limit, observedForeignCount, trailingMergedCount, trailingOpenedCount,
     baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction, measuredBound, pressure,
+    ...(movable === undefined ? {} : { movableStuckOwnedCount: Math.min(stuckOwnedCount, Math.max(0, movable)) }),
   };
   if (!pressureHeld && openPrCount - stuckOwnedCount < limit) return { deferred: false, tier: "under_limit", ...common };
   // "Draining" needs REAL trailing activity (design ii): a silent window (0 merges, 0 opens — a
@@ -30879,6 +31141,7 @@ export function logQueueGovernorDeferral(
     trailing_opened_count: result.trailingOpenedCount ?? 0,
     base_wip_limit: result.baseWipLimit ?? result.wipLimit,
     stuck_owned_count: result.stuckOwnedCount ?? 0,
+    ...(result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: result.movableStuckOwnedCount }),
     headroom_fraction: result.headroomFraction ?? null,
     measured_bound: result.measuredBound,
     pressure_available_mib: result.pressure?.availableMib,

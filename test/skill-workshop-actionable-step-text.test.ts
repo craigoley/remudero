@@ -15,6 +15,13 @@ import {
 
 const ALLOWLIST = { allowedHosts: [], deniedPathPatterns: [], allowedTools: [] };
 
+/** W1-T13857: P1 and P2 (two tasks) both ran the type check and then changed a lib file. */
+const MINED = {
+  runs: ["P1", "P2"].map((runId, i) => ({ runId, taskId: `W1-T30${i}`, type: "implement", verdict: "merged" })),
+  records: ["P1", "P2"].flatMap((runId) => ["Bash:npm run typecheck", "Edit:src/lib/plan.ts"].map((tool_signature) =>
+    ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: tool_signature.split(":")[0], tool_signature }))),
+};
+
 function rendered(signal: string): SkillDraft {
   return renderSkillDraft({
     shapeKey: `implement:${signal}`,
@@ -23,7 +30,7 @@ function rendered(signal: string): SkillDraft {
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
     supportingRuns: 2,
-  })!;
+  }, MINED)!;
 }
 
 /** W1-T4270: renderSkillDraft no longer drafts an outcome-only or unmapped signal, but a draft
@@ -38,9 +45,9 @@ function outcomeOnly(signal = "clean_single_strike"): SkillDraft {
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
     supportingRuns: 2,
-  })!;
+  }, MINED)!;
   const line = `- ${PROCEDURAL_STEP_TEXT[signal] ?? signal}`;
-  return { ...mixed, markdown: mixed.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`, line) };
+  return { ...mixed, markdown: mixed.markdown.replace(/## Procedure\n[\s\S]*?(?=## Evidence)/, `## Procedure\n\n${line}\n\n`) };
 }
 
 function described(description: string, ...steps: string[]): SkillDraft {
@@ -61,19 +68,7 @@ test("W1-T4283: the clean_single_strike step is refused as restating its own out
   assert.equal(scanSkillDraft(draft, ALLOWLIST).ok, false);
 });
 
-test("W1-T4283: mined transcript steps replace the outcome-only step, so the draft scans clean", () => {
-  const tool = (runId: string, taskId: string, name: string) => ({ run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing", tool_name: name });
-  const runs = [
-    { runId: "P1", taskId: "W1-T300", type: "implement", verdict: "merged" },
-    { runId: "P2", taskId: "W1-T301", type: "implement", verdict: "merged" },
-    { runId: "D1", taskId: "W1-T302", type: "implement", verdict: "merged" },
-  ];
-  const records = [
-    tool("P1", "W1-T300", "Grep"), tool("P1", "W1-T300", "Edit"),
-    tool("P2", "W1-T301", "Grep"), tool("P2", "W1-T301", "Edit"),
-    tool("D1", "W1-T302", "Edit"),
-    { ts: "2026-05-01T00:00:01.000Z", run_id: "D1", task_id: "W1-T302", step: "fix.dispatch" },
-  ];
+test("W1-T13857: the recurring commands are the Procedure, never the outcome-only step, so the draft scans clean", () => {
   const draft = renderSkillDraft({
     shapeKey: "implement:clean_single_strike+fully_executed_proof",
     taskType: "implement",
@@ -81,17 +76,18 @@ test("W1-T4283: mined transcript steps replace the outcome-only step, so the dra
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
     supportingRuns: 2,
-  }, { runs, records })!;
+  }, MINED)!;
   assert.ok(!draft.markdown.includes(PROCEDURAL_STEP_TEXT.clean_single_strike));
-  assert.match(draft.markdown, /Call `Grep`/);
+  assert.match(draft.markdown, /- Run `npm run typecheck`\.\n- Change `src\/lib\/\*\.ts`\./);
   assert.deepEqual(scanSkillDraft(draft, ALLOWLIST), { ok: true });
 });
 
-test("W1-T4283: the fully_executed_proof step passes unchanged", () => {
-  const draft = rendered("fully_executed_proof");
-  assert.ok(draft.markdown.includes(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`));
-  assert.deepEqual(scanSkillDraft(draft, ALLOWLIST), { ok: true });
-  // W1-T13858: the per-line check passes the line, and the whole-draft check refuses a draft with no other step.
+test("W1-T13857: the fully_executed_proof step alone is not an action, and the draft is refused", () => {
+  const draft = outcomeOnly("fully_executed_proof");
+  const result = scanSkillDraft(draft, ALLOWLIST);
+  assert.equal(result.offendingLine, `- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`);
+  assert.match(result.reason ?? "", /^not-an-action/);
+  // W1-T13858: the whole-draft check still names the outcome-only draft first.
   const registry = join(mkdtempSync(join(tmpdir(), "rmd-test-actionable-proof-")), "proposals.json");
   const staged = stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" });
   assert.equal(staged.refused, true);
@@ -116,7 +112,7 @@ test("W1-T4283: a refused draft names the offending step verbatim with offending
 test("W1-T4283: future outcome restatements are refused without naming a shipped signal key", () => {
   const draft = described("The repaired tasks merge after the checks pass.", "Merge the repaired task after checks pass!");
   assert.equal(scanSkillDraft(draft, ALLOWLIST).ok, false);
-  assert.deepEqual(scanSkillDraft(described(draft.description, "Run the checks before merging the repaired task."), ALLOWLIST), { ok: true });
+  assert.deepEqual(scanSkillDraft(described(draft.description, "Run `npm run check` before merging the repaired task."), ALLOWLIST), { ok: true });
 });
 
 test("W1-T4283: punctuation, case and grammatical filler add no behavioral content", () => {
@@ -126,14 +122,14 @@ test("W1-T4283: punctuation, case and grammatical filler add no behavioral conte
 });
 
 test("W1-T4283: an actionable sibling cannot hide the first outcome-only step", () => {
-  const draft = described("Verified results shipped.", "Run tests before shipping.", "Ship verified results.", "Verified results shipped.");
+  const draft = described("Verified results shipped.", "Run `npm test` before shipping.", "Ship verified results.", "Verified results shipped.");
   assert.equal(scanSkillDraft(draft, ALLOWLIST).offendingLine, "- Ship verified results.");
   const shipped = outcomeOnly("clean_single_strike");
-  assert.equal(scanSkillDraft({ ...shipped, markdown: shipped.markdown.replace("## Evidence", "- Call `Grep` before editing.\n\n## Evidence") }, ALLOWLIST).ok, false);
+  assert.equal(scanSkillDraft({ ...shipped, markdown: shipped.markdown.replace("## Evidence", "- Run `npm test` before editing.\n\n## Evidence") }, ALLOWLIST).ok, false);
 });
 
 test("W1-T4283: outcome comparisons use only Procedure steps, not frontmatter or Evidence", () => {
-  const draft = described("Verified results shipped.", "Run tests before shipping.");
+  const draft = described("Verified results shipped.", "Run `npm test` before shipping.");
   assert.deepEqual(scanSkillDraft({ ...draft, markdown: `---\ndescription: Verified results shipped.\n---\n\n${draft.markdown}- Ship verified results.\n` }, ALLOWLIST), { ok: true });
   assert.deepEqual(scanSkillDraft({ ...draft, markdown: "## Evidence\n\n- Ship verified results.\n" }, ALLOWLIST), { ok: true });
 });
@@ -152,15 +148,15 @@ test("W1-T4283: caller-supplied outcome metadata reaches the scanner without cha
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
     supportingRuns: 2,
-  })!;
+  }, MINED)!;
   const restatement = { ...draft, markdown: "## Procedure\n\n- Ship verified results.\n" };
   assert.equal(scanSkillDraft(restatement, ALLOWLIST).ok, false);
-  assert.deepEqual(scanSkillDraft({ ...draft, markdown: "## Procedure\n\n- Inspect failing tests before shipping.\n" }, ALLOWLIST), { ok: true });
+  assert.deepEqual(scanSkillDraft({ ...draft, markdown: "## Procedure\n\n- Rerun `npm test` on failing tests before shipping.\n" }, ALLOWLIST), { ok: true });
 });
 
 test("W1-T4283: comparisons keep each mined outcome distinct instead of combining their vocabularies", () => {
-  const draft = described("A pair of independent outcomes.", "Check shipped results.");
-  assert.deepEqual(scanSkillDraft({ ...draft, outcomeDescriptions: ["Checks passed.", "Results shipped."] }, ALLOWLIST), { ok: true });
+  const draft = described("A pair of independent outcomes.", "Run `checks` on shipped results.");
+  assert.deepEqual(scanSkillDraft({ ...draft, outcomeDescriptions: ["Checks run.", "Results shipped."] }, ALLOWLIST), { ok: true });
 });
 
 test("W1-T4283: empty outcome metadata falls back to the draft description", () => {
@@ -175,7 +171,7 @@ test("W1-T4283: removing outcome-only bullets does not prevent a behavioral draf
   const id = skillDraftProposalId(staged.procedureKey);
   const draft = {
     ...staged,
-    markdown: staged.markdown.replace(PROCEDURAL_STEP_TEXT.clean_single_strike, "Call `Grep` before editing."),
+    markdown: staged.markdown.replace(PROCEDURAL_STEP_TEXT.clean_single_strike, "Run `npm test` before editing."),
   };
   try {
     writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: staged.name, markdown: staged.markdown } }] }));
@@ -195,7 +191,7 @@ test("W1-T4283: a staged restatement is discounted against the fallback draft de
   const registry = join(dir, "proposals.json");
   const outcomeOnly = described("Verified results shipped.", "Ship verified results.");
   const id = skillDraftProposalId(outcomeOnly.procedureKey);
-  const draft = described(outcomeOnly.description, "Inspect failing tests before shipping.");
+  const draft = described(outcomeOnly.description, "Rerun `npm test` on failing tests before shipping.");
   try {
     writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }));
     assert.equal(stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" }).refreshed, true);

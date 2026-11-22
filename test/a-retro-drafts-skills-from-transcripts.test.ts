@@ -1,7 +1,8 @@
 // test/a-retro-drafts-skills-from-transcripts.test.ts — W1-T4668 taught renderSkillDraft to mine
 // step-by-step workflows from worker transcripts, but the retro's only production call
 // (buildGather) passed no transcripts, so every staged draft still read "Resolve the task on the
-// first attempt" (skill-draft:88d9945f and 8aa4458e, 2026-09-29). This drives the real gather.
+// first attempt" (skill-draft:88d9945f and 8aa4458e, 2026-09-29). This drives the real gather. Since W1-T13857
+// the draft is the command sequence the runs repeat, read off each row's tool_signature.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
@@ -12,18 +13,22 @@ function run(runId: string, taskId: string, day: number, tools: string[], fixed:
   return [
     JSON.stringify({ ts: ts(0), run_id: runId, task_id: taskId, step: "run.start", type: "implement" }),
     ...tools.map((tool, i) =>
-      JSON.stringify({ ts: ts(i + 1), run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing", tool_name: tool }),
+      JSON.stringify({
+        ts: ts(i + 1), run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing",
+        tool_name: tool.split(":")[0], ...(tool.includes(":") ? { tool_signature: tool } : {}),
+      }),
     ),
     ...(fixed ? [JSON.stringify({ ts: ts(7), run_id: runId, task_id: taskId, step: "fix.dispatch" })] : []),
     JSON.stringify({ ts: ts(8), run_id: runId, task_id: taskId, step: "verdict", verdict: "merged" }),
   ];
 }
 
-test("the retro's skill drafts carry the workflow mined from successful transcripts", () => {
+test("the retro's skill drafts carry the command sequence the fully executed runs repeated", () => {
+  const steps = ["Read:src/lib/retro.ts", "Bash:npm run typecheck", "Grep:src", "Edit:src/lib/retro.ts"];
   const ledgerNdjson = [
-    ...run("P1", "W1-T4800", 1, ["Read", "Grep", "Edit"], false),
-    ...run("P2", "W1-T4801", 2, ["Read", "Grep", "Edit"], false),
-    ...run("P3", "W1-T4802", 3, ["Read", "Grep", "Edit"], false),
+    ...run("P1", "W1-T4800", 1, steps, false),
+    ...run("P2", "W1-T4801", 2, steps, false),
+    ...run("P3", "W1-T4802", 3, steps, false),
     ...run("D1", "W1-T4810", 4, ["Edit"], true),
     ...run("D2", "W1-T4811", 5, ["Edit"], true),
     ...run("D3", "W1-T4812", 6, ["Edit"], true),
@@ -34,10 +39,11 @@ test("the retro's skill drafts carry the workflow mined from successful transcri
     ),
   ].join("\n");
   const gather = buildGather({ ledgerNdjson, learningsMd: "" });
-  const draft = gather.skillDrafts.find((d) => /fully-exec/.test(d.name));
-  assert.ok(draft, "the three clean, fully-executed runs stage a draft");
-  assert.match(draft!.markdown, /Call `Grep`/, "the distinguishing step from the successful transcripts is in the Procedure");
-  assert.match(draft!.markdown, /\[src: transcript#P1\]/);
+  const draft = gather.skillDrafts.find((d) => /^npm-run-typecheck-src-lib-ts-/.test(d.name));
+  assert.ok(draft, "the three fully executed runs stage a draft");
+  assert.match(draft!.markdown, /## Procedure\n\n- Run `npm run typecheck`\.\n- Change `src\/lib\/\*\.ts`\.\n/);
+  assert.match(draft!.markdown, /\[src: run#P1\]/);
+  assert.ok(!draft!.markdown.includes("[src: run#D1]"), "the Edit-only runs are not in the fully executed candidate");
 });
 
 test("a fix round dispatched under the daemon's run id is counted against the run it repaired", async () => {

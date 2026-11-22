@@ -15,7 +15,7 @@
   files:
     - src/lib/worker-provider.ts
     - test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A Codex stream of more than 1 MiB whose bulk is command output still retains its final agent_message item whole, and outputRetention.text reads complete"
