@@ -509,8 +509,9 @@ function clearQuiescentScan(path: string): void {
  * exact reservation identity, and any scan that is not quiescent voids it. The owner pid, boot, namespace and uid
  * checks stay with the callers. INVARIANT scope-evidence-unchanged: a recorded dedicated scope never takes this class.
  */
-function quiescentScanEvidence(slotPath: string, held: TestSlotHolder, evidence: ReservedTreeEvidence, nowMs: number): ReservedTreeEvidence {
+function quiescentScanEvidence(slotPath: string, held: TestSlotHolder, evidence: ReservedTreeEvidence, clock: Clock): ReservedTreeEvidence {
   const keptPath = quiescentScanPath(slotPath);
+  const nowMs = clock.now();
   const identity = testSlotReservationIdentity(held);
   const cadence = held.heartbeatIntervalMs;
   if (evidence.state !== "unknown" || evidence.quiescentScan === undefined || held.cgroupScope?.dedicated === true ||
@@ -531,7 +532,7 @@ function quiescentScanEvidence(slotPath: string, held: TestSlotHolder, evidence:
       reason: `two complete scans ${spacingMs}ms apart, at least one recorded heartbeat (${cadence}ms), found no process ` +
         `carrying the reservation marker and none unreadable (${kept.scanned} then ${evidence.quiescentScan.scanned} scanned)` };
   }
-  const firstScanAt = new Date(nowMs).toISOString();
+  const firstScanAt = clock.iso();
   if (!keepQuiescentScan(keptPath, { reservation: identity, firstScanAt, scanned: evidence.quiescentScan.scanned })) {
     return { ...evidence, reason: `${evidence.reason}; the first quiescent scan could not be kept beside the slot record, so none can release it` };
   }
@@ -1221,7 +1222,7 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
     if (facts?.start === held.processStart || (facts === undefined && (opts.isPidAlive ?? defaultIsPidAlive)(held.pid))) {
       return { outcome: "refused", reason: `owner pid ${held.pid} is alive` };
     }
-    const evidence = quiescentScanEvidence(path, held, observeReservedTree(held, opts.treeProbe ?? probeReservedTree), (opts.clock ?? systemClock).now());
+    const evidence = quiescentScanEvidence(path, held, observeReservedTree(held, opts.treeProbe ?? probeReservedTree), opts.clock ?? systemClock);
     // W1-T14253: a kept first quiescent scan is not a refusal; the same request one recorded heartbeat later releases.
     if (evidence.firstScanAt !== undefined) return { outcome: "deferred", reason: evidence.reason };
     if (!verifiedTerminalEvidence(held, evidence)) return { outcome: "refused", reason: `covered work is not proven ended: ${evidence.reason}` };
@@ -2281,7 +2282,7 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                 (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
-                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" }), clock.now());
+                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" }), clock);
               if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
               observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
                 pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
