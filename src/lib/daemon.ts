@@ -1591,7 +1591,7 @@ export interface DaemonDeps {
    *  listing ledgered and never read as no claims). The sweep itself stays detached. It can publish its listing
    *  separately so selection can reconcile claim-held deferrals before offering work. */
   releaseLandedClaims?: (isMerged: (taskId: string) => boolean) =>
-    Promise<void> & { listing?: Promise<DispatchClaimListing> };
+    Promise<unknown> & { listing?: Promise<DispatchClaimListing> };
   claimSweepSettled?: Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
