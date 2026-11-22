@@ -2,29 +2,23 @@
 // scripts/write-only-ledger-step-ratchet.mjs — W1-T14149 (rationale: this task's own plan shard).
 //
 // INVARIANT no-silent-loop: a ledger step newly written in src/ with no reader outside its writer
-// file fails this check unless BASELINE_PATH declares it record-only with a reason. A decision row
-// nothing reads is how a loop silently stops: `routing.experiment.result` was written daily and
-// read only by its own writer.
+// file fails unless BASELINE_PATH declares it record-only with a reason. A decision row nothing
+// reads is how a loop silently stops (`routing.experiment.result`, read only by its own writer).
 //
-// EMITTED: `log("a.b"` or a `step:` property holding a literal or a constant: lexically bound,
-// imported, or destructured from a host by its exported name, or a template of such constants. An
-// undotted literal counts on a ledger row only. Both operands of `a ?? "x.y"` and both branches of a
-// conditional count, and a call to a function whose parameter reaches an emit (a step helper) emits its argument.
-// READ: equality and switch cases on a step, step membership checks and Map lookups (`.has`,
-// `.includes`, `.get`), a membership check of a step collection whatever its argument (dotted steps
-// only), a reader's `steps` list, read-step collections, step prefixes and suffixes, and raw JSON
-// step patterns; `row.step ?? ""` reads `row.step`.
-// Read evidence must be in a different file from the emission. Comments, console output and
-// incidental literals do not read a step.
+// EMITTED: `log("a.b"` or a `step:` property holding a literal, a constant (bound, imported, or
+// destructured from a host by its exported name) or a template of constants; undotted only on a
+// ledger row. Both sides of `a ?? "x.y"` and of a conditional count, and so does a step helper's call.
+// READ, in a file other than the writer: equality and switch cases on a step; `.has`, `.includes` and
+// `.get` with a step; a step collection's membership check of a value that may hold a step (dotted
+// steps only); a reader's `steps` list; read-step collections; prefixes, suffixes and raw JSON step
+// patterns. Comments, console output and incidental literals do not read a step.
 //
-// THE RATCHET: the baseline's `writeOnly` list is today's debt and only shrinks against the merge
-// base (on its first landing, against the merge base tree's own write-only steps); an entry that
-// gained a reader must leave it. A new write-only step needs a reader, or a `recordOnly` row with a
-// non-empty reason. A step, not a job: it rides ci.yml's light gates beside
-// console-parity and reports under the required comment-load-ratchet check.
-// TRAP: CI measures the MERGE ref, so a step main landed while this PR was open would read as this
-// diff's. A refusal is re-judged against the merge base's own tree, as comment-load-ratchet does: a
-// step already write-only there, or a debt entry already read there, is inherited and only reported.
+// THE RATCHET: `writeOnly` is today's debt and only shrinks against the merge base (on its first
+// landing, against the merge base tree's own write-only steps). A new write-only step needs a reader
+// or a `recordOnly` reason. It rides ci.yml's light gates and reports under comment-load-ratchet.
+// TRAP: CI measures the MERGE ref, so main's drift could read as this diff's. A refusal is re-judged
+// against the merge base's own tree: a step already write-only there, or a debt entry already read
+// there, is inherited and only reported.
 //
 // FALSIFIER: test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts.
 
