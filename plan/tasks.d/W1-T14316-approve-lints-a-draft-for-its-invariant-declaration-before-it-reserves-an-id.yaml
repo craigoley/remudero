@@ -1,0 +1,46 @@
+- id: W1-T14316
+  title: "rmd approve lints a draft for its invariant declaration before it reserves an id, so the push preflight stops refusing drafts approve accepted"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # which approved drafts may become plan records
+  band_meaning: span
+  origin: "operator-session#automation-root-causes-2026-11-22"
+  plan_refs: [W1-T9039, W1-T11746, W1-T12833]
+  files:
+    - src/lib/inbox.ts
+    - test/inbox/approve-lints-the-invariant-declaration-before-it-reserves.test.ts
+    - test/a-drafted-task-is-linted-with-the-push-floors-repo-facts.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    WHY: approved work is lost at the last step, after it has taken a task id.
+    OBSERVED 2026-11-20..22 in the core ledger: 82 plan_pr.preflight_refused rows on the approve lane (21, 20, 41 by
+    day). In the twelve rotations before 2026-11-22T13:46Z, 39 of them are one check, design-invariant-proof:
+    "design declares neither INVARIANT nor NO-INVARIANTS". Each came after approve.id_materialized and
+    approve.shards_written, so each used an id and left no task. Some proposals did this three times.
+    CAUSE: draftFilingLintOptions (src/lib/inbox.ts:2518) spreads DRAFT_FILING_LINT_OPTIONS (:2414), which does not
+    set requireDesignInvariantDeclaration. The push's lint-plan --base does set it for a new task
+    (src/run-task.ts:20058). Approve's lint passes and the preflight then refuses the same bytes. Machine filings
+    already set it (MACHINE_SHARD_LINT_OPTIONS, W1-T12833).
+  design: |
+    INVARIANT lint-never-invents-a-declaration: approve never writes an INVARIANT or NO-INVARIANTS line the draft did not state, and every other lint verdict is unchanged.
+    1. The draft filing lint options require the design invariant declaration, as the push floor does for a new task.
+    2. relintRatificationFragment therefore refuses before materializeDraftTaskIds reserves. The refusal names the
+       check and takes the existing route of a lint-refused draft back to its drafter.
+    3. The suite replays one draft through both option sets and fails when approve accepts what the push floor blocks.
+  acceptance:
+    - claim: "A draft whose design declares neither INVARIANT nor NO-INVARIANTS is refused by approve's lint, naming design-invariant-proof, before any task id is reserved or shard written"
+      proof: "grep: W1-T14316 criterion 1 in test/inbox/approve-lints-the-invariant-declaration-before-it-reserves.test.ts"
+    - claim: "invariant:lint-never-invents-a-declaration — a draft that declares either form files byte for byte as on origin/main, and no declaration is added to one that declares neither"
+      kind: guard
+      proof: "grep: W1-T14316 criterion 2 in test/inbox/approve-lints-the-invariant-declaration-before-it-reserves.test.ts"
+  falsifier: |
+    Leave the option unset and criterion 1 fails. Insert a NO-INVARIANTS line for the drafter and criterion 2 fails.
+  note: |
+    reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
+    Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
