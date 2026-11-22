@@ -1146,8 +1146,11 @@ function isHealthOrDeployStep(step: string): boolean {
  *  still inside its window, while a restart storm's boot count stays bounded rather than kept. */
 export const HEALTH_STEP_RETENTION_WINDOW_MS = 15 * 60 * 1000;
 
-/** Each surviving boot run keeps its newest row of these steps: its heap, its heap policy, its GitHub share. */
-const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set(["daemon.memory", "daemon.memory_policy", "github.budget.configured"]);
+const OPS_CATALOG_HOLD_STEP = "dispatch.ops_catalog_held";
+/** Each surviving boot run keeps its newest row of these steps. */
+const BOOT_LIFETIME_EVIDENCE_STEPS: ReadonlySet<string> = new Set([
+  "daemon.memory", "daemon.memory_policy", "github.budget.configured", OPS_CATALOG_HOLD_STEP,
+]);
 
 /**
  * Rows retained for per-model attribution, not daemon decisions. W1-T3080 needs `implement.done`
@@ -2060,7 +2063,7 @@ function rotateLedgerLocked(
   let candidates: ParsedLedgerLine[] = [];
   for (const parsed of originalOrder) {
     if (
-      parsed.step &&
+      parsed.step && parsed.step !== OPS_CATALOG_HOLD_STEP &&
       (retention.retained.has(parsed.step) ||
         isModelAttributionStep(parsed.step) ||
         isHealthOrDeployStep(parsed.step) ||
@@ -2215,6 +2218,7 @@ function rotateLedgerLocked(
   for (const [step, group] of byStep.entries()) {
     if (
       step === "sweep.disposed" ||
+      step === OPS_CATALOG_HOLD_STEP ||
       isHealthOrDeployStep(step) ||
       (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ||
       group.length <= (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP)
@@ -2283,7 +2287,8 @@ function rotateLedgerLocked(
     // headroom — otherwise the very next append could put it straight back over. The invariant is
     // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
     const targetBytes = Math.floor(ceilingBytes * 0.9);
-    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance" &&
+    const opsHoldsByBoot = new Map(keptCandidates.filter(p => p.step === OPS_CATALOG_HOLD_STEP).map(p => [p.json?.run_id, p]));
+    const sheddable = keptCandidates.filter((p) => p.step !== OPS_CATALOG_HOLD_STEP && p.step !== "correction.provenance" &&
       !(p.step === "sweep.disposed" && p.json?.repeat_escalated === true));
     const byAge = sheddable.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
     const stillKept = new Set(keptCandidates);
@@ -2292,6 +2297,12 @@ function rotateLedgerLocked(
       stillKept.delete(victim);
       keptBytes -= Buffer.byteLength(victim.raw + "\n", "utf8");
       shedCount++;
+      // A boot and its hold evidence have the same lifetime, even under the byte ceiling.
+      const opsHold = victim.step === "daemon.boot" ? opsHoldsByBoot.get(victim.json?.run_id) : undefined;
+      if (opsHold !== undefined && stillKept.delete(opsHold)) {
+        keptBytes -= Buffer.byteLength(opsHold.raw + "\n", "utf8");
+        shedCount++;
+      }
     }
     keptCandidates = keptCandidates.filter((p) => stillKept.has(p));
     keptLines = keptCandidates.map((p) => p.raw);
