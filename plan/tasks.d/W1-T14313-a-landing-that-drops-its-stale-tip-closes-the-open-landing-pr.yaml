@@ -1,0 +1,117 @@
+- id: W1-T14313
+  title: "When a landing's rebuilt tree equals main but the landing branch tip still holds other content, the open landing PR on that tip is closed with a comment naming the refused inputs, so a stale plan-reconcile tip cannot stay open for review and merge"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # it closes a pull request on the live landing lanes; a wrong rule closes a PR with real content, so it acts only when the head is the exact tip the build read and the rebuilt tree is main's tree
+  origin: "operator-session#reconcile-landing-keeps-stale-tip-2026-11-22"
+  plan_refs:
+    - W1-T9425
+    - W1-T13816
+    - W1-T5672
+    - W1-T3561
+    - W1-T9753
+  files:
+    - src/lib/feedback-landing.ts
+    - test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts
+    - test/a-landing-whose-tree-equals-main-pushes-nothing.test.ts
+    - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
+    - test/inbox/compress-src-lib-feedback-landing-ts.test.ts
+    - test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:stale-tip-never-stays-open — on a git fixture, the plan-reconcile landing branch holds a status flip of shard A made against an older main, and an open landing PR has that tip as its head. Main has since changed A so that its status edit is refused. landPlanReconcileShards with A as its only input returns landed false and a refused entry for A, pushes nothing, and closes that PR once with a comment that names A and its refusal reason. The landing branch on origin still points at the old tip"
+      kind: guard
+      proof: "grep: W1-T14313 criterion 1: in test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts"
+    - claim: "invariant:moved-head-is-left-alone — in the same fixture, when the open PR's head is not the branch tip the build read, or no landing PR is open, no PR is closed and the result has no error"
+      kind: guard
+      proof: "grep: W1-T14313 criterion 2: in test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts"
+    - claim: "When the branch tip's tree equals main's tree, the behaviour is the same as on origin/main: a wholly refused landing makes no gh call (W1-T9425), and any other no-op landing still runs closeRedundantLandingPr"
+      proof: "grep: W1-T14313 criterion 3: in test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts"
+    - claim: "A failed close returns landed false with an error that starts 'stale landing PR cleanup failed:' and pushes nothing. The landing.nothing_to_land ledger row carries staleTipClosed with the closed PR's url when a close succeeds, and no such field otherwise"
+      proof: "grep: W1-T14313 criterion 4: in test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts"
+    - claim: "The comment names at most 5 refused paths with their reasons, then 'and N more'"
+      proof: "grep: W1-T14313 criterion 5: in test/plan/a-wholly-refused-reconcile-batch-closes-its-stale-landing-pr.test.ts"
+    - claim: "finishLanding's no-op path calls the stale-tip close"
+      proof: "grep: closeStaleLandingPr( in src/lib/feedback-landing.ts"
+  rationale: |
+    WHAT HAPPENS (origin/main 8923f5635f, 2026-11-22; first seen on 2026-11-19). A plan-reconcile
+    batch where every input is refused, while the landing branch still holds shards from an earlier
+    batch, returns "nothing to land" and leaves the open landing PR on its stale tip.
+    THE PATH.
+    - landContent builds the tree from main (src/lib/feedback-landing.ts:1746). Since W1-T13816
+      (#19700), an earlier pending flip is carried only if its bytes equal the status edit of
+      main's current text (:1749-1762); otherwise it is dropped from the tree. An input whose edit
+      main's text no longer takes is refused (:1776-1780).
+    - When every input is refused and nothing is carried, the tree equals main's tree.
+      finishLanding's nothingToLand (:1158) logs landing.nothing_to_land. With refused inputs and
+      no unlanded path it returns at once (:1162), with no PR check. That return came from W1-T9425
+      (#12551, second commit "skip pr cleanup for wholly refused no-op landings").
+    - Even without that return, closeRedundantLandingPr (:1107) acts only when the branch tip's tree
+      equals the build tree (:1112), that is, equals main. A stale tip's tree differs, so it returns
+      and does nothing.
+    - So the open landing PR keeps a tip whose shards no current input supports. The daemon still
+      reviews that head, and its shards can carry the read copy that W1-T13816 stopped landing.
+    W1-T13816 DID NOT FIX THIS. It made a stale tip more likely: it drops stale carried flips from the
+    tree but does not touch the branch or its PR. Its diff does not touch nothingToLand or
+    closeRedundantLandingPr.
+    NEARBY BUT DIFFERENT. W1-T9425 stops a push when the tree equals main and closes a PR whose tip
+    already equals main. W1-T5672 moves the per-poll landing's git off the loop. Neither handles a tip
+    that differs from main when the rebuilt tree does not. No filed task covers it (grep of
+    plan/tasks.d for nothing_to_land and for stale landing tips, 2026-11-22).
+  design: |
+    INVARIANT stale-tip-never-stays-open: when a landing's rebuilt tree equals main's tree and the open landing PR's head is the branch tip the build read, whose tree is not main's, that PR is closed.
+    INVARIANT moved-head-is-left-alone: a PR whose head is not the tip the build read is never closed, and the branch is never pushed or deleted by this path.
+    1. src/lib/feedback-landing.ts, in finishLanding's nothingToLand (:1158), after the tree check:
+       when b.branchTipSha is set and `<branchTipSha>^{tree}` is not main's tree, call a new
+       closeStaleLandingPr(kind, net, b). It lists the open PR for kind.prHead the way
+       closeRedundantLandingPr does (:1114). It acts only when the PR's headRefOid equals
+       b.branchTipSha. It calls assertLiveWriteAllowed("gh-transport", ...) and then `gh pr close`
+       with a comment: every input of this landing was refused or is already on main, so the branch
+       tip holds content no input now supports; then the refused paths with their reasons (at most
+       5, then "and N more"). It leaves the branch in place: the next real landing force-pushes it
+       under its lease.
+    2. This check runs before the wholly-refused return at :1162, so that return now applies only when
+       the tip's tree equals main's tree. Every case where the tip's tree equals main's tree behaves
+       as today.
+    3. A close failure returns { ...result, error: "stale landing PR cleanup failed: <message>" }, as
+       :1167 does. Add staleTipClosed: <url> to the landing.nothing_to_land row only when a close
+       succeeds. Add no new ledger step and no new LandFeedbackResult field.
+    4. nothingToLand also runs after a rebuild, so the same rule holds there.
+    5. Tests go in the new file, titled "W1-T14313 criterion N: ...". Build the fixture with the
+       helpers that test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts uses
+       (a bare origin made with `git init -b main`, a fake gh that records calls). Load
+       test/setup/tmp-hygiene.ts. Change the listed existing tests only where a behaviour they pin
+       changes. src/lib/feedback-landing.ts has a comment cap: run
+       test/inbox/compress-src-lib-feedback-landing-ts.test.ts and add as few comments as you can.
+  falsifier: |
+    On origin/main, criterion 1 makes no gh pr close call and the PR stays open on the stale tip.
+    Drop the headRefOid check: criterion 2 closes a PR whose head moved. Run the new check after the
+    :1162 return instead of before it: criterion 1 fails again.
+  note: |
+    Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795352828000. The filer did
+    not push a reservation; the shipper reserves it.
+    Filed by the operator session on 2026-11-22. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Not in scope: how the reconcile picks its inputs, and resetting or deleting the landing branch.
+    PINNING TESTS. lint-plan --base listed 17 tests that import src/lib/feedback-landing.ts. The filer
+    added test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts (it closes and rebuilds a
+    landing PR). A grep for close and no-op assertions in the other 16 found none that drives a no-op
+    landing over a tip whose tree differs from main; most name only LandFeedbackResult or headRefOid:
+    test/feedback-landing-repo-scope.test.ts, test/feedback-landing.test.ts,
+    test/feedback-landing-sweep.test.ts,
+    test/inbox/a-new-decision-file-lands-in-the-plan-destination-and-readers-read-both.test.ts,
+    test/the-boot-sweep-and-content-landings-await-their-preflight.test.ts,
+    test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts,
+    test/the-per-poll-feedback-landing-runs-git-off-the-loop.test.ts,
+    test/the-per-poll-landing-awaits-its-local-git-verbs.test.ts,
+    test/a-dep-review-migration-proposal-reaches-the-plan.test.ts, test/arm-outcome-five-sites.test.ts,
+    test/catch-erasure-ratchet.test.ts, test/panel-graph.test.ts, test/run-task.test.ts,
+    test/the-inbox-slow-lane-is-not-a-second-github-fetcher.test.ts,
+    test/the-now-view-decisions-stage-reads-feedback-and-dependencies-once-per-change.test.ts and
+    test/the-remaining-daemon-feedback-captures-stage-for-the-async-sweep.test.ts.
