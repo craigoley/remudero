@@ -9,9 +9,9 @@
  * and the write-only gate is asked before the push by running its own CLI against the merge base.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { test } from "node:test";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { test, type TestContext } from "node:test";
 
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -28,6 +28,7 @@ const census = precheck as unknown as {
   writeOnlyLedgerStepViolations: (input: { changed: string[]; readHead: (p: string) => string | null; runRatchet?: () => Child }) => string[];
   runWriteOnlyLedgerStepChild: (input: { root: string; mergeBase: string; run?: (...args: unknown[]) => unknown }) => Child;
   evaluateCensusPrecheck: (input: unknown) => string[];
+  main: (argv: string[], seams: Record<string, unknown>) => number;
 };
 const CI = ".github/workflows/ci.yml";
 const BASELINE = "scripts/write-only-ledger-step-baseline.json";
@@ -162,4 +163,52 @@ test("W1-T14250: the real child runs the gate's own CLI against the merge base, 
   const failed = census.runWriteOnlyLedgerStepChild({ root: repo.dir, mergeBase: head,
     run: () => ({ status: null, stdout: null, error: new Error("spawn node ENOENT") }) });
   assert.deepEqual(failed, { status: null, stdout: "\nspawn node ENOENT" });
+});
+
+/** A `work` branch over a `main` commit, with the census's own inputs copied byte for byte. */
+function censusTree(t: TestContext, seed: Record<string, string>, change: Record<string, string>): string {
+  const tree = gitRepo({ kind: "w1-t14250-census", scope: t });
+  for (const path of ["src/lib/rule-suites.ts", "scripts/census-precheck.mjs"]) {
+    mkdirSync(dirname(join(tree.dir, path)), { recursive: true });
+    copyFileSync(join(REPO_ROOT, path), join(tree.dir, path));
+  }
+  const write = (files: Record<string, string>) => {
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(tree.dir, path)), { recursive: true });
+      writeFileSync(join(tree.dir, path), text);
+    }
+  };
+  write(seed);
+  tree.git("add", "-A");
+  tree.git("commit", "--quiet", "-m", "the base");
+  tree.git("switch", "--quiet", "-c", "work");
+  write(change);
+  tree.git("add", "-A");
+  tree.git("commit", "--quiet", "-m", "the change");
+  return tree.dir;
+}
+
+test("W1-T14250: the precheck CLI asks the write-only gate through its own child, and a recorded step passes", (t) => {
+  const rules = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`test/rules/r${i + 1}.test.ts`, "export {};\n"]));
+  const steps = (names: string[]) => `export function f(log: (s: string, o: object) => void) {\n${names.map((n) => `  log("${n}", {});`).join("\n")}\n}\n`;
+  const debt = (writeOnly: string[], recordOnly: Record<string, string> = {}) => `${JSON.stringify({ _comment: "fixture", writeOnly, recordOnly }, null, 2)}\n`;
+  const seed = { ...rules, "scripts/census-precheck-parity-baseline.json": JSON.stringify({ ciOnly: Object.keys(rules), ciOnlyScripts: {} }),
+    "src/lib/a.ts": steps(["fixture.unread"]), [BASELINE]: debt(["fixture.unread"]) };
+  const census_ = (root: string) => {
+    const err: string[] = [];
+    const error = t.mock.method(console, "error", (...a: unknown[]) => void err.push(a.join(" ")));
+    const log = t.mock.method(console, "log", () => {});
+    try {
+      return { status: census.main(["--root", root, "--base", "main", "--counts-only"], {}), err };
+    } finally {
+      error.mock.restore();
+      log.mock.restore();
+    }
+  };
+  const unrecorded = census_(censusTree(t, seed, { "src/lib/a.ts": steps(["fixture.unread", "fixture.second"]) }));
+  assert.equal(unrecorded.status, 1, unrecorded.err.join("\n"));
+  assert.ok(unrecorded.err.some((l) => /write-only-ledger-step: BLOCKED — 1 unrecorded.*steps: fixture\.second/.test(l)), unrecorded.err.join("\n"));
+  const recorded = census_(censusTree(t, seed, { "src/lib/a.ts": steps(["fixture.unread", "fixture.second"]),
+    [BASELINE]: debt(["fixture.unread"], { "fixture.second": "a fixture record nothing needs to read" }) }));
+  assert.equal(recorded.status, 0, recorded.err.join("\n"));
 });
