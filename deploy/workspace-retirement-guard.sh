@@ -3,10 +3,14 @@
 # trailers are NOT proof that a workspace's current commits were pushed.
 # Source this file; callers still own age, activity, data and lender guards.
 # Bash 3.2 compatible, no fetch, no persisted publication cache.
-RMD_PUB_URLS=(); RMD_PUB_ROWS=()
+RMD_PUB_URLS=(); RMD_PUB_ROWS=(); RMD_PUB_HOLD_ROWS=()
 # RMD_PUB_REASON is the public output inspected by sourcing callers.
 # shellcheck disable=SC2034
 RMD_PUB_REFS=""; RMD_PUB_REASON="publication-unverified"
+RMD_PUB_INCLUDE_HOLDS=0; RMD_PUB_HOLD_REFS=""
+# The Mac janitor distinguishes an unreadable listing from absent refs.
+# shellcheck disable=SC2034
+RMD_PUB_REFS_READ=0
 RMD_PUB_GRAPH_KEY=""; RMD_PUB_GRAPH=""
 RMD_DECISION_PASS_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # Git reads can otherwise hydrate promisor objects. Older Git (including the
@@ -27,26 +31,75 @@ rmd_retirement_git() {
   GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$top" -C "$repo" "$@"
 }
 rmd_publication_snapshot() {
-  local repo="$1" refresh="${2:-0}" url rows i
+  local repo="$1" refresh="${2:-0}" url rows holds="" i
+  local patterns=('refs/heads/*' 'refs/tags/*' 'refs/pull/*/head')
   RMD_PUB_REASON="publication-unverified"; RMD_PUB_REFS=""
+  RMD_PUB_HOLD_REFS=""; RMD_PUB_REFS_READ=0
   url=$(rmd_retirement_git "$repo" remote get-url origin 2>/dev/null) || return 1
   [ -n "$url" ] || return 1
   for ((i=0; i<${#RMD_PUB_URLS[@]}; i++)); do
     if [ "$refresh" = 0 ] && [ "${RMD_PUB_URLS[$i]}" = "$url" ]; then
-      RMD_PUB_REFS="${RMD_PUB_ROWS[$i]}"; return 0
+      RMD_PUB_REFS="${RMD_PUB_ROWS[$i]}"; RMD_PUB_HOLD_REFS="${RMD_PUB_HOLD_ROWS[$i]}"
+      RMD_PUB_REFS_READ=1; return 0
     fi
   done
   # Pull-request head refs preserve exact pushed tips after a branch is
   # deleted on squash merge. An ancestor is accepted only against a freshly
   # advertised head/tag whose commit is locally readable.
+  if [ "$RMD_PUB_INCLUDE_HOLDS" = 1 ]; then
+    patterns+=('refs/rmd-dispatch/*' 'refs/rmd-id/*')
+  fi
   rows=$(rmd_retirement_git "$repo" -c http.lowSpeedLimit=1 -c http.lowSpeedTime=20 \
-    ls-remote origin 'refs/heads/*' 'refs/tags/*' 'refs/pull/*/head' 2>/dev/null) || return 1
+    ls-remote origin "${patterns[@]}" 2>/dev/null) || return 1
+  RMD_PUB_REFS_READ=1
+  if [ "$RMD_PUB_INCLUDE_HOLDS" = 1 ]; then
+    # A claim or reservation can keep a worktree, but cannot prove publication.
+    holds=$(awk '$2 ~ /^refs\/rmd-(dispatch|id)\//' <<< "$rows")
+    rows=$(awk '$2 !~ /^refs\/rmd-(dispatch|id)\//' <<< "$rows")
+  fi
   [ -n "$rows" ] || return 1
-  RMD_PUB_REFS="$rows"
+  RMD_PUB_REFS="$rows"; RMD_PUB_HOLD_REFS="$holds"
   for ((i=0; i<${#RMD_PUB_URLS[@]}; i++)); do
-    if [ "${RMD_PUB_URLS[$i]}" = "$url" ]; then RMD_PUB_ROWS[i]="$rows"; return 0; fi
+    if [ "${RMD_PUB_URLS[$i]}" = "$url" ]; then RMD_PUB_ROWS[i]="$rows"; RMD_PUB_HOLD_ROWS[i]="$holds"; return 0; fi
   done
-  RMD_PUB_URLS+=("$url"); RMD_PUB_ROWS+=("$rows")
+  RMD_PUB_URLS+=("$url"); RMD_PUB_ROWS+=("$rows"); RMD_PUB_HOLD_ROWS+=("$holds")
+}
+
+# Return 0 for a head main already holds, 1 for a head with work of its own,
+# and 2 when local ancestry cannot be determined.
+rmd_worktree_main_relation() {
+  local repo="$1" head="$2" result=0
+  rmd_retirement_git "$repo" merge-base --is-ancestor "$head" refs/remotes/origin/main 2>/dev/null || result=$?
+  [ "$result" -le 1 ] || return 2
+  return "$result"
+}
+
+# Read holds from the caller's publication snapshot. Reservation holder lines
+# put branch= first, and a run-unfiled branch needs no percent encoding.
+rmd_worktree_hold_ref() {
+  local repo="$1" branch="$2" ref known matches
+  [ -n "$RMD_PUB_HOLD_REFS" ] || return 1
+  if [[ "$branch" =~ ^run-unfiled-[0-9]+$ ]]; then
+    # Only inspect commits present locally. Batch the reads so the number of
+    # subprocesses does not grow with the number of advertised reservations.
+    known=$(printf '%s\n' "$RMD_PUB_HOLD_REFS" | awk '$2 ~ /^refs\/rmd-id\// { print $1 }' |
+      rmd_retirement_git "$repo" cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null |
+      awk '$2 == "commit" { print $1 }') || return 1
+    [ -n "$known" ] || return 1
+    matches=$(printf '%s\n' "$known" | rmd_retirement_git "$repo" log --no-walk=unsorted --stdin \
+      --no-notes --no-show-signature --format=%H --extended-regexp \
+      --grep="^rmd-id holder branch=$branch([[:space:]]|$)" 2>/dev/null) || return 1
+    [ -n "$matches" ] || return 1
+    awk -v matches="$matches" '
+      BEGIN { n=split(matches, hashes, "\n"); for (i=1; i<=n; i++) held[hashes[i]]=1 }
+      $2 ~ /^refs\/rmd-id\// && ($1 in held) { print $2; exit }
+    ' <<< "$RMD_PUB_HOLD_REFS"
+  elif [[ "$branch" =~ ^run-(.+)-[0-9]+$ ]]; then
+    ref="refs/rmd-dispatch/${BASH_REMATCH[1]}"
+    awk -v ref="$ref" '$2 == ref { print $2; found=1; exit } END { exit !found }' <<< "$RMD_PUB_HOLD_REFS"
+  else
+    return 1
+  fi
 }
 rmd_commit_published() {
   local repo="$1" commit="$2" common key known graph

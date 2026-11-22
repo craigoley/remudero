@@ -1316,13 +1316,15 @@ export function reviewerRegressionEscalation(incident: ReviewerIncident, conflic
     ].join("\n"),
     options: [
       { label: "Let the revert PR merge", detail: "Its review runs on the healed tree; the incident closes once the reviewer's outcomes return to baseline.", kind: { type: "operator-only" } },
-      { label: "Heal with a fix PR", detail: `Record the fix PR as \`operatorHeal\` in state/reviewer-health.json (reviewerHealCommand) to review from origin/main merged with it instead of the revert${pr === null ? "" : ` of #${pr}`}.`, kind: { type: "operator-only" } },
+      conflict
+        ? { label: "Let the incident close itself", detail: "Nothing is healing it: no revert PR is open and no fix PR is chosen, so reviews already run from today's path. The incident and this issue close on the next evaluation once today's reviewer is not regressed on its own run (W1-T13393).", kind: { type: "operator-only" } }
+        : { label: "Heal with a fix PR", detail: `Record the fix PR as \`operatorHeal\` in state/reviewer-health.json (reviewerHealCommand) to review from origin/main merged with it instead of the revert${pr === null ? "" : ` of #${pr}`}.`, kind: { type: "operator-only" } },
       { label: "Close as a false alarm", detail: "Close this issue and the revert PR; the detector keeps measuring and closes the incident itself once the reviewer reads healthy.", kind: { type: "operator-only" } },
     ],
-    recommendation: conflict ? "Heal with a fix PR" : "Let the revert PR merge",
+    recommendation: conflict ? "Let the incident close itself" : "Let the revert PR merge",
     headDedup: "independent",
     consequence: conflict
-      ? "Reviews keep running on the regressed reviewer, as before this incident, until a fix merges."
+      ? "Reviews keep running from today's path, as before this incident, until the incident closes itself or a fix merges."
       : "Reviews keep running from the healed tree until the incident closes; nothing merges without review.",
   };
 }
@@ -1407,8 +1409,12 @@ export function claimHealedDeathEscalation(incident: ReviewerIncident): boolean 
 /** W1-T14283 — the incident as an escalation when its healed child dies before it can judge: reviews then run from today's path. */
 export function reviewerHealedChildDiedEscalation(incident: ReviewerIncident, failure: string): Escalation {
   const base = reviewerRegressionEscalation(incident, { reason: failure, paths: [] });
+  // A ready healed tree clears the record W1-T13393's close reads, so no self-close is promised here, and the heal verb is not offered.
   return {
     ...base,
+    options: reviewerRegressionEscalation(incident).options.filter((o) => o.label !== "Heal with a fix PR"),
+    recommendation: "Let the revert PR merge",
+    consequence: "Reviews keep running on the regressed reviewer, as before this incident, until a fix merges.",
     summary: `Reviewer regression ${incident.id}: the healed reviewer dies before it can judge`,
     detail: [
       reviewerRegressionEvidenceText(incident),
@@ -2089,7 +2095,8 @@ export async function readReviewerHealthRows(stateDir: string, cursor: ReviewerH
 
 /** The operator's explicit choice of a fix PR the healed reviewer merges instead of the revert, when the
  *  revert no longer applies (`--with-pr <n>`, or `--clear`). Its `rmd reviewer-heal` verb is not registered
- *  yet: a new CLI-only verb needs a row in the console-parity baseline, the operator's call. */
+ *  yet: a new CLI-only verb needs a row in the console-parity baseline, the operator's call, so a conflict's
+ *  escalation no longer offers it (W1-T14351); it recommends letting the incident close itself. */
 export function reviewerHealCommand(rest: readonly string[], statePath: string, clock: Pick<Clock, "iso">,
   out: (line: string) => void, err: (line: string) => void): number {
   const state = loadReviewerHealthState(statePath);
