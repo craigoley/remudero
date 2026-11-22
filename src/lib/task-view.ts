@@ -27,7 +27,8 @@ import type { GitHub, StatusProjection } from "./status.js";
 import { taskCardRuns, type TaskCardRun } from "./task-card.js";
 import { TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
 import { describeSource } from "./view-freshness.js";
-import type { ViewSource } from "./views.js";
+import { ACTIVITY_RING_ROWS } from "./ledger-projector.js";
+import { encodeTaskActivityCursor, readTaskActivityCursor, TASK_ACTIVITY_RUN_SHAPE, type TaskActivityCursor, type ViewSource } from "./views.js";
 
 /**
  * One instance's projector, as the worker last saw it. Posted to the main thread every tick. It is
@@ -64,6 +65,15 @@ export const TASK_VIEW_TAIL_LINES = 40;
 const TAIL_LINE_CHARS = 300;
 const ACCEPTANCE_ROWS = 20;
 const RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
+/** PRIMARY CONTROL: events one activity page carries. */
+export const TASK_ACTIVITY_PAGE_EVENTS = 50;
+/** BACKSTOP: JSON bytes of one activity page's events; a page that reaches it ends early and says it has more. */
+export const TASK_ACTIVITY_PAGE_BYTES = 16 * 1024;
+/** PRIMARY CONTROL: activity demand keys (one per distinct run or cursor) admitted per task; the most recently read win. */
+export const TASK_ACTIVITY_KEYS_PER_TASK = 4;
+/** PRIMARY CONTROL: activity demand keys admitted in one materialization pass, across every task: the pass's total ring work. */
+export const TASK_ACTIVITY_PASS_KEYS = 16;
+const ACTIVITY_STEP_CHARS = 120;
 
 /** A run's PR as the gateway holds it; `unknown` when the snapshot does not. */
 export interface TaskViewPr {
@@ -76,6 +86,36 @@ export interface TaskViewPr {
 
 export interface TaskViewRun extends TaskCardRun {
   pr?: TaskViewPr;
+}
+
+/** One activity ring row of the run, reduced to what an observer needs: never a prompt, tool argument or transcript body. */
+export interface TaskActivityEvent {
+  /** The ring's apply sequence: the order events are delivered in, which equal timestamps do not disturb. */
+  seq: number;
+  /** The row's own stable identity, `<ms timestamp>:<line hash>`; a replayed page repeats it exactly. */
+  id: string;
+  ts: string;
+  step: string;
+}
+
+/**
+ * One page of a task run's activity, read from the projector's `activity_ring`. `unavailable` is the ONLY state
+ * that says nothing about history: an empty `available` page with a `cursor` is "caught up at that position",
+ * and `retentionGap` or `reset` say the cursor could not be continued (the ring rolled past it, or its corpus
+ * is not this one), so the page restarts at the oldest retained event and the observer must not call it complete.
+ */
+export interface TaskActivity {
+  state: "available" | "unavailable";
+  runId: string;
+  events: TaskActivityEvent[];
+  /** More events of this run follow in the ring than this page carries. */
+  hasMore: boolean;
+  retentionGap: boolean;
+  reset: boolean;
+  /** Pass it back as `activityCursor`: after the page's last event while `hasMore`, else the validated ring tail. */
+  cursor?: string;
+  ring?: { rows: number; capacity: number };
+  reason?: string;
 }
 
 export interface TaskViewData {
@@ -93,6 +133,8 @@ export interface TaskViewData {
   /** The newest run's peek tail. */
   tail?: { runId: string; lines: string[] };
   trace: { runs: number; merged: boolean; costUsd: number; lastVerdict?: string; firstTs?: string; lastTs?: string };
+  /** Present only when the request named `activityRun`; observation only, it never changes `found`, `runs` or `trace`. */
+  activity?: TaskActivity;
 }
 
 export interface TaskViewOptions {
@@ -141,6 +183,89 @@ export function readRunTail(instance: NowInstance, runId: string, lines: number 
   return split.slice(-lines).map((line) => (line.length > TAIL_LINE_CHARS ? `${line.slice(0, TAIL_LINE_CHARS)}…` : line));
 }
 
+function unavailableActivity(runId: string, reason: string): TaskActivity {
+  return { state: "unavailable", runId, events: [], hasMore: false, retentionGap: false, reset: false, reason };
+}
+
+/** What a request asked of the activity feed: one exact run and, optionally, the cursor to continue after. */
+interface ActivityRequest { run: string; cursor?: string }
+
+/**
+ * One page of `run`'s activity for task `id`, from the projector's `activity_ring` (the newest rows of ANY step;
+ * `fact` keeps only decision steps and would silently omit events). The task and run are matched exactly on the
+ * row's own `task_id` and `run_id`; the page is in ring apply order (`seq`), so equal timestamps neither skip nor
+ * repeat. Ring, tail and page are read in one snapshot. A store or ring that cannot be read answers `unavailable`,
+ * never an empty page.
+ */
+function readTaskActivity(
+  db: ReadModelDb | undefined, state: ReadModelInstanceState, id: string, request: ActivityRequest,
+  log: (step: string, extra: Record<string, unknown>) => void,
+): TaskActivity {
+  const { run } = request;
+  if (!db) return unavailableActivity(run, "the read model store is not open yet");
+  const parsed = request.cursor === undefined ? undefined : readTaskActivityCursor(request.cursor, { instance: state.instance, id, run });
+  if (parsed && "error" in parsed) return unavailableActivity(run, parsed.error);
+  const cursor: TaskActivityCursor | undefined = parsed?.cursor;
+  const own = !db.inTransaction();
+  try {
+    if (own) db.exec("BEGIN");
+    try {
+      if (db.prepare("SELECT 1 AS ok FROM pragma_table_info('activity_ring') WHERE name = 'seq'").get() === undefined) {
+        return unavailableActivity(run, "the activity ring is not built yet");
+      }
+      const ring = db.prepare("SELECT count(*) AS n, min(ts_ms) AS lo FROM activity_ring").get();
+      const rows = Number(ring?.n ?? 0);
+      const oldest = ring?.lo === null || ring?.lo === undefined ? undefined : Number(ring.lo);
+      let after = 0;
+      let retentionGap = false;
+      let reset = false;
+      if (cursor) {
+        const held = cursor.g > state.generation ? undefined : db.prepare("SELECT ts_ms, CAST(h AS TEXT) AS h FROM activity_ring WHERE seq = ?").get(cursor.s);
+        if (held && Number(held.ts_ms) === cursor.m && String(held.h) === cursor.h) after = cursor.s;
+        else if (cursor.g <= state.generation && oldest !== undefined && cursor.m <= oldest) retentionGap = true;
+        else reset = true;
+      }
+      const found = db.prepare(`SELECT seq, ts_ms, CAST(h AS TEXT) AS h,
+          CASE WHEN json_valid(body) THEN json_extract(body, '$.ts') END AS ts, CASE WHEN json_valid(body) THEN json_extract(body, '$.step') END AS step
+        FROM activity_ring WHERE seq > ? AND CASE WHEN json_valid(body) THEN json_extract(body, '$.task_id') END = ?
+          AND CASE WHEN json_valid(body) THEN json_extract(body, '$.run_id') END = ? ORDER BY seq LIMIT ?`).all(after, id, run, TASK_ACTIVITY_PAGE_EVENTS + 1);
+      const events: TaskActivityEvent[] = [];
+      const last: Array<{ seq: number; ts_ms: number; h: string }> = [];
+      let bytes = 0;
+      let hasMore = found.length > TASK_ACTIVITY_PAGE_EVENTS;
+      for (const row of found.slice(0, TASK_ACTIVITY_PAGE_EVENTS)) {
+        const ts = typeof row.ts === "string" ? row.ts.slice(0, 40) : new Date(Number(row.ts_ms)).toISOString();
+        const step = typeof row.step === "string" ? row.step.slice(0, ACTIVITY_STEP_CHARS) : "unknown";
+        const event: TaskActivityEvent = { seq: Number(row.seq), id: `${String(row.ts_ms)}:${String(row.h)}`, ts, step };
+        bytes += Buffer.byteLength(JSON.stringify(event)) + 1;
+        if (bytes > TASK_ACTIVITY_PAGE_BYTES && events.length > 0) {
+          hasMore = true;
+          break;
+        }
+        events.push(event);
+        last.length = 0;
+        last.push({ seq: event.seq, ts_ms: Number(row.ts_ms), h: String(row.h) });
+      }
+      // While more follow, the cursor stands after the last event delivered; caught up, it is the ring's own tail, the corpus identity the page was validated against.
+      const edge = hasMore ? last[0] : db.prepare("SELECT seq, ts_ms, CAST(h AS TEXT) AS h FROM activity_ring ORDER BY seq DESC LIMIT 1").get();
+      const next = edge ? encodeTaskActivityCursor({ i: state.instance, t: id, r: run, g: state.generation, s: Number(edge.seq), m: Number(edge.ts_ms), h: String(edge.h) }) : undefined;
+      return {
+        state: "available", runId: run, events, hasMore, retentionGap, reset,
+        ...(next ? { cursor: next } : {}), ring: { rows, capacity: ACTIVITY_RING_ROWS },
+        ...(retentionGap ? { reason: "the ring rolled past the cursor; this page restarts at the oldest retained event" } : {}),
+        ...(reset ? { reason: "the cursor does not belong to this activity ring; this page restarts at the oldest retained event" } : {}),
+      };
+    } finally {
+      if (own) db.exec("COMMIT");
+    }
+  } catch (error) {
+    // Reported, not erased: an unreadable ring answers unavailable with why, never an empty page that reads as complete history.
+    const reason = `the activity ring could not be read: ${(error as Error).message}`;
+    log("read_model.task_activity_failed", { instance: state.instance, id, run, error: (error as Error).message });
+    return unavailableActivity(run, reason);
+  }
+}
+
 export function createTaskView(opts: TaskViewOptions): {
   name: string;
   version: number;
@@ -186,12 +311,12 @@ export function createTaskView(opts: TaskViewOptions): {
     }
   }
 
-  function build(instanceName: string, id: string, now: number, slot: { state: ReadModelInstanceState; db?: ReadModelDb } | undefined): { data: TaskViewData; sources: ViewSource[] } {
+  function build(instanceName: string, id: string, now: number, slot: { state: ReadModelInstanceState; db?: ReadModelDb } | undefined, activity?: ActivityRequest): { data: TaskViewData; sources: ViewSource[] } {
     const instance = byName.get(instanceName);
     const empty: TaskViewData = { instance: instanceName, id, found: false, runs: [], facts: [], factsTruncated: false, trace: { runs: 0, merged: false, costUsd: 0 } };
     if (!instance || !slot) {
       const reason = `no instance named ${instanceName} is projected`;
-      return { data: { ...empty, reason }, sources: [describeSource({ name: `ledger:${instanceName}`, asOf: null, state: "unavailable", reason })] };
+      return { data: { ...empty, reason, ...(activity ? { activity: unavailableActivity(activity.run, reason) } : {}) }, sources: [describeSource({ name: `ledger:${instanceName}`, asOf: null, state: "unavailable", reason })] };
     }
     const sources: ViewSource[] = [opts.ledgerSource(slot.state, now)];
     const db = slot.db;
@@ -267,6 +392,7 @@ export function createTaskView(opts: TaskViewOptions): {
       factsTruncated,
       ...(newest && lines ? { tail: { runId: newest.runId, lines } } : {}),
       trace: { runs: runs.length, merged: projection?.merged ?? false, costUsd: Math.round(costUsd * 1e6) / 1e6, ...(lastVerdict ? { lastVerdict } : {}), ...(firstTs ? { firstTs } : {}), ...(lastTs ? { lastTs } : {}) },
+      ...(activity ? { activity: readTaskActivity(db, slot.state, id, activity, log) } : {}),
     };
     return { data, sources };
   }
@@ -275,18 +401,48 @@ export function createTaskView(opts: TaskViewOptions): {
     name: TASK_VIEW_NAME,
     version: TASK_VIEW_VERSION,
     demand: true,
-    materialize: ({ now, instances }) => opts.demand.keys(TASK_VIEW_NAME).map((key) => {
-      const params = new URLSearchParams(key);
-      const instance = params.get("instance") ?? "";
-      const id = params.get("id") ?? "";
-      try {
-        return { key, ...build(instance, id, now, instances.find((slot) => slot.state.instance === instance)) };
-      } catch (error) {
-        // One key that cannot be built answers as unavailable; it never takes the other keys' bodies with it.
-        const reason = (error as Error).message;
-        log("read_model.task_view_failed", { instance, id, error: reason });
-        return { key, data: { instance, id, found: false, reason, runs: [], facts: [], factsTruncated: false, trace: { runs: 0, merged: false, costUsd: 0 } }, sources: [describeSource({ name: `ledger:${instance}`, asOf: null, state: "unavailable", reason })] };
+    materialize: ({ now, instances }) => {
+      const keys = opts.demand.keys(TASK_VIEW_NAME);
+      const requested = (key: string): ActivityRequest | undefined => {
+        const params = new URLSearchParams(key);
+        const run = params.get("activityRun");
+        if (run === null || !TASK_ACTIVITY_RUN_SHAPE.test(run)) return undefined;
+        const cursor = params.get("activityCursor");
+        return { run, ...(cursor === null ? {} : { cursor }) };
+      };
+      // Admission reuses the demand book's own recency order (least recently read first): the most recently read activity keys
+      // of each task, and of the whole pass, are built; the rest answer unavailable without touching the ring or the plan.
+      const admitted = new Set<string>();
+      const perTask = new Map<string, number>();
+      for (const key of [...keys].reverse()) {
+        if (!requested(key)) continue;
+        const params = new URLSearchParams(key);
+        const task = `${params.get("instance") ?? ""}\u0000${params.get("id") ?? ""}`;
+        if (admitted.size >= TASK_ACTIVITY_PASS_KEYS || (perTask.get(task) ?? 0) >= TASK_ACTIVITY_KEYS_PER_TASK) continue;
+        admitted.add(key);
+        perTask.set(task, (perTask.get(task) ?? 0) + 1);
       }
-    }),
+      const bounded = keys.filter((key) => requested(key) && !admitted.has(key)).length;
+      if (bounded > 0) log("read_model.task_activity_bounded", { admitted: admitted.size, bounded });
+      return keys.map((key) => {
+        const params = new URLSearchParams(key);
+        const instance = params.get("instance") ?? "";
+        const id = params.get("id") ?? "";
+        const activity = requested(key);
+        if (activity && !admitted.has(key)) {
+          const reason = `the task activity demand bound (${TASK_ACTIVITY_KEYS_PER_TASK} per task, ${TASK_ACTIVITY_PASS_KEYS} per pass) holds this key back`;
+          return { key, data: { instance, id, found: false, reason, runs: [], facts: [], factsTruncated: false, trace: { runs: 0, merged: false, costUsd: 0 }, activity: unavailableActivity(activity.run, reason) },
+            sources: [describeSource({ name: `ledger:${instance}`, asOf: null, state: "unavailable", reason })] };
+        }
+        try {
+          return { key, ...build(instance, id, now, instances.find((slot) => slot.state.instance === instance), activity) };
+        } catch (error) {
+          // One key that cannot be built answers as unavailable; it never takes the other keys' bodies with it.
+          const reason = (error as Error).message;
+          log("read_model.task_view_failed", { instance, id, error: reason });
+          return { key, data: { instance, id, found: false, reason, runs: [], facts: [], factsTruncated: false, trace: { runs: 0, merged: false, costUsd: 0 }, ...(activity ? { activity: unavailableActivity(activity.run, reason) } : {}) }, sources: [describeSource({ name: `ledger:${instance}`, asOf: null, state: "unavailable", reason })] };
+        }
+      });
+    },
   };
 }

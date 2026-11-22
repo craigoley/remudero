@@ -13271,6 +13271,58 @@ components:
             lastVerdict: {type: string}
             firstTs: {type: string}
             lastTs: {type: string}
+        activity:
+          $ref: "#/components/schemas/TaskActivity"
+
+    TaskActivity:
+      type: object
+      description: >
+        One bounded page of one run's activity (src/lib/task-view.ts; W1-T11395), present only when the request
+        named activityRun. Read from the projector's activity_ring, matched on the row's own task_id and run_id and
+        delivered in ring apply order. An empty available page with a cursor is caught up at that position;
+        retentionGap and reset say the cursor could not be continued and the page restarts at the oldest retained
+        event; unavailable says nothing about history. It is an observation feed only: it carries no prompt,
+        credential, transcript body or tool argument, and it never starts, resumes, retries, reassigns or completes a worker.
+      required: [state, runId, events, hasMore, retentionGap, reset]
+      properties:
+        state: {type: string, enum: [available, unavailable]}
+        runId: {type: string}
+        events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/TaskActivityEvent"
+        hasMore:
+          type: boolean
+          description: More events of this run follow in the ring than this page carries.
+        retentionGap:
+          type: boolean
+          description: The ring rolled past the cursor, so events between it and the first one here may be lost.
+        reset:
+          type: boolean
+          description: The cursor does not belong to this ring (another corpus, a future position or a rebuilt store).
+        cursor:
+          type: string
+          maxLength: 256
+          description: Pass back as activityCursor. After the last event while hasMore, else the validated ring tail.
+        ring:
+          type: object
+          required: [rows, capacity]
+          properties:
+            rows: {type: number}
+            capacity: {type: number}
+        reason: {type: string}
+
+    TaskActivityEvent:
+      type: object
+      required: [seq, id, ts, step]
+      properties:
+        seq: {type: number}
+        id:
+          type: string
+          description: The row's stable identity, its millisecond timestamp and line hash.
+        ts: {type: string, maxLength: 40}
+        step: {type: string, maxLength: 120}
 
     TaskViewRun:
       type: object
@@ -22234,6 +22286,21 @@ paths:
           required: true
           description: The task id to look up in that instance.
           schema: {type: string, minLength: 1}
+        - name: activityRun
+          in: query
+          required: false
+          description: >
+            W1-T11395: one exact run id of the task. Adds data.activity, a bounded page of that run's activity
+            from the activity ring. Each distinct activityRun or activityCursor is its own demand key, held to
+            four per task and sixteen per materialization pass; a key held back answers activity.state=unavailable.
+          schema: {type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$"}
+        - name: activityCursor
+          in: query
+          required: false
+          description: >
+            W1-T11395: a cursor from a previous data.activity.cursor, at most 256 bytes, valid only with the same
+            instance, id and activityRun. A malformed, oversized, foreign or other-run cursor answers 400 invalid_request.
+          schema: {type: string, maxLength: 256}
         - name: If-None-Match
           in: header
           required: false
