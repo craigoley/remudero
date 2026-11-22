@@ -131,7 +131,7 @@ export interface ReviewerHealthState {
    *  on the same key is a second hold, which the review gate never writes while its ledger read works. */
   holds: Record<string, { sha: string; at: string }>;
   incident: ReviewerIncident | null;
-  closed: Array<ReviewerIncident & { closedAt: string }>;
+  closed: Array<ReviewerIncident & { closedAt: string; closedReason?: "returned-to-baseline" | "blame-cleared" }>;
   /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
   operatorHeal: { withPr: number; at: string } | null;
   coverage: { rows: number; unattributed: number };
@@ -401,6 +401,46 @@ export function returnedToBaseline(state: ReviewerHealthState, incident: Reviewe
   const newest = regressed.at(-1);
   const level = newest === undefined ? { k: incident.evidence.k, n: incident.evidence.n } : shaCounts(newest);
   return { returned: level.n > 0 && judgment.interval.upper < wilsonInterval(level.k, level.n, judgment.z).lower, judgment };
+}
+
+/** The pooled outcomes of every healed sha recorded since the incident opened, and of its regressed shas. */
+export interface ReviewerBlameEvidence {
+  healed: { k: number; n: number; shas: number };
+  regressed: { k: number; n: number };
+  judgment: ReviewerShaJudgment;
+  regressedInterval: { lower: number; upper: number } | null;
+}
+
+/**
+ * W1-T13902 — INVARIANT healing-keeps-its-incident: has the healed tree failed no less often than the
+ * code it was healed from? The healed pool is judged against the incident's pre-onset baseline with
+ * judgeCounts (Wilson at the family z), and is `insufficient` too when even all-posted healed reviews could not
+ * have read clearly better than the regressed pool: `insufficient` never clears. When it is sufficient and its
+ * interval's upper bound is not below the regressed pool's lower bound, reverting the blamed merge did
+ * not help, so the blame was wrong and the incident closes. A healed reviewer clearly better than the
+ * regressed shas keeps the incident open: the revert is working.
+ */
+export function blameCleared(state: ReviewerHealthState, incident: ReviewerIncident): { cleared: boolean; evidence: ReviewerBlameEvidence } {
+  const healed = { k: 0, n: 0, shas: 0 };
+  for (const rec of Object.values(state.shas)) {
+    if (!rec.healed || rec.seq <= incident.regressedSeq) continue;
+    const c = shaCounts(rec);
+    healed.k += c.k;
+    healed.n += c.n;
+    if (c.n > 0) healed.shas += 1;
+  }
+  const regressedShas = incidentRegressed(state, incident);
+  const regressed = regressedShas.length === 0 ? { k: incident.evidence.k, n: incident.evidence.n }
+    : regressedShas.reduce((acc, rec) => { const c = shaCounts(rec); return { k: acc.k + c.k, n: acc.n + c.n }; }, { k: 0, n: 0 });
+  let judgment = judgeCounts(state, incident.offending?.sha ?? incident.regressedSha, healed.k, healed.n, incident.evidence.baseline);
+  const regressedInterval = judgment.z === null || regressed.n === 0 ? null : wilsonInterval(regressed.k, regressed.n, judgment.z);
+  // judgeCounts' thin-sample rule, mirrored against the regressed pool: had every healed unit posted, the
+  // healed interval must lie wholly below the regressed one, or the sample could not have shown recovery.
+  if (judgment.state !== "insufficient" && judgment.z !== null && regressedInterval !== null
+    && wilsonInterval(0, healed.n, judgment.z).upper >= regressedInterval.lower) judgment = { ...judgment, state: "insufficient", reason: "thin-against-regressed" };
+  const evidence = { healed, regressed, judgment, regressedInterval };
+  if (judgment.state === "insufficient" || judgment.interval === null || regressedInterval === null) return { cleared: false, evidence };
+  return { cleared: judgment.interval.upper >= regressedInterval.lower, evidence };
 }
 
 export interface OffendingMerge { sha: string; subject: string; pr: number | null; reason: string }
@@ -779,9 +819,11 @@ export async function evaluateReviewerHealthNow(
       reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
   };
 
-  const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean): Promise<void> => {
+  const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean, cleared?: ReviewerBlameEvidence): Promise<void> => {
     const incident = state.incident!;
-    state.closed = [...state.closed, { ...incident, closedAt: clock.iso() }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
+    // The closed record keeps its signature either way, so a recurrence is matched as before.
+    state.closed = [...state.closed, { ...incident, closedAt: clock.iso(),
+      ...(cleared === undefined ? {} : { closedReason: "blame-cleared" as const }) }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
     state.incident = null;
     if (!live) return;
     let revertPr: "open" | "closed" | "merged" | "unread" | null = null;
@@ -792,8 +834,12 @@ export async function evaluateReviewerHealthNow(
         revertPr = "unread"; // deliberate: an unread PR is left open, never closed blind
       }
     }
-    const comment = `Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) is back inside its baseline: ${judgment.k} of ${judgment.n} ` +
-      `not posted against ${judgment.baseline.k} of ${judgment.baseline.n} before (W1-T10269).`;
+    const comment = cleared !== undefined
+      ? `The healed reviewer (origin/main with ${incident.offending?.sha.slice(0, 12) ?? "the blamed merge"} reverted) failed no less often than ` +
+        `the regressed reviewer code: ${cleared.healed.k} of ${cleared.healed.n} not posted against ${cleared.regressed.k} of ${cleared.regressed.n}, ` +
+        "so the blamed merge is not the cause and the blame is cleared (W1-T13902)."
+      : `Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) is back inside its baseline: ${judgment.k} of ${judgment.n} ` +
+        `not posted against ${judgment.baseline.k} of ${judgment.baseline.n} before (W1-T10269).`;
     if (incident.revertPrUrl !== undefined && revertPr === "open" && lane.closePr) {
       try {
         await lane.closePr(incident.revertPrUrl, `${comment} A fix made this revert unnecessary.`);
@@ -837,6 +883,18 @@ export async function evaluateReviewerHealthNow(
     if (state.incident !== null && current !== null) {
       const back = returnedToBaseline(state, state.incident, current);
       if (back.returned) await closeIncident(back.judgment, live);
+    }
+    if (state.incident !== null) {
+      const blame = blameCleared(state, state.incident);
+      if (blame.cleared) {
+        const incident = state.incident;
+        if (live) log("reviewer.regression_blame_cleared", { incident_id: incident.id, offending_sha: incident.offending?.sha ?? null,
+          offending_pr: incident.offending?.pr ?? null, healed_k: blame.evidence.healed.k, healed_n: blame.evidence.healed.n,
+          healed_shas: blame.evidence.healed.shas, regressed_k: blame.evidence.regressed.k, regressed_n: blame.evidence.regressed.n,
+          healed_interval: blame.evidence.judgment.interval, regressed_interval: blame.evidence.regressedInterval, z: blame.evidence.judgment.z,
+          reason: "healed reviews fail no less often than the regressed reviewer code" });
+        await closeIncident(blame.evidence.judgment, live, blame.evidence);
+      }
     }
   };
 
