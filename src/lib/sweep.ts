@@ -19125,8 +19125,27 @@ export function openEscalationStandDownSince(
 const OPEN_ESCALATION_HISTORY_STEPS: readonly string[] = ["sweep.disposed", "fix.stood_down", "fix.dispatch", "fix.done"];
 const OPEN_ESCALATION_STEP_LINE = new RegExp(OPEN_ESCALATION_HISTORY_STEPS.map((step) => JSON.stringify(step).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
 /** One state directory's open-escalation memo and the rotations each of the last two sweep passes reached. */
-interface OpenEscalationHistoryState { memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string> }
+interface OpenEscalationHistoryState {
+  memo: LedgerRotationMemo; reached: Set<string>; previous: Set<string>;
+  /** Rotations whose inline read failed on their own content (a truncated or foreign gzip), by file identity. */
+  failed: Map<string, { signature: string; error: unknown }>;
+}
 const openEscalationHistoryStates = new Map<string, OpenEscalationHistoryState>();
+
+/** Every stat field a rotation's readability or content can change under: size, mtime, ctime (a chmod or a restore), inode, device. */
+function rotationIdentity(path: string): string | undefined {
+  try {
+    const stat = fs.statSync(path, { bigint: true });
+    return [stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino, stat.dev].join(":");
+  } catch {
+    // deliberate: an unstattable rotation has no identity, so its read is never answered from a remembered failure.
+    return undefined;
+  }
+}
+
+/** A failure of the rotation's bytes themselves (zlib's `Z_*` codes), which the same bytes repeat; an I/O failure is read again. */
+const isContentFailure = (error: unknown): boolean => typeof (error as { code?: unknown } | null)?.code === "string" &&
+  ((error as { code: string }).code).startsWith("Z_");
 
 /** The memo as one read sees it: each rotation the read reaches is recorded for this pass, and completing the read
  *  keeps every rotation this pass or the one before reached. The union of one pass's windows is what the next pass
@@ -19136,7 +19155,29 @@ function retainingTheLastTwoPasses(state: OpenEscalationHistoryState): LedgerRot
   return { ...state.memo, pass: (opts) => {
     const pass = state.memo.pass(opts);
     return { ...pass,
-      rotationRecords: (entry, parse) => { state.reached.add(entry.path); return pass.rotationRecords(entry, parse); },
+      rotationRecords: (entry, parse) => {
+        state.reached.add(entry.path);
+        // origin/main reads every rotation it lists, so one the process can no longer read refuses the strict read
+        // however its rows are held. (A vanished file is left to the memo's own stat, which reads it uncached.)
+        try { fs.accessSync(entry.path, fs.constants.R_OK); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        // A rotation whose load failed is read inline by the memo on EVERY pass. When its bytes are unchanged that read
+        // fails the same way, so the failure is remembered by file identity and replayed, never read on the loop again.
+        const signature = rotationIdentity(entry.path);
+        const failed = state.failed.get(entry.path);
+        if (failed !== undefined && failed.signature === signature) throw failed.error;
+        return pass.rotationRecords(entry, () => {
+          try {
+            const read = parse();
+            state.failed.delete(entry.path);
+            return read;
+          } catch (error) {
+            if (signature !== undefined && isContentFailure(error)) state.failed.set(entry.path, { signature, error });
+            throw error;
+          }
+        });
+      },
       complete: (retain) => pass.complete([...(retain ?? []), ...state.reached, ...state.previous]) };
   } };
 }
@@ -19152,6 +19193,7 @@ export function beginOpenEscalationHistoryPass(ledgerPath: string): void {
   if (state === undefined) return;
   state.previous = state.reached;
   state.reached = new Set();
+  for (const path of state.failed.keys()) if (!state.previous.has(path)) state.failed.delete(path);
   state.memo.pass().complete([...state.previous]);
 }
 
@@ -19184,7 +19226,7 @@ export async function readOpenEscalationHistory(ledgerPath: string, taskId: stri
   if (state === undefined) {
     const memo = createLedgerRotationMemo((rows) => rows.filter((row) => typeof row.step === "string" && OPEN_ESCALATION_HISTORY_STEPS.includes(row.step)),
       { holder: "sweep.open-escalation-history", pattern: OPEN_ESCALATION_STEP_LINE });
-    openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set() });
+    openEscalationHistoryStates.set(stateDir, state = { memo, reached: new Set(), previous: new Set(), failed: new Map() });
   }
   const needle = JSON.stringify(taskId);
   return readLedgerUnionRecordsMemoized(stateDir, retainingTheLastTwoPasses(state), {

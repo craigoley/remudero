@@ -348,6 +348,135 @@ test("W1-T13969 criterion 3: childEntryIsCurrent judges an unchanged tree withou
   assert.equal(stale.now, childEntries.sourceHash(root));
 });
 
+test("W1-T13969 criterion 2: a tree seen before finds its parsed shards after other trees were loaded", async () => {
+  const dir = "plan-w1t13969-c2-alternate";
+  const files = planTree(dir);
+  const runGit = planGit(files, []);
+  const cache = new PlanBlobCache();
+  const load = loadPlanAtRefAsync as unknown as (...args: unknown[]) => Promise<Plan>;
+  const once = (ref = "origin/main") => load("fixture-root", `${dir}/tasks.yaml`, ref, runGit, undefined, cache);
+  const shard = `${dir}/tasks.d/SHARD-4.yaml`;
+  const treeA = files.get(shard)!;
+  const a = await once();
+  files.set(shard, taskYaml("SHARD-4", ["  files:", "    - src/b.ts"]));
+  const b = await once();
+  assert.equal(cache.parsedBlobs, 1, "tree B parses only the shard that differs");
+  files.set(shard, treeA);
+  const again = await once();
+  assert.equal(cache.parsedBlobs, 0, "tree A again parses no shard, though B replaced it as the path's latest blob");
+  assert.equal(cache.reusedBlobs, files.size);
+  assert.deepEqual(again, a, "and returns the plan it returned before");
+  assert.notDeepEqual(b.byId.get("SHARD-4")!.files, again.byId.get("SHARD-4")!.files);
+  // A tree the loader refuses leaves the cache's other trees reusable, and a ref change relabels without reparsing.
+  files.set(`${dir}/tasks.d/SHARD-5.yaml`, taskYaml("SHARD-1"));
+  await assert.rejects(() => once());
+  files.delete(`${dir}/tasks.d/SHARD-5.yaml`);
+  const viaOtherRef = await once("origin/other");
+  assert.equal(cache.parsedBlobs, 0, "a refused tree between two loads of A, and a new ref name, parse no shard");
+  assert.deepEqual(viaOtherRef.tasks.map((task) => task.id), a.tasks.map((task) => task.id));
+  // The kept parses are bounded: distinct versions of one shard cannot grow the cache without limit.
+  for (let version = 0; version < 600; version++) {
+    files.set(shard, taskYaml("SHARD-4", ["  files:", `    - src/v${version}.ts`]));
+    await once();
+  }
+  assert.ok(cache.retained.size <= 2 * files.size + 256, `the retained parses stay bounded (${cache.retained.size})`);
+});
+
+/** The open-escalation reader and pass boundary sweep.ts exports. */
+function historyApi() {
+  const exports = sweepModule as unknown as Record<string, unknown>;
+  return {
+    read: exports.readOpenEscalationHistory as (ledgerPath: string, taskId: string, since: string | undefined) => Promise<LedgerUnionRecordRead>,
+    begin: exports.beginOpenEscalationHistoryPass as (ledgerPath: string) => void,
+  };
+}
+
+test("W1-T13969 criterion 1: an unchanged truncated rotation is read on the loop once, never again on a later pass", async (t) => {
+  const { read, begin } = historyApi();
+  const root = scratch(t, "truncated");
+  const ledgerPath = join(root, "ledger.ndjson");
+  writeFileSync(ledgerPath, ndjson([seedRow]));
+  writeFileSync(join(root, rotationName(-2 * HOUR, false)), ndjson([holdRow(-3 * HOUR)]));
+  const broken = join(root, rotationName(-4 * HOUR, true));
+  const whole = gzipSync(ndjson([holdRow(-5 * HOUR), { step: "ci.polling", task_id: "W1-T1", ts: stamp(-5 * HOUR), detail: "y".repeat(2048) }]));
+  writeFileSync(broken, whole.subarray(0, whole.length - 12));
+  const since = stamp(-8 * HOUR);
+  const refused = syncOpenEscalationRead(root, TASK, since);
+  assert.deepEqual([refused.ok, refused.unread], [false, [broken]], "origin/main refuses the strict read on the truncated rotation");
+  const reads = countArchiveReads(t, root);
+  for (const pass of [1, 2, 3]) {
+    if (pass === 2) reads.reset();
+    begin(ledgerPath);
+    assert.deepEqual(comparable(await read(ledgerPath, TASK, since)), comparable(refused), `pass ${pass} refuses as origin/main does`);
+  }
+  assert.deepEqual(reads.counts, { sync: 0, async: 0 }, "passes over the unchanged truncated rotation read no archive bytes");
+  // Restored whole (a new size and mtime), the rotation reads again and the strict read stops refusing.
+  writeFileSync(broken, whole);
+  begin(ledgerPath);
+  const healed = await read(ledgerPath, TASK, since);
+  assert.equal(healed.ok, true);
+  assert.deepEqual(comparable(healed), comparable(syncOpenEscalationRead(root, TASK, since)));
+});
+
+test("W1-T13969 criterion 4: invariant:same-rows-same-decisions when a cached rotation is no longer readable", async (t) => {
+  const { read, begin } = historyApi();
+  const root = scratch(t, "denied");
+  replayedHistory(root);
+  const ledgerPath = join(root, "ledger.ndjson");
+  const target = join(root, rotationName(-5 * HOUR, true));
+  const since = stamp(-11 * HOUR);
+  begin(ledgerPath);
+  assert.equal((await read(ledgerPath, TASK, since)).ok, true, "the first read holds every rotation");
+  await t.test("a rotation the process may not read refuses the strict read, held or not", async (st) => {
+    const denied = (path: unknown) => path === target;
+    const eacces = () => Object.assign(new Error(`EACCES: permission denied, open '${target}'`), { code: "EACCES" });
+    const readFile = fs.readFileSync, access = fs.accessSync;
+    const spies = [
+      st.mock.method(fs, "readFileSync", (path: unknown, ...args: unknown[]) => {
+        if (denied(path)) throw eacces();
+        return Reflect.apply(readFile, fs, [path, ...args]);
+      }),
+      st.mock.method(fs, "accessSync", (path: unknown, ...args: unknown[]) => {
+        if (denied(path)) throw eacces();
+        return Reflect.apply(access, fs, [path, ...args]);
+      }),
+    ];
+    syncBuiltinESMExports();
+    st.after(() => { for (const spy of spies) spy.mock.restore(); syncBuiltinESMExports(); });
+    const expected = syncOpenEscalationRead(root, TASK, since);
+    assert.deepEqual([expected.ok, expected.unread], [false, [target]], "origin/main refuses on EACCES");
+    for (const pass of [1, 2]) {
+      begin(ledgerPath);
+      assert.deepEqual(comparable(await read(ledgerPath, TASK, since)), comparable(expected), `pass ${pass} refuses on EACCES too`);
+    }
+  });
+  begin(ledgerPath);
+  const restored = await read(ledgerPath, TASK, since);
+  assert.equal(restored.ok, true, "with the permission back, the held rows answer again");
+  assert.deepEqual(comparable(restored), comparable(syncOpenEscalationRead(root, TASK, since)));
+});
+
+test("W1-T13969 criterion 4: invariant:same-rows-same-decisions when a source file's stat changes while the bundle is checked", async (t) => {
+  const root = await builtTree(t);
+  const note = join(root, "src", "lib", "note.ts");
+  const base = childEntries.childEntryIsCurrent(root, ENTRY, { hashSource: childEntries.sourceHash });
+  assert.equal(base.reason, "source-hash-match");
+  // A developer's editor touches a file (same bytes) in the middle of the currency check's hashing.
+  const read = fs.readFileSync;
+  let touched = false;
+  const spy = t.mock.method(fs, "readFileSync", (path: unknown, ...args: unknown[]) => {
+    const bytes = Reflect.apply(read, fs, [path, ...args]);
+    if (!touched && path === note) { touched = true; utimesSync(note, new Date(NOW), new Date(NOW + 1000)); }
+    return bytes;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { spy.mock.restore(); syncBuiltinESMExports(); });
+  const verdict = childEntries.childEntryIsCurrent(root, ENTRY);
+  assert.equal(touched, true, "the fixture touched the file during hashing");
+  assert.deepEqual(verdict, base, "the verdict is the unmemoized check's, not a validation-error");
+  assert.deepEqual(childEntries.childEntryIsCurrent(root, ENTRY), base, "and the next check, on a settled tree, agrees");
+});
+
 /** A replayed history: plain and gzipped rotations, a torn line, an exact replay across files, a row naming the task
  *  only in a nested field, a row with no string ts, and rows of other tasks and steps. */
 function replayedHistory(root: string): void {
