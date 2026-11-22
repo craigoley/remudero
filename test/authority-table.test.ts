@@ -404,6 +404,7 @@ test("W1-T13773 criterion 3: the closed gate vocabulary adds host-switch, whose 
  * row and its `rmd authority` line. An intentional change to this report updates the pin.
  */
 const ROWS_AS_BEFORE: Record<string, string> = {
+  "hand-worktree-run-branch-push": "8f57a3367c725422",
   "create-product-repository": "c75665ea4e8925f0",
   "propose-product-runner-config": "f4add31d2e9f816e",
   "restore-checkpoint-branch": "3369093791eeb635",

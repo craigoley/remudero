@@ -15281,14 +15281,16 @@ export function reportPrChecks(
 }
 
 /**
- * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]` (W1-T5533) — the worktree a hand build
  * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
  * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
+ * W1-T14307: for a filed id it takes the dispatch claim through {@link dispatchClaimReserverFor}, the reserver
+ * `rmd claim` uses, and pushes the run branch; `--no-claim` skips both for an offline host.
  */
 export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number; scratchRoot?: string; exists?: (path: string) => boolean } = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
-    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"], ["--no-claim"]);
   if (badArg) {
     console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
     return 2;
@@ -15301,7 +15303,9 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
   const reason = explicitParent !== undefined ? "explicit --parent" : scratchDefault
     ? `scratch root ${scratchRoot} is a directory` : `scratch root ${scratchRoot} is not a directory; using checkout parent`;
   console.log(`parent: ${parent} (${reason})`);
-  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  const noClaim = rest.includes("--no-claim");
+  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes,
+    noClaim, claimReserver: noClaim ? undefined : dispatchClaimReserverFor(repoDir) });
   if (result.status === "refused") {
     console.error(`rmd hand-worktree: refused — ${result.reason}`);
     return 1;
@@ -44219,9 +44223,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "hand-worktree",
-    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]",
     summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. W1-T14307: for a filed id it also refuses when origin holds `refs/rmd-dispatch/<taskId>`, and after the cut it takes that dispatch claim through `rmd claim`'s reserver and pushes the run branch to origin at its base sha, so the fleet reads the task as in flight from the first minute; a refused push, a failed listing or another run-<taskId>-* branch appearing undoes the worktree, the branch and the claim it made, and refuses. `--no-claim` skips both pushes for an offline host and says so; `unfiled` pushes nothing. Prints the chosen parent and why, the path and branch, and the claim it holds; exits 0 created, 1 refused, 2 bad usage.",
   },
   {
     name: "worktree",
