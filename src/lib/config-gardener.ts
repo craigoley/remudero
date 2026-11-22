@@ -32,14 +32,25 @@ import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedMode
 import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
-import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
-import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
+import {
+  RANDOMISED_ESTIMATE_STEP,
+  RANDOMISED_EXPERIMENT_STEP,
+  randomisedMountRecommendations,
+  recommendMounts,
+  type AdoptMountRecommendation,
+  type MountHeadroomCell,
+  type MountRecommendation,
+  type RandomisedMountRecommendation,
+  type RandomisedRow,
+} from "./mount-recommender.js";
 import { loadMounts, mountsPath, type JudgeShadowOnlyRole } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { ROUTING_EXPERIMENTS, type RoutingExperiment } from "./routing-experiments.js";
 import { GATHER_RUNS_LEDGER_STEPS, gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
 import { loadCreditStore } from "./status.js";
 import { deriveTaskClass } from "./task-class.js";
@@ -54,7 +65,9 @@ import { deriveTaskClass } from "./task-class.js";
  *   - RECALIBRATE-BUDGET: queued shards of one task class get `budget_usd` from that class's observed
  *     implement cost distribution (p90 with headroom for the between-turn overshoot) — no fixed floor.
  *   - ADOPT-MOUNT: a mount recommendation that cleared the recommender's evidence gates is written into
- *     its route in the mounts table (mounts.ts's `mountsPath`).
+ *     its route in the mounts table (mounts.ts's `mountsPath`). W1-T12143: only a concluded randomised
+ *     winner ({@link randomisedRecommendationSource}) reaches it ({@link configCandidates}): its provider on
+ *     every auctioned routes row it covers.
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
  *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
@@ -80,13 +93,20 @@ export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate
 /** One whole-line replacement in a repo file. A rollback swaps `from` and `to`. */
 export interface ConfigEdit {
   path: string;
+  /** W1-T12143: a block row's lines, joined by newlines, are one `from`, which its one-line `to` replaces. */
   from: string;
   to: string;
+  /** W1-T12143: how many identical `from` spans the edit replaces, every one of them; absent, exactly one. Two
+   *  routes rows with identical lines name the same class, model, effort and provider, so evidence covers both or
+   *  neither, and one edit replaces both or neither. */
+  occurrences?: number;
 }
 
 /** Who a canary exposes. `tasks`: named shards against the same class's other tasks, concurrently.
- *  `cell`/`all`: every run it routes, against the same population over the equal window before. */
-export type ConfigCohort = { kind: "tasks"; taskClass: string; taskIds: string[] } | { kind: "cell"; type: string; risk: string; taskClass: string } | { kind: "all" };
+ *  `cell`/`cells`/`all`: every run it routes, against the same population over the equal window before.
+ *  `cells` (W1-T12143) is the routes rows one randomised candidate edits. */
+export type ConfigCohort = { kind: "tasks"; taskClass: string; taskIds: string[] } | { kind: "cell"; type: string; risk: string; taskClass: string }
+  | { kind: "cells"; cells: RandomisedRow[] } | { kind: "all" };
 
 export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   scope: string;
@@ -126,11 +146,15 @@ export interface QueuedBudget {
   line: string;
 }
 
+/** A run as the canaries measure it. `mountClass` is the routes row class its first `run.start` resolved
+ *  (`mount_class`), which differs from its task class on a routed lane such as `routine` (W1-T12143). */
+export type ConfigRun = RunSummary & { mountClass?: string };
+
 export interface ConfigInventory {
   nowIso: string;
-  runs: RunSummary[];
+  runs: ConfigRun[];
   queued: QueuedBudget[];
-  recommendations: MountRecommendation[];
+  recommendations: AdoptMountRecommendation[];
   cap?: { current: number; derivation: KnowledgeBudgetDerivation };
   /** W1-T12187: each judge role's cash shadow record over {@link JUDGE_CASH_BAR}'s window. */
   judgeShadows?: JudgeShadowRoleSummary[];
@@ -147,7 +171,7 @@ export interface ConfigInventory {
 /** Where the gardener reads. Every field has a production default; a test supplies its own. */
 export interface ConfigGardenSources {
   ledgerRows?: () => Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
-  mountRecommendations?: () => MountRecommendation[] | Promise<MountRecommendation[]>;
+  mountRecommendations?: () => AdoptMountRecommendation[] | Promise<AdoptMountRecommendation[]>;
   entryWeights?: () => Record<string, number> | Promise<Record<string, number>>;
 }
 
@@ -295,7 +319,7 @@ export function cohortOutcome(runs: RunSummary[]): CohortOutcome & { excludedCou
 
 /** The canary cohort's runs and the rest's, per {@link ConfigCohort}, since `exposedAt`; `neverWorked`
  *  runs join neither side and are counted as `excludedCount` (W1-T4726). */
-export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[]; excludedCount?: number } {
+export function splitCohort(cohort: ConfigCohort, runs: ConfigRun[], exposedAt: string, nowIso: string): { canary: RunSummary[]; rest: RunSummary[]; excludedCount?: number } {
   const since = Date.parse(exposedAt);
   const at = (r: RunSummary) => Date.parse(r.startTs);
   const inWindow = (canary: RunSummary[], rest: RunSummary[]) => {
@@ -307,7 +331,10 @@ export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt:
     const after = runs.filter((r) => settledImplement(r) && r.taskClass === cohort.taskClass && at(r) >= since);
     return inWindow(after.filter((r) => ids.has(r.taskId)), after.filter((r) => !ids.has(r.taskId)));
   }
-  const inScope = (r: RunSummary) => cohort.kind === "all" ? r.type === "implement" : r.type === cohort.type && r.risk === cohort.risk && r.taskClass === cohort.taskClass;
+  const cells = cohort.kind === "cells" ? cohort.cells : cohort.kind === "cell" ? [cohort] : [];
+  // A routes row serves the runs that resolved to it: its class is the run's mount class, where the run logged one.
+  const inScope = (r: ConfigRun) => cohort.kind === "all" ? r.type === "implement"
+    : cells.some((c) => r.type === c.type && r.risk === c.risk && (r.mountClass ?? r.taskClass) === c.taskClass);
   const before = since - Math.max(0, Date.parse(nowIso) - since);
   const scoped = runs.filter((r) => inScope(r) && r.verdict !== "incomplete");
   return inWindow(scoped.filter((r) => at(r) >= since), scoped.filter((r) => at(r) >= before && at(r) < since));
@@ -316,6 +343,7 @@ export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt:
 function population(cohort: ConfigCohort): string {
   if (cohort.kind === "tasks") return `implement tasks of class ${cohort.taskClass}`;
   if (cohort.kind === "cell") return `${cohort.type} runs at ${cohort.risk} risk of class ${cohort.taskClass}`;
+  if (cohort.kind === "cells") return `runs of the routes rows ${cohort.cells.map((c) => `${c.type}/${c.risk}/${c.taskClass}`).join(", ")}`;
   return "implement runs";
 }
 
@@ -363,6 +391,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "pr.body_normalize.raced",
   // W1-T11756: the history guard turns a SUCCESS back to FAILURE after the run's own pr.opened; its receipt is read.
   "review.history_guarded",
+  // W1-T14235: a refused code pass writes its receipt with the PR it refused.
+  "review.semantic_pass_refused",
   // Automatic follow-up filing records the originating PR on this worker-priced receipt.
   "followup.filed",
   // W1-T12187: the judges' cash shadow rows, for judgeShadowSummary.
@@ -397,7 +427,7 @@ interface InventoryMeasurement {
   nowMs: number;
   rows?: Array<Record<string, unknown>>;
   weights?: Record<string, number>;
-  recommendations: MountRecommendation[];
+  recommendations: AdoptMountRecommendation[];
 }
 
 type ConfigMeasurement = InventoryMeasurement | { kind: "mount"; stateDir: string; sweepScript: string };
@@ -461,13 +491,25 @@ export async function serveConfigMeasurement(input: ConfigMeasurement, port: { p
 
 if (!isMainThread && workerData?.kind === CONFIG_MEASUREMENT_WORKER_KIND) void serveConfigMeasurement(workerData.input, parentPort!);
 
+/** Each run with the `mount_class` of its first `run.start`, the row `gatherRuns` reads its task class from. */
+function withMountClass(runs: RunSummary[], rows: readonly Record<string, unknown>[]): ConfigRun[] {
+  const started = new Set<string>();
+  const mountClass = new Map<string, string>();
+  for (const row of rows) {
+    if (row.step !== "run.start" || typeof row.run_id !== "string" || started.has(row.run_id)) continue;
+    started.add(row.run_id);
+    if (typeof row.mount_class === "string") mountClass.set(row.run_id, row.mount_class);
+  }
+  return runs.map((r) => (mountClass.has(r.runId) ? { ...r, mountClass: mountClass.get(r.runId)! } : r));
+}
+
 function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
   const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir);
   const weights = input.weights ?? buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(input.repoRoot).learningsDir));
   const canaries = readConfigCanaries(input.stateDir);
   return {
     nowIso: fixedClock(input.nowMs).iso(),
-    runs: gatherRuns(rows as LedgerRecord[]),
+    runs: withMountClass(gatherRuns(rows as LedgerRecord[]), rows),
     queued: queuedBudgets(input.repoRoot, input.stateDir),
     recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
@@ -537,6 +579,56 @@ export function mountRecommendationSource(opts: {
   };
 }
 
+/** W1-T12143: the ledger row a randomised winner the mounts table cannot express is reported as, once per evidence day. */
+export const RANDOMISED_FINDING_STEP = `${CONFIG_GARDEN_NAME}.randomised_finding`;
+/** Both producers write one row per experiment or cell per UTC day, a terminal result unchanged on each later day,
+ *  so the newest row of every live one is days old at most; the inventory's own read spans the same 60 days. */
+const RANDOMISED_EVIDENCE_DAYS = 60;
+
+const findingKey = (step: unknown, id: unknown, day: unknown, setting: unknown): string => JSON.stringify([step, id, day, setting]);
+
+/**
+ * W1-T12143: the second source of adopt-mount candidates, beside {@link mountRecommendationSource}: the newest
+ * `routing.experiment.result` row of each experiment and `routing.policy.estimate` row of each cell, streamed from
+ * the ledger union as routing-policy-estimate.ts's recorder streams it, and mapped by
+ * `randomisedMountRecommendations` (mount-recommender.ts). A winner the table cannot express is logged as
+ * {@link RANDOMISED_FINDING_STEP} naming the setting that can, once per evidence day. An unread archive, live file
+ * or directory refuses the read: a missing file could hold an experiment's newest row and let a superseded one
+ * propose. A failed read is logged and proposes nothing.
+ */
+export function randomisedRecommendationSource(opts: {
+  stateDir: string;
+  mountsFile: string;
+  log: GardenerDeps["log"];
+  /** The host's `workerProviders.codexModel`: what a `provider: codex` routes row runs (mount-recommender.ts `RandomisedHost`). */
+  codexModel: string | undefined;
+  /** The experiments a result's arms are mapped through; the live list when absent. */
+  experiments?: readonly RoutingExperiment[];
+}): () => Promise<RandomisedMountRecommendation[]> {
+  return async () => {
+    try {
+      const unread: string[] = [];
+      const rows: Array<Record<string, unknown>> = [];
+      const sinceTs = fixedClock(systemClock.now() - RANDOMISED_EVIDENCE_DAYS * 24 * 3600 * 1000).iso();
+      for await (const row of openLedgerUnion(opts.stateDir, {
+        step: [RANDOMISED_EXPERIMENT_STEP, RANDOMISED_ESTIMATE_STEP, RANDOMISED_FINDING_STEP], sinceTs,
+        onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path), onUnreadDirectory: (path) => unread.push(path),
+      })) rows.push(row);
+      if (unread.length > 0) throw new Error(`incomplete ledger union: ${unread.join(", ")}`);
+      const outcomes = randomisedMountRecommendations(rows, loadMounts(opts.mountsFile), opts.experiments ?? ROUTING_EXPERIMENTS, { codexModel: opts.codexModel });
+      const written = new Set(rows.filter((r) => r.step === RANDOMISED_FINDING_STEP).map((r) => findingKey(r.evidence_step, r.evidence_id, r.day, r.setting)));
+      for (const f of outcomes.findings) {
+        if (written.has(findingKey(f.step, f.id, f.day, f.setting))) continue;
+        opts.log(RANDOMISED_FINDING_STEP, { evidence_step: f.step, evidence_id: f.id, day: f.day, setting: f.setting, detail: f.detail });
+      }
+      return outcomes.recommendations;
+    } catch (e) {
+      opts.log(`${CONFIG_GARDEN_NAME}.randomised_recommendations_unread`, { error: String((e as Error)?.message ?? e) });
+      return [];
+    }
+  };
+}
+
 // ── Candidates ───────────────────────────────────────────────────────────────────────────────
 
 const usd = (n: number) => n.toFixed(2);
@@ -590,6 +682,12 @@ export function budgetCandidate(inv: ConfigInventory, rng: () => number): Config
 /** The `routes.<type>.<risk>.<class>` flow-map line in a mounts.yaml text, or undefined. */
 export function routeLine(text: string, type: string, risk: string, taskClass: string): string | undefined {
   const lines = text.split("\n");
+  const c = routeIndex(lines, type, risk, taskClass);
+  return c < 0 || !/\{.*\bmodel:.*\beffort:.*\}/.test(lines[c]!) ? undefined : lines[c];
+}
+
+/** The index of the `routes.<type>.<risk>.<class>` key line, or -1. */
+function routeIndex(lines: readonly string[], type: string, risk: string, taskClass: string): number {
   const at = (from: number, indent: number, key: string) => {
     for (let i = from; i < lines.length; i++) {
       const line = lines[i]!;
@@ -603,19 +701,137 @@ export function routeLine(text: string, type: string, risk: string, taskClass: s
   const routes = lines.findIndex((l) => l === "routes:");
   const t = routes < 0 ? -1 : at(routes + 1, 2, type);
   const r = t < 0 ? -1 : at(t + 1, 4, risk);
-  const c = r < 0 ? -1 : at(r + 1, 6, taskClass);
-  return c < 0 || !/\{.*\bmodel:.*\beffort:.*\}/.test(lines[c]!) ? undefined : lines[c];
+  return r < 0 ? -1 : at(r + 1, 6, taskClass);
 }
 
-/** The first recommendation whose route exists and would change, adopted on the same provider only —
- *  a provider switch changes more than the one line this edits. */
+/**
+ * W1-T12143: a block-mapping routes row (`<class>:`, then one `key: value` line per field) as one exact edit: its
+ * lines, rewritten as the one-line flow map the table's other rows use, with `provider: <provider>` last. Undefined
+ * for a block holding anything but plain scalar fields at one indent (a comment, a blank line, a nested or quoted
+ * value), so no text is lost. A blank line ends the block only where the next line leaves it.
+ */
+function blockRowEdit(lines: readonly string[], c: number, provider: string): { from: string; to: string } | undefined {
+  const key = /^( *)([^\s:#]+):\s*$/.exec(lines[c]!);
+  if (!key) return undefined;
+  const indent = key[1]!.length;
+  const lead = (line: string) => line.length - line.trimStart().length;
+  const fields: string[] = [];
+  let end = c + 1;
+  let fieldLead: number | undefined;
+  for (; end < lines.length; end++) {
+    const line = lines[end]!;
+    if (line.trim() === "") {
+      const next = lines.slice(end + 1).find((l) => l.trim() !== "");
+      if (next === undefined || lead(next) <= indent) break;
+      return undefined;
+    }
+    if (lead(line) <= indent) break;
+    const field = /^ +([a-z_]+): +([^\s#,{}[\]'"]+) *$/.exec(line);
+    if (!field || (fieldLead ?? lead(line)) !== lead(line)) return undefined;
+    fieldLead = lead(line);
+    fields.push(`${field[1]}: ${field[2]}`);
+  }
+  if (!fields.some((f) => f.startsWith("model: ")) || !fields.some((f) => f.startsWith("effort: "))) return undefined;
+  return { from: lines.slice(c, end).join("\n"), to: `${key[1]}${key[2]}: { ${fields.join(", ")}, provider: ${provider} }` };
+}
+
+/** The exact edit that puts `provider` on a routes row (its flow-map line, or {@link blockRowEdit}), or why not. */
+function providerEdit(lines: readonly string[], row: RandomisedRow, provider: string): { from: string; to: string } | string {
+  const c = routeIndex(lines, row.type, row.risk, row.taskClass);
+  if (c >= 0 && /\{.*\bmodel:.*\beffort:.*\}/.test(lines[c]!)) return { from: lines[c]!, to: withProvider(lines[c]!, provider) };
+  return (c < 0 ? undefined : blockRowEdit(lines, c, provider)) ?? "not a row one exact edit can name";
+}
+
+/** The start of each run of `lines` equal to `span`'s lines, left to right, never overlapping. */
+function spanStarts(lines: readonly string[], span: string): number[] {
+  const want = span.split("\n");
+  const starts: number[] = [];
+  for (let i = 0; i + want.length <= lines.length; i++) {
+    if (!want.every((w, k) => lines[i + k] === w)) continue;
+    starts.push(i);
+    i += want.length - 1;
+  }
+  return starts;
+}
+
+/** `lines` with the `span` at each of `starts` replaced by `to`'s lines. */
+function replaceSpans(lines: readonly string[], starts: readonly number[], span: string, to: string): string[] {
+  const out = [...lines];
+  for (const i of [...starts].reverse()) out.splice(i, span.split("\n").length, ...to.split("\n"));
+  return out;
+}
+
+/** `line`, a one-line flow-map row, with `provider: <provider>` as its last key, ahead of any trailing comment. */
+function withProvider(line: string, provider: string): string {
+  const close = line.replace(/\s+#.*$/, "").lastIndexOf("}");
+  return `${line.slice(0, close).trimEnd()}, provider: ${provider} ${line.slice(close)}`;
+}
+
+/**
+ * W1-T12143: one randomised winner as one canary: the winner's provider on every routes row it covers that one
+ * exact edit can name ({@link providerEdit}). A row an open canary holds (either side of its edit) is left alone, so
+ * two canaries never edit one row; so is a row whose identical rows are not all covered, whose edited line is
+ * already in the file, or (a block row) none of whose lines is its own — each would leave a revert that cannot
+ * tell its row apart. The shadow guard is the winner's own advantage bound, above zero by its producer's decision.
+ */
+function randomisedMountCandidate(rec: RandomisedMountRecommendation, inv: ConfigInventory, text: string, path: string): ConfigGardenAction | undefined {
+  const e = rec.randomised;
+  const lines = text.split("\n");
+  const held = new Set(inv.active.flatMap((c) => c.edits.filter((edit) => edit.path === path).flatMap((edit) => [edit.from, edit.to])));
+  const byFrom = new Map<string, { to: string; rows: RandomisedRow[] }>();
+  const left: string[] = [];
+  const name = (row: RandomisedRow) => `routes.${row.type}.${row.risk}.${row.taskClass}`;
+  for (const row of rec.rows) {
+    const edit = providerEdit(lines, row, e.winner.provider);
+    if (typeof edit === "string") left.push(`${name(row)} (${edit})`);
+    else if (held.has(edit.from)) left.push(`${name(row)} (an open canary holds its line)`);
+    else byFrom.set(edit.from, { to: edit.to, rows: [...(byFrom.get(edit.from)?.rows ?? []), row] });
+  }
+  const edits: ConfigEdit[] = [];
+  const cells: RandomisedRow[] = [];
+  const count = (line: string, within: readonly string[]) => within.filter((l) => l === line).length;
+  for (const [from, { to, rows }] of byFrom) {
+    const occurrences = spanStarts(lines, from).length;
+    const own = from.split("\n");
+    // The revert proves a restored block by a line of it no other row holds.
+    const witnessed = own.some((line) => count(line, lines) === occurrences * count(line, own));
+    if (occurrences !== rows.length || lines.includes(to) || !witnessed) {
+      left.push(...rows.map((row) => `${name(row)} (its line is not one this edit can name exactly)`));
+      continue;
+    }
+    edits.push({ path, from, to, ...(occurrences > 1 ? { occurrences } : {}) });
+    cells.push(...rows);
+  }
+  if (edits.length === 0) return undefined;
+  const cohort: ConfigCohort = { kind: "cells", cells };
+  const where = `${e.capability}/${e.effort}${e.taskClass === undefined ? "" : `/${e.taskClass}`}`;
+  return {
+    class: "adopt-mount",
+    target: rec.cellKey,
+    scope: `mount:${rec.cellKey}`,
+    reason: `${rec.note} Each auctioned routes row it covers takes provider ${e.winner.provider}.${left.length > 0 ? ` Left alone: ${left.join("; ")}.` : ""}`,
+    edits,
+    cohort,
+    candidate: `provider ${e.winner.provider} on ${cells.length} routes row(s) at ${where}`,
+    baseline: `the headroom auction between claude and codex on those rows`,
+    exposure: 1,
+    shadowMetrics: [{ metricName: "randomised_advantage_low", unit: "fraction", direction: "min", abortThreshold: 0 }],
+    shadowObservations: [{ metricName: "randomised_advantage_low", value: e.advantageLow, denominator: e.minTasks, freshness: "verified", comparisonPopulation: population(cohort), observedAt: inv.nowIso }],
+  };
+}
+
+/** The first recommendation whose route exists and would change. The sweep's is adopted on the same provider only —
+ *  a provider switch changes more than the one line it edits; a randomised winner (W1-T12143) is a provider switch,
+ *  written on every row it covers ({@link randomisedMountCandidate}). */
 export function mountCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
   const full = mountsPath(repoRoot);
   const path = relative(repoRoot, full).split(sep).join("/");
   if (!existsSync(full) || inv.recommendations.length === 0) return undefined;
   const text = readFileSync(full, "utf8");
   for (const rec of inv.recommendations) {
-    if (rec.recommendedArm.provider !== rec.currentArm.provider) continue;
+    const randomised = "randomised" in rec ? randomisedMountCandidate(rec, inv, text, path) : undefined;
+    if (randomised) return randomised;
+    if ("randomised" in rec || rec.recommendedArm.provider !== rec.currentArm.provider) continue;
     const from = routeLine(text, rec.type, rec.risk, rec.taskClass);
     if (!from) continue;
     const to = from.replace(/\bmodel:\s*[^,}\s]+/, `model: ${rec.recommendedArm.servedModel}`).replace(/\beffort:\s*[^,}\s]+/, `effort: ${rec.recommendedArm.effort}`);
@@ -915,7 +1131,10 @@ const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
-  const all = [budgetCandidate(inv, rng), mountCandidate(inv, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot),
+  // W1-T12143, invariant randomised-evidence-only: an adopt-mount candidate comes only from a concluded randomised
+  // source, whatever else the inventory read. The observational sweep's recommendations change no mount.
+  const randomised = inv.recommendations.filter((rec): rec is RandomisedMountRecommendation => "randomised" in rec);
+  const all = [budgetCandidate(inv, rng), mountCandidate({ ...inv, recommendations: randomised }, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot),
     judgeShadowSwitchCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
@@ -927,9 +1146,10 @@ export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: ()
 // ── Apply and roll back ──────────────────────────────────────────────────────────────────────
 
 /** Apply `edits` under `root`; returns the paths changed. An edit whose `from` line is not present
- *  exactly once is skipped — the file moved on, and a guess would edit the wrong line. The read is
- *  one ENOENT-guarded `readFileIfExists` and the write a temp-then-rename `writeAtomic`, so no
- *  separate existence check opens a window between checking the path and writing it. */
+ *  exactly once (exactly `occurrences` times, W1-T12143) is skipped — the file moved on, and a guess
+ *  would edit the wrong line. The read is one ENOENT-guarded `readFileIfExists` and the write a
+ *  temp-then-rename `writeAtomic`, so no separate existence check opens a window between checking
+ *  the path and writing it. */
 export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
   const changed = new Set<string>();
   for (const e of edits) {
@@ -937,16 +1157,15 @@ export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
     const raw = readFileIfExists(path);
     if (raw === undefined) continue;
     const lines = raw.split("\n");
-    const hits = lines.flatMap((l, i) => (l === e.from ? [i] : []));
-    if (hits.length !== 1) continue;
-    lines[hits[0]!] = e.to;
-    writeAtomic(path, lines.join("\n"));
+    const hits = spanStarts(lines, e.from);
+    if (hits.length !== (e.occurrences ?? 1)) continue;
+    writeAtomic(path, replaceSpans(lines, hits, e.from, e.to).join("\n"));
     changed.add(e.path);
   }
   return [...changed].sort();
 }
 
-export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ path: e.path, from: e.to, to: e.from }));
+export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ ...e, from: e.to, to: e.from }));
 
 /** Check every rollback line in memory before writing any file. A line already at its baseline is
  * safe to leave alone and is not one of the `applied` edits; a missing or ambiguous line refuses the
@@ -959,12 +1178,12 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): { paths: s
     const raw = staged.get(edit.path) ?? readFileIfExists(join(root, edit.path));
     if (raw === undefined) throw new Error(`config gardener: rollback source unreadable: ${edit.path}`);
     const lines = raw.split("\n");
-    const from = lines.flatMap((line, i) => line === edit.from ? [i] : []);
-    const to = lines.flatMap((line, i) => line === edit.to ? [i] : []);
-    if (from.length === 0 && to.length === 1) continue;
-    if (from.length !== 1 || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
-    lines[from[0]!] = edit.to;
-    staged.set(edit.path, lines.join("\n"));
+    const from = spanStarts(lines, edit.from);
+    const to = spanStarts(lines, edit.to);
+    const count = edit.occurrences ?? 1;
+    if (from.length === 0 && to.length === count) continue;
+    if (from.length !== count || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
+    staged.set(edit.path, replaceSpans(lines, from, edit.from, edit.to).join("\n"));
     applied.push(edit);
   }
   for (const [path, text] of staged) writeAtomic(join(root, path), text);
@@ -1012,15 +1231,16 @@ export function holdsExactLine(text: string, line: string): boolean {
  *  `renderAcceptanceBlock` refuses a block the reviewer's parser would not read back verbatim. A proof that would already
  *  hold before the revert, such as a `|` widened to `.` beside a look-alike line, refuses the revert before any PR opens. */
 function rollbackAcceptance(applied: readonly ConfigEdit[], before: ReadonlyMap<string, string>, root: string): string {
-  for (const e of applied) {
-    const parsed = parseWhitelistedProof(exactLineProof(e.path, e.to));
+  return renderAcceptanceBlock(applied.map((e) => {
     const after = readFileIfExists(join(root, e.path)) ?? "";
-    const runs = parsed?.kind === "grep" && parsed.args.join("\0") === ["-arn", "--", linePattern(e.to), e.path].join("\0");
-    if (!runs || !holdsExactLine(after, e.to) || holdsExactLine(before.get(e.path) ?? "", e.to)) {
+    // One restored line the tree before held nowhere: the line itself, or (a restored block, W1-T12143) its own line.
+    const line = e.to.split("\n").find((l) => holdsExactLine(after, l) && !holdsExactLine(before.get(e.path) ?? "", l));
+    const parsed = line === undefined ? undefined : parseWhitelistedProof(exactLineProof(e.path, line));
+    if (line === undefined || parsed?.kind !== "grep" || parsed.args.join("\0") !== ["-arn", "--", linePattern(line), e.path].join("\0")) {
       throw new Error(`config gardener: the rollback proof for ${e.path} would not tell the revert from the tree before it`);
     }
-  }
-  return renderAcceptanceBlock(applied.map((e) => ({ claim: `${e.path} is back at its line from before the canary`, proof: exactLineProof(e.path, e.to) })));
+    return { claim: `${e.path} is back at its line from before the canary`, proof: exactLineProof(e.path, line) };
+  }));
 }
 
 /** The canary PR's own Acceptance block: each edited file carries the canary's line. */
@@ -1028,13 +1248,16 @@ function acceptance(edits: ConfigEdit[]): string[] {
   return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: ${exactLineProof(e.path, e.to)}`])];
 }
 
+/** An edit's side as one inline-code span: a block's lines joined (W1-T12143). */
+const shownLines = (text: string): string => text.split("\n").map((line) => line.trim()).join(" ");
+
 function prBody(action: ConfigGardenAction): string {
   return [
     `The config gardener (W1-T4113) proposes a **${action.class}** canary on \`${action.scope}\`: ${action.reason}`,
     "",
     `Exposure: ${action.cohort.kind === "tasks" ? `${action.cohort.taskIds.length} shard(s) — ${action.cohort.taskIds.join(", ")}` : "every run this route/cap reaches"}. Once merged, the gardener compares the cohort with the rest by merge rate and cost per merged task; a guardrail breach opens a PR reverting exactly these lines and debits the class, a promotion credits it.`,
     "",
-    ...action.edits.map((e) => `- \`${e.path}\`: \`${e.from.trim()}\` → \`${e.to.trim()}\``),
+    ...action.edits.map((e) => `- \`${e.path}\`: \`${shownLines(e.from)}\` → \`${shownLines(e.to)}\`${e.occurrences === undefined ? "" : ` (${e.occurrences} identical rows)`}`),
     "",
     ...acceptance(action.edits),
   ].join("\n");
@@ -1111,7 +1334,7 @@ export function configCanariesDue(stateDir: string, clock: Clock = systemClock):
   return file.lastTendMs === undefined || clock.now() - file.lastTendMs >= CONFIG_TEND_INTERVAL_MS;
 }
 
-export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise<RunSummary[]>): Promise<TendResult[]> {
+export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise<ConfigRun[]>): Promise<TendResult[]> {
   const nowMs = (deps.clock ?? systemClock).now();
   const file = readConfigCanaryFile(deps.stateDir);
   const canaries = file.canaries;
@@ -1120,7 +1343,7 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
   const nowIso = fixedClock(nowMs).iso();
   const results: TendResult[] = [];
   const failures: unknown[] = [];
-  let measured: RunSummary[] | undefined;
+  let measured: ConfigRun[] | undefined;
   for (const [i, c] of canaries.entries()) {
     if (!isPromotionActive(c.promotion.state)) continue;
     const untended = structuredClone(c);

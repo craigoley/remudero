@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   band_meaning: "span"
-  budget_usd: 30.00
+  budget_usd: 4.50
   files:
     - src/lib/host-parity.ts
     - test/host-parity-azure-pole.test.ts

@@ -18,7 +18,10 @@
     - test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts
     - test/review-status-pending.test.ts # amended 2026-11-22 for PR 20070: its dead-owner fixture must carry the live status id the act-time re-check now reads
     - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts # amended 2026-11-22 for PR 20070: its sweep fixture must wire the act-time re-reader and the live status id
-  status: queued
+    - test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
+    - test/an-aborted-review-posts-no-binding-verdict.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
+    - test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
+  status: merged
   attempts: 0
   rationale: |
     Two findings from W1-T14035's round-11 review (#19922, merged 2026-11-21 19:03:35Z on 66e66ab89) that the merged
@@ -49,3 +52,4 @@
     files: amendment 2026-11-21 (PR 20070 review round 1): criterion 2 asks the act-time re-check to fail closed when no re-reader is wired. The daemon and light sweep pass buildRereadPrAtAct; the one-shot rmd sweep path in src/cli/commands/sweep.ts does not, so failing closed there would hold every dead-owner retry that path admits. The build wires the same re-reader into that path. No criterion changes.
     files: second amendment 2026-11-21 (PR 20070 review round 2 at 213568bb8): the board read in src/lib/tick-read-worker.ts takes a recognisable /status claim without reading /statuses history, so a takeover GitHub accepted before its ledger append still reads as the dead owner's claim. The build reads the history's newest id there. No criterion changes.
     files: third amendment 2026-11-22 (PR 20070 at 9eaae8af0): two existing tests built dead-owner fixtures without a live status id or an act-time re-reader, so the fail-closed re-check now holds them. The build updates those fixtures only. No criterion changes.
+    files: fourth amendment 2026-11-22 (PR 20070 at aa62f68ca): three more existing tests failed in coverage shards 1, 4 and 11 on the same fail-closed re-check. The build may update their fixtures; no criterion changes.

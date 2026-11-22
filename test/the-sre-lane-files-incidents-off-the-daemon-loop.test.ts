@@ -47,7 +47,7 @@ function laneRoots(): { root: string; stateRoot: string } {
 }
 
 function event(atIso: string): IncidentLedgerEvent {
-  return { fingerprint: FP, ts: Date.parse(atIso), kind: "exception", name: "TypeError", message: "boom", instance: "core" };
+  return { fingerprint: FP, ts: Date.parse(atIso), kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "boom", instance: "core" };
 }
 
 function laneDeps(root: string, stateRoot: string, logged: Array<[string, Record<string, unknown>]>): SreLaneInput {

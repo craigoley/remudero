@@ -97,7 +97,7 @@ test("a landed incident is never re-captured with new bytes: a pass skips the la
   const other = "b".repeat(64);
   const at = (minutesAgo: number) => Date.now() - minutesAgo * 60_000;
   const ev = (fingerprint: string, minutesAgo: number): IncidentLedgerEvent =>
-    ({ fingerprint, ts: at(minutesAgo), kind: "exception", name: "TypeError", message: "boom", instance: "core" }) as IncidentLedgerEvent;
+    ({ fingerprint, ts: at(minutesAgo), kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "boom", instance: "core" }) as IncidentLedgerEvent;
   // The landed fingerprint burns hotter, so it would be the worst one filed if the lane missed the landed entry.
   const events = [ev(FINGERPRINT, 30), ev(FINGERPRINT, 20), ev(FINGERPRINT, 10), ev(FINGERPRINT, 5), ev(other, 15)];
   const landed = landedEntry("new");

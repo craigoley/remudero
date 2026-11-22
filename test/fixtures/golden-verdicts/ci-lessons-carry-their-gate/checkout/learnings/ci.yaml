@@ -1,0 +1,65 @@
+- id: security-merge-policy-refusal-evidence-lane
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/security-merge-policy.yml", src/lib/code-scanning-merge-adapter.mjs]
+  error_signatures: ["security-merge-policy"]
+  fact: >-
+    When security-merge-policy refuses a pull request, inspect that PR's policy status reason and
+    the evidence it names before repairing. Keep each PR's disposition separate: a refusal count
+    does not establish one shared cause, and this gate distinguishes unsafe findings, incomplete
+    analysis, unsupported evidence, and target or head identity failures. Route the verified failure
+    and its narrow repair to the lane that owns the named evidence, then recheck the policy status;
+    do not suppress UNKNOWN or treat a repaired cohort as proof of enforcement.
+  evidence: >-
+    The window recorded as ci-learning:11660:security-merge-policy names PRs #11660, #11761,
+    #11801, #11859, and #11861 as refused and repaired, but the available cohort record does not
+    establish each PR's refusal reason or one shared mechanism. The policy adapter publishes
+    reason-coded decisions, including unsafe findings, incomplete analysis, unsupported evidence,
+    and noncanonical targets. Workers in the security-policy repair lane should use each PR's
+    decision evidence to select its owner and preserve unknown evidence until resolved.
+  src: "ci-learning:11660:security-merge-policy"
+  cited: "2026-10-19"
+
+- id: leak-grep-refuses-plan-shard-token-text
+  subsystem: ci
+  lifecycle: active
+  files:
+    - "plan/tasks.d/**"
+    - ".github/scripts/leak-grep.sh"
+    - ".github/workflows/ci.yml"
+  error_signatures:
+    - "leak-grep: possible secret matching"
+    - "leak-grep"
+  fact: >-
+    The leak-grep gate scans every tracked file, plan task shards included, for fixed secret-token
+    formats. Before pushing a plan/tasks.d shard, run `bash .github/scripts/leak-grep.sh` on the
+    committed tree, and if it reports a match, reword the matched text so the pattern no longer
+    matches. Never add an allowlist entry to defeat the tripwire.
+  evidence: >-
+    The leak-grep gate went red on PR #11383 and the repair touched
+    plan/tasks.d/W1-T9181-the-revalidation-garden-never-closes-on-an-absence.yaml. Checked at
+    origin/main on 2026-10-14: that record matches none of the seven patterns in
+    .github/scripts/leak-grep.sh. So the token that tripped #11383 is NOT established, and the
+    #11383 CI log was not read. The gate's own refusal names the rule above, so this entry
+    names that remedy, not a verified per-PR cause.
+  src: "ci-learning:11383:leak-grep"
+  cited: "2026-10-14"
+
+- id: clock-sweep-report-refusal-needs-per-pr-cause
+  subsystem: ci
+  lifecycle: active
+  files: [".github/workflows/**", "package.json"]
+  error_signatures: ["clock-sweep-report (merge the shards, classify, deliver)"]
+  fact: >-
+    When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request, read
+    that pull request's failed job step and its repair diff before choosing a remedy. A refusal that was
+    later repaired does not establish a shared cause, and no generic pre-push ritual is known to prevent
+    it. Record the observed failing step and the change that cleared it, so the next worker acts on the
+    actual failure.
+  evidence: >-
+    The ci-learning finding for PR #11896 records the gate going red and being repaired by a change that
+    touched many .github/workflows files, package.json and src/run-task.ts. The failing step and the
+    repair's causal link were NOT read from the CI log in this entry, so the trigger is not verified here.
+    The recorded recommended action is unclear, and guidance changes are parked for a person's decision.
+  src: "ci-learning:11896:clock-sweep-report (merge the shards, classify, deliver)"
+  cited: "2026-10-16"

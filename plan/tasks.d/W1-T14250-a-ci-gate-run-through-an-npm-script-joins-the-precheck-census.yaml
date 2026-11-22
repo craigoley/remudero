@@ -1,0 +1,66 @@
+- id: W1-T14250
+  title: A CI gate that ci.yml runs through an npm script joins the pre-push census, whatever the step and script are named
+  repo: remudero
+  depends_on: [W1-T14149]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # spans the precheck, its parity baseline, package.json and the population test; hosted CI is unchanged
+  band_meaning: span
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T14149, W1-T5616]
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/census-precheck-parity-baseline.json
+    - package.json
+    - test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts
+    - test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts
+    - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
+  status: merged
+  attempts: 0
+  rationale: |
+    READ at origin/main 86455aa29 and at #20045's head 2a3924375 (2026-11-22).
+    - The author precheck asks every ci.yml script gate for a pre-push verdict. ciScriptRatchetPopulation in
+      scripts/census-precheck.mjs decides which steps are gates: a step counts only when its step id or the npm script
+      name matches SCRIPT_GATE_NAME (`ratchet|census|budget|monotonic|parity|signal`).
+    - W1-T14149 (#20045, not yet merged) adds the write-only ledger step ratchet as step id `write-only-ledger-step`,
+      run as `npm run --silent write-only-ledger-step`, which runs `node scripts/write-only-ledger-step-ratchet.mjs`.
+      Neither name matches. Only the step's `name:` and the script file say "ratchet".
+    - MEASURED: ciScriptRatchetPopulation over #20045's ci.yml returns 12 gates, and the write-only gate is not among
+      them. So test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts never asks it for a verdict, and a break of
+      that ratchet is first seen in hosted CI.
+    - MEASURED: following each `npm run` step to the script file package.json runs finds no gate hidden this way on
+      origin/main, and exactly this one on #20045's head. The fix grows the population by that one gate.
+    The cause is the rule, not the one gate: a gate's census membership depends on how its step is named.
+    SCOPE AMENDED for the W1-T12511 counts-only fixture (read at origin/main 5a6cf3204 on the build branch):
+    - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts runs the
+      census CLI over a fixture tree that adds a `widget-ratchet` step to ci.yml and has no package.json. With design
+      step 2, a tree whose package.json cannot be read fails the census, so that fixture stops as not measured (exit 2)
+      before naming the step (exit 1).
+    - The fixture gains a package.json for its one script; the test's assertions do not change. No criterion, proof or
+      falsifier changes.
+  design: |
+    1. ciScriptRatchetPopulation reads package.json's scripts beside ci.yml. A `npm run [--silent] <name>` step joins
+       the population when its step id, its npm script name, or the scripts/*.mjs file that npm script runs matches
+       SCRIPT_GATE_NAME. The key stays `script:<npm name>`, so existing entries keep their keys. A direct
+       `node scripts/x.mjs` step is read as today.
+    2. A package.json that cannot be read fails the census loudly. It never silently falls back to names only.
+    3. Give the write-only ledger step gate a pre-push verdict: a PRECHECK_SCRIPT_PARITY entry (`run:` an npm census
+       script, or `modeled:`) if its run time fits the precheck, else a ciOnlyScripts row in
+       scripts/census-precheck-parity-baseline.json whose reason states its measured cost. Measure before choosing.
+    4. Update the fixture population test in test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts for the new
+       input.
+
+    INVARIANT no-gate-hides-by-name: a ci.yml step that runs a gate script reaches the census whatever its step id and npm script are named.
+  acceptance:
+    - claim: "invariant:no-gate-hides-by-name — a ci.yml step whose npm script runs a scripts/*-ratchet.mjs file joins ciScriptRatchetPopulation, though neither its step id nor its npm script name matches SCRIPT_GATE_NAME"
+      kind: guard
+      proof: "grep: W1-T14250 criterion 1: in test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts"
+    - claim: "The real ci.yml and package.json put the write-only ledger step gate in the population, and it has a pre-push verdict: a PRECHECK_SCRIPT_PARITY entry or a ciOnlyScripts row with its measured cost"
+      proof: "grep: W1-T14250 criterion 2: in test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts"
+    - claim: "An npm script that runs no gate file stays out of the population, and a package.json that cannot be read fails the census instead of reading names only"
+      proof: "grep: W1-T14250 criterion 3: in test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts"
+  falsifier: |
+    Read only step ids and npm script names again and criteria 1 and 2 must fail. Drop the unreadable-package.json
+    refusal and criterion 3 must fail. Restore and require all to pass.

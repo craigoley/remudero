@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,8 @@ import {
   loadLearningsCorpus,
   projectLearningsHome,
   renderMatchedLearnings,
+  resolveSelectedLearning,
+  selectedLearningHandle,
   selectLearnings,
   type GlobalArtifact,
   type LearningEntry,
@@ -485,4 +487,32 @@ test("W1-T145: a TAMPERED global artifact is excluded from the assembled prompt 
     "the falsifier: a hash-mismatched artifact's content must never be silently trusted into a prompt",
   );
   assert.doesNotThrow(() => assertProvenance(prompt), "the assembled prompt (minus the refused layer) is still provenance-clean");
+});
+
+test("W1-T11159: a layered load names the STORE each entry came from, even when its own layer field is absent", () => {
+  const projectDir = tmpDir("source-project-");
+  const userDir = tmpDir("source-user-");
+  const globalDir = tmpDir("source-global-");
+  writeShard(projectDir, "shard.yaml", [entry({ id: "same" })]);
+  writeShard(userDir, "shard.yaml", [entry({ id: "same", fact: "user fact" })]);
+  const globalEntries = [entry({ id: "same", fact: "global fact" })];
+  const globalPath = join(globalDir, "artifact.yaml");
+  writeFileSync(globalPath, JSON.stringify({ version: "v1", hash: computeArtifactHash(globalEntries), entries: globalEntries }));
+  const homes = { projectDir, userOverallDir: userDir, globalArtifactPath: globalPath };
+  const loaded = loadLayeredLearnings(homes);
+  assert.deepEqual(loaded.entries.map((e) => loaded.sources?.get(e)), ["project", "user-overall", "global"]);
+  for (const e of loaded.entries) {
+    const handle = selectedLearningHandle(e, loaded.sources);
+    const resolved = resolveSelectedLearning(handle, homes);
+    assert.equal(resolved.status, "delivered");
+    assert.equal(resolved.status === "delivered" && resolved.entry.fact, e.fact, "each handle resolves inside its own store");
+  }
+  // A global artifact that no longer verifies is unreadable, never trusted from a snapshot; a vanished one is missing.
+  const globalHandle = selectedLearningHandle(loaded.entries[2], loaded.sources);
+  writeFileSync(globalPath, JSON.stringify({ version: "v1", hash: "bad", entries: globalEntries }));
+  assert.deepEqual(resolveSelectedLearning(globalHandle, homes), { status: "unreadable" });
+  rmSync(globalPath);
+  assert.deepEqual(resolveSelectedLearning(globalHandle, homes), { status: "missing" });
+  assert.deepEqual(resolveSelectedLearning(globalHandle, { projectDir }), { status: "missing" });
+  assert.deepEqual(resolveSelectedLearning(selectedLearningHandle(loaded.entries[0], undefined), homes), { status: "unbound" });
 });
