@@ -17,7 +17,7 @@
     - src/lib/reviewer-health.ts
     - test/review/a-healed-tree-that-fails-the-same-way-clears-the-blame.test.ts
     - scripts/write-only-ledger-step-baseline.json # amended 2026-11-22: operator approved reviewer.regression_blame_cleared as record-only, with a reason
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With enough healed-tree outcomes, an incident whose healed reviews are not better than the regressed shas closes and writes reviewer.regression_blame_cleared naming both rates"

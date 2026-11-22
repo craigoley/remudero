@@ -18,7 +18,7 @@
     - src/lib/ledger.ts
     - test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts
     - test/sweep/a-head-minted-by-absent-repush-is-queued-by-its-ci-green-time.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:re-entry-survives-rotation — a ledger with a sweep.review_eligible row for PR 9 at head h1, then more than MAX_RETAINED_LINES_PER_STEP sweep.review_eligible rows of other PRs, then a kept sweep.disposed row for PR 9, still holds the h1 row after rotateLedger. A light pass that sees PR 9 at a new head h2 then keys it by the first eligible ts of its h2 review key (or now), not by its createdAt, the same as before the rotation"
