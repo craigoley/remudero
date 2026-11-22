@@ -480,6 +480,9 @@ test("W1-T11443 criterion 1: cached CLI restoration rechecks the current shared 
         assert.equal(decisions[0].decisionDisposition, "computed");
         assert.ok(modelRuns > 0, "the computed review dispatches a reviewer");
         const computedModelRuns = modelRuns;
+        const postedStatus = { context: "remudero-review", state: "success", id: 2 };
+        shim.addRoute({ when: `commits/${head}/status`, stdout: JSON.stringify({ statuses: [postedStatus] }) });
+        shim.addRoute({ when: `commits/${head}/statuses?per_page=100`, stdout: JSON.stringify([postedStatus]) });
         attempt = 1;
         const code = await drive();
         assert.equal(decisions[1].decisionDisposition, "replayed", "the second run must exercise the actual cache path");

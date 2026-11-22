@@ -33,7 +33,7 @@ function fixture(dir: string) {
   };
   const posts: Array<{ description: string }> = [];
   const status = (runId = prior.run_id, createdAt = postedAt) => ({ statuses: [{
-    context: "remudero-review", state: "pending",
+    id: runId === prior.run_id ? 1 : 2, context: "remudero-review", state: "pending",
     description: `remudero-review: review in progress (owned by run ${runId})`, created_at: createdAt,
   }] });
   const opts: PostReviewPendingOpts = {
@@ -166,6 +166,7 @@ test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the re
     const h = fixture(dir);
     appendLedger(h.ledgerPath, h.prior);
     const view = () => {
+      const live = h.posts.length === 0 ? h.status() : h.status(h.opts.runId, new Date().toISOString());
       const [pr] = buildOpenPrViews("o", "r", h.ledgerPath, {
         requiredContexts: () => ["ci-gate"],
         assessPendingOwner: (record) => assessPendingReviewOwner(record, {
@@ -178,7 +179,8 @@ test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the re
             updated_at: new Date(h.now).toISOString(), body: h.body, auto_merge: null, state: "open",
           }];
           if (path.includes("check-runs")) return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
-          if (path.includes("/status")) return h.status();
+          if (path.endsWith("/status")) return live;
+          if (path.includes("/statuses?")) return live.statuses;
           if (path.endsWith("/pulls/8088")) return { mergeable: true, mergeable_state: "clean" };
           return [];
         },
@@ -196,6 +198,7 @@ test("W1-T8088: a dead owner is re-reviewed once, and the next pass reads the re
       ledgerPath: h.ledgerPath, runId: "sweep-t8088", now: () => Date.now(),
       arm: () => { assert.fail("pending review cannot arm"); }, close: () => {}, dispatchFix: () => {},
       escalate: () => { assert.fail("this review needs no escalation"); },
+      rereadPrAtAct: view,
       postReview: async () => {
         reviewed++;
         const result = await postReviewPending({ ...h.opts, assessPendingOwner: () => "dead", fetchStatus: () => h.status() });
