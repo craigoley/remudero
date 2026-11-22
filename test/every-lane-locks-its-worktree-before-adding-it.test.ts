@@ -196,7 +196,7 @@ async function driveRealApprove(ids: string[], resumeRunId?: string): Promise<{ 
   ids.forEach((id, i) => {
     drafts[id] = {
       proposalId: id,
-      fragmentYaml: `- id: NEW-1\n  title: ${["a quiet zebra crossing", "an amber lantern shelf"][i]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/${["ledger", "relint"][i]}.ts]\n`,
+      fragmentYaml: `- id: NEW-1\n  title: ${["a quiet zebra crossing", "an amber lantern shelf"][i]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/${["ledger", "relint"][i]}.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new shard only; no prior behavior changes.\n`,
       stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
       anchorFingerprint: "",
     };

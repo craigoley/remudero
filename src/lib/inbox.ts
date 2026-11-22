@@ -1329,7 +1329,7 @@ export function blockingLintMessages(
   // and Analytics beside it: `boundConsoleReadRoute`'s 750ms budget is a `setTimeout` racing the
   // handler, and a `setTimeout` cannot fire while the event loop is blocked.
   const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
-  const filingOpts = facts ? draftFilingLintOptions(facts) : { ...DRAFT_FILING_LINT_OPTIONS };
+  const filingOpts = facts ? draftFilingLintOptions(facts) : {};
   // W1-T14310: the declaration is asked of a task exactly as the plan PR preflight asks it (run-task.ts lintPlanCommand):
   // one new, re-authored against its base-plan twin, or already declaring. A shadowed base task left as it was is not.
   const results = lint(merged, (task) => ({
@@ -2467,12 +2467,9 @@ function draftAbsenceProofViolations(task: import("./plan.js").Task): DraftLintV
   return out;
 }
 
-/** W1-T14310: what the plan PR preflight's changed-task pass sets for a task its diff adds, less what needs a checkout
- *  (see {@link draftFilingLintOptions}). `addedTaskIds` is deliberately absent: a draft's `NEW-n` placeholder is minted at approve. */
 export const DRAFT_FILING_LINT_OPTIONS = Object.freeze({
   riskTransition: Object.freeze({ baseTask: undefined }),
   proofSelfPath: "block",
-  requireDesignInvariantDeclaration: true,
 } as const);
 
 /** W1-T9039: what `lint-plan --base` reads off the checkout a task lands in. */
@@ -2575,7 +2572,9 @@ function draftSizingOptions(opts: LintOpts, task: import("./plan.js").Task): Lin
 
 /** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
 export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
-  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
+  // W1-T14310: a drafted task is new, so the preflight asks it for its design-invariant declaration. `addedTaskIds` is
+  // deliberately not set: a draft's `NEW-n` placeholder is minted at approve, and the option would refuse every draft.
+  return { ...DRAFT_FILING_LINT_OPTIONS, requireDesignInvariantDeclaration: true, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
     moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
 }
 
