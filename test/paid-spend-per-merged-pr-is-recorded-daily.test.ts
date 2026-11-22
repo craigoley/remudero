@@ -19,6 +19,26 @@ const at = (hour: number, day = DAY) => `${day}T${String(hour).padStart(2, "0")}
 const merged = (n: number, day = DAY): Row => ({ ts: at(20, day), step: "pr.terminal", state: "merged",
   pr_number: n, pr_url: `https://github.com/o/remudero/pull/${n}` });
 
+/** The finished days of the seven ending 2026-11-18 that come before 2026-11-17, oldest first. */
+const FINISHED_BEFORE_17 = ["2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15", "2026-11-16"];
+const NOW = new Date("2026-11-19T06:00:00.000Z");
+
+/** What the cadence writes for a ledger holding exactly these rows, read back through its own union read. */
+async function cadenceRows(rows: Row[]): Promise<Row[]> {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}spend-per-merged-read-`));
+  try {
+    const stateDir = join(root, "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, LEDGER_FILENAME), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const written: Row[] = [];
+    await writeSpendPerMergedDays({ stateDir, cwd: REPO_ROOT, escalate: false, writeLedgerLine: row => { written.push(row); } }, NOW);
+    return written;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const dayRow = async (rows: Row[]): Promise<Row> => (await cadenceRows(rows)).find(row => row.day === DAY)!;
+
 /** The known bill: $0.50 fix (api) + $1.00 inbox (cash) + $0.25 attempt-only review = $1.75 over 2 merged PRs. */
 function bill(): Row[] {
   return [
@@ -102,11 +122,13 @@ describe("test/paid-spend-per-merged-pr-is-recorded-daily.test.ts", () => {
         .filter(row => row.step === SPEND_PER_MERGED_DAILY_STEP);
       await run();
       const first = daily();
-      assert.deepEqual(first.map(row => row.day), ["2026-11-17", DAY], "only the day with no row is written; today is not finished");
-      assert.equal(first[1]!.paid_usd, 1.75);
-      assert.equal(first[1]!.paid_usd_per_merged_pr, 0.875);
+      assert.deepEqual(first.map(row => row.day), ["2026-11-17", ...FINISHED_BEFORE_17, DAY],
+        "every finished day of the last seven without a row is written, the recorded one is not repeated, today is not finished");
+      const written = first.find(row => row.day === DAY)!;
+      assert.equal(written.paid_usd, 1.75);
+      assert.equal(written.paid_usd_per_merged_pr, 0.875);
       await run();
-      assert.equal(daily().length, 2, "a day that already has a row gets no second one");
+      assert.equal(daily().length, first.length, "a day that already has a row gets no second one");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -126,7 +148,7 @@ describe("test/paid-spend-per-merged-pr-is-recorded-daily.test.ts", () => {
       process.stderr.write = write;
       assert.equal(written.length, 0, "a refused write is not reported as written");
       const reported = errors.map(line => JSON.parse(line) as Row).filter(row => row.step === SPEND_PER_MERGED_DAILY_STEP);
-      assert.deepEqual(reported.map(row => row.day), ["2026-11-17", DAY]);
+      assert.deepEqual(reported.map(row => row.day), [...FINISHED_BEFORE_17, "2026-11-17", DAY]);
       assert.match(String(reported[0]!.ledger_write_error), /ledger full/);
     } finally {
       process.stderr.write = write;
@@ -159,5 +181,96 @@ describe("test/paid-spend-per-merged-pr-is-recorded-daily.test.ts", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("W1-T13904 class producer-dropped-before-the-join: a paid review.reviewer row is read, so its attempt is not counted again", async () => {
+    const reviewer: Row = { ts: at(2), step: "review.reviewer", model: "opus", billing_mode: "api", total_cost_usd: 0.4, selection_assignment_id: "R" };
+    const attempt: Row = { ts: at(2), step: "worker.attempt", billing_mode: "api", total_cost_usd: 0.4, selection_assignment_id: "R", lane: "review" };
+    const day = await dayRow([reviewer, attempt, merged(1)]);
+    assert.equal(day.paid_usd, 0.4, "the produced charge and its attempt receipt are one dollar");
+    assert.equal(day.attempt_only_usd, 0);
+    assert.equal((day.lanes as Row).review, 0.4);
+    const lost = await dayRow([reviewer, merged(1)]);
+    assert.equal(lost.paid_usd, 0.4, "with no attempt receipt the produced charge is still in the total");
+    assert.equal(paidSpendPerMergedDay([attempt, reviewer], DAY).paid_usd, 0.4, "row order does not matter");
+  });
+
+  test("W1-T13904 class unmatched-lane-spelling: sweep-fix and rung-only fix attempts land in the fix lane", () => {
+    const attempt = (extra: Row, cost: number): Row => ({ ts: at(3), step: "worker.attempt", billing_mode: "api", total_cost_usd: cost, ...extra });
+    const day = paidSpendPerMergedDay([attempt({ lane: "sweep-fix", worker_rung: "fix" }, 0.5), attempt({ worker_rung: "fix" }, 0.25),
+      attempt({ lane: "sweep-fix" }, 0.125), attempt({ lane: "unknown-lane", worker_rung: "fix" }, 0.0625),
+      attempt({ lane: "risk-judge", worker_rung: "fix" }, 0.03125), attempt({ lane: "unknown-lane" }, 0.015625)], DAY);
+    assert.equal(day.lanes.fix, 0.9375);
+    assert.equal(day.lanes.judge_shadow, 0.03125, "a lane that names a lane keeps it over the rung");
+    assert.equal(day.lanes.other, 0.015625);
+    assert.equal(Math.round(Object.values(day.lanes).reduce((a, b) => a + b, 0) * 1e6) / 1e6, day.paid_usd);
+  });
+
+  test("W1-T13904 class cash-attribution-by-assignment: a partial or unavailable cash attempt is never added, with or without a provider field", async () => {
+    const draft = (id: string, state: string): Row => ({ ts: at(8), step: "inbox.draft_synthesized", provider: "cash", total_cost_usd: 2,
+      token_usage_state: state, selection_assignment_id: id });
+    const receipt = (id: string | undefined, state: string, extra: Row = {}): Row => ({ ts: at(8), step: "worker.attempt", billing_mode: "api",
+      total_cost_usd: 2, token_usage_state: state, ...(id === undefined ? {} : { selection_assignment_id: id }), ...extra });
+    const paired = await dayRow([draft("C", "partial"), receipt("C", "partial")]);
+    assert.equal(paired.paid_usd, 0, "the receipt omits the provider; its paired draft names the cash assignment");
+    assert.equal(paired.unpriced_rows, 1, "one cash call, one unpriced row");
+    const routed = await dayRow([{ ts: at(7), step: "worker.assignment", worker_assignment: { id: "D", selected: { provider: "cash" } } },
+      receipt("D", "unavailable")]);
+    assert.equal(routed.paid_usd, 0, "the recorded assignment names the cash provider");
+    assert.equal(routed.unpriced_rows, 1);
+    const named = await dayRow([receipt(undefined, "partial", { provider: "cash" })]);
+    assert.equal(named.paid_usd, 0);
+    assert.equal(named.unpriced_rows, 1);
+    const priced = await dayRow([draft("E", "observed"), receipt("E", "observed")]);
+    assert.equal(priced.paid_usd, 2, "observed cash usage is priced once");
+    assert.equal(priced.unpriced_rows, 0);
+  });
+
+  test("W1-T13904 class idle-day-skipped: a ledger with no activity still gets a zero row for each of the seven finished days", async () => {
+    const rows = await cadenceRows([{ ts: "2026-11-19T01:00:00.000Z", step: "daemon.summary" }]);
+    assert.deepEqual(rows.map(row => row.day), [...FINISHED_BEFORE_17, "2026-11-17", DAY]);
+    for (const row of rows) {
+      assert.equal(row.paid_usd, 0);
+      assert.equal(row.merged_prs, 0);
+      assert.equal(row.paid_usd_per_merged_pr, null);
+    }
+  });
+
+  /** A board over a state dir whose live ledger holds the legacy steps (so its early stop fires) and `live` daily rows,
+   *  with `rotated` daily rows in rotations. */
+  function boardOver(live: Row[], rotated: Record<string, Row[]>) {
+    const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}spend-per-merged-rotated-`));
+    const legacy = ["daemon.summary", "daemon.headroom.degraded", "dispatch.indeterminate"].map(step => ({ ts: at(22), step }));
+    const ledger = join(root, "ledger.ndjson");
+    writeFileSync(ledger, [...legacy, ...live].map(row => JSON.stringify(row)).join("\n") + "\n");
+    for (const [name, list] of Object.entries(rotated)) writeFileSync(join(root, name), list.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined,
+      prBody: () => undefined, readFailed: () => false };
+    const deps: StatusBoardDeps = { queryService: () => ({ running: false, pid: null }), repoDir: "/nonexistent/repo/for/tests",
+      now: () => NOW.getTime(), resolveOriginMainSha: () => undefined, isPidAlive: () => true,
+      plan: loadPlanFromYaml("- id: W1-T1\n  title: \"t\"\n  repo: remudero\n  depends_on: []\n  type: implement\n" +
+        "  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n", "fixture"),
+      github, readPushedRunBranches: () => "" };
+    try {
+      return buildStatusBoard(root, ledger, deps);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const daily = (day: string, ratio: number): Row => ({ ts: `${day}T23:59:00.000Z`, step: SPEND_PER_MERGED_DAILY_STEP, day, paid_usd: 1,
+    merged_prs: 1, paid_usd_per_merged_pr: ratio, lanes: { fix: 1 }, unpriced_rows: 0, attempt_only_usd: 0 });
+
+  test("W1-T13904 class history-in-rotations: the board's median reads daily rows from rotations even when the legacy steps are live", () => {
+    const model = boardOver([daily(DAY, 0.2)], { "ledger.2026-11-18T12-00-00-000Z.ndjson": [daily("2026-11-15", 0.1)] });
+    assert.equal(model.spendPerMerged?.row.day, DAY);
+    assert.equal(model.spendPerMerged?.median7d, 0.15, "the live row alone would give 0.2");
+  });
+
+  test("W1-T13904 class newest-row-in-rotations: the newest daily row is chosen whichever file holds it", () => {
+    const model = boardOver([], { "ledger.2026-11-18T12-00-00-000Z.ndjson": [daily(DAY, 0.3), daily("2026-11-16", 0.1)],
+      "ledger.2026-11-17T12-00-00-000Z.ndjson": [daily("2026-11-15", 0.2)] });
+    assert.equal(model.spendPerMerged?.row.day, DAY);
+    assert.equal(model.spendPerMerged?.row.paid_usd_per_merged_pr, 0.3);
+    assert.equal(model.spendPerMerged?.median7d, 0.2);
   });
 });

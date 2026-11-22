@@ -98,7 +98,7 @@ import {
   readLedgerUnionBounded,
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
-import { latestSpendPerMergedRow, renderSpendPerMergedLine, type LatestSpendPerMerged } from "./spend-per-merged.js";
+import { latestSpendPerMergedRow, renderSpendPerMergedLine, SPEND_PER_MERGED_DAILY_STEP, type LatestSpendPerMerged } from "./spend-per-merged.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
@@ -2495,7 +2495,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T4939: IDLE LANE — the same `lines` window, one more pure fold, no second ledger read. ──
   const idleLane = deriveIdleLane(lines, nowMs);
-  const spendPerMerged = latestSpendPerMergedRow(lines);
+  const spendPerMerged = latestSpendPerMergedRow(deps.readLedger ? lines : readLedgerUnionBounded(ledgerPath, {
+    keep: (line) => line.includes(`"${SPEND_PER_MERGED_DAILY_STEP}"`) }));
 
   // W1-T931: NEEDS ME is another pure fold of that window, without another ledger read.
   const operatorReleases = readOperatorReleaseRecordsForBoard(root, plan, lines);

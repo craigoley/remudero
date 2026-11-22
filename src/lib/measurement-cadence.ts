@@ -25,7 +25,7 @@ import {
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { appendLedger } from "./ledger.js";
-import { finishedUtcDays, paidSpendPerMergedDay, SPEND_PER_MERGED_DAILY_STEP, spendPerMergedDayIsEmpty, SPEND_PER_MERGED_STEPS } from "./spend-per-merged.js";
+import { finishedUtcDays, isSpendPerMergedInput, paidSpendPerMergedDay, SPEND_PER_MERGED_DAILY_STEP } from "./spend-per-merged.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import {
   createIncrementalLedgerUnion,
@@ -2402,16 +2402,15 @@ export async function writeSpendPerMergedDays(opts: MeasurementCadenceReportOpts
   const days = finishedUtcDays(now.getTime(), SPEND_PER_MERGED_DAYS);
   const sinceTs = `${days.at(-1)!}T00:00:00.000Z`;
   let unread = 0;
-  const read = await readLedgerUnionRecords(opts.stateDir, { since: sinceTs, step: SPEND_PER_MERGED_STEPS,
+  const read = await readLedgerUnionRecords(opts.stateDir, { since: sinceTs, where: isSpendPerMergedInput,
     onUnreadArchive: () => { unread++; }, onUnreadLive: () => { unread++; } });
   if (unread > 0) return [];
   const rows = read.filter(row => typeof row.ts === "string" && row.ts >= sinceTs);
   const recorded = new Set(rows.filter(row => row.step === SPEND_PER_MERGED_DAILY_STEP).map(row => row.day));
   const written: string[] = [];
   for (const day of days.filter(candidate => !recorded.has(candidate)).reverse()) {
-    const measured = paidSpendPerMergedDay(rows, day);
-    if (spendPerMergedDayIsEmpty(measured)) continue;
-    const row = { step: SPEND_PER_MERGED_DAILY_STEP, run_id: "MEASUREMENT-CADENCE", task_id: "measurement-cadence", ...measured };
+    const row = { step: SPEND_PER_MERGED_DAILY_STEP, run_id: "MEASUREMENT-CADENCE", task_id: "measurement-cadence",
+      ...paidSpendPerMergedDay(rows, day) };
     try {
       if (opts.writeLedgerLine) opts.writeLedgerLine(row);
       else appendLedger(join(opts.stateDir, LEDGER_FILENAME), row);

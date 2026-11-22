@@ -8,14 +8,30 @@
  */
 import { fixedClock } from "./clock.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
-import { isCashSpendProducer, isProducedSpendRow, SPEND_STEP_ROLES, spendAmountUsd } from "./spend-rows.js";
+import { isCashSpendProducer, isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
 
 export const SPEND_PER_MERGED_DAILY_STEP = "spend.per_merged_daily";
 export const SPEND_LANES = ["implement", "fix", "review", "judge_shadow", "gardener", "inbox_triage", "retro", "scout", "other"] as const;
 export type SpendLane = (typeof SPEND_LANES)[number];
-/** The steps a daily measurement reads: every listed spend step, worker attempts, merged PRs and the daily row. */
-export const SPEND_PER_MERGED_STEPS: readonly string[] = [...Object.keys(SPEND_STEP_ROLES), "worker.attempt", PR_TERMINAL_STEP,
-  SPEND_PER_MERGED_DAILY_STEP];
+
+type Row = Record<string, unknown>;
+const text = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
+
+/** The assignment id of a `worker.assignment` row that routed to the cash provider, else undefined. */
+function cashAssignmentId(row: Row): string | undefined {
+  if (row.step !== "worker.assignment" || !row.worker_assignment || typeof row.worker_assignment !== "object") return undefined;
+  const assignment = row.worker_assignment as { id?: unknown; selected?: { provider?: unknown } };
+  return assignment.selected?.provider === "cash" ? text(assignment.id) : undefined;
+}
+
+/**
+ * The rows a daily measurement reads, chosen by the shared spend rules rather than a step list, so a producer the
+ * rules accept (a `review.reviewer` row carrying a model and a cost) is never dropped before the assignment join.
+ */
+export function isSpendPerMergedInput(row: Row): boolean {
+  return row.step === "worker.attempt" || row.step === PR_TERMINAL_STEP || row.step === SPEND_PER_MERGED_DAILY_STEP ||
+    isProducedSpendRow(row) || isCashSpendProducer(row) || cashAssignmentId(row) !== undefined;
+}
 
 export interface SpendPerMergedDay {
   day: string;
@@ -29,9 +45,7 @@ export interface SpendPerMergedDay {
   attempt_only_usd: number;
 }
 
-type Row = Record<string, unknown>;
-const text = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
-const usd = (value: number): number => Math.round(value * 1e6) / 1e6;
+const usd =(value: number): number => Math.round(value * 1e6) / 1e6;
 const DAY_MS = 86_400_000;
 
 /** The UTC day (`YYYY-MM-DD`) of a row's `ts`, or undefined when it has none. */
@@ -47,27 +61,34 @@ const LANE_RULES: readonly [RegExp, SpendLane][] = [
   [/^retro/, "retro"],
   [/scout/, "scout"],
   [/^review/, "review"],
-  [/^(fix|alert-fix|main-repair|census_push|sweep\.plan_round)/, "fix"],
+  [/^(fix|sweep-fix|alert-fix|main-repair|census_push|sweep\.plan_round)/, "fix"],
   [/^(implement|recon|diagnose)/, "implement"],
 ];
 function laneOfName(name: string | undefined): SpendLane {
   if (name === undefined) return "other";
   return LANE_RULES.find(([pattern]) => pattern.test(name))?.[1] ?? "other";
 }
-/** A produced row's lane comes from its step; a `worker.attempt` row's from the lane it names. */
+/** A produced row's lane comes from its step; a `worker.attempt` row's from the first lane field that names one. */
 function spendLaneOf(row: Row): SpendLane {
   if (row.step !== "worker.attempt") return laneOfName(text(row.step));
   const repair = row.repair && typeof row.repair === "object" ? (row.repair as Row).rung : undefined;
-  return laneOfName(text(row.guardrail_lane) ?? text(row.lane) ?? text(row.workLane) ?? text(repair));
+  const names = [row.guardrail_lane, row.lane, row.workLane, row.worker_rung, repair].map(text);
+  return names.map(laneOfName).find(lane => lane !== "other") ?? "other";
 }
 
 const paidProduced = (row: Row): boolean => row.step !== "worker.attempt" && isProducedSpendRow(row) &&
   (row.billing_mode === "api" || row.provider === "cash");
+const incompleteUsage = (row: Row): boolean => row.token_usage_state === "partial" || row.token_usage_state === "unavailable";
 
 export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): SpendPerMergedDay {
   const lanes = Object.fromEntries(SPEND_LANES.map(lane => [lane, 0])) as Record<SpendLane, number>;
-  const producedIds = new Set(rows.filter(paidProduced).map(row => text(row.selection_assignment_id))
+  const idOf = (row: Row): string | undefined => text(row.selection_assignment_id);
+  const producedIds = new Set(rows.filter(paidProduced).map(idOf).filter((id): id is string => id !== undefined));
+  const unpricedIds = new Set(rows.filter(row => row.step !== "worker.attempt" && isCashSpendProducer(row) &&
+    spendAmountUsd(row) === undefined).map(idOf).filter((id): id is string => id !== undefined));
+  const cashIds = new Set([...rows.filter(row => row.provider === "cash").map(idOf), ...rows.map(cashAssignmentId)]
     .filter((id): id is string => id !== undefined));
+  const countedUnpriced = new Set<string>();
   const merged = new Set<string>();
   let paid = 0, attemptOnly = 0, unpriced = 0, unkeyedMerged = 0;
   for (const row of rows) {
@@ -79,7 +100,17 @@ export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): Spe
       else merged.add(key);
       continue;
     }
-    if (row.step !== "worker.attempt" && isCashSpendProducer(row) && spendAmountUsd(row) === undefined) {
+    const id = idOf(row);
+    if (row.step === "worker.attempt") {
+      const cash = row.provider === "cash" || (id !== undefined && cashIds.has(id));
+      if (row.billing_mode !== "api" && !(cash && incompleteUsage(row))) continue;
+      if (id !== undefined && unpricedIds.has(id)) continue;
+      if (cash && incompleteUsage(row)) {
+        if (id === undefined || !countedUnpriced.has(id)) unpriced++;
+        if (id !== undefined) countedUnpriced.add(id);
+        continue;
+      }
+    } else if (isCashSpendProducer(row) && spendAmountUsd(row) === undefined) {
       unpriced++;
       continue;
     }
@@ -88,8 +119,7 @@ export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): Spe
     if (paidProduced(row)) {
       paid += amount;
       lanes[spendLaneOf(row)] += amount;
-    } else if (row.step === "worker.attempt" && row.billing_mode === "api") {
-      const id = text(row.selection_assignment_id);
+    } else if (row.step === "worker.attempt") {
       if (id !== undefined && producedIds.has(id)) continue;
       paid += amount;
       attemptOnly += amount;
@@ -103,11 +133,6 @@ export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): Spe
     lanes, unpriced_rows: unpriced, attempt_only_usd: usd(attemptOnly) };
 }
 
-/** True when the day has no paid row, no unpriced row and no merged PR: there is nothing to record. */
-export function spendPerMergedDayIsEmpty(day: SpendPerMergedDay): boolean {
-  return day.paid_usd === 0 && day.merged_prs === 0 && day.unpriced_rows === 0;
-}
-
 /** The finished UTC days, newest first, from yesterday back `count` days. */
 export function finishedUtcDays(nowMs: number, count: number): string[] {
   const today = Date.parse(`${fixedClock(nowMs).iso().slice(0, 10)}T00:00:00.000Z`);
@@ -118,15 +143,16 @@ export interface LatestSpendPerMerged { row: SpendPerMergedDay; median7d: number
 
 /** The newest daily row, the median ratio of the daily rows in the seven days ending on its day, and its largest lane. */
 export function latestSpendPerMergedRow(rows: readonly Row[]): LatestSpendPerMerged | undefined {
-  const byDay = new Map<string, SpendPerMergedDay>();
+  const byDay = new Map<string, Row>();
   for (const row of rows) {
     if (row.step !== SPEND_PER_MERGED_DAILY_STEP || typeof row.day !== "string" || typeof row.paid_usd !== "number") continue;
-    byDay.set(row.day, row as unknown as SpendPerMergedDay);
+    if (String(byDay.get(row.day)?.ts ?? "") > String(row.ts ?? "")) continue; // the newest row of a day wins, whatever the read order
+    byDay.set(row.day, row);
   }
   const days = [...byDay.keys()].sort();
   const newest = days.at(-1);
   if (newest === undefined) return undefined;
-  const row = byDay.get(newest)!;
+  const row = byDay.get(newest)! as unknown as SpendPerMergedDay;
   const from = fixedClock(Date.parse(`${newest}T00:00:00.000Z`) - 6 * DAY_MS).iso().slice(0, 10);
   const ratios = days.filter(day => day >= from).map(day => byDay.get(day)!.paid_usd_per_merged_pr)
     .filter((ratio): ratio is number => typeof ratio === "number" && Number.isFinite(ratio)).sort((a, b) => a - b);
