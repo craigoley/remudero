@@ -1189,7 +1189,8 @@ test("W1-T14283: the death names its own escalation, claimed once per incident a
   const e = health.reviewerHealedChildDiedEscalation(incident, "SyntaxError: no export");
   assert.match(e.summary, new RegExp(DIES));
   assert.match(e.detail, /reporting no cause: SyntaxError: no export/);
-  assert.equal(e.recommendation, "Heal with a fix PR");
+  assert.equal(e.recommendation, "Let the revert PR merge", "W1-T14351: the heal verb is not registered, so it is neither offered nor recommended");
+  assert.ok(!e.options.some((o) => o.label === "Heal with a fix PR"));
   assert.equal(health.claimHealedDeathEscalation(incident), true);
   assert.equal(health.claimHealedDeathEscalation(incident), false);
   health.resetHealedReviewerTrees();
