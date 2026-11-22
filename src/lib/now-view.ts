@@ -1073,7 +1073,9 @@ export function createNowView(opts: NowViewOptions): {
         return { ...archived, torn: tornLines.length, tornLines };
       }) });
     pass.complete();
-    if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
+    // W1-T14341: a row only when the digests did something; a build the memo answered would log itself into the ledger it reads.
+    const counts = digests.counts();
+    if (counts.hits + counts.parsed + counts.writeFailed + counts.pruned > 0) log("read_model.now_gate_digests", { instance: instance.name, ...counts });
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
     const rows = keepNewestTokenRefreshRows(read.rows);
     if (complete) {
