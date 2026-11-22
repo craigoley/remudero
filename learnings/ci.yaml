@@ -33,6 +33,7 @@
   subsystem: ci
   lifecycle: active
   files: [".github/workflows/security-merge-policy.yml", src/lib/code-scanning-merge-adapter.mjs]
+  error_signatures: ["security-merge-policy"]
   fact: >-
     When security-merge-policy refuses a pull request, inspect that PR's policy status reason and
     the evidence it names before repairing. Keep each PR's disposition separate: a refusal count
@@ -165,6 +166,7 @@
   subsystem: ci
   lifecycle: active
   files: [".github/workflows/unwired-gate.yml", scripts/unwired-gate-check.mjs, src/lib/ci-parity.ts]
+  error_signatures: ["unwired-gate"]
   fact: >-
     Before opening a PR that adds or changes a gate-shaped script, npm check script, or its CI
     registration, run `npm run --silent unwired-gate:check` on the proposed tree. The check reads
@@ -183,6 +185,7 @@
   subsystem: ci
   lifecycle: active
   files: ["plan/tasks.d/**", "plan/feedback/**", "deploy/**"]
+  error_signatures: ["ci-shard (7/8)"]
   fact: >-
     When ci-shard (7/8) refuses a pull request, inspect that shard's failure before repairing; the
     repair window included selector-plan updates, deployment tests, feedback proposals, and plan
@@ -223,6 +226,7 @@
   subsystem: ci
   lifecycle: active
   files: ["test/**", "scripts/test-tier-manifest.json", ".github/workflows/ci.yml", package.json]
+  error_signatures: ["test-slow-shard (1/2)"]
   fact: >-
     When verifying test changes or the slow-tier runner, run one full test suite at a time. Do not
     background or parallelize `node --test` runs; the deny floor refuses concurrent full-suite
@@ -242,6 +246,7 @@
   subsystem: ci
   lifecycle: active
   files: [".github/workflows/codeql.yml", ".github/workflows/ci-gate.yml", "plan/tasks.d/**", src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, "test/**"]
+  error_signatures: ["Analyze (javascript-typescript)"]
   fact: >-
     The Analyze (javascript-typescript) gate is the CodeQL job that ci-gate.yml requires. Before the
     first push, run `npm run --silent rule15-precheck` if the diff touches plan/, and run
@@ -276,6 +281,7 @@
   subsystem: ci
   lifecycle: active
   files: [src/lib/classify.ts, "test/**", stryker.conf.json, scripts/mutation-baseline.json, .github/workflows/ci.yml]
+  error_signatures: ["mutation-ratchet"]
   fact: >-
     When a PR diff can move the mutation score for src/lib/classify.ts, the mutation-ratchet job
     runs Stryker against its scoped tests and compares the result with the ratcheted baseline. Run
@@ -349,6 +355,7 @@
   subsystem: ci
   lifecycle: active
   files: ["plan/tasks.d/**", src/run-task.ts, ".github/workflows/ci.yml"]
+  error_signatures: ["acceptance-author-gate"]
   fact: >-
     Before opening a PR from the task-authoring lane, ensure its acceptance block has the required
     header and at least one executable proof using a supported dialect (`unit test:` or `grep:`),
@@ -370,6 +377,7 @@
     - "docs/comment-standard.md"
     - "scripts/comment-load-baseline.json"
     - "scripts/comment-load-ratchet.mjs"
+  error_signatures: ["comment-load-ratchet"]
   fact: >-
     Before changing the comment-load gate, its workflow, baseline, or documented policy, run
     `npm run --silent comment-load-signal`. The gate refuses either per-file comment growth over
@@ -437,6 +445,7 @@
   subsystem: ci
   lifecycle: active
   files: [src/lib/ledger-projector.ts, src/lib/read-model-worker.ts, src/lib/board-projection.ts, src/lib/read-model-db.ts]
+  error_signatures: ["CodeQL"]
   fact: >-
     When changing the read-model projection or worker lane, inspect the CodeQL `security-and-quality`
     findings on the pull request and repair each finding in the changed behavior before retrying the
@@ -452,6 +461,7 @@
   subsystem: ci
   lifecycle: active
   files: [src/run-task.ts, src/lib/policy.ts, src/lib/dep-review.ts, scripts/census-precheck.mjs, scripts/preflight-author.mjs, src/lib/ledger.ts, src/lib/proof-amendment.ts, "plan/tasks.d/**"]
+  error_signatures: ["rule-checks"]
   fact: >-
     When a change touches a listed source or preflight helper, or a plan task shard, run the cheap
     checks before the first push: `rmd census-membership` (it maps changed paths to the census
@@ -479,6 +489,7 @@
     - "scripts/source-size-baseline.json"
     - "scripts/comment-load-ratchet.mjs"
     - "scripts/source-size-ratchet.mjs"
+  error_signatures: ["light-gates"]
   fact: >-
     Before pushing a change that touches plan shards, tests, or the light-gates job in
     .github/workflows/ci.yml, run `npm run --silent comment-load-signal` and
@@ -499,6 +510,7 @@
   subsystem: ci
   lifecycle: active
   files: ["plan/tasks.d/**"]
+  error_signatures: ["prompt-surface-gate"]
   fact: >-
     When a task changes data in a `learnings/*.yaml` shard, the prompt-surface-gate requires a golden
     verdict under `test/fixtures/golden-verdicts/**`; adding or editing test files alone cannot
@@ -524,6 +536,7 @@
     - "src/lib/dep-review.ts"
     - "test/**"
     - "learnings/ci.yaml"
+  error_signatures: ["remudero-review"]
   fact: >-
     The remudero-review gate refused eight pull requests in one window (#9717, #9819, #9824, #9834,
     #9838, #9918, #9971, #9979), and each was repaired after the refusal. Before pushing, a worker
@@ -576,6 +589,7 @@
   subsystem: ci
   lifecycle: active
   files: ["scripts/head-identity-gate.mjs", "hooks/pre-push", "src/run-task.ts", "test/**", "plan/tasks.d/**"]
+  error_signatures: ["head-identity-gate"]
   fact: >-
     Before the first push of a branch, give its head an identity the head-identity gate accepts: a
     run-shaped ref (`run-<taskId>-<epochMs>` for a filed task, `run-unfiled-<epochMs>` for unfiled
@@ -600,6 +614,7 @@
     - "test/setup/**"
     - "src/lib/tmp.ts"
     - "scripts/coverage-session-blanking-check.mjs"
+  error_signatures: ["coverage-session-blanking"]
   fact: >-
     The coverage-session-blanking gate refused 4 pull requests in one window, and each was repaired after
     the refusal. In a test that spawns a nested `node --test` runner or a child that strips NODE_TEST_CONTEXT,
@@ -622,6 +637,7 @@
     - "scripts/coverage-ratchet.mjs"
     - "scripts/coverage-baseline.json"
     - "scripts/diff-coverage.mjs"
+  error_signatures: ["coverage-ratchet"]
   fact: >-
     The coverage-ratchet gate refused 13 pull requests in one window (#6062 to #6156), and each was repaired after
     the refusal. The gate is an aggregate: it sums lines and branches across the whole lcov run and refuses when the
@@ -642,6 +658,7 @@
   subsystem: ci
   lifecycle: active
   files: ["plan/tasks.d/**"]
+  error_signatures: ["coverage-shard (1/4)"]
   fact: >-
     When coverage-shard (1/4) refuses a pull request, inspect that shard's failure output before
     repairing; a refusal cohort and its repaired diffs do not establish a shared cause. Route the
@@ -702,6 +719,7 @@
     - ".github/workflows/ci.yml"
     - "scripts/test-tier-manifest.mjs"
     - "test/every-coverage-shard-weighs-the-one-ledger-the-run-resolved.test.ts"
+  error_signatures: ["coverage-ledger"]
   fact: >-
     When changing the coverage-ledger workflow or its resolver, preserve one immutable ledger choice
     for the whole run: resolve it once, bind it to the run id and source SHA, and make each shard
@@ -728,6 +746,7 @@
     - "src/lib/dep-review.ts"
     - "plan/tasks.d/**"
     - "test/**"
+  error_signatures: ["Scan"]
   fact: >-
     The Scan gate refused 11 pull requests in one window, and each was repaired after the refusal.
     Before the first push, a worker runs the two cheap ratchets over its own change,
@@ -753,6 +772,7 @@
     - ".github/workflows/ci.yml"
   error_signatures:
     - "leak-grep: possible secret matching"
+    - "leak-grep"
   fact: >-
     The leak-grep gate scans every tracked file, plan task shards included, for fixed secret-token
     formats. Before pushing a plan/tasks.d shard, run `bash .github/scripts/leak-grep.sh` on the
@@ -773,6 +793,7 @@
   subsystem: ci
   lifecycle: active
   files: ["docs/**", "docs/docs-index.json", "docs/README.md", "scripts/generate-docs-index.mjs"]
+  error_signatures: ["docs-index-check"]
   fact: >-
     Any edit under docs/**/*.md makes the committed docs/docs-index.json STALE, and the docs-index:check gate refuses the PR; before pushing a docs change run `npm run --silent docs-index`, commit the regenerated docs/docs-index.json, then confirm `npm run --silent docs-index:check` prints OK.
   evidence: "ci-learning:11388:docs-index-check: the docs-index-check gate refused #11388 and #11524 because docs/docs-index.json did not match a fresh regeneration from docs/**/*.md (scripts/generate-docs-index.mjs --check exits 1 with 'is STALE'). The ci-learning note records the #11388 repair as regenerating docs/docs-index.json, editing docs/README.md, and touching three tests (a-refused-green-merge-records-why-and-reruns-a-stale-check, daemon-worktrees-pushes-and-arms-never-block-the-loop, run-task); that repair was NOT re-read from the PRs in this run. Also run `npm run --silent docs-index:check-paths` when a mermaid block cites a path."
@@ -795,6 +816,7 @@
   subsystem: ci
   lifecycle: active
   files: [".github/workflows/codeql.yml", ".github/workflows/**"]
+  error_signatures: ["Analyze (actions)"]
   fact: >-
     When the CodeQL `Analyze (actions)` check refuses a pull request, inspect that pull request's
     failed job step and repair diff before choosing a remedy. A count of refusals and a later repair
@@ -814,6 +836,7 @@
   subsystem: ci
   lifecycle: active
   files: [".github/workflows/**", "package.json"]
+  error_signatures: ["clock-sweep-report (merge the shards, classify, deliver)"]
   fact: >-
     When the clock-sweep-report (merge the shards, classify, deliver) gate refuses a pull request, read
     that pull request's failed job step and its repair diff before choosing a remedy. A refusal that was

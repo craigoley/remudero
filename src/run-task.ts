@@ -1448,7 +1448,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningShards, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1458,7 +1458,9 @@ import {
 } from "./lib/model-availability.js";
 import {
   judgeCiLessonEfficacy,
-  readFiledCiLessons,
+  readCheckoutCiLessons,
+  readMergedCiLessons,
+  readMergedCiLessonsAsync,
   summarizeCiLessonRecurrences,
   type FiledCiLessonsRead,
 } from "./lib/ci-lesson-recurrence.js";
@@ -15919,6 +15921,8 @@ export function ciLearningCommand(
     /** W1-T3542 — the isolated landing bridge. Injected so a test writes nothing; production
      *  stages outside the checkout and lands only through the dedicated gated PR. */
     landShards?: typeof landCiLearningShards;
+    /** The plan's filed lessons, including fetched main in production. */
+    loadLessons?: () => FiledCiLessonsRead;
     destinationSnapshot?: TaskIdDestinationSnapshot | null;
     destinationFailure?: string;
   } = {},
@@ -16002,7 +16006,13 @@ export function ciLearningCommand(
   // carries its finding id as its `origin:`, which is what makes the plan answerable here.
   // W1-T4190: unioned with what fetched origin/main holds — the checkout's plan can lag it.
   const planOrigins = deps.planOrigins ?? [...new Set([...ciLearningPlanOrigins(checkoutRoot), ...ciLearningMergedOrigins(checkoutRoot)])];
-  const result = mintCiLearningShards(corpus, planOrigins);
+  const { result } = mintCiLearningFromPlan({
+    corpus, window: input, alreadyFiledFindingIds: planOrigins, stateRoot: root, runId: `CI-LEARNING-${process.pid}`,
+    readLessons: deps.loadLessons ?? (() => readCheckoutCiLessons(checkoutRoot, readMergedCiLessons(checkoutRoot))),
+  });
+  for (const h of result.ladder) {
+    console.log(`  HANDED TO THE FLOW LADDER ${h.gate}: lesson ${h.findingId} recurred on ${h.recurredPrs.map((n) => `#${n}`).join(", ")}`);
+  }
   console.log(`rmd ci-learning — ${days} day window, ${corpus.prsScanned} pull request(s) scanned`);
   console.log(`  status: ${result.status}`);
   if (result.unreadableShas.length > 0) {
@@ -27904,7 +27914,7 @@ export function buildCiLearningCadenceRunner(deps: {
   root: string;
   checkoutRoot: string;
   loadWindow: (days: number) => CiFailureCorpusInput | Promise<CiFailureCorpusInput>;
-  loadLessons?: () => ReturnType<typeof readFiledCiLessons>;
+  loadLessons?: () => FiledCiLessonsRead;
   fileShards?: typeof fileCiLearningShards;
   /** W1-T5965: defaults to the awaited-preflight lander, so the daemon loop turns while the checks run. */
   landShards?: CiLearningShardLander;
@@ -27943,8 +27953,11 @@ export function buildCiLearningCadenceRunner(deps: {
     const mergedOrigins = await (deps.mergedOrigins ?? ciLearningMergedOriginsAsync)(deps.checkoutRoot);
     const idempotencyOrigins = [...new Set([...planOrigins, ...pendingOrigins, ...mergedOrigins])];
     const handFix = deps.handFixInput ? await deps.handFixInput(at) : await ciLearningHandFixInput(deps.root, deps.checkoutRoot, at);
-    const result = mintCiLearningShards(corpus, idempotencyOrigins, handFix);
-    const filedLessons = deps.loadLessons ? deps.loadLessons() : readFiledCiLessons(join(deps.checkoutRoot, "plan", "tasks.d"));
+    const lessonRead = deps.loadLessons?.() ?? readCheckoutCiLessons(deps.checkoutRoot, await readMergedCiLessonsAsync(deps.checkoutRoot));
+    const { result, filedLessons } = mintCiLearningFromPlan({
+      corpus, window, alreadyFiledFindingIds: idempotencyOrigins, handFix, stateRoot: deps.root, runId: `CI-LEARNING-${at.getTime()}`,
+      readLessons: () => lessonRead,
+    });
     const lessonRecurrences =
       filedLessons.status === "measured"
         ? summarizeCiLessonRecurrences(judgeCiLessonEfficacy(corpus, filedLessons.lessons), CI_LEARNING_MINT_CEILING, {
