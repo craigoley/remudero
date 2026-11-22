@@ -28,6 +28,7 @@ async function dispatch(selectionTiming?: boolean, failTimingSink = false) {
   const summary = await runDaemon(plan, {
     ...hostIndependentDaemonDeps(),
     now: () => new Date(ms),
+    selectionTimingNow: () => ms,
     sleep: () => stopped ? Promise.resolve() : new Promise<void>((resolve) => sleepers.push(resolve)),
     checkStop: () => stopped ? "fixture finished" : undefined,
     refreshMerged: () => isMerged,
@@ -145,6 +146,7 @@ test("a task precondition is timed through its normal command reader", async () 
   let stopped = false;
   await runDaemon(plan, {
     ...hostIndependentDaemonDeps(),
+    selectionTimingNow: () => 0,
     sleep: async () => {},
     checkStop: () => stopped ? "fixture finished" : undefined,
     refreshMerged: () => () => false,

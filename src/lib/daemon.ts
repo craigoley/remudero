@@ -176,7 +176,7 @@ import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./fee
 import type { GithubPostureFinding } from "./github-posture.js";
 // Clock adapters preserve DaemonDeps.now's Date and crashLoopCheck.now's string injection shapes.
 // The internal headroom sampler uses Clock directly (W1-T2897).
-import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -1427,6 +1427,8 @@ interface OpsDispatchContext {
 }
 
 export interface DaemonDeps {
+  /** W1-T13286: the selection-timing row's own clock, so timing never consumes a reading of `now` a decision depends on. */
+  selectionTimingNow?: () => number;
   /** Absent by default. This reads completed state only; it never awaits a private source on the tick. */
   readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
   /** W1-T13681: the move janitor, one detached movePlanTask tick per iteration; absent, no tick runs. */
@@ -4706,6 +4708,7 @@ export async function runDaemon(
   };
   const emitLog: (step: string, extra?: Record<string, unknown>) => void = deps.log ?? (() => {});
   const timingSink = opts.selectionTiming === false ? undefined : deps.log && emitLog;
+  const selectionTimingClock = clockFromMillisFn(deps.selectionTimingNow ?? (() => performance.now()));
   type SettlementReporting = {
     report: typeof emitLog;
     faults: Array<{ phase: string; reason: unknown }>;
@@ -8323,7 +8326,7 @@ export async function runDaemon(
     // by {@link assertRunnable} is cleared and its named reason ledgered, never silently dropped. The
     // first runnable kick becomes this cycle's task; others wait (fb-1784988460437-9daa9b).
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
-    const tickTiming = dispatchSelectionTiming("tick", daemonClock, timingSink);
+    const tickTiming = dispatchSelectionTiming("tick", selectionTimingClock, timingSink);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
     let tickLedgerLines: readonly string[] | undefined;
@@ -9175,7 +9178,7 @@ export async function runDaemon(
       return undefined;
     };
     const decideRefill = (lane: number, finished: Task | undefined, grow?: LaneGrow): Task | undefined | Promise<Task | undefined> => {
-      const timing = dispatchSelectionTiming("lane-refill", daemonClock, timingSink);
+      const timing = dispatchSelectionTiming("lane-refill", selectionTimingClock, timingSink);
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
