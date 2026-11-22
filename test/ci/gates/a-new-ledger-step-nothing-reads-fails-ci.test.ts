@@ -846,16 +846,31 @@ test("W1-T14149: the CLI refuses to report OK when it cannot measure", (t) => {
   assert.equal(run(["--no-such-flag"]).code, 2);
 });
 
-test("W1-T14149: a baseline absent at the merge base is a first landing, with no shrink to check", (t) => {
+test("W1-T14149 criterion 1: on a first landing, a debt entry the merge base's own tree does not have write-only fails the check", (t) => {
   const repo = gitRepo({ scope: t, kind: "w1t14149" });
+  put(repo, { "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => log("first.debt");' });
   repo.git("checkout", "--quiet", "-b", "feature");
+  // The reviewed case: the baseline's own first landing lists a new unread step from sre-lane.ts as debt, with no reason.
   put(repo, {
-    "src/lib/writer.ts": 'export const w = (log: (s: string) => void) => log("first.step");',
-    [mod.BASELINE_PATH]: baselineText(["first.step"]),
+    "src/lib/sre-lane.ts": 'export const s = (log: (s: string) => void) => log("sre_lane.smuggled");',
+    [mod.BASELINE_PATH]: baselineText(["first.debt", "sre_lane.smuggled"]),
   });
-  const first = run(["--root", repo.dir, "--base", "main"]);
-  assert.equal(first.code, 0, first.out);
-  assert.match(first.out, /no baseline at the merge base/);
+  const smuggled = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(smuggled.code, 1, smuggled.out);
+  assert.match(smuggled.out, /no baseline at the merge base/);
+  assert.match(smuggled.out, /GROWN[^\n]*\n {2}sre_lane\.smuggled\n/);
+  assert.doesNotMatch(smuggled.out, /\n {2}first\.debt\n/, "debt the merge base's tree already had is the first landing's to record");
+
+  // The remedies: a reason in recordOnly, or no new write-only step at all.
+  put(repo, { [mod.BASELINE_PATH]: baselineText(["first.debt"], { "sre_lane.smuggled": "an audit trail no loop reads" }) });
+  const recorded = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(recorded.code, 0, recorded.out);
+  put(repo, {
+    "src/lib/sre-lane.ts": 'export const s = (log: (s: string) => void) => log("first.debt");',
+    [mod.BASELINE_PATH]: baselineText(["first.debt"]),
+  });
+  const inherited = run(["--root", repo.dir, "--base", "main"]);
+  assert.equal(inherited.code, 0, inherited.out);
 });
 
 // ── the live tree: a positive control and a corpus self-check ──────────────────────────────────
@@ -946,4 +961,73 @@ test("W1-T14149: the scan models each emit form a crude reading of the raw sourc
     if (!crude.has(step)) continue;
     assert.ok(result.emitted.get(step)?.includes(writer), `${step} is emitted by ${writer}: ${JSON.stringify(result.emitted.get(step))}`);
   }
+});
+
+// ── round 5: the production forms the fourth review found unmodelled ──────────────────────────
+
+test("W1-T14149 criterion 2: a step set checked against a step sliced out of a raw row is read, as the projector reads read_model.slow_view", () => {
+  const result = scan({
+    "src/lib/read-model-worker.ts":
+      'export const w = (log: (s: string, f: object) => void) => { log("read_model.slow_view", {}); log("projector.literal", {}); log("projector.other_field", {}); };',
+    "src/lib/ledger-projector.ts": [
+      'const STEP_KEY = \'"step":"\';',
+      'const SERVE_DIAGNOSTIC_STEPS = new Set(["read_model.slow_view"]);',
+      'const LITERAL_ONLY = new Set(["projector.literal"]);',
+      'const OTHER_FIELD = new Set(["projector.other_field"]);',
+      'const KNOWN = "projector.literal";',
+      "export function advance(line: string, row: { kind?: string }): boolean {",
+      "  const at = line.indexOf(STEP_KEY);",
+      "  const scanned = at < 0 ? \"\" : line.slice(at + STEP_KEY.length, line.indexOf('\"', at + STEP_KEY.length));",
+      '  return SERVE_DIAGNOSTIC_STEPS.has(scanned) && LITERAL_ONLY.has(KNOWN) && OTHER_FIELD.has(row.kind ?? "");',
+      "}",
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("read_model.slow_view"), ["src/lib/ledger-projector.ts"], "a local binding may hold the row's step");
+  assert.deepEqual(result.writeOnly, ["projector.literal", "projector.other_field"],
+    "a constant checked against a set, or another named field, reads no step");
+  const { scan: tree } = live();
+  assert.ok(tree.readers.get("read_model.slow_view")?.includes("src/lib/ledger-projector.ts"),
+    `the live projector reads read_model.slow_view: ${JSON.stringify(tree.readers.get("read_model.slow_view"))}`);
+});
+
+test("W1-T14149 criterion 4: a debt entry a reader's steps list reads is stale, as sweep's history slice reads reconcile.repaired", () => {
+  const result = scan({
+    "src/lib/state-reconciler.ts":
+      'export function reconcile(record: (row: object) => void, fields: object): void { record({ ...fields, step: "reconcile.repaired" }); record({ ...fields, step: "reconcile.unread" }); }',
+    "src/lib/sweep.ts": [
+      'const FLEET_STATE_HISTORY_SLICE = { holder: "sweep.fleet-state-history", sharedSnapshot: true, steps: ["reconcile.repaired", "deploy.ok"] };',
+      "export const slice = () => FLEET_STATE_HISTORY_SLICE;",
+      'export const report = (log: (s: string, f: object) => void) => log("sweep.summary", { steps: ["reconcile.unread"] });',
+    ].join("\n"),
+  });
+  assert.deepEqual(result.readers.get("reconcile.repaired"), ["src/lib/sweep.ts"]);
+  assert.deepEqual(result.readers.get("reconcile.unread"), [], "a steps list a written row carries is data, not a reader's filter");
+  const debt = { writeOnly: ["reconcile.repaired", "reconcile.unread", "sweep.summary"], recordOnly: {} };
+  const verdict = mod.ratchetVerdict({ writeOnly: result.writeOnly, baseline: debt, baseBaseline: debt });
+  assert.equal(verdict.ok, false);
+  assert.deepEqual(verdict.stale, ["reconcile.repaired"]);
+  const { scan: tree, baseline } = live();
+  assert.ok(tree.readers.get("reconcile.repaired")?.includes("src/lib/sweep.ts"),
+    `the live sweep reads reconcile.repaired: ${JSON.stringify(tree.readers.get("reconcile.repaired"))}`);
+  assert.equal(baseline.writeOnly.includes("reconcile.repaired"), false, "the retained debt entry is gone from the baseline");
+});
+
+test("W1-T14149 criterion 5: a step constant built from a template of constants resolves, as redesign.scorecard does", () => {
+  const result = scan({
+    "src/lib/names.ts": 'export const REDESIGN_NAME = "redesign";',
+    "src/lib/redesign-gardener.ts": [
+      clause("import { REDESIGN_NAME }", "./names.js"),
+      'const LOCAL = "local";',
+      "const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;",
+      "const NESTED_STEP = `${LOCAL}.${REDESIGN_NAME}.nested`;",
+      "export function garden(deps: { log: (s: string, f: object) => void }, pr: string): void {",
+      "  deps.log(REDESIGN_SCORECARD_STEP, {}); deps.log(NESTED_STEP, {}); deps.log(`${pr}.runtime`, {});",
+      "}",
+    ].join("\n"),
+  });
+  assert.deepEqual([...result.emitted.keys()], ["local.redesign.nested", "redesign.scorecard"], "a runtime substitution names no step");
+  assert.deepEqual(result.emitted.get("redesign.scorecard"), ["src/lib/redesign-gardener.ts"]);
+  const { scan: tree } = live();
+  assert.ok(tree.emitted.get("redesign.scorecard")?.includes("src/lib/redesign-gardener.ts"),
+    `the live redesign garden emits redesign.scorecard: ${JSON.stringify(tree.emitted.get("redesign.scorecard"))}`);
 });

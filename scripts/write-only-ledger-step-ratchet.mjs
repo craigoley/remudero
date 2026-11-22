@@ -7,18 +7,20 @@
 // read only by its own writer.
 //
 // EMITTED: `log("a.b"` or a `step:` property holding a literal or a constant: lexically bound,
-// imported, or destructured from a host by its exported name. An undotted literal counts on a
-// ledger row only. Both operands of `a ?? "x.y"` and both branches of a conditional count, and a
-// call to a function whose parameter reaches an emit (a step helper) emits its argument.
+// imported, or destructured from a host by its exported name, or a template of such constants. An
+// undotted literal counts on a ledger row only. Both operands of `a ?? "x.y"` and both branches of a
+// conditional count, and a call to a function whose parameter reaches an emit (a step helper) emits its argument.
 // READ: equality and switch cases on a step, step membership checks and Map lookups (`.has`,
-// `.includes`, `.get`), read-step collections, step prefixes and suffixes, and raw JSON step
-// patterns; `row.step ?? ""` reads `row.step`.
+// `.includes`, `.get`), a membership check of a step collection whatever its argument (dotted steps
+// only), a reader's `steps` list, read-step collections, step prefixes and suffixes, and raw JSON
+// step patterns; `row.step ?? ""` reads `row.step`.
 // Read evidence must be in a different file from the emission. Comments, console output and
 // incidental literals do not read a step.
 //
 // THE RATCHET: the baseline's `writeOnly` list is today's debt and only shrinks against the merge
-// base; an entry that gained a reader must leave it. A new write-only step needs a reader, or a
-// `recordOnly` row with a non-empty reason. A step, not a job: it rides ci.yml's light gates beside
+// base (on its first landing, against the merge base tree's own write-only steps); an entry that
+// gained a reader must leave it. A new write-only step needs a reader, or a `recordOnly` row with a
+// non-empty reason. A step, not a job: it rides ci.yml's light gates beside
 // console-parity and reports under the required comment-load-ratchet check.
 // TRAP: CI measures the MERGE ref, so a step main landed while this PR was open would read as this
 // diff's. A refusal is re-judged against the merge base's own tree, as comment-load-ratchet does: a
@@ -170,7 +172,22 @@ function alternatives(expr) {
 
 function isStatic(expr) {
   return alternatives(expr).some((node) => node && (node.type === "Identifier" || node.type === "StringLiteral" ||
-    node.type === "RegExpLiteral" || (node.type === "TemplateLiteral" && node.expressions.length === 0) || collection(node) !== undefined));
+    node.type === "RegExpLiteral" || (node.type === "TemplateLiteral" && node.expressions.every(isStatic)) || collection(node) !== undefined));
+}
+
+/** A value that may carry a row's step: a local binding or a computed value, never a literal and never another named
+ *  field (`p.kind ?? ""` names a field that is not the step). A binding to a literal is ruled out where it resolves. */
+function mayHoldStep(expr) {
+  return alternatives(expr).some((node) => node && node.type !== "StringLiteral" && node.type !== "TemplateLiteral" &&
+    node.type !== "NumericLiteral" && !(node.type === "MemberExpression" && memberName(node) !== "step"));
+}
+
+/** `log(step, payload)` and `appendLedger(path, row)`: the objects such a call writes, whose fields are data, not a query. */
+function isWritingCall(callee) {
+  const name = calleeName(callee) ?? "";
+  if (LEDGER_APPEND_RE.test(name)) return true;
+  const node = unwrap(callee);
+  return name === "log" && !(node?.type === "MemberExpression" && (unwrap(node.object)?.value === "console" || memberName(unwrap(node.object)) === "console"));
 }
 
 function collectEvidence(node, rec) {
@@ -192,11 +209,17 @@ function collectEvidence(node, rec) {
       if (key === "step" && query) rec.reads.push(["exact", value]);
       else if (key === "step") rec.emits.push([row ? STEP_RE : DOTTED_STEP_RE, value]);
       else if (key === "pattern" || key === "markers") rec.reads.push(["raw", value]);
+      // A `steps` list off any row or payload is a reader's filter: a history slice, a ledgerRowsFor query, a
+      // projection's reader spec (`{ holder, steps: ["reconcile.repaired", ...] }` in sweep.ts).
+      else if (key === "steps" && !row && !rec.payloads.has(node)) rec.reads.push(["exact", value]);
     }
   } else if (type === "CallExpression") {
     if (LEDGER_APPEND_RE.test(calleeName(node.callee) ?? "")) {
       // A parent is visited before its children, so the row argument is marked before it is read.
       for (const { expression } of node.arguments) if (unwrap(expression)?.type === "ObjectExpression") rec.appended.add(unwrap(expression));
+    }
+    if (isWritingCall(node.callee)) {
+      for (const { expression } of node.arguments) if (unwrap(expression)?.type === "ObjectExpression") rec.payloads.add(unwrap(expression));
     }
     const callee = unwrap(node.callee);
     const method = memberName(callee);
@@ -209,6 +232,9 @@ function collectEvidence(node, rec) {
     const receiver = unwrap(callee.object);
     if (method === "log" && receiver.value !== "console" && memberName(receiver) !== "console") rec.emits.push([STEP_RE, value]);
     if ((method === "has" || method === "includes" || method === "get") && isStep(value)) rec.reads.push(["exact", receiver]);
+    // A membership check of a step collection reads its steps when it is handed a value that may hold a row's step:
+    // ledger-projector.ts slices the step out of a raw row into `scanned` and asks `SERVE_DIAGNOSTIC_STEPS.has(scanned)`.
+    else if ((method === "has" || method === "includes") && mayHoldStep(value)) rec.reads.push(["member", receiver, value]);
     if (node.arguments.length === 1 && isStep(receiver)) {
       if (method === "startsWith") rec.reads.push(["prefix", value]);
       if (method === "endsWith") rec.reads.push(["suffix", value]);
@@ -260,7 +286,7 @@ function resolveSpecifier(from, specifier, known) {
 function analyzeFile({ path, text }) {
   const tree = parseSource(path, text);
   const rec = {
-    path, bindings: new Map(), exports: new Map(), imports: new Map(), destructured: new Map(), appended: new WeakSet(),
+    path, bindings: new Map(), exports: new Map(), imports: new Map(), destructured: new Map(), appended: new WeakSet(), payloads: new WeakSet(),
     functions: new Set(), topFunctions: new Map(), params: new Map(), calls: [],
     emits: [], reads: [], lits: new Set(), prefixes: new Set(), suffixes: new Set(),
   };
@@ -334,6 +360,8 @@ function readValue(mode, value, rec) {
     if (mode === "prefix") rec.prefixes.add(value);
     else if (mode === "suffix") rec.suffixes.add(value);
     else if (mode === "exact") rec.lits.add(value);
+    // A member checked against a value not known to be a step counts only when it is shaped as one.
+    else if (mode === "member" && DOTTED_STEP_RE.test(value)) rec.lits.add(value);
   }
 }
 
@@ -356,7 +384,16 @@ export function scanLedgerSteps(sources) {
     if (!node || seen.has(node)) return [];
     const next = new Set(seen).add(node);
     if (node.type === "StringLiteral") return [node.value];
-    if (node.type === "TemplateLiteral" && node.expressions.length === 0) return [node.quasis[0].cooked];
+    if (node.type === "TemplateLiteral") {
+      // `${REDESIGN_NAME}.scorecard`: each substitution resolves to its constants, as an emitted step does.
+      if (node.quasis.some((quasi) => typeof quasi.cooked !== "string")) return [];
+      let out = [node.quasis[0].cooked];
+      node.expressions.forEach((part, index) => {
+        const parts = values(rec, part, true, next);
+        out = out.flatMap((prefix) => parts.map((value) => `${prefix}${value}${node.quasis[index + 1].cooked}`));
+      });
+      return out;
+    }
     if (node.type === "RegExpLiteral" && !emit) return [node];
     if (node.type !== "Identifier") {
       return emit ? [] : (collection(node) ?? []).flatMap((member) => values(rec, member?.expression, false, next));
@@ -375,6 +412,35 @@ export function scanLedgerSteps(sources) {
       return (declarers.get(node.value) ?? []).flatMap(([other, id]) => values(other, id, true, next));
     }
     return [];
+  }
+
+  /** True when every value `expr` can take is a literal, locally or through its import: `at < 0 ? "" : line.slice(...)` is not. */
+  function literalOnly(rec, expr, seen = new Set()) {
+    return alternatives(expr).every((node) => {
+      if (!node || seen.has(node)) return false;
+      if (node.type === "StringLiteral" || (node.type === "TemplateLiteral" && node.expressions.length === 0)) return true;
+      if (node.type !== "Identifier") return false;
+      const key = bindingKey(node);
+      const next = new Set(seen).add(node);
+      if (rec.bindings.has(key)) return literalOnly(rec, rec.bindings.get(key), next);
+      const imported = rec.imports.get(key);
+      const target = imported && byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
+      return target ? literalOnly(target, target.exports.get(imported.name), next) : false;
+    });
+  }
+
+  /** The members of `expr` when it resolves to a collection, locally or through its import; else nothing. */
+  function memberValues(rec, expr, seen = new Set()) {
+    const node = unwrap(expr);
+    if (!node || seen.has(node)) return [];
+    const next = new Set(seen).add(node);
+    if (collection(node) !== undefined) return values(rec, node);
+    if (node.type !== "Identifier") return [];
+    const key = bindingKey(node);
+    if (rec.bindings.has(key)) return memberValues(rec, rec.bindings.get(key), next);
+    const imported = rec.imports.get(key);
+    const target = imported && byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
+    return target ? memberValues(target, target.exports.get(imported.name), next) : [];
   }
 
   // A STEP HELPER is a function whose parameter reaches an emit, directly (`log(step)`, `{ step }`)
@@ -433,8 +499,10 @@ export function scanLedgerSteps(sources) {
         for (const path of [rec.path, ...files]) writers.get(step).add(path);
       }
     }
-    for (const [mode, expr] of rec.reads) {
-      for (const value of values(rec, expr)) readValue(mode, value, rec);
+    for (const [mode, expr, arg] of rec.reads) {
+      // `STEPS.has(SOME_STEP)` checks a constant, not a row: an argument that is only ever a literal reads nothing.
+      if (mode === "member" && literalOnly(rec, arg)) continue;
+      for (const value of mode === "member" ? memberValues(rec, expr) : values(rec, expr)) readValue(mode, value, rec);
     }
   }
   const emitted = new Map();
@@ -471,10 +539,12 @@ export function parseBaseline(text, label) {
 
 /**
  * The ratchet. Refuses a write-only step recorded nowhere, a debt entry that is no longer write-only,
- * a debt entry the merge base's list lacks (`baseBaseline` null: no baseline there, nothing to
- * shrink against) and a record-only entry with an empty reason. `recordOnlyRead` is reported only.
- * `baseWriteOnly` (the merge base tree's own write-only steps, or null when not measured) moves main's
- * drift into `inherited`: an unrecorded step already write-only there, a stale entry not write-only there.
+ * a debt entry that was not debt at the merge base, and a record-only entry with an empty reason.
+ * `recordOnlyRead` is reported only. `baseWriteOnly` (the merge base tree's own write-only steps, or
+ * null when not measured) moves main's drift into `inherited`: an unrecorded step already write-only
+ * there, a stale entry not write-only there. With no baseline at the merge base (`baseBaseline` null, the
+ * first landing), the debt the merge base had is its tree's write-only set: an entry still write-only
+ * here but not there is new debt this diff brought in, which needs a `recordOnly` reason, never the list.
  */
 export function ratchetVerdict({ writeOnly, baseline, baseBaseline, baseWriteOnly = null }) {
   const current = new Set(writeOnly);
@@ -486,7 +556,8 @@ export function ratchetVerdict({ writeOnly, baseline, baseBaseline, baseWriteOnl
   const unrecorded = baseWriteOnly === null ? missing : missing.filter((step) => !atBase.has(step));
   const stale = baseWriteOnly === null ? noLongerWriteOnly : noLongerWriteOnly.filter((step) => atBase.has(step));
   const inherited = [...missing, ...noLongerWriteOnly].filter((step) => !unrecorded.includes(step) && !stale.includes(step)).sort();
-  const grown = baseBaseline === null ? [] : baseline.writeOnly.filter((step) => !baseBaseline.writeOnly.includes(step)).sort();
+  const grown = (baseBaseline !== null ? baseline.writeOnly.filter((step) => !baseBaseline.writeOnly.includes(step)) :
+    baseWriteOnly === null ? [] : baseline.writeOnly.filter((step) => current.has(step) && !atBase.has(step))).sort();
   const emptyReasons = recorded.filter((step) => baseline.recordOnly[step].trim() === "").sort();
   const recordOnlyRead = recorded.filter((step) => !current.has(step)).sort();
   const ok = unrecorded.length + stale.length + grown.length + emptyReasons.length === 0;
@@ -498,7 +569,7 @@ export function formatReport({ scan, verdict, baselinePath, base }) {
   const out = [
     `${GATE}: ${scan.emitted.size} step(s) emitted in src/, ${scan.emitted.size - scan.writeOnly.length} read outside their writer, ` +
       `${scan.writeOnly.length} write-only.`,
-    base === null ? `${baselinePath}: no baseline at the merge base, so this first landing has no shrink to check.` :
+    base === null ? `${baselinePath}: no baseline at the merge base, so this first landing's "writeOnly" may hold only steps the merge base's own tree has write-only.` :
       `${baselinePath}: "writeOnly" is shrink-only against the merge base ${base}.`,
   ];
   if (!verdict.ok) {
@@ -511,7 +582,7 @@ export function formatReport({ scan, verdict, baselinePath, base }) {
     'Give each a reader outside its writer, or add it to "recordOnly" with the reason nothing needs to read it.');
   section(stale, `STALE — listed in "writeOnly" but no longer write-only (it gained a reader, or nothing emits it):`,
     `Remove each from ${baselinePath}'s "writeOnly"; the debt list only shrinks.`);
-  section(grown, `GROWN — listed in "writeOnly" but absent from the merge base's list:`,
+  section(grown, `GROWN — listed in "writeOnly" but not debt at the merge base (absent from its list or, on a first landing, not write-only in its tree):`,
     'A new write-only step is declared in "recordOnly" with a reason, never added to the debt list.');
   section(emptyReasons, 'EMPTY REASON — a "recordOnly" entry must say why nothing reads it:');
   section(recordOnlyRead, 'FELL — declared record-only but now read, or no longer emitted; its "recordOnly" row can go:');
@@ -573,8 +644,9 @@ export function main(argv, { log = console.log } = {}) {
     const baseBaseline = shown.status === 0 ? parseBaseline(shown.stdout, `${mergeBase}:${values.baseline}`) : null;
     let verdict = ratchetVerdict({ writeOnly: scan.writeOnly, baseline, baseBaseline });
     const head = gitText(root, ["rev-parse", "HEAD"], "cannot resolve HEAD").trim();
-    // A refusal only: a clean run never reads the base tree. At HEAD == base nothing can be inherited.
-    if (verdict.unrecorded.length + verdict.stale.length > 0 && mergeBase !== head) {
+    // A first landing always reads the base tree: its debt list has no list at the merge base to shrink against.
+    // Otherwise a refusal only: a clean run never reads it, and at HEAD == base nothing can be inherited.
+    if (baseBaseline === null || (verdict.unrecorded.length + verdict.stale.length > 0 && mergeBase !== head)) {
       const baseWriteOnly = scanLedgerSteps(readTreeSources(root, mergeBase)).writeOnly;
       verdict = ratchetVerdict({ writeOnly: scan.writeOnly, baseline, baseBaseline, baseWriteOnly });
     }
