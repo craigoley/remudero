@@ -1,4 +1,5 @@
 import { AMBIGUOUS_LEARNING_CONTENT, LEARNING_CONTENT_IDENTITY_RE, learningIdRecord } from "./learnings.js";
+import { KNOWLEDGE_MEASURED_STEP } from "./knowledge-gaps.js";
 import { fixDispatchCountByRun } from "./retro.js";
 
 /**
@@ -17,8 +18,11 @@ import { fixDispatchCountByRun } from "./retro.js";
  * (Hajek), which is causal within the contested band. ACE keeps helpful/harmful counters and ExpeL
  * up/down-votes insights, both from the agent's own judgement; this is the measured version.
  *
- * SURFACE, DO NOT ACT: nothing here feeds ranking or retirement. Below the per-arm floor the answer
- * is `unmeasurable` with its counts, never a favourable zero.
+ * ONLY HARM ACTS (W1-T14141): nothing here feeds ranking. A `hurts` verdict on the exact current
+ * revision of an active learning feeds one retirement candidate in the knowledge gardener
+ * (knowledge-gardener.ts's `measuredHarmRetirements`), which still lands as a reviewed PR; `helps`,
+ * `no-detectable-effect` and `unmeasurable` feed nothing. Below the per-arm floor the answer is
+ * `unmeasurable` with its counts, never a favourable zero.
  *
  * W1-T11115 — ONE COHORT PER CONTENT REVISION. An edit keeps the id, so grouping by id alone pooled
  * different interventions, and an edit inherited its predecessor's verdict. The producer now ledgers
@@ -294,4 +298,39 @@ export function foldLearningOutcomes(
     .map((c) => estimateLearningOutcome(c.id, c.contentId, c.obs, opts.floor))
     .sort((x, y) => order(x.id, y.id) || order(x.contentId, y.contentId));
   return report;
+}
+
+const VERDICTS: ReadonlySet<string> = new Set<LearningOutcomeVerdict>(["helps", "hurts", "no-detectable-effect", "unmeasurable"]);
+const isCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0;
+const isOptionalFinite = (v: unknown): boolean => v === undefined || (typeof v === "number" && Number.isFinite(v));
+
+/** W1-T14141: whether one parsed `outcomes.learnings` entry has the {@link LearningOutcome} shape. A
+ *  ledger row is parsed text, so each field is checked before anything reads it as a verdict. */
+function isLearningOutcome(v: unknown): v is LearningOutcome {
+  if (v === null || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === "string" && typeof o.contentId === "string" && isCount(o.injected) && isCount(o.dropped) &&
+    typeof o.verdict === "string" && VERDICTS.has(o.verdict) && isOptionalFinite(o.effect) && isOptionalFinite(o.se);
+}
+
+/** W1-T14141: the learnings of the NEWEST `knowledge.measured` row, the row the digest reads
+ *  (digest.ts's `summarizeKnowledgeMeasured`): the latest by `ts`, whatever its status. A newest row
+ *  that was refused or carries no outcomes gives `[]`, never an older row's verdicts: a retirement
+ *  acts on the current measurement only. An entry without the outcome shape is left out. */
+export function newestMeasuredLearningOutcomes(rows: Iterable<Record<string, unknown>>): LearningOutcome[] {
+  let latest: Record<string, unknown> | undefined;
+  for (const r of rows) {
+    if (r.step !== KNOWLEDGE_MEASURED_STEP || typeof r.ts !== "string") continue;
+    if (latest === undefined || r.ts > (latest.ts as string)) latest = r;
+  }
+  if (latest?.status !== "measured") return [];
+  const learnings = (latest.outcomes as { learnings?: unknown } | undefined)?.learnings;
+  return Array.isArray(learnings) ? learnings.filter(isLearningOutcome) : [];
+}
+
+/** W1-T14141 — the one verdict that may act. The cohort reads `hurts` AND its numbers agree with
+ *  {@link estimateLearningOutcome}'s own rule: a negative effect beyond {@link OUTCOME_Z} standard
+ *  errors. A row whose verdict and numbers disagree is not harm. */
+export function measuredHarm(o: LearningOutcome): o is LearningOutcome & { effect: number; se: number } {
+  return o.verdict === "hurts" && o.effect !== undefined && o.se !== undefined && o.se >= 0 && o.effect < 0 && -o.effect > OUTCOME_Z * o.se;
 }
