@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 15.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — what the host-path plan-lint gate does when the proof sandbox cannot start; high for blast radius: every harness plan publication from a Darwin host passes through it
   band_meaning: blast-radius
   priority: 2
