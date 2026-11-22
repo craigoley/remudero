@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -40,6 +40,26 @@ test("W1-T13763 criterion 2: a missing registry without a pointer still resolves
   writeFileSync(stateDir, "");
   assert.equal(instanceMode(ownerRepo, readInstanceRegistryText(root)), "live");
 });
+
+test("W1-T13763 criterion 2: a denied search of .remudero with no pointer still resolves live",
+  { skip: process.getuid?.() === 0 ? "root bypasses permission bits" : false }, (t) => {
+    const { root } = fixture(t);
+    const stateDir = join(root, ".remudero");
+    chmodSync(stateDir, 0o000);
+    t.after(() => chmodSync(stateDir, 0o700));
+    const text = readInstanceRegistryText(root);
+    assert.equal(text, undefined);
+    assert.equal(instanceMode(ownerRepo, text), "live");
+  });
+
+test("an unreadable pointer file that is present still refuses even though its directory is searchable",
+  { skip: process.getuid?.() === 0 ? "root bypasses permission bits" : false }, (t) => {
+    const { root, pointer: pointerPath } = fixture(t);
+    writeFileSync(pointerPath, pointer([registryPath]));
+    chmodSync(pointerPath, 0o000);
+    t.after(() => chmodSync(pointerPath, 0o600));
+    assert.throws(() => readInstanceRegistryText(root), new InstanceRegistryRuntimeError("overlay_pointer_unreadable"));
+  });
 
 test("a pointer for other files leaves the missing registry on the legacy path", (t) => {
   const { root, pointer: pointerPath } = fixture(t);

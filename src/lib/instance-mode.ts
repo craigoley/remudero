@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import type { SelectedModeSettings } from "./config-schema.js";
 export type { SelectedModeSettings } from "./config-schema.js";
@@ -32,9 +32,22 @@ function overlayRegistryDeclared(repoRoot: string): boolean {
     return text !== undefined
       && parseOverlayHome(text).paths.includes(posix.join(".remudero", DAEMON_INSTANCE_REGISTRY_BASENAME));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOTDIR") return false;
+    if ((code === "EACCES" || code === "EPERM") && !overlayPointerPresent(repoRoot)) return false;
     // The pointer's contents and host path can appear in the underlying error.
     throw new InstanceRegistryRuntimeError("overlay_pointer_unreadable");
+  }
+}
+
+/** True only when the pointer is demonstrably there: a denied search of `.remudero` proves nothing exists to honour. */
+function overlayPointerPresent(repoRoot: string): boolean {
+  try {
+    lstatSync(join(repoRoot, ".remudero", "overlay-home.json"));
+    return true;
+  } catch {
+    // ENOENT/ENOTDIR/EACCES/EPERM on the stat: no pointer can be shown, so the legacy live default stands.
+    return false;
   }
 }
 
