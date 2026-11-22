@@ -347,7 +347,6 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   runDigestCadenceReport: 1,
   runFixRung: 13,
   runReview: 1,
-  runSweep: 1, // W1-T12954: the repair-history read awaits readSweepRepairHistory
   runTaskBody: 2,
   runWipeTestPair: 2,
   runWorkerStallDetectorRung: 1,
@@ -925,9 +924,12 @@ test("W1-T12954 criterion 6: the sweep's repair-history read lowers its sync-led
   const fns = loopCensusFunctions();
   const reach = loopReachable(fns, "daemonCommand");
   const pop = population(fns, syncScanCalls);
-  assert.ok(reach.has("runSweep") && reach.has("readSweepRepairHistory"), "the loop reaches the sweep and its repair-history reader");
-  assert.equal(SYNC_LEDGER_SCAN_LOOP_BASELINE.runSweep, 1, "the sweep's row dropped by the converted call");
-  assert.equal(pop.get("runSweep"), 1, "only the open-escalation union read stays synchronous in runSweep");
+  assert.ok(reach.has("runSweep") && reach.has("readSweepRepairHistory") && reach.has("readOpenEscalationHistory"),
+    "the loop reaches the sweep, its repair-history reader and its open-escalation history reader");
+  // W1-T13969: the open-escalation read awaits readOpenEscalationHistory, the last synchronous scan in runSweep, so its row is gone.
+  assert.equal(Object.hasOwn(SYNC_LEDGER_SCAN_LOOP_BASELINE, "runSweep"), false, "the sweep has no sync-ledger-scan row");
+  assert.equal(pop.get("runSweep") ?? 0, 0, "runSweep makes no synchronous ledger-union scan");
+  assert.equal(pop.get("readOpenEscalationHistory") ?? 0, 0, "the open-escalation history reader scans nothing synchronously");
   assert.equal(pop.get("readSweepRepairHistory") ?? 0, 0, "the repair-history reader scans nothing synchronously");
   assert.deepEqual(refusals(fns, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), [], "no row rises");
   // Falsifier: the sync union read put back in the reader is named.
@@ -935,4 +937,9 @@ test("W1-T12954 criterion 6: the sweep's repair-history read lowers its sync-led
   const named = refusals(planted, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS);
   assert.equal(named.length, 1);
   assert.match(named[0]!, /^readSweepRepairHistory makes 1 synchronous ledger scan\(s\) and is reachable from the daemon loop/);
+  // Falsifier: a new synchronous union read in runSweep is named, now that the sweep has no row to absorb it.
+  const inSweep = fns.map((f) => (f.name === "runSweep" ? { ...f, body: `${f.body}\n  readLedgerUnionRecordsSync(stateDir);` } : f));
+  const sweepNamed = refusals(inSweep, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS);
+  assert.equal(sweepNamed.length, 1);
+  assert.match(sweepNamed[0]!, /^runSweep makes 1 synchronous ledger scan\(s\) and is reachable from the daemon loop/);
 });
