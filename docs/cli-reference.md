@@ -70,7 +70,7 @@ usage:
   rmd coverage-improve [--lcov <path> | --from-ci]   # File one feedback entry ranking src/ files by uncovered branches (85-90% band).
   rmd verdict-calibration   # Join armed-merge review verdicts to post-merge revert/follow-up-fix rates.
   rmd autonomy-rate   # Report the zero-touch merge rate over every Remudero-Task-trailer merge.
-  rmd replay-goldens --confirm-spend --ledger <path> [--limit N]   # Replay the seeded goldens and record what the retro's Self-Harness leg reads.
+  rmd replay-goldens --confirm-spend --ledger <path> [--limit N] [--models a,b]   # Replay goldens and compare two Codex models on graded pairs.
   rmd skill-eval <proposal-id> --confirm-spend   # Attempt a staged skill draft with and without it on held-out tasks; record the verdict.
   rmd procedures [--days <n>] [--json]   # Report which tool-call steps clean merged runs repeat, per task type, against repaired runs.
   rmd check-acceptance <body-file>   # Report what the reviewer's own parser actually resolves from a PR body file.
@@ -707,13 +707,13 @@ W1-T437: the QUANTITY figure beside W1-T424's correctness join — the zero-touc
 
 ### `rmd replay-goldens`
 
-Replay the seeded goldens and record what the retro's Self-Harness leg reads.
+Replay goldens and compare two Codex models on graded pairs.
 
 ```
-rmd replay-goldens --confirm-spend --ledger <path> [--limit N]
+rmd replay-goldens --confirm-spend --ledger <path> [--limit N] [--models a,b]
 ```
 
-W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.
+--models takes two distinct IDs from the Codex mount rows, such as gpt-6.1-sol,gpt-6.2-sol. While the fleet is quiet and measured headroom is available, each selected implement task gets one sealed attempt per model at its recorded merge base. The task's recorded proofs grade each local head. The command appends replay.result rows to the required --ledger and compares fully graded pairs across runs. --confirm-spend is required per invocation. --limit is capped at three tasks, and --limit 0 only reads the comparison in model mode. Without --models, the seeded path retains its dispatch-seam requirement. Exit 0 for passing attempts or an empty selection, 1 when any attempt fails or is unmeasurable, and 2 on refusal.
 
 ### `rmd skill-eval`
 
