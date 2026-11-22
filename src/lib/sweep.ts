@@ -21095,6 +21095,7 @@ export interface FixAdmissionCharge {
   fixChargeMib: number;
   fixEstimateMib: number;
   fixEstimateSource: "measured" | "default-unmeasured";
+  fixEstimateBasis?: LearnedEstimate["basis"];
   reviewEstimateMib: number;
   fixTypicalMib: number;
   admissionRung: FixAdmissionRung;
@@ -21315,6 +21316,7 @@ export function createSweepFixAdmissionController(input: {
       fixChargeMib: fixAdmissionChargeMib(reservations, fix.estimateMib, residents?.fix),
       fixEstimateMib: fix.estimateMib,
       fixEstimateSource: fix.samples > 0 ? "measured" : "default-unmeasured",
+      ...(fix.basis ? { fixEstimateBasis: fix.basis } : {}),
       reviewEstimateMib: review.estimateMib,
       fixTypicalMib: Math.min(fix.estimateMib, input.readTypical?.("fix").estimateMib ?? fix.estimateMib),
       admissionRung: "none",
@@ -21412,6 +21414,7 @@ export function createSweepFixAdmissionController(input: {
       fix_charge_mib: state.charge?.fixChargeMib,
       fix_estimate_mib: state.charge?.fixEstimateMib,
       fix_estimate_source: state.charge?.fixEstimateSource,
+      ...(state.charge?.fixEstimateBasis ? { fix_estimate_basis: state.charge.fixEstimateBasis } : {}),
       review_estimate_mib: state.charge?.reviewEstimateMib,
       fix_typical_mib: state.charge?.fixTypicalMib,
       admission_rung: state.charge?.admissionRung,
