@@ -15,7 +15,7 @@
   # no child at all; elsewhere, and under the suite's /proc-ENOENT mock, ps as before. Priority 1.5: the 2026-11-20 host
   # loop-stall rows put 113 s of daemon event-loop stall that day on this function's ps spawn.
   priority: 1.5
-  status: queued
+  status: merged
   # backlog gardener: band=4 evidence=60b3823c9f4c196b
   # backlog gardener: placed=2026-11-06T03:53:33.122Z
   attempts: 0

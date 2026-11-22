@@ -82,6 +82,18 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "inbox.draft_cache_missing",
+    meaning: "The daemon skipped a proposal because its current input already has a lint-clean draft receipt, and the cache has no draft for that input. Recorded once per proposal and input.",
+    writer: ["buildInboxDraftHook"],
+    outcomes: ["clean input skipped with no matching cached draft"],
+  },
+  {
+    step: "inbox.draft_history_partial",
+    meaning: "Some of the inbox draft history could not be read or the receipt index could not be updated. Readable receipts stay usable and completion publication continues.",
+    writer: ["buildInboxDraftHook", "retainDraftReceipts"],
+    outcomes: ["ledger path unreadable", "receipt index unavailable"],
+  },
+  {
     step: "judge_shadow.compared",
     meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. W1-T12417: every fixed-option judge (risk, ci, fix-progress, verify-human, refresh-value, quiet-worker watchdog, head-rehome, typed judgment) writes it under its own role when its shadow is named; a decision-model shadow adds the distribution, the latency and model_surface decisions. Nothing acts on the row except the summary the config gardener reads.",
     writer: ["shadowJudgeCall"],
@@ -545,7 +557,12 @@ const SEED_ROWS: readonly SeedRow[] = [
       "released for this pull request and head), split-follow-up (the criteria that need operator input " +
       "move to the held task `held_task_id` by an acceptance amendment, and the pull request merges on the " +
       "rest) or close-and-rebuild (the pull request is closed and `held_task_id` rebuilds it). `cause` keys " +
-      "one held task per pull request; `text` is the escalation text it replaces. \"refused\" means the " +
+      "one held task per pull request; `text` is the escalation text it replaces. `reused: true` means a held " +
+      "follow-up for this task and each criterion was already on the plan of origin/main or in the task-files landing " +
+      "queue, so none was filed (W1-T13944); a split files a held task only for the criteria none carries, and `criteria` " +
+      "names them. `partial_refusal` on a taken split means the held task file staged and the landing refused another " +
+      "file, such as the edit of the parent task file during staging or batch preflight; it holds that refusal first, then any landing error. A landing " +
+      "error with no such refusal stays \"refused\". \"refused\" means the " +
       "remedy could not act; `reason` says why, and the next pass tries again.",
     writer: ["takeParkedPrRemedy"],
     outcomes: ["taken", "refused"],

@@ -52,7 +52,8 @@ import {
   reservationHandoffNoteLine, reserveTaskIdBlockRemoteAsync, reserveTaskIdRemote, taskIdReservationRef,
   type RemoteReserveAsyncInput, type RemoteReserveDeps,
 } from "./task-id-reservation.js";
-import { basename, dirname, join } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
@@ -185,7 +186,9 @@ import {
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
+  defaultGitRunnerAsync,
   loadPlanReusingParses,
+  readBlobsAtRefAsync,
   PlanBlobCache,
   transitiveDependents,
   unmetDependencies,
@@ -413,7 +416,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
-import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type ParkedPrHost } from "./parked-pr-remedy.js";
+import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
 export interface PriorPartialWork {
@@ -1748,7 +1751,8 @@ export interface BuildSweepEffectsDeps {
   /** W1-T3721 — isolates the author-time body proof gate in sweep tests that use synthetic worktrees. */
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
-  planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
+  planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string,
+    beforePush?: (taskId: string, anchor: string) => void) => string;
   /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push; W1-T5521 awaits it. */
   planPrPreflightImpl?: (...args: Parameters<typeof planPrPreflightAtCommitAsync>) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
@@ -5749,18 +5753,59 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
       // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
-      reserveTaskId: (target) => {
+      // W1-T13944: `beforePush` records each reservation push in the split's claim before it is made.
+      reserveTaskId: (target, beforePush) => {
         const branch = landingIdentity({ family: "task-files", targetRepository: { owner: target.owner, repo: target.repo },
           sourceRepository: { owner, repo } }).branch;
-        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch)
-          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log);
+        return deps.planRepairReserveIdImpl ? deps.planRepairReserveIdImpl(repoDir, branch, beforePush)
+          : reservePlanRepairTaskIdAsync(repoDir, branch, undefined, log, beforePush);
+      },
+      // W1-T13944: the id is minted in the public repository, so its reservation ref is read there.
+      reservationHeld: async (taskId, anchor) => {
+        const listed = await planRepairGitRunAsync(repoDir)(["ls-remote", "origin", taskIdReservationRef(taskId)]);
+        // A failed listing says nothing about the ref: the split is refused and keeps the pending push for the next pass,
+        // rather than reserve a second id beside one that may be held.
+        if (listed.status !== 0) {
+          throw new Error(`the reservation ref of ${taskId} cannot be read from origin (git ls-remote exited ${String(listed.status)}); ` +
+            "the pending push is kept for the next pass (W1-T13944)");
+        }
+        return listed.stdout.trim().split(/\s+/)[0] === anchor;
       },
       landTaskFiles: async (files, target) => {
         const landed = await landTaskFilesAsync(target.checkoutDir, files, taskFilesLandingOpts(target));
         const error = landed.error ?? landed.refused[0]?.reason;
-        const refusalChecks = error === undefined ? undefined : planPreflightRefusalChecks(landed);
+        const setAside = landed.setAside.filter(r => files.some(f => f.relPath === r.path));
+        const refusalChecks = planPreflightRefusalChecks({ refused: landed.refused, setAside });
+        // W1-T13944: `staged` names an input that waits with its own bytes; another edit waiting at its path is a refusal.
+        const refused = [
+          ...landed.refused.map(r => ({ relPath: r.path, reason: r.reason,
+            ...(r.id_release === "released" || r.id_release === "already_absent" ? { reservationReleased: true as const } : {}) })),
+          ...setAside.map(r => ({ relPath: r.path, reason: r.reason, setAside: true as const })),
+        ];
+        const staged = [...landed.landed, ...landed.waiting].filter((p) => !refused.some((r) => r.relPath === p));
         return { ...(landed.prUrl === undefined ? {} : { prUrl: landed.prUrl }), ...(error === undefined ? {} : { error }),
-          ...(refusalChecks === undefined ? {} : { refusalChecks }) };
+          ...(refusalChecks === undefined ? {} : { refusalChecks }), staged, refused };
+      },
+      // W1-T13944: a held follow-up on the plan of origin/main or in the landing queue (staged, or carried by an open landing
+      // PR). origin/main is read file by file, so one task file the plan loader would refuse, such as an ops task that
+      // depends on a public one, hides no other. The daemon's plans can lag origin/main, so they add a held follow-up only
+      // for a task and criterion neither origin/main nor the queue holds.
+      heldFollowUpClaimRoot: config.root,
+      readHeldFollowUps: async (target) => {
+        // Read the queue before fetching main so a file that merges out of the queue is visible in one of the reads.
+        const queue = stagedTaskFiles(config.root).flatMap(({ relPath }) => {
+          const abs = join(config.root, "state", "task-files-landing-pending", relPath);
+          return existsSync(abs) ? heldFollowUpsOfTaskText(readFileSync(abs, "utf8")) : [];
+        });
+        let main: HeldFollowUp[];
+        try {
+          main = await readMainHeldFollowUps(target.checkoutDir);
+        } catch (error) {
+          log("parked_pr.held_follow_ups_unread", { ref: "origin/main", checkout: target.checkoutDir, error: String(error) });
+          throw new Error(`held follow-ups on origin/main could not be read: ${String(error)}`, { cause: error });
+        }
+        const daemon = (reloadPlanForFix() ?? plan).tasks.flatMap(task => heldFollowUpOf(task) ?? []);
+        return withLaggingHeldFollowUps([...main, ...queue], daemon);
       },
       closePr: async (prUrl, comment) => {
         assertLiveWriteAllowed("gh-transport", `parked pull request close of ${prUrl}`);
@@ -12470,10 +12515,66 @@ export async function reservePlanRepairTaskIdAsync(
   filingBranch: string,
   run: RemoteReserveAsyncInput["run"] = planRepairGitRunAsync(worktreePath),
   log?: (step: string, fields: Record<string, unknown>) => void,
+  beforePush?: (taskId: string, anchor: string) => void,
 ): Promise<string> {
   const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
-  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log }));
+  const reserver = gatedRemoteRefReserverAsync({ run, filingBranch, lane: "plan-repair", log });
+  // W1-T13944: the caller records the id and anchor before the push, so a restart after the push can find the id. A
+  // takeover of another holder's ref pushes an anchor made inside the reserver, which the caller never sees, so with
+  // `beforePush` the reservation takes over no ref: a held id makes it ask the next one.
+  const attempt = reserver.attempt;
+  const block = await reserveTaskIdBlockRemoteAsync(mint.n, 1, beforePush === undefined ? reserver
+    : { ...reserver, reclaim: undefined, attempt: (taskId, anchor) => { beforePush(taskId, anchor); return attempt(taskId, anchor); } });
   return block.taskIds[0]!;
+}
+
+/**
+ * W1-T13944: the held follow-ups current origin/main declares, each file parsed alone, so a file the plan loader
+ * would refuse (a dependency in another catalog, a duplicate id) hides no held follow-up in another file.
+ */
+async function readMainHeldFollowUps(checkoutDir: string): Promise<HeldFollowUp[]> {
+  const runGit = defaultGitRunnerAsync(checkoutDir);
+  const tracking = "refs/remotes/origin/main";
+  await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
+  const ref = (await runGit(["rev-parse", tracking])).trim();
+  // The target's own layout override places its plan: the one at `ref`, else the one in the working tree.
+  const rel = (path: string) => relative(checkoutDir, path).split(sep).join("/");
+  const overrideRel = rel(join(resolveRepoLayout(checkoutDir, () => undefined).stateDir, "layout.json"));
+  const overrideEntry = await runGit(["ls-tree", "--name-only", ref, "--", overrideRel]);
+  const layoutAtRef = overrideEntry.length === 0 ? undefined : await runGit(["show", `${ref}:${overrideRel}`]);
+  const layout = resolveRepoLayout(checkoutDir, (path) => layoutAtRef ?? (existsSync(path) ? readFileSync(path, "utf8") : undefined));
+  const monolith = rel(layout.planMonolith);
+  const listing = await runGit(["ls-tree", "-r", "--name-only", ref, "--", monolith, `${rel(join(layout.planDir, "tasks.d"))}/`]);
+  const paths = listing.split("\n").map(l => l.trim()).filter(l => l === monolith || /\.ya?ml$/.test(l));
+  const texts = await readBlobsAtRefAsync(runGit, ref, paths);
+  // Every file is parsed: a folded or escaped title shows "(held follow-up)" only once parsed. A parse is kept by the
+  // file's bytes, so a later pass parses only the files that changed.
+  const seen = new Map<string, HeldFollowUp[]>();
+  const held = texts.flatMap((text) => {
+    const key = createHash("sha256").update(text).digest("hex");
+    const parsed = heldFollowUpParses.get(key) ?? heldFollowUpsOfTaskText(text);
+    seen.set(key, parsed);
+    return parsed;
+  });
+  heldFollowUpParses = seen;
+  return held;
+}
+
+/** W1-T13944: the held follow-ups of each task file read at the last {@link readMainHeldFollowUps}, by the file's hash. */
+let heldFollowUpParses = new Map<string, HeldFollowUp[]>();
+
+/**
+ * W1-T13944: `current` (origin/main and the landing queue) and the held follow-ups of `lagging` (the daemon's plans) for
+ * the criteria no held follow-up of the same task in `current` carries, so a lagging plan never names a task in place of
+ * the one origin/main holds. PURE.
+ */
+function withLaggingHeldFollowUps(current: readonly HeldFollowUp[], lagging: readonly HeldFollowUp[]): HeldFollowUp[] {
+  const carried = (parents: readonly string[], claim: string) =>
+    current.some(h => h.claims.includes(claim) && heldFollowUpParents(h).some(d => parents.includes(d)));
+  return [...current, ...lagging.flatMap((h) => {
+    const claims = h.claims.filter(claim => !carried(heldFollowUpParents(h), claim));
+    return claims.length === 0 ? [] : [{ ...h, claims }];
+  })];
 }
 
 export interface StaleBaseReleaseTarget {

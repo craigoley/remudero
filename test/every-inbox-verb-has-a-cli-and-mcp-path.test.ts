@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { createServer } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -111,6 +113,15 @@ test("each MCP inbox verb posts its own fields with the server's write credentia
   } finally { await client.close(); await server.close(); await new Promise<void>(resolve => http.close(() => resolve())); }
 });
 
+/** W1-T14173: the verb waits for the end of its input, so this setup-only check hands it input that has already ended. */
+async function endedStdio() {
+  const stdin = new PassThrough();
+  stdin.end();
+  stdin.resume();
+  await once(stdin, "end");
+  return { stdin, stdout: new PassThrough() };
+}
+
 test("MCP reads its credentials from config.root and exposes inbox writes only when enabled", async t => {
   const deps = world(t);
   writeFileSync(join(deps.inboxRoot, "state", "service-tokens.json"), JSON.stringify({ read: "stored-read", write: "stored-write" }));
@@ -121,7 +132,7 @@ test("MCP reads its credentials from config.root and exposes inbox writes only w
       const server = createOperatorMcpServer(config);
       server.connect = async () => {};
       return server;
-    });
+    }, await endedStdio());
     assert.equal(observed!.readToken, "stored-read");
     assert.equal(observed!.writeToken, enabled ? "stored-write" : undefined);
     const server = createOperatorMcpServer(observed!);
