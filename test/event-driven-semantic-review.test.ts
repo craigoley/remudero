@@ -7,6 +7,7 @@ import test from "node:test";
 
 import type { Config } from "#src/lib/config.js";
 import type { Mount } from "#src/lib/mounts.js";
+import { operatorReviewArgs } from "#src/cli/commands/review.js";
 import { ledgeredNonDispatchSpawn, reviewCommand, runReview } from "#src/run-task.js";
 
 const REPO_ROOT = process.cwd();
@@ -63,7 +64,8 @@ async function captureReview(
       ...(mode !== "manual" ? { executionMode: "semantic" as const } : {}),
     };
 
-    const code = await reviewCommand(mode === "sweep" ? "9999" : "codex/event-review-test", ["--repo", "craigoley/remudero"], deps as never);
+    const rest = ["--repo", "craigoley/remudero"];
+    const code = await reviewCommand(mode === "sweep" ? "9999" : "codex/event-review-test", mode === "manual" ? operatorReviewArgs(rest) : rest, deps as never);
 
     assert.equal(code, expectedCode);
     if (expectedCode === 0) assert.ok(captured, "the real review command must reach runReview");
@@ -112,15 +114,16 @@ test("the sweep runner explicitly enables a semantic reviewer with the head-reso
   assert.equal(args.settingsFileExists, true, "the rendered settings path handed to runReview must exist");
 });
 
-test("manual rmd review remains deterministic-only by default", async () => {
+test("manual rmd review runs the semantic reviewer by default", async () => {
   const { args } = await captureReview("Remudero-Task: W1-T2593", "manual");
 
   assert.ok(args);
-  assert.equal(args.spawnReviewer, false);
-  assert.equal(args.requireSemanticReview, false);
-  assert.equal(args.budgetUsd, undefined);
-  assert.equal(args.reviewerMount, undefined);
-  assert.equal(args.settingsFile, "");
+  assert.equal(args.spawnReviewer, true);
+  assert.equal(args.requireSemanticReview, true);
+  assert.equal(args.budgetUsd, 15, "the reviewer hard cap must be W1-T2593's head-resolved budget_usd");
+  assert.equal(args.reviewerMount?.model, "sonnet");
+  assert.ok(args.settingsFile, "semantic mode must render a normal worker settings file");
+  assert.equal(args.settingsFileExists, true);
 });
 
 test("semantic mode with no head-resolved task metadata refuses before pending, materialization or review", async () => {
