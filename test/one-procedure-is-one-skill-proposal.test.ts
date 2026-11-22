@@ -12,7 +12,8 @@
  *
  * The draft's NAME follows the procedure too, so the `.claude/skills/<name>/SKILL.md` path a
  * ratification would write stays stable as evidence accrues, instead of minting a new directory
- * per cadence pass.
+ * per cadence pass. Since W1-T13857 the procedure is the mined command sequence: its key hashes the
+ * task type and the ordered steps.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -32,15 +33,31 @@ function candidate(over: Record<string, unknown> = {}) {
     taskType: "implement",
     signals: ["fully_executed_proof"],
     runIds: ["R1", "R2"],
-    taskIds: ["W1-T1"],
+    taskIds: ["W1-T1", "W1-T2"],
     supportingRuns: 2,
     ...over,
   } as Parameters<typeof renderSkillDraft>[0];
 }
 
+const TYPECHECK_THEN_COMMIT = ["Bash:npm run typecheck", "Bash:git commit"];
+
+/** R1 to R4 (four tasks) ran the type check and then committed; L1 and L2 ran the plan linter and then pushed. */
+function corpus() {
+  const spec: Array<[string, string[]]> = [
+    ["R1", TYPECHECK_THEN_COMMIT], ["R2", TYPECHECK_THEN_COMMIT], ["R3", TYPECHECK_THEN_COMMIT], ["R4", TYPECHECK_THEN_COMMIT],
+    ["L1", ["Bash:npm run lint-plan:fast", "Bash:git push"]], ["L2", ["Bash:npm run lint-plan:fast", "Bash:git push"]],
+  ];
+  return {
+    runs: spec.map(([runId], i) => ({ runId, taskId: `W1-T${i + 1}`, type: "implement", verdict: "merged" })),
+    records: spec.flatMap(([runId, steps]) =>
+      steps.map((tool_signature) => ({ run_id: runId, step: "worker.activity", event_kind: "tool-executing", tool_name: "Bash", tool_signature }))),
+  };
+}
+const MINED = corpus();
+
 test("W1-T3385c: the SAME procedure with MORE supporting runs is ONE proposal, not another", () => {
-  const early = renderSkillDraft(candidate({ runIds: ["R1", "R2"], supportingRuns: 2 }))!;
-  const later = renderSkillDraft(candidate({ runIds: ["R1", "R2", "R3", "R4"], supportingRuns: 4 }))!;
+  const early = renderSkillDraft(candidate({ runIds: ["R1", "R2"], supportingRuns: 2 }), MINED)!;
+  const later = renderSkillDraft(candidate({ runIds: ["R1", "R2", "R3", "R4"], supportingRuns: 4 }), MINED)!;
   assert.notEqual(early.candidateHash, later.candidateHash, "the run-set hash still moves — that is its job");
   assert.equal(
     skillDraftProposalId(early.procedureKey),
@@ -49,21 +66,23 @@ test("W1-T3385c: the SAME procedure with MORE supporting runs is ONE proposal, n
   );
 });
 
-test("W1-T3385c: a DIFFERENT procedure shape is still its own proposal", () => {
-  const a = renderSkillDraft(candidate({ shapeKey: "fully_executed_proof" }))!;
-  const b = renderSkillDraft(candidate({ shapeKey: "clean_single_strike+fully_executed_proof", signals: ["clean_single_strike", "fully_executed_proof"] }))!;
+test("W1-T13857: a DIFFERENT procedure is its own proposal, and two shapes that draft the same procedure share one", () => {
+  const a = renderSkillDraft(candidate({ runIds: ["R1", "R2"] }), MINED)!;
+  const b = renderSkillDraft(candidate({ runIds: ["L1", "L2"] }), MINED)!;
   assert.notEqual(skillDraftProposalId(a.procedureKey), skillDraftProposalId(b.procedureKey));
+  const c = renderSkillDraft(candidate({ shapeKey: "clean_single_strike+fully_executed_proof", signals: ["clean_single_strike", "fully_executed_proof"] }), MINED)!;
+  assert.equal(skillDraftProposalId(a.procedureKey), skillDraftProposalId(c.procedureKey));
 });
 
-test("W1-T3385c: the same shape for a DIFFERENT task type is its own proposal", () => {
-  const a = renderSkillDraft(candidate({ taskType: "implement" }))!;
-  const b = renderSkillDraft(candidate({ taskType: "diagnose" }))!;
+test("W1-T3385c: the same procedure for a DIFFERENT task type is its own proposal", () => {
+  const a = renderSkillDraft(candidate({ taskType: "implement" }), MINED)!;
+  const b = renderSkillDraft(candidate({ taskType: "diagnose" }), MINED)!;
   assert.notEqual(skillDraftProposalId(a.procedureKey), skillDraftProposalId(b.procedureKey));
 });
 
 test("W1-T3385c: the written skill NAME is stable as evidence accrues", () => {
-  const early = renderSkillDraft(candidate({ runIds: ["R1", "R2"], supportingRuns: 2 }))!;
-  const later = renderSkillDraft(candidate({ runIds: ["R1", "R2", "R3"], supportingRuns: 3 }))!;
+  const early = renderSkillDraft(candidate({ runIds: ["R1", "R2"], supportingRuns: 2 }), MINED)!;
+  const later = renderSkillDraft(candidate({ runIds: ["R1", "R2", "R3"], supportingRuns: 3 }), MINED)!;
   assert.equal(early.name, later.name, "a new directory per cadence pass is the same defect wearing a path");
 });
 
@@ -75,12 +94,12 @@ test("W1-T3385c: the run-set hash is UNCHANGED — this repoints the id, it does
   );
 });
 
-test("W1-T3385c: the draft carries its supporting-run count, so a stager can compare evidence", () => {
-  const d = renderSkillDraft(candidate({ supportingRuns: 9, runIds: ["A", "B", "C"] }))!;
-  assert.equal(d.supportingRuns, 9);
-  assert.equal(procedureKeyFor({ shapeKey: "fully_executed_proof", taskType: "implement" }), d.procedureKey);
+test("W1-T3385c: the draft carries the procedure's run count, so a stager can compare evidence", () => {
+  const d = renderSkillDraft(candidate({ supportingRuns: 9, runIds: ["R1", "R2", "R3"] }), MINED)!;
+  assert.equal(d.supportingRuns, 3);
+  assert.equal(procedureKeyFor({ taskType: "implement", steps: TYPECHECK_THEN_COMMIT }), d.procedureKey);
 });
 
 test("W1-T3385c: a single-run candidate is still refused outright — the floor is untouched", () => {
-  assert.equal(renderSkillDraft(candidate({ supportingRuns: 1 })), undefined);
+  assert.equal(renderSkillDraft(candidate({ supportingRuns: 1 }), MINED), undefined);
 });
