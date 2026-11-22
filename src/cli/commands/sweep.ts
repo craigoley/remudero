@@ -22,7 +22,7 @@ import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
-import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhApiFetcher, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { createSweepStageWatch, escalatePostReviewStall, SWEEP_STAGE_STREAK_SLICE, type SweepStageOutcome } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
@@ -44,6 +44,11 @@ import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.j
 import type { RunTaskCommandHost } from "./run-task-verb.js";
 
 type HostFn = (...args: any[]) => any;
+
+/** W1-T14177: the action-time proof must revalidate both commit status endpoints through the broker. */
+const readSweepPrAtAct: GhApiFetcher = (args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit,
+  /\/commits\/[^/]+\/status(?:es\?|$)/.test(args[1] ?? "") ? { fresh: true } : {});
+
 export interface SweepCommandHost {
   readonly freshTreeGit?: (args: string[]) => string;
   readonly commandViews?: HostFn;
@@ -824,6 +829,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
       // W1-T14177: the act-time re-check of a dead owner's proof reads GitHub's live status through this re-reader, as the
       // daemon's two passes do; without one the re-check fails closed.
       rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+        fetchAsync: readSweepPrAtAct,
         views: { planFilingFileCache, onPlanFilingClassification, ciGateSource, log },
       }),
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
@@ -1160,6 +1166,7 @@ export function buildSweepHook(
           // W1-T7734: a head that moved under this pass is re-read (paced) and re-derived in this pass.
           rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
             pacer,
+            fetchAsync: readSweepPrAtAct,
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),
@@ -1440,6 +1447,7 @@ export function buildSweepLightHook(
             return (await readViews("refill")).views.filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
           },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
+            fetchAsync: readSweepPrAtAct,
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),

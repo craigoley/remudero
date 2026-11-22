@@ -17,6 +17,7 @@ import { reviewCommand, type ReviewCommandDeps, type ReviewCommandHost } from "#
 import { sweepCommand } from "#src/cli/commands/sweep.js";
 import { configPath, type Config } from "#src/lib/config.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { fetchSinglePrRestAsync } from "#src/lib/open-prs-rest.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { postReviewPending, reviewInputDigest } from "#src/lib/review.js";
 import { DEFAULT_SWEEP_POLICY, deadOwnerProofSuperseded, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
@@ -41,6 +42,7 @@ function ownerDeadView(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "pending", checksPendingSince: ago(30), lastActivityAt: ago(30), createdAt: ago(45),
     reviewState: "pending", reviewPendingSince: ago(20), reviewPendingOwnerDead: true, reviewPendingOwnerGone: "owner-pid-dead",
     reviewVerdictPostedAt: ago(20).replace(/\.\d{3}Z$/, "Z"), reviewPendingOwnerRunId: OWNER, reviewPendingStatusRunId: OWNER,
+    reviewPendingStatusId: 7001,
     priorReviewAttemptsForInput: 0, reviewInputDigest: reviewInputDigest(SHA, BODY),
     ...over,
   } as OpenPrView;
@@ -106,30 +108,39 @@ test("W1-T14177 criterion 1: a claim another run settled is no live replacement,
 /** The real view producer over the owner's claim row, with `description` as GitHub's live `remudero-review` status (id
  *  7001). The status history's newest post is that same status unless `newerPost` says GitHub accepted a newer one. */
 async function producedView(dir: string, description: string, createdAt: string,
-  over: { newerPost?: { id: number; description: string }; checks?: "green" | "pending" } = {}): Promise<OpenPrView> {
+  over: { newerPost?: { id: number; description: string }; checks?: "green" | "pending"; liveId?: number;
+    statusAtReread?: { id: number; description: string }; rows?: LedgerLine[] } = {}): Promise<OpenPrView> {
   const ledgerPath = join(dir, "ledger.ndjson");
   rmSync(ledgerPath, { force: true });
-  appendLedger(ledgerPath, ownerAndHoldRows()[0]!);
+  for (const row of over.rows ?? [ownerAndHoldRows()[0]!]) appendLedger(ledgerPath, row);
   const row = { number: 20065, html_url: PR_URL, head: { ref: "run-W1-T14177-1795288835761", sha: SHA },
     updated_at: ago(30), created_at: ago(45), body: BODY, auto_merge: null, state: "open" };
+  let combinedReads = 0;
+  const fetchAsync = async (args: string[]) => {
+    const path = args.at(-1)!;
+    if (path.includes("state=open")) return [row];
+    if (path.includes("check-runs")) return { check_runs: [over.checks === "green"
+      ? { name: "ci-gate", status: "completed", conclusion: "success", started_at: ago(30), completed_at: ago(25) }
+      : { name: "ci-gate", status: "in_progress", started_at: ago(30) }] };
+    if (path.includes("/statuses")) return [
+      ...(over.newerPost ? [{ context: "remudero-review", state: "pending", ...over.newerPost, created_at: ago(1) }] : []),
+      { context: "remudero-review", state: "pending", id: over.liveId ?? 7001, description, created_at: createdAt },
+    ];
+    if (path.includes("/status")) {
+      const later = ++combinedReads > 1 ? over.statusAtReread : undefined;
+      return { statuses: [{ context: "remudero-review", state: "pending", id: over.liveId ?? 7001, description,
+        created_at: createdAt, ...later }] };
+    }
+    if (path.endsWith("/pulls/20065")) return { ...row, mergeable: true, mergeable_state: "blocked" };
+    return [];
+  };
   const [pr] = await buildOpenPrViewsAsync("o", "r", ledgerPath, {
     requiredContexts: () => ["ci-gate"],
+    readCiGateRequired: () => ["ci-gate"],
+    mainPlanPath: join(dir, "unused-plan.yaml"),
     assessPendingOwner: (record) => record.runId === OWNER ? "dead" : "active",
-    fetchAsync: async (args) => {
-      const path = args.at(-1)!;
-      if (path.includes("state=open")) return [row];
-      if (path.includes("check-runs")) return { check_runs: [over.checks === "green"
-        ? { name: "ci-gate", status: "completed", conclusion: "success", started_at: ago(30), completed_at: ago(25) }
-        : { name: "ci-gate", status: "in_progress", started_at: ago(30) }] };
-      if (path.includes("/statuses")) return [
-        ...(over.newerPost ? [{ context: "remudero-review", state: "pending", ...over.newerPost, created_at: ago(1) }] : []),
-        { context: "remudero-review", state: "pending", id: 7001, description, created_at: createdAt },
-      ];
-      if (path.includes("/status")) return { statuses: [{ context: "remudero-review", state: "pending", id: 7001, description,
-        created_at: createdAt }] };
-      if (path.endsWith("/pulls/20065")) return { ...row, mergeable: true, mergeable_state: "blocked" };
-      return [];
-    },
+    fetchAsync,
+    ...(over.statusAtReread === undefined ? {} : { openPrRows: [await fetchSinglePrRestAsync("o", "r", 20065, fetchAsync)] }),
   });
   assert.ok(pr);
   return pr;
@@ -146,6 +157,8 @@ test("W1-T14177 criterion 2: a takeover GitHub accepted before its ledger append
     ago(1).replace(/\.\d{3}Z$/, "Z"));
   const cases: Array<[string, SweepDeps["rereadPrAtAct"]]> = [
     ["GitHub's live status is the live takeover", () => takeover],
+    ["another post by the same writer in the same second", async () =>
+      producedView(dir, `remudero-review: review in progress (owned by run ${OWNER})`, postedAt, { liveId: 7002 })],
     ["the same writer's status was posted again", (pr) => ({ ...pr, reviewVerdictPostedAt: ago(1).replace(/\.\d{3}Z$/, "Z") })],
     ["the act-time re-read failed", () => { throw new Error("rate limited"); }],
     ["the PR is no longer open", () => undefined],
@@ -162,6 +175,9 @@ test("W1-T14177 criterion 2: a takeover GitHub accepted before its ledger append
     producedView(dir, `remudero-review: review in progress (owned by run ${OWNER})`, postedAt));
   assert.equal(unchanged.row.disposition, "post-review", "GitHub still shows the dead owner's own claim: the re-run goes ahead");
   assert.equal(unchanged.posted.length, 1);
+  const missing = await sweepOnce(t, view, [ownerAndHoldRows()[0]!], null);
+  assert.equal(missing.row.disposition, "wait", "a dead owner cannot be retried without the live re-reader");
+  assert.equal(missing.admitted, false);
 });
 
 test("W1-T14177 criterion 2: a takeover landing after the act-time re-read is refused by the reviewer's publish guard", async (t) => {
@@ -208,6 +224,32 @@ test("W1-T14177 criterion 1: a run the dead owner took over is retired, so an ag
   assert.equal(deadOwnerProofSuperseded(ownerDeadView(), [predecessor, ownerClaim!, hold!]), PREDECESSOR);
 });
 
+test("W1-T14177 criterion 1: an aged takeover of a completed foreign hold can retry on green CI", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14177-hold-chain-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const [claim, hold] = ownerAndHoldRows();
+  const earlier: LedgerLine = { ...claim!, run_id: PREDECESSOR, ts: ago(90) };
+  const completed: LedgerLine = { ...hold!, ts: ago(85) };
+  const takeover: LedgerLine = { ...claim!, took_over_run_id: NOOP, ts: ago(70) };
+  const rows = [earlier, completed, takeover];
+  const read = () => producedView(dir, `remudero-review: review in progress (owned by run ${OWNER}) — took over a stale claim from ${NOOP}`,
+    ago(70).replace(/\.\d{3}Z$/, "Z"), { checks: "green", rows });
+  const view = await read();
+  assert.equal(view.reviewPendingOwnerDead, true);
+  assert.equal(view.reviewPendingOwnerRunId, OWNER);
+  const retry = await sweepOnce(t, view, rows, read);
+  assert.equal(retry.row.disposition, "post-review");
+  assert.equal(retry.admitted, true);
+  assert.equal(retry.posted.length, 1);
+
+  for (const unrelated of [{ ...completed, head_sha: "a".repeat(40) }, { ...completed, pr_url: `${PR_URL}1` }]) {
+    const stillClaimed = await sweepOnce(t, view, [earlier, unrelated, takeover], read);
+    assert.equal(stillClaimed.row.disposition, "wait", "another input's hold cannot retire this head's claim");
+    assert.match(String(stillClaimed.row.reason), new RegExp(PREDECESSOR));
+    assert.equal(stillClaimed.admitted, false);
+  }
+});
+
 /** The ops-redaction hold the dead owner published after its claim; its writer is read only from GitHub's status history. */
 const OPS_HOLD = "remudero-review: pending — detailed evidence retained on host";
 
@@ -222,6 +264,8 @@ async function producedHoldView(dir: string, liveId: number, historyNewestId: nu
   const postedAt = ago(15).replace(/\.\d{3}Z$/, "Z");
   const [pr] = await buildOpenPrViewsAsync("o", "r", ledgerPath, {
     requiredContexts: () => ["ci-gate"],
+    readCiGateRequired: () => ["ci-gate"],
+    mainPlanPath: join(dir, "unused-plan.yaml"),
     assessPendingOwner: (record) => record.runId === OWNER ? "dead" : "active",
     fetchAsync: async (args) => {
       const path = args.at(-1)!;
@@ -416,9 +460,47 @@ test("W1-T14177 criterion 2: a claim the combined status still serves proves not
   }
 });
 
+test("W1-T14177 criterion 2: green CI cannot attach a dead ledger owner's proof to a live takeover", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14177-green-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const rows = [{ ...ownerAndHoldRows()[0]!, ts: ago(70) }];
+  const takeover = `pending (owned by run ${LIVE}) — took over run ${OWNER}: owner proven dead`;
+  for (const postedAt of [ago(1), "unreadable"]) {
+    const read = () => producedView(dir, takeover, postedAt, { checks: "green", liveId: 7002, rows });
+    const live = await read();
+    assert.equal(live.reviewPendingStatusRunId, LIVE);
+    assert.notEqual(live.reviewPendingOwnerDead, true, "the old ledger run supplies no proof about the new status writer");
+    const result = await sweepOnce(t, live, rows, read);
+    assert.equal(result.row.disposition, "wait", postedAt);
+    assert.equal(result.admitted, false);
+    assert.deepEqual(result.posted, []);
+  }
+});
+
+test("W1-T14177 criterion 2: a changed combined status during the single-PR reread invalidates the old proof", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-t14177-single-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const claim = `remudero-review: review in progress (owned by run ${OWNER})`;
+  const takeover = { id: 7002, description: `pending (owned by run ${LIVE}) — took over run ${OWNER}: owner proven dead` };
+  const postedAt = ago(20);
+  const view = await producedView(dir, claim, postedAt, { checks: "green" });
+  assert.equal(view.reviewPendingOwnerDead, true);
+  for (const newerPost of [undefined, takeover]) {
+    const reread = () => producedView(dir, claim, postedAt, { checks: "green", statusAtReread: takeover, newerPost });
+    assert.notEqual((await reread()).reviewPendingOwnerDead, true, "a second combined response disagrees with the rollup");
+    const result = await sweepOnce(t, view, [ownerAndHoldRows()[0]!], reread);
+    assert.equal(result.row.disposition, "wait");
+    assert.equal(result.admitted, false);
+  }
+  const same = await sweepOnce(t, view, [ownerAndHoldRows()[0]!], () =>
+    producedView(dir, claim, postedAt, { checks: "green", statusAtReread: { id: 7001, description: claim } }));
+  assert.equal(same.admitted, true, "identical combined responses let the history bind the claim");
+});
+
 /** `rmd review` retrying a dead owner's head through the REAL postReviewPending, over a ledger seeded with `rows`, while
  *  GitHub's live status is `live`. Returns the claim it answered and every effect the command reached. */
-async function retryThroughRealClaim(rows: LedgerLine[], live: { description: string; created_at: string }) {
+async function retryThroughRealClaim(rows: LedgerLine[], live: { description: string; created_at: string },
+  newest: { id?: number; description: string; created_at: string } | Error = { ...live, id: 7001 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t14177-retry-"));
   const effects: string[] = [];
   const claims: Array<{ posted: boolean; reason?: string }> = [];
@@ -427,6 +509,7 @@ async function retryThroughRealClaim(rows: LedgerLine[], live: { description: st
   try {
     const ledgerPath = join(root, "state", "ledger.ndjson");
     for (const row of rows) appendLedger(ledgerPath, row);
+    const status = { context: "remudero-review", state: "pending", id: 7001, ...live };
     const code = await reviewCommand(REVIEW_HOST, "run-PR-pending-1795288835761", ["--repo", "craigoley/remudero"], {
       resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
       fetchView: () => ({ headRefOid: REVIEWED_HEAD, headRefName: "run-PR-pending-1795288835761", number: 20070,
@@ -435,10 +518,16 @@ async function retryThroughRealClaim(rows: LedgerLine[], live: { description: st
       loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/bin/true" }) as Config,
       executionMode: "semantic",
       fetchHead: () => {},
+      fetchPendingStatus: (args) => {
+        if (args[1]?.endsWith("/status")) return { statuses: [status] };
+        assert.match(args[1] ?? "", /\/statuses\?per_page=100$/);
+        if (newest instanceof Error) throw newest;
+        return [{ ...status, ...newest }];
+      },
       postReviewPending: async (opts) => {
         effects.push("pending");
         const claim = await postReviewPending({ ...opts, fetchLifecycle: () => ({ merged: false, closed: false }),
-          fetchStatus: () => ({ statuses: [{ context: "remudero-review", state: "pending", ...live }] }),
+          fetchStatus: opts.fetchStatus ?? (() => ({ statuses: [status] })),
           assessPendingOwner: (record) => record.runId === OWNER ? "dead" : "active",
           post: () => { effects.push("claim-posted"); } });
         claims.push(claim);
@@ -456,7 +545,7 @@ async function retryThroughRealClaim(rows: LedgerLine[], live: { description: st
           summary: "fixture review complete", floorDegraded: false, capped: false, keywordOnly: false, planOnly: false };
       },
     } satisfies ReviewCommandDeps);
-    return { code, effects, claims };
+    return { code, effects, claims, rows: readLedgerLines(ledgerPath) };
   } finally {
     console.log = originalLog;
     rmSync(root, { recursive: true, force: true });
@@ -483,4 +572,27 @@ test("W1-T14177 criterion 1: a completed hold from another reviewer never stops 
   const rival = await retryThroughRealClaim([deadClaim], live);
   assert.equal(rival.code, 2);
   assert.deepEqual(rival.effects, ["pending"]);
+});
+
+test("W1-T14177 criterion 2: rmd review checks the newest status id before the real takeover publisher", async () => {
+  const postedAt = new Date(Date.now() - 65 * 60_000).toISOString();
+  const claim: LedgerLine = { run_id: OWNER, task_id: "PR-pending", step: "review.pending_posted", head_sha: REVIEWED_HEAD,
+    pr_url: "https://github.com/craigoley/remudero/pull/20070", ts: postedAt, host: hostname(), owner_pid: 41,
+    owner_started_at: postedAt };
+  const combined = { description: `remudero-review: review in progress (owned by run ${OWNER})`, created_at: postedAt };
+  const takeover = { id: 7002, description: `pending (owned by run ${LIVE}) — took over run ${OWNER}: owner proven dead`,
+    created_at: postedAt };
+  for (const newest of [takeover, { ...combined, id: 7002 }, { ...combined, id: 7000 }, { ...combined, id: undefined }]) {
+    const result = await retryThroughRealClaim([claim], combined, newest);
+    assert.equal(result.code, 2);
+    assert.deepEqual(result.effects, [], "no claim post, worktree, review, or verdict");
+    assert.match(String(result.rows.find((row) => row.step === "review.stood_down")?.reason), /status id does not match/);
+  }
+  const unreadable = await retryThroughRealClaim([claim], combined, new Error("history unavailable"));
+  assert.equal(unreadable.code, 2);
+  assert.deepEqual(unreadable.effects, []);
+  assert.match(String(unreadable.rows.find((row) => row.step === "review.stood_down")?.reason), /could not be verified/);
+  const unchanged = await retryThroughRealClaim([claim], combined);
+  assert.ok(unchanged.effects.includes("claim-posted"), "the real publisher takes over when both endpoints agree");
+  assert.ok(unchanged.effects.includes("review"));
 });

@@ -244,6 +244,7 @@ import {
   recordedLoad1,
   sampleHostLoad,
   reviewLedgerKeyFor,
+  reviewRowNamesPr,
   reviewLaneCancellation,
   reviewLanePr,
   reviewTaskNarrative,
@@ -6905,8 +6906,6 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
     age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
 }
 
-/** W1-T14177 — rows after which a review run holds no claim: it published (a hold included), stood down, was refused, or
- *  recorded its decision. */
 /** W1-T14177: the rows by which a review run settles a head: after one, that run holds no claim on it. */
 export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
   "review.skipped_closed_lifecycle"]);
@@ -6931,20 +6930,33 @@ export function deadOwnerProofSuperseded(
   if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead !== true) return undefined;
   if (pr.reviewPendingOwnerRunId === undefined && pr.checksState !== "pending") return undefined;
   const since = Date.parse(pr.reviewPendingSince ?? "");
-  const live = new Map<string, boolean>();
+  const live = new Set<string>();
+  const claimBeforeHold = new Map<string, string>();
+  let lastClaim: string | undefined;
   for (const line of lines) {
-    const run = typeof line.run_id === "string" ? line.run_id : undefined;
-    const claim = line.step === "review.pending_posted" && line.head_sha === pr.headSha &&
-      (line.pr_url !== undefined ? line.pr_url === pr.prUrl : line.task_id === pr.taskId);
-    // A takeover retires the run it names: only the newest unsettled link of a takeover chain can hold the head.
-    if (claim && typeof line.took_over_run_id === "string" && live.has(line.took_over_run_id)) live.set(line.took_over_run_id, false);
-    if (run === undefined || run === pr.reviewPendingOwnerRunId) continue;
-    const at = Date.parse(typeof line.ts === "string" ? line.ts : "");
-    if (claim && (pr.reviewPendingOwnerRunId !== undefined || !(Number.isFinite(at) && Number.isFinite(since) && at <= since))) {
-      live.set(run, true);
-    } else if (live.has(run) && typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) live.set(run, false);
+    if (line.head_sha !== pr.headSha || !reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
+    const run = line.run_id;
+    if (line.step === "review.pending_posted") {
+      const replaced = line.took_over_run_id;
+      if (typeof replaced === "string") {
+        live.delete(replaced);
+        const displaced = claimBeforeHold.get(replaced);
+        if (displaced !== undefined) live.delete(displaced);
+      }
+      lastClaim = run;
+      claimBeforeHold.delete(run);
+      const at = Date.parse(typeof line.ts === "string" ? line.ts : "");
+      if (run !== pr.reviewPendingOwnerRunId && (pr.reviewPendingOwnerRunId !== undefined ||
+          !(Number.isFinite(at) && Number.isFinite(since) && at <= since))) live.add(run);
+    } else if (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) {
+      live.delete(run);
+      // A takeover of a completed hold names its writer, which can differ from the preceding claimant.
+      if (line.step === "review.posted" && line.state === "pending" && lastClaim !== undefined) {
+        claimBeforeHold.set(run, lastClaim);
+      }
+    }
   }
-  return [...live].find(([, claimed]) => claimed)?.[0];
+  return live.values().next().value;
 }
 
 /** W1-T14177 — threat (2) of {@link deadOwnerProofSuperseded}: the act-time re-read view must be the same head, still carry
@@ -6954,13 +6966,18 @@ export function deadOwnerProofSuperseded(
 export function deadOwnerProofStillLive(pr: OpenPrView, reread: OpenPrView | undefined): string | undefined {
   if (reread === undefined) return "the act-time re-read found the PR no longer open";
   if (reread.headSha !== pr.headSha) return `the head moved to ${reread.headSha.slice(0, 8)} since the death proof`;
-  if (reread.reviewPendingOwnerDead !== true || reread.reviewPendingOwnerRunId !== pr.reviewPendingOwnerRunId) {
+  if (!pendingClaimOwnerProvenDead(reread) || reread.reviewPendingOwnerRunId !== pr.reviewPendingOwnerRunId) {
     return "GitHub's live remudero-review status no longer proves the same owner dead";
   }
-  if (reread.reviewPendingStatusRunId !== pr.reviewPendingStatusRunId) {
+  if (reread.reviewPendingStatusRunId !== reread.reviewPendingOwnerRunId ||
+      reread.reviewPendingStatusRunId !== pr.reviewPendingStatusRunId) {
     return `GitHub's live remudero-review status was written by ${reread.reviewPendingStatusRunId ?? "an unknown run"}`;
   }
-  return pr.reviewVerdictPostedAt !== undefined && reread.reviewVerdictPostedAt === pr.reviewVerdictPostedAt ? undefined
+  if (reread.reviewPendingStatusId === undefined ||
+      (pr.reviewPendingStatusId !== undefined && reread.reviewPendingStatusId !== pr.reviewPendingStatusId)) {
+    return "GitHub's live remudero-review status id could not be bound to the same post";
+  }
+  return reread.reviewVerdictPostedAt === pr.reviewVerdictPostedAt ? undefined
     : `GitHub's live remudero-review status was posted at ${reread.reviewVerdictPostedAt ?? "an unread time"}, not the ` +
       `${pr.reviewVerdictPostedAt ?? "(undated)"} post the death proof was bound to`;
 }
@@ -8554,6 +8571,10 @@ export interface OpenPrView {
   /** W1-T14035 — the run that published the live `remudero-review` status (tick-read-worker's reviewPendingStatusRunId);
    *  absent when unknown. Evidence only: the producer sets `reviewPendingOwnerDead` only when it equals the judged run. */
   reviewPendingStatusRunId?: string;
+  /** The pending post's GitHub id, corroborated by status history. */
+  reviewPendingStatusId?: number;
+  /** The combined status and another GitHub read disagree about the pending post. */
+  reviewPendingStatusConflict?: true;
   /** W1-T2299 — when the current `reviewState` reading was posted, read off the same rollup entry
    *  already scanned. NOT A BODY-EDIT TIMESTAMP, and must never be documented as one: GitHub
    *  exposes no body-specific time field, so this detects ACTIVITY AFTER A VERDICT and a gaming
@@ -23989,10 +24010,15 @@ export async function runSweep(
       if (!(deliveredDedups || durableRefusal || retryBackoff !== undefined)) {
         const liveRun = deadOwnerProofSuperseded(pr, freshLines);
         if (liveRun !== undefined) stale = `the fresh ledger holds a live claim by ${liveRun} on this head`;
-        else if (deps.rereadPrAtAct && pr.reviewState === "pending" && producerProvedOwnerDead(pr) &&
-          (pr.reviewPendingOwnerRunId !== undefined || pr.checksState === "pending")) {
+        else if (pr.reviewState === "pending" && pr.reviewPendingStatusConflict === true) {
+          stale = "GitHub reads disagree on the live remudero-review post";
+        } else if (pr.reviewPendingStatusRunId !== undefined && pr.reviewPendingStatusRunId !== pr.reviewPendingOwnerRunId &&
+          (Number.isNaN(Date.parse(pr.reviewVerdictPostedAt ?? "")) || !reviewPendingIsStale(pr, policy, now))) {
+          stale = `GitHub's live remudero-review claim belongs to ${pr.reviewPendingStatusRunId}`;
+        } else if (pendingClaimOwnerProvenDead(pr) && pr.reviewPendingOwnerRunId !== undefined) {
           try {
-            stale = deadOwnerProofStillLive(pr, await deps.rereadPrAtAct(pr));
+            stale = deps.rereadPrAtAct === undefined ? "the act-time re-reader is unavailable"
+              : deadOwnerProofStillLive(pr, await deps.rereadPrAtAct(pr));
           } catch (error) {
             // Reason: the error text is recorded in the wait reason, so the head waits and names the failed read.
             stale = `the act-time re-read failed (${String((error as Error)?.message ?? error)})`;

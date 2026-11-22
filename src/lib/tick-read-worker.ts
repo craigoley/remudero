@@ -98,14 +98,19 @@ export function* openPrsWithPostedIdsSteps(owner: string, repo: string, fetch: G
 /** W1-T14035: the live `remudero-review` status's own GitHub id, kept beside its rollup entry so an owner proof read off the
  *  head's status history binds to that one post, never to another with the same text. Absent when GitHub gave none. */
 export function attachReviewStatusId<T extends object>(rollup: T[], response: unknown): void {
-  const status = (response as { statuses?: Array<{ context?: unknown; id?: unknown; description?: unknown }> } | undefined)
-    ?.statuses?.find((candidate) => candidate?.context === REVIEW_CTX);
-  const entry = rollup.find((c) => (c as { context?: string }).context === REVIEW_CTX) as (T & { statusId?: number;
-    description?: string }) | undefined;
-  // A combined status read apart from the rollup's own lends its id only to the same wording.
-  if (entry !== undefined && typeof status?.id === "number" && (status.description ?? undefined) === entry.description) {
-    entry.statusId = status.id;
-  }
+  const statuses = (response as { statuses?: unknown } | undefined)?.statuses;
+  const status = Array.isArray(statuses) ? statuses.find((candidate) => candidate?.context === REVIEW_CTX) : undefined;
+  const entry = rollup.find((c) => (c as { context?: string }).context === REVIEW_CTX) as (T & RollupCheck) | undefined;
+  if (entry === undefined) return;
+  // The single-PR reader supplies a second combined response. An incompatible post invalidates the rollup's proof.
+  if (!status || (status.description || undefined) !== entry.description || (status.created_at || undefined) !== entry.startedAt ||
+      (typeof status.state === "string" ? status.state.toUpperCase() : undefined) !== entry.state) {
+    entry.statusId = null;
+  } else if (validReviewStatusId(status.id)) entry.statusId = status.id;
+}
+
+function validReviewStatusId(id: unknown): id is number {
+  return typeof id === "number" && Number.isSafeInteger(id) && id > 0;
 }
 
 /** Only the failing log's explicit `Run 'npm run <name>' and commit the result.` qualifies;
@@ -585,8 +590,8 @@ export interface RollupCheck {
   completedAt?: string;
   /** A status context's own description, verbatim from REST (`securityMergePolicyRefusal` reads it). */
   description?: string;
-  /** W1-T14035: a status context's own GitHub id (`remudero-review` only), from {@link attachReviewStatusId}. */
-  statusId?: number;
+  /** GitHub's `remudero-review` status id. Null records a disagreement between the rollup and the next combined read. */
+  statusId?: number | null;
 }
 
 export interface RawOpenPr {
@@ -652,7 +657,7 @@ export interface ReviewStatusHistoryEntry { id?: number; state?: string; descrip
 export function reviewStatusHistoryFromRest(rows: unknown): ReviewStatusHistoryEntry[] | undefined {
   if (!Array.isArray(rows) || rows.some((row) => typeof row !== "object" || row === null)) return undefined;
   return (rows as Array<Record<string, unknown>>).filter((row) => row.context === REVIEW_CTX).map((row) => ({
-    id: typeof row.id === "number" ? row.id : undefined,
+    id: validReviewStatusId(row.id) ? row.id : undefined,
     state: typeof row.state === "string" ? row.state : undefined,
     description: typeof row.description === "string" ? row.description : undefined,
   }));
@@ -678,11 +683,8 @@ export function reviewPendingStatusRunId(
   const live = (rollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX);
   const description = live?.description;
   const claimant = reviewStatusRunIdFromRollup(rollup);
-  // W1-T14177: GitHub can accept a takeover while the combined status still serves the older claim, so a claim the head's
-  // status history was read against names its writer only while that history's newest id is the live status's own.
-  if (claimant !== undefined) {
-    return history !== undefined && live?.statusId !== undefined && history[0]?.id !== live.statusId ? undefined : claimant;
-  }
+  if (live?.statusId === null || (history !== undefined && history[0]?.id !== live?.statusId)) return undefined;
+  if (claimant !== undefined) return claimant;
   // The history's newest post must BE the live status, by GitHub's id: equal text from another post proves nothing.
   if (!description || history === undefined || live?.statusId === undefined || history[0]?.id !== live.statusId ||
     history[0]?.description !== description) return undefined;
@@ -2640,7 +2642,7 @@ export function* openPrViewSteps(
         // again, before the history, so the history's newest post is compared with a post GitHub named current.
         const rollup = byNumber.get(c.number)?.statusCheckRollup;
         if (rollup !== undefined && rollup.find((r) => r.context === REVIEW_CTX)?.statusId === undefined) {
-          attachReviewStatusId(rollup, yield* step(() => read(["api", `repos/${owner}/${repo}/commits/${c.headSha}/status`])));
+          attachReviewStatusId(rollup, yield* step(() => read(combinedStatusRestArgs(owner, repo, c.headSha))));
         }
         return reviewStatusHistoryFromRest(yield* step(() => read(["api", `repos/${owner}/${repo}/commits/${c.headSha}/statuses?per_page=100`])));
       } catch {
@@ -2725,19 +2727,15 @@ export function* openPrViewSteps(
     // the live rollup is pending, and date only a row matching the current head_sha.
     const pendingRecord = reviewState === "pending" ? lastPendingReviewStatusFromLedger(ledger, unmetKey, pr.url) : undefined;
     const currentPendingRecord = pendingRecord?.headSha === pr.headRefOid ? pendingRecord : undefined;
-    const reviewPendingSince = currentPendingRecord?.postedAt;
-    // W1-T14035: while checks are pending the flag alone releases a claim alongside CI, so there it is set only when the live
-    // status is the judged run's own post; the green-check rows keep reading it as they did before this task.
-    const statusRunId = reviewState === "pending" ? reviewPendingStatusRunId(pr.statusCheckRollup,
-      reviewStatusHistories.get(pr.number), ledger, unmetKey, pr.url, pr.headRefOid) : undefined;
-    // W1-T14177: a status history read whose newest post is not the live status shows GitHub accepted a newer post (a
-    // takeover) the combined status does not serve yet, so no check state proves the owner of the older one dead.
     const statusHistory = reviewStatusHistories.get(pr.number);
+    const statusRunId = reviewState === "pending" ? reviewPendingStatusRunId(pr.statusCheckRollup,
+      statusHistory, ledger, unmetKey, pr.url, pr.headRefOid) : undefined;
+    const foreignClaim = statusRunId !== undefined && statusRunId !== currentPendingRecord?.runId;
+    const reviewPendingSince = foreignClaim ? reviewVerdictPostedAt : currentPendingRecord?.postedAt;
     const liveReviewStatusId = (pr.statusCheckRollup ?? []).find((c) => c.context === REVIEW_CTX || c.name === REVIEW_CTX)?.statusId;
-    const historyHasNewerPost = statusHistory !== undefined && liveReviewStatusId !== undefined &&
-      statusHistory[0]?.id !== liveReviewStatusId;
-    const reviewPendingOwnerDead = currentPendingRecord && !historyHasNewerPost &&
-      (checksState !== "pending" || statusRunId === currentPendingRecord.runId) &&
+    const statusConflict = liveReviewStatusId === null || (statusHistory !== undefined &&
+      statusHistory[0]?.id !== liveReviewStatusId);
+    const reviewPendingOwnerDead = currentPendingRecord && statusRunId !== undefined && statusRunId === currentPendingRecord.runId &&
       assessPendingOwner(currentPendingRecord) === "dead" ? true : undefined;
     // W1-T923 (design note ii): the SAME synthetic `PR-<n>` fallback {@link escalationTaskIdFor}
     // already mints, but WITH NO `isPlanOnlyFilingPr` restriction — that restriction is what
@@ -2762,6 +2760,9 @@ export function* openPrViewSteps(
       reviewPendingOwnerGoneReason: undefined,
       reviewPendingOwnerRunId: currentPendingRecord?.runId ? currentPendingRecord.runId : undefined,
       reviewPendingStatusRunId: statusRunId,
+      reviewPendingStatusId: reviewState === "pending" && typeof liveReviewStatusId === "number" &&
+        statusHistory?.[0]?.id === liveReviewStatusId ? liveReviewStatusId : undefined,
+      reviewPendingStatusConflict: reviewState === "pending" && statusConflict ? true : undefined,
       reviewVerdictPostedAt,
       checksState,
       // W1-T13195: a failed rollup read is carried so the sweep waits instead of reading "none".
