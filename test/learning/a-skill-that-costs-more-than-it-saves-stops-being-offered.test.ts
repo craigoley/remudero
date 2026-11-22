@@ -187,8 +187,8 @@ test("W1-T13860 criterion 3: a priced pending shipment counts toward the bootstr
 test("W1-T13860 criterion 4: a skill that merges more at a cost not confidently higher is never retired on cost", () => {
   // The proof-preflight shape: more merges, cost per merged PR a little higher, intervals wide.
   const shape = buildSkillEffectivenessReport([
-    ...pricedArm("sel", true, 20, 11, (i) => (i % 2 === 0 ? 3 : 4), 1000),
-    ...pricedArm("ctl", false, 20, 10, (i) => (i % 2 === 0 ? 2 : 4), 2000),
+    ...pricedArm("sel", true, 30, 30, (i) => (i % 2 === 0 ? 3 : 4), 1000),
+    ...pricedArm("ctl", false, 30, 5, (i) => i % 2, 2000),
   ], SKILL);
   assert.ok(shape.selected.cost_per_merged_pr! > shape.control.cost_per_merged_pr!, "precondition: it costs a little more");
   assert.ok(shape.cost_difference_lower_bound_usd !== null && shape.cost_difference_lower_bound_usd <= 0);
@@ -212,7 +212,7 @@ test("W1-T13860 criterion 4: pending control spend prevents a false cost retirem
   assert.equal(report.selected.cost_per_merged_pr, 5);
   assert.equal(report.control.cost_per_merged_pr, 4.5);
   assert.equal(report.status, "INSUFFICIENT EVIDENCE");
-  assert.equal(report.basis, "pending-shipment");
+  assert.equal(report.basis, "undecided");
   const beforeFixRounds = buildSkillEffectivenessReport(rows.filter((row) => row.step !== "fix.done"), SKILL);
   assert.ok(beforeFixRounds.cost_difference_lower_bound_usd !== null && beforeFixRounds.cost_difference_lower_bound_usd > 0);
   assert.equal(beforeFixRounds.basis, "costs-more-than-it-saves");
@@ -221,10 +221,10 @@ test("W1-T13860 criterion 4: pending control spend prevents a false cost retirem
 test("W1-T13860 criterion 4: either arm missing a priced merge leaves the cost comparison unavailable", () => {
   for (const offeredUnpriced of [true, false]) {
     const report = buildSkillEffectivenessReport([
-      ...pricedArm("sel", true, 21, 11, (i) => offeredUnpriced ? (i < 11 ? undefined : 0) : (i < 11 ? 5 : undefined), 1000),
-      ...pricedArm("ctl", false, 22, 10, (i) => offeredUnpriced ? (i < 10 ? 1 : undefined) : (i >= 10 ? 0 : undefined), 2000),
+      ...pricedArm("sel", true, 45, 33, (i) => offeredUnpriced ? (i < 33 ? undefined : 0) : (i < 33 ? 5 : undefined), 1000),
+      ...pricedArm("ctl", false, 45, 10, (i) => offeredUnpriced ? (i < 10 ? 1 : undefined) : (i >= 10 ? 0 : undefined), 2000),
     ], SKILL);
-    assert.equal(report.selected.merged_runs, 11);
+    assert.equal(report.selected.merged_runs, 33);
     assert.equal(report.control.merged_runs, 10);
     assert.ok(report.selected.costed_runs >= report.horizon && report.control.costed_runs >= report.horizon);
     assert.equal(report.selected.cost_per_merged_pr, offeredUnpriced ? null : 5);
@@ -424,7 +424,7 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     ]).flat());
     assert.equal(gardenPassDue(spec, deps), true, "new ledger evidence is eligible on the next hourly pass");
     assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
-    assert.deepEqual(judged.map((row) => row.basis), ["costs-more-than-it-saves", "favorable-comparison"]);
+    assert.deepEqual(judged.map((row) => row.basis), ["costs-more-than-it-saves", "undecided"]);
     assert.deepEqual(loadProposalRegistry(registry), []);
     assert.deepEqual(offeredRuns(), normal, "withdrawn: the normal share returns");
     assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));

@@ -28,6 +28,7 @@ import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js
 import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
+import { mergeDifferenceSequence, type MergeDifferenceObservation, type MergeDifferenceSequence } from "./sequential-test.js";
 import { mineRecurringProcedures, type TranscriptLedgerRow, type TranscriptRun } from "./workflow-mining.js";
 
 /** The fields {@link renderSkillDraft} reads off a mined procedural candidate — see this module's
@@ -985,6 +986,7 @@ export const SKILL_EFFECTIVENESS_TASK_TYPE = "implement";
 export const SKILL_FIX_TASK_TYPE = "fix";
 /** Predeclared before observing any result, so the report cannot lower it after the fact. */
 export const SKILL_EFFECTIVENESS_HORIZON = 10;
+export const SKILL_MIN_MERGE_BENEFIT = 0.02;
 /** A terminal worker failure is the named harm outcome; harm decides only through {@link harmExcessPValue}. */
 export const SKILL_EFFECTIVENESS_HARM_OUTCOMES = ["failed"] as const;
 /** Predeclared, as the horizon is: harm alone makes a skill a retire candidate only when the selected arm's harm
@@ -1088,7 +1090,7 @@ export interface SkillEffectivenessReport {
   task_type: string;
   horizon: number;
   status: SkillEffectivenessStatus;
-  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "costs-more-than-it-saves" | "not-better-than-control" | "favorable-comparison" | "pending-shipment";
+  basis: "below-horizon" | "zero-selection" | "named-harm-signal" | "costs-more-than-it-saves" | "not-better-than-control" | "favorable-comparison" | "undecided";
   selected: SkillEffectivenessArm;
   control: SkillEffectivenessArm;
   harm_outcomes: readonly string[];
@@ -1102,6 +1104,7 @@ export interface SkillEffectivenessReport {
   settle_window_ms: number | null;
   /** One-sided 95% lower bound of (selected minus control) cost per merged PR; null when not compared. */
   cost_difference_lower_bound_usd: number | null;
+  merge_difference: MergeDifferenceSequence;
 }
 
 export interface SkillEffectivenessVersion {
@@ -1165,7 +1168,7 @@ export function buildSkillEffectivenessReport(
   const mergedAtMs = new Map<string, number | undefined>();
   const timedClosedPrKeys = new Set<string>();
   const fixCostByPr = new Map<string, number>();
-  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null }>();
+  const selectionByRun = new Map<string, { selected: boolean; withheld?: boolean; digest: string | null; enrolledAt: number }>();
   let latestMs: number | undefined;
 
   for (const row of rows) {
@@ -1205,6 +1208,7 @@ export function buildSkillEffectivenessReport(
       selected: stringArray(row.selected_names).includes(skillName),
       ...(Array.isArray(row.withheld_names) ? { withheld: stringArray(row.withheld_names).includes(skillName) } : {}),
       digest: typeof digest === "string" ? digest : null,
+      enrolledAt: ms ?? 0,
     });
   }
 
@@ -1239,14 +1243,24 @@ export function buildSkillEffectivenessReport(
   const inArm = (o: { selected: boolean; withheld?: boolean }, treated: boolean): boolean =>
     randomized ? o.withheld !== undefined && o.withheld !== treated : o.selected === treated;
 
+  // Pair by enrollment, so completion order cannot pick the comparison's early observations.
+  const enrollments = [...selectionByRun].sort(([aId, a], [bId, b]) =>
+    a.enrolledAt - b.enrolledAt || (aId < bId ? -1 : Number(aId > bId)));
+  const mergeSamples = { selected: [] as MergeDifferenceObservation[], control: [] as MergeDifferenceObservation[] };
   const costSamples = { selected: [] as CostSample[], control: [] as CostSample[] };
   const buildCohort = (selected: boolean): SkillEffectivenessArm => {
     const cohort = emptyCohort();
-    const samples = selected ? costSamples.selected : costSamples.control;
-    for (const [runId, observation] of selectionByRun) {
+    const arm = selected ? "selected" : "control";
+    const samples = costSamples[arm];
+    for (const [runId, observation] of enrollments) {
       if (!inArm(observation, selected)) continue;
       cohort.observed_eligible_runs++;
       const resolved = resolve(runId);
+      const merged = resolved?.outcome === "merged";
+      mergeSamples[arm].push({
+        lower: Number(merged),
+        upper: Number(merged || !resolved || PENDING_VERDICTS.includes(resolved.outcome)),
+      });
       if (!resolved) continue;
       const { outcome, cost } = resolved;
       cohort.terminal_runs++;
@@ -1284,11 +1298,12 @@ export function buildSkillEffectivenessReport(
     selected.observed_eligible_runs === 0 && control.terminal_runs >= SKILL_EFFECTIVENESS_HORIZON;
   const belowComparisonHorizon =
     selected.terminal_runs < SKILL_EFFECTIVENESS_HORIZON || control.terminal_runs < SKILL_EFFECTIVENESS_HORIZON;
-  const selectedMergeRate = selected.terminal_runs === 0 ? 0 : selected.merged_runs / selected.terminal_runs;
-  const controlMergeRate = control.terminal_runs === 0 ? 0 : control.merged_runs / control.terminal_runs;
-  // Identification bounds, not confidence intervals: pending work can all merge or all remain unmerged.
-  const selectedMergeUpper = selected.terminal_runs === 0 ? 0 : (selected.merged_runs + selected.pending_merge_runs) / selected.terminal_runs;
-  const controlMergeUpper = control.terminal_runs === 0 ? 0 : (control.merged_runs + control.pending_merge_runs) / control.terminal_runs;
+  const pairCount = Math.min(mergeSamples.selected.length, mergeSamples.control.length);
+  const mergeDifference = mergeDifferenceSequence(mergeSamples.selected.slice(0, pairCount).map((sample, index) => {
+    const baseline = mergeSamples.control[index]!;
+    return { lower: sample.lower - baseline.upper, upper: sample.upper - baseline.lower };
+  }));
+  const consistentMergeBounds = mergeDifference.lower <= mergeDifference.upper;
 
   const costLowerBound = selected.cost_per_merged_pr === null || control.cost_per_merged_pr === null
     ? null : costDifferenceLowerBound(skillName, costSamples.selected, costSamples.control);
@@ -1307,15 +1322,15 @@ export function buildSkillEffectivenessReport(
   } else if (costLowerBound !== null && costLowerBound > 0) {
     status = "RETIRE-CANDIDATE";
     basis = "costs-more-than-it-saves";
-  } else if (selectedMergeUpper <= controlMergeRate) {
+  } else if (consistentMergeBounds && mergeDifference.upper < SKILL_MIN_MERGE_BENEFIT) {
     status = "RETIRE-CANDIDATE";
     basis = "not-better-than-control";
-  } else if (selectedMergeRate > controlMergeUpper) {
+  } else if (consistentMergeBounds && mergeDifference.lower > 0) {
     status = "REVIEW-CANDIDATE";
     basis = "favorable-comparison";
   } else {
     status = "INSUFFICIENT EVIDENCE";
-    basis = "pending-shipment";
+    basis = "undecided";
   }
 
   return {
@@ -1331,6 +1346,7 @@ export function buildSkillEffectivenessReport(
     versions: [...versionByDigest.values()],
     settle_window_ms: settleWindowMs,
     cost_difference_lower_bound_usd: costLowerBound,
+    merge_difference: mergeDifference,
   };
 }
 
@@ -1358,7 +1374,7 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
     `named harm outcomes: ${report.harm_outcomes.join(", ")}`,
     `harm comparison: ${renderHarmComparison(report)}`,
     `cost comparison: ${renderCostComparison(report)}`,
-    "shipment comparison: best/worst-case bounds over handed_off and blocked_ci runs; overlapping possibilities are insufficient evidence. These are not confidence intervals or deployment/live-benefit claims.",
+    `merge comparison: ${renderMergeComparison(report)}`,
     report.assignment === "randomized"
       ? `assignment: randomized — control is eligible runs that withheld the skill (share ${SKILL_WITHHOLDING_SHARE}); ` +
         "selected is every other eligible run (intent to treat)."
@@ -1368,6 +1384,15 @@ export function renderSkillEffectivenessReport(report: SkillEffectivenessReport)
       : "interpretation: descriptive selection/outcome evidence only; this report does not prove causation or modify a skill.",
     `skill versions: ${renderSkillVersions(report.versions)}`,
   ].join("\n");
+}
+
+function renderMergeComparison(report: SkillEffectivenessReport): string {
+  const rate = (arm: SkillEffectivenessArm): string => `${arm.merged_runs}/${arm.terminal_runs}`;
+  const { pairs, lower, upper, pValue } = report.merge_difference;
+  const interval = lower <= upper ? `[${lower.toFixed(3)}, ${upper.toFixed(3)}]` : "empty";
+  return `merged selected ${rate(report.selected)} and control ${rate(report.control)}, with a ` +
+    `95% confidence sequence ${interval} for selected minus control over ${pairs} pairs and ` +
+    `always-valid p=${pValue.toPrecision(3)} for zero difference across possible shipment outcomes`;
 }
 
 /** The settle window and the cost bound a verdict rests on. */
@@ -1423,6 +1448,7 @@ export function skillLifecycleEvidenceFingerprint(report: SkillEffectivenessRepo
       selected: fingerprintCohort(report.selected),
       control: fingerprintCohort(report.control),
       harm_outcomes: [...report.harm_outcomes].sort(),
+      ...(report.basis === "not-better-than-control" ? { merge_difference: report.merge_difference } : {}),
     }))
     .digest("hex")
     .slice(0, 16);
@@ -1440,8 +1466,8 @@ function skillLifecycleRefusal(report: SkillEffectivenessReport, approvedSkillsD
  *  judge with this one rule, so approval never accepts evidence staging would refuse. */
 function skillLifecycleEvidenceRefusal(report: SkillEffectivenessReport): string | undefined {
   if (report.status === "INSUFFICIENT EVIDENCE") {
-    if (report.basis === "pending-shipment") {
-      return `pending shipment: selected=${report.selected.pending_merge_runs}, control=${report.control.pending_merge_runs}; merge-rate bounds overlap`;
+    if (report.basis === "undecided") {
+      return `merge comparison undecided: ${renderMergeComparison(report)}`;
     }
     return (
       `below horizon: selected terminal_runs=${report.selected.terminal_runs}, ` +
@@ -1463,6 +1489,7 @@ function renderSkillLifecycleSummary(report: SkillEffectivenessReport, action: S
     `Basis: ${report.basis}`,
     `Harm: ${renderHarmComparison(report)}`,
     `Cost: ${renderCostComparison(report)}`,
+    `Merge: ${renderMergeComparison(report)}`,
     `Selected: observed=${report.selected.observed_eligible_runs}; terminal=${report.selected.terminal_runs}; ` +
       `merged=${report.selected.merged_runs}; harmful=${report.selected.harmful_terminal_runs}; ` +
       `outcomes=${renderOutcomes(report.selected.outcomes)}`,
