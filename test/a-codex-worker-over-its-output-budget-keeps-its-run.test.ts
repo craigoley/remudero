@@ -71,8 +71,8 @@ test("W1-T6352: retained output never exceeds the budget", async () => {
     child.end();
     const result = await child.run;
     assert.equal(result.text, "done 🦊");
-    assert.equal(result.isError, true);
-    assert.equal(result.subtype, "error_incomplete_output");
+    assert.equal(result.isError, false);
+    assert.equal(result.subtype, "success");
     assert.equal(result.outputRetention?.blocks.state, "truncated");
     assert.ok(result.outputTruncation);
     const bytes = [...result.blocks, ...result.permissionDenials as string[]].reduce((sum, text) => sum + Buffer.byteLength(text), 0);
