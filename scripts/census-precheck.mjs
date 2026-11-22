@@ -279,7 +279,8 @@ function testRepoRootViolations({ changed, readHead, readBase }) {
  * the merge base, or null when it does not exist there.
  *
  * @param {{ changed: string[], readHead: (p: string) => string | null, readBase: (p: string) => string | null,
- *   measuredFiles: string[], testFiles: string[], reportHouseLayoutSplit?: (line: string) => void }} input
+ *   measuredFiles: string[], testFiles: string[], reportHouseLayoutSplit?: (line: string) => void,
+ *   runWriteOnlyLedgerStep?: () => { status: number | null, stdout: string } }} input
  */
 export function evaluateCensusPrecheck(input) {
   return [
@@ -290,15 +291,16 @@ export function evaluateCensusPrecheck(input) {
     ...depsInterfaceViolations(input),
     ...scriptRatchetViolations(input),
     ...testRepoRootViolations(input),
+    ...writeOnlyLedgerStepViolations({ changed: input.changed, readHead: input.readHead, runRatchet: input.runWriteOnlyLedgerStep }),
   ];
 }
 
 const CI_YAML_PATH = ".github/workflows/ci.yml";
 
-/** W1-T5737: a push that edits ci.yml or the parity baseline must leave every script gate ci.yml runs with a
- *  verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only the two files. */
+/** W1-T5737: a push that edits ci.yml, package.json or the parity baseline must leave every script gate ci.yml runs
+ *  with a verdict — asked in PRECHECK_SCRIPT_PARITY, or a reasoned `ciOnlyScripts` row. Reads only those files. */
 function scriptRatchetViolations({ changed, readHead }) {
-  if (!changed.includes(CI_YAML_PATH) && !changed.includes(PRECHECK_PARITY_BASELINE)) return [];
+  if (![CI_YAML_PATH, PACKAGE_JSON, PRECHECK_PARITY_BASELINE].some((p) => changed.includes(p))) return [];
   const ci = readHead(CI_YAML_PATH);
   const baselineText = readHead(PRECHECK_PARITY_BASELINE);
   if (ci === null || baselineText === null) return [];
@@ -309,7 +311,7 @@ function scriptRatchetViolations({ changed, readHead }) {
     return [];
   }
   if (typeof rows !== "object" || rows === null || Array.isArray(rows)) return [];
-  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci), baseline: rows });
+  const verdict = scriptRatchetParityVerdict({ population: ciScriptRatchetPopulation(ci, readHead(PACKAGE_JSON)), baseline: rows });
   return verdict.unasked.map(
     (key) =>
       `script-ratchet: ${key} runs in ${CI_YAML_PATH} but nothing asks it before the push — model it in ` +
@@ -2146,24 +2148,71 @@ export function censusParityViolations({ changed, readHead, readBase = () => nul
 }
 
 /** The script-level gates CI runs as their own steps (W1-T5737). The question W1-T5616 asked of every census
- *  SUITE, asked of every ci.yml script: `npm run --silent <script>` or `node scripts/<name>.mjs`, counted when the
- *  enclosing step's id or the script's own name says ratchet, census, budget, monotonic, parity or signal. Each is
- *  keyed `script:<name>` and counted once however many places ci.yml invokes it. Only .github/workflows/ci.yml. */
+ *  SUITE, asked of every ci.yml script: `npm run [--silent] <script>` or `node scripts/<name>.mjs`, counted when the
+ *  enclosing step's id, the script's own name, or (W1-T14250) the scripts/*.mjs file an npm script runs says
+ *  ratchet, census, budget, monotonic, parity or signal. Each is keyed `script:<name>` and counted once however many
+ *  places ci.yml invokes it. Only .github/workflows/ci.yml, read beside package.json's scripts. */
 const SCRIPT_GATE_NAME = /ratchet|census|budget|monotonic|parity|signal/;
+const PACKAGE_JSON = "package.json";
 
-export function ciScriptRatchetPopulation(ciYamlText) {
+/** package.json's `scripts`. A file that cannot be read fails the census: names alone would hide a gate (W1-T14250). */
+export function npmScripts(packageJsonText) {
+  if (typeof packageJsonText !== "string") throw new Error(`${PACKAGE_JSON} cannot be read, so no npm script can be followed to its file`);
+  let doc;
+  try {
+    doc = JSON.parse(packageJsonText);
+  } catch (e) {
+    throw new Error(`${PACKAGE_JSON} is not JSON (${String(e?.message ?? e)}), so no npm script can be followed to its file`);
+  }
+  const scripts = doc?.scripts;
+  if (scripts === null || typeof scripts !== "object" || Array.isArray(scripts)) throw new Error(`${PACKAGE_JSON} has no "scripts" object`);
+  return scripts;
+}
+
+export function ciScriptRatchetPopulation(ciYamlText, packageJsonText) {
+  const scripts = npmScripts(packageJsonText);
   const keys = new Set();
   let stepId = "";
   for (const line of String(ciYamlText).split("\n")) {
     if (/^\s*-\s+\S/.test(line)) stepId = "";
     const id = line.match(/^\s*(?:-\s+)?id:\s*([\w-]+)/);
     if (id) stepId = id[1];
-    for (const m of line.matchAll(/npm run --silent\s+([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
+    for (const m of line.matchAll(/npm run (?:--silent\s+)?([\w:-]+)|\bnode\s+(?:\S+\s+)*?scripts\/([\w-]+)\.mjs/g)) {
       const name = m[1] ?? m[2];
-      if (SCRIPT_GATE_NAME.test(`${stepId} ${name}`)) keys.add(`script:${name}`);
+      const command = m[1] !== undefined && Object.hasOwn(scripts, name) ? String(scripts[name]) : "";
+      const file = /\bscripts\/([\w-]+)\.mjs\b/.exec(command)?.[1] ?? "";
+      if (SCRIPT_GATE_NAME.test(`${stepId} ${name} ${file}`)) keys.add(`script:${name}`);
     }
   }
   return [...keys].sort();
+}
+
+const WRITE_ONLY_LEDGER_STEP_BASELINE = "scripts/write-only-ledger-step-baseline.json";
+const WRITE_ONLY_LEDGER_STEP_SCRIPT = "scripts/write-only-ledger-step-ratchet.mjs";
+const WRITE_ONLY_LEDGER_STEP_CLI = fileURLToPath(new URL("./write-only-ledger-step-ratchet.mjs", import.meta.url));
+// BACKSTOP only: this ends a hung child as not measured. A healthy run took 7.1-7.9 s on a 4-core host at load 0.6
+// (2026-11-22, W1-T14250); 120 s is CENSUS_SUITE_CHILD_TIME_BOUND_MS, the operator's bound for a census child.
+const WRITE_ONLY_LEDGER_STEP_TIME_BOUND_MS = 120_000;
+
+/** W1-T14250: the write-only ledger step ratchet asked before the push, as CI asks it: its own CLI against the merge
+ *  base, when the push can move it (a src/ module, its baseline or its script) and the tree carries its baseline.
+ *  `runRatchet` is the child (`main` supplies it outside the git-free snapshot); with none, it is not asked here. */
+export function writeOnlyLedgerStepViolations({ changed, readHead, runRatchet }) {
+  if (typeof runRatchet !== "function" || readHead(WRITE_ONLY_LEDGER_STEP_BASELINE) === null) return [];
+  if (!changed.some((p) => /^src\/.+\.(?:ts|mts|mjs)$/.test(p) || p === WRITE_ONLY_LEDGER_STEP_BASELINE || p === WRITE_ONLY_LEDGER_STEP_SCRIPT)) return [];
+  const { status, stdout } = runRatchet();
+  if (status === 0) return [];
+  if (status !== 1) throw new Error(`write-only-ledger-step could not measure (exit ${status}): ${String(stdout).trim().split("\n").pop()}`);
+  const lines = String(stdout).split("\n");
+  const headline = lines.find((l) => l.includes("BLOCKED")) ?? "write-only-ledger-step: BLOCKED";
+  return [`${headline.trim()} — run \`npm run write-only-ledger-step\`; steps: ${lines.filter((l) => /^ {2}\S/.test(l)).map((l) => l.trim()).join(", ")}`];
+}
+
+/** The real child: the ratchet's own CLI over `root` against `mergeBase`, bounded by the backstop above. */
+export function runWriteOnlyLedgerStepChild({ root, mergeBase, run = spawnSync }) {
+  const res = run(process.execPath, [WRITE_ONLY_LEDGER_STEP_CLI, "--root", root, "--base", mergeBase],
+    { encoding: "utf8", timeout: WRITE_ONLY_LEDGER_STEP_TIME_BOUND_MS });
+  return { status: res.status, stdout: `${res.stdout ?? ""}${res.error ? `\n${res.error.message}` : ""}` };
 }
 
 /** Every ci.yml script gate this script asks before the push: `modeled` names the check, `run` an npm script
@@ -2172,6 +2221,7 @@ export function ciScriptRatchetPopulation(ciYamlText) {
 export const PRECHECK_SCRIPT_PARITY = {
   "script:comment-load-signal": { modeled: commentLoadViolations },
   "script:cycle-ratchet": { run: "census:cycle-ratchet" },
+  "script:write-only-ledger-step": { modeled: writeOnlyLedgerStepViolations },
 };
 
 /** The verdict for the script gates: `precheckParityVerdict` over `script:<name>` keys. `baseline` and
@@ -2458,6 +2508,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
       measuredFiles: snapshot ? censusSnapshotPaths(snapshot).filter((p) => MEASURED_ROOTS.some((dir) => p.startsWith(`${dir}/`))) : listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
+      ...(snapshot ? {} : { runWriteOnlyLedgerStep: () => runWriteOnlyLedgerStepChild({ root, mergeBase }) }),
     });
     if (!snapshot) {
       violations = [...violations, ...censusParityViolations({ changed, ...readers,
