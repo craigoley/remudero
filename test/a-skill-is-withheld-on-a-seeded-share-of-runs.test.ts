@@ -7,9 +7,9 @@ import {
   renderSkillEffectivenessReport,
   SKILL_EFFECTIVENESS_HORIZON,
   SKILL_WITHHOLDING_SHARE,
-  skillWithheldForRun,
   type InjectableSkill,
 } from "../src/lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, taskArmWithheld } from "#src/lib/task-arm.js";
 
 // Without withholding, a skill that fits the budget is selected on every eligible run, so the
 // effectiveness report's control cohort (eligible but not selected) is empty and it can never
@@ -38,22 +38,26 @@ test("without a withholding predicate the observation keeps today's shape, with 
   assert.equal("withheld_names" in observed.observation, false);
 });
 
-test("the assignment is stable per (run, skill) and lands near the predeclared share", () => {
-  assert.equal(skillWithheldForRun("run-1", "a"), skillWithheldForRun("run-1", "a"));
+// W1-T14137: drawn per task, not per run, so every run of one task lands in one arm.
+const skillDraw = (taskId: string, skillName: string, share = SKILL_WITHHOLDING_SHARE): boolean =>
+  taskArmWithheld({ taskId, unit: skillName, share, epoch: SKILL_ARM_EPOCH });
+
+test("the assignment is stable per (task, skill) and lands near the predeclared share", () => {
+  assert.equal(skillDraw("task-1", "a"), skillDraw("task-1", "a"));
   let withheld = 0;
   let both = 0;
   const n = 10_000;
   for (let i = 0; i < n; i++) {
-    const a = skillWithheldForRun(`run-${i}`, "a");
-    const b = skillWithheldForRun(`run-${i}`, "b");
+    const a = skillDraw(`task-${i}`, "a");
+    const b = skillDraw(`task-${i}`, "b");
     if (a) withheld++;
     if (a && b) both++;
   }
   assert.ok(Math.abs(withheld / n - SKILL_WITHHOLDING_SHARE) < 0.02, `share ${withheld / n}`);
   assert.ok(Math.abs(both / n - SKILL_WITHHOLDING_SHARE ** 2) < 0.02,
     `skills are assigned independently (joint share ${both / n})`);
-  assert.equal(skillWithheldForRun("run-1", "a", 0), false, "share 0 never withholds");
-  assert.equal(skillWithheldForRun("run-1", "a", 1), true, "share 1 always withholds");
+  assert.equal(skillDraw("task-1", "a", 0), false, "share 0 never withholds");
+  assert.equal(skillDraw("task-1", "a", 1), true, "share 1 always withholds");
 });
 
 const selectionRow = (runId: string, opts: { selected: boolean; withheld?: boolean; omitted?: boolean }) => ({

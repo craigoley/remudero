@@ -23,6 +23,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { promotionCeiling, promotionFloor } from "./promotion-bars.js";
 import { escapeGrepLiteral, renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { parseWhitelistedProof } from "./review.js";
 import { JUDGE_SHADOW_STEPS, judgeShadowSummary, type JudgeShadowRoleSummary } from "./judge-shadow.js";
@@ -185,8 +186,9 @@ export const BUDGET_MIN_CHANGE = 0.25;
 /** BACKSTOP: past p90×headroom, at most this share of the class's history may have overrun the new
  *  budget. By construction under a tenth does, so this fires only when the derivation itself is wrong. */
 export const BUDGET_MAX_SHADOW_OVERRUN = 0.1;
-/** Every canary needs this many tasks on BOTH sides before it is judged (experiment-promotion's floor). */
-export const CANARY_DENOMINATOR_FLOOR = 5;
+/** Every canary needs this many tasks on BOTH sides before it is judged (experiment-promotion's floor). A promotion bar,
+ *  so it is scripts/promotion-floors-baseline.json's `canaryMinTasksPerSide` (src/lib/promotion-bars.ts). */
+export const CANARY_DENOMINATOR_FLOOR = promotionFloor("canaryMinTasksPerSide");
 /** PRIMARY CONTROL on exposure: a budget canary changes at most this many shards at once. */
 export const CANARY_MAX_COHORT = 10;
 export const CANARY_TTL_MS = 21 * 24 * 3600 * 1000;
@@ -195,13 +197,15 @@ export const CONFIG_GARDEN_BUCKET_MS = 6 * 3600 * 1000;
 /** How often the open canaries are judged. */
 export const CONFIG_TEND_INTERVAL_MS = 3600 * 1000;
 /** W1-T12187: what a judge's cash shadow must show before its row moves to cash. The three numbers are new and
- *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. */
-export const JUDGE_CASH_BAR = { windowMs: 14 * 24 * 3600 * 1000, minPaired: 200, minAgreeShare: 0.98, maxNoAnswerShare: 0.02 } as const;
+ *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. They are
+ *  promotion bars, read from scripts/promotion-{floors,ceilings}-baseline.json (src/lib/promotion-bars.ts). */
+export const JUDGE_CASH_BAR = { windowMs: 14 * 24 * 3600 * 1000, minPaired: promotionFloor("judgeMinPaired"),
+  minAgreeShare: promotionFloor("judgeMinAgreeShare"), maxNoAnswerShare: promotionCeiling("judgeMaxNoAnswerShare") } as const;
 /** W1-T12417: the per-model bar. The first three numbers are {@link JUDGE_CASH_BAR}'s; the Brier ceiling is new and
  *  unmeasured (2026-11-17: no shadow answer has a known outcome yet). It applies to a model with a Brier figure; a
  *  single answer has none (W1-T12414), and is judged on agreement. */
 export const JUDGE_SWITCH_BAR = { minCompared: JUDGE_CASH_BAR.minPaired, minAgreeShare: JUDGE_CASH_BAR.minAgreeShare,
-  maxNoAnswerShare: JUDGE_CASH_BAR.maxNoAnswerShare, maxBrier: 0.1 } as const;
+  maxNoAnswerShare: JUDGE_CASH_BAR.maxNoAnswerShare, maxBrier: promotionCeiling("judgeMaxBrier") } as const;
 /** W1-T12417: judges that fail closed. No gardener proposal moves their primary off the subscription. */
 export const FAIL_CLOSED_JUDGE_ROLES: ReadonlySet<string> = new Set(["risk-judge"]);
 /** The mounts-table row of each shadowed role. */
