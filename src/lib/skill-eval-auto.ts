@@ -18,13 +18,14 @@
  * finished one keeps it, so no text is ever evaluated twice by the fleet. The workshop's next rewrite is a new
  * sha256 and earns one new eval.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
 import { replayIdleGate, type ReplayIdleSignal } from "./golden-corpus.js";
 import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillEvalAutoRecord } from "./inbox.js";
 import type { LedgerLine } from "./ledger.js";
-import { SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL } from "./skill-eval.js";
-import { outcomeOnlyDraftRefusal, readSkillDraftVerdicts, workshopClosedSkillDraft } from "./skill-workshop.js";
+import { SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL, type SkillEvalRun } from "./skill-eval.js";
+import { hasSkillDraftLedgerReceipt, outcomeOnlyDraftRefusal, readSkillDraftVerdicts,
+  withSkillDraftVerdictLock, workshopClosedSkillDraft } from "./skill-workshop.js";
 
 /** The two rows this pass writes; declared in ledger-steps.ts. */
 export const SKILL_EVAL_AUTO_STEPS = { waiting: "skill_eval.auto_waiting", claimed: "skill_eval.auto_claimed" } as const;
@@ -56,8 +57,9 @@ export interface SkillEvalAutoInput {
 
 /** The one eval path (skill-eval-command.ts's `evaluateStagedSkillDraft` over the same input), run with the standing
  *  approval and the claim's run id. `refusedBeforeDispatch`: it refused with zero attempts dispatched. */
-export type SkillEvalAutoEvaluate = (proposalId: string, approval: { standingApproval: Readonly<{ ref: string }> }, runId: string)
-  => Promise<{ code: number; refusedBeforeDispatch: boolean }>;
+export type StartClaimedSkillEval = (draftSha256: string, start: () => Promise<SkillEvalRun>) => Promise<SkillEvalRun> | undefined;
+export type SkillEvalAutoEvaluate = (proposalId: string, approval: { standingApproval: Readonly<{ ref: string }> }, runId: string,
+  startClaimed: StartClaimedSkillEval) => Promise<{ code: number; refusedBeforeDispatch: boolean }>;
 
 /** One pass's outcome: the draft it acted on (absent when none was eligible) and a line the retro prints. */
 export interface SkillEvalAutoPass {
@@ -66,6 +68,16 @@ export interface SkillEvalAutoPass {
 }
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+
+function eligibleDraftSha(entry: Proposal, ownRunId?: string): string | undefined {
+  if (!entry.id.startsWith(SKILL_DRAFT_ID_PREFIX) || !entry.skillFile ||
+    workshopClosedSkillDraft(entry) || outcomeOnlyDraftRefusal(entry.skillFile.markdown) !== undefined) return undefined;
+  const sha = sha256(entry.skillFile.markdown);
+  if (entry.skillEval?.draftSha256 === sha) return undefined;
+  const claim = entry.skillEvalAuto;
+  const claimed = claim?.state === "claimed" && claim.draftSha256 === sha;
+  return (ownRunId === undefined ? !claimed : claimed && claim.runId === ownRunId) ? sha : undefined;
+}
 
 /** Why the spend reading keeps the eval from starting, or undefined when it fits. */
 function spendFitRefusal(fit: SkillEvalSpendFit | undefined): string | undefined {
@@ -105,52 +117,61 @@ function writeAutoRecord(registryPath: string, proposalId: string, draftSha256: 
 export async function autoEvaluateSkillDrafts(input: SkillEvalAutoInput, evaluate: SkillEvalAutoEvaluate): Promise<SkillEvalAutoPass> {
   const clock = input.clock ?? systemClock;
   const registryPath = input.registryPath();
-  const candidates = loadProposalRegistry(registryPath).filter((p) => {
-    if (!p.id.startsWith(SKILL_DRAFT_ID_PREFIX) || p.skillFile === undefined || workshopClosedSkillDraft(p)) return false;
-    if (outcomeOnlyDraftRefusal(p.skillFile.markdown) !== undefined) return false;
-    const sha = sha256(p.skillFile.markdown);
-    // Any verdict on this text, too-few-measurable-tasks included, and any claim of it end the fleet's part.
-    return p.skillEval?.draftSha256 !== sha && !(p.skillEvalAuto?.state === "claimed" && p.skillEvalAuto.draftSha256 === sha);
+  const candidates = loadProposalRegistry(registryPath).flatMap((entry) => {
+    const draftSha256 = eligibleDraftSha(entry);
+    return draftSha256 === undefined ? [] : [{ proposalId: entry.id, draftSha256 }];
   });
   if (candidates.length === 0) return { reason: "no skill draft is waiting for an eval" };
-  // Ratified and declined (not restored) drafts, in ledger order as the Inbox reads them.
-  const verdicts = readSkillDraftVerdicts(input.stateDir());
+  const stateDir = input.stateDir();
+  const verdicts = readSkillDraftVerdicts(stateDir);
   if ("unmeasured" in verdicts) return { reason: `no skill draft evaluated: ${verdicts.unmeasured}` };
-  const draft = candidates.find((p) => !verdicts.isRatified(p.id) && verdicts.isDeclined(p.id) === undefined);
+  const draft = candidates.find(({ proposalId }) => !verdicts.isRatified(proposalId) && verdicts.isDeclined(proposalId) === undefined);
   if (draft === undefined) return { reason: "no skill draft is waiting for an eval" };
-  const proposalId = draft.id;
-  const draftSha256 = sha256(draft.skillFile!.markdown);
-  const runId = `SKILL-EVAL-${clock.now()}`;
-  const write = (step: string, fields: Record<string, unknown>): void =>
-    input.log({ ...fields, run_id: runId, task_id: proposalId, step, draft_sha256: draftSha256 });
+  const { proposalId, draftSha256 } = draft;
+  const runId = `SKILL-EVAL-${clock.now()}-${randomUUID()}`;
+  const row = (step: string, fields: Record<string, unknown>): LedgerLine =>
+    ({ ...fields, run_id: runId, task_id: proposalId, step, draft_sha256: draftSha256 });
+  const verdictRefusal = (): string | undefined => {
+    const current = readSkillDraftVerdicts(stateDir);
+    if ("unmeasured" in current) return current.unmeasured;
+    if (current.isRatified(proposalId) || current.isDeclined(proposalId) !== undefined) return `${proposalId} is no longer open`;
+  };
 
   const idle = replayIdleGate(await input.readIdle());
   const fit = idle.enabled ? input.readSpendFit?.() : undefined;
   const waitReason = idle.enabled ? spendFitRefusal(fit) : idle.reason;
-  if (waitReason !== undefined) {
-    const at = clock.iso();
-    let changed = false;
-    writeAutoRecord(registryPath, proposalId, draftSha256, (entry) => {
+  const skipped = withSkillDraftVerdictLock(stateDir, proposalId, () => {
+    const refusal = verdictRefusal();
+    if (refusal !== undefined) return refusal;
+    const changed = writeAutoRecord(registryPath, proposalId, draftSha256, (entry) => {
+      if (eligibleDraftSha(entry) !== draftSha256) return null;
+      const at = clock.iso();
+      if (waitReason === undefined) return { draftSha256, state: "claimed", runId, at };
       const prior = entry.skillEvalAuto;
       if (prior?.state === "waiting" && prior.draftSha256 === draftSha256 && prior.reason === waitReason) return null;
-      changed = true;
       return { draftSha256, state: "waiting", reason: waitReason, at };
     });
-    if (changed) {
-      write(SKILL_EVAL_AUTO_STEPS.waiting, { reason: waitReason, ...(fit === undefined ? {} : { day_cost_usd: fit.dayCostUsd,
-        unpriced_rows: fit.unpricedRows, daily_cost_ceiling_usd: fit.ceilingUsd }) });
+    if (waitReason !== undefined) {
+      if (changed) input.log(row(SKILL_EVAL_AUTO_STEPS.waiting, { reason: waitReason, ...(fit === undefined ? {} : {
+        day_cost_usd: fit.dayCostUsd, unpriced_rows: fit.unpricedRows, daily_cost_ceiling_usd: fit.ceilingUsd }) }));
+      return `${proposalId} waits: ${waitReason}`;
     }
-    return { proposalId, reason: `${proposalId} waits: ${waitReason}` };
-  }
+    if (!changed) return `${proposalId}'s text or eligibility changed before it was claimed; the next pass looks again`;
+    const receipt = row(SKILL_EVAL_AUTO_STEPS.claimed, { max_spend_usd: SKILL_EVAL_MAX_SPEND_USD, approval: SKILL_EVAL_STANDING_APPROVAL.ref });
+    input.log(receipt);
+    if (!hasSkillDraftLedgerReceipt(stateDir, receipt)) return `${proposalId}'s claim receipt could not be verified; its claim stays on this text`;
+  });
+  if (skipped !== undefined) return { proposalId, reason: skipped };
 
-  // Claim the text durably before the first attempt, and only while it is still unjudged and unclaimed.
-  const claimed = writeAutoRecord(registryPath, proposalId, draftSha256, (entry) =>
-    entry.skillEval?.draftSha256 === draftSha256 || (entry.skillEvalAuto?.state === "claimed" && entry.skillEvalAuto.draftSha256 === draftSha256)
-      ? null : { draftSha256, state: "claimed", runId, at: clock.iso() });
-  if (!claimed) return { proposalId, reason: `${proposalId}'s text changed before it was claimed; the next pass looks again` };
-  write(SKILL_EVAL_AUTO_STEPS.claimed, { max_spend_usd: SKILL_EVAL_MAX_SPEND_USD, approval: SKILL_EVAL_STANDING_APPROVAL.ref });
-
-  const outcome = await evaluate(proposalId, { standingApproval: SKILL_EVAL_STANDING_APPROVAL }, runId);
+  // The common command awaits corpus and headroom again. Recheck under the verdict lock at the
+  // synchronous start of the first attempt, without holding the lock through worker execution.
+  const outcome = await evaluate(proposalId, { standingApproval: SKILL_EVAL_STANDING_APPROVAL }, runId, (selectedSha, start) =>
+    withSkillDraftVerdictLock(stateDir, proposalId, () => {
+      const current = loadProposalRegistry(registryPath).find((entry) => entry.id === proposalId);
+      if (selectedSha !== draftSha256 || current === undefined || eligibleDraftSha(current, runId) !== draftSha256 ||
+        verdictRefusal() !== undefined) return undefined;
+      return start();
+    }));
   if (outcome.refusedBeforeDispatch) {
     // Nothing was spent, so the text is not judged: release the claim and let a later pass try again.
     writeAutoRecord(registryPath, proposalId, draftSha256, (entry) => (entry.skillEvalAuto?.runId === runId ? undefined : null));

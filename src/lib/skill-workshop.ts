@@ -25,7 +25,7 @@ import { inflightLockPath } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
+import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock, type LedgerLine } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import {
@@ -1783,6 +1783,13 @@ function skillDraftVerdicts(rows: SkillDraftLedgerRows): ReturnType<typeof ledge
 export function readSkillDraftVerdicts(stateDir: string): ReturnType<typeof ledgerProposalVerdicts> | UnmeasuredSkillDraftLedger {
   const union = readSkillDraftLedger(stateDir, SKILL_DRAFT_VERDICT_STEPS, true);
   return "unmeasured" in union ? union : ledgerProposalVerdicts(union.rows);
+}
+
+/** Confirm a complete receipt, including when rotation moved the append out of the live ledger. */
+export function hasSkillDraftLedgerReceipt(stateDir: string, receipt: LedgerLine): boolean {
+  const union = readSkillDraftLedger(stateDir, [receipt.step], true);
+  return !("unmeasured" in union) && union.rows.some((row) =>
+    Object.entries(receipt).every(([key, value]) => row[key] === value));
 }
 
 /** Called after checking the current verdict. A restore can outlive a failed close-record write. */

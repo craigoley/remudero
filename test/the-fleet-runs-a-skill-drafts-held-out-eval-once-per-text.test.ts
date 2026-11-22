@@ -1,26 +1,30 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
+import { LIVENESS_WINDOW_MS } from "#src/lib/fleet-liveness.js";
 import { UNIT_TEST_DISCRIMINATES_NOTE, type ReplayIdleSignal } from "#src/lib/golden-corpus.js";
 import { classifyProposal, loadProposalRegistry, renderInbox, type Proposal, type SkillEvalRecord } from "#src/lib/inbox.js";
-import type { LedgerLine } from "#src/lib/ledger.js";
+import { LIVENESS_CHECK_MS, livenessInstances } from "#src/lib/instance-gateway.js";
+import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
+import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import { meaningOfStep } from "#src/lib/ledger-steps.js";
 import type { PairedGrader } from "#src/lib/paired-trial.js";
 import { inboxLanes, type InboxReadyItem } from "#src/lib/panel-graph.js";
-import { loadDefaultPolicy, resolveDailyCostCeiling } from "#src/lib/policy.js";
+import { DAILY_COST_CEILING_SHARE_ENV_VAR, loadDefaultPolicy, resolveDailyCostCeiling } from "#src/lib/policy.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { replayOptIn } from "#src/lib/replay-harness.js";
 import { runSkillEval, SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL, type HeldOutSelected } from "#src/lib/skill-eval.js";
 import { autoEvaluateSkillDrafts as autoPass, reportSkillEvalAuto, SKILL_EVAL_AUTO_STEPS, type SkillEvalSpendFit } from "#src/lib/skill-eval-auto.js";
-import { evaluateStagedSkillDraft, readSkillEvalSpendFit, skillEvalCommand, skillEvalProductionInput,
+import { evaluateStagedSkillDraft, readSkillEvalSpendFit, skillEvalCommand, skillEvalPeerLivenessReader, skillEvalProductionInput,
   type SkillEvalCommandInput } from "#src/lib/skill-eval-command.js";
 import { skillEvalInboxStatus } from "#src/lib/skill-eval-gate.js";
-import { outcomeOnlyDraftRefusal, PROCEDURAL_STEP_TEXT } from "#src/lib/skill-workshop.js";
+import { outcomeOnlyDraftRefusal, PROCEDURAL_STEP_TEXT, withSkillDraftVerdictLock } from "#src/lib/skill-workshop.js";
 import { deriveDayCostUsd, deriveDayUnpricedRows } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -40,6 +44,8 @@ const DAY_MS = 24 * 60 * 60_000;
 const NOW_MS = Date.parse("2026-10-13T12:00:00.000Z");
 const ID = "skill-draft:proc-auto";
 const OTHER_ID = "skill-draft:proc-other";
+const SELF_REPO = "craigoley/remudero";
+const PEER_REPO = "craigoley/remudero-site";
 const DRAFT_NAME = "types-first";
 const markdownWith = (steps: string[]): string =>
   `---\nname: ${DRAFT_NAME}\ndescription: run the type checker first\napplies-to: implement\n---\n\n## Procedure\n\n${steps.map((s) => `- ${s}`).join("\n")}\n`;
@@ -125,7 +131,10 @@ function fixture(opts: { proposals?: Partial<Proposal>[]; ledger?: Record<string
     stack: () => STACK,
     readIdle: async () => gates.idle,
     readSpendFit: () => gates.fit,
-    log: (row) => { rows.push(row); },
+    log: (row) => {
+      rows.push(row);
+      appendLedger(ledgerPathFor({ root: repoRoot }), row, { clock: fixedClock(NOW_MS) });
+    },
     grade,
     clock: fixedClock(NOW_MS),
     print: (line) => { printed.push(line); },
@@ -150,11 +159,41 @@ const READINESS = { plan: { byId: new Map() } as unknown as Plan, isMerged: () =
 
 /** The pass as the retro wires it: the one eval path over the same input. */
 const autoEvaluateSkillDrafts = (input: SkillEvalCommandInput) =>
-  autoPass(input, (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, input, runId));
+  autoPass(input, (proposalId, approval, runId, startClaimed) => evaluateStagedSkillDraft(proposalId, approval, input, runId, startClaimed));
 
 const stepRows = (fx: Fixture, step: string): LedgerLine[] => fx.rows.filter((row) => row.step === step);
 /** 3 held-out tasks x 2 trials x 2 arms. */
 const ONE_EVAL = 12;
+
+const pulse = (repo: string) => ({ ts: iso(NOW_MS - 1000), step: "daemon.idle_starved.pulse", repo });
+
+function productionPass(fx: Fixture, readHeadroom = async (): Promise<typeof HEADROOM | undefined> => HEADROOM,
+  env: NodeJS.ProcessEnv = {}) {
+  const checkoutRoot = tmp("skill-eval-checkout-");
+  const registryDir = join(checkoutRoot, ".remudero");
+  mkdirSync(registryDir);
+  const registryPath = join(registryDir, "daemon-instances.yaml");
+  writeFileSync(registryPath, ["instances:", "  core:", `    github_repo: ${SELF_REPO}`, "  site:", `    github_repo: ${PEER_REPO}`,
+    "  preview:", "    github_repo: example/preview", "    mode: shadow", "  retired:", "    github_repo: example/retired",
+    "    retired: true", ""].join("\n"));
+  fs.copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(registryDir, "mounts.yaml"));
+  const clock = fixedClock(NOW_MS);
+  const input = skillEvalProductionInput(checkoutRoot, undefined, readHeadroom,
+    { loadConfig: () => ({ root: fx.repoRoot }) as Config, autoRepository: SELF_REPO, clock, env });
+  const log = input.log;
+  Object.assign(input, { dispatcherFor: fx.deps.dispatcherFor, loadPlanTasks: fx.deps.loadPlanTasks, grade: fx.deps.grade,
+    approvedSkillsDir: fx.deps.approvedSkillsDir, print: fx.deps.print,
+    log: (row: LedgerLine) => { log(row); fx.rows.push(row); } });
+  const stateBase = tmp("skill-eval-gateway-mounts-");
+  const peers = livenessInstances({ registryPath, stateBase });
+  const observe = skillEvalPeerLivenessReader(fx.stateDir, SELF_REPO, clock);
+  const observePeer = (rows: Record<string, unknown>[], name = "site") => {
+    const peer = peers.find((instance) => instance.name === name)!;
+    writeLedger(rows, { dir: peer.stateDir });
+    return observe(peer, NOW_MS - LIVENESS_WINDOW_MS);
+  };
+  return { input, checkoutRoot, clock, peers, observe, observePeer };
+}
 
 // ── criterion 1 ───────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -186,6 +225,78 @@ test("W1-T13861 criterion 1: an open staged draft that passes the whole-draft ch
   assert.ok(![...fx.rows.map((row) => JSON.stringify(row)), ...fx.printed].some((line) => line.includes("confirm-spend")));
 });
 
+test("W1-T13861 criterion 1: retro's production input uses a fresh eligible peer pulse from the gateway", async () => {
+  const fx = fixture({ ledger: [pulse(SELF_REPO)] });
+  const { input, clock, observe, observePeer, peers } = productionPass(fx);
+  const site = peers.find((peer) => peer.name === "site")!;
+  observe({ name: "core", repo: SELF_REPO, stateDir: fx.stateDir }, NOW_MS - LIVENESS_WINDOW_MS);
+  observePeer([pulse("example/preview")], "preview");
+  observePeer([pulse("example/retired")]);
+  assert.equal((await input.readIdle()).liveness, undefined, "self, shadow and mismatched repository pulses supply no quiet evidence");
+  writeLedger([{ ...pulse(PEER_REPO), ts: iso(NOW_MS - 2 * LIVENESS_CHECK_MS) }], { dir: site.stateDir });
+  clock.now = () => NOW_MS - LIVENESS_CHECK_MS - 1;
+  observe(site, NOW_MS - LIVENESS_WINDOW_MS);
+  assert.deepEqual((await input.readIdle()).liveness, { state: "up", quiet: true }, "the observation was initially usable");
+  clock.now = () => NOW_MS;
+  assert.equal((await input.readIdle()).liveness, undefined, "an old observation cannot stand in for a current read");
+  observePeer([pulse(PEER_REPO), { ts: iso(NOW_MS), step: "daemon.start" }]);
+  assert.equal((await input.readIdle()).liveness, undefined, "a resumed daemon invalidates the previous pulse");
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(fx.dispatched.length, 0);
+  assert.equal(fx.proposal()!.skillEvalAuto?.state, "waiting");
+  observePeer([pulse(PEER_REPO)]);
+  assert.deepEqual((await input.readIdle()).liveness, { state: "up", quiet: true });
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(fx.dispatched.length, ONE_EVAL);
+  assert.equal(fx.proposal()!.skillEval?.verdict, "pass");
+  assert.equal(stepRows(fx, SKILL_EVAL_AUTO_STEPS.claimed).length, 1);
+});
+
+test("W1-T13861 criterion 1: unreadable peer evidence refuses the eval and a publish failure preserves the gateway read", async (t) => {
+  const fx = fixture();
+  const { input, observePeer } = productionPass(fx);
+  const evidenceDir = join(fx.stateDir, "skill-eval-quiet");
+  mkdirSync(evidenceDir);
+  const evidence = join(evidenceDir, "site.json");
+  writeFileSync(evidence, "{torn");
+  const errors = t.mock.method(console, "error", () => {});
+  assert.equal((await input.readIdle()).liveness, undefined);
+  fs.rmSync(evidence);
+  mkdirSync(evidence);
+  assert.deepEqual(observePeer([pulse(PEER_REPO)]), [pulse(PEER_REPO)]);
+  assert.deepEqual(errors.mock.calls.map((call) => String(call.arguments[0]).split(":").slice(0, 2).join(":")),
+    ["skill eval: unreadable quiet evidence for site", "skill eval: could not publish quiet evidence for site"]);
+});
+
+test("W1-T13861 criterion 1: a missing or unterminated claim receipt cannot start a production eval", async (t) => {
+  for (const noBytesWritten of [true, false]) {
+    await t.test(noBytesWritten ? "no bytes persisted" : "valid JSON without the terminator", async (subtest) => {
+      const fx = fixture();
+      const { input, observePeer } = productionPass(fx);
+      observePeer([pulse(PEER_REPO)]);
+      const realWrite = fs.writeSync;
+      let shortWrites = 0;
+      subtest.mock.method(fs, "writeSync", (...args: unknown[]) => {
+        const buffer = args[1];
+        if (Buffer.isBuffer(buffer) && buffer.includes('"step":"skill_eval.auto_claimed"')) {
+          shortWrites++;
+          return noBytesWritten ? 0 : realWrite(args[0] as number, buffer, 0, buffer.length - 1);
+        }
+        return Reflect.apply(realWrite, fs, args);
+      });
+      syncBuiltinESMExports();
+      subtest.after(() => { subtest.mock.restoreAll(); syncBuiltinESMExports(); });
+      const result = await autoEvaluateSkillDrafts(input);
+      assert.equal(shortWrites, 1, "the ledger writer took its short-write path");
+      assert.equal(fx.dispatched.length, 0);
+      assert.match(result.reason, /claim receipt could not be verified/);
+      assert.equal(fx.proposal()!.skillEvalAuto?.state, "claimed", "ambiguous receipt leaves the durable claim in place");
+      await autoEvaluateSkillDrafts(input);
+      assert.equal(fx.dispatched.length, 0);
+    });
+  }
+});
+
 // ── criterion 2 ───────────────────────────────────────────────────────────────────────────────────────────────
 
 const assertUntouched = async (fx: Fixture, why: string): Promise<void> => {
@@ -215,6 +326,39 @@ test("W1-T13861 criterion 2: a declined draft that the operator restored is open
   ] });
   await autoEvaluateSkillDrafts(fx.deps);
   assert.equal(fx.dispatched.length, ONE_EVAL);
+});
+
+test("W1-T13861 criterion 2: a verdict during production headroom leaves no new wait or claim", async () => {
+  for (const [step, headroom] of [["panel.proposal_declined", HEADROOM], ["ratify.approved", undefined]] as const) {
+    const fx = fixture();
+    const { input, observePeer } = productionPass(fx, async () => {
+      await Promise.resolve();
+      withSkillDraftVerdictLock(fx.stateDir, ID, () => input.log({ run_id: "P-late", task_id: ID, step, reason: "operator verdict" }));
+      return headroom;
+    });
+    observePeer([pulse(PEER_REPO)]);
+    await assertUntouched({ ...fx, deps: input }, step);
+    assert.equal(stepRows(fx, step).length, 1, "the verdict landed during the read");
+  }
+});
+
+test("W1-T13861 criterion 2: a verdict during the shared evaluator's headroom read prevents the first dispatch", async () => {
+  const fx = fixture();
+  let reads = 0;
+  const { input, observePeer } = productionPass(fx, async () => {
+    if (++reads === 2) {
+      await Promise.resolve();
+      withSkillDraftVerdictLock(fx.stateDir, ID, () => input.log({ run_id: "P-late", task_id: ID,
+        step: "panel.proposal_declined", reason: "operator verdict" }));
+    }
+    return HEADROOM;
+  });
+  observePeer([pulse(PEER_REPO)]);
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(reads, 2);
+  assert.equal(stepRows(fx, SKILL_EVAL_AUTO_STEPS.claimed).length, 1, "the draft was open at claim time");
+  assert.equal(fx.dispatched.length, 0);
+  assert.equal(fx.proposal()!.skillEvalAuto, undefined, "a pre-dispatch refusal releases the claim");
 });
 
 test("W1-T13861 criterion 2: an unreadable ledger leaves every draft alone", async () => {
@@ -329,29 +473,64 @@ test("W1-T13861 criterion 4: an input with no spend reading waits, and a new rea
 });
 
 test("W1-T13861 criterion 4: the production spend reading is the day's ledgered cost, the effective ceiling and, for cash, the allowance", () => {
-  const root = tmp("skill-eval-fit-");
-  const stateDir = join(root, "state");
-  mkdirSync(stateDir, { recursive: true });
   const rows = [
     { ts: iso(NOW_MS - 60_000), step: "verdict", run_id: "R-1", task_id: "W1-T1", cost_usd: 42.5, outcome: "merged" },
     { ts: iso(NOW_MS - 30_000), step: "verdict", run_id: "R-2", task_id: "W1-T2", outcome: "merged" },
   ];
-  writeLedger(rows, { dir: stateDir });
+  const fx = fixture({ ledger: rows });
+  const { input, checkoutRoot } = productionPass(fx);
+  const stateDir = join(checkoutRoot, "state");
+  mkdirSync(stateDir);
   writeFileSync(join(stateDir, "DAILY_COST_CEILING_OVERRIDE"), JSON.stringify({ usd: 300, setAt: STAMP }));
-  const config = { root } as Config;
-  const input = skillEvalProductionInput(REPO_ROOT, undefined, async () => undefined,
-    { loadConfig: () => config, clock: fixedClock(NOW_MS) });
   const fit = input.readSpendFit!();
   assert.equal(fit.dayCostUsd, deriveDayCostUsd(rows, NOW_MS));
   assert.equal(fit.unpricedRows, deriveDayUnpricedRows(rows, NOW_MS));
   assert.equal(fit.ceilingUsd, 300);
-  assert.equal(fit.ceilingUsd, resolveDailyCostCeiling(root, loadDefaultPolicy()).usd);
+  assert.equal(fit.ceilingUsd, resolveDailyCostCeiling(checkoutRoot, loadDefaultPolicy()).usd);
   assert.equal(fit.cash, undefined, "the implement/medium mount runs on the Claude subscription");
+  const config = { root: fx.repoRoot } as Config;
   const cashPin = { billing: "api" as const, model: "cash-model" };
   const noCap = readSkillEvalSpendFit(config, cashPin, fixedClock(NOW_MS), loadDefaultPolicy());
   assert.ok(noCap.cash !== undefined && "unreadable" in noCap.cash && /dailyCapUsd/.test(noCap.cash.unreadable));
-  const capped = readSkillEvalSpendFit({ root, dailyCapUsd: 50 } as Config, cashPin, fixedClock(NOW_MS), loadDefaultPolicy());
+  const capped = readSkillEvalSpendFit({ ...config, dailyCapUsd: 50 }, cashPin, fixedClock(NOW_MS), loadDefaultPolicy());
   assert.deepEqual(capped.cash, { remainingUsd: 50 });
+});
+
+test("W1-T13861 criterion 4: the production pass uses the live instance ceiling ahead of the local override", async () => {
+  const fx = fixture({ ledger: [{ ts: iso(NOW_MS), step: "verdict", run_id: "R-priced", task_id: "W1-T7", cost_usd: 100 }] });
+  const env = { [DAILY_COST_CEILING_SHARE_ENV_VAR]: "250" };
+  const { input, checkoutRoot, observePeer } = productionPass(fx, undefined, env);
+  const stateDir = join(checkoutRoot, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "DAILY_COST_CEILING_OVERRIDE"), JSON.stringify({ usd: 300, setAt: STAMP }));
+  observePeer([pulse(PEER_REPO)]);
+  await autoEvaluateSkillDrafts(input);
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(fx.dispatched.length, 0);
+  assert.equal(stepRows(fx, SKILL_EVAL_AUTO_STEPS.claimed).length, 0);
+  const waiting = stepRows(fx, SKILL_EVAL_AUTO_STEPS.waiting);
+  assert.equal(waiting.length, 1);
+  assert.equal(waiting[0]!.daily_cost_ceiling_usd, 250);
+  assert.match(String(waiting[0]!.reason), /^daily-cost-ceiling:/);
+  env[DAILY_COST_CEILING_SHARE_ENV_VAR] = String(100 + SKILL_EVAL_MAX_SPEND_USD);
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(fx.dispatched.length, ONE_EVAL, "the live share can change and an exact fit is eligible");
+});
+
+test("W1-T13861 criterion 4: each production attempt is priced independently, including null prices in mixed eval runs", async () => {
+  const attempt = (cost_usd: number | null, ts = iso(NOW_MS), run_id = "E-prior") =>
+    ({ ts, step: "skill_eval.attempt", run_id, task_id: OTHER_ID, cost_usd });
+  const ledger = [attempt(4), attempt(null), attempt(6), attempt(0), attempt(null, iso(NOW_MS - DAY_MS)),
+    attempt(50, iso(NOW_MS - DAY_MS)), attempt(3, iso(NOW_MS), "E-abandoned"),
+    { ts: iso(NOW_MS), step: "skill_eval.result", run_id: "E-prior", task_id: OTHER_ID, total_cost_usd: 10 }];
+  const fx = fixture({ ledger });
+  const { input, observePeer } = productionPass(fx);
+  observePeer([pulse(PEER_REPO)]);
+  assert.deepEqual(input.readSpendFit!(), { dayCostUsd: 13, unpricedRows: 1, ceilingUsd: loadDefaultPolicy().values.sweep.dailyCostCeilingUsd });
+  await autoEvaluateSkillDrafts(input);
+  assert.equal(fx.dispatched.length, 0);
+  assert.equal(stepRows(fx, SKILL_EVAL_AUTO_STEPS.claimed).length, 0);
+  assert.match(String(stepRows(fx, SKILL_EVAL_AUTO_STEPS.waiting)[0]!.reason), /^daily-cost-unpriced:/);
 });
 
 // ── criterion 5 ───────────────────────────────────────────────────────────────────────────────────────────────

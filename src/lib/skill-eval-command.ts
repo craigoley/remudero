@@ -15,17 +15,21 @@
  * a held-out selection refused, or the text changed mid-run); 2 refused before any attempt was dispatched.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { deriveRuntimePins, type RuntimePins } from "./benchmark-aa-readiness.js";
 import type { BenchmarkRevisionPin, BenchmarkStackEvidence } from "./benchmark-run.js";
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig, type Config } from "./config.js";
-import { judgeInstanceLiveness, LIVENESS_WINDOW_MS, readLivenessRows } from "./fleet-liveness.js";
+import { judgeInstanceLiveness, LIVENESS_WINDOW_MS, QUIET_PULSE_BOUND_MS, readLivenessRows, type ReadLastRows } from "./fleet-liveness.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { deriveGoldenCorpus, mergeCreditsFromLedger, type CorpusTaskSpec, type GoldenCorpusItem, type ReplayIdleSignal } from "./golden-corpus.js";
 import type { UsageSnapshot } from "./headroom.js";
 import { approvedSkillRelPath, loadProposalRegistry, updateProposalRegistry, type SkillEvalRecord } from "./inbox.js";
+import { LIVENESS_CHECK_MS } from "./instance-gateway.js";
+import { readInstanceRegistryText } from "./instance-mode.js";
+import { parseInstanceRegistry } from "./instance-registry.js";
 import { resolveInstallRoot } from "./install-root.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "./learnings.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
@@ -35,13 +39,13 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, sealedPairedAttemptDispatcher, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedGrader } from "./paired-trial.js";
 import { loadPlan, type Task } from "./plan.js";
-import { loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "./policy.js";
+import { loadDefaultPolicy, resolveDailyCostCeilingForInstance, type Policy } from "./policy.js";
 import { replayOptIn } from "./replay-harness.js";
-import type { SkillEvalSpendFit } from "./skill-eval-auto.js";
+import type { SkillEvalSpendFit, StartClaimedSkillEval } from "./skill-eval-auto.js";
 import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput,
   type SkillEvalVerdictReason } from "./skill-eval.js";
 import { readLedgerLines } from "./status.js";
-import { deriveDayCostUsd, deriveDayUnpricedRows } from "./sweep.js";
+import { deriveDayCostUsd, deriveDayUnpricedRows, utcDayWindowMs } from "./sweep.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillFileStagedAtMs, type InjectableSkill } from "./skill-workshop.js";
 import { withTempDir } from "./tmp.js";
 import { readOpenWeightAllowance } from "./worker-provider.js";
@@ -140,7 +144,7 @@ export async function skillEvalCommand(argv: readonly string[], input: SkillEval
  * with the standing approval. Exit codes, refusal reasons and the record are those {@link skillEvalCommand} documents.
  */
 export async function evaluateStagedSkillDraft(proposalId: string, approval: SkillEvalSpendApproval, input: SkillEvalCommandInput,
-  runIdIn?: string): Promise<SkillEvalOutcome> {
+  runIdIn?: string, startClaimed?: StartClaimedSkillEval): Promise<SkillEvalOutcome> {
   const print = input.print ?? ((line: string) => console.log(line));
   const clock = input.clock ?? systemClock;
   const runId = runIdIn ?? `SKILL-EVAL-${clock.now()}`;
@@ -224,7 +228,7 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
       draft_sha256: selection.draftSha256 });
   }
 
-  const run = await runSkillEval({
+  const runInput: SkillEvalRunInput = {
     selection, draftMarkdown: skillFile.markdown, grade: input.grade, control: input.control, stack: input.stack(), idle: await input.readIdle(),
     ...("argv" in approval ? { argv: approval.argv } : { argv: [], standingApproval: approval.standingApproval }),
     dispatcherFor: (item) => {
@@ -234,7 +238,11 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
     // Every row names the proposal as its task; an attempt's held-out task rides beside it.
     log: (step, { task_id: heldOutTaskId, ...fields }) => write(step, { ...fields,
       ...(heldOutTaskId === undefined ? {} : { held_out_task_id: heldOutTaskId }) }),
-  });
+  };
+  const start = () => runSkillEval(runInput);
+  const pending = startClaimed === undefined ? start() : startClaimed(selection.draftSha256, start);
+  if (pending === undefined) return ended(2, true);
+  const run = await pending;
   if (run.state === "refused") {
     print(`skill-eval: refused ${proposalId}: ${run.reason}: ${run.detail}`);
     return ended(2, true);
@@ -268,23 +276,94 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
 
 /**
  * W1-T13861: the spend reading the auto pass checks before it claims a draft. The day's ledgered cost and its
- * unpriced rows are the cost governor's own reading (live ledger); the ceiling is the effective one (the state/
- * override within the committed bound, else plan/policy.yaml). The cash allowance is read only for a stack that
- * bills cash, and observing it reserves nothing.
+ * unpriced rows use the live governor's reducers for ordinary runs. A skill eval's run emits individual costs
+ * for each attempt, so the per-run reducer would miss subsequent attempts. The instance share takes precedence
+ * over the saved override and policy default. Cash allowance is only observed, since reading reserves nothing.
  */
 export function readSkillEvalSpendFit(config: Config, pin: Pick<SkillEvalRunInput["stack"]["pin"], "billing" | "model">,
-  clock: Clock, policy: Policy): SkillEvalSpendFit {
+  clock: Clock, policy: Policy, options: { ceilingRoot?: string; env?: NodeJS.ProcessEnv } = {}): SkillEvalSpendFit {
   const nowMs = clock.now();
   // ledger-read-intent: live
   const lines = readLedgerLines(ledgerPathFor(config));
-  const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(lines, nowMs), unpricedRows: deriveDayUnpricedRows(lines, nowMs),
-    ceilingUsd: resolveDailyCostCeiling(config.root, policy).usd };
+  const otherRows: Record<string, unknown>[] = [];
+  const [start, end] = utcDayWindowMs(nowMs);
+  let evalCostUsd = 0;
+  let evalUnpricedRows = 0;
+  for (const line of lines) {
+    if (line.step !== SKILL_EVAL_STEPS.attempt) {
+      otherRows.push(line);
+      continue;
+    }
+    const ts = Date.parse(String(line.ts ?? ""));
+    if (!(ts >= start && ts < end)) continue;
+    const cost = line.cost_usd;
+    if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) evalCostUsd += cost;
+    else evalUnpricedRows++;
+  }
+  const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(otherRows, nowMs) + evalCostUsd,
+    unpricedRows: deriveDayUnpricedRows(otherRows, nowMs) + evalUnpricedRows,
+    ceilingUsd: resolveDailyCostCeilingForInstance(options.ceilingRoot ?? config.root, policy, options.env).usd };
   if (pin.billing !== "api") return fit;
   try {
     return { ...fit, cash: { remainingUsd: readOpenWeightAllowance(config, { deployments: [pin.model], atIso: clock.iso() }).deployments[0]!.remainingUsd } };
   } catch (error) {
     return { ...fit, cash: { unreadable: String((error as Error)?.message ?? error).slice(0, 200) } };
   }
+}
+
+const peerQuietPath = (stateDir: string, instance: string): string => join(stateDir, "skill-eval-quiet", `${instance}.json`);
+
+/** The gateway already reads peer ledgers on its liveness tick. Project its quiet evidence into the
+ * shared control root so retro can read it without mounting peer ledgers into the build container. */
+export function skillEvalPeerLivenessReader(stateDir: string, ownRepo: string, clock: Clock = systemClock): ReadLastRows {
+  return (instance, sinceMs) => {
+    if (instance.repo.toLowerCase() === ownRepo.toLowerCase()) return readLivenessRows(instance, sinceMs);
+    const path = peerQuietPath(stateDir, instance.name);
+    let evidence: { repo: string; checkedMs: number; pulseMs: number } | undefined;
+    try {
+      const rows = readLivenessRows(instance, sinceMs);
+      const checkedMs = clock.now();
+      const evalRows = rows.filter((row) => row.step !== "daemon.idle_starved.enter" &&
+        (row.step !== "daemon.idle_starved.pulse" || String(row.repo).toLowerCase() === instance.repo.toLowerCase()));
+      const pulseMs = evalRows.reduce((latest, row) => {
+        if (row.step !== "daemon.idle_starved.pulse" || typeof row.ts !== "string") return latest;
+        const ts = Date.parse(row.ts);
+        return ts <= checkedMs ? Math.max(latest, ts) : latest;
+      }, -Infinity);
+      const restarted = evalRows.some((row) => (row.step === "daemon.start" || (row.step === "cli.invoked" && row.verb === "daemon")) &&
+        Date.parse(String(row.ts)) >= pulseMs && Date.parse(String(row.ts)) <= checkedMs);
+      const currentRows = evalRows.filter((row) => row.step !== "daemon.idle_starved.pulse" || Date.parse(String(row.ts)) === pulseMs);
+      if (checkedMs - pulseMs <= QUIET_PULSE_BOUND_MS && !restarted && !existsSync(join(instance.stateDir, "STOP")) &&
+        judgeInstanceLiveness(instance, currentRows, checkedMs).quiet === true) evidence = { repo: instance.repo, checkedMs, pulseMs };
+      return rows;
+    } finally {
+      try {
+        if (evidence === undefined) rmSync(path, { force: true });
+        else writeAtomic(path, JSON.stringify(evidence), { mode: 0o600 });
+      } catch (error) {
+        console.error(`skill eval: could not publish quiet evidence for ${instance.name}: ${String(error)}`);
+      }
+    }
+  };
+}
+
+function readPeerQuiet(stateDir: string, repoRoot: string, ownRepo: string, nowMs: number): ReplayIdleSignal["liveness"] {
+  const registry = readInstanceRegistryText(repoRoot);
+  if (registry === undefined) return undefined;
+  for (const instance of parseInstanceRegistry(registry).instances) {
+    if (!instance.live || instance.mode === "shadow" || instance.repo.toLowerCase() === ownRepo.toLowerCase()) continue;
+    try {
+      const text = readFileIfExists(peerQuietPath(stateDir, instance.name));
+      if (text === undefined) continue;
+      const evidence = JSON.parse(text);
+      if (evidence?.repo === instance.repo && typeof evidence.checkedMs === "number" && typeof evidence.pulseMs === "number" &&
+        evidence.pulseMs <= evidence.checkedMs && evidence.checkedMs <= nowMs && nowMs - evidence.checkedMs <= LIVENESS_CHECK_MS &&
+        nowMs - evidence.pulseMs <= QUIET_PULSE_BOUND_MS) return { state: "up", quiet: true };
+    } catch (error) {
+      console.error(`skill eval: unreadable quiet evidence for ${instance.name}: ${String(error)}`);
+    }
+  }
+  return undefined;
 }
 
 /** A revision pin as the one string a stack's `revisions` row records: its revision, or `unavailable:<reason>`. */
@@ -317,7 +396,8 @@ export function skillEvalStack(pins: RuntimePins, mount: Pick<Mount, "model" | "
  */
 export function skillEvalProductionInput(repoRoot: string, harnessRevision: BenchmarkStackEvidence["harnessRevision"],
   readHeadroom: (config: Config) => Promise<UsageSnapshot | undefined>,
-  options: { loadConfig?: () => Config; clock?: Clock; workerAbandonMs?: number; policy?: Policy } = {}): SkillEvalCommandInput {
+  options: { loadConfig?: () => Config; clock?: Clock; workerAbandonMs?: number; policy?: Policy; env?: NodeJS.ProcessEnv;
+    autoRepository?: string } = {}): SkillEvalCommandInput {
   let loaded: Config | undefined;
   const config = (): Config => (loaded ??= (options.loadConfig ?? loadConfig)());
   const clock = options.clock ?? systemClock;
@@ -335,13 +415,17 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
     stack: () => skillEvalStack(deriveRuntimePins({ harnessRevision, installRoot: resolveInstallRoot(config()) }),
       resolveMount(loadMounts(mountsPath(repoRoot)), SKILL_EVAL_MOUNT_ROUTE.taskType, SKILL_EVAL_MOUNT_ROUTE.risk)),
     readIdle: async () => {
+      if (options.autoRepository !== undefined) {
+        const headroom = await readHeadroom(config());
+        return { liveness: readPeerQuiet(stateDir(), repoRoot, options.autoRepository, clock.now()), headroom };
+      }
       const instance = { name: "operator-skill-eval", repo: "operator/skill-eval", stateDir: stateDir() };
       const nowMs = clock.now();
       return { liveness: judgeInstanceLiveness(instance, readLivenessRows(instance, nowMs - LIVENESS_WINDOW_MS), nowMs),
         headroom: await readHeadroom(config()) };
     },
     log: (row) => appendLedger(ledgerPathFor(config()), row, { clock }),
-    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock, policy()),
+    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock, policy(), { ceilingRoot: repoRoot, env: options.env }),
     clock,
   };
   return input;

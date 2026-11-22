@@ -1394,7 +1394,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalPeerLivenessReader, skillEvalProductionInput } from "./lib/skill-eval-command.js";
 import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
@@ -24420,9 +24420,9 @@ async function retroCommand(
   // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
   // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
   const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
-    { loadConfig: () => config });
+    { loadConfig: () => config, autoRepository: `${owner}/${repo}` });
   await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
-    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
+    (proposalId, approval, runId, startClaimed) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId, startClaimed)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -31043,6 +31043,7 @@ export async function serveCommand(
     productResearchBudgetUsd: productResearchProvider ? DEFAULT_BUDGET_USD : undefined,
     assistantRepository: `${self.owner}/${self.repo}`,
     questionsRoot: repoRoot,
+    instances: { readLastRows: skillEvalPeerLivenessReader(dirname(ledgerPath), `${self.owner}/${self.repo}`) },
     operatorNoteStore: operatorNoteStore({ stateDir: join(config.root, "state"), repository: `${self.owner}/${self.repo}`, legacyRoot: repoRoot }),
     tokens,
     // W1-T371/W1-T398: additive tailnet-identity auth, opt-in via config.serve.identityCapability
