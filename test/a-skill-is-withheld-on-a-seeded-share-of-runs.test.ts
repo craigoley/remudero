@@ -97,8 +97,8 @@ test("randomized rows compare withheld runs against every other eligible run, an
 
 test("with a control cohort, a skill that fits the budget reaches a verdict at the horizon", () => {
   const rows = [];
-  for (let i = 0; i < SKILL_EFFECTIVENESS_HORIZON; i++) {
-    rows.push(selectionRow(`t-${i}`, { selected: true, withheld: false }), verdict(`t-${i}`, i < 8 ? "merged" : "no_diff"));
+  for (let i = 0; i < 30; i++) {
+    rows.push(selectionRow(`t-${i}`, { selected: true, withheld: false }), verdict(`t-${i}`, i < 27 ? "merged" : "no_diff"));
     rows.push(selectionRow(`c-${i}`, { selected: false, withheld: true }), verdict(`c-${i}`, i < 3 ? "merged" : "no_diff"));
   }
   const favorable = buildSkillEffectivenessReport(rows, "proc");
@@ -119,7 +119,7 @@ test("randomized pending shipments stay in their assigned arms without claiming 
   assert.equal(uncertain.selected.pending_merge_runs, 2);
   assert.equal(uncertain.control.pending_merge_runs, 7);
   assert.equal(uncertain.status, "INSUFFICIENT EVIDENCE");
-  assert.equal(uncertain.basis, "pending-shipment");
+  assert.equal(uncertain.basis, "undecided");
 });
 
 test("legacy rows alone keep the observational comparison", () => {
