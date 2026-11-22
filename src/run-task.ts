@@ -142,6 +142,7 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
+import { newPublicTaskRecords, readCatalogNewTasksRow } from "./cli/commands/lint-plan.js";
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { daemonBoot } from "./lib/daemon.js";
 import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
@@ -19830,6 +19831,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // silently does nothing in the mode people run by hand is a check nobody notices is broken.
     console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
   }
+  // W1-T14343: the ids this diff adds that the public catalog never held, while its committed row is closed.
+  const publicCatalog = newTaskIds && scopeBase ? newPublicTaskRecords({ checkoutRoot, planRel, policyFile: join(dirname(planPath), "policy.yaml"), base: scopeBase, addedIds: newTaskIds }) : undefined;
+  if (publicCatalog?.state === "unknown") console.warn(`  ⚠ lint-plan: [new-public-task-record] not checked: ${publicCatalog.reason}`);
 
   // W1-T324: the whole-plan (no --base) scope filter. `--base` mode is untouched — `scope`
   // above already defines its bounds and this block never runs alongside it in a way that
@@ -20067,6 +20071,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // W1-T11746/W1-T12832: only this pass demands INVARIANT/NO-INVARIANTS, and only of a task that is new, re-authored
         // against `oldTask` or already declaring; a metadata-only edit, whole-plan and dispatch leave history valid.
         requireDesignInvariantDeclaration: designContractChanged(oldTask, task) || declaresDesignInvariant(task),
+        ...(publicCatalog?.state === "checked" ? { newPublicTaskRecordIds: publicCatalog.newIds } : {}),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -20233,6 +20238,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   if (existsSync(policyFile)) {
     try {
       loadPolicy(policyFile);
+      readCatalogNewTasksRow(policyFile); // W1-T14343: a malformed catalog row fails here, never reads as open
     } catch (e) {
       failing++;
       const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
