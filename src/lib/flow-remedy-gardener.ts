@@ -22,12 +22,14 @@ import { ADMISSION_FLOW_STEP, observeAdmissionFlow, type AdmissionFlowInput, typ
 import { feedbackContentDigest } from "./contributor-admission.js";
 
 export interface PrOutcome { state: "open" | "closed" | "merged"; at?: string; mergedBy?: string }
-export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string }
+export interface Charge {
+  pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string;
+  handedOff?: boolean;
+}
 export interface Episode {
   pr: number; key: string; owner: string; start: number; end: number;
   outcome: "open" | "cleared" | "failed" | "unknown"; eligible: boolean;
   charges: Charge[];
-  handedOff?: boolean;
 }
 export interface Price { key: string; hours: number; prs: number; owners: string[]; thresholdHours?: number }
 export interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
@@ -316,17 +318,16 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
         episode = { pr, key, owner: String(r.blocker_owner), start, end: start, outcome: "open", eligible: false, charges: [] };
         episodes.push(episode);
       }
-      // Join the evidence on the PR: the row is the handed check's when it names that check, or when it was written at a
-      // head where the check read red. Sweep gives one aggregate reason for most red rollups and names no check in it.
-      const named = redChecksOf(r);
-      if (r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) => named.includes(gate) || r.head_sha === sha)) {
-        episode.handedOff = true;
-      }
       const next = rows[i + 1];
       if (next) {
+        const checks = r.blocker === "own-red" ? handoffs.get(pr) : undefined;
+        // A rerun on the same head can fail a different check, so prefer the row's named checks.
+        const named = checks ? redChecksOf(r) : [];
+        const handedOff = checks?.some(({ gate, sha }) => named.length ? named.includes(gate) : r.head_sha === sha);
         const end = Date.parse(next.ts!);
         episode.end = end;
-        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner });
+        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner,
+          ...(handedOff ? { handedOff: true } : {}) });
       }
     }
     if (!episode) continue;
@@ -378,7 +379,6 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
   now: number, fileable?: LadderFileable): Inventory {
   const episodes = episodesOf(records, outcomes, now);
   const thresholds = markEligibility(episodes, now);
-  for (const e of episodes) if (e.handedOff) e.eligible = true;
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
 
@@ -393,7 +393,12 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   now: number, thresholds: ReadonlyMap<string, number> = new Map(), fileable?: LadderFileable): Inventory {
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
-  const candidates = priceEpisodes(episodes.filter(e => e.eligible), now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
+  const eligibleEpisodes = episodes.flatMap(e => {
+    if (e.eligible) return [e];
+    const handedOff = e.charges.filter(c => c.handedOff);
+    return handedOff.length ? [{ ...e, charges: handedOff }] : [];
+  });
+  const candidates = priceEpisodes(eligibleEpisodes, now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
   const ladder: Inventory["ladder"] = [];
   let next: FlowAction | undefined;
   // A filing PR the sweep recorded closed unmerged (`pr.terminal`, W1-T5318) holds nothing: its cause drafts again.
@@ -440,7 +445,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
     const action: FlowAction | undefined = !next && (state === "draft" || state === "escalate") ? {
       class: "draft", target: origin, origin, rung, price, prior,
-      charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
+      charges: eligibleEpisodes.filter(e => e.key === price.key).flatMap(e => e.charges),
       population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
       ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) } : undefined;
     const skipped = action && state === "draft" ? fileable?.(action) : undefined;

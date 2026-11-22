@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { collectCiFailureCorpus, type CiFailureCorpus, type CiFailureCorpusInput, type CiFailurePair, type CiFullyObservedGatePr } from "#src/lib/ci-failure-corpus.js";
+import { ciFrictionRecencyWeight } from "#src/lib/ci-friction-gardener.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { CI_LESSON_HANDOFF_STEP, flowGardenSpec, redChecksOf } from "#src/lib/flow-remedy-gardener.js";
 import type { GardenerDeps } from "#src/lib/gardener.js";
@@ -360,6 +361,37 @@ test("W1-T14140 criterion 5: the third reopen goes to the flow-remedy ladder, an
   const once = [{ findingId: filed[0]!, gate: "ci-gate", watermarkPr: 120 }];
   assert.deepEqual(mintCiLearningShards(corpus([], [{ pr: 130, gate: "ci-gate" }]), filed.slice(0, 1), undefined, once).drafts, []);
   assert.deepEqual(mintCiLearningShards(corpus([pair(110)]), filed.slice(0, 1), undefined, once).drafts, []);
+});
+
+test("a ci lesson handoff promotes only waits for its own check across consecutive aggregate-red heads", () => {
+  const key = "own-red:required checks red";
+  const red = (h: number, head: string): LedgerRecord => ({
+    step: "sweep.disposed", pr_number: 170, ts: new Date(NOW + h * HOUR).toISOString(),
+    blocker: "own-red", blocker_owner: "fix-lane", reason: "required checks red", head_sha: head,
+  });
+  const [gateRed, lintRed] = [red(-10, "aaaaaaa170"), red(-9, "bbbbbbb170")];
+  const cleared: LedgerRecord = { ...red(-1, "ccccccc170"), blocker: "armed-idle", blocker_owner: "armed-idle-merge", reason: "armed" };
+  const handoff = { step: CI_LESSON_HANDOFF_STEP, gate: "ci-gate", red_heads: [{ pr: 170, sha: gateRed.head_sha }] };
+  const rows = [gateRed, lintRed, cleared];
+
+  const ordinary = flowInventory([], 170, rows);
+  assert.deepEqual(ordinary.charges.map(c => c.hours), [1, 8]);
+  assert.deepEqual(ordinary.candidates, []);
+
+  const promoted = flowInventory([handoff], 170, rows);
+  assert.deepEqual(promoted.priced, ordinary.priced);
+  assert.deepEqual(promoted.candidates.map(c => [c.key, c.prs, c.hours]), [[key, 1, ciFrictionRecencyWeight(lintRed.ts, NOW)]]);
+  assert.deepEqual(promoted.next?.charges.map(c => [c.start, c.end, c.hours]),
+    [[Date.parse(gateRed.ts!), Date.parse(lintRed.ts!), 1]]);
+
+  const lintOnly = { ...lintRed, head_sha: gateRed.head_sha, red_checks: ["commitlint"] };
+  assert.deepEqual(flowInventory([handoff], 170, [gateRed, lintOnly, cleared]).next?.charges.map(c => c.hours), [1],
+    "a row naming a different check can follow a ci-gate failure even on the same head");
+
+  const unowned = rows.map(row => row.blocker === "own-red" ? { ...row, blocker_owner: "NONE" } : row);
+  const independent = flowInventory([handoff], 170, unowned);
+  assert.deepEqual(independent.candidates.map(c => [c.key, c.hours]), ordinary.priced.map(p => [p.key, p.hours]),
+    "the full wait remains a candidate when the episode is independently eligible");
 });
 
 const NOW = Date.parse("2026-11-21T12:00:00.000Z");
