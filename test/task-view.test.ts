@@ -501,7 +501,7 @@ test("task activity cursor distinguishes caught up gaps resets and unavailable h
   assert.equal(unreadable.state, "unavailable");
   assert.match(String(unreadable.reason), /could not be read: database disk image is malformed/);
   assert.deepEqual(unreadable.events, []);
-  assert.ok(logs.some(([step]) => step === "read_model.task_activity_failed"));
+  assert.ok(logs.some(([step, extra]) => step === "read_model.task_view_failed" && extra.activity === true));
 });
 
 test("task activity cursor bounds demand cardinality and total materialization work", (t) => {
@@ -536,7 +536,6 @@ test("task activity cursor bounds demand cardinality and total materialization w
   const heldBack = withActivity.filter((entry) => entry.data.activity?.state === "unavailable" && /demand bound/.test(String(entry.data.activity.reason)));
   assert.equal(heldBack.length, 190 - worked.length);
   assert.ok(heldBack.every((entry) => entry.data.activity!.events.length === 0 && entry.data.found === false));
-  assert.ok(logs.some(([step, extra]) => step === "read_model.task_activity_bounded" && extra.bounded === heldBack.length));
   // the most recently read keys of the one-task flood are the ones admitted: the oldest cursors give way.
   const admittedOfFlood = worked.filter((entry) => entry.data.id === ID).map((entry) => new URLSearchParams(entry.key).get("activityCursor"));
   assert.deepEqual(admittedOfFlood.sort(), [96, 97, 98, 99].map((n) => cursorFor(ID, n)).sort());

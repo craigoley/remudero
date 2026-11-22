@@ -261,7 +261,7 @@ function readTaskActivity(
   } catch (error) {
     // Reported, not erased: an unreadable ring answers unavailable with why, never an empty page that reads as complete history.
     const reason = `the activity ring could not be read: ${(error as Error).message}`;
-    log("read_model.task_activity_failed", { instance: state.instance, id, run, error: (error as Error).message });
+    log("read_model.task_view_failed", { instance: state.instance, id, run, activity: true, error: (error as Error).message });
     return unavailableActivity(run, reason);
   }
 }
@@ -422,8 +422,6 @@ export function createTaskView(opts: TaskViewOptions): {
         admitted.add(key);
         perTask.set(task, (perTask.get(task) ?? 0) + 1);
       }
-      const bounded = keys.filter((key) => requested(key) && !admitted.has(key)).length;
-      if (bounded > 0) log("read_model.task_activity_bounded", { admitted: admitted.size, bounded });
       return keys.map((key) => {
         const params = new URLSearchParams(key);
         const instance = params.get("instance") ?? "";
