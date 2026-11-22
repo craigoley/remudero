@@ -529,9 +529,24 @@ function loadGrowth(api: OpsCatalogApi, repositoryId: number, stateDir: string |
   if (stateDir === undefined) return remembered ?? { days: [] };
   try {
     const path = opsCatalogGrowthFile(stateDir, repositoryId);
-    const stat = fs.statSync(path, { throwIfNoEntry: false });
-    if (stat === undefined || !stat.isFile() || stat.size > GROWTH_FILE_MAX_BYTES) return remembered ?? { days: [] };
-    const raw = rec(JSON.parse(fs.readFileSync(path, "utf8")));
+    // One descriptor, opened without following a link and without blocking, is checked and read: the bytes checked
+    // are the bytes parsed (no check-then-reopen race).
+    let fd: number;
+    try {
+      fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    } catch (error) {
+      void error; // An absent or unopenable record is no record.
+      return remembered ?? { days: [] };
+    }
+    let text: string;
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > GROWTH_FILE_MAX_BYTES) return remembered ?? { days: [] };
+      text = fs.readFileSync(fd, "utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    const raw = rec(JSON.parse(text));
     if (!Array.isArray(raw.days) || raw.days.length > GROWTH_DAYS_KEPT) throw new Refusal("malformed");
     const days = raw.days.map((value): GrowthDay => {
       const d = rec(value);
