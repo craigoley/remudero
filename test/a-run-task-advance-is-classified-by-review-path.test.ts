@@ -1,3 +1,4 @@
+// @source-text-subject: criteria 2 and 4 classify the real src/run-task.ts text itself (which top-level units the review walk reaches, and the review child's argument list); importing run-task.ts would trip the affected-suite reach ratchet.
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
