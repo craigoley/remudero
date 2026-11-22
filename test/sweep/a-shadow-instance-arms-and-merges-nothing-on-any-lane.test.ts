@@ -50,6 +50,15 @@ async function withRegistry<T>(body: string | undefined, run: (cfg: typeof loadC
   }
 }
 
+/**
+ * The real deps as an EXPLICIT seam. `realArmDeps` stamps a symbol marker that `requireExplicitArmSeam` reads as "the
+ * caller omitted deps", which throws ArmSeamRequiredError under the test runner before any arm logic runs. Object.entries
+ * skips symbol keys, so this keeps every real function (the registry read included) and drops only the marker.
+ */
+function explicitSeam<D extends object>(real: D): D {
+  return Object.fromEntries(Object.entries(real)) as D;
+}
+
 /** Fake arm deps: every call is recorded by name, and a PASS review sits in the ledger for this head. */
 function spyDeps(shadow: boolean | undefined, overrides: Partial<ArmDeps> = {}) {
   const calls: string[] = [];
@@ -87,7 +96,7 @@ test("W1-T13698 criterion 1: with the registry mode shadow a review-lane PASS re
     const rows: Row[] = [];
     // The review lane's context carries NO repoMode: the refusal comes from the arm's own registry read.
     const outcome = await armIfVerdictPermitsAsync(PASS, ctxFor(rows), {
-      arm: (prUrl, taskId) => armAutoMergeDetailedAsync(prUrl, taskId, realArmDepsAsync(cfg)),
+      arm: (prUrl, taskId) => armAutoMergeDetailedAsync(prUrl, taskId, explicitSeam(realArmDepsAsync(cfg))),
     });
     assert.equal(outcome, "shadow-refused");
     assert.deepEqual(shim.calls(), [], "no gh call of any kind: no head read, no --auto arm, no direct merge");
@@ -105,7 +114,7 @@ test("W1-T13698 criterion 1: the synchronous review arm over the real deps is re
   await withRegistry(registry("acme/remudero", "shadow"), (cfg) => withGhShim([], async (shim) => {
     const rows: Row[] = [];
     const outcome = armIfVerdictPermits(PASS, ctxFor(rows), {
-      arm: (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, realArmDeps(cfg)),
+      arm: (prUrl, taskId) => armAutoMergeDetailed(prUrl, taskId, explicitSeam(realArmDeps(cfg))),
     });
     assert.equal(outcome, "shadow-refused");
     assert.deepEqual(shim.calls(), []);
