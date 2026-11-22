@@ -136,3 +136,35 @@ test("W1-T11815 criterion 3: without a thread CPU reading cpuMs is omitted and t
     assert.ok(bare.builds.every((row) => !("cpuMs" in row)) && bare.slow.every((row) => !("cpuMs" in row)), `${reading}: no cpuMs`);
   }
 });
+
+test("W1-T14380 criterion 1: view_builds sums each stage's ms over builds faster than a pass", (t) => {
+  let ran: Record<string, number> = { board: 30, snapshot: 9 };
+  const { ticker, rows, flushAt } = rig(t, (spent) => [{
+    name: "staged", version: 1,
+    materialize: () => {
+      spent.wall(40);
+      return [{ key: "", data: 1, sources: [] }];
+    },
+    stages: () => ran,
+  }], "scripted");
+  ticker.tick();
+  ran = { board: 5, assemble: 2 };
+  ticker.buildNow("staged");
+  flushAt(T0 + WINDOW_MS);
+  assert.deepEqual(rows("read_model.slow_view"), [], "control: neither build passed the slow threshold");
+  assert.deepEqual(rows()[0]?.stageMs, { board: 35, snapshot: 9, assemble: 2 });
+});
+
+test("W1-T14380 criterion 2: invariant:untimed-unchanged — a view that times no stages reports no stageMs", (t) => {
+  const { ticker, rows, flushAt } = rig(t, (spent) => [{
+    name: "untimed", version: 1,
+    materialize: () => {
+      spent.wall(40);
+      return [{ key: "", data: 1, sources: [] }];
+    },
+  }], "scripted");
+  ticker.tick();
+  flushAt(T0 + WINDOW_MS);
+  assert.equal(rows().length, 1);
+  assert.equal("stageMs" in rows()[0]!, false);
+});

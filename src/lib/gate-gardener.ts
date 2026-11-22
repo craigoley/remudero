@@ -24,7 +24,7 @@ import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest } from "./open-prs-rest.js";
 import { checkJobId, rollupProducerKey } from "./sweep.js";
 import { actionsJobIdOf, type CheckRunRef } from "./fix-lane-gardener.js";
-import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK } from "./base-reproduction.js";
+import { failingRuleSuitesFromCiFailures, RULE_CHECKS_CHECK, topLevelTapFailures } from "./base-reproduction.js";
 import { commentCompressionOrigin, nextCommentCompression, readGateFollowupOrigins, type CommentCompressionFinding } from "./comment-compression.js";
 
 /**
@@ -229,12 +229,13 @@ async function evaluateTriggerAsync(rule: GateRepairRule, changed: string[], sha
 
 /**
  * The suites an aggregate check's log names as FAILED: rule-checks' closing `failed suites:` line and its
- * per-suite `failed (` line, and a TAP `not ok` line naming a test file. An aggregate log also names every
+ * per-suite `failed (` line, and the file named by a top-level TAP failure. An aggregate log also names every
  * suite that PASSED (`rule-checks: <suite>`, `ok N - <suite>`); those are not this red's.
  */
 export function failedSuitesInLog(log: string): Set<string> {
   const failed = new Set(failingRuleSuitesFromCiFailures([{ name: RULE_CHECKS_CHECK, logTail: log }]));
-  const named = [...log.matchAll(/rule-checks: (\S+): failed \(/g), ...log.matchAll(/\bnot ok \d+ - (\S+)/g)].map(([, path]) => path!);
+  const named = [...log.matchAll(/rule-checks: (\S+): failed \(/g)].map(([, path]) => path!);
+  for (const failure of topLevelTapFailures(log)) named.push(failure.location ?? failure.test);
   for (const m of log.matchAll(/test-judge: NODE --TEST RUN FAILED \(status [1-9]\d*\): # fail ([1-9]\d*)\. 1\/1 file\(s\) reported, # tests ([1-9]\d*), # fail ([1-9]\d*)\. Last test started: (test\/\S+\.test\.ts) > /g)) {
     const tests = Number(m[2]), failedCount = Number(m[3]);
     if (m[1] === m[3] && Number.isSafeInteger(tests) && Number.isSafeInteger(failedCount) && failedCount <= tests) named.push(m[4]!);

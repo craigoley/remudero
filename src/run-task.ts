@@ -434,6 +434,7 @@ import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type Bina
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { readPreopenGateRows } from "./lib/preopen-gate-health.js";
 import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -641,7 +642,7 @@ import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProje
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, noteHealedTreeOutcome, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 import {
   REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
 } from "./lib/reviewer-calibration.js";
@@ -2477,7 +2478,6 @@ export function buildReviewerHealthRoute(
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
   const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
     (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
-  const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
@@ -2487,18 +2487,14 @@ export function buildReviewerHealthRoute(
     // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
     const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
     const healed = await buildHealedReviewerTree(repoDir, incident.offending!.sha, cut, remove, withPr === undefined ? {} : { withPr });
+    // W1-T13393: the outcome is recorded on the incident, and its first conflict escalated, once per incident.
+    await noteHealedTreeOutcome(statePath, incident, healed, escalation, log, systemClock);
     if (healed.state === "empty") {
       log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
       return normal();
     }
     if (healed.state !== "ready") {
       log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, ...reviewerHealedTreeUnavailableFields(healed) });
-      const key = `${incident.id}:${healed.originMainSha}`;
-      if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
-        escalatedConflicts.add(key);
-        // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
-        await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
-      }
       return normal();
     }
     const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
@@ -10946,7 +10942,44 @@ async function runTask(
   taskId: string,
   opts: Parameters<typeof runTaskFromModule>[1] = {},
 ): Promise<RunResult> {
-  return runTaskFromModule(taskId, opts, runTaskCommandHost());
+  const { options, host } = consoleParityPrOpenGuard(opts, runTaskCommandHost());
+  return runTaskFromModule(taskId, options, host);
+}
+
+function consoleParityPrOpenGuard(opts: NonNullable<Parameters<typeof runTaskFromModule>[1]>, host: RunTaskCommandHost) {
+  if (opts.spawn !== undefined && opts.preopenGate === undefined) {
+    return { options: opts, host };
+  }
+
+  const gate = opts.preopenGate ?? ((cwd: string) => {
+    const stateDir = dirname(ledgerPathFor(opts.config ?? loadConfig()));
+    return runPreopenGate(cwd, { history: { stateDir, readRows: () => readPreopenGateRows(stateDir) } });
+  });
+  let parityRefusal: { cwd: string; detail: string } | undefined;
+  const options: typeof opts = {
+    ...opts,
+    preopenGate: async cwd => {
+      const result = await gate(cwd);
+      const detail = result.kind === "fail" && result.failedSteps.includes("ci-checks:console-parity")
+        ? result.failedDetail?.["ci-checks:console-parity"] : undefined;
+      parityRefusal = detail && /^UNMAPPED — neither a console route nor a CLI_ONLY reason /m.test(detail)
+        ? { cwd, detail } : undefined;
+      return result;
+    },
+  };
+  const guardedHost: RunTaskCommandHost = {
+    ...host,
+    runGhPrCreate: (create, branch, log, say, ...ports) => {
+      // The implementation retry has already run. A measured parity red would send this PR to the fix lane.
+      if (parityRefusal?.cwd === create.options.cwd) {
+        log("pr.open_refused", { branch, refusal_class: "console-parity-unmapped", reason: parityRefusal.detail });
+        say(`PR open refused for ${branch} because console parity still reports unmapped commands`);
+        return {};
+      }
+      return host.runGhPrCreate(create, branch, log, say, ...ports);
+    },
+  };
+  return { options, host: guardedHost };
 }
 
 /** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
