@@ -1,4 +1,5 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
+import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
@@ -21175,6 +21176,38 @@ export function detachedActionInFlight(kind: DetachedActionKind): boolean {
   return false;
 }
 
+// W1-T13990: FIX_CLAIM_YIELDED_STEP is the step a fix claim refused BEFORE the capacity controller was consulted writes,
+// one row per refusal: the controller's own `fixes_refused` never counts it, and the focus gate's reader does.
+export { FIX_CLAIM_YIELDED_STEP };
+
+/** W1-T13990: {@link yieldingFixClaim}, with each refusal review precedence makes before the controller is consulted
+ *  ledgered as {@link FIX_CLAIM_YIELDED_STEP}, its cause named. A refusal the controller makes is its own row's. */
+export function countedYieldingFixClaim<P extends { prNumber: number; headSha?: string }>(
+  ...args: Parameters<typeof yieldingFixClaim<P>>
+): ReturnType<typeof yieldingFixClaim<P>> {
+  const [surface, inner, lines, nowMs, log, waiting, admitted] = args;
+  if (inner === undefined) return undefined;
+  let consulted = false;
+  const yielded = yieldingFixClaim<P>(surface, (pr) => { consulted = true; return inner(pr); }, lines, nowMs, log, waiting, admitted);
+  return (pr) => {
+    consulted = false;
+    const grant = yielded(pr);
+    if (!grant.admitted && !consulted) {
+      log?.(FIX_CLAIM_YIELDED_STEP, { surface, pr_number: pr.prNumber, head_sha: pr.headSha, cause: "review_precedence", reason: grant.reason });
+    }
+    return grant;
+  };
+}
+
+/** W1-T13990: the fix rounds this process admitted that have not ended: waiting for the work host to start their run child,
+ *  running in process (their memory admission included), or running as a run child. A claim the capacity controller refuses
+ *  releases its key before it reaches any of these; a round leaves them when its dispatch settles, done, refused or lost. */
+export function fixRoundsInFlight(): number {
+  let n = queuedHostFixes.size + childWorkCount("fix-dispatch");
+  for (const action of detachedSweepActions.values()) if (action.actionKind === "fix-dispatch") n++;
+  return n;
+}
+
 export type SweepRepairSurface = "full" | "light";
 
 /**
@@ -21500,6 +21533,8 @@ export function createSweepFixAdmissionController(input: {
   readResidents?: () => FixAdmissionResidents;
   readActiveWorkers?: () => number;
   readPressure?: () => FixHostPressure;
+  /** W1-T13990: names this controller on its `sweep.fix_capacity` rows. Production passes mint one per controller. */
+  controllerId?: string;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   reviewQueue?: readonly FixAdmissionWaiter[]; // W1-T9582: the planned reviews, each with when its PR began waiting.
   waitSinceMs?: (pr: OpenPrView) => number; // W1-T9582: when a claiming PR began waiting.
@@ -21625,6 +21660,9 @@ export function createSweepFixAdmissionController(input: {
   refresh();
   let fixesAdmitted = 0;
   let fixesRefused = 0;
+  // W1-T13990: the caller's id for this controller, so a reader keys each running count to the controller that wrote it,
+  // never to a run and surface that many passes share. Absent, the rows carry none and read as before.
+  const controllerId = input.controllerId;
   const snapshot = (): SweepFixCapacitySnapshot => ({
     surface: input.surface,
     queueDepth: input.queueDepth,
@@ -21640,6 +21678,7 @@ export function createSweepFixAdmissionController(input: {
   const emit = (order?: Record<string, unknown>): void => {
     const state = snapshot();
     input.log?.("sweep.fix_capacity", {
+      ...(controllerId === undefined ? {} : { controller_id: controllerId }),
       surface: state.surface,
       queue_depth: state.queueDepth,
       host_worker_budget: state.hostWorkerBudget,
@@ -23447,6 +23486,7 @@ export async function runSweep(
       ? undefined
       : createSweepFixAdmissionController({
           surface: "full",
+          controllerId: randomUUID(),
           queueDepth: fullReviewQueueDepth,
           ...sweepFixAdmissionReaders(deps, policy),
           activeWorkers: fullRepairActiveWorkers,
@@ -23471,7 +23511,7 @@ export async function runSweep(
   // W1-T13991: the per-PR admission lock each held charge carries, handed to a hosted child in place.
   const fixAdmissionLocks = new Map<string, { lock: FixAdmissionLock; releaseCharge?: () => void }>();
   const fixCapacityKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
-  const capacityClaim = deps.claimFixAdmission ?? yieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
+  const capacityClaim = deps.claimFixAdmission ?? countedYieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
     try {
       // W1-T13991: a head moved under a round that no longer holds the branch replaces that round's spent charge.
@@ -30465,6 +30505,7 @@ async function runSweepLightPassCore(
   // review controller reads, and selected spawning reviews reserve their width before fixes race.
   const repairAdmission = createSweepFixAdmissionController({
     surface: "light",
+    controllerId: randomUUID(),
     queueDepth,
     ...sweepFixAdmissionReaders(deps, policy),
     activeWorkers,
@@ -30472,7 +30513,7 @@ async function runSweepLightPassCore(
     readReviewReservations: () => unsettledSpawning,
     log: deps.log,
   });
-  const claimFixAdmission = yieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
+  const claimFixAdmission = countedYieldingFixClaim("light", deps.claimFixAdmission ?? repairAdmission.claim, selectionLedgerLines, now, deps.log, refillTail);
   const selectedNumbers = new Set<number>([
     ...spawning.map((p) => p.prNumber),
     ...planFilings.map((p) => p.prNumber),
@@ -31343,6 +31384,8 @@ export interface QueueGovernorFlow {
   /** New PRs opened inside the SAME trailing window (ledger `pr.opened` rows). */
   trailingOpenedCount?: number;
   stuckOwnedCount?: number;
+  /** W1-T13990: the stuck owned PRs a fix lane can move (adaptive-wip.ts); carried for focus, never subtracted. */
+  movableStuckOwnedCount?: number;
   adaptiveBound?: number;
   headroomFraction?: number;
 }
@@ -31379,6 +31422,7 @@ export interface QueueGovernorResult {
   trailingOpenedCount?: number;
   baseWipLimit?: number;
   stuckOwnedCount?: number;
+  movableStuckOwnedCount?: number;
   headroomFraction?: number;
 }
 
@@ -31420,9 +31464,11 @@ export function checkQueueGovernor(
   // #10510's adaptive bound wins when wired; W1-T7243's measured bound otherwise; the old bound is the stand-in.
   const limit = flow.adaptiveBound ?? measuredBound ?? policy.wipLimit;
   const stuckOwnedCount = Math.min(openPrCount, Math.max(0, flow.stuckOwnedCount ?? 0));
+  const movable = flow.movableStuckOwnedCount;
   const common = {
     observedOpenCount: openPrCount, wipLimit: limit, observedForeignCount, trailingMergedCount, trailingOpenedCount,
     baseWipLimit: policy.wipLimit, stuckOwnedCount, headroomFraction: flow.headroomFraction, measuredBound, pressure,
+    ...(movable === undefined ? {} : { movableStuckOwnedCount: Math.min(stuckOwnedCount, Math.max(0, movable)) }),
   };
   if (!pressureHeld && openPrCount - stuckOwnedCount < limit) return { deferred: false, tier: "under_limit", ...common };
   // "Draining" needs REAL trailing activity (design ii): a silent window (0 merges, 0 opens — a
@@ -31485,6 +31531,7 @@ export function logQueueGovernorDeferral(
     trailing_opened_count: result.trailingOpenedCount ?? 0,
     base_wip_limit: result.baseWipLimit ?? result.wipLimit,
     stuck_owned_count: result.stuckOwnedCount ?? 0,
+    ...(result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: result.movableStuckOwnedCount }),
     headroom_fraction: result.headroomFraction ?? null,
     measured_bound: result.measuredBound,
     pressure_available_mib: result.pressure?.availableMib,

@@ -1,0 +1,81 @@
+- id: W1-T14203
+  title: "Ledger rotation keeps the earliest review-eligible row of each PR the sweep still disposes, so a PR that re-enters review after a day queues from when it became eligible, not from its creation time"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: low # one more rescue rule in rotateLedger PASS 4 for one step, bounded by one row per PR that has a kept sweep.disposed row; no reader changes
+  band_meaning: blast-radius
+  origin: "operator-session#audit-small-findings-2026-11-21"
+  plan_refs:
+    - W1-T12756
+    - W1-T12534
+    - W1-T5517
+  files:
+    - src/lib/ledger.ts
+    - test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:re-entry-survives-rotation — a ledger with a sweep.review_eligible row for PR 9 at head h1, then more than MAX_RETAINED_LINES_PER_STEP sweep.review_eligible rows of other PRs, then a kept sweep.disposed row for PR 9, still holds the h1 row after rotateLedger. A light pass that sees PR 9 at a new head h2 then keys it by the first eligible ts of its h2 review key (or now), not by its createdAt, the same as before the rotation"
+      kind: guard
+      proof: "grep: W1-T14203 criterion 1: in test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts"
+    - claim: "invariant:cap-unchanged-for-other-prs — a sweep.review_eligible row of a PR that has no kept sweep.disposed row is capped exactly as on origin/main. Rows kept by this rule are one per PR at most and never more than the number of distinct pr_number values among the kept sweep.disposed rows. W1-T12756's tests still pass unchanged"
+      kind: guard
+      proof: "grep: W1-T14203 criterion 2: in test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts"
+    - claim: "The kept rows are counted in the rotation's archived-line count the same way as other kept rows, and a second rotation of the result keeps the same rows (idempotent)"
+      proof: "grep: W1-T14203 criterion 3: in test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts"
+  rationale: |
+    WHY: W1-T14073 (#19948, on main) queues a review input that re-enters review from when it became eligible,
+    not from its PR's createdAt. It decides "re-entered" from the ledger alone, and rotation removes the row it
+    needs, so an old PR falls back to createdAt and wins the review slot again. That is the bug #19948 fixed.
+    READ at origin/main f80f72841:
+    - src/lib/sweep.ts reviewInputQueuedAt (lines 30560-30593): a PR is re-entered only when a
+      sweep.review_eligible row for a different head of that PR is in the ledger view (line 30590). With no
+      such row the lookup returns undefined and the PR ranks on createdAt.
+    - src/lib/ledger.ts rotateLedger PASS 4 (lines 2189-2229): sweep.review_eligible keeps the newest
+      MAX_RETAINED_LINES_PER_STEP (200, line 1255) rows. The only rescue is W1-T12756's, for heads that a kept
+      sweep.absent_repush row minted (lines 2199-2226). A fix head is not an absent-repush head.
+    MEASURED 2026-11-21 21:33Z on the Azure host ledger (read only): the live file holds 202
+    sweep.review_eligible rows, the oldest at 05:01Z, so about 16.5 hours (8 to 24 rows an hour). The
+    archives hold #19515's rows at seven heads from 2026-11-19 02:11Z on, the last head e62a2493 first eligible
+    2026-11-20 21:50Z. The live file holds one #19515 row (14:11Z, the same head e62a2493), so the light pass saw
+    no earlier head and ranked #19515 on createdAt, the case #19948's body names. Any PR whose fix round takes
+    longer than about 16 hours loses its earlier-head rows the same way.
+    NOT A DEFECT (checked): a PR's first head ranks on createdAt on purpose. #19948's body says so,
+    W1-T12534's criteria 2 and 3 pin it, and createdAt is never later than a first eligibility.
+  design: |
+    INVARIANT re-entry-survives-rotation: while the sweep still keeps a sweep.disposed row for a PR, rotation
+    keeps that PR's earliest sweep.review_eligible row.
+    INVARIANT cap-unchanged-for-other-prs: rows of PRs with no kept sweep.disposed row are capped as today.
+    CHOICE: gate the rescue on a kept sweep.disposed row. boundSweepRows (ledger.ts lines 1456-1473) keeps the
+    newest sweep.disposed row of each PR for SWEEP_DISPOSED_STANDING_WINDOW_MS (7 days), so the gate follows the
+    PRs the sweep still handles and the bound is one row per such PR (112 distinct PRs at 21:33Z). Rejected:
+    - pr.reviewedHeadSha in the reader: it also comes from ledger review rows, which rotate.
+    - Keeping every PR's earliest row: no bound, since closed PRs never leave.
+    - A larger per-step cap: it moves the cutoff, it does not remove it.
+    1. In rotateLedger PASS 4, after the sweep.disposed rows are known, collect the pr_number of every kept
+       sweep.disposed row. From the sweep.review_eligible rows the cap would drop, keep the first row (file
+       order) of each collected pr_number. Add these to W1-T12756's rescued set; a row both rules keep counts once.
+    2. Count the kept rows in archivedLineCount as other kept rows are counted. Keep file order.
+    3. Change no reader. reviewInputQueuedAt then sees the earlier head after rotation.
+    4. Tests in test/ledger/rotation-keeps-the-earliest-eligibility-row-of-an-open-pr.test.ts, titled
+       "W1-T14203 criterion N: ...", built like test/ledger/rotation-keeps-the-first-eligibility-row-of-a-repushed-head.test.ts.
+       Criterion 1 also runs the production observer and reviewInputQueuedAt (through selectReviewAdmissions)
+       on the rotated rows. Load test/setup/tmp-hygiene.ts.
+    MEASURE AFTER DEPLOY: on the host ledger, for each open PR with a live sweep.review_eligible row at its
+    current head, count the PRs with no live row at an earlier head although the archives hold one. Expect 0
+    for PRs with a kept sweep.disposed row.
+  falsifier: |
+    On origin/main criterion 1 fails: the h1 row is capped away and PR 9 at h2 ranks on createdAt. Rescue every
+    PR's earliest row with no gate: criterion 2's no-disposed-row case keeps a row that main drops. Rescue by
+    head instead of by PR: criterion 2's one-row-per-PR count fails for a PR with rows at many heads.
+  note: |
+    Id reserved for run-unfiled-1795297339463 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21 from an audit of merged PR #19948. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    W1-T14073's task file is not on main (its filing PR #19944 closed after #19948 merged), so this task
+    names #19948 rather than citing W1-T14073 in plan_refs.
