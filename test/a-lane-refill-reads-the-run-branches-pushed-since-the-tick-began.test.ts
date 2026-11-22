@@ -12,7 +12,8 @@ import { setImmediate as drainMicrotasks } from "node:timers/promises";
 import { test } from "node:test";
 import { runDaemon, runLanePool, type DaemonDeps } from "../src/lib/daemon.js";
 import { loadPlan } from "../src/lib/plan.js";
-import { readPushedRunBranchesOutputAsync, type RunResult } from "../src/run-task.js";
+import { readPushedRunBranchesOutputAsync } from "#src/cli/commands/daemon.js";
+import type { RunResult } from "#src/lib/run-result.js";
 
 const IDS = ["W1-T9001", "W1-T9002", "W1-T9003", "W1-T9004"];
 const LATE = "W1-T9004";
