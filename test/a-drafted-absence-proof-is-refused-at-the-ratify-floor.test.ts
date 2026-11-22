@@ -12,6 +12,7 @@ const ABSENCE = 'grep: "renderPromotionProposals" not found in docs/forensics/re
 function withProof(proof: string): string {
   const tasks = parse(inboxDraftExampleFragmentYaml());
   tasks[0].title = "retro.md no longer mentions renderPromotionProposals";
+  tasks[0].design = "NO-INVARIANTS: the draft only retires a doc mention; the absence-proof lint is what the fixture exercises.";
   tasks[0].acceptance = [{ claim: "docs/forensics/retro.md no longer mentions renderPromotionProposals", proof }];
   return stringify(tasks);
 }

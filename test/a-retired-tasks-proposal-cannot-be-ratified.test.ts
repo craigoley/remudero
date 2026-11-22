@@ -26,6 +26,8 @@ const fragmentYaml = `- id: NEW-1
   attempts: 0
   origin: architect
   files: [src/lib/inbox.ts, test/a-retired-tasks-proposal-cannot-be-ratified.test.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one repair task only; no prior behavior changes.
   acceptance:
     - claim: "explicit retirement prevents ratification"
       proof: "unit test: ${proof}"

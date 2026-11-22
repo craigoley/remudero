@@ -100,6 +100,10 @@ export interface VerdictRow {
    *  of different rigor under one rate). */
   lane?: string;
   verdictClass: VerdictClass | null;
+  /** W1-T12145: the reviewer's served model, from the joined `review.posted` row's
+   *  `evaluator_provenance.servedModel`. ABSENT when that row names none (before W1-T11985 restored it, or
+   *  a floor-only review); the report then counts the row under {@link UNREADABLE_REVIEWER_MODEL}. */
+  reviewerModel?: string;
   /** Present only when `verdictClass === null`. */
   classifyWhy?: string;
   /** Present only when `verdictClass === null` and set by {@link mineVerdictRows} itself (never
@@ -115,6 +119,17 @@ export interface VerdictMiningResult {
    *  "nothing to look for" case here, only `ok: true`/`ok: false`. */
   ledger: LedgerUnionResult;
   rows: VerdictRow[];
+}
+
+/** W1-T12145: the bucket of a passed merge whose review row names no served model. */
+export const UNREADABLE_REVIEWER_MODEL = "unreadable" as const;
+
+/** The served model a `review.posted` row's `evaluator_provenance` names, or undefined. */
+function servedReviewerModel(line: Record<string, unknown>): string | undefined {
+  const provenance = line.evaluator_provenance;
+  if (provenance === null || typeof provenance !== "object") return undefined;
+  const served = (provenance as Record<string, unknown>).servedModel;
+  return typeof served === "string" && served !== "" ? served : undefined;
 }
 
 function parseLedgerJson(raw: string): Record<string, unknown> | null {
@@ -200,7 +215,8 @@ export function mineVerdictRows(stateDir: string, fsDeps?: LedgerGrepFsDeps): Ve
     }
     const verdictClass: VerdictClass =
       postedLine.capped === true ? "degraded-arm" : postedLine.floor_degraded === true ? "keyword-floor" : "full-pass";
-    rows.push({ taskId, headSha, armedTs, lane, verdictClass });
+    const reviewerModel = servedReviewerModel(postedLine);
+    rows.push({ taskId, headSha, armedTs, lane, verdictClass, ...(reviewerModel === undefined ? {} : { reviewerModel }) });
   }
   return { ledger, rows };
 }
@@ -470,6 +486,18 @@ export interface LaneClassOutcome extends ClassOutcome {
   lane: string;
 }
 
+/** W1-T12145: one reviewer model's passed merges and what became of them inside the window. */
+export interface ReviewerModelOutcome {
+  reviewerModel: string;
+  total: number;
+  revertedCount: number;
+  followupFixedCount: number;
+  /** `null` below {@link MIN_POPULATION_FLOOR}, the same refusal a class takes. */
+  revertRate: number | null;
+  followupFixRate: number | null;
+  taskIds: string[];
+}
+
 export interface UnmeasurableRow {
   taskId: string;
   /** Absent exactly when the row's own {@link VerdictRow.headSha} was absent — see that field's
@@ -489,6 +517,11 @@ export interface VerdictCalibrationReport {
   classes: ClassOutcome[];
   /** Observed (lane, class) populations, with a rate only when that population clears the floor. */
   byLane?: LaneClassOutcome[];
+  /** W1-T12145: passed merges grouped by the reviewer model that passed them, with its revert and follow-up
+   *  fix rates inside the same {@link AttributionPolicy.windowDays} window. A row whose review names no
+   *  served model is counted under {@link UNREADABLE_REVIEWER_MODEL}, never dropped. Sorted by model.
+   *  Optional like {@link byLane}: a report built by hand may omit it; {@link verdictCalibrationReport} always sets it. */
+  byReviewerModel?: ReviewerModelOutcome[];
   /** Rows whose merge sha (or verdict class) could not be recovered — P48's no-naked-zero
    *  clause: every one of these is named, never folded into a denominator as if measured. */
   unmeasurable: UnmeasurableRow[];
@@ -539,6 +572,7 @@ export function verdictCalibrationReport(
     VERDICT_CLASSES.map((c) => [c, { total: 0, reverted: 0, fixed: 0, lanes: new Set<string>(), taskIds: [] }]),
   );
   const laneTotals = new Map<string, { verdictClass: VerdictClass; lane: string; total: number; reverted: number; fixed: number; taskIds: string[] }>();
+  const modelTotals = new Map<string, { total: number; reverted: number; fixed: number; taskIds: string[] }>();
   const unmeasurable: UnmeasurableRow[] = [];
   const unmeasurableByCause: Record<UnmeasurableCause, number> = {
     "no-head-sha": 0,
@@ -589,13 +623,20 @@ export function verdictCalibrationReport(
     laneBucket.total += 1;
     laneBucket.taskIds.push(row.taskId);
     laneTotals.set(key, laneBucket);
+    const modelKey = row.reviewerModel ?? UNREADABLE_REVIEWER_MODEL;
+    const modelBucket = modelTotals.get(modelKey) ?? { total: 0, reverted: 0, fixed: 0, taskIds: [] };
+    modelBucket.total += 1;
+    modelBucket.taskIds.push(row.taskId);
+    modelTotals.set(modelKey, modelBucket);
     if (wasReverted(index, merge, row.taskId, policy.windowDays)) {
       bucket.reverted += 1;
       laneBucket.reverted += 1;
+      modelBucket.reverted += 1;
     }
     if (hasFollowupFix(index, merge, row.taskId, policy.windowDays)) {
       bucket.fixed += 1;
       laneBucket.fixed += 1;
+      modelBucket.fixed += 1;
     }
   }
 
@@ -639,7 +680,19 @@ export function verdictCalibrationReport(
       taskIds: b.taskIds,
     }));
 
-  return { policy, minPopulationFloor, classes, byLane, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
+  const byReviewerModel: ReviewerModelOutcome[] = [...modelTotals]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([reviewerModel, b]) => ({
+      reviewerModel,
+      total: b.total,
+      revertedCount: b.reverted,
+      followupFixedCount: b.fixed,
+      revertRate: b.total < minPopulationFloor ? null : b.reverted / b.total,
+      followupFixRate: b.total < minPopulationFloor ? null : b.fixed / b.total,
+      taskIds: b.taskIds,
+    }));
+
+  return { policy, minPopulationFloor, classes, byLane, byReviewerModel, unmeasurable, armsSeen: verdictRows.length, armsClassified, unmeasurableByCause };
 }
 
 

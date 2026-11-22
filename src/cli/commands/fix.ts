@@ -16,9 +16,11 @@ import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
 import { readFixScopeHistory } from "../../lib/fix-scope-history.js";
 import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, fixRungInputsUnchanged, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { loadConfig, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js";
@@ -53,7 +55,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockReg
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS, COMMAND_REGISTRY, commandVerbsAddedByDiff } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
@@ -1822,6 +1824,62 @@ function fixRoundLandingFields(landing: FixRoundLanding | undefined, workerSubty
     push_failure_reason: landing.reason.slice(0, 500), ...(landing.remoteHead === undefined ? {} : { remote_head_sha: landing.remoteHead }) };
 }
 
+const isWorkflowPath = (path: string): boolean => path.startsWith(".github/workflows/");
+
+async function commitPartialScopeRepair(
+  worktree: string, base: string, expectedBranch: string | undefined, scopePaths: readonly string[],
+  commit: (branch: string) => string | undefined,
+): Promise<{ head?: string; blocked: string[] } | undefined> {
+  const git = (args: string[]) => hostWorktreeGitAsync(worktree, args, {
+    maxBuffer: 1 << 26, env: { GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" },
+  });
+  const branch = (await git(["symbolic-ref", "HEAD"])).trim();
+  if ((expectedBranch !== undefined && branch !== `refs/heads/${expectedBranch}`) || (await git(["rev-parse", branch])).trim() !== base) {
+    throw new Error("the fix branch moved before the partial commit");
+  }
+  const index = resolve(worktree, (await git(["rev-parse", "--git-path", "index"])).trim());
+  const scratch = await mkdtemp(join(tmpdir(), "rmd-scope-repair-"));
+  const savedIndex = join(scratch, "index");
+  const candidateBranch = `rmd-scope-repair-${randomUUID()}`;
+  const candidateRef = `refs/heads/${candidateBranch}`;
+  try {
+    await copyFile(index, savedIndex);
+    await git(["update-ref", candidateRef, base, ""]);
+    // The normal harness checks the candidate. Its ref is private to this attempt, so even an
+    // automatically admitted baseline cannot reach the PR branch before the scope check below.
+    let installed = false;
+    try {
+      const candidate = commit(candidateBranch);
+      if (candidate === undefined) return undefined;
+      const changed = (await git(["diff", "--name-only", "--no-renames", "-z", base, candidate])).split("\0").filter(Boolean);
+      const blocked = changed.filter((path) =>
+        scopePaths.some((scopePath) => path === scopePath || path.startsWith(`${scopePath}/`)) ||
+        isWorkflowPath(path) || isUngrantableInstrumentPath(path));
+      const registry = COMMAND_REGISTRY.path;
+      // A worker-added verb depends on the refused registrations. Keep that registry edit with them.
+      if (scopePaths.some(isVerbRegistrationPath) && changed.includes(registry) && !blocked.includes(registry)) {
+        const added = commandVerbsAddedByDiff(await git(["show", `${base}:${registry}`]), await git(["show", `${candidate}:${registry}`]));
+        if (added?.length !== 0) blocked.push(registry);
+      }
+      let head = candidate;
+      if (blocked.length > 0) {
+        await git(["restore", "--source", base, "--staged", "--", ...blocked]);
+        const tree = (await git(["write-tree"])).trim();
+        if (tree === (await git(["rev-parse", `${base}^{tree}`])).trim()) return { blocked };
+        const message = (await git(["show", "-s", "--format=%B", candidate])).trimEnd();
+        head = (await git(["commit-tree", tree, "-p", base, "-m", message])).trim();
+      }
+      await git(["update-ref", branch, head, base]);
+      installed = true;
+      return { head, blocked };
+    } finally {
+      try {
+        if (!installed) await copyFile(savedIndex, index);
+      } finally { await git(["update-ref", "-d", candidateRef]); }
+    }
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+}
+
 /** W1-T5920 — the fix rung's FLAKE rerun: the same POST, a typed outcome (an in-flight HTTP 403
  *  is `deferred`), and its refusal logged under a fix-lane step, never the main-health one. */
 function requeueActionsJobOutcome(
@@ -2158,6 +2216,8 @@ async function routeFix(
     fixLearnedArmsFor,
     fixRebaseAlreadySpent,
     fixRoundLandingFields,
+    isWorkflowPath,
+    commitPartialScopeRepair,
     fixRungScopeStandDownReason,
     fixRungStandDownReason,
     fixWorkerEndedBySignal,
@@ -2412,6 +2472,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   const fixRungEscalationForTask = (
     task: { catalog?: "public" | "ops"; title: string; acceptance?: AcceptanceCriterion[] },
     escalation: Escalation,
+    publicFacts?: string,
   ): Escalation => {
     if (task.catalog !== "ops") return escalation;
     const pullRequest = /https:\/\/github\.com\/[^\s)]+\/pull\/\d+/.exec(`${escalation.summary}\n${escalation.detail}`)?.[0];
@@ -2419,7 +2480,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     return {
       ...escalation,
       summary: `${task.title}${pullRequest ? ` — ${pullRequest}` : ""}`,
-      detail: acceptance || task.title,
+      detail: [acceptance || task.title, publicFacts].filter(Boolean).join("\n\n"),
       options: escalation.options.map((option) => ({ ...option, detail: task.title })),
       runId: undefined,
       decisionSummary: null,
@@ -2427,10 +2488,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       consequence: null,
     };
   };
-  const escalateForTask = (escalation: Escalation, deps: Parameters<typeof escalateWithJudge>[1]) => {
+  const escalateForTask = (escalation: Escalation, deps: Parameters<typeof escalateWithJudge>[1], publicFacts?: string) => {
+    const issue = fixRungEscalationForTask(opts.task, escalation, publicFacts);
     const note = recheck?.note();
-    const issue = note ? { ...escalation, detail: `${escalation.detail}\n\n${note}` } : escalation;
-    return escalateWithJudge(fixRungEscalationForTask(opts.task, issue), deps);
+    return escalateWithJudge(note ? { ...issue, detail: `${issue.detail}\n\n${note}` } : issue, deps);
   };
   const {
     formerBoundStandIn,
@@ -2467,6 +2528,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     scopeAmendmentFromFixReport,
     undeclaredPathsLedgerFields,
     fixRoundLandingFields,
+    isWorkflowPath,
+    commitPartialScopeRepair,
     requeueActionsJobOutcome,
     dispatchProofAmendmentWrite,
     deriveChangesetClaimUpdate,
@@ -4824,15 +4887,16 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
     let ownRows: string[] = [];
-    const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) => {
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}, candidate?: { branch: string; base: string }) => {
       if (censusCheck?.refusal) {
         harnessCommitRefusalReason = censusCheck.refusal.text;
         return 0;
       }
       return (deps.harnessCommitForShellLessWorker ?? host.harnessCommitForShellLessWorker)({
-        harnessOwnsGit: fixHarnessOwnsGit,
-        commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? host.commitsAhead)(opts.worktreePath, roundStartSha),
-        ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? roundBase.baseSha : roundBase.baseSha, branch: opts.branch } : {}),
+        harnessOwnsGit: candidate !== undefined || fixHarnessOwnsGit,
+        commitCount: candidate || (opts.guardRoundHead && fixHarnessOwnsGit) || roundStartSha === undefined ? 0 : (deps.commitsAhead ?? host.commitsAhead)(opts.worktreePath, roundStartSha),
+        ...(candidate ? { priorHeadSha: candidate.base, branch: candidate.branch }
+          : opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? roundBase.baseSha : roundBase.baseSha, branch: opts.branch } : {}),
         report,
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
@@ -4898,8 +4962,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const derivedFirst = fixHarnessOwnsGit && (fixResult.provider ?? fixArgs.mountProvider) !== undefined && fixLeftEdits()
       ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
-    const requiresCommit = fixAction.kind === "legacy" || fixAction.kind === "commit" ||
-      (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0);
+    const requiresCommit = fixAction.kind === "legacy" || fixAction.kind === "commit";
     const firstOptions = outcomeCommitOptions();
     let harnessCommitCount = requiresCommit ? harnessCommit(fixReport, {
       ...firstOptions, derivedCommit: firstOptions.derivedCommit ?? derivedFirst,
@@ -4940,7 +5003,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         fixOutcome = anchoredFixOutcome(answeredReport);
         ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
         fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
-        if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
+        if (["legacy", "commit"].includes(fixAction.kind)) {
           harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
         }
       }
@@ -5173,7 +5236,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       } else logFixDone(pushedHeadSha, undefined, landing);
       if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
     };
-    const pushThrew = (error: unknown): FixRoundLanding => ({ landed: false, outcome: "failed", reason: String((error as Error)?.message ?? error).slice(0, 500) });
+    const pushThrew = (error: unknown): Extract<FixRoundLanding, { landed: false }> => ({ landed: false, outcome: "failed", reason: String((error as Error)?.message ?? error).slice(0, 500) });
     const unlandedStrikes = () => (strikes === attempt ? attempt - 1 : strikes);
     const notLandedOutcome = (landing: Extract<FixRoundLanding, { landed: false }>): FixRungOutcome => ({ outcome: "stood_down", review,
       strikes: unlandedStrikes(), retriggers, reason: `fix round push did not land (${landing.outcome})`, standDownReason: `fix round push did not land (${landing.outcome}): ${landing.reason}` });
@@ -5420,13 +5483,41 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       return finish({ outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason });
     }
     if (fixAction.kind === "scope-needed") {
+      const scopeAction = fixAction;
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha,
         ...(fixAction.attribution ? { attribution: fixAction.attribution.kind, attribution_reason: fixAction.attribution.reason } : {}) });
-      const workflowPaths = fixAction.paths.filter((path) => path.startsWith(".github/workflows/"));
+      const workflowPaths = fixAction.paths.filter(isWorkflowPath);
       const instrumentPaths = fixAction.paths.filter(isUngrantableInstrumentPath);
-      if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
-        const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
-        const paths = [...new Set(fixAction.paths)].sort();
+      const paths = [...new Set(fixAction.paths)].sort();
+      let landing: FixRoundLanding | undefined;
+      let heldPaths: string[] = [];
+      const pushScopeRepair = async (): Promise<string | undefined> => {
+        if (roundStartSha === undefined || currentMergeConflict !== undefined || harnessCommitRefused || !fixLeftEdits()) return undefined;
+        const base = roundStartSha;
+        let partialHead: string | undefined;
+        try {
+          const repair = await commitPartialScopeRepair(opts.worktreePath, base, opts.guardRoundHead ? opts.branch : undefined, paths, (branch) => {
+            harnessCommit(fixReport, { ...firstOptions, derivedCommit: derivedFirst ?? derivedFixCommit(opts.task.title, opts.prUrl) }, { branch, base });
+            return harnessCommittedSha;
+          });
+          if (repair) heldPaths = repair.blocked.filter((path) => !paths.includes(path)).sort();
+          partialHead = repair?.head;
+          if (partialHead === undefined) return undefined;
+          expectedHeadShaForPush = partialHead;
+          const lease = opts.guardRoundHead && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, partialHead, lease, ownedSessionPushGuard),
+            partialHead, "rung.strike");
+          landing = await roundLanding(partialHead);
+          return pushed === undefined && landing.landed ? landing.remoteHead : undefined;
+        } catch (error) {
+          if (partialHead !== undefined) landing = pushThrew(error);
+          else deps.log("implement.harness_commit_refused", { reason: String(error), fix_outcome: "NEEDS_SCOPE" });
+          return undefined;
+        }
+      };
+      const escalateScope = async (scopeKind: "workflow" | "instrument" | "unfiled" | "refused", repairedHead?: string,
+        refusal?: string): Promise<{ reason: string; issueUrl?: string }> => {
+        const scopeHead = repairedHead ?? priorHeadSha;
         // W1-T11029: judge the worker's instrument edit in shadow and save it for the operator's spot-check. It grants
         // nothing and never throws, so the escalation below is unchanged.
         if (scopeKind === "instrument") await recordInstrumentGrantShadow({ worktreePath: opts.worktreePath, instrumentPaths,
@@ -5436,24 +5527,28 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         // (the issue's Contract line) and its issue dedup omit the head; a closed issue still gets a fresh one.
         const headIndependent = scopeKind === "unfiled";
         const identityKey = createHash("sha256")
-          .update(JSON.stringify(headIndependent ? [prNumber, paths] : [prNumber, priorHeadSha, paths])).digest("hex");
+          .update(JSON.stringify(headIndependent ? [prNumber, paths] : [prNumber, scopeHead, paths])).digest("hex");
         const prior = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
-          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey && row.head_sha === priorHeadSha);
+          row.outcome === `${scopeKind}-escalated` && row.identity_key === identityKey && row.head_sha === scopeHead);
         let issueUrl = typeof prior?.issue_url === "string" ? prior.issue_url : undefined;
         let deliveryError: { error: string } | undefined;
+        const repairNote = repairedHead === undefined ? undefined : `The in-scope repairs were pushed in commit ${repairedHead}.`;
+        const neededPaths = `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}`;
+        const heldNote = heldPaths.length === 0 ? "" : `\n\nAdditional edits held in the worktree:\n${heldPaths.map((path) => `- ${path}`).join("\n")}`;
         if (!issueUrl) try {
           issueUrl = await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
-            headSha: priorHeadSha, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
+            headSha: scopeHead, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
             ...(headIndependent ? { headDedup: "independent" as const } : {}),
             summary: scopeKind === "workflow"
               ? `PR #${prNumber} needs a workflow repair outside the fix lane — ${opts.prUrl}`
               : scopeKind === "instrument" ? `PR #${prNumber} needs an instrument edit only the operator can grant — ${opts.prUrl}`
-              : `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`,
+              : scopeKind === "unfiled" ? `unfiled PR #${prNumber} needs scope outside its own diff — ${opts.prUrl}`
+              : `PR #${prNumber} still needs a scope decision after its partial repair — ${opts.prUrl}`,
             detail: `@${opts.reviewBase.owner}: ${opts.prUrl} ` + (scopeKind === "workflow"
               ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
               : scopeKind === "instrument" ? `needs instrument edits a scope amendment always refuses (instrument-path): ${instrumentPaths.join(", ")}.`
-              : "has no plan record to amend.") + ` Round ${roundId} ` +
-              `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}\n\n` +
+              : scopeKind === "unfiled" ? "has no plan record to amend." : `scope amendment was refused (${refusal}).`) +
+              (repairNote ? ` ${repairNote}` : "") + ` Round ${roundId} ${neededPaths}${heldNote}\n\n` +
               `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
               `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}` +
               (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
@@ -5462,17 +5557,25 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
                 ? "grant exactly these paths to this PR's fix lane: the repository owner replies revise-pr on this issue"
                 : "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
-          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge });
+          { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
+          repairNote ? `${repairNote} This PR ${neededPaths}${heldNote}` : undefined);
         } catch (error) {
           deliveryError = { error: String(error) };
         }
         const reason = issueUrl ? `${scopeKind} scope need escalated` : `${scopeKind} scope escalation undelivered`;
         deps.log("fix.scope_amendment", { outcome: issueUrl ? `${scopeKind}-escalated` : `${scopeKind}-escalation-failed`,
-          identity_key: identityKey, paths, head_sha: priorHeadSha, pr_number: prNumber, round_id: roundId,
+          identity_key: identityKey, paths, head_sha: scopeHead, pr_number: prNumber, round_id: roundId,
           issue_url: issueUrl, reason, contract_revision: currentContractRevision, ...deliveryError,
           ...(headIndependent ? { red_test_files: baseReproductionFiles(priorCiFailures ?? []) } : {}) });
-        deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: priorHeadSha, reason, paths, issue_url: issueUrl });
-        logFixDone();
+        deps.log("fix.stood_down", { site: `rung.${scopeKind}_scope`, head_sha: scopeHead, reason, paths, issue_url: issueUrl });
+        return { reason, issueUrl };
+      };
+      const finishScopeRound = () => logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing);
+      if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
+        const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
+        const repairedHead = await pushScopeRepair();
+        const { reason, issueUrl } = await escalateScope(scopeKind, repairedHead);
+        finishScopeRound();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl });
       }
       let amendment: ScopeAmendmentOutcome;
@@ -5503,13 +5606,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
             // W1-T10900: requestScopeAmendment refuses the WHOLE ask when any one path is untouched by the worker's
             // diff (path-not-changed), and a refusal is not retried. Drop the untouched paths first and amend the
             // rest; when nothing is touched the original ask stands, so the refusal stays named, not hidden.
-            const touched = fixAction.paths.filter((path) => changed.includes(path));
-            const dropped = fixAction.paths.filter((path) => !changed.includes(path));
-            if (touched.length === 0 || dropped.length === 0) return await amendScope(fixAction.paths, changed, priorHeadSha, true, extra);
+            const touched = scopeAction.paths.filter((path) => changed.includes(path));
+            const dropped = scopeAction.paths.filter((path) => !changed.includes(path));
+            if (touched.length === 0 || dropped.length === 0) return await amendScope(scopeAction.paths, changed, priorHeadSha, true, extra);
             return await amendScope(touched, changed, priorHeadSha, true, { ...extra, dropped_paths: dropped });
           } catch (error) {
             const refused = { kind: "refused" as const, reason: "worker-diff-unreadable", detail: String(error) };
-            deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: fixAction.paths, head_sha: priorHeadSha, ...extra });
+            deps.log("fix.scope_amendment", { outcome: refused.kind, ...refused, paths: scopeAction.paths, head_sha: priorHeadSha, ...extra });
             return refused;
           }
         };
@@ -5521,25 +5624,20 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         logFixDone(undefined, "scope_amendment_pending");
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" });
       }
+      const repairedHead = await pushScopeRepair();
+      const refusal = `${amendment.reason}: ${amendment.detail}`;
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
-        reason: `non-test paths need scope (${amendment.reason}: ${amendment.detail})`,
+        reason: `non-test paths need scope (${refusal})` + (repairedHead ? `. In-scope repairs pushed in ${repairedHead}. Scope still needed for ${paths.join(", ")}` : ""),
         scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
         scope_amendment_refusal: amendment.reason, scope_amendment_refusal_detail: amendment.detail, scope_amendment_asks: scopeAsks,
         fix_outcome: fixOutcome?.kind });
-      if (harnessCommitCount > 0) {
-        let landing: FixRoundLanding | undefined;
-        try {
-          await selfCheckBeforePush();
-          const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
-          landing = await roundLanding(expectedHeadShaForPush);
-          if (pushed && pushed !== "refused") return finish(pushed);
-        } catch (error) {
-          landing = pushThrew(error);
-          throw error;
-        } finally { logFixDone(landing?.landed ? landing.remoteHead ?? expectedHeadShaForPush : undefined, undefined, landing); }
-      } else logFixDone();
-      if (scopeMainOwned.length > 0 && deps.updateBranch && prNumber !== undefined) {
+      if (repairedHead !== undefined && scopeMainOwned.length === 0) {
+        const { issueUrl } = await escalateScope("refused", repairedHead, refusal);
+        finishScopeRound();
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope", issueUrl });
+      }
+      finishScopeRound();
+      if (scopeMainOwned.length > 0 && landing?.landed !== false && deps.updateBranch && prNumber !== undefined) {
         const refresh = { pr_number: prNumber, head_sha: priorHeadSha, red_checks: [...new Set((currentCiFailures ?? []).map((f) => f.name))],
           test_files: [], matching_base_files: scopeMainOwned, method: "merge", reason: "scope-main-owned" };
         try {

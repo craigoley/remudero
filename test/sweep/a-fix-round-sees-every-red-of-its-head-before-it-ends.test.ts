@@ -24,7 +24,8 @@ function worker(text: string): WorkerResult {
   };
 }
 
-async function round(t: TestContext, pending: boolean, options: { reports?: string[]; unreadable?: boolean; land?: boolean } = {}) {
+async function round(t: TestContext, pending: boolean,
+  options: { reports?: string[]; unreadable?: boolean; land?: boolean; catalog?: "ops" } = {}) {
   const repo = gitRepo({ kind: "fix-round-early-checks" });
   t.after(() => repo.cleanup());
   const headSha = repo.git("rev-parse", "HEAD");
@@ -50,8 +51,9 @@ async function round(t: TestContext, pending: boolean, options: { reports?: stri
     state: "failure" as const, headSha, criteria: [], testTheater: false, summary: "required checks red",
     floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, reviewerOutcome: "sweep-reconstructed-ci-log",
   };
+  const task = { id: taskId, title: "repair checks", catalog: options.catalog };
   const outcome = await runFixRung({
-    taskId, runId: "early-red-round", task: { id: taskId, title: "repair checks" },
+    taskId, runId: "early-red-round", task,
     prUrl: "https://github.com/acme/remudero/pull/1", branch: `run-${taskId}-1`, worktreePath: repo.dir,
     mount, settingsFile: join(repo.dir, "settings.json"), config: { root: repo.dir } as Config,
     budgetUsd: 5, strikeCap: 2, initialSessionId: "initial", initialReview, ciFailures: failures, ...earlyEvidence,
@@ -105,6 +107,16 @@ test("a workflow-scope escalation names the late check still open", async (t) =>
   assert.equal(result.outcome.outcome, "stood_down");
   assert.equal(result.issues.length, 1);
   assert.ok(result.issues[0]!.includes(`still unaddressed: ${shardCheck}`));
+});
+
+test("an ops scope escalation names the late check and keeps worker diagnostics host-side", async (t) => {
+  const result = await round(t, true, { catalog: "ops",
+    reports: ["FIX_OUTCOME: NEEDS_SCOPE .github/workflows/ci.yml\nInternal worker diagnosis"] });
+  assert.equal(result.outcome.outcome, "stood_down");
+  assert.ok(result.outcome.reason.includes(shardCheck));
+  assert.equal(result.issues.length, 1);
+  assert.ok(result.issues[0]!.includes(`still unaddressed: ${shardCheck}`));
+  assert.ok(!result.issues[0]!.includes("Internal worker diagnosis"));
 });
 
 test("green CI at the round's own new head clears the outstanding check", async (t) => {

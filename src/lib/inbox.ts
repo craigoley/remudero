@@ -14,7 +14,7 @@ import { hostname } from "node:os";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import type { MergedResolver, Plan, Task } from "./plan.js";
 import { isPlacedTestPath, missingDeclaredPaths, placementImports, placementSubsystemMap, parseTasksFromYaml, PlanError, RETIREMENT_REASONS, TASK_TYPES, unmetDependencies } from "./plan.js";
-import { lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
+import { declaresDesignInvariant, designContractChanged, lintPlan, lintTask, MINTED_TASK_ID_RE, promoteIntroducedPlanOnlyDiagnostics, type LintOpts, type LintViolation } from "./task-linter.js";
 import { DUPLICATE_SLUG_SHINGLE_K } from "./task-linter.js";
 import { bestNearDuplicate, DEFAULT_DUPLICATE_CUTOFF, type DuplicateCorpusEntry } from "./knowledge-dedup.js";
 import type { GhFailureReason } from "./status.js";
@@ -1330,7 +1330,12 @@ export function blockingLintMessages(
   // handler, and a `setTimeout` cannot fire while the event loop is blocked.
   const fragmentIds = new Set(fragmentPlan.tasks.map((t) => t.id));
   const filingOpts = facts ? draftFilingLintOptions(facts) : {};
-  const results = lint(merged, () => filingOpts, fragmentIds);
+  // W1-T14310: the declaration is asked of a task exactly as the plan PR preflight asks it (run-task.ts lintPlanCommand):
+  // one new, re-authored against its base-plan twin, or already declaring. A shadowed base task left as it was is not.
+  const results = lint(merged, (task) => ({
+    ...filingOpts,
+    requireDesignInvariantDeclaration: designContractChanged(basePlan.byId.get(task.id), task) || declaresDesignInvariant(task),
+  }), fragmentIds);
   const out: string[] = [];
   for (const task of fragmentPlan.tasks) {
     for (const v of draftMissingPathViolations(task, facts ?? HARNESS_FACTS)) out.push(`${task.id}: [${v.check}] ${v.message}`);
@@ -1813,9 +1818,13 @@ export function inboxDraftExampleFragmentYaml(): string {
     "  attempts: 0",
     "  files:",
     "    - src/lib/plan.ts",
+    "  design: |",
+    "    INVARIANT a-valid-input-parses-as-before: every non-empty input parses as before.",
     "  acceptance:",
     '    - claim: "parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
     '      proof: "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
+    '    - claim: "invariant:a-valid-input-parses-as-before — every non-empty input parses as before"',
+    '      proof: "unit test: parseTasksFromYaml parses a non-empty input to the same tasks"',
     '  origin: "architect"',
   ].join("\n");
 }
@@ -2563,7 +2572,9 @@ function draftSizingOptions(opts: LintOpts, task: import("./plan.js").Task): Lin
 
 /** W1-T9039: every floor lints a drafted task as the push floor lints a task its diff adds. */
 export function draftFilingLintOptions(facts: DraftRepoFacts, knownRepos?: ReadonlySet<string>): LintOpts {
-  return { ...DRAFT_FILING_LINT_OPTIONS, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
+  // W1-T14310: a drafted task is new, so the preflight asks it for its design-invariant declaration. `addedTaskIds` is
+  // deliberately not set: a draft's `NEW-n` placeholder is minted at approve, and the option would refuse every draft.
+  return { ...DRAFT_FILING_LINT_OPTIONS, requireDesignInvariantDeclaration: true, blockedDisposition: { baseTask: undefined }, baseAcceptance: [],
     moduleExists: facts.moduleExists, readGrepProofFile: facts.readGrepProofFile, knownRepos };
 }
 
