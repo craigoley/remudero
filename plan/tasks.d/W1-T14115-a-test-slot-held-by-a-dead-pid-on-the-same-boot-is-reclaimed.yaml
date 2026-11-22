@@ -2,7 +2,6 @@
   title: A test slot held by a killed preflight is reclaimed when its pid is dead on the same boot
   repo: remudero
   depends_on: []
-  dispatch_hold: true # overlaps merged W1-T14253 and is looser (one scan frees a slot, which W1-T14253 criterion 3 refuses); the operator releases or retires it
   priority: 1
   type: implement
   verify: auto
@@ -13,7 +12,9 @@
   files:
     - src/lib/test-slot.ts
     - test/ci/suites/a-test-slot-held-by-a-dead-pid-on-the-same-boot-is-reclaimed.test.ts
-  status: queued
+  status: blocked
+  retirement: retired # operator 2026-11-22T16:46:54Z: "Retire W1-T14115"; W1-T14253 (#20250) shipped the dead-owner release with a stricter rule
+  superseded_by: W1-T14253
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 05:27Z on the Azure host: /mnt/scratch/rmd/test-slots/slot-1.json names pid 2438443 (label
