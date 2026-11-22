@@ -1310,8 +1310,11 @@ function routingAssignmentFromLine(acc: RoutingTelemetryAccumulator, line: Recor
   const routing = raw.routing;
   const routingObject = routing && typeof routing === "object" ? (routing as Record<string, unknown>) : undefined;
   const capabilityPreference = routingObject?.capabilityPreference;
+  // W1-T14373: a preference that stood aside for another provider's expiring budget did not govern the spawn; the
+  // headroom auction drew it, so it is not preferred-provider routing.
   const preferredProvider =
-    capabilityPreference && typeof capabilityPreference === "object"
+    capabilityPreference && typeof capabilityPreference === "object" &&
+      (capabilityPreference as Record<string, unknown>).stoodAside === undefined
       ? str((capabilityPreference as Record<string, unknown>).provider)
       : undefined;
   const preferenceBypass = routingObject?.preferenceBypass;
