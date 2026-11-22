@@ -119,7 +119,7 @@ import {
   blockerFields, decideSloRung, judgeSloRebuild, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
   securityArmRefusalAtHead, securityHoldReason, securityPolicyCause, type SecurityArmRefusal,
 } from "./pr-blocker.js";
-import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
+import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "./clock.js";
 import { isWorkerProviderId, type Config, type WorkerProviderId, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { defaultGitCaptureAsync, gitPushEmptyCommit, gitPushRunBranchAsync, worktreePushExec, worktreePushExecAsync, runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
 import { ghExec, ghJson, ghJsonAsync, ghLinesAsync, ghTextAsync, GhPaceWouldBlockError, paceGhEntryAsync, type GhJsonReadOptions } from "./github-transport.js";
@@ -322,6 +322,8 @@ import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
   buildEscalationJudgePrompt,
+  editEscalationMachineFields,
+  escalationBodyInLegacyOrder,
   escalationCause,
   escalationHeadSha,
   escalationIssueCause,
@@ -691,10 +693,12 @@ function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl
   key: { class: EscalationClass; taskId: string; cause: EscalationCause }): { view: OpenIssue; stored: OpenIssue } | undefined {
   const prefix = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
   const probe = { ...key, summary: `PR ${pr.prUrl}`, detail: "" };
-  const asked = open.filter(issue => stalledStageIssueIdentity(issue)?.startsWith(prefix) === true &&
+  const asked = open.filter(issue =>
+    stalledStageIssueIdentity({ title: issue.title, body: escalationBodyInLegacyOrder(issue.body) })?.startsWith(prefix) === true &&
     matchDuplicateEscalation(probe, [issue]) !== undefined).sort((a, b) => a.number - b.number)[0];
   if (!asked) return undefined;
-  const body = (stallIssueBodyAtHead(asked.body, pr.headSha) ?? asked.body ?? "").replace(/^\*\*Contract:\*\*.*\n/m, "");
+  const body = editEscalationMachineFields(stallIssueBodyAtHead(asked.body, pr.headSha) ?? asked.body ?? "",
+    (fields) => fields.replace(/^\*\*Contract:\*\*.*\n/m, ""));
   return { view: { ...asked, body }, stored: asked };
 }
 
@@ -703,7 +707,7 @@ function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl
  *  the issue-revalidation garden closes a stall whose stored head the PR has moved past (#16079). */
 export function stallIssueBodyAtHead(body: string | undefined, headSha: string): string | undefined {
   if (body === undefined || escalationHeadSha(body) === undefined || escalationHeadSha(body) === headSha) return undefined;
-  return body.replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${headSha}`);
+  return editEscalationMachineFields(body, (fields) => fields.replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${headSha}`));
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -4480,7 +4484,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
             const head = escalationHeadSha(issue.body);
-            return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
+            return (head !== undefined && head !== pr.headSha)
+              || stalledStageIssueIdentity({ title: issue.title, body: escalationBodyInLegacyOrder(issue.body) }) === stallIdentity;
           });
         } }
         : issues;
@@ -11981,6 +11986,8 @@ export interface PlanRepairOutcome {
   reason?: string;
   renames?: Record<string, string>;
   newHeadSha?: string;
+  /** W1-T14198: a hand-off stood down only for a young reservation; the head is tried again at this time. */
+  retryAtMs?: number;
 }
 
 /** A task-id-existence header naming held ids; exported so a fixture drives both arms (W1-T2317). */
@@ -12120,11 +12127,26 @@ export function planRepairHistoryFromLedger(lines: readonly Record<string, unkno
     if (line.outcome === "stood-down") {
       keys.add(`${head}@${String(line.signature)}@stood-down`).add(`${head}@${String(line.signature)}@stood-down@${String(line.reason)}`);
       if (line.signature !== "held-task-id-handoff") continue;
+      if (typeof line.retry_at === "string") {
+        keys.add(`${head}@held-task-id-handoff@retry-at@${line.retry_at}`);
+        continue;
+      }
     }
     keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
     if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
   }
   return keys;
+}
+
+/** The newest retry time ledgered for a head's young-holder hand-off stand-down (W1-T14198). */
+function planHandoffRetryAtMs(history: ReadonlySet<string>, head: string): number | undefined {
+  const prefix = `${head}@held-task-id-handoff@retry-at@`;
+  let latest: number | undefined;
+  for (const key of history) {
+    const at = key.startsWith(prefix) ? Date.parse(key.slice(prefix.length)) : NaN;
+    if (Number.isFinite(at) && (latest === undefined || at > latest)) latest = at;
+  }
+  return latest;
 }
 
 export function decidePlanRepair(
@@ -12260,17 +12282,31 @@ export async function renumberPlanPrIds(
   }
 }
 
+function planHandoffClaimPath(ledgerPath: string, head: string): string {
+  const key = createHash("sha256").update(JSON.stringify([basename(ledgerPath), head])).digest("hex");
+  return join(dirname(ledgerPath), "plan-handoff-attempts", key);
+}
+
 // Persist the claim before the effect so even a crashed sweep cannot spend the same head again.
 function claimPlanHandoff(ledgerPath: string, head: string, runId: string): boolean {
-  const dir = join(dirname(ledgerPath), "plan-handoff-attempts");
-  const key = createHash("sha256").update(JSON.stringify([basename(ledgerPath), head])).digest("hex");
-  mkdirSync(dir, { recursive: true });
+  const path = planHandoffClaimPath(ledgerPath, head);
+  mkdirSync(dirname(path), { recursive: true });
   try {
-    writeFileSync(join(dir, key), JSON.stringify({ head, run_id: runId }), { flag: "wx" });
+    writeFileSync(path, JSON.stringify({ head, run_id: runId }), { flag: "wx" });
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
+  }
+}
+
+/** W1-T14198: a young-holder stand-down gives back this pass's claim; a claim that cannot be removed keeps the head spent. */
+function releasePlanHandoffClaim(ledgerPath: string, head: string): { released: boolean; reason?: string } {
+  try {
+    unlinkSync(planHandoffClaimPath(ledgerPath, head));
+    return { released: true };
+  } catch (error) {
+    return { released: false, reason: String((error as Error)?.message ?? error) };
   }
 }
 
@@ -12301,15 +12337,17 @@ export async function handOffHeldPlanPrIds(
     }
   }
   let cut = false;
+  const stoodDown = (why: string | { reason: string; retryAtMs: number }): PlanRepairOutcome =>
+    typeof why === "string" ? { outcome: "stood-down", reason: why } : { outcome: "stood-down", ...why };
   try {
     const beforeCut = await handoffStandDown(handoffs, repoDir, git, deps);
-    if (beforeCut !== undefined) return { outcome: "stood-down", reason: beforeCut };
+    if (beforeCut !== undefined) return stoodDown(beforeCut);
     await worktreeAddAsync(repoDir, wt, basename(wt), `origin/${branch}`, { log: deps.log });
     cut = true;
     const observed = (await git(wt, ["rev-parse", "HEAD"])).trim();
     if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
     const beforeEdit = await handoffStandDown(handoffs, repoDir, git, deps);
-    if (beforeEdit !== undefined) return { outcome: "stood-down", reason: beforeEdit };
+    if (beforeEdit !== undefined) return stoodDown(beforeEdit);
     const files: string[] = [];
     for (const [rel, edit] of edits) {
       const path = join(wt, rel);
@@ -12328,7 +12366,7 @@ export async function handOffHeldPlanPrIds(
     const newHeadSha = (await git(wt, ["rev-parse", "HEAD"])).trim();
     assertLiveWriteAllowed("git-push", `recording the reservation hand-off for ${ids} on ${branch} for PR #${pr.prNumber}`);
     const beforePush = await handoffStandDown(handoffs, repoDir, git, deps);
-    if (beforePush !== undefined) return { outcome: "stood-down", reason: beforePush };
+    if (beforePush !== undefined) return stoodDown(beforePush);
     await git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
     return { outcome: "handed-off", newHeadSha };
   } catch (error) {
@@ -12338,15 +12376,16 @@ export async function handOffHeldPlanPrIds(
   }
 }
 
-/** Fetch all reservations before checking live holders, and stand down on unreadable facts. */
+/** Fetch all reservations before checking live holders, and stand down on unreadable facts; youth alone is a dated stand-down. */
 async function handoffStandDown(
   handoffs: readonly HeldIdHandoff[], repoDir: string, git: (cwd: string, args: string[]) => Promise<string>,
   deps: Pick<BuildSweepEffectsDeps, "owner" | "repo"> & { readJson: (args: string[]) => Promise<unknown>; nowMs: () => number },
-): Promise<string | undefined> {
+): Promise<string | { reason: string; retryAtMs: number } | undefined> {
   try {
     const readShas = async (refs: readonly string[]) => new Map((await git(repoDir, ["ls-remote", "--refs", "origin", ...refs]))
       .split("\n").map((row) => row.split("\t")).filter(([, name]) => name !== undefined && refs.includes(name)).map(([sha, name]) => [name!, sha!]));
     const validated = new Map<string, string>();
+    let young: { reason: string; retryAtMs: number } | undefined;
     for (const { id, holder } of handoffs) {
       const ref = taskIdReservationRef(id);
       const readSha = async () => (await readShas([ref])).get(ref) ?? "";
@@ -12359,7 +12398,9 @@ async function handoffStandDown(
       const started = Date.parse(parsed.holder.startedAt ?? "");
       if (!Number.isFinite(started)) return `the reservation of ${id} records no start time`;
       if (!(deps.nowMs() - started > RESERVATION_PUSH_GRACE_MS)) {
-        return `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`;
+        const retryAtMs = Math.max(young?.retryAtMs ?? -Infinity, started + RESERVATION_PUSH_GRACE_MS);
+        young = { reason: young?.reason ??
+          `the reservation of ${id} started at ${parsed.holder.startedAt}; it must be older than ${RESERVATION_PUSH_GRACE_MS / 3_600_000} h`, retryAtMs };
       }
       validated.set(ref, sha);
     }
@@ -12389,7 +12430,7 @@ async function handoffStandDown(
       const openPr = open.rows.find((row) => row.headRefName === holder);
       if (openPr) return `open PR #${openPr.number} has holder branch ${holder} of ${id} as its head`;
     }
-    return undefined;
+    return young;
   } catch (error) {
     return `a holder fact is unreadable: ${capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP)}`;
   }
@@ -23496,7 +23537,8 @@ export async function runSweep(
     let facts: PlanRepairFacts = {};
     const head = `${pr.prNumber}@${pr.headSha}`;
     // The usual CI excerpt can drop part of the gate's HELD block.
-    const handoffJobId = pr.isPlanFiling && pr.headRefName && !planRepairHistory.has(`${head}@held-task-id-handoff`)
+    const handoffJobId = pr.isPlanFiling && pr.headRefName && !planRepairHistory.has(`${head}@held-task-id-handoff`) &&
+      !(now < (planHandoffRetryAtMs(planRepairHistory, head) ?? -Infinity))
       ? pr.ciFailures?.find((f) => f.name === "task-id-existence" && /^\d+$/.test(f.jobId ?? ""))?.jobId
       : undefined;
     if (handoffJobId || isMachineLanePlanHead(pr.headRefName) || filedTaskPlanRepairCandidate(pr)) {
@@ -23522,11 +23564,13 @@ export async function runSweep(
     }
     let result: PlanRepairOutcome;
     try {
-      if (decision.action === "handoff" &&
-          (planRepairHistoryFromLedger(readLedger(deps.ledgerPath)).has(`${head}@${decision.signature}`) ||
-           !claimPlanHandoff(deps.ledgerPath, head, deps.runId))) {
-        planRepairHistory.add(`${head}@${decision.signature}`);
-        return notRepaired;
+      if (decision.action === "handoff") {
+        const fresh = planRepairHistoryFromLedger(readLedger(deps.ledgerPath));
+        if (!fresh.has(`${head}@${decision.signature}`) && now < (planHandoffRetryAtMs(fresh, head) ?? -Infinity)) return notRepaired;
+        if (fresh.has(`${head}@${decision.signature}`) || !claimPlanHandoff(deps.ledgerPath, head, deps.runId)) {
+          planRepairHistory.add(`${head}@${decision.signature}`);
+          return notRepaired;
+        }
       }
       result =
         decision.signature === "base-red"
@@ -23537,6 +23581,10 @@ export async function runSweep(
       result = { outcome: "error", reason: String((e as Error)?.message ?? e) };
     }
     if (decision.signature === "base-red" && result.reason !== undefined) result = { outcome: `error: ${result.reason}` };
+    const { retryAtMs, ...outcome } = result;
+    const retry = decision.action === "handoff" && result.outcome === "stood-down" && Number.isFinite(retryAtMs)
+      ? releasePlanHandoffClaim(deps.ledgerPath, head) : undefined;
+    const retryAtIso = retry?.released ? fixedClock(retryAtMs!).iso() : undefined;
     const standDownKey = `${pr.prNumber}@${pr.headSha}@${decision.signature}@stood-down`;
     if (result.outcome !== "stood-down" || !planRepairHistory.has(`${standDownKey}@${String(result.reason)}`)) {
       appendLine(deps.ledgerPath, {
@@ -23545,11 +23593,14 @@ export async function runSweep(
         ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
         ...(decision.action === "retitle" ? { title: decision.title } : {}),
         ...(decision.action === "handoff" ? { handoffs: decision.handoffs } : {}),
-        ...result,
+        ...outcome,
+        ...(retryAtIso !== undefined ? { retry_at: retryAtIso } : {}),
+        ...(retry?.reason !== undefined ? { claim_release_error: retry.reason } : {}),
       });
     }
     if (result.outcome === "stood-down") planRepairHistory.add(standDownKey).add(`${standDownKey}@${String(result.reason)}`);
-    if (result.outcome !== "unwired" && (result.outcome !== "stood-down" || decision.action === "handoff")) {
+    if (retryAtIso !== undefined) planRepairHistory.add(`${head}@held-task-id-handoff@retry-at@${retryAtIso}`);
+    else if (result.outcome !== "unwired" && (result.outcome !== "stood-down" || decision.action === "handoff")) {
       planRepairHistory.add(`${head}@${decision.signature}`);
     }
     if (["renumbered", "retitled", "updated", "handed-off"].includes(result.outcome)) {
@@ -30814,6 +30865,30 @@ export function selectReviewAdmissions(
 
 /** W1-T14073 — when one review input joined the queue, or undefined to keep its PR's createdAt. */
 export type ReviewQueuedAt = (pr: OpenPrView) => string | undefined;
+
+/** W1-T14243 — THE LIGHT PASS'S EARLY-BATCH SPLIT RANKS ON ADMISSION'S KEY: {@link reviewInputQueuedAt} folded from the
+ *  live ledger view the light pass selects from, so the split never delays an input behind a PR eligible after it. */
+export function lightPassReviewQueuedAt(deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "now">): ReviewQueuedAt {
+  const now = deps.now ? deps.now() : systemClock.now();
+  return reviewInputQueuedAt((deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath), now);
+}
+
+/** W1-T14243 — the early candidates that start before the refresh: each one queued ahead of the first delayed review
+ *  candidate in admission's order. With no delayed candidate every early candidate starts and no ledger is read. */
+export function lightPassEarlyReviewBatch(
+  reviewCandidates: readonly OpenPrView[],
+  earlyCandidates: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "now">,
+): OpenPrView[] {
+  const early = new Set(earlyCandidates.map((pr) => pr.prNumber));
+  const delayed = reviewCandidates.filter((pr) => !early.has(pr.prNumber));
+  if (delayed.length === 0) return [...earlyCandidates];
+  const queuedAt = lightPassReviewQueuedAt(deps);
+  const inQueueOrder = (prs: readonly OpenPrView[]): OpenPrView[] =>
+    orderPendingReviewsNeedsPersonLast(prs.map((pr) => ({ pr })), undefined, queuedAt).map(({ pr }) => pr);
+  const oldestDelayed = inQueueOrder(delayed)[0]!;
+  return earlyCandidates.filter((pr) => inQueueOrder([pr, oldestDelayed])[0] === pr);
+}
 
 /** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
  *  W1-T12534's absent-repush map, folded from the ledger view the pass already holds (no second scan). A head

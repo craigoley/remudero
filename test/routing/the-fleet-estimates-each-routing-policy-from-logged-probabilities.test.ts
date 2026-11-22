@@ -604,6 +604,7 @@ test("W1-T14146: the measurement cadence writes one routing.policy.estimate row 
 });
 
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+const REVIEWER_MOUNT = { model: "sonnet", provider: "claude", effort: "high", maxTurns: 10, contextBudget: 120000 } as const;
 function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
 
 /** The review lane run for real (`runReview`, src/cli/commands/review.ts) through to its reviewer. The reviewer's
@@ -661,11 +662,15 @@ async function reviewedByTheLane(task: { id: string; files?: string[] }, setup: 
         budget_present: false, own_task_record_missing: false, reviewer_outcome: "not_attempted", verdict_lines: [], ...setup },
       settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as never,
       log: () => {}, say: () => {}, account: (r: never) => r, spawnReviewer: true, disarm: () => {},
-      reviewerMount: { model: "sonnet", provider: "claude", effort: "high", maxTurns: 10, contextBudget: 120000 },
+      reviewerMount: REVIEWER_MOUNT,
       headCheckoutDir: REPO_ROOT, ledgerPath: join(root, "review-ledger.ndjson"), runId: `review-PR1-${1795000000000 + n}`,
     } as never);
+    // The lane's advisory shadow judge (runShadowJudge) samples 1 head in 20, here this checkout's HEAD, and always spawns
+    // a model other than the reviewer's (shadowJudgeMount): keep the reviewer's own assignments.
     return readFileSync(join(root, "state", LEDGER_FILENAME), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Row)
-      .filter((row) => row.step === "worker.assignment").map((row) => ({ ...row, ts: at(n) }));
+      .filter((row) => row.step === "worker.assignment"
+        && (row.worker_assignment as { requested?: { model?: unknown } } | undefined)?.requested?.model === REVIEWER_MOUNT.model)
+      .map((row) => ({ ...row, ts: at(n) }));
   } finally {
     process.env.PATH = oldPath;
     rmSync(root, { recursive: true, force: true });
