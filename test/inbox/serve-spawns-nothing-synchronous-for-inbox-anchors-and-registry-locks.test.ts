@@ -91,10 +91,19 @@ function recordSyncSpawns(t: TestContext): SpawnRecord {
   return record;
 }
 
-test("the pre-import recorder catches fs-race-safe's captured synchronous ps syscall", (t) => {
+/** W1-T11457: Linux uses /proc after a one-time CLK_TCK lookup. */
+const onLinux = process.platform === "linux";
+
+test("the pre-import recorder sees one Linux clock lookup and no child on the next PID read", (t) => {
   const spawns = recordSyncSpawns(t);
-  defaultGetProcessStartTime(process.pid);
-  assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), spawns.calls.join("\n"));
+  assert.equal(typeof defaultGetProcessStartTime(process.pid), "number");
+  if (onLinux) {
+    assert.deepEqual(spawns.calls.splice(0), ['execFileSync:getconf ["CLK_TCK"]']);
+    assert.equal(typeof defaultGetProcessStartTime(process.pid), "number");
+    assert.deepEqual(spawns.calls, [], "a warm Linux lookup is spawn-free");
+  } else {
+    assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), spawns.calls.join("\n"));
+  }
 });
 
 const isGitGrep = (call: string): boolean => call.startsWith("execFile:git ") && call.includes('"grep"');
@@ -304,7 +313,8 @@ test("W1-T11128 criterion 2: the synchronous registry lock polls without a sleep
 
   assert.deepEqual(spawns.calls.filter((call) => !call.startsWith("execFileSync:ps ")), [],
     "polling starts no child except the preserved portable identity probe");
-  assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), "the CLI retains its portable probe");
+  if (onLinux) assert.deepEqual(spawns.calls, [], "on Linux the portable probe reads /proc and spawns no ps");
+  else assert.ok(spawns.calls.some((call) => call.startsWith("execFileSync:ps ")), "the CLI retains its portable probe");
   assert.ok(elapsed >= 140, `the bounded wait still waits (elapsed ${elapsed}ms)`);
 });
 

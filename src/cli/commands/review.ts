@@ -28,6 +28,8 @@ import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, try
 import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
+import { deriveTaskClass } from "../../lib/task-class.js";
+import { withReceiptWork } from "../../lib/benchmark-run.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
@@ -114,6 +116,11 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
     ...(planLintRetryHead !== undefined && /^[a-f0-9]{40}$/i.test(planLintRetryHead) ? { planLintRetryHead } : {}),
     ...(excludeProviders.length ? { excludeProviders } : {}),
   };
+}
+
+/** W1-T14156: the `rmd review` verb runs the model reviewer unless its caller chose a mode. */
+export function operatorReviewArgs(rest: string[]): string[] {
+  return rest.includes("--execution-mode") ? rest : [...rest, "--execution-mode", "semantic"];
 }
 
 export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
@@ -560,6 +567,13 @@ export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post:
     await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
       : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
   };
+}
+
+/** W1-T14146: what the reviewer's assignment receipt records of the reviewed work — the class of the PR's plan task,
+ *  `deriveTaskClass` of its files as its implement run records it — and nothing when the review has no plan task
+ *  (untasked, or its task unresolved at head), so the receipt names no class rather than the default one. */
+export function reviewedTaskWork(task: { files?: string[] }, setup: Pick<ReviewReplayInput, "untasked" | "head_task_resolved">): { taskClass?: string } {
+  return setup.untasked || !setup.head_task_resolved ? {} : { taskClass: deriveTaskClass({ files: task.files }) };
 }
 
 export async function runReview(host: ReviewCommandHost, args: {
@@ -1139,7 +1153,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerClockBoundMs =
           host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
-        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        const reviewerSpawn = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T14146: every reviewer call, the judge's and its shadow's, carries the reviewed work, so its assignment
+        // receipt records the plan task's class.
+        const reviewedWork = reviewedTaskWork(task, replayInput);
+        const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
@@ -1289,6 +1307,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     // spawn still reported `not_attempted_plan_only`, i.e. the ledger lied in the one direction
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
+    // Only when criteria exist: a review with none has no semantic work to skip, so it keeps the
+    // bare `not_attempted` ("no criteria") value it always reported.
+    deterministicMode: args.spawnReviewer === false && criteria.length > 0,
   });
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
@@ -1987,7 +2008,7 @@ export interface ReviewCommandDeps {
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
   fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
-  /** Operator CLI remains deterministic; only internal unattended callers opt in. */
+  /** The CLI verb defaults to semantic through operatorReviewArgs; internal callers that pass no flag stay deterministic. */
   executionMode?: "deterministic" | "semantic";
   /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
   excludeProviders?: SpawnWorkerArgs["excludeProviders"];

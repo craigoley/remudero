@@ -66,7 +66,7 @@ import { decideGatePosture, type GatePostureDecision, type GatePostureFinding, t
 import { refusalReason } from "../../lib/inbox.js";
 import { gatherRuns, parseLedger } from "../../lib/retro.js";
 import type { ChildEntryStoreOptions } from "../../lib/child-entry-argv.js";
-import { bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
+import { bindCanonicalCoreCriteria, bindCanonicalOpsCriteria, partitionAcceptanceCriteria, bodyWithInconclusiveProofAtOpen, defaultProofRunnerAsync, openPullRequestCheckedAsync, PrOpenRefusedError, proposeStaleProofReplacement, readOtherOpenPrForTask, recordRefusedPrOpen, type CanonicalOpsCriteriaAtOpen, type AsyncOpenPullRequestProofRunner, type OpenPrJsonReader, type OpenPullRequestProofRunner } from "../../lib/pr-open.js";
 import { createPlanPrRest, probeExistingPlanPr } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, requestScopeAmendment, readBuildScopeRecovery, saveBuildScopeRecovery, restoreBuildScopeRecovery, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentWritePorts } from "../../lib/proof-amendment.js";
 import { appendLedger, DECISION_RELEVANT_LEDGER_STEPS } from "../../lib/ledger.js";
@@ -80,7 +80,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, runPairedTrial, seal
 import { runProspectiveAaPair } from "../../lib/benchmark-aa-prospective.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "../../lib/self-forecast.js";
 import { readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
-import { releasedTaskIds, assertRunnable, loadPlan, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
+import { releasedTaskIds, assertRunnable, loadPlan, parseTasksFromYaml, selectTask, type AcceptanceCriterion, type TaskRisk, type Plan, type Task, taskRecordPath } from "../../lib/plan.js";
 import { GENERIC_EXIT_CODE, RmdError } from "../../lib/errors.js";
 import { assertLintClean, lintTask, TaskLintError } from "../../lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "../../lib/dispatch-repair.js";
@@ -133,13 +133,14 @@ import { shouldRecordDecision, reversibilityFactor, type DiffFileChange } from "
 import { assertLiveWriteAllowed } from "../../lib/live-write-guard.js";
 import { runChildCredentialSocket } from "../../lib/secret-boundary.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { resolveOwnerRepoAtAsync } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { buildIntoStore, childEntryStoreRoot } from "../../lib/child-entry-store.js";
 import { buildEngineAfterStore } from "../../lib/engine-tree.js";
 import { chainAbortSignal } from "../../lib/run-child.js";
-import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync } from "../../lib/tick-read-worker.js";
+import { type RollupCheck, fetchCiFailures, fetchCiFailuresAsync, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
 
 export type GitRunner = (args: string[], stdin?: string) => string;
 
@@ -1139,6 +1140,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task & { catalog?: "public" | "ops" };
   opsCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
+  /** W1-T12936: Core public-plan criteria pinned at one commit, for a target whose own plan lacks the task. */
+  coreCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
   taskId: string;
   /** Resolved once by the outer run so reviewer watchdogs reuse the same policy value. */
   workerAbandonMs?: number;
@@ -1864,7 +1867,7 @@ async function ghPrCreateFillCommandAsync(
 ): Promise<PrCreateCommand> {
   const { withDiagnostics, draftPrCreate, prCreateArgv } = helperHost;
   // Preserve the public authored-title call site; private titles use the immutable catalog binding.
-  const draftTitle = canonicalOps === undefined ? title
+  const draftTitle = canonicalOps === undefined || canonicalOps.catalog !== "ops" ? title
     : prTitleForTask([], { id: canonicalOps.taskId, title: canonicalOps.title }) ?? canonicalOps.title;
   const draft = bodyOverride === undefined
     ? draftPrCreate(worktreePath, owner, repo, branch, draftTitle)
@@ -4949,6 +4952,12 @@ export async function runTask(
   const opsCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "ops"
     ? bindCanonicalOpsCriteria(task.id, task.title, `${owner}/${task.repo}`, lookup.commit, task.acceptance ?? [])
     : undefined;
+  // Local working-tree snapshots still go through the destination's filed criteria check.
+  const coreCriteriaAtOpen = lookup.outcome === "found" && lookup.catalog === "public" && !opts.skipGitSync
+    && !(opts.planSnapshot && isAbsolute(task.sourcePath ?? "") && task.repo === resolveOwnerRepo().repo)
+    ? await pinCoreCriteriaAtOpen(planPath, task, `${owner}/${task.repo}`, log, boundedVerdictReason)
+    : undefined;
+  if (coreCriteriaAtOpen) log("core_criteria.pinned", { source_commit: coreCriteriaAtOpen.sourceCommit, target: coreCriteriaAtOpen.targetRepository });
   if (task.catalog === "ops" && !plan.byId.has(taskId)) {
     const privatePlan = opsPlanForLookup(lookup);
     if (privatePlan === undefined) throw new Error("task catalog unreadable (ops-plan-unavailable)");
@@ -5230,6 +5239,7 @@ export async function runTask(
       spawn,
       task,
       opsCriteriaAtOpen,
+      coreCriteriaAtOpen,
       taskId,
       workerAbandonMs,
       workerStateSensor,
@@ -5280,6 +5290,36 @@ export function claimRunTaskFixBranch(input: {
       return reason;
     }
   });
+}
+
+/** Cross-repository dispatch pins the selected record before any worker starts. Same-repository runs use the local opener. */
+async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetRepository: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  boundReason: (reason: string) => string): Promise<CanonicalOpsCriteriaAtOpen | undefined> {
+  const repoDir = dirname(dirname(planPath)), planRel = relative(repoDir, planPath), shardRel = join(dirname(planRel), "tasks.d");
+  const git = planSyncGitRunnerAsync(repoDir);
+  try {
+    const { owner, repo } = await resolveOwnerRepoAtAsync(repoDir);
+    if (`${owner}/${repo}` === targetRepository) return undefined;
+
+    const source = /^origin\/main:(.+)$/.exec(task.sourcePath ?? "")?.[1];
+    if (source === undefined || (source !== planRel && (dirname(source) !== shardRel || !/\.ya?ml$/.test(source)))) {
+      throw new Error(`${task.id} has no readable source record path`);
+    }
+    const commit = (await git(["rev-parse", "--verify", "origin/main^{commit}"])).trim();
+    const label = `${commit}:${source}`;
+    const record = parseTasksFromYaml(await git(["show", label]), label).find(t => t.id === task.id);
+    if (record === undefined) throw new Error(`${task.id} is absent from the plan at ${commit}`);
+    if (record.title !== task.title || record.repo !== task.repo
+        || JSON.stringify(record.acceptance ?? []) !== JSON.stringify(task.acceptance ?? [])) {
+      throw new Error(`${task.id} at ${commit} differs from the selected task`);
+    }
+    return bindCanonicalCoreCriteria(record.id, record.title, targetRepository, commit, record.acceptance ?? []);
+  } catch (err) {
+    const reason = boundReason(String(err));
+    log("core_criteria.refused", { task_id: task.id, reason });
+    throw new Error(`core public-plan criteria refused (${reason})`, { cause: err });
+  }
 }
 
 /** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
@@ -5537,6 +5577,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     spawn,
     task,
     opsCriteriaAtOpen,
+    coreCriteriaAtOpen,
     taskId,
     workerAbandonMs,
     workerStateSensor,
@@ -7766,7 +7807,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         // W1-T6034: the filed proofs run as awaited children, off the daemon loop. W1-T7952: titled after the task.
         const publication = opsCriteriaAtOpen ? opsRunPublication(taskId, opsCriteriaAtOpen.title, opsCriteriaAtOpen.criteria) : undefined;
         prCreate = await ghPrCreateFillCommandAsync(worktreePath, owner, task.repo, branch,
-          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen);
+          branchPrTitle(worktreePath, task), opts.prOpenProofRunner, true, { log }, publication?.body, opsCriteriaAtOpen ?? coreCriteriaAtOpen);
       } catch (err) {
         if (!(err instanceof PrOpenRefusedError)) throw err;
         // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.

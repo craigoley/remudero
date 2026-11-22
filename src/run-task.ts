@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, loadLocalReleasePlan, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -53,6 +53,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  operatorReviewArgs,
   REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
@@ -180,7 +181,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
-import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
+import { APPROVE_PUBLIC_REPLAY_FLAG, APPROVE_WORKING_TREE_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -232,7 +233,7 @@ import { StringDecoder } from "node:string_decoder";
 import { mkdir as mkdirAsync, open as openAsync, readdir as readdirAsync, readFile as readFileAsync, rm as rmAsync, stat as statAsync } from "node:fs/promises";
 import { BASE_REPRODUCTION_MAX_FILES, baseProbeSetupFailure, boundedBaseProbeReason, baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile, type BaseProbeResult } from "./lib/base-reproduction.js";
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger, type ImportClosureRead } from "./lib/base-reproduction.js";
-import { assembleAdaptiveQueueFlow, readMemoryHeadroomFraction } from "./lib/adaptive-wip.js";
+import { assembleAdaptiveQueueFlow, createFixRoundUnionReader, readMemoryHeadroomFraction, type FixRoundReader } from "./lib/adaptive-wip.js";
 import { RUN_AGENT_WAIT_HEAP_STEP, type AgentWaitHeap } from "./lib/agent-wait-heap.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { fixRoundBaseHead } from "./lib/fix-round-base.js";
@@ -254,6 +255,7 @@ import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
 import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, retractLocalServePort } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -929,7 +931,7 @@ import {
   type GatePostureRuntime,
 } from "./lib/gate-posture.js";
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
-import { inboxVerbCommand, inboxVerbHelp, proposalVerdictCommand, type InboxVerbName } from "./lib/inbox-verdict-command.js";
+import { inboxVerbCommand, inboxVerbHelp, type InboxVerbActions, type InboxVerbName } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
 import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import { adoptPlanSource, planSourceFailed, planSourceLoaded, type PlanSourceHolder } from "./lib/serve-plan-reload.js";
@@ -1357,6 +1359,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { recordRoutingPolicyEstimates } from "./lib/routing-policy-estimate.js";
 import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
   recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
@@ -1894,7 +1897,7 @@ import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, orphanedRunIds, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
-import { currentReviewSignal, headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE, reviewOnlyStandDownReason } from "./lib/sweep.js";
+import { fixRoundsInFlight, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
   terminalUnionScans } from "./lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "./lib/refresh-value.js";
@@ -22820,6 +22823,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      // W1-T14146: the same provider choice, estimated from the auction's logged probabilities over all routed traffic.
+      await recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
@@ -26147,10 +26152,15 @@ function queueGovernorGateFor(
   readQueuePressure: typeof productionFixPressure = productionFixPressure,
 ): QueueGovernorGate {
   let admission: QueueGovernorResult | undefined;
+  let fixRounds: FixRoundReader | undefined;
+  // W1-T13990: the dwell's fix rounds come from the ledger union, read off the loop; the live lines add newer rows, and
+  // this process's fix registry adds the rounds it admitted that are still running.
+  const fixRoundUnion = createFixRoundUnionReader(dirname(ledgerPath), { clock: clockFromMillisFn(now), readRunning: fixRoundsInFlight });
   const gate = (): QueueGovernorResult | undefined => {
     admission = undefined;
     const { owned, foreign, ownedPrNumbers } = openPrOwnership();
     const lines = readLedgerLines(ledgerPath);
+    fixRounds = fixRoundUnion.readerFor(lines);
     const nowMs = now();
     const flow = deriveQueueGovernorTrailingFlow(lines, nowMs, policy);
     const adaptive = assembleAdaptiveQueueFlow({
@@ -26163,6 +26173,7 @@ function queueGovernorGateFor(
       trailingMergedCount: flow.trailingMergedCount,
       trailingOpenedCount: flow.trailingOpenedCount,
       stuckOwnedCount: adaptive.stuckOwnedCount,
+      movableStuckOwnedCount: adaptive.movableStuckOwnedCount,
       adaptiveBound: adaptive.adaptiveBound,
       headroomFraction: adaptive.headroomFraction,
     });
@@ -26190,12 +26201,12 @@ function queueGovernorGateFor(
     logQueueGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
   };
-  return Object.assign(gate, { readAdmission: () => admission });
+  return Object.assign(gate, { readAdmission: () => admission, readFixRounds: (sinceMs: number) => fixRounds?.(sinceMs) });
 }
 
 /** The queue gate plus the reading behind its latest admission, which sizes the lane budget so a
  *  pass the adaptive bound admits is never sized to zero against the static `wipLimit`. */
-type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined };
+type QueueGovernorGate = (() => QueueGovernorResult | undefined) & { readAdmission: () => QueueGovernorResult | undefined; readFixRounds?: FixRoundReader };
 
 /** W1-T3144 — bridge the complete open-board observation already made inside `projectPlan` to the
  * dispatch governor. Gateways without the optional batch method retain the historical projection
@@ -29144,12 +29155,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T13750: held work is re-probed on the events its refusal class names; the operator's own refused release
-    // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
-    // record it refused is unchanged.
+    // re-runs as `rmd approve <id>` (approveCommand, in a child) while the refused record is unchanged.
     case "stuck-state": {
       const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
-      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
-        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: readOriginMainSha,
+        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild({ publicRoot }),
         gardenNames: REGISTERED_GARDEN_NAMES });
       return () => runStuckStateGardener(ports);
     }
@@ -30767,9 +30777,7 @@ export async function serveCommand(
   let hosts: string[];
   let identity: ReturnType<typeof resolveServeIdentity>;
   try {
-    // Config is the LAST fallback (flag > RMD_SERVE_HOST > config.serve.* > loopback:4317), so
-    // the launchd unit's baked env and a hand-run `rmd serve` land on the same interfaces.
-    port = resolveServePort(rest, config.serve?.port);
+    port = resolveLocalServePort(rest, config.serve?.port, resolveServePort);
     hosts = resolveServeHosts(rest, process.env, config.serve?.host);
     // W1-T398: resolved here, side by side with host/port, so an install that enables identity
     // without declaring which proxy it trusts fails the SAME way an invalid --host does — a
@@ -31154,6 +31162,11 @@ export async function serveCommand(
   }
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
+  try {
+    publishLocalServePort(config.root, port);
+  } catch (error) {
+    log("serve.port_publication_failed", { port, reason: (error as Error).message });
+  }
 
   // Start the projection only after a successful bind. The worker uses this process's one
   // GitHub gateway for facts and publishes complete snapshots; client reads never start a pass.
@@ -31172,6 +31185,12 @@ export async function serveCommand(
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       log("serve.stop", {});
+      // W1-T13238: a stopped serve must not stay the port an Inbox CLI dials first.
+      try {
+        retractLocalServePort(config.root, port);
+      } catch (error) {
+        log("serve.port_retraction_failed", { port, reason: (error as Error).message });
+      }
       stopServeReadModel(server);
       server.close(() => resolve());
     };
@@ -39804,27 +39823,42 @@ export function readLedgerRawLines(path: string): readonly string[] {
 }
 
 export async function inboxActionCliCommand(name: InboxVerbName, rest: string[], config: Config = loadConfig(), deps?: PanelGraphDeps): Promise<number> {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
-  const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
-  const actions = buildInboxVerbActions(deps ?? {
-    root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
-    github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
-    ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
-  }, causalScope);
-  return inboxVerbCommand(name, rest, actions);
+  let built: InboxVerbActions | undefined;
+  const inProcess = (): InboxVerbActions => built ??= (() => {
+    const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+    const { owner, repo } = deps ? { owner: "", repo: "" } : instancePlan.target ?? resolveOwnerRepo();
+    const causalScope = deps?.inboxSourceIdentity ?? deps?.inboxAuditScope ?? reframeCausalScope(config, true);
+    return buildInboxVerbActions(deps ?? {
+      root: instancePlan.root, inboxRoot: config.root, planPath: join(instancePlan.root, "plan", "tasks.yaml"), ledgerPath: ledgerPathFor(config),
+      github: ghTraceGateway(owner, repo), statusGithub: ghGateway(owner, repo),
+      ratify: ratifyCliGateway(instancePlan.root, join(config.root, "logs")),
+    }, causalScope);
+  })();
+  if (deps) return inboxVerbCommand(name, rest, inProcess());
+  // W1-T13238: the running serve's write route first, as the Console does; in-process only when no serve answers.
+  return inboxVerbViaServe(name, rest, { ...config, resolveServePort }, inProcess);
+}
+
+/**
+ * W1-T13238: `rmd decline` and `rmd restore`, serve first. The in-process verdict preserves terminal verify-human
+ * decisions (W1-T10077) and can restore skill drafts whose decline is only in an archive (W1-T13859).
+ */
+function proposalVerdictServeFirst(kind: ProposalVerdictKind, rest: string[]): Promise<number> {
+  const config = loadConfig();
+  return proposalVerdictViaServe(kind, rest, { ...config, resolveServePort }, () => proposalVerdictCliCommand(kind, rest, config),
+    kind === "restore" && rest[0]?.startsWith(SKILL_DRAFT_ID_PREFIX));
 }
 
 export function proposalVerdictCliCommand(kind: ProposalVerdictKind, rest: string[], config: Config = loadConfig()): number {
-  const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
-  const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
   const ledgerPath = ledgerPathFor(config);
-  const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
   const summaries = new Map<string, string>();
-  const decide = () => proposalVerdictCommand(
+  const decide = () => proposalVerdictInProcess(
     kind,
     rest,
     (id) => {
+      const instancePlan = instanceVerbPlanRoot(() => join(config.root, "state"));
+      const plan = loadPlan(join(instancePlan.root, "plan", "tasks.yaml"));
+      const { owner, repo } = instancePlan.target ?? resolveOwnerRepo();
       let { proposal, classification } = loadProposalForRatify(id, plan, ledgerPath, owner, repo, config);
       if (proposal) summaries.set(id, proposal.summary);
       if (kind === "restore" && proposal?.skillFile && id.startsWith(SKILL_DRAFT_ID_PREFIX)) {
@@ -39959,16 +39993,17 @@ export async function approveCommand(
   const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
-    // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
-    const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
-    // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
-    // is released against the plan the daemon's tick composes, so both read the same pin.
-    // W1-T13749: that composition reads the checkout's origin/main, the ref the daemon's plan reloader reads, never
-    // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
-    const localPlan = located?.ok ? located.plan : loadPlan(planPath);
+    const stateDir = join(config.root, "state");
+    const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
+    const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
+    const workingTreeReplay = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
+    // Keep the strict checkout search so an invalid cwd cannot mask a valid daemon target (W1-T10925).
+    const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir) : undefined;
+    // After a miss, the default plan can still surface a public hold through its deferred edges.
+    const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : loadLocalReleasePlan(planPath, stateDir) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
-    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir: join(config.root, "state") },
-      row => appendLedger(ledgerPathFor(config), row));
+    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
+      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, workingTreeReplay);
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
       return 1;
@@ -39978,12 +40013,13 @@ export async function approveCommand(
       console.error(`rmd approve: cannot release '${proposalId}': it is held by ${whose} (${held.hold.reason}: ${compositionHoldEdge(held.hold)}) — nothing released`);
       return 1;
     }
-    if (located && !located.ok && held?.outcome !== "found") {
-      console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
+    const releasePlan = held?.outcome === "found" ? held.plan : localPlan;
+    if (releasePlan === undefined || (located && !located.ok && held?.outcome !== "found")) {
+      console.error(`rmd approve: unknown task '${proposalId}'${located?.ok === false ? ` (${located.error})` : ""}`);
       return 2;
     }
     const outcome = approveParkedTask(proposalId, {
-      plan: held?.outcome === "found" ? held.plan : localPlan,
+      plan: releasePlan,
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -45456,7 +45492,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 2 -- dispatch glue enters GitHub-backed reviewCommand; reviewCommand has injectable tests */
       await loadHeavyVerb("review");
-      return await withGhTransportFloor(() => reviewCommand(arg, rest.slice(1)));
+      return await withGhTransportFloor(() => reviewCommand(arg, operatorReviewArgs(rest.slice(1))));
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],
@@ -45696,8 +45732,9 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await approveCommandMirrored(rest);
     },
   ],
-  ["decline", (rest) => proposalVerdictCliCommand("decline", rest)],
-  ["restore", (rest) => proposalVerdictCliCommand("restore", rest)],
+  // W1-T13238: the running serve's verdict route first, as the Console does; in-process only when no serve answers.
+  ["decline", (rest) => proposalVerdictServeFirst("decline", rest)],
+  ["restore", (rest) => proposalVerdictServeFirst("restore", rest)],
   ["verify-human-sweep", async (rest) => await verifyHumanSweepCommand(rest)],
   ["rule", async (rest) => await ruleCommand(rest)],
   [
@@ -46107,7 +46144,7 @@ async function runFixDispatchWork(work: DetachedWorkSpec, ctx: { runId: string; 
     log: ports.log ?? log,
     stageClock,
     claimFixAdmission: ports.claimFixAdmission ?? ((pr) => createSweepFixAdmissionController({
-      surface: "full", queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
+      surface: "full", controllerId: randomUUID(), queueDepth: 1, hostWorkerBudget: DEFAULT_SWEEP_POLICY.reviewCapacity.hostWorkerBudget,
       activeWorkers: activeWorkerCount(), readActiveWorkers: activeWorkerCount, reviewReservations: 0,
       readPressure: ports.readFixPressure ?? (() => productionFixPressure(DEFAULT_SWEEP_POLICY.memoryFloorMib, ledgerPath(), classEstimate("fix").estimateMib)),
       readEstimate: classEstimate, readTypical: classTypical, readResidents: () => productionFixAdmissionResidents(cfg().root),

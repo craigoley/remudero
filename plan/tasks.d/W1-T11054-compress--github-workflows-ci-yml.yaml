@@ -6,8 +6,8 @@
   verify: human
   risk: high
   band_meaning: blast-radius
-  priority: 1
-  status: queued
+  status: blocked
+  retirement: retired
   attempts: 0
   author_class: machine
   origin: "comment-compression:.github/workflows/ci.yml"
@@ -24,6 +24,7 @@
     Add the named regression in test/infra/compress--github-workflows-ci-yml.test.ts; compare executable tokens against the pre-compression source and verify a real comment-count reduction.
     Preserve every existing behavioral assertion and run the actual callers. Do not invent a new hard comment ceiling or claim success from a title-only proof.
     Preserve existing owners, stops and deployment holds. This maintenance task grants no service restart, release or publication override.
+    RETIRED 2026-11-21 (operator): never built. The operator declined its human check in the Console Inbox at 21:32-21:37Z and retired it: comment cleanup in a high-risk deploy/CI/merge file is not worth the risk.
   risk_ruling:
     verdict: "high"
     action: escalate

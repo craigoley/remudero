@@ -1,0 +1,70 @@
+- id: W1-T14207
+  title: "A Codex reviewer whose final message is kept whole returns success when only earlier messages were reclaimed under the output cap, not error_incomplete_output that withholds its verdict"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: medium # changes which retention value makes a Codex result incomplete, at one line of the spawn; the cap, the retention evidence and the Claude worker's rule are unchanged
+  origin: "operator-session#audit-small-findings-2026-11-21"
+  plan_refs:
+    - W1-T13951
+  files:
+    - src/lib/worker-provider.ts
+    - test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:reclaimed-blocks-not-incomplete — the W1-T13951 fixture (a 400 KiB earlier agent message, a 2 MiB command item, then an 800 KiB final message, then turn.completed, exit 0) returns outputRetention.text complete, outputRetention.blocks truncated, subtype success and isError false, and the review's reviewerOutcome for that subtype is success. On origin/main the same stream returns error_incomplete_output"
+      kind: guard
+      proof: "grep: W1-T14207 criterion 1: in test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts"
+    - claim: "invariant:partial-result-still-incomplete — a final message that alone passes the limit (text truncated), a stream without turn.completed for its final turn, a malformed or unreadable stdout spill, and a truncated stderr each still return error_incomplete_output or error_codex exactly as on origin/main, and the W1-T13951 suite passes unchanged"
+      kind: guard
+      proof: "grep: W1-T14207 criterion 2: in test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts"
+    - claim: "The success case still records the loss: outputRetention.blocks reads truncated with its bytesRead, and outputTruncation and the worker.output_truncated row are written as on origin/main"
+      proof: "grep: W1-T14207 criterion 3: in test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts"
+  rationale: |
+    WHY: W1-T13951 (#19919, on main) keeps a reviewer's final message whole past the 1 MiB cap by reclaiming
+    earlier agent messages. Its task title says the reviewer "still yields its final verdict", and its design
+    step 2 says "blocks may read truncated". But the spawn still marks such a run incomplete, so the review
+    withholds the verdict that was kept.
+    READ at origin/main f80f72841 (src/lib/worker-provider.ts):
+    - finish() (line 2908): blocksTruncated is lastBlockTruncated || retainedTruncated, so reclaiming an
+      earlier message sets blocks truncated while text stays complete.
+    - The spawn (lines 6927-6935): incomplete is true when ANY outputRetention value is not complete, blocks
+      included. Then isError is true and subtype is error_incomplete_output (line 6966).
+    - src/lib/review.ts reviewerOutcome (lines 11449-11473) returns the subtype, and src/cli/commands/review.ts
+      (lines 1263-1290) withholds the verdict (review.semantic_incomplete) for an outcome that is not success.
+    - test/worker/a-reviewer-stream-past-the-cap-keeps-its-final-message.test.ts lines 120-138 (W1-T13951
+      criterion 1, "an earlier message is reclaimed ...") asserts text complete and blocks truncated, and does
+      not assert subtype or isError. Run as written, that stream returns error_incomplete_output.
+    NOT MEASURED: the live ledger holds no review.semantic_incomplete row with error_incomplete_output since
+    #19919 merged (2026-11-21 13:16Z). The defect is read from the code; criterion 1 shows it at base.
+    OVERLAP: W1-T13960 (ops catalog, queued) replaces the same line 6935 with codexResultRetentionComplete, and
+    its step 3 still asks for blocks complete. Whichever lands second takes the other's rule: blocks never
+    decides completeness on its own.
+  design: |
+    INVARIANT reclaimed-blocks-not-incomplete: a Codex result is not incomplete only because blocks reads truncated.
+    INVARIANT partial-result-still-incomplete: text, stdout, stderr and completion decide completeness as today.
+    1. In the spawn (worker-provider.ts line 6935), leave blocks out of the incomplete test: incomplete is true
+       when text, stdout or stderr reads other than complete, or completion is other than complete. A final
+       message that was itself cut still reads text truncated (lastBlockTruncated), so it stays incomplete.
+    2. Keep outputRetention.blocks, outputTruncation and worker.output_truncated as they are, so the loss is
+       still on the row.
+    3. Do not change the cap, the reclaim order or the Claude worker's rule (src/lib/worker.ts line 4518).
+    4. Tests in test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts, titled
+       "W1-T14207 criterion N: ...". Drive spawnCodexWorker with an injected child stream as the W1-T13951 suite does,
+       and call reviewerOutcome from src/lib/review.ts for criterion 1. Load test/setup/tmp-hygiene.ts.
+    MEASURE AFTER DEPLOY: on the host ledger, count review.reviewer rows with output_retention.blocks truncated
+    and text complete, by subtype. Expect success, not error_incomplete_output.
+  falsifier: |
+    On origin/main criterion 1 fails: the stream returns error_incomplete_output. Drop text from the test as
+    well as blocks: criterion 2's final-message-past-the-limit case returns success. Drop stderr: criterion 2's
+    truncated-stderr case returns success.
+  note: |
+    Id reserved for run-unfiled-1795297339464 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21 from an audit of merged PR #19919. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Coordinate with W1-T13960 (ops catalog): it edits the same line.

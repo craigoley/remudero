@@ -28,6 +28,9 @@
     ("owned by run <id>") or, for an unmarked hold, by GitHub status order binding it to that run. A status that names
     another run, or an unmarked one that status order does not bind, carries no dead-owner fact. Update the W1-T2844
     test so a pending status with no description and no binding no longer reads as dead.
+    AMENDED 2026-11-21 after #19922 (W1-T14035) merged: the binding is the same status-id check that #19922 adds
+    for the CI-pending lane. On green, the live remudero-review status id must equal the review history's newest
+    entry id (reuse RollupCheck.statusId from #19922) before reviewPendingOwnerDead is set.
 
     INVARIANT green-dead-owner-is-proven: on a green head, reviewPendingOwnerDead is set only when the live pending status is proven to be the dead run's.
   acceptance:
