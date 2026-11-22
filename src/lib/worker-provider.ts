@@ -2440,7 +2440,8 @@ export function codexResultRetentionComplete(
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
 ): boolean {
   const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
-  if (!notComplete(retention)) return true;
+  const { blocks: _blocks, ...judged } = retention;
+  if (!notComplete(judged)) return true;
   const loss = parsed.retentionLoss;
   const { stdout, ...rest } = retention;
   if (loss.rebuiltLines === 0 || retention.originalSubtype !== "success" || notComplete(rest)) return false;
