@@ -17,7 +17,7 @@
     - test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts
     - test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts
     - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 86455aa29 and at #20045's head 2a3924375 (2026-11-22).

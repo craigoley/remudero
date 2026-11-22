@@ -21,7 +21,7 @@
     - src/run-task.ts
     - test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts
     - scripts/write-only-ledger-step-baseline.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The config gardener reads the newest routing.experiment.result row of each experiment, and a result that is concluded with a winner becomes one adopt-mount candidate"

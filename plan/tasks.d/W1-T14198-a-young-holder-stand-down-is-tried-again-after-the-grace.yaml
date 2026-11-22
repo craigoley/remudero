@@ -16,7 +16,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:young-holder-not-spent — at head H, a sweep at 05:40Z for a reservation started 05:24:07Z stands down for youth. The ledger row is outcome stood-down with retry_at 07:24:07.232Z, planRepairHistoryFromLedger does not hold `<pr>@<H>@held-task-id-handoff`, and no plan-handoff-attempts claim file for H is left after the pass"
