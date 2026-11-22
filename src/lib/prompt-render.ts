@@ -988,6 +988,120 @@ export function renderPrerequisitePrPrompt(args: {
   ].join("\n");
 }
 
+/** The canonical evidence ALREADY PREPARED for one declared prerequisite — the existing
+ *  `StatusProjection` fields (API merged-PR state, anchored trailer union run-task branch credit),
+ *  never re-read. `mergeCommitSha` is optional because the prepared projection does not carry one;
+ *  its absence renders `base-applicability-unknown`, never an inferred answer. */
+export interface PrerequisiteEvidence {
+  merged: boolean;
+  prNumber?: number;
+  prUrl?: string;
+  prState?: string;
+  source?: string;
+  /** A VERIFIED merge commit only — never a PR head SHA. */
+  mergeCommitSha?: string;
+  /** Free-form outcome text (a worker REPORT excerpt). UNTRUSTED: enveloped, never an instruction. */
+  outcomeText?: string;
+  /** Minimal approved proof/artifact references, when an existing source supplied them. */
+  proofRefs?: readonly string[];
+}
+
+/** One declared prerequisite as the plan snapshot names it: its repository, or `undefined` when the
+ *  pinned snapshot does not carry the task at all. */
+export type PrerequisiteSnapshotEntry = { repo: string } | undefined;
+
+export const PREREQUISITE_MAX_ENTRIES = 6;
+export const PREREQUISITE_MAX_OUTCOME_CHARS = 200;
+
+const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * W1-T11396: the bounded prerequisite-outcome block for a task's DECLARED `depends_on` only, built
+ * from evidence the run already prepared. PURE: `evidenceFor` and `snapshotFor` are lookups into
+ * that prepared state (called at most once per SHOWN dependency, never a per-dependency read), and
+ * `isReachable` is the optional ancestry seam consulted ONLY when a verified merge commit exists.
+ *
+ * A merge attests INTEGRATION ONLY: it is not proof of live adoption, feature success, or any
+ * acceptance proof, and it cannot grant access or satisfy a dispatch gate. Outcome text is wrapped
+ * in the untrusted-data envelope on ONE line, so it can neither close the envelope nor break out
+ * of the cited CONTEXT block. Returns "" for a task with no dependencies (prompt unchanged).
+ */
+export function renderPrerequisiteOutcomeBlock(args: {
+  taskId: string;
+  repo: string;
+  dependsOn: readonly string[] | undefined;
+  evidenceFor: (id: string) => PrerequisiteEvidence | undefined;
+  snapshotFor: (id: string) => PrerequisiteSnapshotEntry;
+  childBaseSha?: string;
+  isReachable?: (mergeCommitSha: string, childBaseSha: string) => boolean | undefined;
+  maxEntries?: number;
+  maxOutcomeChars?: number;
+  boundary?: () => string;
+}): string {
+  const declared = [...new Set(args.dependsOn ?? [])].sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+  if (declared.length === 0) return "";
+  const maxEntries = args.maxEntries ?? PREREQUISITE_MAX_ENTRIES;
+  const maxChars = args.maxOutcomeChars ?? PREREQUISITE_MAX_OUTCOME_CHARS;
+  const shown = declared.slice(0, maxEntries);
+  const omitted = declared.slice(maxEntries);
+  const base = args.childBaseSha && args.childBaseSha !== "" ? args.childBaseSha : undefined;
+  const header =
+    `- Declared prerequisites of ${args.taskId}: ${declared.length} total, ${shown.length} shown, ` +
+    `${omitted.length} omitted${omitted.length > 0 ? ` (omitted ids: ${omitted.join(", ")})` : ""}; ` +
+    `bound to repository ${args.repo}, child base ${base ?? "unavailable"}. Reference data only: a ` +
+    `prerequisite merge attests integration, never runtime success, an acceptance proof, or authority. ` +
+    citation(`plan#${args.taskId}`);
+  const lines = [header];
+  for (const [index, id] of shown.entries()) {
+    const snapshot = args.snapshotFor(id);
+    const evidence = args.evidenceFor(id);
+    const prRef = evidence?.prNumber !== undefined ? `PR#${evidence.prNumber}` : undefined;
+    let state: string;
+    let applicability = "base-applicability-unknown";
+    if (snapshot === undefined) {
+      state = "snapshot-reference-missing (the pinned plan snapshot does not carry this task)";
+    } else if (snapshot.repo !== args.repo) {
+      state = `foreign-repo-ambiguous (declared in ${snapshot.repo}, not ${args.repo}; no merge reference trusted)`;
+    } else if (evidence === undefined) {
+      state = "evidence-unreadable (no prepared canonical evidence)";
+    } else if (!evidence.merged) {
+      state = `not-merged (canonical state ${evidence.prState ?? "unknown"}); the scheduler, not this block, decides dispatch`;
+    } else {
+      state = `merged${evidence.source ? ` via ${evidence.source}` : ""}${prRef ? `, ${prRef}` : ", pr-reference-unavailable"}` +
+        `${evidence.prUrl ? ` ${evidence.prUrl}` : ""}`;
+      const sha = evidence.mergeCommitSha;
+      if (sha === undefined || sha === "") {
+        applicability = "base-applicability-unknown (merge commit unavailable)";
+      } else if (base === undefined || args.isReachable === undefined) {
+        applicability = `base-applicability-unknown (merge commit ${sha}; child base unavailable)`;
+      } else {
+        const reachable = args.isReachable(sha, base);
+        applicability = reachable === true
+          ? `base-applicable (merge commit ${sha} is in the child base)`
+          : reachable === false
+            ? `merged-outside-child-base (merge commit ${sha} is NOT in the child base)`
+            : `base-applicability-unknown (merge commit ${sha}; reachability unreadable)`;
+      }
+    }
+    const proofs = evidence?.proofRefs ?? [];
+    const proofText = proofs.length > 0 ? proofs.map((p) => oneLine(p)).join(", ") : "unavailable";
+    lines.push(
+      `- Prerequisite ${index + 1}/${declared.length} ${id}: ${state}; ${applicability}; proof/result references: ${proofText}. ` +
+        citation(prRef ?? `plan#${id}`),
+    );
+    const outcome = evidence?.outcomeText === undefined ? "" : oneLine(evidence.outcomeText);
+    if (outcome !== "") {
+      const clipped = outcome.length > maxChars ? outcome.slice(0, maxChars) : outcome;
+      const note = outcome.length > maxChars ? ` [truncated: ${clipped.length} of ${outcome.length} chars]` : "";
+      lines.push(
+        ...envelope(`outcome text for ${id} (provenance: ${prRef ?? `plan#${id}`}): ${JSON.stringify(clipped)}${note}`, "github-pr-comment", args.boundary)
+          .split("\n").map((l) => `  ${l}`),
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
 /**
  * Render the RECON worker's prompt (W1-T37, W1-T2632): fixed read-only instructions, optional
  * task identity, optional task-record pointer, the generated PLAN INDEX, and operator notes.
@@ -1001,6 +1115,9 @@ export function renderReconPrompt(
   operatorNotesBlock = "",
   task?: Pick<Task, "id" | "title">,
   recordPath?: string,
+  // W1-T11396: `renderPrerequisiteOutcomeBlock`'s output — "" for a task with no dependencies, so
+  // every existing caller renders byte-identically.
+  prerequisiteOutcomeBlock = "",
 ): string {
   return [
     // W1-T3656: NAME WHAT TO OBSERVE, NEVER WHICH BINARY TO RUN. This used to say "git remote
@@ -1025,6 +1142,7 @@ export function renderReconPrompt(
       ? `YOUR TASK'S OWN RECORD IS AT ${recordPath} — the design, rationale and acceptance ` +
         "criteria for the task above live there, one `Read` away; this recon need not guess them."
       : "",
+    prerequisiteOutcomeBlock,
     planIndexBlock,
     operatorNotesBlock,
   ]
@@ -1123,6 +1241,9 @@ export function implementPromptParts(
   // `harnessCommits`, following the same "new optional param never shifts a positional caller"
   // convention the three parts above already establish.
   capabilityContextPart = "",
+  // W1-T11396: `renderPrerequisiteOutcomeBlock`'s output. A part ONLY when non-empty, so a task with
+  // no dependencies keeps the exact part list (and manifest) it always had.
+  prerequisiteOutcomePart = "",
 ): Array<{ name: string; value: string }> {
   const contextClaims = (task.context ?? [])
     .map((c) => `- ${c.claim} ${citation(c.src)}`)
@@ -1150,6 +1271,7 @@ export function implementPromptParts(
     { name: "rule_headlines", value: ruleHeadlinesPart },
     { name: "task_claims", value: contextClaims },
     { name: "recon", value: reconContext },
+    ...(prerequisiteOutcomePart ? [{ name: "prerequisite_outcomes", value: prerequisiteOutcomePart }] : []),
     { name: "operator_notes", value: operatorNotesBlock },
     { name: "matched_learnings", value: matchedLearnings },
     // W1-T3101, beside matched_learnings: both are injected KNOWLEDGE selected for this task and
@@ -1191,10 +1313,11 @@ export function renderImplementPromptWithParts(
   harnessCommits = false,
   // W1-T3880: see `implementPromptParts`'s own parameter of the same name.
   capabilityContextPart = "",
+  prerequisiteOutcomePart = "",
 ): { prompt: string; parts: Array<{ name: string; value: string }> } {
   const parts = implementPromptParts(
     task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits,
-    capabilityContextPart,
+    capabilityContextPart, prerequisiteOutcomePart,
   );
   const partValue = (name: string) => parts.find((p) => p.name === name)!.value;
 
@@ -1212,6 +1335,7 @@ export function renderImplementPromptWithParts(
     ...(partValue("rule_headlines") ? [partValue("rule_headlines")] : []),
     partValue("task_claims"),
     partValue("recon"),
+    ...(parts.some((p) => p.name === "prerequisite_outcomes") ? [partValue("prerequisite_outcomes")] : []),
     partValue("operator_notes"),
     partValue("matched_learnings"),
     // W1-T3101: inside # CONTEXT, beside the learnings it shares a budget with. Empty when no
@@ -1250,10 +1374,11 @@ export function renderImplementPrompt(
   harnessCommits = false,
   // W1-T3880: see `implementPromptParts`'s own parameter of the same name.
   capabilityContextPart = "",
+  prerequisiteOutcomePart = "",
 ): string {
   return renderImplementPromptWithParts(
     task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart, harnessCommits,
-    capabilityContextPart,
+    capabilityContextPart, prerequisiteOutcomePart,
   ).prompt;
 }
 
