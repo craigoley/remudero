@@ -7,16 +7,18 @@
  * its sources are the union of theirs. An input with no usable body is ABSENT WITH A REASON, never a
  * zero: the instance or inbox carries `reason`, and an `unavailable` source names it.
  */
+import { statSync } from "node:fs";
 import { systemClock, type Clock } from "./clock.js";
 import { projectClassifiedHumanGates, projectProposalHumanGates } from "./ask-classification.js";
 import { consumeHumanGateCounts, displayedHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import type { InboxClassification, InboxState } from "./inbox.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, type InboxViewData } from "./inbox-view.js";
-import type { NowDecision } from "./now-decisions.js";
+import { heldTaskDecisions, type NowDecision } from "./now-decisions.js";
 import { NAV_BADGE_VIEW_NAME, withNavBadgeDecisions, type NavBadgeData } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowAction, type NowViewData } from "./now-view.js";
+import type { Plan, Task, TaskInputAnswer } from "./plan.js";
 import type { ReadModelBodyEntry, ReadModelWorkerHandle } from "./read-model-worker.js";
-import { newestLedgerRow, oldestAsOf, viewEtag, type ViewBody, type ViewSource } from "./views.js";
+import { effectiveViewMode, newestLedgerRow, oldestAsOf, viewEtag, type EffectiveViewMode, type ViewBody, type ViewSource, type ViewSwitchMode } from "./views.js";
 
 export const NEEDS_YOU_VIEW_NAME = "needs-you";
 export const NEEDS_YOU_VIEW_VERSION = 1;
@@ -43,6 +45,43 @@ export interface NeedsYouData {
   instances: NeedsYouInstance[];
   /** Why a top-level input is absent: `inbox`, or `instances` when no instance is known yet. */
   reasons?: { inbox?: string; instances?: string };
+}
+
+/** W1-T14172: core's held task questions read from the plan, for when core's now body is not used. */
+export interface HeldTaskInput {
+  tasks: readonly Task[];
+  answered: (taskId: string) => boolean;
+}
+
+/** W1-T14172: the held-task input as serve holds it now; `key` moves whenever the plan or an answer source may have. */
+export type HeldTasksRead = () => HeldTaskInput & { key: string };
+
+/**
+ * W1-T14172: serve's held-task input: the plan `plan()` holds and `answer`, the read-only answer reader. Its key is
+ * the plan object's number and the byte sizes of `answerFiles`, from stat calls only, so an unchanged read reads no file.
+ */
+export function planHeldTasks(plan: () => Plan, answer: TaskInputAnswer, answerFiles: readonly string[]): HeldTasksRead {
+  const plans = new WeakMap<Plan, number>();
+  let seq = 0;
+  const size = (path: string): number => {
+    try {
+      return statSync(path).size;
+    } catch {
+      return -1; // deliberate: an absent or unreadable file has no size; the reader itself decides what it answers.
+    }
+  };
+  return () => {
+    const held = plan();
+    let id = plans.get(held);
+    if (id === undefined) plans.set(held, id = ++seq);
+    return { key: [id, ...answerFiles.map(size)].join(":"), tasks: held.tasks, answered: (taskId) => answer(taskId) !== undefined };
+  };
+}
+
+/** W1-T14172: why a now body is not used while the now view is switched off. */
+function switchedOffReason(entry: ReadModelBodyEntry | undefined): string {
+  const off = "the now view is switched off (read-model/switches.json views.now is off)";
+  return entry === undefined ? `${off}; it has no body` : `${off}; its last body, from ${entry.body.generatedAt}, is not shown`;
 }
 
 function absentSource(input: string, instance: string, reason: string): ViewSource {
@@ -73,8 +112,12 @@ function projectionSources(projection: HumanGateProjection): HumanGateSource[] {
   }));
 }
 
-/** The composite's data and sources from the bodies held now; `known` are the instances the worker reported. */
-export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>, known: Iterable<string>): { data: NeedsYouData; sources: ViewSource[]; generation: number; buildStartedMs?: number } {
+/**
+ * The composite's data and sources from the bodies held now; `known` are the instances the worker reported.
+ * W1-T14172: `nowMode` off skips every now body; `held` is read only when core's now body is not used.
+ */
+export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>, known: Iterable<string>,
+  opts: { nowMode?: ViewSwitchMode | EffectiveViewMode; held?: HeldTaskInput } = {}): { data: NeedsYouData; sources: ViewSource[]; generation: number; buildStartedMs?: number } {
   const nows = new Map<string, ReadModelBodyEntry>();
   let inbox: ReadModelBodyEntry | undefined;
   for (const entry of bodies.values()) {
@@ -91,7 +134,7 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
   const reasons: NonNullable<NeedsYouData["reasons"]> = {};
   const instances = names.map((instance): NeedsYouInstance => {
     const entry = nows.get(instance);
-    const reason = entry === undefined ? "no now body for this instance yet"
+    const reason = opts.nowMode === "off" ? switchedOffReason(entry) : entry === undefined ? "no now body for this instance yet"
       : entry.version !== NOW_VIEW_VERSION ? `its now body is version ${entry.version}; this view reads ${NOW_VIEW_VERSION}` : undefined;
     if (reason !== undefined) {
       sources.push(absentSource(NOW_VIEW_NAME, instance, reason));
@@ -119,6 +162,11 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
       ...(data.decisionsReasons ? { decisionsReasons: data.decisionsReasons } : {}),
     };
   });
+  if (opts.held && instances.find((i) => i.instance === "core")?.counts === undefined) {
+    const held = heldTaskDecisions("core", opts.held.tasks, opts.held.answered);
+    gateSources.push({ name: "held-tasks", instance: "core", state: "complete", gates: held.map(decisionObservation) });
+    decisions.push(...held);
+  }
   if (names.length === 0) {
     reasons.instances = "the read model has reported no instance yet";
     gateSources.push({ name: "instances", instance: "core", state: "unavailable", reason: reasons.instances, gates: [] });
@@ -186,17 +234,22 @@ function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
  * posts (and on every read of it, so a dropped input is never served), and posted to body listeners only
  * when its ETag moved, which is what view-events pushes.
  */
-export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = systemClock): ReadModelWorkerHandle {
+export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = systemClock, opts: { heldTasks?: HeldTasksRead } = {}): ReadModelWorkerHandle {
   let current: ReadModelBodyEntry | undefined;
   // W1-T13876: what `current` was composed from. Every lookup through the merged map below composes, so an
   // unchanged set of input entries (held bodies are replaced, never mutated) and instances answers the held body.
-  let composedFrom: { inputs: ReadModelBodyEntry[]; known: string[] } | undefined;
+  // W1-T14172: the now switch's effective mode and the held-task key join it, so a flip or a new answer composes again.
+  let composedFrom: { inputs: ReadModelBodyEntry[]; known: string[]; nowMode?: EffectiveViewMode; heldKey?: string } | undefined;
   const compose = (): ReadModelBodyEntry => {
     const known = [...inner.state().instances.keys()];
     const inputs: ReadModelBodyEntry[] = [];
     for (const entry of inner.bodies.values()) if (isNeedsYouInput(entry)) inputs.push(entry);
-    if (current && composedFrom && sameItems(composedFrom.inputs, inputs) && sameItems(composedFrom.known, known)) return current;
-    const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, known);
+    const nowMode = effectiveViewMode((inner.switches?.() ?? inner.state().switches).views[NOW_VIEW_NAME], undefined, inner.autoMode?.(NOW_VIEW_NAME));
+    const coreNow = nowMode === "off" ? undefined : inputs.find((entry) => entry.view === NOW_VIEW_NAME && new URLSearchParams(entry.key).get("instance") === "core" && entry.version === NOW_VIEW_VERSION);
+    const held = coreNow === undefined ? opts.heldTasks?.() : undefined;
+    if (current && composedFrom && sameItems(composedFrom.inputs, inputs) && sameItems(composedFrom.known, known)
+      && composedFrom.nowMode === nowMode && composedFrom.heldKey === held?.key) return current;
+    const { data, sources, generation, buildStartedMs } = composeNeedsYou(inner.bodies, known, { ...(nowMode ? { nowMode } : {}), ...(held ? { held } : {}) });
     const stale = sources.some((s) => s.state !== "fresh");
     const etag = viewEtag(NEEDS_YOU_VIEW_NAME, NEEDS_YOU_VIEW_VERSION, stale, data);
     if (current?.etag !== etag) {
@@ -204,7 +257,7 @@ export function withNeedsYouView(inner: ReadModelWorkerHandle, clock: Clock = sy
       current = { view: NEEDS_YOU_VIEW_NAME, key: "", version: NEEDS_YOU_VIEW_VERSION, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
     }
     // Recorded only beside the body these inputs built: any throw above leaves the next lookup to compose again (#19774 review).
-    composedFrom = { inputs, known };
+    composedFrom = { inputs, known, ...(nowMode ? { nowMode } : {}), ...(held ? { heldKey: held.key } : {}) };
     return current;
   };
   // W1-T5373: a served nav-badge body carries the same composite count; the worker's own body stays the shadow's.

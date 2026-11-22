@@ -1,0 +1,48 @@
+- id: W1-T14252
+  title: The registry-selection run-and-sweep test never kills a healthy rmd child for being slower than an earlier one; only its own test's end does
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low # one test's child spawner; no source change
+  band_meaning: blast-radius
+  origin: operator-session#follow-ups-2026-11-22
+  plan_refs: [W1-T12457]
+  files:
+    - test/shadow-instance-safety.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ at origin/main 86455aa29 (2026-11-22).
+    - test/shadow-instance-safety.test.ts, test "private registry selection preserves owner holds and private-safe
+      boundaries: real run and sweep", spawns `rmd stop`, `pause` and `resume` children through its local `child`
+      helper.
+    - After the first spawn, each child gets a SIGKILL timer of `slowestMs * spawnsAfterFirst`: the slowest earlier
+      child's wall time times `stopPaths.length + refusedPaths.length * 2 + 2`. A killed child then fails the test as
+      "timed out against Nms derived from the slowest spawn".
+    - A peer's wall time is not a hang signal. On a loaded host, a later child that is only slower than an early one is
+      killed while healthy. OBSERVED 2026-11-21 on this session's host: the suite failed under load, with this test at
+      4345 ms, and passed when run alone.
+    - This is the repository's recurring defect, a bound that fires on a healthy condition
+      (doctrine/investigation-discipline/healthy-condition-bound.md). The operator rules out hard ceilings, so no
+      larger multiplier or fixed number replaces it.
+  design: |
+    1. Remove the ratio timer from the `child` helper. A child is killed only when the test itself ends: its
+       TestContext `signal` aborts at the test's own timeout or cancellation. The test's existing tier timeout is the
+       one hang bound.
+    2. On abort, kill every live child and name the verb and elapsed time in the failure, so a real hang still fails
+       by name and leaves no process behind.
+    3. The test's existing assertions about owner holds, refusals and private paths are unchanged.
+
+    INVARIANT no-peer-ratio-kill: no rmd child in this test is killed because another child was faster.
+  acceptance:
+    - claim: "invariant:no-peer-ratio-kill — a child that runs longer than the slowest earlier child times spawnsAfterFirst, and then exits, is not killed, and its result is asserted"
+      kind: guard
+      proof: "grep: W1-T14252 criterion 1: in test/shadow-instance-safety.test.ts"
+    - claim: "When the test's signal aborts, every child it spawned is killed and the failure names the verb, so a hung child never outlives its test"
+      proof: "grep: W1-T14252 criterion 2: in test/shadow-instance-safety.test.ts"
+  falsifier: |
+    Put the `slowestMs * spawnsAfterFirst` timer back and criterion 1 must fail. Drop the abort handler and criterion 2
+    must fail. Restore and require all to pass.

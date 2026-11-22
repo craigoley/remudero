@@ -14,10 +14,11 @@ import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
 import {
   SKILL_EFFECTIVENESS_LEDGER_STEPS,
+  SKILL_WITHHOLDING_SHARE,
   buildSkillEffectivenessReport,
   skillLifecycleProposalId,
-  skillWithheldForRun,
 } from "#src/lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
@@ -304,11 +305,13 @@ test("W1-T13860 criterion 5: a skill-lifecycle pass judges every offered approve
 const criteria: CriterionVerdict[] = [
   { claim: "wire producer", proof: "unit test: wires it", met: false, reason: "consumer disconnected", proof_exec: "executed_fail" },
 ];
-const fixTask = { id: "W1-T9001", title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria };
 const mount = { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 };
 
-/** One fix round through the fix lane's own selection; returns the prompt the worker got. */
-async function fixPrompt(stateRoot: string, runId: string, approvedSkillsDir: string): Promise<string> {
+/** One fix round of `taskId` through the fix lane's own selection; returns the prompt the worker got. The arm is
+ *  drawn per task (W1-T14137), so the task id, not the run id, picks it. */
+async function fixPrompt(stateRoot: string, taskId: string, approvedSkillsDir: string): Promise<string> {
+  const fixTask = { id: taskId, title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria };
+  const runId = `${taskId}-1791151948510`;
   const worktree = tmp("w1t13860-fix-");
   const initialReview = {
     state: "failure" as const, criteria, testTheater: false, summary: "one visible gap",
@@ -319,7 +322,7 @@ async function fixPrompt(stateRoot: string, runId: string, approvedSkillsDir: st
   try {
     await runFixRung({
       task: fixTask, taskId: fixTask.id, runId, prUrl: "https://github.com/acme/remudero/pull/1",
-      branch: "run-W1-T9001-1791151948510", worktreePath: worktree, initialSessionId: "", initialReview,
+      branch: `run-${runId}`, worktreePath: worktree, initialSessionId: "", initialReview,
       mount, settingsFile: join(worktree, "settings.json"), config: { root: stateRoot } as Config, budgetUsd: 1, strikeCap: 1,
       reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: worktree, reviewerMount: mount },
       deps: {
@@ -357,16 +360,14 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
   const stateDir = join(root, "state");
   const registry = join(stateDir, "inbox-proposals.json");
   const approved = join(root, ".claude", "skills");
-  const task = { type: "implement" as const, files: ["src/a.ts"] };
-  const offeredRuns = (): string[] => {
-    const out: string[] = [];
-    for (let i = 0; i < 400; i++) {
-      if (selectImplementSkills(root, root, task, `run-${i}`).observation.selected_names.includes(SKILL)) out.push(`run-${i}`);
-    }
-    return out;
-  };
-  const seededShare = Array.from({ length: 400 }, (_, i) => `run-${i}`).filter((r) => skillWithheldForRun(r, SKILL));
-  const normal = Array.from({ length: 400 }, (_, i) => `run-${i}`).filter((r) => !skillWithheldForRun(r, SKILL));
+  const taskIds = Array.from({ length: 400 }, (_, i) => `W1-T${50000 + i}`);
+  const task = (id: string) => ({ id, type: "implement" as const, files: ["src/a.ts"] });
+  const offeredTasks = (): string[] =>
+    taskIds.filter((id) => selectImplementSkills(root, root, task(id)).observation.selected_names.includes(SKILL));
+  const drawn = (id: string): boolean =>
+    taskArmWithheld({ taskId: id, unit: SKILL, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH });
+  const seededShare = taskIds.filter(drawn);
+  const normal = taskIds.filter((id) => !drawn(id));
   try {
     writeFileSync(join(approved, SKILL, "SKILL.md"), `---\nname: ${SKILL}\napplies-to: implement, fix\n---\n\nDo ${SKILL}.\n`);
     writeFileSync(join(stateDir, "KNOWLEDGE_OFF-refresh"), "");
@@ -375,7 +376,7 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     let failJudgment = true;
     const judged: Row[] = [];
     const filingFailures: Row[] = [];
-    const keptRun = normal[0]!;
+    const keptTask = normal[0]!;
     const deps = {
       stateDir, repoRoot: root, seed: 3, clock: clockFromMillisFn(() => now),
       log: (step: string, extra?: Row) => {
@@ -384,7 +385,7 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
         if (failJudgment) throw new Error("judgment append failed");
         if (extra?.status === "RETIRE-CANDIDATE") {
           assert.deepEqual(loadProposalRegistry(registry), [], "the judgment precedes publication");
-          assert.ok(selectImplementSkills(root, root, task, keptRun).observation.selected_names.includes(SKILL));
+          assert.ok(selectImplementSkills(root, root, task(keptTask)).observation.selected_names.includes(SKILL));
         }
         ledger.append([{ step, ts: iso(now), ...extra }]);
         judged.push(extra ?? {});
@@ -395,14 +396,14 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
       }),
     };
     const spec = knowledgeGardenSpec(deps);
-    assert.deepEqual(offeredRuns(), normal, "before staging: offered on every run the seed does not withhold");
+    assert.deepEqual(offeredTasks(), normal, "before staging: offered on every task the seed does not withhold");
     assert.equal(gardenPassDue(spec, deps), true);
     assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
     assert.deepEqual(filingFailures.map((row) => row.reason), ["judgment append failed"]);
     assert.equal(judged.length, 0);
     assert.deepEqual(loadProposalRegistry(registry), [], "a failed append leaves no retirement to consume");
-    assert.deepEqual(offeredRuns(), normal);
-    assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
+    assert.deepEqual(offeredTasks(), normal);
+    assert.ok((await fixPrompt(root, keptTask, approved)).includes(`## skill: ${SKILL}`));
 
     failJudgment = false;
     now += HOUR;
@@ -411,10 +412,10 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     assert.equal(judged[0]?.status, "RETIRE-CANDIDATE");
     assert.deepEqual(loadProposalRegistry(registry).map((proposal) => proposal.id), [skillLifecycleProposalId(SKILL)]);
     assert.equal(gardenPassDue(spec, deps), false, "an unchanged tick is idle");
-    assert.deepEqual(offeredRuns(), seededShare, "staged: offered only on the seeded share");
+    assert.deepEqual(offeredTasks(), seededShare, "staged: offered only on the seeded share");
     assert.ok(seededShare.length < normal.length / 2);
     // The fix lane reads the same registry.
-    assert.ok(!(await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
+    assert.ok(!(await fixPrompt(root, keptTask, approved)).includes(`## skill: ${SKILL}`));
     assert.ok((await fixPrompt(root, seededShare[0]!, approved)).includes(`## skill: ${SKILL}`));
 
     now += HOUR;
@@ -426,8 +427,8 @@ test("W1-T13860 criterion 6: a skill with a staged retirement is offered only on
     assert.deepEqual((await runGardenPass(deps)).plan?.acting, ["skill-lifecycle"]);
     assert.deepEqual(judged.map((row) => row.basis), ["costs-more-than-it-saves", "undecided"]);
     assert.deepEqual(loadProposalRegistry(registry), []);
-    assert.deepEqual(offeredRuns(), normal, "withdrawn: the normal share returns");
-    assert.ok((await fixPrompt(root, keptRun, approved)).includes(`## skill: ${SKILL}`));
+    assert.deepEqual(offeredTasks(), normal, "withdrawn: the normal share returns");
+    assert.ok((await fixPrompt(root, keptTask, approved)).includes(`## skill: ${SKILL}`));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -441,7 +442,7 @@ test("W1-T13860 criterion 7: a skill removed from .claude/skills is never offere
     const judged = lifecyclePass(root).filter(([step]) => step === "skills.lifecycle_judged");
     assert.deepEqual(judged.map(([, row]) => row.skill), [SKILL]);
     for (let i = 0; i < 50; i++) {
-      const observed = selectImplementSkills(root, root, { type: "implement" as const, files: [] }, `run-${i}`).observation;
+      const observed = selectImplementSkills(root, root, { id: `W1-T${50000 + i}`, type: "implement" as const, files: [] }).observation;
       assert.ok(!observed.approved_eligible_names.includes("retired-skill"));
       assert.ok(!observed.selected_names.includes("retired-skill"));
     }
