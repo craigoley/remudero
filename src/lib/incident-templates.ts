@@ -157,6 +157,30 @@ export function resolveIncidentTemplate(
   return { ok: true, template };
 }
 
+/** Counts of the refusal rows a ledger holds: the ingest route's (`incident.refused`, one `incident.refused_sampled` per
+ *  capped window) and the SRE lane's own (`sre_lane.template_refused`, `sre_lane.template_refusals_unread`). */
+export interface IncidentRefusalSummary {
+  ingestRefused: number;
+  ingestSampledWindows: number;
+  laneCountedPasses: number;
+  laneMemoryUnread: number;
+}
+
+/** Read the refusal rows out of ledger rows, counting by step only: no row's payload is carried out. */
+export function summarizeIncidentRefusalRows(rows: ReadonlyArray<Readonly<Record<string, unknown>>>): IncidentRefusalSummary {
+  const summary: IncidentRefusalSummary = { ingestRefused: 0, ingestSampledWindows: 0, laneCountedPasses: 0, laneMemoryUnread: 0 };
+  for (const row of rows) {
+    switch (row.step) {
+      case "incident.refused": summary.ingestRefused += 1; break;
+      case "incident.refused_sampled": summary.ingestSampledWindows += 1; break;
+      case "sre_lane.template_refused": summary.laneCountedPasses += 1; break;
+      case "sre_lane.template_refusals_unread": summary.laneMemoryUnread += 1; break;
+      default: break;
+    }
+  }
+  return summary;
+}
+
 // ── identity ──────────────────────────────────────────────────────────────────────────────────
 
 /** The fingerprint basis: the contract version, the template's id and literal, its classification and the kind

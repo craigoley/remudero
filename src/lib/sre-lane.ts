@@ -32,6 +32,7 @@ import {
   laneOwnedIncidentTemplateId,
   renderIncidentPublication,
   resolveIncidentTemplate,
+  summarizeIncidentRefusalRows,
   type IncidentTemplate,
   type IncidentTemplateRefusalReason,
 } from "./incident-templates.js";
@@ -428,7 +429,7 @@ function readRefusalMemory(path: string): Map<string, number> {
  */
 export function admitTemplatedEvents(
   events: readonly IncidentLedgerEvent[],
-  input: { stateDir: string; nowMs: number; log: SreLaneInput["log"] },
+  input: { stateDir: string; nowMs: number; log: SreLaneInput["log"]; readRefusalRows?: SreLaneInput["readRefusalRows"] },
 ): TemplateAdmission {
   const zero = () => Object.fromEntries(INCIDENT_TEMPLATE_REFUSAL_REASONS.map((r) => [r, 0])) as Record<IncidentTemplateRefusalReason, number>;
   const resolutions = events.map((event) => {
@@ -476,7 +477,9 @@ export function admitTemplatedEvents(
       if (newlyCounted) {
         for (const [key, ts] of counted) if (ts < input.nowMs - REFUSAL_MEMORY_MS) counted.delete(key);
         writeAtomic(path, JSON.stringify({ counted: Object.fromEntries(counted) }) + "\n");
-        input.log("sre_lane.template_refused", { refused: newlyCounted, ...reasons });
+        // The ledger's own refusal rows (ingest and earlier passes), read by step: counts only, context for this pass's count.
+        const ledgered = input.readRefusalRows ? { ledgered: summarizeIncidentRefusalRows(input.readRefusalRows()) } : {};
+        input.log("sre_lane.template_refused", { refused: newlyCounted, ...reasons, ...ledgered });
       }
     }
   }
@@ -495,6 +498,8 @@ export type SreLaneInput = Pick<FleetLaneDeps, "stateDir" | "mergedLastDay" | "c
   landingStateRoot?: string;
   /** Every incident.event/incident.sampled row this pass should consider, read-only. */
   readEvents: () => IncidentLedgerEvent[];
+  /** W1-T13131: the ledger's rows, read only for their refusal steps ({@link summarizeIncidentRefusalRows}). Optional. */
+  readRefusalRows?: () => ReadonlyArray<Readonly<Record<string, unknown>>>;
   /** True when a plan task already exists for this fingerprint (the plan-side dedupe half). */
   hasOpenTask: (fingerprint: string) => boolean;
   /** The in-app frames captured for a fingerprint's recent samples, for suspect-commit matching. */
@@ -574,7 +579,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
     events.push({ ...routing, instance: instanceOf.get(routing.fingerprint) ?? deps.root });
   }
   // W1-T13131: no event reaches aggregation, a runbook or a filing without a resolved template.
-  const admission = admitTemplatedEvents(events, { stateDir: deps.stateDir, nowMs: now, log: deps.log });
+  const admission = admitTemplatedEvents(events, { stateDir: deps.stateDir, nowMs: now, log: deps.log, readRefusalRows: deps.readRefusalRows });
   const evidence = aggregateIncidents(admission.events);
   const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntryAsync(deps.root, id));
   const byFingerprint = new Map(evidence.map((e) => [e.fingerprint, e]));
@@ -669,6 +674,7 @@ export async function daemonSreLaneInput(
         .filter((row) => row.task_id === "INCIDENT" && (row.step === "incident.event" || row.step === "incident.sampled"))
         .map((row) => incidentEventFromLedgerRow(row, instance.resolved ? instance.name : input.repo))
         .filter((event): event is IncidentLedgerEvent => event !== undefined),
+    readRefusalRows: () => readLiveLedgerRows(input.ledgerPath),
     hasOpenTask: () => false,
     framesFor: () => [],
     mergedPrsSince: (sinceSha) => mergedPrsSince(input.root, input.owner, input.repo, sinceSha),

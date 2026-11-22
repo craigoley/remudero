@@ -303,6 +303,24 @@ test("W1-T13131: the template gate's unreadable memory, pruning and contested id
   assert.deepEqual([...contested.admitted.keys()], ["c".repeat(64)]);
 });
 
+test("W1-T13131: a counting pass reports the ledger's own refusal rows by step, as counts only", () => {
+  const stateDir = join(tmpRoot(), "state");
+  const rows = [
+    { step: "incident.refused", reason: "missing", source: "gateway", kind: "http_5xx", message: "must never be carried" },
+    { step: "incident.refused", reason: "unknown", source: "gateway", kind: "http_5xx" },
+    { step: "incident.refused_sampled", reason: "missing", source: "gateway", kind: "http_5xx" },
+    { step: "sre_lane.template_refused", refused: 1 },
+    { step: "sre_lane.template_refusals_unread", error: "torn" },
+    { step: "incident.event", fingerprint: FP_A },
+  ];
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => { logged.push([step, extra]); };
+  const nowMs = Date.parse("2026-09-23T11:00:00.000Z");
+  admitTemplatedEvents([event(FP_B, "2026-09-23T10:00:00.000Z", { templateId: undefined })], { stateDir, nowMs, log, readRefusalRows: () => rows });
+  assert.deepEqual(logged[0][1]?.ledgered, { ingestRefused: 2, ingestSampledWindows: 1, laneCountedPasses: 1, laneMemoryUnread: 1 });
+  assert.ok(!JSON.stringify(logged).includes("must never be carried"), "no refusal row's payload leaves the reader");
+});
+
 test("W1-T13131: the catalog, resolver and publication policies refuse what they do not declare", () => {
   const internal = INCIDENT_TEMPLATE_CATALOG.find((t) => t.id === "service.internal-error")!;
   assert.deepEqual(resolveIncidentTemplate({ templateId: null, kind: "http_5xx" }), { ok: false, reason: "missing" });
