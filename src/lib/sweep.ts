@@ -322,6 +322,8 @@ import {
   FLEET_NOTICE_LABEL,
   NEEDS_HUMAN_LABEL,
   buildEscalationJudgePrompt,
+  editEscalationMachineFields,
+  escalationBodyInLegacyOrder,
   escalationCause,
   escalationHeadSha,
   escalationIssueCause,
@@ -691,10 +693,12 @@ function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl
   key: { class: EscalationClass; taskId: string; cause: EscalationCause }): { view: OpenIssue; stored: OpenIssue } | undefined {
   const prefix = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
   const probe = { ...key, summary: `PR ${pr.prUrl}`, detail: "" };
-  const asked = open.filter(issue => stalledStageIssueIdentity(issue)?.startsWith(prefix) === true &&
+  const asked = open.filter(issue =>
+    stalledStageIssueIdentity({ title: issue.title, body: escalationBodyInLegacyOrder(issue.body) })?.startsWith(prefix) === true &&
     matchDuplicateEscalation(probe, [issue]) !== undefined).sort((a, b) => a.number - b.number)[0];
   if (!asked) return undefined;
-  const body = (stallIssueBodyAtHead(asked.body, pr.headSha) ?? asked.body ?? "").replace(/^\*\*Contract:\*\*.*\n/m, "");
+  const body = editEscalationMachineFields(stallIssueBodyAtHead(asked.body, pr.headSha) ?? asked.body ?? "",
+    (fields) => fields.replace(/^\*\*Contract:\*\*.*\n/m, ""));
   return { view: { ...asked, body }, stored: asked };
 }
 
@@ -703,7 +707,7 @@ function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl
  *  the issue-revalidation garden closes a stall whose stored head the PR has moved past (#16079). */
 export function stallIssueBodyAtHead(body: string | undefined, headSha: string): string | undefined {
   if (body === undefined || escalationHeadSha(body) === undefined || escalationHeadSha(body) === headSha) return undefined;
-  return body.replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${headSha}`);
+  return editEscalationMachineFields(body, (fields) => fields.replace(/^\*\*Head:\*\*.*$/m, `**Head:** ${headSha}`));
 }
 
 export function escalationTaskIdFor(pr: { taskId?: string; prNumber: number }): string {
@@ -4480,7 +4484,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
             const head = escalationHeadSha(issue.body);
-            return (head !== undefined && head !== pr.headSha) || stalledStageIssueIdentity(issue) === stallIdentity;
+            return (head !== undefined && head !== pr.headSha)
+              || stalledStageIssueIdentity({ title: issue.title, body: escalationBodyInLegacyOrder(issue.body) }) === stallIdentity;
           });
         } }
         : issues;
