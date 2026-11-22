@@ -4066,8 +4066,8 @@ function originRepoSlug(url: string): string {
   return url.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1").toLowerCase();
 }
 
-/** W1-T14364: the bound on one `git log` of the whole history, for every reader of the commit trailer index. It is a
- *  limit, not an allocation: 256 MiB, as the reviewer's own git reads. */
+/** W1-T14364 BACKSTOP on buffered `git log` output for both commit trailer readers. The 256 MiB cap matches the
+ *  reviewer's git reads and aborts an oversized read. The buffer grows with actual output. */
 export const COMMIT_TRAILER_LOG_MAX_BYTES = 256 * 1024 * 1024;
 
 /** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
