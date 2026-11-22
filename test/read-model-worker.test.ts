@@ -21,7 +21,7 @@ import {
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
 } from "#src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
 import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
 import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
@@ -582,7 +582,7 @@ function digestOf(stateDir: string): string {
   }
 }
 
-test("after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows", (t) => {
+test("after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows", async (t) => {
   const ledgerDir = scratch(t, "rmw-swap-ledger");
   const stateDir = scratch(t, "rmw-swap-state");
   corpus(ledgerDir, 1, 10, 4);
@@ -614,6 +614,9 @@ test("after a CLI rebuild swaps the file the worker resumes against the new file
   assert.equal(tableCount(stateDir, "core", "seen"), 23, "no row lost and none doubled");
 
   // The design's full rollback deletes state/read-model/: the worker rebuilds from the ledger.
+  // The delete waits for the transaction publisher thread to drain first. Otherwise that thread can
+  // re-create `core.v1.sqlite.transactions/` under the recursive delete, and its final rmdir fails ENOTEMPTY.
+  await flushReadModelTransactions();
   rmSync(join(stateDir, "read-model"), { recursive: true, force: true });
   ticker.tick();
   assert.equal(sink.logs("read_model.reopened").length, 2, "a deleted file reads as replaced");
