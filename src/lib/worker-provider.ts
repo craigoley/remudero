@@ -54,8 +54,9 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME,
-  typecheckEnv, typecheckPeakBytes,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, measuredTypecheckArgs,
+  recordTypecheckPeak, seedFromCanonical, takeTypecheckObservation, TYPECHECK_BUILDINFO_NAME,
+  typecheckEnv, typecheckPeakBytes, type TypecheckObservation, type TypecheckPeakRow,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
@@ -5551,6 +5552,7 @@ export interface OpenWeightCheckInput {
   workerHome: string;
   /** Test-only platform port. Production leaves this absent and uses the host platform. */
   platform?: NodeJS.Platform;
+  observeTypecheck?: (observation: TypecheckObservation | undefined, stderr: string) => void;
 }
 
 /** Fixed checks inherit executable discovery and locale, never daemon credentials (including
@@ -5645,16 +5647,30 @@ export async function runOpenWeightCheck(input: OpenWeightCheckInput): Promise<s
   const cwd = realpathSync(input.cwd);
   let stdout: string;
   try {
-    ({ stdout } = await execFileRouted(OPENWEIGHT_CHECK_SANDBOX, openWeightCheckSandboxArgv({ ...input, argv }), {
+    const sandboxArgv = openWeightCheckSandboxArgv({ ...input, argv });
+    // Observe bwrap from its parent so the compiler remains inside the original namespace and teardown.
+    const result = await execFileRouted(input.observeTypecheck ? process.execPath : OPENWEIGHT_CHECK_SANDBOX,
+      input.observeTypecheck ? measuredTypecheckArgs("sandbox", OPENWEIGHT_CHECK_SANDBOX, sandboxArgv) : sandboxArgv, {
       cwd,
       env: input.env,
       encoding: "utf8",
       timeout: OPENWEIGHT_CHECK_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
-    }));
+    });
+    stdout = result.stdout;
+    if (input.observeTypecheck) {
+      const { stderr, observation } = takeTypecheckObservation(result.stderr);
+      input.observeTypecheck(observation, stderr);
+    }
   } catch (err) {
-    const e = err as { stdout?: unknown };
+    const e = err as { stdout?: unknown; stderr?: unknown; code?: number | string };
     if (judge && typeof e.stdout === "string") e.stdout = judge.splitInlineTally(e.stdout).output;
+    if (input.observeTypecheck && typeof e.stderr === "string") {
+      const { stderr, observation } = takeTypecheckObservation(e.stderr);
+      e.stderr = stderr;
+      if (observation?.error) e.code = "TYPECHECK_SPAWN_FAILED";
+      input.observeTypecheck(observation, stderr);
+    }
     throw err;
   }
   if (!judge) return stdout;
@@ -6081,13 +6097,23 @@ async function executeOpenWeightTool(
         return { check: args.check, ran: false, refused: `NOT_RUN (${slot.note})` };
       }
       if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), typecheckPeakBytes(warm))];
+      let observation: TypecheckObservation | undefined;
+      let compilerOutput = "";
+      let compilerStderr = "";
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
           cwd: realpathSync(cwd),
           workerHome,
           env: args.check === "typecheck" ? typecheckEnv(checkEnv) : checkEnv,
+          ...(args.check === "typecheck" ? {
+            observeTypecheck: (sample: TypecheckObservation | undefined, stderr: string) => {
+              observation = sample;
+              compilerStderr = stderr;
+            },
+          } : {}),
         });
+        compilerOutput = stdout;
         ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode: 0, scopeRule });
         return { check: args.check, exitCode: 0, output: stdout.slice(-20_000), ...scoped };
       } catch (err) {
@@ -6095,10 +6121,16 @@ async function executeOpenWeightTool(
         // still throws, because that is not a result.
         const e = err as { status?: number; code?: number | string; killed?: boolean; stdout?: string | Buffer; stderr?: string | Buffer };
         const out = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`;
+        compilerOutput = out;
         const exitCode = typeof e.status === "number" ? e.status : typeof e.code === "number" ? e.code : 1;
         ledgerRunCheck(ledger, { check: args.check, outcome: "ran", suites, startedAt, exitCode, timedOut: e.killed === true, scopeRule });
         return { check: args.check, exitCode, output: out.slice(-20_000), ...scoped };
       } finally {
+        if (args.check === "typecheck") {
+          recordTypecheckPeak(row => appendLedger(ledgerPathFor(ledger.config), {
+            run_id: ledger.runId ?? "unattributed", task_id: ledger.taskId ?? "unattributed", ...row,
+          }), "bwrap", warm, observation, `${compilerOutput}\n${compilerStderr}`);
+        }
         slot?.release();
       }
     }
@@ -7022,6 +7054,30 @@ function codexWorkerExit(code: number | null, signal: NodeJS.Signals | null | un
   return { kind: "unobserved" };
 }
 
+/** Only the typed observation crosses from completed command output into the host ledger. */
+export function readRelayedTypecheckPeaks(output: string): TypecheckPeakRow[] {
+  const rows: TypecheckPeakRow[] = [];
+  for (const match of output.matchAll(/^rmd-typecheck-peak:(\{[^\r\n]{1,180}\})\r?$/gm)) {
+    let row: Partial<TypecheckPeakRow> | null;
+    try {
+      row = JSON.parse(match[1]!);
+    } catch {
+      // A truncated or malformed command line carries no observation.
+      continue;
+    }
+    if (row?.step !== "typecheck.peak" || typeof row.warm !== "boolean" ||
+        (row.entry !== "npm" && row.entry !== "preflight" && row.entry !== "merge-probe")) continue;
+    rows.push({
+      step: row.step, entry: row.entry, warm: row.warm,
+      peak_rss_bytes: typeof row.peak_rss_bytes === "number" && row.peak_rss_bytes > 0 && Number.isSafeInteger(row.peak_rss_bytes)
+        ? row.peak_rss_bytes : "unknown",
+      ...(typeof row.rechecked_files === "number" && row.rechecked_files >= 0 && Number.isSafeInteger(row.rechecked_files)
+        ? { rechecked_files: row.rechecked_files } : {}),
+    });
+  }
+  return rows;
+}
+
 async function spawnCodexWorkerInPrivateTemp(
   args: CodexSpawnArgs,
   config: Config,
@@ -7034,7 +7090,20 @@ async function spawnCodexWorkerInPrivateTemp(
   const startedAt = Date.now();
   const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
-  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => observeWorkerToolLineage(toolLineage, raw),
+  const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => {
+    observeWorkerToolLineage(toolLineage, raw);
+    const event = raw as CodexJsonEvent | null;
+    if (event?.type !== "item.completed" || event.item?.type !== "command_execution" ||
+        typeof event.item.aggregated_output !== "string") return;
+    for (const row of readRelayedTypecheckPeaks(event.item.aggregated_output)) {
+      recordTypecheckPeak(peak => appendLedger(ledgerPathFor(config), {
+        run_id: args.runId ?? "unattributed", task_id: args.taskId ?? "unattributed", ...peak, source: "codex_command",
+      }), row.entry, row.warm, {
+        peak: typeof row.peak_rss_bytes === "number" ? row.peak_rss_bytes : undefined,
+        rechecked: row.rechecked_files,
+      });
+    }
+  },
     (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }),
     (toolName, toolInput, tsMs) =>
       args.streamObserver?.({ kind: "tool-executing", tsMs, text: `[tool_use: ${toolName}]`, toolName, toolInput, cwd: args.cwd }));

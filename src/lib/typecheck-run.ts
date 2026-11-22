@@ -19,21 +19,29 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
+import { appendLedger } from "./ledger.js";
+import { ledgerPathFor } from "./ledger-path.js";
+import { discoverLiveLedgerRoot } from "./live-write-guard.js";
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
   installedTypescriptVersion,
   lowMemoryTypecheckArgs,
+  measuredTypecheckInvocation,
+  measuredTypecheckResult,
   prepareWorktreeTypecheck,
+  recordTypecheckPeak,
   seedBuildInfo,
   typecheckArgs,
   typecheckEnv,
   typecheckPeakBytes,
   worktreeBuildInfoPath,
   type SeedOutcome,
+  type TypecheckObservation,
+  type TypecheckPeakRow,
 } from "./typecheck-buildinfo.js";
 
 /** The slot label an `npm run typecheck` holds while tsc runs. */
@@ -45,7 +53,7 @@ export const WORKTREE_BUILDINFO_NAME = ".rmd-typecheck.tsbuildinfo";
 /** Runs tsc with stdio inherited in `env`; returns its exit status (null when it was killed or never started). */
 export type TypecheckRunSpawn = (
   file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv,
-) => { status: number | null; error?: Error };
+) => { status: number | null; error?: Error; observation?: TypecheckObservation };
 
 export interface TypecheckRunOptions {
   spawn?: TypecheckRunSpawn;
@@ -57,9 +65,20 @@ export interface TypecheckRunOptions {
 }
 
 const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
-  const r = spawnSync(file, [...args], { cwd, stdio: "inherit", env });
-  return { status: r.status, ...(r.error ? { error: r.error } : {}) };
+  const command = measuredTypecheckInvocation(file, args, { cwd, env, encoding: "utf8" }, true);
+  return measuredTypecheckResult(spawnSync(command.file, command.args, command.options));
 };
+
+export function typecheckPeakWriter(root: string): (row: TypecheckPeakRow) => void {
+  return row => {
+    const parent = dirname(resolve(root));
+    // Fleet worktrees are rooted under config.root/worktrees, including when a worker has a redirected HOME.
+    const managed = !process.env.NODE_TEST_CONTEXT && basename(parent) === "worktrees" && existsSync(join(dirname(parent), "state"));
+    const ledgerRoot = process.env.NODE_TEST_CONTEXT
+      ? canonicalBuildInfo(root)?.root ?? root : managed ? dirname(parent) : discoverLiveLedgerRoot();
+    appendLedger(ledgerPathFor({ root: ledgerRoot }), { run_id: "unattributed", task_id: "unattributed", ...row });
+  };
+}
 
 /** Can this process create a file in `dir`? Probed by writing one: a sandbox's read-only bind still passes access(2). */
 export function dirIsWritable(dir: string): boolean {
@@ -113,9 +132,14 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
     const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
     const tight = lowMemoryTypecheckArgs(headroom, peak);
     if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
-    const res = (opts.spawn ?? inheritSpawn)(
-      join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
-    );
+    let res: ReturnType<TypecheckRunSpawn> | undefined;
+    try {
+      res = (opts.spawn ?? inheritSpawn)(
+        join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
+      );
+    } finally {
+      recordTypecheckPeak(typecheckPeakWriter(root), "npm", !cold, res?.observation);
+    }
     if (res.error) {
       log(`typecheck: could not run tsc: ${res.error.message}`);
       return 127;
