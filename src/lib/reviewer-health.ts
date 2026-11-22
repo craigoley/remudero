@@ -111,8 +111,9 @@ export const REVIEWER_HEALTH_READ_STEPS: readonly string[] = [
 ];
 
 /** posted; withheld after the reviewer ran (success) or failed (provider health); refused at setup;
- *  withheld-pending: the first downgrade-unclassified hold for its head and input, which re-asks (W1-T13849). */
-export type ReviewerOutcomeClass = "posted" | "withheld-success" | "withheld-failure" | "setup-refused" | "withheld-pending";
+ *  withheld-pending: the first downgrade-unclassified hold for its head and input, which re-asks (W1-T13849);
+ *  carried: a failure whose head and reason were already recorded at an earlier sha, with no post since (W1-T14321). */
+export type ReviewerOutcomeClass = "posted" | "withheld-success" | "withheld-failure" | "setup-refused" | "withheld-pending" | "carried";
 
 export interface ReviewerShaRecord {
   sha: string;
@@ -238,6 +239,10 @@ export interface ReviewerHealthState {
   /** `<unit>\u0000<input digest>` → the first downgrade-unclassified hold: its sha and row time. A later hold
    *  on the same key is a second hold, which the review gate never writes while its ledger read works. */
   holds: Record<string, { sha: string; at: string }>;
+  /** W1-T14321: unit (a healed tree's under `healed\u0000<unit>`) → failure reason → where that failure was first
+   *  recorded (its sha and row time), and the newest time the unit posted after it. Pooled away with its sha, like a
+   *  hold. Absent in a file written before it. */
+  carriedFailures?: Record<string, Record<string, { sha: string; at: string; postedAt?: string }>>;
   incident: ReviewerIncident | null;
   closed: Array<ReviewerIncident & { closedAt: string; closedReason?: ReviewerIncidentCloseReason }>;
   /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
@@ -419,6 +424,42 @@ function reportModelHealthFailure(error: unknown, log?: ReviewerHealthLog): void
 
 const isFailure = (cls: ReviewerOutcomeClass): boolean => cls === "withheld-success" || cls === "setup-refused";
 
+/**
+ * W1-T14321 — is this failure of `unit` for `reason` at `sha` new evidence about `sha`? One PR head refused at every
+ * main commit is one failure, not one per reviewer sha: a (unit, reason) first recorded at an earlier sha, with no post
+ * of the unit since, is a `repeat` and joins neither k nor n here. `new` counts as on origin/main (the first record, a
+ * failure at the recording sha itself, or one after the unit posted, which becomes the new record). `stale` is a row
+ * older than the record at another sha: a re-read, which leaves any class the unit already has here as it was.
+ * A healed tree's failures are carried among healed shas only: blameCleared compares the healed pool with the regressed
+ * one, so each counts a head once on its own side.
+ */
+function carryOf(state: ReviewerHealthState, sha: string, unit: string, reason: string, at: string, healed: boolean): "new" | "repeat" | "stale" {
+  const byReason = (state.carriedFailures ??= {})[carryKey(unit, healed)] ??= {};
+  const first = byReason[reason];
+  if (first === undefined) {
+    byReason[reason] = { sha, at };
+    return "new";
+  }
+  if (first.sha === sha) return "new";
+  if (at < first.at) return "stale";
+  if (first.postedAt !== undefined && at > first.postedAt) {
+    byReason[reason] = { sha, at };
+    return "new";
+  }
+  return "repeat";
+}
+
+const carryKey = (unit: string, healed: boolean): string => (healed ? `healed\u0000${unit}` : unit);
+
+/** W1-T14321 — `unit` posted at `at`, healed or not: a failure recorded before it is no longer carried at a later sha. */
+function notePosted(state: ReviewerHealthState, unit: string, at: string): void {
+  for (const key of [carryKey(unit, false), carryKey(unit, true)]) {
+    for (const first of Object.values(state.carriedFailures?.[key] ?? {})) {
+      if (at >= first.at && (first.postedAt === undefined || at > first.postedAt)) first.postedAt = at;
+    }
+  }
+}
+
 function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract<Classified, { kind: "outcome" }>, log?: ReviewerHealthLog): void {
   let rec = state.shas[sha];
   if (rec === undefined) {
@@ -443,11 +484,18 @@ function recordOutcome(state: ReviewerHealthState, sha: string, outcome: Extract
     else if (first.sha !== sha || first.at !== outcome.at) cls = "withheld-success";
   }
   const prior = rec.units[outcome.unit];
+  if (cls === "posted") notePosted(state, outcome.unit, outcome.at);
+  else if (isFailure(cls) && prior !== "posted") {
+    // A failure that posted wins over at this sha is no record to carry: the next sha's failure counts.
+    const carry = carryOf(state, sha, outcome.unit, outcome.reason ?? cls, outcome.at, outcome.healed);
+    if (carry === "repeat") cls = "carried";
+    else if (carry === "stale" && prior !== undefined) return;
+  }
   // A unit that ever posted at this sha is posted; otherwise its newest class stands. A pending hold
-  // never displaces a class the unit already has.
-  if (prior === "posted" || (cls === "withheld-pending" && prior !== undefined)) return;
+  // or a carried failure never displaces a class the unit already has.
+  if (prior === "posted" || ((cls === "withheld-pending" || cls === "carried") && prior !== undefined)) return;
   rec.units[outcome.unit] = cls;
-  if (isFailure(cls) && (prior === undefined || prior === "withheld-pending")) {
+  if (isFailure(cls) && (prior === undefined || prior === "withheld-pending" || prior === "carried")) {
     const reason = outcome.reason ?? cls;
     rec.reasons[reason] = (rec.reasons[reason] ?? 0) + 1;
     rec.firstFailHost ??= outcome.host;
@@ -480,6 +528,10 @@ function pool(state: ReviewerHealthState, log?: ReviewerHealthLog): void {
     }
     delete state.shas[rec.sha];
     for (const [key, first] of Object.entries(state.holds)) if (first.sha === rec.sha) delete state.holds[key];
+    for (const [unit, byReason] of Object.entries(state.carriedFailures ?? {})) {
+      for (const [reason, first] of Object.entries(byReason)) if (first.sha === rec.sha) delete byReason[reason];
+      if (Object.keys(byReason).length === 0) delete state.carriedFailures![unit];
+    }
   }
 }
 
@@ -550,11 +602,12 @@ export interface ReviewerShaJudgment {
 
 /** k = units not posted though the reviewer ran or was refused by setup; n adds the posted units.
  *  Withheld after a reviewer FAILURE is provider health, not reviewer code: in neither. A first
- *  downgrade-unclassified hold has no outcome yet, its re-ask will: in neither. */
+ *  downgrade-unclassified hold has no outcome yet, its re-ask will: in neither. A carried failure was counted at the
+ *  sha that first recorded it (W1-T14321): in neither. */
 export function shaCounts(rec: ReviewerShaRecord): { k: number; n: number } {
   let k = 0, n = 0;
   for (const cls of Object.values(rec.units)) {
-    if (cls === "withheld-failure" || cls === "withheld-pending") continue;
+    if (cls === "withheld-failure" || cls === "withheld-pending" || cls === "carried") continue;
     n += 1;
     if (isFailure(cls)) k += 1;
   }
