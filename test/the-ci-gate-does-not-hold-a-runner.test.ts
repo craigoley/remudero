@@ -84,7 +84,7 @@ test("W1-T4400: ci-gate evaluates on completion events without a wait loop", () 
   // Actions expressions are left to the calling job, which supplies them itself.
   assert.ok(!("SHA" in contractRun(GATE_TEXT).env));
   const jobEnv = ci.jobs["ci-gate"]!.env!;
-  assert.deepEqual(Object.keys(jobEnv).sort(), ["GH_TOKEN", "REPO", "SHA", "WAIT_CAP_SECONDS"]);
+  assert.deepEqual(Object.keys(jobEnv).sort(), ["GATE_EVENT", "GH_TOKEN", "HEAD_REF", "REPO", "SHA", "WAIT_CAP_SECONDS"]);
   // Its own wait (other workflows' stragglers only) plus the contract's grace window ends inside the
   // job's bound, so the gate's named refusal fires before Actions kills it.
   const timeoutSeconds = (ci.jobs["ci-gate"] as { "timeout-minutes"?: number })["timeout-minutes"]! * 60;
