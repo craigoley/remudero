@@ -51,8 +51,9 @@ test("W1-T10012: check:test:test/next-task-id-waits-for-the-shared-read-floor.te
         assert.equal(decision.paced, true);
         assert.deepEqual(sleeps, mode === "wait" ? [60_000] : []);
         assert.equal(readGhReadCadenceStampMs(path), now);
-        assert.equal(warnings.length, 1);
-        assert.ok(warnings[0].includes(mode === "wait" ? "(wait, W1-T7957)" : "advisory, W1-T3297"));
+        // W1-T14197: a wait-mode read prints a start line and a closing line.
+        assert.equal(warnings.length, mode === "wait" ? 2 : 1);
+        assert.ok(warnings.every((line) => line.includes(mode === "wait" ? "(wait, W1-T7957)" : "advisory, W1-T3297")));
       }, env);
       assert.equal(existsSync(`${path}.lock`), false);
     }
