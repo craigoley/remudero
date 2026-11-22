@@ -1117,7 +1117,8 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       }
       const identities = [...stdout.matchAll(/^( *)(?:not )?ok [0-9]+ - (.+)$/gm)]
         .map((match) => `${match[1].length}:${match[2]}`);
-      return { failing, tests: Number(total[1]), identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
+      // W1-T13551: `tests` counts what the run held; `ran` counts what it executed (a declared platform skip never ran).
+      return { failing, tests: Number(total[1]), ran: summary.pass ?? 0, skipped: summary.skipped ?? 0, identities, passed, elapsedMs: finishedMs - startedMs, finishedMs,
         [CENSUS_CAPTURE_DISPOSITION]: (accepted, reason) => dispose(res, accepted, reason) };
     };
     const finish = (sample, accepted, reason) => sample[CENSUS_CAPTURE_DISPOSITION](accepted, reason);
@@ -1132,6 +1133,14 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
         !(readerRuntimePolicy.remeasureMargin >= 1 && Number.isFinite(readerRuntimePolicy.remeasureMargin))) {
       throw new Error("source-reader runtime is UNKNOWN: invalid calibration policy");
     }
+    // W1-T13551: a reader whose every test is a declared platform skip measured nothing here. It is neither a pass nor
+    // unmeasured: CI runs it on the platform its gate names, and this line says so instead of a runtime nobody measured.
+    const deferToCi = (sample, reason) => {
+      finish(sample, true, reason);
+      console.log(`census-reader-deferred-to-ci: ${JSON.stringify({ file: files[0], platform, skipped: sample.skipped,
+        reason: "every test is skipped by a platform gate declared for this platform", assurance: "not-measured-here-ci-runs-it" })}`);
+      return sample.failing;
+    };
     const context = readContext(root, child, options);
     const historyKey = censusReaderHistoryKey(files[0], history?.runtime);
     const known = history?.path ? readCensusReaderHistory(history.path) : { runs: {}, reason: "history off" };
@@ -1162,6 +1171,7 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
           return single.failing;
         }
         if (!single.passed) throw new Error("source-reader runtime is UNKNOWN: the history run has no complete unskipped pass");
+        if (single.ran === 0) return deferToCi(single, "deferred history run");
         finish(single, true, "accepted history run");
         recordCensusReaderRuntime(history.path, historyKey, single.elapsedMs);
         console.log(`census-reader-runtime: ${JSON.stringify({ file: files[0], context, tests: single.tests, cases: single.identities,
@@ -1178,9 +1188,11 @@ export function runCensusSuitesViaChild({ root, files, run = runCensusChild, pri
       return calibration.failing;
     }
     if (!calibration.passed) throw new Error("source-reader runtime is UNKNOWN: calibration has no complete unskipped pass");
-    console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.tests,
+    if (calibration.ran === 0) return deferToCi(calibration, "deferred calibration");
+    console.log(`census-reader-calibration: ${JSON.stringify({ file: files[0], context, tests: calibration.ran,
       cases: calibration.identities, measuredMs: Math.ceil(calibration.elapsedMs), assurance: "observation-not-qualification" })}`);
-    const measurement = { ...calibration, context, complete: true, passed: true };
+    // W1-T13551: priced from the tests it ran, never from a declared platform skip's zero-cost row.
+    const measurement = { ...calibration, tests: calibration.ran, context, complete: true, passed: true };
     // As the fast gate judges a RUNAWAY (ci-parity.ts): a first overrun is re-measured once, against the budget
     // times FAST_GATE_CENSUS_REMEASURE_MARGIN; only a second overrun refuses. Both budgets share one calibration age.
     const budgetAtMs = now();
