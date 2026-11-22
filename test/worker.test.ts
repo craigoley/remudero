@@ -46,6 +46,7 @@ import type { Task } from "#src/lib/plan.js";
 import { sealedPairedAttemptDispatcher } from "#src/lib/paired-trial.js";
 import { CODEX_WORKER_STDERR_MAX_BYTES, spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { repoRoot } from "#test/helpers/repo-root.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 test("W1-T10962: truncated or unreadable worker and gardener output stays explicit and cannot become a complete success", async (t) => {
   {
@@ -1564,16 +1565,12 @@ test("harness contract metadata cannot widen worker authority or disclose runtim
 test("W1-T11112: the capability record is not the paired trial runtime receipt", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-capability-paired-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const repoDir = join(dir, "repo");
-  mkdirSync(repoDir);
   mkdirSync(join(dir, "state", "tmp"), { recursive: true });
-  const git = (...gitArgs: string[]) => execFileSync("git", ["-C", repoDir, ...gitArgs], { encoding: "utf8" });
-  git("init", "--quiet", "-b", "main");
-  git("config", "user.name", "capability fixture");
-  git("config", "user.email", "capability-fixture@remudero.invalid");
+  const repo = gitRepo({ scope: t, kind: "capability-paired", seedCommit: false });
+  const repoDir = repo.dir;
   writeFileSync(join(repoDir, "notes.txt"), "base\n");
-  git("add", "notes.txt");
-  git("commit", "--quiet", "-m", "base");
+  repo.git("add", "notes.txt");
+  repo.git("commit", "--quiet", "-m", "base");
   let worker: Awaited<ReturnType<typeof spawnWorker>> | undefined;
   const task = { id: "W1-T11112", title: "capability fixture", repo: "remudero", depends_on: [], type: "implement",
     verify: "auto", origin: "fixture", files: ["notes.txt"], risk: "low", status: "queued", attempts: 0, acceptance: [] } satisfies Task;
