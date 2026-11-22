@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn as spawnProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync, type PathLike } from "node:fs";
+import fs, { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, type PathLike } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { providerRoutingOwnsHeadroom, resolveHeadroomEnabled, type Config } from "#src/lib/config.js";
@@ -1060,25 +1062,16 @@ test("W1-T13855 criterion 7: a funded publication racing fallback invalidation k
   const newerAt = account.state.now + 1_000;
   const publishFunded = () => statusFor(root, newerAt, [claudeAt(99), creditsCodex()]);
 
-  const target = providerRoutingStatusPath(root);
-  const rename = fs.renameSync;
-  const realNow = Date.now;
+  // The fallback records its cutoff; a funded publish lands in the middle of that write. Neither waits
+  // for the other (no lock), so the publish must complete rather than throw or queue.
+  const write = fs.writeFileSync as (file: PathLike, ...rest: unknown[]) => void;
   let interleaved = false;
-  let queued = false;
-  const hook = t.mock.method(fs, "renameSync", (from: PathLike, to: PathLike) => {
-    if (to === target && !interleaved) {
+  const hook = t.mock.method(fs, "writeFileSync", (file: PathLike, ...rest: unknown[]) => {
+    if (String(file).includes("provider-routing-credits-cutoff-") && !interleaved) {
       interleaved = true;
-      // Distinct staging paths model separate worker processes, even within the same millisecond.
-      const clock = t.mock.method(Date, "now", () => realNow() + 60_000);
-      try { publishFunded(); }
-      catch (error) {
-        if ((error as { errcode?: number }).errcode !== 5) throw error;
-        queued = true;
-      } finally {
-        clock.mock.restore();
-      }
+      publishFunded();
     }
-    rename(from, to);
+    write(file, ...rest);
   });
   syncBuiltinESMExports();
   try {
@@ -1087,12 +1080,7 @@ test("W1-T13855 criterion 7: a funded publication racing fallback invalidation k
     hook.mock.restore();
     syncBuiltinESMExports();
   }
-  assert.equal(interleaved, true, "publication was attempted after fallback staged its update");
-  if (queued) {
-    const invalidated = readProviderRoutingStatus(root, { now: () => newerAt });
-    assert.equal(routingStatus.creditsLaneRoom(invalidated, newerAt), false);
-    publishFunded();
-  }
+  assert.equal(interleaved, true, "publication was attempted while the fallback recorded its cutoff");
   const status = readProviderRoutingStatus(root, { now: () => newerAt });
   assert.equal(status.observedAt, new Date(newerAt).toISOString());
   assert.equal(routingStatus.creditsLaneRoom(status, newerAt), true);
@@ -1117,7 +1105,10 @@ test("W1-T13855 criterion 7: a delayed funded publication cannot restore the rev
   for (const delayedAt of [fallbackAt - 1, fallbackAt]) {
     statusFor(root, delayedAt, funded);
     const after = readStatus();
-    assert.deepEqual(after, invalidated);
+    // The delayed publish lands (no publish is refused or dropped) but its flag is neutralised on read.
+    assert.equal(after.observedAt, new Date(delayedAt).toISOString());
+    assert.equal(after.providers?.find((row) => row.provider === "codex")?.creditsLane, undefined);
+    assert.deepEqual(after.providers, invalidated.providers, "the same capacities, with the credits flag removed on both");
     const observation = hostHealthy(fallbackAt, after);
     assert.equal(observation.provider.creditsLane, undefined);
     const { decision } = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), POLICY,
@@ -1127,8 +1118,10 @@ test("W1-T13855 criterion 7: a delayed funded publication cannot restore the rev
 
   const newer = statusFor(root, fallbackAt + 1, funded);
   assert.equal(reviewProviderObservation(newer, fallbackAt + 1).creditsLane, true);
-  statusFor(root, fallbackAt - 1, funded);
-  assert.deepEqual(readStatus(), newer, "a later publication preserves the cutoff for delayed writers");
+  const delayedAfterNewer = statusFor(root, fallbackAt - 1, funded);
+  assert.equal(delayedAfterNewer.observedAt, new Date(fallbackAt - 1).toISOString(), "the last completed publish is the one on disk");
+  assert.equal(routingStatus.creditsLaneRoom(readStatus(), fallbackAt), false,
+    "a later publication leaves the cutoff in place for delayed writers");
 });
 
 test("W1-T13855 criterion 4: cash fallback preserves delayed Claude subscription headroom", async (t) => {
@@ -1156,8 +1149,11 @@ test("W1-T13855 criterion 4: cash fallback preserves delayed Claude subscription
     ["healthy-window", 5, undefined]);
 
   const newer = statusFor(root, START + 1, [claudeAt(95), codex]);
-  statusFor(root, delayedAt, [claudeAt(95), codex]);
-  assert.deepEqual(readStatus(START + 1), newer, "a delayed credits-only selection cannot replace the newer selection");
+  assert.equal(routingStatus.creditsLaneRoom(newer, START + 1), true, "a reading after the cutoff keeps the credits lane");
+  const lateCredits = statusFor(root, delayedAt, [claudeAt(95), codex]);
+  assert.equal(lateCredits.observedAt, new Date(delayedAt).toISOString(), "the last completed publish is the one on disk");
+  assert.equal(routingStatus.creditsLaneRoom(readStatus(START + 1), START + 1), false,
+    "a credits-only reading at or before the cutoff never restores the credits lane");
 });
 
 test("W1-T13855 criterion 4: a delayed Claude subscription selection publishes beside a stored blocked auction", async (t) => {
@@ -1196,8 +1192,48 @@ test("a first cash fallback records the credits cutoff before any funded status 
   assert.equal((await routeSpawn(account, 99, { root, write: true })).decision?.rule, "cash-fallback");
 
   const delayed = statusFor(root, START, [claudeAt(99), creditsCodex()]);
-  assert.equal(delayed.state, "not-probed");
+  assert.equal(delayed.state, "selected", "the delayed publish is written, not dropped");
+  assert.equal(delayed.providers?.find((row) => row.provider === "codex")?.creditsLane, undefined);
   assert.equal(reviewProviderObservation(delayed, fallbackAt).creditsLane, undefined);
   const newer = statusFor(root, fallbackAt + 1, [claudeAt(99), creditsCodex()]);
   assert.equal(reviewProviderObservation(newer, fallbackAt + 1).creditsLane, true);
+});
+
+// Review finding class: a publish is refused, blocked or dropped because another process is publishing.
+// Real worker processes publish through the production writer at the same moment, mixing snapshot
+// publishes with credits invalidations; none may throw, and the file left behind is one whole record.
+test("W1-T13855 criterion 3: concurrent worker processes publish the status without a lock refusing or dropping one", async (t) => {
+  const root = scratchRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const modulePath = pathToFileURL(join(REPO_ROOT, "src", "lib", "provider-routing-status.ts")).href;
+  const script = `
+    const { writeProviderRoutingStatus } = await import(process.argv[1]);
+    const [, , root, id, count, base] = process.argv;
+    for (let i = 0; i < Number(count); i += 1) {
+      const observedAtMs = Number(base) + Number(id) * 1000 + i;
+      const shared = { enabledProviders: ["claude", "codex"], reservePercent: 5, observedAtMs, cacheValidMs: 60000 };
+      writeProviderRoutingStatus(root, { ...shared, state: "blocked", capacities: [] });
+      writeProviderRoutingStatus(root, { ...shared, state: "invalidate-credits" });
+    }
+  `;
+  const workers = 4;
+  const count = 40;
+  const results = await Promise.all(Array.from({ length: workers }, (_, id) => new Promise<{ code: number | null; stderr: string }>((resolve) => {
+    const child = spawnProcess(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, modulePath, root, String(id), String(count), String(START)],
+      { cwd: REPO_ROOT, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("close", (code) => resolve({ code, stderr }));
+  })));
+  for (const result of results) assert.deepEqual(result, { code: 0, stderr: "" }, "a publisher failed while others were publishing");
+
+  const status = readProviderRoutingStatus(root, { now: () => START });
+  assert.equal(status.state, "blocked", "the file left behind is one whole, parseable record");
+  const stateDir = dirname(providerRoutingStatusPath(root));
+  const names = readdirSync(stateDir);
+  assert.deepEqual(names.filter((name) => name.includes(".tmp-")), [], "no staging file is left behind");
+  assert.equal(existsSync(join(root, "local", "provider-routing-status.lock.sqlite")), false, "no lock database guards the publish");
+  const newestCutoff = Math.max(...names.filter((name) => name.startsWith("provider-routing-credits-cutoff-"))
+    .map((name) => Number(name.slice("provider-routing-credits-cutoff-".length))));
+  assert.equal(newestCutoff, START + (workers - 1) * 1000 + count - 1, "the newest invalidation survives the concurrent pruning");
 });

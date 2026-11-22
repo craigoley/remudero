@@ -3,8 +3,7 @@
  * daemon. The daemon/worker is the only writer; the console only reads this file. Capacity
  * probes and provider credentials therefore never cross into the console process.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
@@ -448,61 +447,84 @@ function storedRecord(target: string): Record<string, unknown> | undefined {
   }
 }
 
-const require = createRequire(import.meta.url);
+/**
+ * W1-T13855: the credits-invalidation cutoff lives BESIDE the snapshot, as the NAME of an empty file, so
+ * recording it needs no read-modify-write of the snapshot and no lock. A cash fallback that ran out of
+ * credits records the instant it observed; the READER then drops the codex credits-lane flag from any
+ * snapshot observed at or before it. A funded publish racing the fallback therefore cannot resurrect
+ * the flag whichever rename lands last, and no publish is ever refused or dropped on the cutoff's account.
+ * Several processes may record at once: each writes its own uniquely named file and prunes only the
+ * strictly older ones, so the largest cutoff always survives.
+ */
+const CREDITS_CUTOFF_PREFIX = "provider-routing-credits-cutoff-";
 
-/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
- *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
- *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
-export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
-  // Serialize the snapshot read and rename across workers. SQLite releases the lock on process exit.
-  const lockDir = join(root, "local");
-  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
-  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-  const lock = new DatabaseSync(join(lockDir, "provider-routing-status.lock.sqlite"), { timeout: 1_000 });
+function creditsCutoffEntries(dir: string): Array<{ name: string; ms: number }> {
+  let names: string[];
   try {
-    lock.exec("BEGIN IMMEDIATE");
-    publishStatus(providerRoutingStatusPath(root), input);
-    lock.exec("COMMIT");
-  } finally {
-    lock.close();
+    names = readdirSync(dir);
+  } catch {
+    // An absent or unreadable state directory carries no cutoff: the reading is then trusted as written.
+    return [];
+  }
+  const entries: Array<{ name: string; ms: number }> = [];
+  for (const name of names) {
+    if (!name.startsWith(CREDITS_CUTOFF_PREFIX)) continue;
+    const ms = Number(name.slice(CREDITS_CUTOFF_PREFIX.length));
+    if (Number.isSafeInteger(ms)) entries.push({ name, ms });
+  }
+  return entries;
+}
+
+function creditsCutoffMs(root: string): number {
+  return creditsCutoffEntries(dirname(providerRoutingStatusPath(root))).reduce((max, entry) => Math.max(max, entry.ms), Number.NEGATIVE_INFINITY);
+}
+
+function recordCreditsInvalidation(root: string, observedAtMs: number): void {
+  if (!Number.isFinite(observedAtMs)) throw new Error("provider routing observation time is invalid");
+  const dir = dirname(providerRoutingStatusPath(root));
+  const ms = Math.trunc(observedAtMs);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (creditsCutoffEntries(dir).some((entry) => entry.ms >= ms)) return; // an equal or newer cutoff already covers it
+  writeFileSync(join(dir, `${CREDITS_CUTOFF_PREFIX}${ms}`), "", { mode: 0o600 });
+  for (const entry of creditsCutoffEntries(dir)) {
+    if (entry.ms >= ms) continue;
+    try {
+      unlinkSync(join(dir, entry.name));
+    } catch {
+      // Another process already pruned it; a leftover older cutoff never lowers the maximum.
+    }
   }
 }
 
-function publishStatus(target: string, input: ProviderRoutingWriteInput): void {
-  const stored = storedRecord(target);
-  // Keep the cutoff in the same atomic write as the flag. The public projection omits it.
-  const storedCutoff = stored?.creditsInvalidatedAtMs;
-  let creditsInvalidatedAtMs = typeof storedCutoff === "number" && Number.isFinite(storedCutoff) ? storedCutoff : undefined;
-  const cutoffMs = creditsInvalidatedAtMs ?? Number.NEGATIVE_INFINITY;
-  let record: ProviderRoutingStatus | Record<string, unknown>;
+let temporarySequence = 0;
+
+/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
+ *  Lock-free: every publish is a whole-file replace through a uniquely named staging file, so no
+ *  publisher can block, refuse or drop another and the last completed rename is the one on disk.
+ *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
+ *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
+export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
   if (input.state === "invalidate-credits") {
-    if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
-    if (input.observedAtMs <= cutoffMs) return;
-    creditsInvalidatedAtMs = input.observedAtMs;
-    record = stored ?? projectWrite({ ...input, state: "not-probed" });
-    if (record.state === "selected" && typeof record.observedAt === "string" &&
-        Date.parse(record.observedAt) <= input.observedAtMs && Array.isArray(record.providers)) {
-      const codex = record.providers.find((row) => row?.provider === "codex");
-      if (codex) delete codex.creditsLane;
-    }
-  } else {
-    const projected = projectWrite(input);
-    if (input.state === "selected" && input.observedAtMs <= cutoffMs) {
-      const codex = projected.providers?.find((row) => row.provider === "codex" && row.creditsLane);
-      if (input.selection.lane === "codex-credits") return;
-      if (codex) delete codex.creditsLane;
-    }
-    const kept = input.state === "not-probed" && (stored?.state === "selected" || stored?.state === "blocked") ? stored : undefined;
-    record = kept
-      ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
-      : projected;
+    recordCreditsInvalidation(root, input.observedAtMs);
+    return;
   }
-  const payload = `${JSON.stringify(creditsInvalidatedAtMs === undefined ? record : { ...record, creditsInvalidatedAtMs })}\n`;
+  publishStatus(providerRoutingStatusPath(root), input);
+}
+
+function publishStatus(target: string, input: Exclude<ProviderRoutingWriteInput, { state: "invalidate-credits" }>): void {
+  const projected = projectWrite(input);
+  const stored = input.state === "not-probed" ? storedRecord(target) : undefined;
+  const kept = stored?.state === "selected" || stored?.state === "blocked" ? stored : undefined;
+  const record: ProviderRoutingStatus | Record<string, unknown> = kept
+    ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
+    : projected;
+  const payload = `${JSON.stringify(record)}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
   }
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  temporarySequence += 1;
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}-${temporarySequence}`;
   try {
     writeFileSync(temporary, payload, { encoding: "utf8", mode: 0o600 });
     renameSync(temporary, target);
@@ -842,7 +864,13 @@ export function readProviderRoutingStatus(
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (parsed.version !== PROVIDER_ROUTING_STATUS_VERSION) return unknown("unsupported-version");
-    return parseSnapshot(parsed, (deps.now ?? Date.now)()) ?? unknown("malformed");
+    const status = parseSnapshot(parsed, (deps.now ?? Date.now)()) ?? unknown("malformed");
+    // A reading observed at or before a recorded credits invalidation no longer vouches for the credits lane.
+    if (status.providers?.some((row) => row.creditsLane) && status.observedAt !== undefined &&
+        Date.parse(status.observedAt) <= creditsCutoffMs(root)) {
+      return { ...status, providers: status.providers.map(({ creditsLane: _lane, ...row }) => row) };
+    }
+    return status;
   } catch {
     // JSON/schema/clock failures are malformed, distinct from absent and unreadable state.
     return unknown("malformed");
