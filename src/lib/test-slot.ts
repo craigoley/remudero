@@ -22,7 +22,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, ftruncateSync, futimesSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, statfsSync, statSync, unlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
 import { availableParallelism, hostname, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleepAsync } from "node:timers/promises";
@@ -430,6 +430,14 @@ export interface ReservedTreeEvidence {
   /** Positive coverage of the entire run, including reparented/detached work, bound to this generation. */
   complete?: boolean;
   reservation?: TestSlotReservationIdentity;
+  /** W1-T14253: this ONE scan was complete and quiescent: no process started since the owner carried its marker and
+   *  none was unreadable. A fact about one scan, never an end on its own ({@link quiescentScanEvidence}). */
+  quiescentScan?: { scanned: number };
+  /** W1-T14253: the kept first quiescent scan a `proc-scan-quiescent` release still waits on. */
+  firstScanAt?: string;
+  /** W1-T14253: how many complete scans, and how far apart, a `proc-scan-quiescent` release rests on. */
+  scans?: number;
+  spacingMs?: number;
 }
 
 function verifiedTerminalEvidence(held: TestSlotHolder, evidence: ReservedTreeEvidence): boolean {
@@ -447,6 +455,87 @@ function observeReservedTree(held: TestSlotHolder, probe: (held: TestSlotHolder)
   } catch (error) {
     return { state: "unknown", coverage: "none", reason: `process-tree probe failed: ${String(error)}` };
   }
+}
+
+/** W1-T14253: where a dead owner's first quiescent scan is kept between polls, which may be separate processes:
+ *  beside its slot record, so every waiter and the owner lane that re-read the record find it. */
+export function quiescentScanPath(slotPath: string): string {
+  return `${slotPath}.quiescent-scan.json`;
+}
+
+interface QuiescentScanRecord { reservation: TestSlotReservationIdentity; firstScanAt: string; scanned: number }
+
+/** The kept first scan, read only from a regular file this uid owns, never through a link. Anything else, or a body that
+ *  does not parse, is no kept scan: the poll then keeps a new first scan, so a bad record only delays a release. */
+function readQuiescentScan(path: string): QuiescentScanRecord | undefined {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch { return undefined; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== process.getuid?.() || st.size > 4096) return undefined;
+    return JSON.parse(readFileSync(fd, "utf8")) as QuiescentScanRecord;
+  } catch { return undefined; }
+  finally { closeSync(fd); }
+}
+
+/** Keep a first scan by exclusive create and rename. False when it cannot be kept, which withholds: no later scan can
+ *  then find a first one to pair with. */
+function keepQuiescentScan(path: string, record: QuiescentScanRecord): boolean {
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    try { unlinkSync(tmp); } catch { /* never created */ }
+    return false;
+  }
+}
+
+/** Void a kept first scan. A failed unlink cannot let one stand where it should not: a path that is not this uid's
+ *  regular file is never read as a scan, and a regular file this uid cannot unlink sits in a directory where the slot
+ *  record's own unlink, which every release ends in, fails the same way. */
+function clearQuiescentScan(path: string): void {
+  try { unlinkSync(path); } catch { /* absent, or not removable: see above */ }
+}
+
+/**
+ * W1-T14253 — the `proc-scan-quiescent` evidence class, for a lease that records no dedicated cgroup scope. One /proc
+ * scan cannot end a reservation: a descendant can replace its environment or fork while the scan runs. Two complete
+ * quiescent scans at least one recorded heartbeat apart can, as a weaker class than scope evidence: a descendant would
+ * have to slip past both, a full cadence apart. The spacing is the lease's own `heartbeatIntervalMs`; a lease without
+ * one never takes this class. The first scan is kept beside the slot record ({@link quiescentScanPath}), keyed by the
+ * exact reservation identity, and any scan that is not quiescent voids it. The owner pid, boot, namespace and uid
+ * checks stay with the callers. INVARIANT scope-evidence-unchanged: a recorded dedicated scope never takes this class.
+ */
+function quiescentScanEvidence(slotPath: string, held: TestSlotHolder, evidence: ReservedTreeEvidence, nowMs: number): ReservedTreeEvidence {
+  const keptPath = quiescentScanPath(slotPath);
+  const identity = testSlotReservationIdentity(held);
+  const cadence = held.heartbeatIntervalMs;
+  if (evidence.state !== "unknown" || evidence.quiescentScan === undefined || held.cgroupScope?.dedicated === true ||
+      identity === undefined || cadence === undefined || !Number.isSafeInteger(cadence) || cadence < 1) {
+    clearQuiescentScan(keptPath);
+    return evidence;
+  }
+  const kept = readQuiescentScan(keptPath);
+  const firstAt = Date.parse(kept?.firstScanAt ?? "");
+  const sameReservation = kept !== undefined && Object.entries(identity).every(([key, value]) =>
+    kept.reservation?.[key as keyof TestSlotReservationIdentity] === value);
+  const pending = (firstScanAt: string): ReservedTreeEvidence => ({ ...evidence, firstScanAt,
+    reason: `first quiescent scan at ${firstScanAt}; a second complete scan one recorded heartbeat (${cadence}ms) later releases` });
+  if (sameReservation && firstAt >= Date.parse(held.heartbeatAt) && firstAt <= nowMs) {
+    const spacingMs = nowMs - firstAt;
+    if (spacingMs < cadence) return pending(kept.firstScanAt);
+    return { state: "ended", complete: true, coverage: "proc-scan-quiescent", reservation: identity, scans: 2, spacingMs,
+      reason: `two complete scans ${spacingMs}ms apart, at least one recorded heartbeat (${cadence}ms), found no process ` +
+        `carrying the reservation marker and none unreadable (${kept.scanned} then ${evidence.quiescentScan.scanned} scanned)` };
+  }
+  const firstScanAt = new Date(nowMs).toISOString();
+  if (!keepQuiescentScan(keptPath, { reservation: identity, firstScanAt, scanned: evidence.quiescentScan.scanned })) {
+    return { ...evidence, reason: `${evidence.reason}; the first quiescent scan could not be kept beside the slot record, so none can release it` };
+  }
+  return pending(firstScanAt);
 }
 
 /** Seams for {@link probeReservedTree}; every field defaults to this host. */
@@ -699,7 +788,8 @@ function probeCgroupScope(held: TestSlotHolder, ownerStart: number, read: (path:
  * inherit. Seeing a marker proves live work; its absence cannot prove complete coverage: exec can
  * replace an environment, and a process can fork during a scan. Without an independent complete run
  * monitor this probe returns `unknown` when it sees no live work. A recorded dedicated cgroup scope
- * supplies complete coverage once the owner is gone and the scope is absent or unpopulated.
+ * supplies complete coverage once the owner is gone and the scope is absent or unpopulated. A complete scan
+ * that sees no live work and no unreadable process says so in `quiescentScan` (W1-T14253): still `unknown`.
  */
 export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeHost = {}): ReservedTreeEvidence {
   const platform = host.platform ?? process.platform;
@@ -763,7 +853,8 @@ export function probeReservedTree(held: TestSlotHolder, host: ReservedTreeProbeH
     scanned += 1;
   }
   if (unreadable.length > 0) return unknown(`incomplete: ${unreadable.length} process(es) started since the owner could not be read (pid ${unreadable.slice(0, 5).join(",")})`, "proc-environ (incomplete)");
-  return unknown(`none of ${scanned} process(es) carries the marker; marker absence does not prove complete process-tree quiescence`, "proc-environ (incomplete)");
+  return { ...unknown(`none of ${scanned} process(es) carries the marker; marker absence does not prove complete process-tree quiescence`, "proc-environ (incomplete)"),
+    quiescentScan: { scanned } };
 }
 
 /** What a beating process needs to rewrite exactly one reservation; the lease's own identity, never a new one. */
@@ -1107,6 +1198,8 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
   bootId?: () => string | undefined;
   pidNamespace?: () => string | undefined;
   log?: (line: string) => void;
+  /** W1-T14253: when this observation is, for the `proc-scan-quiescent` spacing. */
+  clock?: Clock;
 } = {}): OwnerReleaseResult {
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const mutation = acquireSlotMutation(path);
@@ -1128,7 +1221,9 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
     if (facts?.start === held.processStart || (facts === undefined && (opts.isPidAlive ?? defaultIsPidAlive)(held.pid))) {
       return { outcome: "refused", reason: `owner pid ${held.pid} is alive` };
     }
-    const evidence = observeReservedTree(held, opts.treeProbe ?? probeReservedTree);
+    const evidence = quiescentScanEvidence(path, held, observeReservedTree(held, opts.treeProbe ?? probeReservedTree), (opts.clock ?? systemClock).now());
+    // W1-T14253: a kept first quiescent scan is not a refusal; the same request one recorded heartbeat later releases.
+    if (evidence.firstScanAt !== undefined) return { outcome: "deferred", reason: evidence.reason };
     if (!verifiedTerminalEvidence(held, evidence)) return { outcome: "refused", reason: `covered work is not proven ended: ${evidence.reason}` };
     const result = reclaimStaleLock(path, {
       parseHolder: raw => ({ holder: parseTestSlotHolder(raw) }),
@@ -1136,13 +1231,16 @@ export function releaseTestSlotForOwner(path: string, request: OwnerReleaseReque
       onReclaim: () => log(JSON.stringify({ step: "test_slot.owner_release", path, pid: held.pid, label: held.label,
         ownerNonce: held.ownerNonce, processStart: held.processStart, bootId: held.bootId, pidNs: held.pidNs,
         reservation: testSlotReservationIdentity(held),
-        evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason })),
+        evidence: evidence.state, coverage: evidence.coverage, reason: evidence.reason, scans: evidence.scans, spacing_ms: evidence.spacingMs })),
       onLostReclaim: () => {},
     }, {
       openSync, readFileSync, closeSync, fstatSync, statSync: lstatSync,
       unlinkSync: () => unlinkObservedTestSlot(path, st, held),
     });
-    if (result.outcome === "reclaimed") return { outcome: "released", evidence };
+    if (result.outcome === "reclaimed") {
+      clearQuiescentScan(quiescentScanPath(path));
+      return { outcome: "released", evidence };
+    }
     return { outcome: "held", reason: "reservation changed during release; re-observe" };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "refused", reason: "no reservation at this path" };
@@ -2179,11 +2277,11 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
               }
               if (!pidStale) return false;
               // The owner pid is gone or reused: only exact-tree terminal evidence (darwin: pid and lease) frees its capacity.
-              const evidence = darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
+              const evidence = quiescentScanEvidence(path, held, darwinMarkerOwnerEvidence(held, currentStat?.uid, true, clock.now(), darwinWaiter()) ??
                 (held.ownerUid === currentStat?.uid && held.ownerUid === process.getuid?.() &&
                 held.bootId === bootId() && held.pidNs === myNs && testSlotReservationIdentity(held) !== undefined
                 ? observeReservedTree(held, treeProbe)
-                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" });
+                : { state: "unknown" as const, coverage: "none", reason: "owner identity unknown or host/boot/namespace/uid differs" }), clock.now());
               if (evidence.state === "ended") { quiescent = { held, evidence }; return true; }
               observeOnce(`withheld:${i}:${held.ownerNonce}:${evidence.state}:${evidence.reason}`, { step: "test_slot.reclaim_withheld", label, slot: i,
                 pid: held.pid, holder: held.label, ownerNonce: held.ownerNonce, processStart: held.processStart,
@@ -2201,7 +2299,9 @@ function* testSlotPolls(label: string, opts: TestSlotOptions, maximum: number,
                 cgroupIdentity: held.cgroupScope?.dev !== undefined ? { path: held.cgroupScope.path, dev: held.cgroupScope.dev,
                   ino: held.cgroupScope.ino, cgroupNs: held.cgroupScope.cgroupNs } : undefined,
                 reservation: testSlotReservationIdentity(held),
-                coverage: evidence.coverage, reason: evidence.reason, silentMs: clock.now() - Date.parse(held.heartbeatAt) }));
+                coverage: evidence.coverage, reason: evidence.reason, scans: evidence.scans, spacing_ms: evidence.spacingMs,
+                silentMs: clock.now() - Date.parse(held.heartbeatAt) }));
+              clearQuiescentScan(quiescentScanPath(path));
             },
             onLostReclaim: () => {},
           }, {
