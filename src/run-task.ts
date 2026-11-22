@@ -642,12 +642,8 @@ import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 import {
-  CALIBRATION_HEAD_FLAG, REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, REVIEWER_MODEL_PIN_FLAG, calibrationCaseResult,
-  calibrationInputsFromRows, modelKey, scoreReviewersAgainstKnownAnswers, type CalibrationCase, type CalibrationCaseResult,
-  type CalibrationInputs, type CalibrationModel, type ReviewerCalibrationPorts,
+  REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
 } from "./lib/reviewer-calibration.js";
-import { WORKER_PROVIDER_IDS } from "./lib/config-schema.js";
-import type { ReplayIdleSignal } from "./lib/golden-corpus.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -22779,125 +22775,31 @@ export function buildCoverageNightlyDaemonHook(opts: Omit<Parameters<typeof read
   };
 }
 
-/** W1-T12145: every step a calibration pass reads off the ledger union, in one read per pass. */
-export const REVIEWER_CALIBRATION_READ_STEPS = [
-  VERDICT_OUTCOME_STEP, "review.posted", "review.semantic_mode", REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP,
-] as const;
 /** W1-T12145: pacing, not a bound on the result — the most case reviews one cadence fire starts. An epoch completes over fires. */
 export const REVIEWER_CALIBRATION_CASES_PER_PASS = 2;
 /** W1-T12145: what a cash-backed case reserves against the evaluator cap before its request; its read cost then replaces it. */
 export const REVIEWER_CALIBRATION_CASH_RESERVE_USD = 1;
 
-/** W1-T12145: the calibration rows of the WHOLE ledger union. An incomplete union throws, and the pass then refuses: a
- *  pass over a short history would re-run cases already run and count the evaluator cap short. */
-export function readReviewerCalibrationRows(stateDir: string, fsDeps?: LedgerGrepFsDeps): Array<Record<string, unknown>> {
-  const read = readLedgerUnionRecordsSync(stateDir, { step: REVIEWER_CALIBRATION_READ_STEPS, refuseIncomplete: true }, fsDeps);
-  if (!read.ok) throw new Error(`the ledger union under ${stateDir} is incomplete; unread: ${read.unread.join(", ")}`);
-  return read.rows;
-}
-
-/** W1-T12145: the fleet's idleness and measured usage before a subscription-backed case. An unreadable liveness ledger
- *  is no measurement: the signal then carries none, and the idle gate refuses for that reason. */
-export async function readReviewerCalibrationIdle(
-  stateDir: string,
-  config: Config,
-  clock: Clock,
-  usageDeps?: Parameters<typeof readUsageSnapshotPreferSdk>[1],
-): Promise<ReplayIdleSignal> {
-  const instance = { name: "reviewer-calibration", repo: "self", stateDir };
-  let liveness: ReplayIdleSignal["liveness"];
-  try {
-    liveness = judgeInstanceLiveness(instance, readLivenessRows(instance, clock.now() - LIVENESS_WINDOW_MS), clock.now());
-  } catch (error) {
-    process.stderr.write(`reviewer calibration: fleet liveness unreadable, so idleness is unmeasured: ${String((error as Error)?.message ?? error)}\n`);
-  }
-  const headroom = await readUsageSnapshotPreferSdk(config, usageDeps);
-  return { ...(liveness === undefined ? {} : { liveness }), ...(headroom === undefined ? {} : { headroom }) };
-}
-
-/** W1-T12145: one case through the live reviewer, in shadow mode at the case's head with the model pinned, from a fresh
- *  tree at origin/main. Never rejects: a review that could not run reads as a null verdict with its reason. */
-export async function runReviewerCalibrationCase(
-  c: CalibrationCase,
-  model: CalibrationModel,
-  io: {
-    run: (prArg: string, rest: string[], freshness: { originMainSha: string }, onFailure: (failure: string) => void) => Promise<number | undefined>;
-    originMainSha: () => string;
-    readAttemptRows: (attemptId: string, sinceIso: string) => Array<Record<string, unknown>>;
-    attemptId: string;
-    clock: Clock;
-  },
-): Promise<CalibrationCaseResult> {
-  const target = prUrlTarget(c.prUrl);
-  if (target === undefined) return { verdict: null, costUsd: null, reason: `the case's pull request URL ${c.prUrl} names no repository` };
-  let originMainSha: string;
-  try {
-    originMainSha = io.originMainSha().trim();
-  } catch (error) {
-    return { verdict: null, costUsd: null, reason: `origin/main could not be read: ${String((error as Error)?.message ?? error)}` };
-  }
-  const sinceIso = io.clock.iso();
-  // Every other provider excluded, so routing cannot move the case off the model under test.
-  const others = WORKER_PROVIDER_IDS.filter((provider) => provider !== model.provider);
-  const rest = [
-    "--repo", `${target.owner}/${target.repo}`, REVIEWER_SHADOW_FLAG, CALIBRATION_HEAD_FLAG, c.headSha,
-    REVIEWER_MODEL_PIN_FLAG, modelKey(model), JUDGE_AT_OWN_START_FLAG,
-    ...reviewOptionFlags({ executionMode: "semantic", reviewAttemptId: io.attemptId, excludeProviders: others }),
-  ];
-  let failure: string | undefined;
-  const code = await io.run(String(target.number), rest, { originMainSha }, (why) => { failure = why; });
-  return calibrationCaseResult(c, model, io.readAttemptRows(io.attemptId, sinceIso), { code, ...(failure === undefined ? {} : { failure }) });
-}
-
-/** W1-T12145: what {@link buildReviewerCalibrationPorts} lets a test replace; each absent field is the live read or spawn. */
-export type ReviewerCalibrationWiring = {
-  readRows?: (stateDir: string) => Array<Record<string, unknown>>;
-  readAttemptRows?: (stateDir: string, attemptId: string, sinceIso: string) => Array<Record<string, unknown>>;
-  idleSignal?: () => Promise<ReplayIdleSignal>;
-  review?: FreshTreeReviewSeams;
-  attemptId?: (prNumber: number) => string;
-};
-
-/** W1-T12145: the measurement cadence's calibration pass, wired to this instance's ledger, fleet and reviewer. */
-export function buildReviewerCalibrationPorts(config: Config, clock: Clock, wiring: ReviewerCalibrationWiring = {}): ReviewerCalibrationPorts {
-  const stateDir = join(config.root, "state");
-  let rows: Array<Record<string, unknown>> | undefined;
-  const ledgerRows = (): Array<Record<string, unknown>> => (rows ??= (wiring.readRows ?? readReviewerCalibrationRows)(stateDir));
-  let inputs: CalibrationInputs | undefined;
-  const calibrationInputs = (): CalibrationInputs => (inputs ??= calibrationInputsFromRows(ledgerRows(), clock.now()));
-  const seams: FreshTreeReviewSeams = wiring.review ?? {
-    git: reviewerGit(repoRoot), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(repoRoot, "..", "worktrees"),
-    spawnReview: spawnRmdReviewForFreshTree,
-  };
-  const runner = buildFreshTreeReviewRunner(repoRoot, seams);
-  const readAttemptRows = wiring.readAttemptRows ?? ((dir: string, attemptId: string, sinceIso: string) =>
-    readLedgerUnionRecordsSync(dir, { since: sinceIso, where: (row) => row.review_attempt_id === attemptId }).rows);
-  const runId = `REVIEWER-CALIBRATION-${clock.now()}`;
+/** W1-T12145: earlier calibration passes' rows, split by step. The case rows score the epoch and pick the next cases;
+ *  the result rows carry the pairs an earlier pass decided, which spend nothing more this epoch. */
+export function splitReviewerCalibrationRows(rows: ReadonlyArray<Record<string, unknown>>): Awaited<ReturnType<ReviewerCalibrationPorts["readPriorRows"]>> {
   return {
-    stateDir,
-    clock,
-    readOutcomes: async () => calibrationInputs().outcomes,
-    readReviewedHeads: async () => calibrationInputs().reviewed,
-    // The reader splits the rows by step: the case rows score the epoch, the result rows carry the decided pairs.
-    readPriorRows: async () => ({
-      cases: ledgerRows().filter((row) => row.step === REVIEW_CALIBRATION_CASE_STEP),
-      results: ledgerRows().filter((row) => row.step === REVIEW_CALIBRATION_RESULT_STEP),
-    }),
-    models: async () => calibrationInputs().models,
-    idleSignal: wiring.idleSignal ?? (() => readReviewerCalibrationIdle(stateDir, config, clock)),
-    runCase: (c, model) => runReviewerCalibrationCase(c, model, {
-      run: runner,
-      originMainSha: () => seams.git(["-C", repoRoot, "rev-parse", "origin/main"]),
-      readAttemptRows: (attemptId, sinceIso) => readAttemptRows(stateDir, attemptId, sinceIso),
-      attemptId: (wiring.attemptId ?? ((prNumber: number) => `review-PR${prNumber}-${randomUUID()}`))(c.prNumber),
-      clock,
-    }),
-    log: (row) => appendLedger(ledgerPathFor(config), {
-      run_id: runId, task_id: "REVIEWER-CALIBRATION", lane: "measurement-cadence", ...row, step: String(row.step),
-    }),
-    cashCaseReserveUsd: REVIEWER_CALIBRATION_CASH_RESERVE_USD,
-    casesPerPass: REVIEWER_CALIBRATION_CASES_PER_PASS,
+    cases: rows.filter((row) => row.step === REVIEW_CALIBRATION_CASE_STEP),
+    results: rows.filter((row) => row.step === REVIEW_CALIBRATION_RESULT_STEP),
   };
+}
+
+/** W1-T12145: the measurement cadence's calibration ports. Every leaf is asynchronous, because the cadence is reached
+ *  from the daemon loop: a case is an `rmd review` child of this checkout, with no tree cut and no git on the loop. */
+export function buildReviewerCalibrationPorts(config: Config, clock: Clock): ReviewerCalibrationPorts {
+  const runId = `REVIEWER-CALIBRATION-${clock.now()}`;
+  return calibrationPorts({
+    stateDir: join(config.root, "state"), clock, config, checkoutDir: repoRoot,
+    spawnReview: spawnRmdReviewForFreshTree, ownStartFlag: JUDGE_AT_OWN_START_FLAG, optionFlags: reviewOptionFlags,
+    readUsage: readUsageSnapshotPreferSdk, splitPriorRows: splitReviewerCalibrationRows,
+    log: (row) => appendLedger(ledgerPathFor(config), { run_id: runId, task_id: "REVIEWER-CALIBRATION", lane: "measurement-cadence", ...row, step: String(row.step) }),
+    cashCaseReserveUsd: REVIEWER_CALIBRATION_CASH_RESERVE_USD, casesPerPass: REVIEWER_CALIBRATION_CASES_PER_PASS,
+  });
 }
 
 export function buildMeasurementCadenceDaemonHooks(deps: {

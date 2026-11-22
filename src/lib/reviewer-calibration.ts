@@ -35,11 +35,15 @@
  * NOT IN SCOPE (the shard): which model reviews live work (W1-T14043 reads this pass's result), the
  * review prompt, and seeded mutants.
  */
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import type { Clock } from "./clock.js";
-import { isWorkerProviderId } from "./config.js";
-import type { WorkerProviderId } from "./config-schema.js";
+import { fixedClock, type Clock } from "./clock.js";
+import { isWorkerProviderId, type Config } from "./config.js";
+import { WORKER_PROVIDER_IDS, type WorkerProviderId } from "./config-schema.js";
+import { judgeInstanceLiveness, LIVENESS_WINDOW_MS } from "./fleet-liveness.js";
+import type { UsageSnapshot } from "./headroom.js";
+import { readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_STEP_PREFIX, REVIEWER_SHADOW_VERDICT_STEP } from "./reviewer-health.js";
 import { buildEvalCard, protocolHash, type EvalCard, type EvalCardTrial } from "./eval-card.js";
 import { replayIdleGate, type ReplayIdleSignal } from "./golden-corpus.js";
@@ -55,12 +59,13 @@ export const REVIEW_CALIBRATION_CASE_STEP = "review.calibration.case" as const;
  *  back, so an epoch never spends again on a pair it already decided. */
 export const REVIEW_CALIBRATION_RESULT_STEP = "review.calibration.result" as const;
 
-/** Operator decision 2026-11-21: a subscription-backed case runs only below 80% of every measured window. */
+/** PRIMARY CONTROL: no subscription-backed case starts while any measured usage window is at or above it (operator, 2026-11-21). */
 export const IDLE_LIMIT_PCT = 80;
-/** Operator decision 2026-11-21: cash-backed cases spend inside $25 a week. */
+/** PRIMARY CONTROL: no cash-backed case starts unless the window's cash spend plus its reservation fits it (operator, 2026-11-21). */
 export const EVALUATOR_CASH_CAP_USD = 25;
+/** PRIMARY CONTROL: the days of cash case rows, across epochs, that {@link EVALUATOR_CASH_CAP_USD} sums. */
 export const EVALUATOR_CAP_WINDOW_DAYS = 7;
-/** A new epoch starts only when this many escaped defects exist that no earlier epoch holds. */
+/** PRIMARY CONTROL: no new epoch is frozen until this many escaped defects exist that no earlier epoch holds. */
 export const NEW_EPOCH_ESCAPED_DEFECTS = 20;
 /** The sequential test's level; its mixing variance is W1-T14147's {@link MERGE_MIXING_VARIANCE}. */
 export const CALIBRATION_ALPHA = 0.05;
@@ -705,4 +710,128 @@ export async function scoreReviewersAgainstKnownAnswers(deps: ReviewerCalibratio
     });
   }
   return { epoch: current.epoch, ran, refused, scores, decisions };
+}
+
+// ── The production ports ─────────────────────────────────────────────────────────────────────
+
+/** What the measurement cadence hands the pass. Every leaf is asynchronous, because the cadence is reached from the
+ *  daemon loop: no case review cuts a tree or runs git on the loop, each is an `rmd review` child of the checkout. */
+export interface CalibrationWiring {
+  stateDir: string;
+  clock: Clock;
+  config: Config;
+  /** The checkout whose `bin/rmd` reviews each case: the daemon's own. */
+  checkoutDir: string;
+  /** Starts `rmd review <args>` from `checkoutDir` and resolves to its exit code; a non-zero exit names its failure first. */
+  spawnReview: (checkoutDir: string, args: string[], onFailure?: (failure: string) => void) => Promise<number>;
+  /** The review command's flag for a child that takes its own start reading. */
+  ownStartFlag: string;
+  /** The review command's option flags for one attempt (run-task's `reviewOptionFlags`). */
+  optionFlags: (opts: { executionMode: "semantic"; reviewAttemptId: string; excludeProviders: WorkerProviderId[] }) => string[];
+  /** The account's measured usage windows, or undefined when unread. */
+  readUsage: (config: Config) => Promise<UsageSnapshot | undefined>;
+  /** Splits earlier passes' rows by step. It lives with the caller, so each step's reader sits outside its writer's file. */
+  splitPriorRows: (rows: ReadonlyArray<Record<string, unknown>>) => Awaited<ReturnType<ReviewerCalibrationPorts["readPriorRows"]>>;
+  log: (row: Record<string, unknown>) => void;
+  cashCaseReserveUsd: number;
+  casesPerPass: number;
+  /** A fresh review attempt id for a case's pull request; a random UUID by default. */
+  attemptId?: (prNumber: number) => string;
+}
+
+/** The steps a pass reads off the union, in one read. */
+const CALIBRATION_READ_STEPS = [VERDICT_OUTCOME_STEP, "review.posted", "review.semantic_mode", REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP];
+
+/** The union's lines as rows. A torn line (only an unfiltered read can return one) is no row, and is not guessed at. */
+function parsedRows(lines: readonly string[]): Array<Record<string, unknown>> {
+  return lines.flatMap((line) => {
+    try {
+      const row: unknown = JSON.parse(line);
+      return row !== null && typeof row === "object" && !Array.isArray(row) ? [row as Record<string, unknown>] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** Every calibration row of the WHOLE ledger union, read off the loop. An incomplete union throws and the pass refuses:
+ *  a pass over a short history would re-run cases already run and count the evaluator cap short. */
+export async function readCalibrationRows(stateDir: string): Promise<Array<Record<string, unknown>>> {
+  const read = await readLedgerUnionRawLinesAsync(stateDir, { step: CALIBRATION_READ_STEPS, refuseIncomplete: true });
+  if (!read.ok) throw new Error(`the ledger union under ${stateDir} is incomplete; unread: ${read.unread.join(", ")}`);
+  return parsedRows(read.rawLines);
+}
+
+/** The fleet's idleness and measured usage before a subscription-backed case, read off the loop. A live ledger that was
+ *  not read is no measurement: the signal then carries no liveness, and the idle gate refuses for that reason. */
+export async function readCalibrationIdle(stateDir: string, clock: Clock, usage: () => Promise<UsageSnapshot | undefined>): Promise<ReplayIdleSignal> {
+  const nowMs = clock.now();
+  const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: fixedClock(nowMs - LIVENESS_WINDOW_MS).iso() });
+  const liveness = read.liveFileRead ? judgeInstanceLiveness({ name: "reviewer-calibration", repo: "self", stateDir }, parsedRows(read.rawLines), nowMs) : undefined;
+  const headroom = await usage();
+  return { ...(liveness === undefined ? {} : { liveness }), ...(headroom === undefined ? {} : { headroom }) };
+}
+
+/** The rows one shadow review wrote under its attempt id, since it started. */
+export async function readCalibrationAttemptRows(stateDir: string, attemptId: string, sinceIso: string): Promise<Array<Record<string, unknown>>> {
+  const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: sinceIso, keep: (line) => line.includes(attemptId) });
+  return parsedRows(read.rawLines).filter((row) => row.review_attempt_id === attemptId);
+}
+
+const pullOf = (url: string): { owner: string; repo: string; number: number } | undefined => {
+  const m = /^https?:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/([1-9][0-9]*)$/.exec(url);
+  return m ? { owner: m[1]!, repo: m[2]!, number: Number(m[3]) } : undefined;
+};
+
+/** One case through the live reviewer: an `rmd review` child in shadow mode at the case's head, the model under test
+ *  pinned and every other provider excluded. Never rejects: a child that could not start reads as a null verdict. */
+export async function runCalibrationCase(
+  c: CalibrationCase,
+  model: CalibrationModel,
+  w: Pick<CalibrationWiring, "checkoutDir" | "spawnReview" | "ownStartFlag" | "optionFlags" | "clock"> & {
+    attemptId: string;
+    readAttemptRows: (attemptId: string, sinceIso: string) => Promise<Array<Record<string, unknown>>>;
+  },
+): Promise<CalibrationCaseResult> {
+  const pull = pullOf(c.prUrl);
+  if (pull === undefined) return { verdict: null, costUsd: null, reason: `the case's pull request URL ${c.prUrl} names no repository` };
+  const sinceIso = w.clock.iso();
+  const excludeProviders = WORKER_PROVIDER_IDS.filter((provider) => provider !== model.provider);
+  const args = [
+    String(pull.number), "--repo", `${pull.owner}/${pull.repo}`, REVIEWER_SHADOW_FLAG, CALIBRATION_HEAD_FLAG, c.headSha,
+    REVIEWER_MODEL_PIN_FLAG, modelKey(model), w.ownStartFlag,
+    ...w.optionFlags({ executionMode: "semantic", reviewAttemptId: w.attemptId, excludeProviders }),
+  ];
+  let failure: string | undefined;
+  let code: number | undefined;
+  try {
+    code = await w.spawnReview(w.checkoutDir, args, (why) => { failure = why; });
+  } catch (error) {
+    failure = `the review child could not start: ${String((error as Error)?.message ?? error)}`;
+  }
+  return calibrationCaseResult(c, model, await w.readAttemptRows(w.attemptId, sinceIso), { code, ...(failure === undefined ? {} : { failure }) });
+}
+
+/** The pass's ports over the wiring: one union read per pass, shared by every reader. */
+export function calibrationPorts(w: CalibrationWiring): ReviewerCalibrationPorts {
+  let rows: Promise<Array<Record<string, unknown>>> | undefined;
+  const ledgerRows = (): Promise<Array<Record<string, unknown>>> => (rows ??= readCalibrationRows(w.stateDir));
+  let inputs: Promise<CalibrationInputs> | undefined;
+  const calibrationInputs = (): Promise<CalibrationInputs> => (inputs ??= ledgerRows().then((r) => calibrationInputsFromRows(r, w.clock.now())));
+  const attemptId = w.attemptId ?? ((prNumber: number) => `review-PR${prNumber}-${randomUUID()}`);
+  return {
+    stateDir: w.stateDir,
+    clock: w.clock,
+    readOutcomes: async () => (await calibrationInputs()).outcomes,
+    readReviewedHeads: async () => (await calibrationInputs()).reviewed,
+    readPriorRows: async () => w.splitPriorRows(await ledgerRows()),
+    models: async () => (await calibrationInputs()).models,
+    idleSignal: () => readCalibrationIdle(w.stateDir, w.clock, () => w.readUsage(w.config)),
+    runCase: (c, model) => runCalibrationCase(c, model, {
+      ...w, attemptId: attemptId(c.prNumber), readAttemptRows: (id, sinceIso) => readCalibrationAttemptRows(w.stateDir, id, sinceIso),
+    }),
+    log: w.log,
+    cashCaseReserveUsd: w.cashCaseReserveUsd,
+    casesPerPass: w.casesPerPass,
+  };
 }

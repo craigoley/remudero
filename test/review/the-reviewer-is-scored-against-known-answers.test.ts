@@ -7,6 +7,7 @@
  * model seam here is a fake or a local executable: nothing spends and nothing reaches the network.
  */
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,10 +23,8 @@ import * as cal from "#src/lib/reviewer-calibration.js";
 import {
   MIN_POPULATION_FLOOR, UNREADABLE_REVIEWER_MODEL, VERDICT_OUTCOME_STEP, mineVerdictRows, verdictCalibrationReport, type VerdictRow,
 } from "#src/lib/verdict-calibration.js";
-import {
-  buildReviewerCalibrationPorts, readReviewerCalibrationIdle, readReviewerCalibrationRows, reviewCommand, runReviewerCalibrationCase,
-  spawnRmdReviewForFreshTree,
-} from "#src/run-task.js";
+import { reviewCommand, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { spawnWorker } from "#src/lib/worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -76,7 +75,7 @@ interface FakeOptions {
   nowMs?: number;
 }
 
-/** The pass's ports over one in-memory ledger; its reader splits rows by step, as run-task.ts's reader does. */
+/** The pass's ports over one in-memory ledger; its reader splits rows by step, as the cadence's reader does. */
 function fakePorts(opts: FakeOptions) {
   let nowMs = opts.nowMs ?? T0;
   const clock = clockFromMillisFn(() => nowMs);
@@ -106,6 +105,52 @@ function fakePorts(opts: FakeOptions) {
 }
 
 const stateOf = (t: TestContext): string => ownedFixtureDir(t, "w1t12145-state").dir;
+
+/** The review command's host, built here as test/review/a-hand-review-runs-the-model-reviewer.test.ts builds it: every
+ *  leaf this fixture must never reach throws. */
+function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
+const HOST: ReviewCommandHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all",
+  JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+  attributeWorkerStreamEvent: (event) => event,
+  ledgeredNonDispatchSpawn: (_lane, raw) => raw ?? spawnWorker,
+  lintPlanForReview: unexpected,
+  liveWorkerRunIds: new Set<string>(),
+  materializeReviewWorktree: unexpected,
+  readHeadShaRest: unexpected,
+  readMainPlanTreeSha: unexpected,
+  realDeps: () => ({ reviewWorktree: { fetch: () => {} } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+  reviewPostedDescription: (verdict) => verdict.summary,
+  reviewWorkerLockId: (runId) => runId,
+  reviewerClockBoundMs: () => 60_000,
+  reviewSubjectGit: unexpected,
+};
+
+/** The flags run-task's `reviewOptionFlags` gives a case attempt, as the cadence hands that function to the runner. */
+const optionFlags = (o: { executionMode: "semantic"; reviewAttemptId: string; excludeProviders: string[] }): string[] =>
+  ["--execution-mode", o.executionMode, "--review-attempt-id", o.reviewAttemptId, "--exclude-providers", o.excludeProviders.join(",")];
+/** The cadence's split of earlier rows by step, as run-task's `splitReviewerCalibrationRows` does it. */
+const splitPriorRows = (rows: ReadonlyArray<Row>) => ({
+  cases: rows.filter((r) => r.step === cal.REVIEW_CALIBRATION_CASE_STEP), results: rows.filter((r) => r.step === cal.REVIEW_CALIBRATION_RESULT_STEP),
+});
+
+/** The cadence's wiring over a fixture root. Its review spawn starts `<checkout>/bin/rmd review …` asynchronously, as
+ *  run-task's `spawnRmdReviewForFreshTree` does, and resolves to the child's exit code. */
+function wiringFor(root: string, over: Partial<cal.CalibrationWiring> = {}): cal.CalibrationWiring {
+  return {
+    stateDir: join(root, "state"), clock: fixedClock(T0), config: { root } as Config, checkoutDir: join(root, "checkout"),
+    spawnReview: (dir, args) => new Promise<number>((resolve, reject) => {
+      execFile(join(dir, "bin", "rmd"), ["review", ...args], (error) => {
+        if (error && typeof error.code !== "number") reject(error);
+        else resolve(typeof error?.code === "number" ? error.code : 0);
+      });
+    }),
+    ownStartFlag: "--judge-at-own-start", optionFlags, readUsage: async () => undefined, splitPriorRows,
+    log: () => {}, cashCaseReserveUsd: 1, casesPerPass: 2,
+    ...over,
+  };
+}
 const epochFiles = (stateDir: string): string[] => readdirSync(cal.calibrationEpochDir(stateDir)).sort();
 const scored = (rows: Row[]): Row[] => rows.filter((r) => r.step === cal.REVIEW_CALIBRATION_RESULT_STEP && r.outcome === "scored");
 const refusals = (rows: Row[]): Row[] => rows.filter((r) => r.step === cal.REVIEW_CALIBRATION_RESULT_STEP && r.outcome === "refused");
@@ -313,13 +358,15 @@ test("W1-T12145 criterion 5 invariant calibration-publishes-nothing: a case is a
     { step: "shadow.review.reviewer", provider: "codex", model: SOL.model, total_cost_usd: 0.4 },
     { step: "shadow.review.shadow_verdict", state, head_sha: head, reviewer_outcome: "success" },
   ];
-  const ran = await runReviewerCalibrationCase(c, SOL, {
-    run: async (prArg, rest) => { argv = [prArg, ...rest]; return 0; },
-    originMainSha: () => `${sha("main")}\n`,
-    readAttemptRows: (id) => (id === attemptId ? shadowRows("failure") : []),
+  let checkout = "";
+  const ran = await cal.runCalibrationCase(c, SOL, {
+    checkoutDir: "/daemon/checkout", ownStartFlag: "--judge-at-own-start", optionFlags,
+    spawnReview: async (dir, args) => { checkout = dir; argv = args; return 0; },
+    readAttemptRows: async (id) => (id === attemptId ? shadowRows("failure") : []),
     attemptId, clock: fixedClock(T0),
   });
   assert.deepEqual(ran, { verdict: "FAIL", costUsd: 0.4 });
+  assert.equal(checkout, "/daemon/checkout", "a case is a child of the daemon's checkout: no tree is cut");
   assert.equal(argv[0], "8");
   assert.ok(argv.includes(REVIEWER_SHADOW_FLAG), "a case review runs in shadow mode");
   assert.deepEqual(argv.slice(argv.indexOf(cal.CALIBRATION_HEAD_FLAG), argv.indexOf(cal.CALIBRATION_HEAD_FLAG) + 2), [cal.CALIBRATION_HEAD_FLAG, head]);
@@ -341,7 +388,7 @@ test("W1-T12145 criterion 5 invariant calibration-publishes-nothing: a case is a
     runReview: async (args: Record<string, any>) => { reviewed = args; return { state: "failure", headSha: head, reviewerOutcome: "success", criteria: [] }; },
     reviewerCodeFreshness: () => ({ status: "fresh", codeSha: head, originMainSha: head, advance: "none" }),
   });
-  const code = await reviewCommand("8", argv.slice(1), deps(view("2026-11-01T00:00:00Z")) as never);
+  const code = await reviewCommand(HOST, "8", argv.slice(1), deps(view("2026-11-01T00:00:00Z")) as never);
   assert.equal(code, 0, "a shadow review ends at its verdict");
   assert.equal(reviewed?.shadow, true);
   assert.equal(reviewed?.spawnReviewer, true);
@@ -355,8 +402,8 @@ test("W1-T12145 criterion 5 invariant calibration-publishes-nothing: a case is a
 
   // Anything but a shadow review at the merged head is declined as a closed pull request always was.
   reviewed = undefined;
-  assert.equal(await reviewCommand("8", ["--repo", "acme/remudero", REVIEWER_SHADOW_FLAG], deps(view("2026-11-01T00:00:00Z")) as never), 2);
-  assert.equal(await reviewCommand("8", argv.slice(1), deps(view(null)) as never), 2, "an unmerged closed pull request is no case");
+  assert.equal(await reviewCommand(HOST, "8", ["--repo", "acme/remudero", REVIEWER_SHADOW_FLAG], deps(view("2026-11-01T00:00:00Z")) as never), 2);
+  assert.equal(await reviewCommand(HOST, "8", argv.slice(1), deps(view(null)) as never), 2, "an unmerged closed pull request is no case");
   assert.equal(reviewed, undefined);
   assert.equal(pending, 0);
   const row = { head: { sha: head }, merged_at: "2026-11-01T00:00:00Z" };
@@ -474,9 +521,10 @@ test("W1-T12145 the calibration rows come from the whole ledger union, and a uni
       evaluator_provenance: { provider: "claude", requestedModel: SONNET.model } }),
     line({ step: "sweep.summary" }),
   ].join("\n") + "\n");
-  assert.deepEqual(readReviewerCalibrationRows(stateDir).map((r) => r.step),
+  assert.deepEqual((await cal.readCalibrationRows(stateDir)).map((r) => r.step),
     [VERDICT_OUTCOME_STEP, cal.REVIEW_CALIBRATION_CASE_STEP, cal.REVIEW_CALIBRATION_RESULT_STEP, "review.posted"]);
-  const ports = buildReviewerCalibrationPorts({ root } as Config, fixedClock(T0));
+  const logged: Row[] = [];
+  const ports = cal.calibrationPorts(wiringFor(root, { log: (row) => logged.push(row) }));
   assert.deepEqual(await ports.readPriorRows(), {
     cases: [{ ts: "2026-11-01T00:00:00.000Z", step: cal.REVIEW_CALIBRATION_CASE_STEP, epoch: 1, case_id: "c1" }],
     results: [{ ts: "2026-11-01T00:00:00.000Z", step: cal.REVIEW_CALIBRATION_RESULT_STEP, outcome: "scored", epoch: 1 }],
@@ -486,27 +534,34 @@ test("W1-T12145 the calibration rows come from the whole ledger union, and a uni
   assert.equal((await ports.readReviewedHeads()).get("a")?.prUrl, "https://github.com/acme/remudero/pull/1");
 
   writeFileSync(join(stateDir, "ledger.2026-11-03T00-00-00-000Z.ndjson.gz"), "not gzip");
-  assert.throws(() => readReviewerCalibrationRows(stateDir), /is incomplete; unread: .*ledger\.2026-11-03T00-00-00-000Z\.ndjson\.gz/);
-  const refused = await cal.scoreReviewersAgainstKnownAnswers(buildReviewerCalibrationPorts({ root } as Config, fixedClock(T0)));
+  await assert.rejects(cal.readCalibrationRows(stateDir), /is incomplete; unread: .*ledger\.2026-11-03T00-00-00-000Z\.ndjson\.gz/);
+  const torn: Row[] = [];
+  const refused = await cal.scoreReviewersAgainstKnownAnswers(cal.calibrationPorts(wiringFor(root, { log: (row) => torn.push(row) })));
   assert.equal(refused.epoch, null);
   assert.match(refused.refused[0]!, /^the ledger could not be read whole, so no case runs on a short count of earlier cases and spend: /);
-  const written = readFileSync(join(stateDir, "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Row).at(-1)!;
-  assert.deepEqual([written.step, written.outcome, written.task_id, written.lane], [cal.REVIEW_CALIBRATION_RESULT_STEP, "refused", "REVIEWER-CALIBRATION", "measurement-cadence"]);
-  assert.match(String(written.run_id), /^REVIEWER-CALIBRATION-\d+$/);
+  assert.deepEqual([torn.length, torn[0]!.step, torn[0]!.outcome], [1, cal.REVIEW_CALIBRATION_RESULT_STEP, "refused"]);
 });
 
-test("W1-T12145 the idle signal reads the fleet's liveness and usage, and an unreadable liveness ledger is no measurement", async (t) => {
+test("W1-T12145 the idle signal reads the fleet's liveness and usage off the loop, and an unread live ledger is no measurement", async (t) => {
   const usage = { billingMode: "subscription" as const, weekly: [{ label: "all models", percentUsed: 40 }] };
-  const usageDeps = { viaSdk: async () => usage, viaCli: () => undefined };
   const missing = join(ownedFixtureDir(t, "w1t12145-idle-missing").dir, "state");
-  const unmeasured = await readReviewerCalibrationIdle(missing, { root: missing } as Config, fixedClock(T0), usageDeps);
+  const unmeasured = await cal.readCalibrationIdle(missing, fixedClock(T0), async () => usage);
   assert.deepEqual(unmeasured, { headroom: usage });
   assert.match(replayIdleGate(unmeasured, cal.IDLE_LIMIT_PCT).reason, /fleet idleness was not measured/);
-  const stateDir = ownedFixtureDir(t, "w1t12145-idle").dir;
-  writeFileSync(join(stateDir, "ledger.ndjson"), JSON.stringify({ ts: new Date(T0 - 60_000).toISOString(), step: "sweep.summary", poll_interval_ms: 60_000 }) + "\n");
-  const measured = await readReviewerCalibrationIdle(stateDir, { root: stateDir } as Config, fixedClock(T0), { viaSdk: async () => undefined, viaCli: () => undefined });
-  assert.equal(measured.liveness?.state, "up");
+  const root = ownedFixtureDir(t, "w1t12145-idle").dir;
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "ledger.ndjson"), [
+    JSON.stringify({ ts: new Date(T0 - 60_000).toISOString(), step: "sweep.summary", poll_interval_ms: 60_000 }),
+    `{"ts":"${new Date(T0 - 30_000).toISOString()}","step":"sweep.summ`,
+    "[1]",
+  ].join("\n") + "\n");
+  let asked: unknown;
+  const ports = cal.calibrationPorts(wiringFor(root, { readUsage: async (config) => { asked = config; return undefined; } }));
+  const measured = await ports.idleSignal();
+  assert.equal(measured.liveness?.state, "up", "a torn line and a non-object line are no rows, and the sweep row is read");
   assert.equal(measured.headroom, undefined);
+  assert.deepEqual(asked, { root });
 });
 
 test("W1-T12145 a case result is a verdict only at the case's head from the pinned model's finished review; anything else is null with its reason", async () => {
@@ -526,21 +581,21 @@ test("W1-T12145 a case result is a verdict only at the case's head from the pinn
   assert.equal(cal.calibrationCaseResult(c, SOL, [reviewer, verdictRow({ state: "pending" })], { code: 0 }).reason, "the shadow verdict was pending");
 
   const base = { caseId: head, taskId: "W1-T1", headSha: head, mergeSha: head, kind: "control" as const, expected: "PASS" as const, risk: "low", prNumber: 1 };
-  const io = { run: async () => assert.fail("never started"), readAttemptRows: () => [], attemptId: "review-PR1-x", clock: fixedClock(T0) };
-  assert.deepEqual(await runReviewerCalibrationCase({ ...base, prUrl: "not a url" }, SOL, { ...io, originMainSha: () => "m" }),
+  const io = { checkoutDir: "/c", ownStartFlag: "--judge-at-own-start", optionFlags, readAttemptRows: async () => [], attemptId: "review-PR1-x", clock: fixedClock(T0) };
+  assert.deepEqual(await cal.runCalibrationCase({ ...base, prUrl: "not a url" }, SOL, { ...io, spawnReview: async () => assert.fail("never started") }),
     { verdict: null, costUsd: null, reason: "the case's pull request URL not a url names no repository" });
-  assert.deepEqual(await runReviewerCalibrationCase({ ...base, prUrl: "https://github.com/acme/remudero/pull/1" }, SOL, { ...io, originMainSha: () => { throw new Error("no origin"); } }),
-    { verdict: null, costUsd: null, reason: "origin/main could not be read: no origin" });
+  assert.deepEqual(await cal.runCalibrationCase({ ...base, prUrl: "https://github.com/acme/remudero/pull/1" }, SOL,
+    { ...io, spawnReview: async () => { throw new Error("spawn bin/rmd ENOENT"); } }),
+    { verdict: null, costUsd: null, reason: "the review could not run: the review child could not start: spawn bin/rmd ENOENT" });
 });
 
-test("W1-T12145 the production ports run a case through the fresh-tree runner and the real review spawn, read its rows by attempt id, and log to the ledger", async (t) => {
+test("W1-T12145 the production ports run a case as an rmd review child of the checkout, read its rows by attempt id off the loop, and pass the readers their rows", async (t) => {
   const root = ownedFixtureDir(t, "w1t12145-ports").dir;
   mkdirSync(join(root, "state"), { recursive: true });
   const ledger = join(root, "state", "ledger.ndjson");
   const argsFile = join(root, "args.txt");
-  const main = sha("origin-main");
   const head = sha("case-head");
-  const bin = join(root, "worktrees", `reviewer-${main.slice(0, 12)}`, "bin");
+  const bin = join(root, "checkout", "bin");
   mkdirSync(bin, { recursive: true });
   const row = (fields: string) => `echo "{\\"ts\\":\\"2026-11-22T00:00:01.000Z\\",\\"review_attempt_id\\":\\"$attempt\\",${fields}}" >> ${JSON.stringify(ledger)}`;
   writeFileSync(join(bin, "rmd"), [
@@ -554,17 +609,15 @@ test("W1-T12145 the production ports run a case through the fresh-tree runner an
     "",
   ].join("\n"));
   chmodSync(join(bin, "rmd"), 0o755);
-  const ports = buildReviewerCalibrationPorts({ root } as Config, fixedClock(T0), {
-    review: {
-      git: (args) => (args.includes("rev-parse") ? `${main}\n` : ""), addWorktree: () => {}, inspectExistingWorktree: () => "reusable",
-      prepareWorktree: () => true, spawnReview: spawnRmdReviewForFreshTree, worktreeRoot: join(root, "worktrees"),
-    },
-  });
+  // The cadence hands the runner its async spawn (run-task's `spawnRmdReviewForFreshTree`); this one starts the same `bin/rmd review`.
+  const ports = cal.calibrationPorts(wiringFor(root, { checkoutDir: join(root, "checkout") }));
   const c: cal.CalibrationCase = { caseId: head, taskId: "W1-T9", headSha: head, mergeSha: sha("m"), kind: "escaped-defect", expected: "FAIL", risk: "high",
     prNumber: 8, prUrl: "https://github.com/acme/remudero/pull/8" };
   assert.deepEqual(await ports.runCase(c, SOL), { verdict: "FAIL", costUsd: 0.25 });
   const args = readFileSync(argsFile, "utf8").trim().split("\n");
+  assert.equal(args[0], "review");
   assert.equal(args[args.indexOf("review") + 1], "8");
+  assert.ok(args.includes("--judge-at-own-start"));
   assert.ok(args.includes(REVIEWER_SHADOW_FLAG));
   assert.equal(args[args.indexOf(cal.CALIBRATION_HEAD_FLAG) + 1], head);
   assert.equal(args[args.indexOf(cal.REVIEWER_MODEL_PIN_FLAG) + 1], "codex:gpt-6.1-sol");
