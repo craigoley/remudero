@@ -9,6 +9,8 @@ import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { parseTasksFromYaml } from "#src/lib/plan.js";
+import { PreviewUnknown, selectPlanTaskMigration } from "#src/lib/plan-task-migration.js";
+import type { OpsCatalogBoundsIo } from "#src/lib/ops-catalog-source.js";
 
 const record = (id: string, priority = 1, deps: string[] = []) => { const text = `- id: ${id}\n  title: migration fixture\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  depends_on: ${JSON.stringify(deps)}\n`; assert.equal(parseTasksFromYaml(text,"fixture")[0]!.id,id); return text; };
 function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n", publicSeed: Record<string, string> = {}, opsSeed: Record<string, string> = {}) {
@@ -116,7 +118,7 @@ test("migration preview reads a measured healthy catalog above 32 MiB and still 
 
 test("migration preview respects the actual private reader capacity contract", async t => {
   // Published reader limits, not host-admission overrides: 256 KiB/blob, 8 MiB total,
-  // 500 YAML shards and 10,000 cumulative tree entries. All cases use real Git and the CLI.
+  // 500 YAML shards and 10,000 cumulative tree entries. All cases use real Git; the fixed bounds run the CLI.
   const emptyAtBytes = (bytes: number) => "[]\n#" + "x".repeat(bytes - 5) + "\n";
   const maximum = 8 * 1024 * 1024;
   const blob = 256 * 1024;
@@ -131,8 +133,6 @@ test("migration preview respects the actual private reader capacity contract", a
   });
   const cases = [
     { name: "a blob larger than the private reader accepts", text: emptyAtBytes(blob + 1), seed: {} },
-    { name: "too many private YAML shards", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])) },
-    { name: "too many private snapshot bytes", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(blob)])) },
     { name: "unselected root entries still count toward the private tree bound", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 10000 }, (_, i) => [`metadata-${i}`, ""])) },
   ];
   for (const entry of cases) await t.test(entry.name, sub => {
@@ -141,4 +141,42 @@ test("migration preview respects the actual private reader capacity contract", a
     assert.equal(result.answer.outcome, "unknown");
     assert.equal(result.answer.permission, "not_granted");
   });
+  // W1-T14368: past 500 shards or 8 MiB the reader's derived bounds judge the catalog the copy would produce. Each of
+  // these is driven past one of them with an injected reading, and the same selection without it is the control.
+  const derived: Array<{ name: string; seed: Record<string, string>; bounds: OpsCatalogBoundsIo }> = [
+    { name: "too many private YAML shards", seed: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])),
+      // A catalog measured as not growing: the copy's one shard is a jump past its daily growth.
+      bounds: { dailyGrowth: () => ({ shards: 0, bytes: 0 }) } },
+    { name: "too many private snapshot bytes", seed: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(blob)])),
+      // A heap with no headroom left below the daemon's heap-limit exit: no byte past the baseline fits.
+      bounds: { heap: () => ({ used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 }) } },
+  ];
+  for (const entry of derived) await t.test(entry.name, async sub => {
+    const f = fixture(sub, undefined, "[]\n", {}, entry.seed);
+    const refused = await selectInProcess(f, entry.bounds);
+    assert.equal(refused.reason, "catalog_incompatible", JSON.stringify(refused));
+    const control = await selectInProcess(f, {});
+    assert.equal(control.selection?.candidate?.id, "W1-T1", `positive control: without the reading the copy is admitted ${JSON.stringify(control)}`);
+  });
 });
+
+/** The CLI's own selection, in process, so a test can hand it the bound readings the reader takes. */
+async function selectInProcess(f: ReturnType<typeof fixture>, bounds: OpsCatalogBoundsIo) {
+  const env: Record<string, string> = { PATH: `${f.shim.dir}:${process.env.PATH}`, GIT_ALLOW_PROTOCOL: "file", GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: `url.${f.pub.origin.dir}.insteadOf`, GIT_CONFIG_VALUE_0: "https://github.com/fixture/remudero.git",
+    GIT_CONFIG_KEY_1: `url.${f.ops.origin.dir}.insteadOf`, GIT_CONFIG_VALUE_1: "https://github.com/fixture/ops.git" };
+  const previous = new Map(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  try {
+    const o = { publicRoot: f.pub.clone.dir, publicCommit: f.pubCommit, publicRepo: "fixture/remudero",
+      opsRoot: f.ops.clone.dir, opsCommit: f.opsCommit, opsRepo: "fixture/ops" };
+    const answer = JSON.parse(readFileSync(join(f.root, "answer.json"), "utf8"));
+    return { selection: await selectPlanTaskMigration(o, async () => answer, bounds), reason: undefined };
+  } catch (error) {
+    if (!(error instanceof PreviewUnknown)) throw error;
+    return { selection: undefined, reason: error.reason };
+  } finally {
+    for (const [key, value] of previous) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+}
