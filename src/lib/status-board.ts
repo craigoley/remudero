@@ -98,7 +98,7 @@ import {
   readLedgerUnionBounded,
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
-import { latestSpendPerMergedRow, renderSpendPerMergedLine, type LatestSpendPerMerged } from "./spend-per-merged.js";
+import { finishedUtcDays, latestSpendPerMergedRow, renderSpendPerMergedLine, SPEND_PER_MERGED_DAYS, type LatestSpendPerMerged } from "./spend-per-merged.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
@@ -2342,18 +2342,12 @@ export async function buildStatusBoardAsync(root: string, ledgerPath: string, de
 export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusBoardDeps): StatusBoardModel {
   const now = deps.now ?? Date.now;
   const nowMs = now();
-  // Read rotations: rotateLedger can shed unretained steps completely from readLedgerLines' one
-  // file. Seek the three measured steps; every rung takes the NEWEST row.
-  // Why: 0 live `daemon.summary` rows against 524 in rotations — docs/forensics/status-board.md
+  // Rotations can hold both the latest daily row and the older ratios for its median.
+  // Include the time since midnight so the union covers all seven finished UTC days.
+  const oldestSpendDay = finishedUtcDays(nowMs, SPEND_PER_MERGED_DAYS).at(-1)!;
   const readLedger =
     deps.readLedger ??
-    ((ledgerPath: string) =>
-      readLedgerUnionBounded(ledgerPath, {
-        satisfied: (stepsSeen) =>
-          stepsSeen.has("daemon.summary") &&
-          stepsSeen.has("daemon.headroom.degraded") &&
-          stepsSeen.has("dispatch.indeterminate"),
-      }));
+    ((ledgerPath: string) => readLedgerUnionBounded(ledgerPath, { windowMs: nowMs - Date.parse(oldestSpendDay) }));
   const resolveOriginMainSha = deps.resolveOriginMainSha ?? defaultResolveOriginMainSha;
   const crashLoopWindow = deps.crashLoopWindow ?? DEFAULT_CRASHLOOP_WINDOW;
   const isPidAlive = deps.isPidAlive ?? defaultIsPidAlive;

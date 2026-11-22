@@ -659,10 +659,10 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "spend.per_merged_daily",
     meaning:
       "The paid model spend of one finished UTC day divided by the PRs merged that day. Fields: `day`, `paid_usd` " +
-      "(produced api or cash rows, plus worker.attempt api rows whose selection_assignment_id has no produced row), " +
+      "(produced api or cash rows, plus priced worker.attempt api receipts without a matching producer receipt), " +
       "`merged_prs` (pr.terminal merged rows), `paid_usd_per_merged_pr` (null when no PR merged), `lanes` (the paid " +
       "sum by lane), `unpriced_rows` (cash rows with partial or unavailable token usage, never priced) and " +
-      "`attempt_only_usd`. One row per day; a day that already has a row gets no second one.",
+      "`attempt_only_usd`. One row per day, including idle days, with no second row for an already recorded day.",
     writer: ["writeSpendPerMergedDays"],
     outcomes: ["recorded"],
   },

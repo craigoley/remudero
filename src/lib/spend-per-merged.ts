@@ -8,14 +8,14 @@
  */
 import { fixedClock } from "./clock.js";
 import { PR_TERMINAL_STEP } from "./ledger-carry.js";
-import { isCashSpendProducer, isProducedSpendRow, SPEND_STEP_ROLES, spendAmountUsd } from "./spend-rows.js";
+import { isCashSpendProducer, isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
+import type { WorkerExecutionEvidenceV1 } from "./worker-execution-evidence.js";
+import type { WorkerSelectionAssignment } from "./worker.js";
 
 export const SPEND_PER_MERGED_DAILY_STEP = "spend.per_merged_daily";
+export const SPEND_PER_MERGED_DAYS = 7;
 export const SPEND_LANES = ["implement", "fix", "review", "judge_shadow", "gardener", "inbox_triage", "retro", "scout", "other"] as const;
 export type SpendLane = (typeof SPEND_LANES)[number];
-/** The steps a daily measurement reads: every listed spend step, worker attempts, merged PRs and the daily row. */
-export const SPEND_PER_MERGED_STEPS: readonly string[] = [...Object.keys(SPEND_STEP_ROLES), "worker.attempt", PR_TERMINAL_STEP,
-  SPEND_PER_MERGED_DAILY_STEP];
 
 export interface SpendPerMergedDay {
   day: string;
@@ -47,27 +47,60 @@ const LANE_RULES: readonly [RegExp, SpendLane][] = [
   [/^retro/, "retro"],
   [/scout/, "scout"],
   [/^review/, "review"],
-  [/^(fix|alert-fix|main-repair|census_push|sweep\.plan_round)/, "fix"],
+  [/^(fix|sweep-fix|alert-fix|main-repair|census_push|sweep\.plan_round)/, "fix"],
   [/^(implement|recon|diagnose)/, "implement"],
 ];
 function laneOfName(name: string | undefined): SpendLane {
   if (name === undefined) return "other";
   return LANE_RULES.find(([pattern]) => pattern.test(name))?.[1] ?? "other";
 }
-/** A produced row's lane comes from its step; a `worker.attempt` row's from the lane it names. */
+/** Produced rows use their step; attempt receipts use the first recognized lane or rung. */
 function spendLaneOf(row: Row): SpendLane {
   if (row.step !== "worker.attempt") return laneOfName(text(row.step));
-  const repair = row.repair && typeof row.repair === "object" ? (row.repair as Row).rung : undefined;
-  return laneOfName(text(row.guardrail_lane) ?? text(row.lane) ?? text(row.workLane) ?? text(repair));
+  const repairRung = (row.repair as Row | undefined)?.rung;
+  for (const name of [row.guardrail_lane, row.lane, row.worker_rung, row.workLane, repairRung]) {
+    const lane = laneOfName(text(name));
+    if (lane !== "other") return lane;
+  }
+  return "other";
 }
 
 const paidProduced = (row: Row): boolean => row.step !== "worker.attempt" && isProducedSpendRow(row) &&
   (row.billing_mode === "api" || row.provider === "cash");
+const cashProduced = (row: Row): boolean => row.step !== "worker.attempt" && isCashSpendProducer(row);
+const paidAttempt = (row: Row): boolean => row.step === "worker.attempt" && row.billing_mode === "api";
+const incompleteUsage = (row: Row): boolean => row.token_usage_state === "partial" || row.token_usage_state === "unavailable";
+
+function cashAssignmentId(row: Row): string | undefined {
+  if (row.step !== "worker.assignment") return undefined;
+  const assignment = row.worker_assignment as Partial<WorkerSelectionAssignment> | undefined;
+  return assignment?.selected?.provider === "cash" ? text(assignment.id) : undefined;
+}
+
+function isCashAttempt(row: Row, id: string | undefined, cashAssignments: ReadonlySet<string>): boolean {
+  const observed = (row.execution_evidence as WorkerExecutionEvidenceV1 | undefined)?.identity?.provider;
+  const provider = row.provider ?? (observed?.state === "observed" ? observed.value : undefined);
+  return provider === undefined ? id !== undefined && cashAssignments.has(id) : provider === "cash";
+}
+
+/** Use the shared producer predicate here too, including producers recognized by model or spend role. */
+export function isSpendPerMergedInput(row: Row): boolean {
+  return row.step === SPEND_PER_MERGED_DAILY_STEP || row.step === PR_TERMINAL_STEP ||
+    paidAttempt(row) || cashAssignmentId(row) !== undefined || cashProduced(row) || paidProduced(row);
+}
 
 export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): SpendPerMergedDay {
   const lanes = Object.fromEntries(SPEND_LANES.map(lane => [lane, 0])) as Record<SpendLane, number>;
-  const producedIds = new Set(rows.filter(paidProduced).map(row => text(row.selection_assignment_id))
-    .filter((id): id is string => id !== undefined));
+  const producerReceipts = new Set<string>();
+  const cashAssignments = new Set<string>();
+  for (const row of rows) {
+    const cashId = cashAssignmentId(row);
+    if (cashId !== undefined) cashAssignments.add(cashId);
+    const id = text(row.selection_assignment_id);
+    if (id !== undefined && (paidProduced(row) || (cashProduced(row) && incompleteUsage(row)))) {
+      producerReceipts.add(id);
+    }
+  }
   const merged = new Set<string>();
   let paid = 0, attemptOnly = 0, unpriced = 0, unkeyedMerged = 0;
   for (const row of rows) {
@@ -79,33 +112,30 @@ export function paidSpendPerMergedDay(rows: readonly Row[], utcDay: string): Spe
       else merged.add(key);
       continue;
     }
-    if (row.step !== "worker.attempt" && isCashSpendProducer(row) && spendAmountUsd(row) === undefined) {
+    const amount = spendAmountUsd(row);
+    if (cashProduced(row) && amount === undefined) {
       unpriced++;
       continue;
     }
-    const amount = spendAmountUsd(row);
-    if (amount === undefined) continue;
-    if (paidProduced(row)) {
-      paid += amount;
-      lanes[spendLaneOf(row)] += amount;
-    } else if (row.step === "worker.attempt" && row.billing_mode === "api") {
+    const attempt = paidAttempt(row);
+    if (attempt) {
       const id = text(row.selection_assignment_id);
-      if (id !== undefined && producedIds.has(id)) continue;
-      paid += amount;
-      attemptOnly += amount;
-      lanes[spendLaneOf(row)] += amount;
+      if (id !== undefined && producerReceipts.has(id)) continue;
+      if (incompleteUsage(row) && isCashAttempt(row, id, cashAssignments)) {
+        unpriced++;
+        continue;
+      }
     }
+    if (amount === undefined || (!attempt && !paidProduced(row))) continue;
+    paid += amount;
+    lanes[spendLaneOf(row)] += amount;
+    if (attempt) attemptOnly += amount;
   }
   const mergedPrs = merged.size + unkeyedMerged;
   for (const lane of SPEND_LANES) lanes[lane] = usd(lanes[lane]);
   return { day: utcDay, paid_usd: usd(paid), merged_prs: mergedPrs,
     paid_usd_per_merged_pr: mergedPrs > 0 ? usd(paid / mergedPrs) : null,
     lanes, unpriced_rows: unpriced, attempt_only_usd: usd(attemptOnly) };
-}
-
-/** True when the day has no paid row, no unpriced row and no merged PR: there is nothing to record. */
-export function spendPerMergedDayIsEmpty(day: SpendPerMergedDay): boolean {
-  return day.paid_usd === 0 && day.merged_prs === 0 && day.unpriced_rows === 0;
 }
 
 /** The finished UTC days, newest first, from yesterday back `count` days. */
@@ -127,7 +157,7 @@ export function latestSpendPerMergedRow(rows: readonly Row[]): LatestSpendPerMer
   const newest = days.at(-1);
   if (newest === undefined) return undefined;
   const row = byDay.get(newest)!;
-  const from = fixedClock(Date.parse(`${newest}T00:00:00.000Z`) - 6 * DAY_MS).iso().slice(0, 10);
+  const from = fixedClock(Date.parse(`${newest}T00:00:00.000Z`) - (SPEND_PER_MERGED_DAYS - 1) * DAY_MS).iso().slice(0, 10);
   const ratios = days.filter(day => day >= from).map(day => byDay.get(day)!.paid_usd_per_merged_pr)
     .filter((ratio): ratio is number => typeof ratio === "number" && Number.isFinite(ratio)).sort((a, b) => a - b);
   const mid = Math.floor(ratios.length / 2);
