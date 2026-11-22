@@ -349,6 +349,16 @@ test("W1-T14140 criterion 5: the third reopen goes to the flow-remedy ladder, an
     ["own-red:lint failed on <sha>; ci-gate failed on <sha>"]);
   const otherCheck = [disposed(-5, "lint failed on ccccccc", "ccccccc170"), merged(-1)];
   assert.deepEqual(flowInventory([streakHandoff], 170, otherCheck).candidates, []);
+  // ONE EPISODE, TWO HEADS. Aggregate-red rows on successive heads share a cause key, so they make one episode. The
+  // hand-off owns only the PR-hours of its own red head: 1 h at bbbbbbb170, not the 8 h after it at ccccccc170, where only
+  // lint read red and whose wait is not otherwise eligible. Those 8 h stay priced, and stay out of the remedy.
+  const twoHeads = [disposed(-10, "required checks red", "bbbbbbb170"), disposed(-9, "required checks red", "ccccccc170"), merged(-1)];
+  const split = flowInventory([streakHandoff], 170, twoHeads);
+  const span = (c: { start: number; end: number }) => [(c.start - NOW) / HOUR, (c.end - NOW) / HOUR];
+  assert.deepEqual(split.candidates.map((c) => c.key), ["own-red:required checks red"]);
+  assert.deepEqual(split.next?.charges.map(span), [[-10, -9]], "the remedy carries only the handed head's hour");
+  assert.deepEqual(split.charges.filter((c) => c.key === "own-red:required checks red").map(span), [[-10, -9], [-9, -1]],
+    "the other head's hours are still priced");
 
   // HELD: later PRs met the gate and it did not refuse them.
   const held = mintCiLearningShards(corpus([], [{ pr: 180, gate: "ci-gate" }]), filed, undefined, lessons);

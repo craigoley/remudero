@@ -22,7 +22,7 @@ import { ADMISSION_FLOW_STEP, observeAdmissionFlow, type AdmissionFlowInput, typ
 import { feedbackContentDigest } from "./contributor-admission.js";
 
 export interface PrOutcome { state: "open" | "closed" | "merged"; at?: string; mergedBy?: string }
-export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string }
+export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string; handedOff?: boolean }
 export interface Episode {
   pr: number; key: string; owner: string; start: number; end: number;
   outcome: "open" | "cleared" | "failed" | "unknown"; eligible: boolean;
@@ -319,14 +319,14 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
       // Join the evidence on the PR: the row is the handed check's when it names that check, or when it was written at a
       // head where the check read red. Sweep gives one aggregate reason for most red rollups and names no check in it.
       const named = redChecksOf(r);
-      if (r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) => named.includes(gate) || r.head_sha === sha)) {
-        episode.handedOff = true;
-      }
+      const handed = r.blocker === "own-red" && handoffs.get(pr)?.some(({ gate, sha }) => named.includes(gate) || r.head_sha === sha) === true;
+      if (handed) episode.handedOff = true;
       const next = rows[i + 1];
       if (next) {
         const end = Date.parse(next.ts!);
         episode.end = end;
-        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner });
+        episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner,
+          ...(handed ? { handedOff: true } : {}) });
       }
     }
     if (!episode) continue;
@@ -378,8 +378,15 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
   now: number, fileable?: LadderFileable): Inventory {
   const episodes = episodesOf(records, outcomes, now);
   const thresholds = markEligibility(episodes, now);
-  for (const e of episodes) if (e.handedOff) e.eligible = true;
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
+}
+
+/** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
+ *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
+function eligibleSlice(e: Episode): Episode[] {
+  if (e.eligible) return [e];
+  const handed = e.charges.filter(c => c.handedOff);
+  return handed.length ? [{ ...e, charges: handed }] : [];
 }
 
 /**
@@ -393,7 +400,8 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   now: number, thresholds: ReadonlyMap<string, number> = new Map(), fileable?: LadderFileable): Inventory {
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
-  const candidates = priceEpisodes(episodes.filter(e => e.eligible), now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
+  const eligible = episodes.flatMap(eligibleSlice);
+  const candidates = priceEpisodes(eligible, now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
   const ladder: Inventory["ladder"] = [];
   let next: FlowAction | undefined;
   // A filing PR the sweep recorded closed unmerged (`pr.terminal`, W1-T5318) holds nothing: its cause drafts again.
@@ -440,7 +448,7 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
     const action: FlowAction | undefined = !next && (state === "draft" || state === "escalate") ? {
       class: "draft", target: origin, origin, rung, price, prior,
-      charges: episodes.filter(e => e.eligible && e.key === price.key).flatMap(e => e.charges),
+      charges: eligible.filter(e => e.key === price.key).flatMap(e => e.charges),
       population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
       ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) } : undefined;
     const skipped = action && state === "draft" ? fileable?.(action) : undefined;
