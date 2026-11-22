@@ -179,7 +179,7 @@ test("a matching runbook runs only after its precheck and records a before-and-a
   const laneDeps: SreLaneInput = {
     stateDir: join(root, "state"),
     root,
-    readEvents: () => [{ fingerprint: FP, ts: NOW - 60_000, kind: "invariant", name: "stale-managed-checkout", message: "behind=3", instance: "core" }],
+    readEvents: () => [{ fingerprint: FP, ts: NOW - 60_000, kind: "invariant", templateId: "invariant.dispatch-stall", name: "stale-managed-checkout", message: "behind=3", instance: "core" }],
     hasOpenTask: () => false,
     framesFor: () => [],
     mergedPrsSince: () => [],

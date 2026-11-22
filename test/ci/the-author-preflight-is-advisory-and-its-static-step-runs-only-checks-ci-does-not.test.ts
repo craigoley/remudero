@@ -273,6 +273,8 @@ test("W1-T12511 criterion 2: the author keeps worker-branch-shape and the census
   const root = changedTree(t, {
     ...rules,
     "scripts/census-precheck-parity-baseline.json": JSON.stringify({ ciOnly: Object.keys(rules), ciOnlyScripts: {} }),
+    // W1-T14250: the script census follows each npm script to its file, so the tree carries package.json.
+    "package.json": JSON.stringify({ scripts: { "widget-ratchet": "node scripts/widget-ratchet.mjs" } }),
     [CI_YML]: minimalCi,
   }, {
     "test/rules/r21.test.ts": "export {};\n",
