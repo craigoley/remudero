@@ -51,10 +51,11 @@
        counts no reference and says why; it never reports OK.
     4. The existing W1-T3519 tests keep their titles verbatim; only their fixtures change, to name a PR their git
        fixture's history holds or the PR passed with `--pr`.
-    5. Besides step 2, a demotion passes when its rationale holds the token `#this-pr` as a whole word AND names every
-       demoted context by its exact name. The token names the PR under check, the one whose merge decides, so it needs no
-       plan or PR record; naming each demoted context keeps a rationale carried over from main, or one padded from it,
-       from reviewing a demotion it does not mention. The gate gardener's demotion rationale (gate-gardener.ts, W1-T4116)
+    5. Besides step 2, a demotion passes when its rationale holds the token `#this-pr` as a whole word, names every
+       demoted context by its exact name, AND is not origin/main's rationale carried over (identical once whitespace is
+       collapsed). The token names the PR under check, the one whose merge decides, so it needs no plan or PR record;
+       naming each demoted context keeps a rationale carried over from main, or one padded from it, from reviewing a
+       demotion it does not mention, and the carried-over test keeps main's own rationale from reviewing one it does. The gate gardener's demotion rationale (gate-gardener.ts, W1-T4116)
        ends with the token, and its own check reads the result the way the CI gate does. The W1-T4116 suite keeps its
        titles; it gains a case where main's rationale already names W1-T4116 and the gardener's next demotion still lands.
 
