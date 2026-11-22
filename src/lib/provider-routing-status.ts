@@ -842,6 +842,10 @@ export function readProviderRoutingStatus(
   const status = readSnapshot(providerRoutingStatusPath(root), nowMs, readFile);
   const refresh = readSnapshot(policyRefreshPath(root), nowMs, readFile);
   if (refresh.state === "not-probed" && (status.state === "unknown" || status.state === "not-probed")) return refresh;
+  // A refresh file that exists but cannot be trusted is refused as what it is (malformed, unreadable,
+  // unsupported-version); it is never hidden behind the probed file's mere absence.
+  if (status.state === "unknown" && status.reason === "absent" &&
+      refresh.state === "unknown" && refresh.reason !== "absent") return refresh;
   if (refresh.state === "not-probed" && refresh.observedAt !== undefined &&
       status.observedAt !== undefined && Date.parse(refresh.observedAt) >= Date.parse(status.observedAt)) {
     if (refresh.policy) status.policy = refresh.policy;

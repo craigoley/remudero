@@ -94,3 +94,25 @@ test("W1-T4562: the openweight alias round-trips as cash, and an unknown provide
     assert.equal(status.reason, "malformed");
   });
 });
+
+test("W1-T4562: a refresh file that cannot be trusted is refused by its own reason, never as absent", () => {
+  withRoot((root) => {
+    // Neither file exists: genuinely absent.
+    const none = readProviderRoutingStatus(root, { now: () => NOW });
+    assert.equal(none.state, "unknown");
+    assert.equal(none.reason, "absent");
+
+    // Only the refresh file exists and it is garbage: the corruption is named, not hidden by the
+    // probed file's absence.
+    writeFileSync(policyRefreshPath(root), "{not json");
+    const garbage = readProviderRoutingStatus(root, { now: () => NOW });
+    assert.equal(garbage.state, "unknown");
+    assert.equal(garbage.reason, "malformed");
+
+    // A refresh file with an unsupported version is refused as such.
+    writeFileSync(policyRefreshPath(root), JSON.stringify({ version: -1 }));
+    const versioned = readProviderRoutingStatus(root, { now: () => NOW });
+    assert.equal(versioned.state, "unknown");
+    assert.equal(versioned.reason, "unsupported-version");
+  });
+});
