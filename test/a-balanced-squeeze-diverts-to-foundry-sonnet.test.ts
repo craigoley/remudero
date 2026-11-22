@@ -38,7 +38,7 @@ const exhausted = (provider: "claude" | "codex"): ProviderCapacity => ({
   provider, readable: false, windows: [], detail: "exhausted",
 });
 const nearlyFull = (provider: "claude" | "codex"): ProviderCapacity => ({
-  provider, readable: true, windows: [{ name: `${provider} weekly`, usedPercent: 99, resetsAt: NOW / 1000 + 3600 }],
+  provider, readable: true, windows: [{ name: `${provider} weekly`, usedPercent: 99, resetsAt: NOW / 1000 + 30 * 3600 }],
 });
 
 function fixtureRoot(prefix: string): string {
