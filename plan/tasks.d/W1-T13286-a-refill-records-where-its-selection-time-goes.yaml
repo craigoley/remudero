@@ -14,6 +14,10 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/a-refill-records-where-its-selection-time-goes.test.ts
+    - scripts/write-only-ledger-step-baseline.json
+    - test/helpers/daemon-host-pins.ts
+    - test/plan/ops-catalog-shadow-invalid-edges.test.ts
+    - test/daemon/ops-catalog-shadow-enabled.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -36,3 +40,12 @@
   note: |
     reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
     Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing daemon.ts. Do not add a test importer of src/run-task.ts.
+  amendment: |
+    2026-11-22, scope: four files join files:. The timing row needs its own clock so measuring moves no
+    decision (W1-T11129 criterion 1 failed when it shared the decision clock). Suites that compare whole
+    ledgers between runs then saw real timings, so they pin that clock to 0 next to their pinned now:
+    test/helpers/daemon-host-pins.ts (hostIndependentDaemonDeps), and the inline deps in
+    test/plan/ops-catalog-shadow-invalid-edges.test.ts and test/daemon/ops-catalog-shadow-enabled.test.ts.
+    No assertion changes. The operator approved (2026-11-22 21:36Z) a recordOnly entry for
+    dispatch.selection_timing in scripts/write-only-ledger-step-baseline.json, since design step 2 says no
+    decision reads the row.
