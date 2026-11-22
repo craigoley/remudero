@@ -12,7 +12,7 @@
   files:
     - .remudero/overlay-home.json
     - test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The overlay pointer is JSON naming one owner/name repository and the relative paths it holds, with no host path or secret"

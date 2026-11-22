@@ -22,7 +22,7 @@
     - src/lib/review-flow-observation.ts
     - test/event-driven-semantic-review.test.ts
     - test/review/a-hand-review-runs-the-model-reviewer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The `review` verb in src/run-task.ts, given `<n> --repo craigoley/remudero` and no --execution-mode flag, reaches runReview with spawnReviewer true, requireSemanticReview true, a reviewerMount and the head task's budget_usd as budgetUsd"

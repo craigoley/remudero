@@ -82,6 +82,18 @@ type SeedRow = Omit<LedgerStepRow, "family">;
 // `src/lib/review.ts`, `src/lib/sweep.ts` and `src/lib/panel-actions.ts` at 2026-09-07.
 const SEED_ROWS: readonly SeedRow[] = [
   {
+    step: "inbox.draft_cache_missing",
+    meaning: "The daemon skipped a proposal because its current input already has a lint-clean draft receipt, and the cache has no draft for that input. Recorded once per proposal and input.",
+    writer: ["buildInboxDraftHook"],
+    outcomes: ["clean input skipped with no matching cached draft"],
+  },
+  {
+    step: "inbox.draft_history_partial",
+    meaning: "Some of the inbox draft history could not be read or the receipt index could not be updated. Readable receipts stay usable and completion publication continues.",
+    writer: ["buildInboxDraftHook", "retainDraftReceipts"],
+    outcomes: ["ledger path unreadable", "receipt index unavailable"],
+  },
+  {
     step: "judge_shadow.compared",
     meaning: "After the risk judge or the decision summary answered, the same prompt went once to a cash model in shadow and a reply came back. The row holds the role, both models and the cost of each call. A risk judge row also holds both answers and whether they agree; a decision summary row holds whether the reply parses and no agreement. W1-T12417: every fixed-option judge (risk, ci, fix-progress, verify-human, refresh-value, quiet-worker watchdog, head-rehome, typed judgment) writes it under its own role when its shadow is named; a decision-model shadow adds the distribution, the latency and model_surface decisions. Nothing acts on the row except the summary the config gardener reads.",
     writer: ["shadowJudgeCall"],
@@ -664,6 +676,25 @@ const SEED_ROWS: readonly SeedRow[] = [
       "The proposal stays due without an attempt key. A retry resumes any earlier paid work separately.",
     writer: ["runDraftRung"],
     outcomes: ["window", "allowance"],
+  },
+  {
+    step: "skill_eval.auto_waiting",
+    meaning:
+      "The fleet's own held-out eval of a staged skill draft did not start, because a gate was closed: the fleet was " +
+      "not quiet, today's ledgered cost plus the eval's spend limit was above the daily cost ceiling, today had " +
+      "unpriced rows, or a cash stack had too little allowance left. Nothing was spent and nothing was claimed. " +
+      "`reason` says which gate; the same reason on a later pass writes no second row.",
+    writer: ["autoEvaluateSkillDrafts"],
+    outcomes: ["spend-not-measured", "fleet-not-idle", "daily-cost-unpriced", "daily-cost-ceiling", "cash-allowance-unreadable", "cash-allowance"],
+  },
+  {
+    step: "skill_eval.auto_claimed",
+    meaning:
+      "The fleet claimed one staged skill draft's text (`draft_sha256`) for its held-out eval, with every gate open, " +
+      "and the eval run `run_id` starts next. The claim is released only when the eval refused before any attempt; " +
+      "otherwise that text is never evaluated by the fleet again.",
+    writer: ["autoEvaluateSkillDrafts"],
+    outcomes: ["claimed"],
   },
 ];
 
