@@ -14,7 +14,9 @@ test("W1-T13757 criterion 1: the overlay pointer contains only the repository an
   });
 });
 
-test("W1-T13757 criterion 2: src and deploy contain no reference to the overlay pointer", () => {
+// W1-T13763 adds the one sanctioned reader: the instance-mode resolver, which must refuse
+// (never resolve live) when the pointer declares an unreadable overlay registry.
+test("W1-T13757 criterion 2: only the instance-mode resolver references the overlay pointer", () => {
   const references: string[] = [];
   for (const directory of ["src", "deploy"]) {
     const entries = readdirSync(join(REPO_ROOT, directory), { recursive: true, withFileTypes: true });
@@ -27,5 +29,5 @@ test("W1-T13757 criterion 2: src and deploy contain no reference to the overlay 
       }
     }
   }
-  assert.deepEqual(references.sort(), [], "files that may read the overlay pointer");
+  assert.deepEqual(references.sort(), ["src/lib/instance-mode.ts"], "files that may read the overlay pointer");
 });

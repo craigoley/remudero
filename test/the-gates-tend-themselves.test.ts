@@ -84,6 +84,7 @@ function seededGates(opts: { ciGate?: string } = {}): string {
   put("openapi/daemon.yaml", "paths:\n  /v1/status:\n    get: {}\n");
   put("learnings/core.yaml", "- id: one\n  fact: A fact.\n");
   put("scripts/learnings-budget-baseline.json", '{\n  "_comment": "cap \\u00a78A",\n  "measuredChars": 1,\n  "measuredActiveEntries": 9,\n  "capChars": 42000\n}\n');
+  put("plan/tasks.d/W1-T4116-the-gates-tend-themselves.yaml", "- id: W1-T4116\n  title: The gates tend themselves\n");
   put(CI_GATE_YML, opts.ciGate ?? CI_GATE());
   mkdirSync(join(root, "state"));
   writeFileSync(join(root, "state", "gate-fire-rates.json"), JSON.stringify(REPORT, null, 2) + "\n");
@@ -135,6 +136,7 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   const base = readFileSync(join(root, CI_GATE_YML), "utf8");
   const pass = runGarden(spec, deps(root, landed));
   assert.deepEqual(pass.plan?.actions.map((a) => a.target), ["quiet-gate"]);
+  assert.equal(landed.length, 1, "the gardener files the reviewed demotion");
   // Operator ruling 2026-09-24: a demotion is never held or drafted — it is judged by whether it merges.
   assert.equal("review" in landed[0]!, false, "nothing asks the checkout to hold or draft the PR");
   assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The gate gardener's `demote` changes are judged by whether this PR merges/);
@@ -143,7 +145,12 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   assert.deepEqual([...lists(head).required].sort(), ["busy-gate", "ci"]);
   assert.match(head, /"dashboard",\n {8}"quiet-gate"\n {8}\]/);
   // The repo's own gate-monotonic check reads it as a REVIEWED demotion.
-  assert.equal(probes.gm.evaluateGateMonotonic(probes.gm.readGateLists(base), probes.gm.readGateLists(head)).ok, true);
+  assert.ok(probes.bm);
+  const verdict = probes.gm.evaluateGateMonotonic(
+    probes.gm.readGateLists(base), probes.gm.readGateLists(head),
+    probes.bm.planTasks(root), probes.bm.knownPrs(root, "HEAD"),
+  );
+  assert.equal(verdict.ok, true, verdict.detail);
   // Judged by the decision alone: a closed PR debits the class.
   writeFileSync(join(root, "src/lib/a.ts"), "export const a = 2;\n");
   execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-qam", "move"], { stdio: "pipe" });
@@ -195,16 +202,14 @@ test("W1-T4116: edits refuse what they cannot do exactly", async () => {
   assert.throws(() => editBaselineRow(escaped, "missing", 1), /no numeric row/);
   assert.throws(() => editBaselineRow(escaped, "n", null), /cannot remove/);
   assert.throws(() => demoteInCiGate(CI_GATE(), "dashboard", "W1-T4116 x"), /not in a readable REQUIRED list/);
-  // A rationale identical to the one already on main would be refused by gate-monotonic, so the pass fails.
-  const rationale = demotionCandidate(REPORT, new Set(["quiet-gate"]))!.edit;
-  assert.equal(rationale.kind, "demote");
-  const root = seededGates({ ciGate: CI_GATE(rationale.kind === "demote" ? rationale.rationale : "") });
+  // Rewording a rationale that names the same filed task does not review a new demotion.
+  const root = seededGates({ ciGate: CI_GATE("W1-T4116: earlier reviewed demotion") });
   off(root, "tighten", "refresh");
   // A refused filing lands nothing and is ledgered with its reason, to be retried after a backoff.
   const failures: string[] = [];
   const refusing = { ...deps(root, []), log: (step: string, e?: Record<string, unknown>) => void (step === "gate.garden_filing_failed" && failures.push(String(e?.reason))) };
   assert.equal(runGarden(gateGardenSpec(refusing, probes), refusing).prUrl, undefined);
-  assert.match(failures.join("\n"), /gate-monotonic would refuse/);
+  assert.match(failures.join("\n"), /gate-monotonic would refuse: .*names no PR or task origin\/main's did not/);
   assert.ok(!existsSync(join(root, "docs/gate-garden-log.md")));
 });
 
