@@ -431,3 +431,35 @@ test("an older unarmed review still starts before a younger armed head's refresh
     f.cleanup();
   }
 });
+
+test("W1-T14243: an older armed PR on a new head does not hold an earlier-eligible review behind the refresh barrier", async t => {
+  // The older PR's fix head re-entered the queue this pass; the younger PR has been eligible since it opened.
+  const old = { ...pr(991902), autoMergeArmed: true, createdAt: "2026-10-27T00:00:00Z", headSha: "fix-head-991902" };
+  const young = { ...pr(991903), createdAt: "2026-10-27T01:00:00Z" };
+  const f = fixture([pr(991901, true), young, old]);
+  f.rows.push({ ts: "2026-10-27T00:10:00Z", step: "sweep.review_eligible", pr_number: old.prNumber,
+    head_sha: "first-head-991902", review_key: "prior-key-991902" });
+  const gate = deferred<void>(), entered = deferred<void>();
+  f.effects.selectAdaptiveReviewWidth = () => 1;
+  f.io.readCompare = async () => {
+    entered.resolve();
+    await gate.promise;
+    return { ahead_by: 0, files: [] };
+  };
+  const running = f.hook()();
+  try {
+    await t.waitFor(() => assert.equal(entered.settled, true), { interval: 1, timeout: 2000 });
+    await t.waitFor(() => assert.equal(f.reviewed.length, 1), { interval: 1, timeout: 2000 });
+    assert.deepEqual(f.reviewed, [young.prNumber], "the earlier-eligible input starts before the refresh");
+    assert.equal(gate.settled, false);
+    gate.resolve();
+    await running;
+    await t.waitFor(() => assert.equal(f.reviewed.length, 2), { interval: 1, timeout: 2000 });
+    assert.deepEqual(f.reviewed, [young.prNumber, old.prNumber]);
+    assert.deepEqual(f.logs.filter(row => row.step === "sweep_light.error"), []);
+  } finally {
+    gate.resolve();
+    await running;
+    f.cleanup();
+  }
+});

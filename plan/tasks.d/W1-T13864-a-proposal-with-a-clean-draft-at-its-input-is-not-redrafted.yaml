@@ -21,7 +21,7 @@
     - "src/lib/ledger.ts"
     - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
     - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every inbox.draft_synthesized and inbox.drafted row records draft_input_key: the proposal's anchor fingerprint and reframe count, without the lane identity"
