@@ -12112,6 +12112,19 @@ export function semanticJudgementRefusal(fact: SemanticJudgementFact): string | 
   return `${SEMANTIC_REVIEW_NOT_RUN}: ${outcome}`;
 }
 
+/** W1-T14241 (invariant capped-is-not-green): the reason a capped code pass stays unpublished. */
+export const UNCERTIFIED_PASS_HELD = "capped-not-certified";
+
+/** W1-T14241 (invariant capped-is-not-green), amending W1-T185 for code diffs: why a CAPPED success (zero proofs
+ *  executed) may not be published or re-published. A plan-only diff is structurally capped and keeps its pass (W1-T205);
+ *  any other capped verdict passes only on the operator's {@link CappedOverride} recorded for that head. A missing
+ *  plan-only fact is not plan-only, so it refuses too. */
+export function cappedCertificationRefusal(verdict: { capped?: unknown; planOnly?: unknown } | undefined,
+  override: CappedOverride | undefined): string | undefined {
+  if (verdict?.capped !== true || verdict.planOnly === true || override !== undefined) return undefined;
+  return `${UNCERTIFIED_PASS_HELD}: 0 proofs executed and no capped override is recorded for this head`;
+}
+
 // ── gh poster (runs outside the sandbox; TLS fails under Seatbelt) ──────────
 
 /** Total attempts, first try plus retries, before a TRANSIENT gh-status-post error gives up (W1-T135) — the same bound
@@ -12898,6 +12911,8 @@ export interface PostReviewStatusGuardedResult {
   publisherEvidence?: ReviewReplayPublisherEvidence;
   /** W1-T14235: present when a success was held because no semantic judgement certified it; names the reason. */
   semanticHold?: string;
+  /** W1-T14241: present when a capped code success was held as pending because no override certified it. */
+  cappedHold?: string;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -13060,6 +13075,11 @@ export async function postReviewStatusGuarded(
       const semanticHold = effectiveVerdict.state === "success" && opts.semanticJudgement !== undefined
         ? semanticJudgementRefusal(opts.semanticJudgement) : undefined;
       if (semanticHold !== undefined) return await publishSemanticHold(opts, effectiveVerdict, semanticHold);
+      // W1-T14241 (invariant capped-is-not-green): checked for EVERY caller that hands a verdict, so the run, the
+      // replay, the sweep's restore and reuse and the cut-post settlement all hold an uncertified capped code pass.
+      const cappedHold = effectiveVerdict.state === "success"
+        ? cappedCertificationRefusal(effectiveVerdict, recordedCappedOverride(opts)) : undefined;
+      if (cappedHold !== undefined) return await publishCappedHold(opts, effectiveVerdict, cappedHold);
     }
     const result = await publishReviewStatusLocked(opts);
     return !historyApplied ? result : { ...result, ...(effectiveVerdict ? { effectiveVerdict } : {}),
@@ -13120,6 +13140,27 @@ async function publishSemanticHold(opts: PostReviewStatusGuardedOpts, verdict: R
   const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
     reviewDecisionDigest: undefined });
   return { ...result, effectiveState: "pending", effectiveVerdict: held, semanticHold: refusal, reason: result.reason ?? refusal };
+}
+
+/** W1-T14241: the operator's capped override recorded for this PR and head, read inside the lock. */
+function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverride | undefined {
+  if (opts.verdict?.capped !== true) return undefined;
+  return cappedOverrideFromLedger(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, opts.sha, opts.prUrl);
+}
+
+/** W1-T14241 (invariant capped-is-not-green): a capped code success no override certified posts pending — never
+ *  success, and never failure (CAPPED IS NOT FAIL) — under the same CAPPED description, so nothing can merge or arm on
+ *  it until proof executes or an operator records an override for this head. */
+async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
+  refusal: string): Promise<PostReviewStatusGuardedResult> {
+  const description = (opts.description ?? verdict.summary).slice(0, STATUS_DESC_MAX);
+  const held: ReviewVerdict = { ...verdict, state: "pending" };
+  appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.capped_pass_held",
+    head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending" });
+  // No decision digest: a hold is not a terminal decision, so an earlier uncertified pass cannot replay over it.
+  const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
+    reviewDecisionDigest: undefined });
+  return { ...result, effectiveState: "pending", effectiveVerdict: held, cappedHold: refusal, reason: result.reason ?? refusal };
 }
 
 async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Promise<PostReviewStatusGuardedResult> {
@@ -13548,6 +13589,11 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
     // settled as posted; it goes through the guarded post, which holds it.
     const judgement = { planOnly: entry.decision_verdict?.planOnly, reviewerOutcome: entry.reviewer_outcome };
     if (entry.state === "success" && semanticJudgementRefusal(judgement) !== undefined) onGitHub = false;
+    // W1-T14241 (invariant capped-is-not-green): nor is a cut capped code pass no override certified.
+    if (entry.state === "success" && cappedCertificationRefusal(entry.decision_verdict,
+      cappedOverrideFromLedger(readLiveLedgerRecords(opts.ledgerPath), opts.taskId, entry.head_sha, opts.prUrl)) !== undefined) {
+      onGitHub = false;
+    }
     let code: ReviewerCodeFreshness | undefined;
     if (!onGitHub) {
       if (!isFullReviewerCodeSha(entry.reviewer_code_sha)) {
@@ -13596,6 +13642,10 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
     }
     if (result.semanticHold !== undefined) {
       discard(`the stored pass has no semantic judgement: ${result.reason ?? result.semanticHold}`);
+      continue;
+    }
+    if (result.cappedHold !== undefined) {
+      discard(`the stored pass is capped and uncertified: ${result.reason ?? result.cappedHold}`);
       continue;
     }
     if (!result.posted) {

@@ -40,7 +40,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -266,6 +266,12 @@ export function reviewerAbandonmentLedgerFields(error: Pick<WorkerAbandonedError
  *
  * Its CALLER must invoke it BEFORE posting the status; see `runReview`.
  */
+/** W1-T1085 / W1-T14241: the command that releases a capped code pass, printed where a CAPPED verdict was judged. */
+function cappedOverrideHint(prNumber: number): string {
+  return `NOTE: a CAPPED verdict cannot arm auto-merge without executed proof or an operator override: ` +
+    `rmd review ${prNumber} --override-capped-by <name> --override-capped-reason <text>`;
+}
+
 export function withdrawArmIfVerdictRefuses(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: {
@@ -1619,6 +1625,13 @@ export async function runReview(host: ReviewCommandHost, args: {
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
+  if (posted.cappedHold !== undefined) {
+    // W1-T14241 (invariant capped-is-not-green): the capped pass was held as pending, so an arm taken at open is withdrawn.
+    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    say(`remudero-review: CAPPED PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.cappedHold}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.cappedHold,
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   if (posted.effectiveState === "pending") {
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
@@ -2799,6 +2812,37 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // head goes first and the base follows on every exit path too; a grep tree is
   // deleted there the same way, and a blob-only fallback dir is not a worktree and
   // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
+  // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
+  // a LEDGERED, attributable decision to arm a capped verdict anyway.
+  // Granted here (the manual escape hatch, an operator-run command) rather
+  // than inferred: an override is a decision someone made, and it must name
+  // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
+  // CAPPED verdict refuses to arm regardless of tdd tier. W1-T14241: recorded
+  // BEFORE the review runs, because a capped code pass now posts pending until
+  // an override for its head is in the ledger — the run's own guarded post
+  // reads this row and publishes success.
+  const overrideBy = flagValue(rest, "--override-capped-by");
+  const overrideReason = flagValue(rest, "--override-capped-reason");
+  if (overrideBy && overrideReason && !shadow) {
+    if (!taskId) {
+      console.error(
+        "--override-capped-by/--override-capped-reason need a resolvable task (a Remudero-Task: trailer) " +
+          "— not recorded.",
+      );
+    } else {
+      // W1-T219: BIND the grant to the head it is reviewed against —
+      // cappedOverrideFromLedger refuses to honour it against any other head.
+      log("automerge.capped_override_granted", {
+        by: overrideBy,
+        reason: overrideReason,
+        pr_url: view.url,
+        head_sha: view.headRefOid,
+      });
+      console.log(
+        `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${view.headRefOid.slice(0, 7)})`,
+      );
+    }
+  }
   exit.step = "review";
   let verdict = await withMaterialized(
     baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
@@ -2906,6 +2950,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
         { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
       verdict.verdictWithheld = restored.reason ?? restored.semanticHold;
+    } else if (restored.cappedHold !== undefined) {
+      // W1-T14241: a replayed capped code pass no override certified is restored as pending, never as success.
+      withdrawArmIfVerdictRefuses(verdict,
+        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+      verdict.verdictWithheld = restored.cappedHold;
     } else if (restored.posted) {
       replayStatusAction = "restored";
       const { unmetClaims, reasons } = reviewUnmetFields(verdict);
@@ -2953,6 +3002,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
       (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
   );
+  // W1-T14241: a capped code pass held as pending is withheld, yet the override that releases it is still followable.
+  const cappedHoldWithheld = verdict.verdictWithheld?.startsWith(UNCERTIFIED_PASS_HELD) === true;
+  if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
+    console.log(cappedOverrideHint(view.number));
+  }
   if (verdict.verdictWithheld) exit.as("verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
@@ -2969,36 +3023,14 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // than inferred: an override is a decision someone made, and it must name
   // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
   // CAPPED verdict refuses to arm regardless of tdd tier.
-  const overrideBy = flagValue(rest, "--override-capped-by");
-  const overrideReason = flagValue(rest, "--override-capped-reason");
-  if (overrideBy && overrideReason) {
-    if (!taskId) {
-      console.error(
-        "--override-capped-by/--override-capped-reason need a resolvable task (a Remudero-Task: trailer) " +
-          "— not recorded.",
-      );
-    } else {
-      // W1-T219: BIND the grant to the head it was actually reviewed against —
-      // cappedOverrideFromLedger refuses to honour it against any other head.
-      log("automerge.capped_override_granted", {
-        by: overrideBy,
-        reason: overrideReason,
-        pr_url: view.url,
-        head_sha: verdict.headSha,
-      });
-      console.log(
-        `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${verdict.headSha.slice(0, 7)})`,
-      );
-    }
-  } else if (cappedWordingApplies(verdict)) {
+  // W1-T14241: the grant itself is recorded BEFORE the review runs (the `--override-capped-by` block above), so the run's
+  // own guarded post reads it and releases the capped pass to success. Only the hint remains here.
+  if (!(overrideBy && overrideReason) && cappedWordingApplies(verdict) && !cappedHoldWithheld) {
     // W1-T1085: a SEPARATE call site from the capped annotation above, with the same defect —
     // gated on `capped` alone. For a plan-only verdict both halves are false: it arms, and the
     // override is structurally unreachable, so the hint is advice that cannot be followed. The
     // status this run posts already states the truth, so nothing replaces it here.
-    console.log(
-      `NOTE: a CAPPED verdict cannot arm auto-merge without executed proof or an operator override: ` +
-        `rmd review ${view.number} --override-capped-by <name> --override-capped-reason <text>`,
-    );
+    console.log(cappedOverrideHint(view.number));
   }
 
   if (verdict.state !== "success") exit.as(REVIEW_EXIT_CAUSES.find((cause) => cause === `verdict-${verdict.state}`) ?? "verdict-not-success");

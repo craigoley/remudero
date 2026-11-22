@@ -53,7 +53,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { recordedWorktreeGitDir } from "./worktree-git.js";
 import { engineTreesRoot, isEngineTreeEntryName } from "./engine-paths.js";
-import { resolveTestSlotDir } from "./test-slot.js";
+import { readPidNamespace, resolveTestSlotDir } from "./test-slot.js";
 import { performance } from "node:perf_hooks";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -2026,6 +2026,8 @@ function emitFixRoutingDecision(learned: FixLearnedArms, fields: Record<string, 
  * W1-T5535: shape ONE fix-lane auction by commit acceptance. Steers the Codex read to the arm whose Thompson draw
  * beats the model the read served (revalidated by that read: a model without headroom is bypassed, never forced),
  * then weighs every eligible provider's served arm. Never throws: an unreadable re-read keeps the original capacity.
+ * W1-T14297: `only` is the provider a serving capability or role preference names; the learner then ranks that
+ * provider's models alone, so a Claude preference re-reads no Codex model and weighs no Codex arm.
  */
 async function applyFixLearner(input: {
   args: SpawnWorkerArgs;
@@ -2037,11 +2039,12 @@ async function applyFixLearner(input: {
   codexPreference: unknown;
   reservePercent: number;
   readCodexFor: (preferred: { capability: CodexModelTier; effort: string; model: string }) => Promise<ProviderCapacity>;
+  only?: WorkerProviderId;
 }): Promise<{ capacities: ProviderCapacity[]; mixing: ProviderMixing; weights: FixRoutingWeights }> {
   const { args, learned, seed, capability, capabilities } = input;
   let capacities = input.capacities;
   const codexIndex = capacities.findIndex((capacity) => capacity.provider === "codex");
-  if (codexIndex >= 0 && capability && !input.codexPreference) {
+  if (codexIndex >= 0 && capability && !input.codexPreference && (input.only ?? "codex") === "codex") {
     const current = capacities[codexIndex];
     // W1-T6360: only arms the lane's current capability row mounts compete; with no rival to the served model, no draw.
     // W1-T13450: and only those AHEAD of the served model in that row; a trailing entry is an availability fallback.
@@ -2065,7 +2068,7 @@ async function applyFixLearner(input: {
     }
   }
   const candidates = capacities
-    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible)
+    .filter((capacity) => providerEligibility(capacity, input.reservePercent).eligible && (input.only ?? capacity.provider) === capacity.provider)
     .map((capacity) => ({ provider: capacity.provider as string, model: fixArmModel(args, capacity, capabilities) }));
   const weights = learned.weigh(candidates, seed);
   return {
@@ -2879,14 +2882,20 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const draw = args.providerRouting?.draw ?? keyed;
       const learned = args.providerRouting?.learnedArms;
       let fixLearning: { mixing: ProviderMixing; weights: FixRoutingWeights } | undefined;
+      // W1-T14297: a capability or role preference that is not bypassed names the provider, never the learner's mix.
+      const byPreference = (current: ProviderCapacity[]) => auction.policy.preference === "automatic" ? undefined
+        : selectWorkerProviderWithExclusions(current, auction.policy, draw, args.excludeProviders);
       if (learned) {
+        // W1-T14297: only the OPERATOR's own preference stands the learner aside, never one the committed table produced.
         const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
-          : auction.policy.preference !== "automatic" ? "operator-preference" : undefined;
+          : routingPolicy.preference !== "automatic" ? "operator-preference" : undefined;
         if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
         else {
+          const preferred = byPreference(capacities);
           const learning = await applyFixLearner({
             args, learned, capacities, seed: routingDrawValue(keyed).seed, capability: requestedCapability, capabilities,
             codexPreference: routingPolicy.codexModelPreference, reservePercent: routingPolicy.reservePercent, readCodexFor,
+            ...(preferred && !preferred.preferenceBypass ? { only: preferred.selection.provider } : {}),
           });
           capacities = learning.capacities;
           fixLearning = { mixing: learning.mixing, weights: learning.weights };
@@ -2895,13 +2904,21 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const finalCandidates = providerExclusionCandidates(
         capacities, auction.policy.reservePercent, args.excludeProviders, auction.policy.routableProviders,
       );
-      const routed = fixLearning
+      const preferred = fixLearning ? byPreference(capacities) : undefined;
+      const routed = fixLearning && preferred && !preferred.preferenceBypass
+        // The preference serves: its provider holds the whole share, and the learner shaped only that provider's model.
+        ? {
+          selection: selectWorkerProvider([preferred.selection.capacity], auction.policy.reservePercent, draw, fixLearning.mixing),
+          preferenceBypass: undefined,
+          exclusion_unhonoured: preferred.exclusion_unhonoured,
+        }
+        : fixLearning
         ? {
           selection: selectWorkerProvider(
             finalCandidates.capacities.filter((capacity) => auction.policy.routableProviders.includes(capacity.provider)),
             auction.policy.reservePercent, draw, fixLearning.mixing,
           ),
-          preferenceBypass: undefined,
+          preferenceBypass: preferred?.preferenceBypass,
           exclusion_unhonoured: finalCandidates.exclusion_unhonoured,
         }
         : selectWorkerProviderWithExclusions(capacities, auction.policy, draw, args.excludeProviders);
@@ -6983,11 +7000,22 @@ export interface RunLockInfo {
   pid: number;
   run_id: string;
   startedAt: string;
+  /** The writer's pid namespace (`/proc/self/ns/pid`), as test slots record it. Optional: a lock written before W1-T14319,
+   * or off Linux, has none. A namespace, never a hostname, so the W1-T406 host-free identity for pid reuse stands. */
+  pidNs?: string;
 }
 
 /** Path of the sibling run.lock for a worktree (outside the working tree). */
 export function runLockPath(worktreePath: string): string {
   return `${worktreePath}.lock`;
+}
+
+/** The record a run lock stores: `info`, stamped with the writer's own pid namespace unless it names one, so a reaper in a
+ * sibling container can tell an unprobeable pid from a dead one (W1-T14319). Every production writer builds its lock
+ * through here; {@link writeRunLock} itself writes what it is given. */
+export function runLockRecord(info: RunLockInfo, pidNamespace: () => string | undefined = readPidNamespace): RunLockInfo {
+  const pidNs = info.pidNs ?? pidNamespace();
+  return pidNs === undefined ? info : { ...info, pidNs };
 }
 
 export function writeRunLock(worktreePath: string, info: RunLockInfo): void {
@@ -7472,6 +7500,9 @@ export type WorktreeKeepReason =
   | "live-branch"
   /** Recent file activity somewhere in the tree — the W1-T378 age gate. */
   | "recent-activity"
+  /** W1-T14319: recent activity, under a run lock written in ANOTHER pid namespace (or one recording none), whose pid is
+   * therefore unprobeable from here — never a confirmed-dead pid. Past the age gate it is reaped like any other tree. */
+  | "foreign-holder"
   /** The activity probe could not complete (unreadable, or past the entry cap), so liveness is UNKNOWN and the entry is kept.
    * An ambiguous signal keeps; it never destroys. */
   | "activity-unknown"
@@ -7561,6 +7592,9 @@ export interface WorktreeReapOpts {
    * argument lets a caller supply a start-time-aware predicate (see {@link worktreeLockIsPidAlive}) without this reaper
    * knowing anything about pid reuse (W1-T406). */
   isPidAlive?: (pid: number, info: RunLockInfo) => boolean;
+  /** This reaper's own pid namespace, compared against a lock's `pidNs` (W1-T14319). Defaults to {@link readPidNamespace}
+   * on `/proc/self/ns/pid`; undefined (off Linux) proves no lock same-namespace. */
+  pidNamespace?: () => string | undefined;
   /** Age ceiling (ms) below which a terminal-looking entry is still protected — the same create-before-lock and
    * branch-not-yet-pushed race {@link DEFAULT_PRUNE_GRACE_MS} covers in pruneStaleRuns. Default {@link
    * DEFAULT_WORKTREE_REAP_GRACE_MS}, this reaper's OWN ceiling rather than pruneGraceMs (W1-T378). */
@@ -7800,6 +7834,7 @@ function* worktreeReapPass(
   opts: Omit<WorktreeReapOpts, "onCandidate">,
 ): Generator<string, WorktreeReapSummary> {
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const ownPidNs = (opts.pidNamespace ?? readPidNamespace)();
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_WORKTREE_REAP_GRACE_MS;
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
@@ -7853,8 +7888,13 @@ function* worktreeReapPass(
     }
     // The lock's OWN pid, confirmed dead by the predicate the live-pid guard just used, outranks the activity probe: an mtime
     // records THAT a write happened, never WHO made it. Same staleness shape drain-lock.ts's `reclaimStaleLock` uses
-    // (W1-T381).
-    const lockNamesDeadPid = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid, lockRead.info);
+    // (W1-T381). W1-T14319: "confirmed dead" needs the lock's pid to be probeable HERE — written in this reaper's own pid
+    // namespace. A sibling container sharing the worktrees root has its own namespace, so its live pid reads absent from
+    // here; such a lock (or a pre-W1-T14319 lock naming no namespace) is a FOREIGN holder, never a dead one.
+    const lockUnprobed = lockRead.kind === "live" && !isPidAlive(lockRead.info.pid, lockRead.info);
+    const sameNamespace = lockRead.kind === "live" && ownPidNs !== undefined && lockRead.info.pidNs === ownPidNs;
+    const lockNamesDeadPid = lockUnprobed && sameNamespace;
+    const lockIsForeign = lockUnprobed && !sameNamespace;
 
     // Not a live-pid worktree. A registered branch still live upstream — an open, unmerged PR — is fail-closed KEPT
     // regardless of age. The sweep-W1-T154 falsifier: a `sweep-*` dir writes no lock at all, so lock state alone cannot tell
@@ -7890,7 +7930,7 @@ function* worktreeReapPass(
     // already confirmed dead above. This only ever WITHDRAWS a rescue the guard would otherwise grant, so it cannot newly
     // reap a tree whose run is alive (W1-T381).
     if (!lockNamesDeadPid && now() - activity.mtimeMs < maxAgeMs) {
-      keep(name, "recent-activity");
+      keep(name, lockIsForeign ? "foreign-holder" : "recent-activity");
       continue;
     }
     // HOW to remove it, decided BEFORE anything is destroyed: a linked worktree must die through its parent, or its record is
