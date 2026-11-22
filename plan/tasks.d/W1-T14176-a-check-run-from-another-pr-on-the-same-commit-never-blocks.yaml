@@ -16,6 +16,7 @@
     - .github/workflows/ci-gate.yml
     - .github/workflows/ci.yml
     - test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts
+    - test/the-ci-gate-does-not-hold-a-runner.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -92,6 +93,17 @@
        "W1-T14176 criterion N: ...". Extract the real step from ci-gate.yml as test/ci-gate-dedupe.test.ts
        does, and use a fake gh that answers the check-runs and actions/runs paths with different fixtures.
        Load test/setup/tmp-hygiene.ts.
+    6. AMENDED 2026-11-22 (scope, found by the hand build): the step reads the event from GATE_EVENT,
+       which both jobs set from github.event_name, not from GITHUB_EVENT_NAME. The ci-gate suites run
+       this step with ...process.env, and CI runs them on pull_request and merge_group events. An
+       ambient GITHUB_EVENT_NAME would turn the branch filter on in every existing suite, add a read
+       that their counting fake gh does not expect, and fail them on an empty HEAD_REF. This is the trap
+       scripts/ci-gate-from-contract.mjs already names for --event. An empty GATE_EVENT is today's read
+       with no branch filter; merge_group has no filter; any other GATE_EVENT needs a HEAD_REF.
+       runs_json reads the check runs first and the workflow runs second, so each check run it read
+       already has its workflow run in the second read. A posted row is judged by the run id in its
+       external_id before its suite id. test/the-ci-gate-does-not-hold-a-runner.test.ts asserts the
+       exact env keys of ci.yml's ci-gate job, so that list gains GATE_EVENT and HEAD_REF.
     MEASURE AFTER DEPLOY: push one commit to two PR branches, make one branch's commitlint fail (a bad
     subject on its PR title), and see the other PR's ci-gate pass.
   falsifier: |
