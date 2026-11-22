@@ -4,6 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
+  CARD_LEAD_RE,
   classifyAsk,
   editEscalationMachineFields,
   escalate,
@@ -834,6 +835,32 @@ test("the layout marker grammar accepts only a writer marker: v1, a 16-hex nonce
   LAYOUT_MARKER_RE.lastIndex = 0;
   assert.equal(LAYOUT_MARKER_RE.test(renderIssueBody(escalation)), true);
   LAYOUT_MARKER_RE.lastIndex = 0;
+});
+
+test("the decision-card lead grammar accepts only the card renderIssueBody writes", () => {
+  const lead = renderIssueBody({ ...escalation, decisionSummary: cardOf(escalation) }).split("\n<!--")[0]!;
+  assert.equal(lead, ["## Decision Summary", "The release needs a decision", "", "The release checks failed twice.", "",
+    "**Decision:** Choose whether to retry the checks."].join("\n"));
+  assert.equal(CARD_LEAD_RE.test(lead), true);
+  assert.equal(CARD_LEAD_RE.test(lead.replaceAll("\n", "\r\n")), true);
+  // An operator's note under the heading, a reworded decision line, or text above the heading is no card.
+  for (const lookalike of ["## Decision Summary\nHold the release.", lead.replace("**Decision:** ", "Decision: "), `An operator note.\n\n${lead}`]) {
+    assert.equal(CARD_LEAD_RE.test(lookalike), false);
+  }
+});
+
+test("W1-T12041 criterion 2: a layout marker quoted in the summary never replaces the body's own markers", () => {
+  // A generated case: the summary ended with another body's summary marker, which was tried first and
+  // left the real markers in the text the readers saw.
+  const quoted = "<!-- rmd-escalation-layout:v1:0123456789abcdef:summary -->";
+  for (const summary of [`Release checks failed ${quoted}`, `${quoted} Release checks failed`, `Release checks failed\n${quoted}`]) {
+    const subject = { ...escalation, summary };
+    const body = renderIssueBody(subject);
+    assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
+    assert.equal(escalationBodyInLegacyOrder(body.replaceAll("\n", "\r\n")), legacyRender(subject).replaceAll("\n", "\r\n"));
+    assert.equal(escalationTaskId(body), subject.taskId);
+    assert.equal(reactionAnswerText("+1", body), "retry");
+  }
 });
 
 // ── The sweep's one stall question per PR (src/lib/sweep.ts, scope amendment #20023) ──────────────

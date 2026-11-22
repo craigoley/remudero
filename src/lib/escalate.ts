@@ -1231,13 +1231,20 @@ const SECTION_OPENERS: readonly { re: RegExp; last: boolean }[] = [
  *  opening line begins, so deleting any marker, or all of them, still finds the machine fields.
  *  Undefined unless the lead (the text before Options) has the shape renderIssueBody writes: any
  *  fields-first body is then read as before, whatever new-order issue its later prose pastes.
- *  The body's own markers are those of the first nonce, in order of appearance, whose layout is
- *  complete and opens the body; a quoted or pasted issue's markers come later or fail the lead
+ *  The body's own markers are those of the first nonce (see {@link writerMarkers}) whose layout
+ *  is complete and opens the body; a quoted or pasted issue's markers come later or fail the lead
  *  check, so the last marker never decides which issue the readers believe. With no valid marker
  *  set, the sections are found by their headings alone (a body whose markers were all deleted). */
 type EscalationLayout = { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsBody: number; fieldsAt: number; rest: string };
+/** renderIssueBody writes every marker on a line of its own; a marker inside a line (one quoted in
+ *  the one-line summary) is text. The nonce with the most markers is tried first, ties by position. */
+function writerMarkers(body: string): RegExpMatchArray[] {
+  return [...body.matchAll(LAYOUT_MARKER_RE)].filter((m) => m.index! > 0 && body[m.index! - 1] === "\n");
+}
 function layoutOf(body: string): EscalationLayout | undefined {
-  const nonces = [...new Set([...body.matchAll(LAYOUT_MARKER_RE)].map((m) => m[1]!))];
+  const counts = new Map<string, number>();
+  for (const m of writerMarkers(body)) counts.set(m[1]!, (counts.get(m[1]!) ?? 0) + 1);
+  const nonces = [...counts.keys()].sort((a, b) => counts.get(b)! - counts.get(a)!);
   for (const nonce of [...nonces, undefined]) {
     const layout = layoutWithNonce(body, nonce);
     if (layout !== undefined) return layout;
@@ -1246,15 +1253,15 @@ function layoutOf(body: string): EscalationLayout | undefined {
 }
 
 /** A card lead is the decision card exactly as renderIssueBody writes it, and never carries a
- *  fields-first header: an operator note under that heading above a legacy header is not a card. */
-const CARD_LEAD_RE = /^## Decision Summary\r?\n[\s\S]{1,400}?\r?\n\r?\n[\s\S]{1,1200}\r?\n\r?\n\*\*Decision:\*\* [\s\S]{1,600}$/;
+ *  fields-first header: an operator note under that heading above a legacy header is not a card.
+ *  Exported so a test drives both arms of the grammar by identifier. */
+export const CARD_LEAD_RE = /^## Decision Summary\r?\n[\s\S]{1,400}?\r?\n\r?\n[\s\S]{1,1200}\r?\n\r?\n\*\*Decision:\*\* [\s\S]{1,600}$/;
 function holdsFieldsHeader(lead: string): boolean {
   return /^\*\*Class:\*\*/m.test(lead) && /^\*\*Task:\*\*/m.test(lead);
 }
 
 function layoutWithNonce(body: string, nonce: string | undefined): EscalationLayout | undefined {
-  const markers = [...body.matchAll(LAYOUT_MARKER_RE)];
-  const own = markers.filter((m) => m[1] === nonce);
+  const own = writerMarkers(body).filter((m) => m[1] === nonce);
   const names = ["lead", ...LAYOUT_SECTIONS] as const;
   const slot = (m: RegExpMatchArray) => (m[2] === "card" || m[2] === "summary" ? 0 : names.indexOf(m[2] as typeof names[number]));
   const at = own.map(slot);
